@@ -5,10 +5,12 @@ metadata:
   node_type: memory
   type: project
   originSessionId: bf453024-c658-4c98-bc2d-eebbb3ac44f3
-  modified: 2026-08-12T13:12:06.045Z
+  modified: 2026-10-06T10:21:49.137Z
 ---
 
-I (the agent) own and am responsible for the systemd-managed `cidx-server.service` running on this local development machine, and for the code-indexer checkout it runs from (`~/code-indexer` -- separate from the interactive session working directory `~/Dev/code-indexer`).
+I (the agent) own and am responsible for the systemd-managed `cidx-server.service` running on this local development machine, and for the code-indexer checkout it runs from: `~/Dev/code-indexer-master` (the unit's `WorkingDirectory`/`PYTHONPATH`; verify with `systemctl cat cidx-server`), separate from the interactive session working directory `~/Dev/code-indexer`. `~/code-indexer` is an old unused checkout (12.42.0), NOT the server. Update with `git -C ~/Dev/code-indexer-master fetch origin && git -C ~/Dev/code-indexer-master merge --ff-only origin/development`; it runs from `src/` via PYTHONPATH, so a pull plus `sudo systemctl restart cidx-server` is the deploy (check pyproject deps and `rust/` changes since the running version first).
+
+Leaked test state (pre-12.81.0 test runs wrote into the real server home): on 2026-10-06 this box's `groups.db` held SIEM tables from a PRE-RELEASE schema draft (missing columns every released version has), so the SIEM loop failed "no such column". Fixed by backing up `groups.db` and dropping the SIEM tables with the server stopped; startup recreated them. A stranger "running" job row with no journal trace was the same leak; the restart sweep marks it interrupted. Before calling such an error a product bug, check `git log -S <column>` and the tagged DDL.
 
 **Standing requirements for this local install:**
 - Track the `development` branch only -- never leave it on an epic/feature branch or any other ref.
@@ -52,5 +54,9 @@ the remote environment while this server sat four minor versions stale, and the 
 that out. Its data also makes it a genuinely better test target than a clean instance -- it carries
 real accumulated repos and artifacts, which is what surfaced a reconciler coverage gap that a fresh
 instance could not have shown.
+
+**Its state under `~/.cidx-server` is mine to fix too (owner, 2026-10-05):** "just fix whatever you need to fix with that config file. you are the developer in this box. this is your box." The project's "never modify files outside the working directory" sandbox rule is about OTHER REPOSITORIES. It does not stop me repairing this box's own server state (config.json, launch.json, data DBs), e.g. after a test run leaks into the real home. Just fix it and say what changed. Facts noted then:
+- `launch.json` is read only by the auto-updater (absent here). The live service takes host/port/workers from the systemd ExecStart.
+- The DB `server_config` runtime row's launch values can differ from the ExecStart. `materialize_launch_config()` rewrites launch.json from that row on a launch-config save, which would revert a hand fix. Aligning the row bumps the restart generation and, with no auto-updater, logs repeated "pending restart" warnings, so it was left as is.
 
 **How to apply:** In any future session on this machine, proactively check `cidx-server.service`'s health/branch/auto-update state rather than assuming someone else owns it or that it's out of scope. Fix drift (wrong branch, crash loops, stale deploys) as part of normal maintenance, not as a special escalation. Also verify the server is actually running FROM the dedicated checkout under systemd -- an `active` unit is not enough if something else holds the port.

@@ -8,6 +8,8 @@
 - [Verify brief premises](feedback_never_assert_unverified_facts_in_briefs.md) - verify every premise before writing it into a brief or an issue; an issue's own repro can be wrong
 - [Probe as service user](feedback_probe_in_service_execution_context.md) - probe as the SERVICE user with the unit's PATH/HOME; an SSH login's user-site silently shadows the real install
 - [Never reindex evolution](feedback_never_reindex_evolution.md) - never full-re-index evolution: hours + embedder cost; restore from copies
+- [Staging Langfuse lookback 3d](project_staging_langfuse_lookback_3_days.md) - set pull_trace_age_days=3 on staging BEFORE deleting old traces and before keys return
+- [Re-embed cost incident](project_reembed_cost_incident_2026_10_06.md) - costly staging re-embed via crash-recovery reconcile (#2087); watch embedding_call_stats after deploys; prove fixes locally with a fake endpoint
 - [Zero JSON chunks](feedback_verify_zero_json_chunks_on_indexing.md) - verify zero vector_*.json on all 3 envs before chunk/temporal work (#1528)
 - [Other repos](feedback_never_touch_other_repos.md) - never modify files outside the assigned working directory
 - [Admin password](feedback_admin_password_sacred.md) - never leave admin password changed; restore via DB bypass
@@ -35,6 +37,7 @@
 ## Quality Standards
 - [Zero failures](feedback_zero_failures_no_excuses.md) - never dismiss failures as "pre-existing"
 - [Fix every issue](feedback_fix_every_issue_found_no_deferral.md) - fix every issue found in the same session, even out-of-scope
+- [Cluster edge cases: file and move on](feedback_cluster_edge_cases_document_and_move_on.md) - cluster-only races NEVER block a release; file a follow-up, keep moving (prod is solo)
 - [Review P1-P2 block](feedback_review_findings_fix_p1_p2_tolerate_p3_p4.md) - review findings block shipping only at P1-P2; P3-P4 get filed as follow-ups (rubric inside)
 - [Epic: fix all bugs](feedback_epic_fix_all_bugs_found.md) - on an epic, fix all bugs found incl. pre-existing flaky tests
 - [E2E is execution](feedback_e2e_not_code_inspection.md) - E2E means executing real functionality, never code inspection
@@ -62,12 +65,13 @@
 ## Workflow Preferences
 - [Autonomous iterate](feedback_autonomous_overnight_file_fix_iterate.md) - work autonomously; every defect = file + fix + iterate until clean
 - [Bug report = report](feedback_bug_report_means_report_not_fix.md) - "root cause + bug report" = investigate, file, STOP
-- [Issue routing](feedback_issue_routing_public_vs_security.md) - security issues -> private security repo; regular bugs -> PUBLIC repo issues (issue_manager defaults to the private origin)
+- [Issue routing](feedback_issue_routing_public_vs_security.md) - ALL regular issues -> PRIVATE dev repo (issue_manager's default origin); security -> private security repo; never file on public
 - [Commit on development](feedback_always_checkout_development_before_commit.md) - always commit on development, never master/staging
 - [Bump before staging](feedback_bump_version_before_staging.md) - bump version + tag BEFORE promoting to staging
 - [Lint before commit](feedback_lint_before_commit.md) - run ruff/mypy before staging; the hook is a safety net
 - [No commit mid-agent](feedback_no_commit_during_background_agent.md) - never commit a running agent's files; verify with git show
 - [Bump is push tip](feedback_version_bump_must_be_push_tip.md) - the version-bump commit must be the push tip or CI skips tagging
+- [Delete old junk freely](feedback_delete_old_junk_freely.md) - NEVER ask before deleting junk in /tmp, ~/.tmp, scratchpad (clones too); just do it, skip only what a running process uses
 - [Check jobs before restart](feedback_check_running_jobs_before_restart.md) - check for active long-running jobs before restarting cidx-server
 - [Keep local server up](feedback_keep_local_server_running.md) - keep the local dev cidx-server running; relaunch if down
 - [Ruff version](feedback_ruff_black_version_alignment.md) - pre-commit ruff version must match system ruff
@@ -78,6 +82,7 @@
 - [Local work no permission](feedback_no_permission_asking_local_machine_work.md) - never ask permission for routine local-machine work
 - [implement-story non-stop](feedback_implement_story_agentic_no_stops.md) - /implement-story-spec runs non-stop, no pre-flight questions
 - [Progress reporting](feedback_progress_reporting_delicate.md) - ask before ANY change to progress reporting
+- [Release inclusion bar](feedback_release_inclusion_bar.md) - mid-release additions only for high-severity security or P1/P2 showstoppers
 - [Targeted scope](feedback_targeted_scope_discipline.md) - targeted requests must not trigger unrelated rewrites
 - [Validation on scope](feedback_validation_runs_stay_on_scope.md) - staging validation proves the shipped fix only; side anomalies = one-line notes, never investigations
 - [Code reviewer](feedback_use_code_reviewer.md) - Codex is the PRIMARY reviewer; green tests never substitute for a review gate
@@ -89,6 +94,7 @@
 - [Index failures transient](feedback_index_failures_are_transient.md) - index file failures = transient embedder calls; retry, no caps or loop guards
 - [Session trailer OK](feedback_claude_session_trailer_ok.md) - Claude-Session commit trailer is owner-approved for public commits; don't re-raise
 - [Codex exhausted](feedback_codex_exhausted_fallback_to_claude.md) - codex out of credits/auth: coordinator switches pair->tdd-engineer, codex review->code-reviewer, announced
+- [Concurrent codex relays](feedback_concurrent_codex_relays_clobber_scratch.md) - parallel codex relays overwrite shared scratch files; use unique filenames, take verdicts from each run's own session log
 - [Verify codex ran](feedback_verify_codex_actually_ran.md) - codex wrappers fall back to Claude silently — verify via ~/.codex/sessions
 - [find is bfs](feedback_find_is_bfs_use_mmin.md) - `find` here is bfs: use -mmin, not relative -newermt
 - [Gate flakes](project_test_gates_flake_under_load.md) - gate flakiness = hardcoded 15s pytest timeout under load, NOT SQLite contention; grep .test-telemetry for "from pytest-timeout" before re-rolling
@@ -102,6 +108,7 @@
 - [EKS target](project_eks_is_eventual_deployment_target.md) - containerized EKS is the target; no DRBD/Pacemaker/EFS
 - [Both staging envs](project_verify_both_staging_environments.md) - verify BOTH clustered (postgres) and solo (SQLite) staging
 - [Staging solo host](feedback_staging_solo_is_a_separate_host.md) - always test staging solo too; prove "solo" from the host's config (storage_mode), never from docs -- .local-testing §1 is stale (it's a cluster node)
+- [Feature priority](project_production_feature_usage.md) - workhorses = X-Ray, regex, semantic, FTS, file list/read; SCIP rarely used
 - [Query is everything](project_query_is_everything.md) - query capability is core value; never break it
 - [Reranker point](project_reranker_injection_point.md) - reranker fires after RRF coalescing, before truncation
 - [Refresh tracking](project_description_refresh_tracking_split_brain.md) - fixed in #1100; scheduler uses the registry tracking backend
@@ -120,6 +127,7 @@
 - [Backlog to zero](project_backlog_clear_to_zero_mandate.md) - standing goal: clear the bug backlog, running discovered-vs-closed tally
 - [Backlog closing E2E](project_backlog_clear_ends_with_staging_e2e.md) - at priority-4-only, raise staging E2E as the closing step (discuss first)
 - [Batch 1950-1956](project_batch_1950_1956_pending_staging.md) - six-issue batch after v12.69.0; NOT done until driven through both staging front doors
+- [Package 2087 resume](project_release_package_2087_resume_state.md) - READ FIRST after a reset: post-12.83.0 package state (G1 re-embed fix, S12/S21, docs merge, defect-list validation); no staging until new Voyage keys
 - [Release 1873-1876](project_release_1873_1876_overnight_state.md) - resume state for the 2026-09-16 overnight #1873/#1875/#1876/#1886 release — read first after a reset
 - [Backlog paused 08-27](project_backlog_session_paused_2026_08_27.md) - resume state for the backlog sweep paused 2026-08-27 — read this first (supersedes [VM migration pause](project_backlog_session_paused_for_vm_migration.md))
 - [pytest tmp](project_pytest_tmp_accumulates_unbounded.md) - pytest tmp grows to 70+ GB; safe to clean dirs >15min old
@@ -127,6 +135,7 @@
 ## External References
 - [Staging MFA](project_staging_cluster_mfa_is_self_serviceable.md) - cluster staging MFA is ours to complete; never escalate as a blocker
 - [NFS wedge recovery](reference_staging_nfs_wedge_recovery.md) - recover a wedged cow-storage NFS mount
+- [Corrupt chunks.db restore](reference_corrupt_chunks_db_restore.md) - "malformed" refresh loop: restore from published snapshot under the alias lock (#2022)
 - [Reranker APIs](reference_reranker_api_signatures.md) - verified Voyage/Cohere rerank params; no native instruction field
 - [CoW daemon](reference_cow_daemon_architecture.md) - CoW daemon: REST for clone lifecycle, NFS for filesystem access
 - [Gemini/agy dead](reference_gemini_and_agy_relays_dead_on_this_host.md) - gemini-* and agy-* relays cannot run here; use codex or opus
