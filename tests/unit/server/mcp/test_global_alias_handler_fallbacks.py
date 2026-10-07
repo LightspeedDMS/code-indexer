@@ -309,3 +309,132 @@ def test_unreachable_registry_means_not_published_not_an_error(
         )
         is None
     )
+
+
+# --- check_hnsw_health handler ---------------------------------------------------
+
+
+def _patch_hnsw(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    golden_repo: Optional[_Repo],
+    clone: Optional[Path],
+    access_ok: Any = True,
+) -> dict:
+    """Wire check_hnsw_health's collaborators; returns what was observed."""
+    from code_indexer.server.mcp.handlers import repos as repos_mod
+
+    seen: dict = {"index_base_path": None, "submitted": None, "access": []}
+
+    class _BJM:
+        def submit_job(self, **kw: Any) -> str:
+            seen["submitted"] = kw
+            # The job closes over index_base_path; run it to capture what it would read.
+            return "job-1"
+
+    class _GRMStub:
+        def get_golden_repo(self, alias: str) -> Optional[_Repo]:
+            return golden_repo
+
+    class _AppModule:
+        golden_repo_manager = _GRMStub()
+        background_job_manager = _BJM()
+
+    monkeypatch.setattr(repos_mod._utils, "app_module", _AppModule())
+    monkeypatch.setattr(repos_mod, "published_global_clone_path", lambda a, g: clone)
+
+    def _require(_svc: Any, username: str, alias: Any) -> None:
+        seen["access"].append((username, alias))
+        if access_ok is not True:
+            raise access_ok
+
+    monkeypatch.setattr(repos_mod, "require_repo_access", _require)
+    monkeypatch.setattr(repos_mod, "_get_access_filtering_service", lambda: object())
+    return seen
+
+
+def test_check_hnsw_health_global_alias_uses_the_golden_clone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The published "<alias>-global" resolves, and the submitted job is scoped to
+    the GOLDEN clone -- not to an activated path that does not exist."""
+    from code_indexer.server.mcp.handlers import check_hnsw_health
+
+    seen = _patch_hnsw(
+        monkeypatch, golden_repo=None, clone=Path("/golden/example-repo")
+    )
+    result = check_hnsw_health({"repository_alias": "example-repo-global"}, _User())
+    data = json.loads(result["content"][0]["text"])
+    assert data["success"] is True
+    assert seen["submitted"]["repo_alias"] == "example-repo-global"
+    assert seen["submitted"]["operation_type"] == "repository_health_check"
+
+
+def test_check_hnsw_health_bare_alias_still_uses_the_direct_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-existing behaviour: a bare golden alias resolves without the fallback."""
+    from code_indexer.server.mcp.handlers import check_hnsw_health
+
+    seen = _patch_hnsw(
+        monkeypatch, golden_repo=_Repo("/golden/example-repo"), clone=None
+    )
+    result = check_hnsw_health({"repository_alias": "example-repo"}, _User())
+    data = json.loads(result["content"][0]["text"])
+    assert data["success"] is True
+    assert seen["submitted"] is not None
+
+
+def test_check_hnsw_health_unpublished_alias_reports_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_indexer.server.mcp.handlers import check_hnsw_health
+
+    seen = _patch_hnsw(monkeypatch, golden_repo=None, clone=None)
+    result = check_hnsw_health({"repository_alias": "example-repo-global"}, _User())
+    data = json.loads(result["content"][0]["text"])
+    assert data["success"] is False
+    assert "not found" in data["error"].lower()
+    assert seen["submitted"] is None
+
+
+def test_check_hnsw_health_denies_before_resolving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """This handler previously accepted a bare alias with NO access check at all."""
+    from code_indexer.server.mcp.handlers import check_hnsw_health
+    from code_indexer.server.services.repo_access_guard import RepoAccessDeniedError
+
+    seen = _patch_hnsw(
+        monkeypatch,
+        golden_repo=_Repo("/golden/example-repo"),
+        clone=None,
+        access_ok=RepoAccessDeniedError("example-repo", "testuser"),
+    )
+    result = check_hnsw_health({"repository_alias": "example-repo"}, _User())
+    data = json.loads(result["content"][0]["text"])
+    assert data["success"] is False
+    assert seen["submitted"] is None
+
+
+def test_check_hnsw_health_fails_closed_when_access_service_unwired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_indexer.server.mcp.handlers import check_hnsw_health
+    from code_indexer.server.services.repo_access_guard import (
+        AccessFilteringServiceUnavailableError,
+    )
+
+    seen = _patch_hnsw(
+        monkeypatch,
+        golden_repo=_Repo("/golden/example-repo"),
+        clone=None,
+        access_ok=AccessFilteringServiceUnavailableError("unwired"),
+    )
+    result = check_hnsw_health({"repository_alias": "example-repo"}, _User())
+    data = json.loads(result["content"][0]["text"])
+    assert data["success"] is False
+    # Assert the SPECIFIC refusal: a generic error path also yields success=False,
+    # so anything weaker passes even when the fail-closed branch is gone.
+    assert "access filtering unavailable" in data["error"].lower()
+    assert seen["submitted"] is None
