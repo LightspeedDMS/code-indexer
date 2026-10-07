@@ -306,11 +306,17 @@ def finish_fts_run(
     """
     index_dir = fts_index_dir(config)
     # Keyed by path: a file failing in the bootstrap AND the retry is one
-    # missing file (its first error is kept).
+    # missing file (its first error is kept); one the retry indexed is not
+    # missing at all.
     missing_by_path = {Path(path): error for path, error in failed_files}
     if not run_raised:
-        for path, error in _replace_from_disk(fts_manager, config, retry_files):
-            missing_by_path.setdefault(Path(path), error)
+        retried = [Path(path) for path in retry_files]
+        retry_failures = dict(_replace_from_disk(fts_manager, config, retried))
+        for path in retried:
+            if path in retry_failures:
+                missing_by_path.setdefault(path, retry_failures[path])
+            else:
+                missing_by_path.pop(path, None)
     missing = list(missing_by_path.items())
     try:
         fts_manager.commit()

@@ -266,6 +266,30 @@ class TestFinishFtsRun2056:
         assert warning is not None
         assert warning.startswith("1 file(s) missing from the FTS index"), warning
 
+    def test_bootstrap_failure_healed_by_retry_is_not_missing(
+        self, tmp_path: Path
+    ) -> None:
+        config = Config(codebase_dir=tmp_path)
+        fts = self._open(config, ["a.py"])
+        healed = tmp_path / "healed.py"
+        healed.write_text("def healed(): return 'HEALEDTOKEN'\n")
+
+        warning = finish_fts_run(
+            fts,
+            config,
+            rebuilt=True,
+            run_raised=False,
+            failed_files=[(healed, "bootstrap: transient read error")],
+            retry_files=[healed],
+            source_files=[],
+        )
+        hits = fts.search("HEALEDTOKEN", limit=5)
+        fts.close()
+
+        assert warning is None, warning
+        assert [hit["path"] for hit in hits] == ["healed.py"]
+        assert fts_content_version_is_current(fts_index_dir(config))
+
     def test_commit_failure_raises_unless_the_run_already_raised(
         self, tmp_path: Path
     ) -> None:

@@ -115,6 +115,57 @@ class TestFtsWatchHandlerUsesNormalIndexingDocuments2056:
 
         assert not fts_content_version_is_current(index_dir)
 
+    def test_watched_read_failure_drops_the_content_marker(
+        self, tmp_path: Path
+    ) -> None:
+        import os
+
+        from code_indexer.services.fts_file_documents import (
+            fts_content_version_is_current,
+            mark_fts_content_current,
+        )
+
+        _config, handler, fts = _setup(tmp_path)
+        index_dir = tmp_path / ".code-indexer" / "tantivy_index"
+        mark_fts_content_current(index_dir)
+        unreadable = tmp_path / "unreadable.py"
+        unreadable.write_text("def x(): return 'UNREADABLETOKEN'\n")
+        os.chmod(unreadable, 0)
+        try:
+            handler.on_modified(FileModifiedEvent(str(unreadable)))
+        finally:
+            os.chmod(unreadable, 0o644)
+            fts.close()
+
+        assert not fts_content_version_is_current(index_dir)
+
+    def test_watched_commit_failure_drops_the_content_marker(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from code_indexer.services.fts_file_documents import (
+            fts_content_version_is_current,
+            mark_fts_content_current,
+        )
+
+        _config, handler, fts = _setup(tmp_path)
+        index_dir = tmp_path / ".code-indexer" / "tantivy_index"
+        mark_fts_content_current(index_dir)
+        edited = tmp_path / "edited.py"
+        edited.write_text("def x(): return 'EDITEDTOKEN'\n")
+
+        def failing_commit(self):
+            raise OSError("injected FTS commit failure")
+
+        # Fault injection at the external FTS library boundary.
+        monkeypatch.setattr(TantivyIndexManager, "commit", failing_commit)
+        try:
+            handler.on_modified(FileModifiedEvent(str(edited)))
+        finally:
+            monkeypatch.undo()
+            fts.close()
+
+        assert not fts_content_version_is_current(index_dir)
+
     def test_watched_edit_that_blanks_a_file_removes_its_documents(
         self, tmp_path: Path
     ) -> None:

@@ -46,18 +46,20 @@ class FTSWatchHandler(FileSystemEventHandler):
 
     def _replace_and_commit(self, file_path: Path) -> None:
         """Replace the file's FTS documents with its current chunks (none
-        when it no longer exists) and make the change visible. A failed
-        replacement drops the index's content marker (the next
-        `cidx index --fts` rebuilds it from disk) before propagating."""
-        from .fts_file_documents import FtsReplaceError, invalidate_fts_content_marker
+        when it no longer exists) and make the change visible. ANY failure
+        -- reading or chunking the file, writing its documents, committing
+        -- may leave the index without the file's current content, so it
+        drops the index's content marker (the next `cidx index --fts`
+        rebuilds it from disk) before propagating."""
+        from .fts_file_documents import invalidate_fts_content_marker
         from .fts_lifecycle import fts_index_dir
 
         try:
             self._documents.replace_in_index(self.tantivy_manager, file_path)
-        except FtsReplaceError:
+            self.tantivy_manager.commit()
+        except Exception:
             invalidate_fts_content_marker(fts_index_dir(self.config))
             raise
-        self.tantivy_manager.commit()
 
     def on_modified(self, event):
         """Handle file modification events."""
