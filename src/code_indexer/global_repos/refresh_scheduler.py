@@ -3828,6 +3828,12 @@ class RefreshScheduler:
         )
         logger.info(f"cidx index on source completed successfully for {alias_name}")
 
+        # This step builds the FTS index too, so record WHICH commit it was built at
+        # under the shared .build_commit convention. Without this the backfill sweep
+        # sees a freshly-built index with a stale (or absent) marker, calls it stale,
+        # and enqueues a rebuild that was never needed -- once per refresh, forever.
+        _record_fts_build_commit(Path(source_path))
+
         # Step 1b: build the trigram index for index-assisted regex search.
         _build_source_trigram_index(alias_name, source_path)
 
@@ -5322,3 +5328,21 @@ class RefreshScheduler:
                 f"(Bug #1406), not auto-enabling"
             )
         self._reconcile_scip_flag(global_alias, repo_info, detected)
+
+
+def _record_fts_build_commit(source_path: Path) -> None:
+    """Record the commit the FTS index was just built at (best-effort).
+
+    ``cidx index`` builds semantic AND FTS in one step here, so this is the second
+    place an FTS index is produced; ``ensure_fts_index`` is the other. Both record
+    through the same helper so the freshness convention has one meaning.
+    """
+    try:
+        from code_indexer.server.services.fts_index_builder import FTS_INDEX_DIRNAME
+        from code_indexer.server.services.index_freshness import record_build_commit
+
+        record_build_commit(
+            source_path / ".code-indexer" / FTS_INDEX_DIRNAME, source_path
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail a completed index for this
+        logger.debug("could not record FTS build commit for %s: %s", source_path, exc)
