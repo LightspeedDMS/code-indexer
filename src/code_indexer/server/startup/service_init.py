@@ -12,10 +12,13 @@ import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
+
+if TYPE_CHECKING:
+    from code_indexer.server.auth.user_manager import UserManager
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +77,35 @@ def register_postgres_pool_atexit_cleanup(pool: Any) -> None:
         )
     with _postgres_pools_lock:
         _postgres_pools_for_cleanup.append(pool)
+
+
+def seed_initial_admin_at_startup(
+    user_manager: "UserManager",
+    server_data_dir: str,
+    db_path: str,
+    storage_mode: str,
+) -> bool:
+    """Seed the initial administrator only into an empty user store.
+
+    Runs under the bootstrap lock, before the legacy users.json import.  In
+    solo mode a users.json import still to run, with accounts in it, counts
+    as a populated store: those accounts are imported later in start-up.
+    Cluster mode never imports users.json, so only the shared store counts.
+    Returns True when the initial administrator was created.
+    """
+    from code_indexer.server.storage.migration_service import MigrationService
+
+    if storage_mode != "postgres" and (
+        MigrationService(server_data_dir, db_path).has_pending_users_import()
+    ):
+        logger.info("Initial admin not seeded: legacy users.json import pending")
+        return False
+    seeded: bool = user_manager.seed_initial_admin()
+    if seeded:
+        logger.info("Initial admin seeded into the empty user store")
+    else:
+        logger.info("Initial admin not seeded: the user store already has users")
+    return seeded
 
 
 def initialize_services() -> Dict[str, Any]:
@@ -639,11 +671,15 @@ def initialize_services() -> Dict[str, Any]:
     with _filelock.FileLock(
         _bootstrap_lock_path, timeout=_BOOTSTRAP_LOCK_TIMEOUT, is_singleton=True
     ):
-        # Seed initial admin user inside the lock so concurrent workers cannot
-        # race on the users.username UNIQUE constraint.  seed_initial_admin()
-        # pre-checks get_user("admin") before calling create_user(), so the
-        # second worker skips the INSERT entirely — backends stay strict (fail-loud).
-        user_manager.seed_initial_admin()
+        # Seed the initial administrator only when the user store is empty
+        # (first boot) and, in solo mode, no legacy users.json import with
+        # accounts is still pending; a populated store is left unchanged.
+        # The emptiness check and the insert are one atomic step in the store
+        # (SQLite exclusive transaction / PostgreSQL table lock), so of all
+        # concurrent workers and cluster nodes exactly one seeds.
+        seed_initial_admin_at_startup(
+            user_manager, str(server_data_dir), str(db_path), _storage_mode
+        )
 
         # Migration and bootstrap using the main golden_repo_manager instance
         try:

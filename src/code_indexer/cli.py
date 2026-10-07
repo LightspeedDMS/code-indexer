@@ -10329,13 +10329,13 @@ def install_server(
     • Finds available port starting from 8090 (or --port if specified)
     • Generates server configuration (config.json)
     • Creates executable startup script (start-server.sh)
-    • Seeds initial admin user (admin/admin)
+    • Leaves accounts to the server: its first start creates the initial
+      admin user (admin/admin), only when no users exist
     • Displays startup instructions
 
     \b
     WHAT IT CREATES:
     • ~/.cidx-server/config.json           # Server configuration
-    • ~/.cidx-server/users.json            # User database with hashed passwords
     • ~/.cidx-server/logs/                 # Server logs directory
     • ~/.cidx-server/start-server.sh       # Executable startup script
 
@@ -10348,7 +10348,7 @@ def install_server(
     • Repository idle timeout: 10 minutes
 
     \b
-    INITIAL CREDENTIALS:
+    INITIAL CREDENTIALS (created by the first server start, only when no users exist):
     Username: admin
     Password: admin
     Role: admin (full access to all features)
@@ -10467,6 +10467,10 @@ def install_server(
 
         # Initial credentials
         console.print("🔑 Initial Admin Credentials:", style="cyan bold")
+        console.print(
+            "   Created by the first server start, only when no users exist",
+            style="dim",
+        )
         console.print("   Username: admin", style="white")
         console.print("   Password: admin", style="white")
         console.print("   Role: admin (full access)", style="white")

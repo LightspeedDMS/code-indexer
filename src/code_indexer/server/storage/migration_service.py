@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import sqlite3
+import stat
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -28,6 +29,14 @@ from .sqlite_backends import (
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
+
+# Legacy files holding credentials (password hashes, tokens) end owner-only.
+OWNER_ONLY_MODE = 0o600
+
+
+def _restrict_to_owner(path: Path) -> None:
+    """Drop every group/other permission bit of *path*; never add a bit."""
+    os.chmod(str(path), stat.S_IMODE(path.stat().st_mode) & OWNER_ONLY_MODE)
 
 
 class MigrationService:
@@ -266,6 +275,18 @@ class MigrationService:
         """
         Migrate users.json to SQLite with normalized tables.
 
+        The import completes -- completion recorded in the database, then
+        users.json renamed to an owner-only ``users.json.migrated`` -- only
+        when every entry was imported or already had an account.  Otherwise
+        users.json is atomically rewritten (owner-only) to hold only the
+        entries still to import, nothing is recorded, and the import runs
+        again at the next start; start-up seeds no initial administrator
+        while it is pending.  Entries that can never be imported keep it
+        pending for good: the ERROR is logged at every start until an
+        operator fixes or removes them in users.json.  Rows are written
+        before the record and the record before the rename, so a stop at
+        any point leaves the rows written or the import pending.
+
         Returns:
             Migration result with counts.
         """
@@ -274,6 +295,17 @@ class MigrationService:
         if not source_file.exists():
             logger.info("No users.json found, skipping migration")
             return {"migrated": 0, "errors": 0, "skipped": True}
+
+        # Owner-only from the first look, whatever happens to it later.
+        try:
+            _restrict_to_owner(source_file)
+        except OSError as e:
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-205",
+                    f"Failed to make {source_file} owner-only: {e}",
+                )
+            )
 
         # Completion is recorded in the database: once the import ran it
         # never runs again, even when the file could not be renamed.
@@ -349,36 +381,100 @@ class MigrationService:
             f"Users migration complete: {migrated} migrated, "
             f"{already_exists} already existed, {errors} errors"
         )
-        if not_imported:
-            # The import is recorded as complete below and never runs again.
-            listing = "; ".join(f"{n} ({why})" for n, why in not_imported.items())
-            logger.error(
-                "users.json import will not run again; these entries were not "
-                f"imported and must be re-created by an administrator: {listing}"
-            )
-
-        # Record completion once the file was read and processed -- durably in
-        # the database first, then by renaming the file -- so the import never
-        # runs again and a later start cannot re-import (resurrect) a removed
-        # user.  Failed entries were logged above and stay readable in the file.
-        try:
-            self._record_users_import()
-        except Exception as e:  # noqa: BLE001 - the rename below still records it
-            logger.error(f"Recording the users.json import as complete failed: {e}")
-        self._rename_imported(source_file)
-
-        return {
+        result = {
             "migrated": migrated,
             "already_exists": already_exists,
             "errors": errors,
             "skipped": False,
         }
+        if not_imported:
+            # Not complete: users.json keeps only the entries still to import
+            # (imported and existing names leave it, so a retry never brings
+            # back an account removed after its import, unless the rewrite of
+            # the pending file fails), no completion is recorded, and the
+            # import runs again at the next start.
+            self._keep_pending_entries(
+                source_file, {name: users_data[name] for name in not_imported}
+            )
+            logger.error(
+                f"users.json import incomplete: {len(not_imported)} entries could "
+                "not be imported; it runs again at the next start and the initial "
+                "admin is not seeded until it completes.  Fix or remove those "
+                "entries in users.json."
+            )
+            return result
+
+        # Every entry was imported or already had an account.  Order: rows
+        # (above), then the durable completion record, then the rename -- a
+        # stop at any point leaves the import pending or its rows written.
+        try:
+            self._record_users_import()
+        except Exception as e:  # noqa: BLE001 - the rename below still records it
+            logger.error(f"Recording the users.json import as complete failed: {e}")
+        self._rename_imported(source_file)
+        return result
+
+    @staticmethod
+    def _keep_pending_entries(source_file: Path, entries: Dict[str, Any]) -> None:
+        """Atomically rewrite users.json to hold only *entries*.
+
+        A failed rewrite leaves the original file in place: the import stays
+        pending either way, and its already-imported names are skipped.
+        """
+        temp_file = source_file.with_name(source_file.name + ".tmp")
+        try:
+            temp_file.unlink(missing_ok=True)  # never reuse a stale file's mode
+            fd = os.open(
+                str(temp_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_ONLY_MODE
+            )
+            try:
+                f = os.fdopen(fd, "w")
+            except BaseException:
+                os.close(fd)
+                raise
+            with f:
+                os.fchmod(f.fileno(), OWNER_ONLY_MODE)  # exact, whatever the umask
+                json.dump(entries, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(str(temp_file), str(source_file))
+        except OSError as e:
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-205",
+                    f"Failed to keep pending users.json entries: {e}",
+                )
+            )
+            try:
+                temp_file.unlink()
+            except FileNotFoundError:
+                pass
 
     _IMPORT_STATE_DDL = (
         "CREATE TABLE IF NOT EXISTS legacy_import_state ("
         "name TEXT PRIMARY KEY, completed_at TEXT NOT NULL)"
     )
     _USERS_IMPORT = "users.json"
+
+    def has_pending_users_import(self) -> bool:
+        """True while a users.json import with accounts is still to run.
+
+        That is: this service imports users, users.json exists, its import is
+        not recorded as complete, and the file holds at least one entry.  A
+        file that cannot be read counts as pending: it may hold accounts, and
+        the import itself reports the read failure.
+        """
+        source_file = Path(self.source_dir) / "users.json"
+        if not self._import_users or not source_file.exists():
+            return False
+        if self._users_import_recorded():
+            return False
+        try:
+            with open(source_file, "r") as f:
+                users_data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return True
+        return bool(users_data)
 
     def _users_import_recorded(self) -> bool:
         """True once the users.json import has completed (database marker)."""
@@ -403,8 +499,10 @@ class MigrationService:
 
     @staticmethod
     def _rename_imported(source_file: Path) -> None:
-        """Rename an imported users.json to .migrated; a failure is loud."""
+        """Rename an imported users.json to .migrated, owner-only; a failure
+        is loud."""
         try:
+            _restrict_to_owner(source_file)
             os.rename(str(source_file), str(source_file) + ".migrated")
             logger.info(f"Renamed {source_file} to {source_file}.migrated")
         except OSError as e:
@@ -663,6 +761,7 @@ class MigrationService:
         )
         if errors == 0 and (migrated > 0 or already_exists > 0):
             try:
+                _restrict_to_owner(source_file)
                 os.rename(str(source_file), str(source_file) + ".migrated")
             except OSError as e:
                 logger.warning(
