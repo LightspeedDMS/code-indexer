@@ -38,6 +38,11 @@ from typing import Iterable, List, Optional, Tuple, Union, cast
 
 import anyio.to_thread
 
+from code_indexer.utils.path_confinement import (
+    has_git_segment,
+    resolves_into_git_directory,
+)
+
 from code_indexer.server.services.subprocess_executor import (
     SubprocessExecutor,
     ExecutionStatus,
@@ -827,7 +832,22 @@ class RegexSearchService:
             start_monotonic + timeout_seconds if timeout_seconds is not None else None
         )
 
+        # A path inside the repository's .git is answered exactly as a
+        # missing path (lexical check: no filesystem call here).
+        if path and has_git_segment(Path(os.path.normpath(path)).parts):
+            raise ValueError(f"Path does not exist: {path}")
         search_path = self.repo_path / path if path else self.repo_path
+        repo_path = self.repo_path
+
+        def search_root_exists() -> bool:
+            # The RESOLVED search root must exist and lie outside the
+            # repository's .git; a root resolving into .git (e.g. a committed
+            # symlink to it) is answered exactly as a missing path. Runs in
+            # a worker thread below, never on the event loop.
+            return search_path.exists() and not resolves_into_git_directory(
+                search_path, repo_path.resolve()
+            )
+
         # Bug #1590 review round 5 finding 1 fix: bound via the same
         # thread-watchdog idiom (_run_with_thread_watchdog) used throughout
         # this file, instead of the plain anyio.to_thread.run_sync offload
@@ -836,15 +856,15 @@ class RegexSearchService:
         # in uninterruptible kernel retry and never return; the plain
         # offload (still used below when there is no deadline at all)
         # bounds only the EVENT LOOP, not this request. No sqlite
-        # connection is ever opened by Path.exists, so the watchdog's
-        # optional ``holder`` parameter is simply omitted.
+        # connection is ever opened by the existence check, so the
+        # watchdog's optional ``holder`` parameter is simply omitted.
         from .trigram_index_manager import _run_with_thread_watchdog
 
         if deadline is not None:
             remaining_exists = max(0.0, deadline - time.monotonic())
             path_exists, exists_timed_out = await anyio.to_thread.run_sync(
                 _run_with_thread_watchdog,
-                search_path.exists,
+                search_root_exists,
                 remaining_exists,
                 "regex_search_path_exists",
             )
@@ -854,7 +874,7 @@ class RegexSearchService:
                     f"{remaining_exists:.3f}s remaining search deadline"
                 )
         else:
-            path_exists = await anyio.to_thread.run_sync(search_path.exists)
+            path_exists = await anyio.to_thread.run_sync(search_root_exists)
         if not path_exists:
             raise ValueError(f"Path does not exist: {path}")
 
@@ -1034,6 +1054,10 @@ class RegexSearchService:
                 raw_path,
                 self.repo_path,
             )
+            return None
+        # Matches inside the repository's .git are never returned (an
+        # include glob or a symlink can reach it).
+        if has_git_segment(rel.parts):
             return None
         return str(rel)
 

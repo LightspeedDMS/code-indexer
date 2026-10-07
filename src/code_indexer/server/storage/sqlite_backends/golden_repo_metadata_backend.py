@@ -16,6 +16,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from code_indexer.utils.credential_redaction import mask_url_credentials
 from ..database_manager import DatabaseConnectionManager
 from ._forced_reconcile_state_mixin import (
     _ForcedReconcileStateSqliteMixin,
@@ -579,7 +580,11 @@ class GoldenRepoMetadataSqliteBackend(
 
         updated: bool = self._conn_manager.execute_atomic(operation)
         if updated:
-            logger.info(f"Updated repo_url={repo_url} for golden repo: {alias}")
+            logger.info(
+                "Updated repo_url=%s for golden repo: %s",
+                mask_url_credentials(repo_url),
+                alias,
+            )
         return updated
 
     def update_category(

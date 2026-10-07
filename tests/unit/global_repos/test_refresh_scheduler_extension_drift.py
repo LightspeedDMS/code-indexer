@@ -39,6 +39,19 @@ from code_indexer.config import ConfigManager
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
+from code_indexer.server.git.git_subprocess_env import RemoteUrlSanitization
+
+
+@pytest.fixture(autouse=True)
+def _origin_already_credential_free():
+    """These tests stub subprocess.run module-wide; the base clone's origin
+    rewrite at refresh start is covered by test_refresh_runtime_credentials.py."""
+    with patch(
+        "code_indexer.global_repos.refresh_scheduler."
+        "ensure_remote_url_without_credentials",
+        return_value=RemoteUrlSanitization(rewritten=0, failed=0),
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------

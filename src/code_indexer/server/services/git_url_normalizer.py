@@ -17,6 +17,8 @@ import os
 import re
 from pydantic import BaseModel
 
+from code_indexer.utils.credential_redaction import mask_url_credentials
+
 
 class GitUrlNormalizationError(Exception):
     """Exception raised when git URL normalization fails."""
@@ -87,6 +89,9 @@ class GitUrlNormalizer:
         https_match = self.https_pattern.match(git_url)
         if https_match:
             domain, path = https_match.groups()
+            # The userinfo (``user:token@``) is a credential, not part of
+            # the repository's identity.
+            domain = domain.rpartition("@")[2]
             return self._create_normalized_url(git_url, domain, path)
 
         # Try SSH format
@@ -110,7 +115,9 @@ class GitUrlNormalizer:
             return self._create_filesystem_url(git_url, abs_path)
 
         # If no patterns match, it's not a valid git URL
-        raise GitUrlNormalizationError(f"Invalid git URL format: {git_url}")
+        raise GitUrlNormalizationError(
+            f"Invalid git URL format: {mask_url_credentials(git_url)}"
+        )
 
     def _create_filesystem_url(
         self, original_url: str, abs_path: str

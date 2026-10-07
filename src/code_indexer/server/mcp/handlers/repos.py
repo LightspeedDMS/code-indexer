@@ -29,6 +29,10 @@ from code_indexer.server.services.repository_health_aggregator import (
     get_shared_health_service,
 )
 from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
+from code_indexer.utils.credential_redaction import (
+    mask_url_credentials,
+    with_masked_repo_url,
+)
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
@@ -79,6 +83,8 @@ def discover_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 if r.get("alias", r.get("name", "")) in accessible_aliases
             ]
 
+        # Repository URLs are returned with their userinfo redacted.
+        repos = [with_masked_repo_url(r) for r in repos]
         return _mcp_response({"success": True, "repositories": repos})
     except Exception as e:
         logger.warning("discover_repositories failed: %s", e, exc_info=True)
@@ -506,7 +512,7 @@ def _get_global_repo_status(
     status = {
         "user_alias": repo_entry["alias_name"],
         "golden_repo_alias": repo_entry.get("repo_name"),
-        "repo_url": repo_entry.get("repo_url"),
+        "repo_url": mask_url_credentials(repo_entry.get("repo_url")),
         "is_global": True,
         "path": repo_entry.get("index_path"),
         "last_refresh": repo_entry.get("last_refresh"),
@@ -630,7 +636,7 @@ def _append_global_repos_to_status(status_summary: list, user: User) -> None:
                 "golden_repo_alias": repo["repo_name"],
                 "current_branch": None,
                 "is_global": True,
-                "repo_url": repo.get("repo_url"),
+                "repo_url": mask_url_credentials(repo.get("repo_url")),
                 "last_refresh": repo.get("last_refresh"),
                 "index_path": repo.get("index_path"),
                 "created_at": repo.get("created_at"),
@@ -727,7 +733,7 @@ def _load_global_repos_normalized() -> list:
                     "golden_repo_alias": repo["repo_name"],
                     "current_branch": None,
                     "is_global": True,
-                    "repo_url": repo.get("repo_url"),
+                    "repo_url": mask_url_credentials(repo.get("repo_url")),
                     "last_refresh": repo.get("last_refresh"),
                 }
             )
@@ -1357,6 +1363,9 @@ def handle_list_global_repos(args: Dict[str, Any], user: User) -> Dict[str, Any]
                 )
                 repos = [r for r in repos if r.get("repo_name", "") in accessible_names]
 
+        # Repository URLs are returned with their userinfo redacted, for
+        # administrators and granted users alike.
+        repos = [with_masked_repo_url(r) for r in repos]
         return _mcp_response({"success": True, "repos": repos})
     except Exception as e:
         logger.warning("handle_list_global_repos failed: %s", e, exc_info=True)

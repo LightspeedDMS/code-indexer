@@ -8,6 +8,7 @@ import json
 import re
 from pathlib import Path
 from typing import Optional, Set
+from urllib.parse import urlsplit
 
 
 class RemoteDiscoveryService:
@@ -56,10 +57,10 @@ class RemoteDiscoveryService:
         if match:
             return match.group(1)
 
-        # HTTPS format: https://github.com/user/repo.git
-        match = re.match(r"^https?://([^/]+)/", remote_url)
-        if match:
-            return match.group(1)
+        # HTTPS format: https://github.com/user/repo.git. The host is the
+        # netloc without its userinfo (``user:token@`` is a credential).
+        if re.match(r"^https?://[^/]+/", remote_url):
+            return urlsplit(remote_url).netloc.rpartition("@")[2] or None
 
         return None
 

@@ -10,6 +10,7 @@ import stat
 import uuid
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -109,10 +110,13 @@ class GitCredentialHelper:
         if match:
             return match.group(1)
 
-        # HTTPS/HTTP: https://host/path or http://host/path
-        match = re.match(r"^https?://([^/]+)", url)
-        if match:
-            return match.group(1)
+        # HTTPS/HTTP: https://host[:port]/path or http://host[:port]/path.
+        # The host is the netloc without its userinfo (a URL's
+        # ``user:token@`` is a credential, never part of the host); case and
+        # port are kept, as stored credentials are keyed by them.
+        if re.match(r"^https?://", url):
+            host = urlsplit(url).netloc.rpartition("@")[2]
+            return host or None
 
         # SSH: ssh://git@host(:port)?/path
         match = re.match(r"^ssh://git@([^:/]+)", url)

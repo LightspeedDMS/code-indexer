@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.utils.credential_redaction import mask_url_credentials
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
@@ -1979,7 +1980,8 @@ def _resolve_repo_alias_for_cicd(
                             "Could not auto-detect forge from repository remote URL. "
                             "Pass forge='github' or forge='gitlab' explicitly."
                         ),
-                        "remote_url": repo_url,
+                        # Returned with its userinfo redacted.
+                        "remote_url": mask_url_credentials(repo_url),
                     }
                 ),
             )

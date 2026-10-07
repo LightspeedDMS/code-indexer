@@ -130,6 +130,7 @@ def test_cb_git_fetch_and_validate_all_git_calls_have_noninteractive_env(tmp_pat
             base_clone_path=str(tmp_path),
             target_branch="main",
             git_timeout=TEST_GIT_TIMEOUT,
+            credentials_url=None,
         )
 
     _assert_all_git_calls_have_noninteractive_env(
@@ -153,6 +154,7 @@ def test_cb_checkout_and_pull_all_git_calls_have_noninteractive_env(tmp_path):
             base_clone_path=str(tmp_path),
             target_branch="main",
             git_timeout=TEST_GIT_TIMEOUT,
+            credentials_url=None,
         )
 
     _assert_all_git_calls_have_noninteractive_env(

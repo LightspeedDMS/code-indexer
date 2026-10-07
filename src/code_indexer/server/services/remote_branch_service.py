@@ -19,7 +19,11 @@ from urllib.parse import urlparse
 
 from ..middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.git.git_subprocess_env import (
+    build_non_interactive_git_env,
+    remote_url_without_credentials,
+)
+from code_indexer.utils.credential_redaction import mask_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -312,22 +316,32 @@ class RemoteBranchService:
             # Handles SSH URLs, HTTPS URLs, and platform-specific auth formats
             effective_url = _build_effective_url(clone_url, platform, credentials)
 
-            # Fetch branch list using git ls-remote --heads
-            branches_cmd = ["git", "ls-remote", "--heads", effective_url]
+            # Fetch branch list using git ls-remote --heads. The credentials
+            # are supplied to git at run time, never on argv.
+            branches_cmd = [
+                "git",
+                "ls-remote",
+                "--heads",
+                remote_url_without_credentials(effective_url),
+            ]
             result = subprocess.run(
                 branches_cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
-                env=build_non_interactive_git_env(),
+                env=build_non_interactive_git_env(effective_url),
             )
 
             if result.returncode != 0:
-                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                # Returned and logged with any URL userinfo redacted.
+                error_msg = mask_url_credentials(
+                    result.stderr.strip() if result.stderr else "Unknown error"
+                )
                 logger.warning(
                     format_error_log(
                         "GIT-GENERAL-052",
-                        f"git ls-remote failed for {clone_url}: {error_msg}",
+                        f"git ls-remote failed for "
+                        f"{mask_url_credentials(clone_url)}: {error_msg}",
                     )
                 )
                 return BranchFetchResult(
@@ -360,7 +374,7 @@ class RemoteBranchService:
             logger.warning(
                 format_error_log(
                     "GIT-GENERAL-053",
-                    f"git ls-remote timeout for {clone_url}",
+                    f"git ls-remote timeout for {mask_url_credentials(clone_url)}",
                 )
             )
             return BranchFetchResult(
@@ -370,13 +384,14 @@ class RemoteBranchService:
                 error=error_msg,
             )
         except Exception as e:
-            error_msg = str(e)
+            error_msg = mask_url_credentials(str(e))
             # SECURITY: Do not use exc_info=True here - stack traces could expose
             # effective_url which may contain embedded credentials
             logger.error(
                 format_error_log(
                     "GIT-GENERAL-054",
-                    f"Error fetching branches for {clone_url}: {error_msg}",
+                    f"Error fetching branches for "
+                    f"{mask_url_credentials(clone_url)}: {error_msg}",
                 )
             )
             return BranchFetchResult(
@@ -404,13 +419,19 @@ class RemoteBranchService:
         """
         try:
             # Try to get symbolic-ref for HEAD
-            cmd = ["git", "ls-remote", "--symref", url, "HEAD"]
+            cmd = [
+                "git",
+                "ls-remote",
+                "--symref",
+                remote_url_without_credentials(url),
+                "HEAD",
+            ]
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
-                env=build_non_interactive_git_env(),
+                env=build_non_interactive_git_env(url),
             )
 
             if result.returncode == 0 and result.stdout:

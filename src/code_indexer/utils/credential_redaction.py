@@ -10,14 +10,17 @@ captured output that are logged, raised or returned.
 """
 
 import re
-from typing import Any, Iterator, List, Tuple
+from typing import Any, Dict, Iterator, List, Tuple
 from urllib.parse import unquote
 
 _MASK = "***"
 
 # Userinfo (``user:pass@`` / ``oauth2:TOKEN@`` / ``TOKEN@``) between a URL
-# scheme separator and the host.
-_URL_USERINFO_RE = re.compile(r"(://)([^/@\s]+)@")
+# scheme separator and the host: everything up to the LAST '@' before the
+# host, never crossing '/', '?', '#' or whitespace (so a password containing
+# '@' is masked whole, and an '@' in a path, query or fragment is not
+# userinfo).
+_URL_USERINFO_RE = re.compile(r"(://)([^/?#\s]+)@")
 
 # ``Authorization: <scheme> <credentials>`` in free text or a header value;
 # group 3 is the credential itself.
@@ -81,14 +84,35 @@ def is_display_mask(value: Any) -> bool:
 def mask_url_credentials(url: Any) -> Any:
     """Strip embedded credentials from a git/HTTP URL for safe exposure.
 
-    ``https://oauth2:TOKEN@git.example.com/org/repo.git`` ->
-    ``https://***@git.example.com/org/repo.git``. Non-string input, credential-free
-    URLs, and scheme-only forms (e.g. ``local://alias``) are returned unchanged.
+    The one rule, shared by log redaction and every API, MCP and Web response
+    that returns a repository URL: the WHOLE userinfo of a ``scheme://``
+    URL is replaced by ``***``, whatever the scheme and whether or not it has
+    a ``:password`` part, so neither a secret nor the presence of a username
+    is revealed:
+
+    * ``https://user:TOKEN@host/org/repo.git`` -> ``https://***@host/org/repo.git``
+    * ``https://TOKEN@host:8443/repo.git`` -> ``https://***@host:8443/repo.git``
+    * ``ssh://git@host/org/repo.git`` -> ``ssh://***@host/org/repo.git``
+
+    Scheme, host, port and path are unchanged. scp-style addresses
+    (``git@host:org/repo.git``) have no ``://`` and are returned unchanged,
+    as are local paths, ``file:///...`` and scheme-only forms such as
+    ``local://alias``. Non-string input (``None``) and ``""`` pass through.
     Idempotent: masking an already-masked URL is a no-op.
     """
     if not isinstance(url, str):
         return url
     return _URL_USERINFO_RE.sub(r"\1***@", url)
+
+
+def with_masked_repo_url(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Shallow copy of a repository record whose ``repo_url`` (when present)
+    is masked by mask_url_credentials, for returning in a response. The
+    record passed in is left unchanged."""
+    masked = dict(entry)
+    if "repo_url" in masked:
+        masked["repo_url"] = mask_url_credentials(masked["repo_url"])
+    return masked
 
 
 def _mask_text(text: str) -> str:

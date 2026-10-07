@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.git.git_subprocess_env import (
+    ensure_remote_url_without_credentials,
+)
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
@@ -979,6 +982,9 @@ def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         git_operations_service._trigger_migration_if_needed(
             repo_path, user.username, repository_alias
         )
+        # The stored origin converges to its credential-free URL before the
+        # push resolves it (a versioned snapshot is never rewritten).
+        ensure_remote_url_without_credentials(repo_path)
 
         credential, remote_url, cred_error = _get_pat_credential_for_remote(
             repo_path, remote, user.username

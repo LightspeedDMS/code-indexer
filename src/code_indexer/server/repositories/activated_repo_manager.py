@@ -22,6 +22,7 @@ from code_indexer.server.storage.shared.clone_backend import (
 )
 from code_indexer.server.storage.json_column import parse_json_column
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.credential_redaction import mask_url_credentials
 from code_indexer.utils.subprocess_diagnostics import (
     format_completed_process_diagnostic,
 )
@@ -50,7 +51,11 @@ from .background_jobs import BackgroundJobManager
 from ..services.committer_resolution_service import CommitterResolutionService
 from ..services.deactivation_query_drain import wait_for_activated_repo_query_drain
 from ..services.job_tracker import DuplicateJobError
-from ..git.git_subprocess_env import build_non_interactive_git_env
+from ..git.git_subprocess_env import (
+    build_non_interactive_git_env,
+    ensure_remote_url_without_credentials,
+    remote_url_without_credentials,
+)
 from ...config import GitServiceConfig
 from ...services.git_hook_manager import GitHookManager
 
@@ -1464,7 +1469,10 @@ class ActivatedRepoManager:
         self._ensure_branch_hook_self_heal(repo_dir)
 
         try:
-            # Step 1: Determine if we should attempt to fetch from remote
+            # Step 1: Determine if we should attempt to fetch from remote.
+            # The stored origin converges to its credential-free URL; the
+            # golden repository's credentials are supplied at run time.
+            credentials_url = self.prepare_remote_operation(username, user_alias)
             should_fetch, remote_info = self._should_fetch_from_remote(repo_dir)
             fetch_attempted = False
             fetch_successful = False
@@ -1481,7 +1489,7 @@ class ActivatedRepoManager:
                     capture_output=True,
                     text=True,
                     timeout=60,
-                    env=build_non_interactive_git_env(),
+                    env=build_non_interactive_git_env(credentials_url),
                 )
 
                 if fetch_result.returncode == 0:
@@ -2049,6 +2057,10 @@ class ActivatedRepoManager:
                 self.logger.warning(
                     f"Cannot migrate remotes for '{user_alias}': golden repo alias '{golden_repo_alias}' not found"
                 )
+
+            # The stored origin converges to its credential-free URL (the
+            # sync below fetches from the local golden remote).
+            self.prepare_remote_operation(username, user_alias)
 
             # Step 1: Fetch from golden (local golden repository) - Story #636
             self.logger.info(
@@ -4199,6 +4211,33 @@ class ActivatedRepoManager:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+    def prepare_remote_operation(self, username: str, user_alias: str) -> Optional[str]:
+        """Prepare a git network operation on an activated repository.
+
+        Repository credentials are supplied to git at run time and never
+        stored in a clone's configuration: the activated clone's stored
+        origin URL is rewritten to its credential-free form when it still
+        carries credentials (idempotent), and the golden repository's
+        registered URL is returned so the caller hands its credentials to
+        git at run time. None when the golden repository is not registered.
+        A failed rewrite is logged and does not abort the operation (the
+        stored URL still authenticates). Local git calls only -- call from a
+        worker/request thread.
+        """
+        repo_dir = self._safe_user_scoped_path(username, user_alias)
+        if not ensure_remote_url_without_credentials(repo_dir).ok:
+            self.logger.warning(
+                "Stored remote URLs of %s could not all be made "
+                "credential-free; the git operation continues",
+                repo_dir,
+            )
+        repo_data = self._load_metadata(username, user_alias)
+        golden_alias = repo_data.get("golden_repo_alias") if repo_data else None
+        if not golden_alias:
+            return None
+        golden_repo = self.golden_repo_manager.get_golden_repo(golden_alias)
+        return golden_repo.repo_url if golden_repo is not None else None
+
     def _add_or_update_remote(self, repo_path: str, remote_name: str, url: str) -> None:
         """
         Add or update a git remote (helper method to eliminate duplication).
@@ -4211,6 +4250,9 @@ class ActivatedRepoManager:
         Raises:
             ActivatedRepoError: If remote configuration fails
         """
+        # Repository credentials are supplied to git at run time and never
+        # stored in a clone's configuration: the stored URL is credential-free.
+        url = remote_url_without_credentials(url)
         # Try to add remote
         result = subprocess.run(
             ["git", "remote", "add", remote_name, url],
@@ -4277,7 +4319,8 @@ class ActivatedRepoManager:
             if github_url_result.returncode == 0:
                 github_url = github_url_result.stdout.strip()
                 self.logger.info(
-                    f"Extracted GitHub/GitLab URL from golden repo: {github_url}"
+                    "Extracted GitHub/GitLab URL from golden repo: "
+                    f"{mask_url_credentials(github_url)}"
                 )
             else:
                 # Fallback: If golden repo has no origin, use local path
@@ -4326,7 +4369,7 @@ class ActivatedRepoManager:
                 f"Dual remote git structure configured successfully for: {dest_path}"
             )
             self.logger.info(
-                f"  origin -> {github_url}",
+                f"  origin -> {mask_url_credentials(github_url)}",
                 extra={"correlation_id": get_correlation_id()},
             )
             self.logger.info(
@@ -4457,7 +4500,8 @@ class ActivatedRepoManager:
                 self._add_or_update_remote(repo_dir, "origin", github_url)
 
                 self.logger.info(
-                    f"Migration complete: origin={github_url}, golden={golden_repo_path}"
+                    f"Migration complete: origin={mask_url_credentials(github_url)}, "
+                    f"golden={golden_repo_path}"
                 )
                 return True
 
@@ -4718,10 +4762,12 @@ class ActivatedRepoManager:
 
             # Remote URLs - attempt fetch
             self.logger.debug(
-                f"Origin is remote URL: {origin_url}, will attempt fetch",
+                f"Origin is remote URL: {mask_url_credentials(origin_url)}, "
+                "will attempt fetch",
                 extra={"correlation_id": get_correlation_id()},
             )
-            return True, f"Remote repository: {origin_url}"
+            # Returned into error messages: userinfo redacted.
+            return True, f"Remote repository: {mask_url_credentials(origin_url)}"
 
         except subprocess.TimeoutExpired:
             return False, "Timeout checking remote URL"

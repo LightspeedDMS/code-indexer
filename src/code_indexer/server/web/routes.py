@@ -72,6 +72,10 @@ from ..utils.bounded_submission_gate import (
 from ..utils.host_validation import normalize_server_host
 from code_indexer import __version__ as cidx_version
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.utils.credential_redaction import (
+    mask_url_credentials,
+    with_masked_repo_url,
+)
 from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -3409,7 +3413,8 @@ def _get_golden_repos_list(backend_registry=None):
     """Get list of all golden repositories with global alias, version, and index info."""
     try:
         manager = _get_golden_repo_manager()
-        repos = manager.list_golden_repos()
+        # Repository URLs are rendered with their userinfo redacted.
+        repos = [with_masked_repo_url(r) for r in manager.list_golden_repos()]
         server_data_dir = os.environ.get(
             "CIDX_SERVER_DATA_DIR", os.path.expanduser("~/.cidx-server")
         )
@@ -3573,7 +3578,9 @@ def add_golden_repo(
         if "already exists" in error_msg.lower():
             error_msg = f"Repository alias '{alias}' already exists"
         elif "invalid" in error_msg.lower() or "inaccessible" in error_msg.lower():
-            error_msg = f"Invalid or inaccessible repository: {repo_url}"
+            error_msg = (
+                f"Invalid or inaccessible repository: {mask_url_credentials(repo_url)}"
+            )
         return _create_golden_repos_page_response(
             request, session, error_message=error_msg
         )
@@ -4343,6 +4350,8 @@ def _get_single_repo_enriched(alias: str, backend_registry=None) -> Optional[dic
     repo = next((r for r in repos if r.get("alias") == alias), None)
     if repo is None:
         return None
+    # The repository URL is rendered with its userinfo redacted.
+    repo = with_masked_repo_url(repo)
     server_data_dir = os.environ.get(
         "CIDX_SERVER_DATA_DIR", os.path.expanduser("~/.cidx-server")
     )

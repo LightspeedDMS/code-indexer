@@ -15,6 +15,8 @@ from typing import Dict, Any, Optional, Tuple
 
 import httpx
 
+from code_indexer.utils.credential_redaction import mask_url_credentials
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,14 +62,18 @@ def extract_owner_repo(remote_url: str) -> Tuple[str, str]:
         # Remove protocol and host — path starts after the 3rd slash segment
         parts = url.split("/")
         if len(parts) < 4:
-            raise ValueError(f"Cannot extract owner/repo from: {remote_url}")
+            raise ValueError(
+                f"Cannot extract owner/repo from: {mask_url_credentials(remote_url)}"
+            )
         path = "/".join(parts[3:])
     else:
-        raise ValueError(f"Cannot parse remote URL: {remote_url}")
+        raise ValueError(f"Cannot parse remote URL: {mask_url_credentials(remote_url)}")
 
     segments = path.split("/")
     if len(segments) < 2:
-        raise ValueError(f"Cannot extract owner/repo from: {remote_url}")
+        raise ValueError(
+            f"Cannot extract owner/repo from: {mask_url_credentials(remote_url)}"
+        )
 
     repo = segments[-1]
     owner = "/".join(segments[:-1])

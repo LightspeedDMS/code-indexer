@@ -164,7 +164,10 @@ class GitPullUpdater(UpdateStrategy):
     """
 
     def __init__(
-        self, repo_path: str, cancel_check: Optional[Callable[[], bool]] = None
+        self,
+        repo_path: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        credentials_url: Optional[str] = None,
     ):
         """
         Initialize git pull updater.
@@ -176,9 +179,14 @@ class GitPullUpdater(UpdateStrategy):
                 is terminated on cancel (SubprocessCancelledError, a
                 RuntimeError, propagates unchanged). None = plain
                 subprocess.run (no owning job).
+            credentials_url: The registered repository URL. Its credentials
+                are supplied to every fetch/pull at run time (the clone's
+                stored origin URL is credential-free). None when the
+                repository needs none.
         """
         self.repo_path = Path(repo_path)
         self._cancel_check = cancel_check
+        self._credentials_url = credentials_url
 
         if not self.repo_path.exists():
             # Bug #1338: this is the ORPHAN case (registry row present, clone
@@ -214,7 +222,7 @@ class GitPullUpdater(UpdateStrategy):
                     capture_output=True,
                     text=True,
                     timeout=30,
-                    env=build_non_interactive_git_env(),
+                    env=build_non_interactive_git_env(self._credentials_url),
                 )
             except subprocess.TimeoutExpired as e:
                 # Bug #1830 AC1/AC4: a fetch that TIMES OUT must be classified
@@ -404,7 +412,7 @@ class GitPullUpdater(UpdateStrategy):
             capture_output=True,
             text=True,
             timeout=30,
-            env=build_non_interactive_git_env(),
+            env=build_non_interactive_git_env(self._credentials_url),
         )
         if fetch_result.returncode != 0:
             # Bug #1832: name exit code + both streams, not stderr alone.
@@ -559,7 +567,7 @@ class GitPullUpdater(UpdateStrategy):
                 capture_output=True,
                 text=True,
                 timeout=120,
-                env=build_non_interactive_git_env(),
+                env=build_non_interactive_git_env(self._credentials_url),
             )
 
             if result.returncode != 0:
@@ -607,7 +615,7 @@ class GitPullUpdater(UpdateStrategy):
                         capture_output=True,
                         text=True,
                         timeout=120,
-                        env=build_non_interactive_git_env(),
+                        env=build_non_interactive_git_env(self._credentials_url),
                     )
                     if retry.returncode == 0:
                         logger.info(

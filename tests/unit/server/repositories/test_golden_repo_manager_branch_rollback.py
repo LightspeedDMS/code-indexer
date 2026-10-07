@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from code_indexer.server.git.git_subprocess_env import RemoteUrlSanitization
 from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepo,
     GoldenRepoManager,
@@ -18,6 +19,19 @@ from code_indexer.server.repositories.golden_repo_manager import (
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _origin_already_credential_free():
+    """The base-clone origin rewrite before the branch fetch is covered by
+    test_golden_repo_runtime_credentials.py; these tests count only the
+    rollback's git calls."""
+    with patch(
+        "code_indexer.server.repositories.golden_repo_manager."
+        "ensure_remote_url_without_credentials",
+        return_value=RemoteUrlSanitization(rewritten=0, failed=0),
+    ):
+        yield
 
 
 @pytest.fixture

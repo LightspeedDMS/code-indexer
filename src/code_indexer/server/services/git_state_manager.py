@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional, Any, List, Union, cast
 
 from code_indexer.utils.git_runner import run_git_command
+from code_indexer.utils.credential_redaction import mask_url_credentials
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
@@ -694,7 +695,9 @@ class GitHubPRClient:
             # HTTPS: https://github.com/owner/repo.git
             # SSH: git@github.com:owner/repo.git
             if "github.com" not in remote_url:
-                raise ValueError(f"Not a GitHub repository: {remote_url}")
+                raise ValueError(
+                    f"Not a GitHub repository: {mask_url_credentials(remote_url)}"
+                )
 
             parts = remote_url.replace(".git", "").split("/")
             repo = parts[-1]
@@ -795,7 +798,9 @@ class GitLabPRClient:
             # HTTPS: https://gitlab.com/owner/repo.git
             # SSH: git@gitlab.com:owner/repo.git
             if "gitlab.com" not in remote_url:
-                raise ValueError(f"Not a GitLab repository: {remote_url}")
+                raise ValueError(
+                    f"Not a GitLab repository: {mask_url_credentials(remote_url)}"
+                )
 
             parts = remote_url.replace(".git", "").split("/")
             repo = parts[-1]

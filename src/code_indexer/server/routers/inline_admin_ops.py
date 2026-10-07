@@ -50,6 +50,7 @@ from ..repositories.golden_repo_manager import GoldenRepoError, GitOperationErro
 from ..repositories.activated_repo_manager import ActivatedRepoError
 from ..repositories.background_jobs import DuplicateJobError
 from ..logging_utils import format_error_log
+from code_indexer.utils.credential_redaction import with_masked_repo_url
 from ..services.activated_repo_audited_ops import deactivate_repository_for_user
 from ..services.golden_repo_audited_ops import (
     request_golden_repo_refresh,
@@ -204,7 +205,11 @@ def register_admin_ops_routes(
         Returns:
             List of golden repositories
         """
-        repos = golden_repo_manager.list_golden_repos()
+        # Repository URLs are returned with their userinfo redacted.
+        repos = [
+            with_masked_repo_url(repo)
+            for repo in golden_repo_manager.list_golden_repos()
+        ]
         return {
             "golden_repositories": repos,
             "total": len(repos),

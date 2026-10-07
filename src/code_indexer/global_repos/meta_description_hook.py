@@ -18,6 +18,7 @@ from typing import Any, Optional
 import yaml
 
 from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
+from code_indexer.utils.credential_redaction import mask_url_credentials
 from code_indexer.global_repos.write_lock_manager import (
     describe_scheduler_lock_holder,
 )
@@ -823,16 +824,19 @@ def _generate_repo_description(
     analyzer = RepoAnalyzer(clone_path, claude_cli_manager=cli_manager)
     info = analyzer.extract_info()
 
+    # The description is indexed in cidx-meta and globally queryable, so the
+    # repository URL is written with its userinfo redacted.
+    display_url = mask_url_credentials(repo_url)
     frontmatter_dict: dict = {
         "name": repo_name,
-        "url": repo_url,
+        "url": display_url,
         "technologies": list(info.technologies),
         "purpose": info.purpose,
         "last_analyzed": now,
     }
 
     # Build markdown body
-    body = f"\n# {repo_name}\n\n{info.summary}\n\n**Repository URL**: {repo_url}\n"
+    body = f"\n# {repo_name}\n\n{info.summary}\n\n**Repository URL**: {display_url}\n"
     if info.features:
         body += "\n## Features\n\n"
         for feat in info.features[:10]:

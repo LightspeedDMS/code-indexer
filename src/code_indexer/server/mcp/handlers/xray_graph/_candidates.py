@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
+from code_indexer.utils.path_confinement import is_readable_within_root
+
 # R3-2 (Codex re-review, ROUND 3): the SAME whole-repo candidate-file cap
 # Rust's `GRAPH_INDEX_MAX_FILES` (rust/xray-cli/src/main.rs) enforces --
 # must stay in sync with that constant. Capping HERE, during the Python-
@@ -139,10 +141,20 @@ def _collect_graph_candidate_files(
     files_excluded_with_extractor = 0
     files_excluded_without_extractor = 0
     languages_excluded_with_extractor: Set[str] = set()
+    # os.walk does not follow symlinked directories, so only a file's own
+    # final component can redirect: a symlink resolving outside the
+    # repository or into its .git (e.g. ``link.py -> .git/config``) is
+    # never handed to the graph extractor.
+    resolved_root = repo_path.resolve()
     for dirpath, dirnames, filenames in os.walk(repo_path):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_NAMES]
         for filename in sorted(filenames):
-            rel = Path(dirpath, filename).relative_to(repo_path).as_posix()
+            full_path = Path(dirpath, filename)
+            if os.path.islink(full_path) and not is_readable_within_root(
+                full_path, resolved_root
+            ):
+                continue
+            rel = full_path.relative_to(repo_path).as_posix()
             if not selector.select(rel):
                 # Bug #1907: this file will NEVER reach Rust -- classify it
                 # NOW, while its extension is still in hand, or it becomes

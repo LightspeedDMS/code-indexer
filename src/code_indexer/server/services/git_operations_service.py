@@ -646,8 +646,17 @@ class GitOperationsService:
 
         # Story #636: Trigger migration before push if needed
         self._trigger_migration_if_needed(repo_path, username, repo_alias)
+        # Stored origin converges; credentials are supplied at run time.
+        credentials_url = self.activated_repo_manager.prepare_remote_operation(
+            username, repo_alias
+        )
 
-        result = self.git_push(Path(repo_path), remote=remote, branch=branch)
+        result = self.git_push(
+            Path(repo_path),
+            remote=remote,
+            branch=branch,
+            credentials_url=credentials_url,
+        )
         result["success"] = True
         return result
 
@@ -679,8 +688,17 @@ class GitOperationsService:
 
         # Story #636: Trigger migration before pull if needed
         self._trigger_migration_if_needed(repo_path, username, repo_alias)
+        # Stored origin converges; credentials are supplied at run time.
+        credentials_url = self.activated_repo_manager.prepare_remote_operation(
+            username, repo_alias
+        )
 
-        result = self.git_pull(Path(repo_path), remote=remote, branch=branch)
+        result = self.git_pull(
+            Path(repo_path),
+            remote=remote,
+            branch=branch,
+            credentials_url=credentials_url,
+        )
         result["success"] = True
         return result
 
@@ -711,8 +729,14 @@ class GitOperationsService:
 
         # Story #636: Trigger migration before fetch if needed
         self._trigger_migration_if_needed(repo_path, username, repo_alias)
+        # Stored origin converges; credentials are supplied at run time.
+        credentials_url = self.activated_repo_manager.prepare_remote_operation(
+            username, repo_alias
+        )
 
-        result = self.git_fetch(Path(repo_path), remote=remote)
+        result = self.git_fetch(
+            Path(repo_path), remote=remote, credentials_url=credentials_url
+        )
         result["success"] = True
         return result
 
@@ -1631,7 +1655,11 @@ class GitOperationsService:
         return 0
 
     def git_push(
-        self, repo_path: Path, remote: str = "origin", branch: Optional[str] = None
+        self,
+        repo_path: Path,
+        remote: str = "origin",
+        branch: Optional[str] = None,
+        credentials_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Push commits to remote repository.
@@ -1640,6 +1668,8 @@ class GitOperationsService:
             repo_path: Path to git repository
             remote: Remote name (default: "origin")
             branch: Optional branch name
+            credentials_url: Registered repository URL whose credentials are
+                supplied to git at run time (None when none are needed)
 
         Returns:
             Dict with success flag and pushed_commits count
@@ -1674,6 +1704,7 @@ class GitOperationsService:
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_remote_timeout,
                 check=True,
+                credentials_url=credentials_url,
             )
 
             pushed_commits = self._count_pushed_commits(result, repo_path)
@@ -1771,8 +1802,15 @@ class GitOperationsService:
                     returncode=e.returncode,
                 )
 
-        # Convert SSH to HTTPS for PAT-based auth
-        https_url = helper.convert_ssh_to_https(remote_url)
+        from code_indexer.server.git.git_subprocess_env import (
+            remote_url_without_credentials,
+        )
+
+        # Convert SSH to HTTPS for PAT-based auth. The push names the
+        # credential-free URL; the PAT is supplied through GIT_ASKPASS.
+        https_url = remote_url_without_credentials(
+            helper.convert_ssh_to_https(remote_url)
+        )
 
         # Create askpass script
         askpass_path = helper.create_askpass_script(credential["token"])
@@ -1867,7 +1905,11 @@ class GitOperationsService:
             helper.cleanup_askpass_script(askpass_path)
 
     def git_pull(
-        self, repo_path: Path, remote: str = "origin", branch: Optional[str] = None
+        self,
+        repo_path: Path,
+        remote: str = "origin",
+        branch: Optional[str] = None,
+        credentials_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Pull updates from remote repository.
@@ -1876,6 +1918,8 @@ class GitOperationsService:
             repo_path: Path to git repository
             remote: Remote name (default: "origin")
             branch: Optional branch name
+            credentials_url: Registered repository URL whose credentials are
+                supplied to git at run time (None when none are needed)
 
         Returns:
             Dict with success, updated_files count, and conflicts list
@@ -1919,6 +1963,7 @@ class GitOperationsService:
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_remote_timeout,
                 check=False,
+                credentials_url=credentials_url,
             )
 
             conflicts = []
@@ -1944,13 +1989,20 @@ class GitOperationsService:
         except subprocess.TimeoutExpired as e:
             raise GitCommandError(f"git pull timed out after {e.timeout}s", stderr="")
 
-    def git_fetch(self, repo_path: Path, remote: str = "origin") -> Dict[str, Any]:
+    def git_fetch(
+        self,
+        repo_path: Path,
+        remote: str = "origin",
+        credentials_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Fetch updates from remote repository.
 
         Args:
             repo_path: Path to git repository
             remote: Remote name (default: "origin")
+            credentials_url: Registered repository URL whose credentials are
+                supplied to git at run time (None when none are needed)
 
         Returns:
             Dict with success flag and fetched_refs list
@@ -1971,6 +2023,7 @@ class GitOperationsService:
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_remote_timeout,
                 check=True,
+                credentials_url=credentials_url,
             )
 
             fetched_refs = []

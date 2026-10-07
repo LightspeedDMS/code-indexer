@@ -78,6 +78,7 @@ def run_git_command(
     capture_output: bool = True,
     text: bool = True,
     timeout: Optional[float] = None,
+    credentials_url: Optional[str] = None,
     **kwargs,
 ) -> subprocess.CompletedProcess:
     """
@@ -90,6 +91,10 @@ def run_git_command(
         capture_output: Whether to capture stdout and stderr
         text: Whether to decode output as text
         timeout: Optional timeout in seconds
+        credentials_url: The registered repository URL for a network
+            command; its credentials are supplied to git at run time
+            through the environment (never on argv nor stored in the
+            clone). None when the command needs none.
         **kwargs: Additional arguments to pass to subprocess.run
 
     Returns:
@@ -99,6 +104,8 @@ def run_git_command(
         subprocess.CalledProcessError: If check=True and command fails
         subprocess.TimeoutExpired: If timeout is exceeded
     """
+    from code_indexer.server.git.git_subprocess_env import supply_remote_credentials
+
     if not cmd or cmd[0] != "git":
         raise ValueError("Command must start with 'git'")
 
@@ -109,6 +116,9 @@ def run_git_command(
     if "env" in kwargs:
         env.update(kwargs["env"])
         kwargs.pop("env")
+
+    # Appended after the safe.directory/inherited GIT_CONFIG_* entries.
+    supply_remote_credentials(env, credentials_url)
 
     return subprocess.run(
         cmd,

@@ -31,7 +31,11 @@ from code_indexer.config import ConfigManager
 from .alias_manager import AliasManager
 from .git_error_classifier import GitFetchError
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
-from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.git.git_subprocess_env import (
+    build_non_interactive_git_env,
+    ensure_remote_url_without_credentials,
+    remote_url_without_credentials,
+)
 from .git_pull_updater import GitPullUpdater
 from .meta_directory_updater import MetaDirectoryUpdater
 from .update_strategy import UpdateStrategy
@@ -399,6 +403,34 @@ def _is_git_repo_url(repo_url: str) -> bool:
     if not repo_url:
         return False
     return any(repo_url.startswith(prefix) for prefix in _GIT_URL_PREFIXES)
+
+
+def _git_pull_updater_for(
+    master_path: str,
+    repo_url: str,
+    cancel_check: Optional[Callable[[], bool]],
+) -> GitPullUpdater:
+    """The updater for one golden refresh of the base clone at
+    ``master_path``.
+
+    Repository credentials are supplied to git at run time and never stored
+    in a clone's configuration: the registered ``repo_url`` (which may carry
+    userinfo) is handed to every fetch/pull as a run-time credential, and the
+    base clone's stored origin URL is first rewritten to its credential-free
+    form (idempotent). Only the base clone is rewritten -- never a versioned
+    snapshot. A failed rewrite is logged and does not abort the refresh (the
+    stored URL still authenticates). Raises OrphanedRepoError (before any
+    rewrite) when the clone is missing. Runs in the refresh job's thread."""
+    updater = GitPullUpdater(
+        master_path, cancel_check=cancel_check, credentials_url=repo_url
+    )
+    if not ensure_remote_url_without_credentials(master_path).ok:
+        logger.warning(
+            "Stored remote URLs of %s could not all be made credential-free; "
+            "the refresh continues",
+            master_path,
+        )
+    return updater
 
 
 # Bug #1810 / Bug #1832: the diagnostic formatter used to be defined
@@ -1246,13 +1278,20 @@ class RefreshScheduler:
             shutil.rmtree(str(temp_clone))
 
         try:
+            # Credential-free URL on argv and in the clone's stored origin;
+            # repository credentials are supplied at run time.
             clone_result = run_with_cancel(
-                ["git", "clone", repo_url, str(temp_clone)],
+                [
+                    "git",
+                    "clone",
+                    remote_url_without_credentials(repo_url),
+                    str(temp_clone),
+                ],
                 cancel_check,
                 capture_output=True,
                 text=True,
                 timeout=self.CLONE_TIMEOUT_SECONDS,
-                env=build_non_interactive_git_env(),
+                env=build_non_interactive_git_env(repo_url),
             )
         except SubprocessCancelledError:
             # Bug #2012: the job was cancelled mid-clone -- drop the partial
@@ -2736,8 +2775,11 @@ class RefreshScheduler:
                                 # message-substring matching.
                                 try:
                                     # Bug #2012: its git calls are cancellable.
-                                    updater = GitPullUpdater(
-                                        master_path, cancel_check=cancel_check
+                                    # The base clone's origin converges to
+                                    # the credential-free URL; credentials
+                                    # are supplied at run time.
+                                    updater = _git_pull_updater_for(
+                                        master_path, repo_url, cancel_check
                                     )
                                 except OrphanedRepoError as orphan_exc:
                                     logger.warning(
