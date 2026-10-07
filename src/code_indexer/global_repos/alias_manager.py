@@ -377,7 +377,25 @@ class AliasManager:
         alias_file = self.aliases_dir / f"{alias_name}.json"
 
         if not alias_file.exists():
-            raise RuntimeError(f"Alias {alias_name} does not exist")
+            # Self-heal rather than abort. The pointer is DERIVED state: the record
+            # that a repo is globally active lives in the global registry, and the
+            # caller has already built and validated the snapshot being published.
+            # Raising here fails the whole refresh AND leaves queries served from the
+            # previous snapshot, so a missing pointer degrades into permanently stale
+            # answers that look healthy -- observed on the fleet as every
+            # global_repo_refresh failing with "Alias <x>-global does not exist" while
+            # a freshly built snapshot sat unpublished beside the one being served.
+            #
+            # There is no old_target to validate against when no file exists, so the
+            # conflict check this method otherwise performs has nothing to protect.
+            logger.warning(
+                "Alias %s missing on publish; recreating it at %s "
+                "(pointer is derived state, rebuilt from the publish in progress)",
+                alias_name,
+                new_target,
+            )
+            self.create_alias(alias_name=alias_name, target_path=new_target)
+            return
 
         try:
             # Read current alias data
