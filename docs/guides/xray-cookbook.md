@@ -232,7 +232,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 }
 ```
 
-This template uses `is_definitely_dead_code`. `Some(true)` means an unreferenced symbol has explicit Java `private` visibility. A `None` result is normal for most symbols on a complete graph and is not a completeness signal; it means the extractor refuses to guess enclosing-type visibility. The `dead_code_scan_census` reports definitely dead, undecidable, referenced, and unresolved counts. When `fact_graph_complete: false`, an empty `findings` list is untrustworthy. Signature matching is text matching, not name resolution.
+This template uses `is_definitely_dead_code`. `Some(true)` means an unreferenced symbol has explicit `private` visibility (Java or Kotlin). A `None` result is normal for most symbols on a complete graph and is not a completeness signal; it means the extractor refuses to guess enclosing-type visibility. The `dead_code_scan_census` reports definitely dead, undecidable, referenced, and unresolved counts. When `fact_graph_complete: false`, an empty `findings` list is untrustworthy. Signature matching is text matching, not name resolution.
 
 <!-- template:find-reference-cycles -->
 ```rust
@@ -330,7 +330,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 }
 ```
 
-This reports the true component size and the unresolved drop count separately. When `fact_graph_complete: false`, an empty `findings` list is untrustworthy. This template takes no caller-supplied dense IDs -- it enumerates the graph's own strongly connected components, so there is nothing to edit before running it; unresolved symbols may be dropped from the attached finding while remaining in the true component size. `is_definitely_dead_code` depends on explicit Java visibility and is not a completeness signal. Signature matching is text matching, not name resolution.
+This reports the true component size and the unresolved drop count separately. When `fact_graph_complete: false`, an empty `findings` list is untrustworthy. This template takes no caller-supplied dense IDs -- it enumerates the graph's own strongly connected components, so there is nothing to edit before running it; unresolved symbols may be dropped from the attached finding while remaining in the true component size. `is_definitely_dead_code` depends on explicit `private` visibility and is not a completeness signal. Signature matching is text matching, not name resolution.
 
 <!-- template:report-reachable-symbols-from-dense-id -->
 ```rust
@@ -425,7 +425,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 }
 ```
 
-The caller-supplied dense IDs are placeholders. The template checks `symbol_count` and emits an explicit out-of-range finding. When `fact_graph_complete: false`, an empty `findings` list is untrustworthy; reached and unresolved counts are reported separately. `is_definitely_dead_code` depends on explicit Java visibility and is not a completeness signal. Signature matching is text matching, not name resolution.
+The caller-supplied dense IDs are placeholders. The template checks `symbol_count` and emits an explicit out-of-range finding. When `fact_graph_complete: false`, an empty `findings` list is untrustworthy; reached and unresolved counts are reported separately. `is_definitely_dead_code` depends on explicit `private` visibility and is not a completeness signal. Signature matching is text matching, not name resolution.
 
 <!-- template:find-path-to-dense-sink -->
 ```rust
@@ -490,7 +490,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 }
 ```
 
-Like this cookbook's other caller-supplied dense IDs, `SINK_DENSE_ID` is a placeholder. This template no longer reports per-source path/no path findings individually -- a real repository can have thousands of sources -- so the `dense_sink_path_census`'s `no_path` counter is what distinguishes sources with no path to the sink from a template that never ran. When `fact_graph_complete: false`, an empty `findings` list is untrustworthy. `is_definitely_dead_code` depends on explicit Java visibility and is not a completeness signal. Signature matching is text matching, not name resolution.
+Like this cookbook's other caller-supplied dense IDs, `SINK_DENSE_ID` is a placeholder. This template no longer reports per-source path/no path findings individually -- a real repository can have thousands of sources -- so the `dense_sink_path_census`'s `no_path` counter is what distinguishes sources with no path to the sink from a template that never ran. When `fact_graph_complete: false`, an empty `findings` list is untrustworthy. `is_definitely_dead_code` depends on explicit `private` visibility and is not a completeness signal. Signature matching is text matching, not name resolution.
 
 <!-- template:callers-of-symbols-matching-signature-text -->
 ```rust
@@ -657,7 +657,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 }
 ```
 
-This is text matching over `signature_for()`, not name resolution. It can over-match any signature containing the substring, under-match symbols with no cached signature, and callers_of sees only the post-cap candidate arena. Use it to locate candidates for inspection, never as an authoritative all-callers result. This template takes no caller-supplied dense IDs -- it enumerates `0..symbol_count()`; the only value to edit is the signature text constant. When `fact_graph_complete: false`, an empty `findings` list is untrustworthy. `is_definitely_dead_code` depends on explicit Java visibility and is not a completeness signal.
+This is text matching over `signature_for()`, not name resolution. It can over-match any signature containing the substring, under-match symbols with no cached signature, and callers_of sees only the post-cap candidate arena. Use it to locate candidates for inspection, never as an authoritative all-callers result. This template takes no caller-supplied dense IDs -- it enumerates `0..symbol_count()`; the only value to edit is the signature text constant. When `fact_graph_complete: false`, an empty `findings` list is untrustworthy. `is_definitely_dead_code` depends on explicit `private` visibility and is not a completeness signal.
 
 ## MCP request fields
 
@@ -701,7 +701,8 @@ graph and is a different execution mode from single-file `xray_search`.
 Graph mode requires both `fn collect_facts` and `fn analyze_graph`; neither is
 optional. A graph evaluator must not define `fn evaluate_node`. `collect_facts`
 runs per file to collect auxiliary evidence, while `analyze_graph` reduces the
-completed graph. The graph extractor currently supports Java only.
+completed graph. The graph extractor currently supports Java and Kotlin
+(`.java`, `.kt`, `.kts`); files in other languages contribute no declarations.
 
 Always inspect `fact_graph_complete` and the degradation counters before
 treating an empty `findings` list as a verified negative. When
@@ -723,7 +724,7 @@ their required function contracts must not be mixed.
 
 - For the engine architecture, its two execution modes, and the graph node/edge model: `get_file_content(repository_alias='code-indexer-global', file_path='docs/architecture/xray/architecture.md')` (X-Ray Architecture).
 - `get_file_content(repository_alias='code-indexer-global', file_path='docs/architecture/xray/sandbox.md')`
-  describes the retained internal Python module and its non-contract status.
+  describes how evaluator code is validated, compiled and isolated.
 - `get_file_content(repository_alias='code-indexer-global', file_path='src/code_indexer/server/mcp/tool_docs/search/xray_search.md')`
   defines the single-file request and evaluator schema.
 - For graph extraction, reduction, and completeness semantics: `get_file_content(repository_alias='code-indexer-global', file_path='src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md')` (analyze_graph MCP contract).

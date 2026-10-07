@@ -1,49 +1,84 @@
-# X-Ray Sandbox Security Boundary (v10.4.0)
+# X-Ray Evaluator Security Boundary
 
-This document captures the X-Ray sandbox security boundary invariants extracted from project CLAUDE.md. It defines how the AST evaluator subprocess is locked down so caller-supplied Python code cannot escape the sandbox.
+Maintainer reference for how the server runs caller-supplied X-Ray evaluator code: Rust source that is validated,
+compiled into a shared library and executed in a child process. It applies to every evaluator that reaches
+`xray_search`, `xray_explore`, `xray_search_batch` and `analyze_graph`, including stored patterns. The engine around
+it is described in [architecture.md](architecture.md).
 
-**The `PythonEvaluatorSandbox` CLASS below is not the live MCP/REST evaluator contract.** It is retained in-tree but is not on the evaluation path for `xray_search` or `xray_explore` -- the current single-file evaluator contract is the Rust `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`, documented in the [xray_search tool documentation](../../../src/code_indexer/server/mcp/tool_docs/search/xray_search.md) and the [X-Ray Cookbook](../../guides/xray-cookbook.md). Everything below describes this retained class's own internals, not a currently reachable API.
+## Layers
 
-This module is NOT dormant, though: it also exports `validate_rust_evaluator()` (`sandbox.py:1427`), the live pre-flight validator every `xray_search`, `xray_explore`, and `xray_search_batch` request runs against caller-supplied Rust evaluator source before job submission. Only the `PythonEvaluatorSandbox` class and its subprocess pipeline, described from here on, are off the current evaluation path.
+| Layer | Where | What it enforces |
+|-------|-------|------------------|
+| 1. Pre-flight validation | `validate_rust_evaluator()`, `src/code_indexer/xray/sandbox.py` | Required entry points and a fast forbidden-construct scan, before any job or compile starts |
+| 2. Authoritative validation | `validate_evaluator_source()`, `rust/xray-core/src/validator.rs` | AST-based allowlist and blocklist, run by the compile pipeline before `rustc` |
+| 3. Compilation | `rust/xray-core/src/compiler/` | Assembly with the fixed PREAMBLE/EPILOGUE, pinned toolchain, bounded compile time |
+| 4. Execution | `xray-cli` child process, `src/code_indexer/xray/rust_backend.py` | Evaluator runs outside the server process; killed with its process group on timeout |
+| 5. Output handling | `rust_backend.py` | File reads confined to the repository root; server paths removed from error messages |
 
-`src/code_indexer/xray/sandbox.py` — `PythonEvaluatorSandbox` securely executes caller-supplied Python evaluator code against AST nodes. The class remains in the codebase and is exercised by its own test suite; no MCP/REST request reaches the class itself.
+## 1. Pre-flight validation
 
-**Three defense layers**:
-1. AST whitelist validation (Layer 1) — `ast.parse()` + walk; any node not in `ALLOWED_NODES` is rejected before subprocess spawn.
-2. Stripped exec() environment (Layer 2) — `STRIPPED_BUILTINS` removed from globals dict; only `SAFE_BUILTIN_NAMES` are available.
-3. `multiprocessing.Process` isolation (Layer 3) — SIGTERM at 5.0s, SIGKILL at +1.0s; side effects confined to child.
+Every handler calls `validate_rust_evaluator(code)` before submitting work. It rejects:
 
-**ALLOWED_NODES**:
-- Core expression nodes: `Call, Name, Attribute, Constant, Subscript, Slice, Compare, BoolOp, UnaryOp, List, Tuple, Dict, Return, Expr, Module, Load`.
-- Abstract bases (matched via `isinstance()`): `boolop, cmpop, unaryop, expr_context, operator`.
-- Group A — local variable binding: `Assign`, `AugAssign`.
-- Group B — comprehensions and ternaries: `comprehension, GeneratorExp, ListComp, IfExp`. Note: `SetComp` and `DictComp` are NOT allowed.
-- Group C — statement-level control flow: `If, For, While, Break, Continue, Pass`. Iteration is bounded by `HARD_TIMEOUT_SECONDS` — infinite loops surface as `EvaluatorTimeout`, not validation rejection.
-- Group E — arithmetic binary operations: `BinOp` plus the `operator` abstract base (concrete subclasses Add, Sub, Mult, Div, Mod, etc. via isinstance).
-- Group G — function definitions: `FunctionDef`, `arguments`, `arg`. Allows evaluators to define helper functions. Note: `Lambda` is NOT allowed.
+- `missing_entry_point`: neither `fn evaluate_node` (single-file mode) nor both `fn collect_facts` and
+  `fn analyze_graph` (graph mode). Mixed-mode sources pass here and are rejected by the Rust compiler's own mode
+  detection.
+- The constructs in `_RUST_FORBIDDEN_PATTERNS`: `unsafe`; `std::fs`, `std::net`, `std::process`, `std::env`,
+  `std::io`; raw pointers (`*const`, `*mut`); `extern`; `mod`; `static`; `macro_rules!`; and named macros such as
+  `include!`, `include_str!`, `include_bytes!`, `env!`, `option_env!`, `print!`, `println!`, `eprint!`,
+  `eprintln!`, `panic!`, `todo!`, `unimplemented!`.
+- Any macro invocation other than a bare `vec!`, `format!` or `matches!`.
 
-**STRIPPED_BUILTINS**: `getattr, setattr, delattr, __import__, eval, exec, open, compile`.
+The scan runs on the source with string and character literal contents and comments blanked out, so text inside a
+string or comment is not mistaken for code. Layer 2 is the authoritative check; this layer rejects the same macro
+names early.
 
-**SAFE_BUILTIN_NAMES** (8 total):
-`len, any, all, range, enumerate, sorted, min, max`.
+## 2. Authoritative validation
 
-**Still banned at validation time** (rejected before any subprocess is spawned): `class`, `async def`, `lambda`, `with`, `async with`, `global`, `nonlocal`, `async`, `await`, `yield`, `yield from`, `try`/`except`/`raise` (Groups D — Try, ExceptHandler, Raise), all imports (Groups F — Import, ImportFrom, alias), set comprehensions (SetComp), dict comprehensions (DictComp). Plus dunder Attribute and Subscript access (see `DUNDER_ATTR_BLOCKLIST` below).
+`validate_evaluator_source()` parses the source with `syn` and walks the AST. It rejects:
 
-**Timeout policy**: `HARD_TIMEOUT_SECONDS=5.0` (SIGTERM), `SIGKILL_GRACE_SECONDS=1.0` (SIGKILL if still alive). Pipe data is read BEFORE `is_alive()` check — under heavy concurrency `waitpid()` races can cause `is_alive()=True` after the child has sent valid data; pipe data takes precedence.
+- `unsafe` blocks and `unsafe fn`;
+- `use std::{fs,net,process,env,io}` (and sub-paths) and any path expression starting with those modules;
+- `static` items, raw pointer types, `extern` blocks and `extern` ABI functions, `mod` declarations;
+- `macro_rules!` definitions;
+- macro invocations other than bare, unqualified `vec!`, `format!` and `matches!`, with the arguments of allowed
+  macros inspected as well, and macro nesting deeper than 32;
+- attributes other than doc comments.
 
-**Why NOT signal.alarm**: FastAPI request handlers run in worker threads; `signal.alarm()` only works in the main thread.
+Graph-mode sources go through the same visitor first.
 
-**Failure modes** (`EvalResult.failure`):
-- `"validation_failed"` — AST whitelist rejected the code; `detail` carries the rejection reason and a list of allowed nodes.
-- `"evaluator_timeout"` — subprocess did not finish within `HARD_TIMEOUT_SECONDS`; was terminated by SIGTERM/SIGKILL.
-- `"evaluator_subprocess_died"` — subprocess exited with non-zero code (segfault, NameError on stripped builtin, etc.); `detail` carries `exitcode=N` or `no_pipe_data` or `__exception__:Type:msg` (with difflib attribute suggestions for `XRayNode` typos -- `XRayNode` is this retained Python module's own AST wrapper type, distinct from the Rust `OwnedNode` used by the current MCP/REST evaluator contract).
-- `"evaluator_returned_non_bool"` — legacy failure mode kept in the dataclass for backward compatibility; not emitted by the current Rust engine. This describes historical behavior of this retained module's own engine layer (`_normalize_eval_result`, `sandbox.py:858-917`), which validated the v10.4.0 dict-return contract and raised `InvalidEvaluatorReturn` in `evaluation_errors[]` instead -- not the current `_evaluate_file` in `search_engine.py`, which routes to the Rust backend and its `EvalFinding` list contract, with no dict-shape validation of this kind.
+## 3. Compilation
 
-**v10.4.0 file-as-unit dict-return contract (historical, this module only)**: The sandbox accepts any return value (including `None`); shape validation is done at the engine layer, not in the sandbox. Evaluators MUST return `{"matches": [...], "value": <any>}`. Bool returns (legacy v10.3.x contract) are rejected by the engine with `InvalidEvaluatorReturn`. The sandbox passes `match_positions` (list of dicts, one per Phase 1 hit) as a global so evaluators can scope their analysis to the regex-matched positions when desired. This dict-return shape and the `match_positions` global belong to this retained Python module only -- they are not part of the current MCP/REST evaluator contract, which is the Rust `Vec<EvalFinding>` shape described in [xray_search.md](../../../src/code_indexer/server/mcp/tool_docs/search/xray_search.md).
+`compile_evaluator()` (`rust/xray-core/src/compiler/pipeline.rs`) validates, computes the compile identity
+(`compute_cache_identity`: SHA-256 over the assembled source, `XRAY_ABI_VERSION` and the `rustc` version), reuses a
+cached library when one exists, and otherwise compiles. `rustc` runs with `RUSTUP_TOOLCHAIN` pinned to
+`rust/rust-toolchain.toml`'s channel, `--crate-type cdylib`, `-C opt-level=2`, in its own process group, and is
+killed after `RUSTC_COMPILE_TIMEOUT` (120 s, `compiler/rustc_driver.rs`). The cache lives in
+`$CIDX_DATA_DIR/xray-cache/` (default `~/.cidx-server/xray-cache/`, `rust/xray-core/src/cache.rs`). The server allows
+at most 4 concurrent compiling `xray-cli` launches per process (`_MAX_CONCURRENT_COMPILES`, `rust_backend.py`); a
+request that cannot get a compile slot within its timeout fails with a "compile queue full" error.
 
-**Dunder access is BLOCKED at validation time**:
-- `DUNDER_ATTR_BLOCKLIST` (frozenset, 39 names — original 24 plus security-audit extensions for info-leak vectors) covers: `__class__`, `__bases__`, `__base__`, `__mro__`, `__subclasses__`, `__init__`, `__init_subclass__`, `__new__`, `__globals__`, `__builtins__`, `__import__`, `__dict__`, `__getattribute__`, `__setattr__`, `__delattr__`, `__reduce__`, `__reduce_ex__`, `__call__`, `__code__`, `__closure__`, `__func__`, `__module__`, `__name__`, `__qualname__`, plus info-leak vectors `__loader__`, `__spec__`, `__file__`, `__path__`, `__package__`, `__cached__`, `__defaults__`, `__kwdefaults__`, `__annotations__`, `__type_params__`, `__set_name__`, `__instancecheck__`, `__subclasscheck__`, `__prepare__`, `__weakref__`.
-- Any `ast.Attribute` node whose `.attr` is in the blocklist → `validation_failed`.
-- Any `ast.Subscript` node whose slice is a string `Constant` starting with `__` → `validation_failed`.
-- Verified by canary tests in `tests/unit/xray/test_sandbox_dunder_escapes.py` that confirm `validation_failed` + no-subprocess + no-side-effect for each escape pattern including the confirmed exploit: `node.__class__.__init__.__globals__['__builtins__']['open']('/tmp/...','w')`.
-**Files**: `src/code_indexer/xray/sandbox.py`. Tests: `tests/unit/xray/test_sandbox*.py` (18 files, 303+ tests).
+The evaluator only sees the types the PREAMBLE declares: `OwnedNode` and `EvalFinding` in single-file mode, and the
+opaque `GraphHandle` accessors in graph mode (ADR-002).
+
+## 4. Execution
+
+The compiled library is never loaded into the server process. `RustNativeBackend` starts `xray-cli` with
+`subprocess.Popen(..., start_new_session=True)`; `xray-cli` loads the library (`libloading`,
+`rust/xray-core/src/dynlib.rs`) and calls the entry points. When the request's timeout expires, the backend sends
+`SIGKILL` to the child's process group. A crash or panic inside the evaluator terminates or fails only that child.
+In graph mode the exported `collect_facts`, `analyze_graph` and `refine` wrappers catch panics (`catch_unwind`,
+`compiler/graph_preamble.rs`) and report them as failures. When cgroup v2 delegation is available, the
+`--analyze-graph` child is bounded by a `memory.max` ceiling derived from the admission estimate (`rust/xray-core/src/graph/analyze/memory_ceiling.rs`,
+ADR-003).
+
+## 5. Output handling
+
+When findings are enriched with `line_content`, the source file is read only if it resolves inside the repository
+root (`is_resolved_within_root`). `_sanitize_error_message()` replaces X-Ray cache paths with `evaluator.rs` and
+redacts server filesystem paths before an error reaches the caller.
+
+## Retained Python sandbox class
+
+`sandbox.py` also contains `PythonEvaluatorSandbox`, a Python AST-whitelist evaluator runner from an earlier
+evaluator contract. `XRaySearchEngine` still constructs it, but evaluation goes through `RustNativeBackend`; no MCP or
+REST request executes Python evaluator code. Only `validate_rust_evaluator()` in that module is on the live path.

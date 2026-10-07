@@ -10,7 +10,7 @@ the Bug #1181 one-transaction-per-batch insert convention (see CLAUDE.md's
 
 Full architecture (writer registry, 10 instrumentation injection points,
 dual-mode cross-process bootstrap, config tunables, retention sweep):
-docs/architecture/invariants.md#embedding--reranker-call-tracking.
+docs/architecture/invariants/query-path.md#embedding-and-reranker-call-tracking.
 """
 
 from __future__ import annotations

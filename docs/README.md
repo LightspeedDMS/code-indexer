@@ -53,8 +53,10 @@ overview is in the [repository README](../README.md).
 ## Architecture
 
 - [Overview](architecture/overview.md): system design and storage architecture.
-- [Invariants](architecture/invariants.md): rules the code must keep (cluster state, scale, memory, migrations).
+- [Invariants](architecture/invariants/README.md): rules the code must keep, one file per topic.
 - [Indexing](architecture/indexing.md): file discovery, chunking, embedding batches, deduplication and publishing.
+- [Storage](architecture/storage.md): chunk layouts (JSON shards and chunks.db), migration, HNSW integrity, temporal location.
+- [Refresh recovery](architecture/refresh-recovery.md): failed refresh classification, restore, backoff and deferred triggers.
 - [Query path](architecture/query-path.md): query embedding cache, coalescing, provider calls and the REST/MCP seams.
 - [Repository lifecycle](architecture/repository-lifecycle.md): golden clones, aliases, immutable snapshots, retention and activation.
 - [Cluster](architecture/cluster.md): multi-node design on PostgreSQL and shared storage.

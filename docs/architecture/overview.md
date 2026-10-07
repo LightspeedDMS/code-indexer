@@ -1,795 +1,95 @@
-# Code Indexer Architecture (v8.0+)
-
-This document describes the high-level architecture and design decisions for Code Indexer (CIDX) version 8.0 and later.
-
-## Version 8.0 Architectural Changes
-
-Version 8.0 represents a major architectural simplification:
-- **Removed**: Qdrant backend, container infrastructure, Ollama embeddings
-- **Consolidated**: Filesystem-only backend, VoyageAI-only embeddings
-- **Simplified**: Two operational modes (was three in v7.x)
-- **Result**: Container-free, instant setup, reduced complexity
-
-See [Migration Guide](../archive/migration-to-v8.md) for upgrading from v7.x.
-
-## Operating Modes
-
-CIDX has **two operational modes** (simplified from three in v7.x), each optimized for different use cases.
-
-### Mode 1: CLI Mode (Direct, Local)
-
-**Purpose**: Direct command-line tool for local semantic code search
-
-**Storage**: FilesystemVectorStore in `.code-indexer/index/` (container-free)
-
-**Use Case**: Individual developers, single-user workflows
-
-**Characteristics**:
-- Indexes code locally in project directory
-- No daemon, no server, no network
-- Vectors stored as JSON files on filesystem
-- Each query loads indexes from disk
-- Container-free, instant setup
-
-### Mode 2: Daemon Mode (Local, Cached)
-
-**Purpose**: Local RPyC-based background service for faster queries
-
-**Storage**: Same FilesystemVectorStore + in-memory cache
-
-**Use Case**: Developers wanting faster repeated queries and watch mode
-
-**Characteristics**:
-- Caches HNSW/FTS indexes in memory (daemon process)
-- Auto-starts on first query when enabled
-- Unix socket communication (`.code-indexer/daemon.sock`)
-- Eliminates per-query HNSW/FTS index cold-load (warm in-process lookup ~5ms vs ~1s cold from disk); end-to-end query latency remains bounded by the embedding-provider round trip
-- Watch mode for real-time file change indexing
-- Container-free, runs as local process
-
-## Vector Storage Architecture (v7.0+)
-
-### HNSW Graph-Based Indexing
-
-Code Indexer v7.0 introduced **HNSW (Hierarchical Navigable Small World)** graph-based indexing for blazing-fast semantic search with **O(log N)** complexity.
-
-**Performance:**
-- **300x speedup**: ~20ms queries (vs 6+ seconds with binary index)
-- **Scalability**: Tested with 37K vectors, sub-30ms response times
-- **Memory efficient**: 154 MB index for 37K vectors (4.2 KB per vector)
-
-**Algorithm Complexity:**
-```
-Query Time Complexity: O(log N + K)
-  - HNSW graph search: O(log N) average case
-  - Candidate loading: O(K) where K = limit * 2, K << N
-  - Practical: ~20ms for 37K vectors
-```
-
-**HNSW Configuration:**
-- **M=16**: Connections per node (graph connectivity)
-- **ef_construction=200**: Build-time accuracy parameter
-- **ef_query=50**: Query-time accuracy parameter
-- **Space=cosine**: Cosine similarity distance metric
-
-### Filesystem Vector Store
-
-Container-free vector storage using filesystem + HNSW indexing:
-
-**Storage Structure:**
-```
-.code-indexer/index/<collection>/
-├── hnsw_index.bin              # HNSW graph (O(log N) search)
-├── id_index.bin                # Binary mmap ID→path mapping
-├── collection_meta.json        # Metadata + staleness tracking
-└── vectors/                    # Quantized path structure
-    └── <level1>/<level2>/<level3>/<level4>/
-        └── vector_<uuid>.json  # Individual vector + payload
-```
-
-**Collection Names** (v8.8+):
-- `voyage-code-3`: Source code and plain text (default, always present)
-- `voyage-multimodal-3`: Markdown with embedded images (created when multimodal content exists)
-
-See [Dual Model Architecture](#dual-model-architecture-v88) for details on multi-collection storage.
-
-**Key Features:**
-- **Path-as-Vector Quantization**: 64-dim projection → 4-level directory depth
-- **Git-Aware Storage**:
-  - Clean files: Store only git blob hash (space efficient)
-  - Dirty/non-git: Store full chunk_text
-- **Hash-Based Staleness**: SHA256 for precise change detection
-- **3-Tier Content Retrieval**: Current file → git blob → error
-
-**Binary ID Index:**
-- **Format**: Packed binary `[num_entries:uint32][id_len:uint16, id:utf8, path_len:uint16, path:utf8]...`
-- **Performance**: <20ms cached loads via memory mapping (mmap)
-- **Thread-safe**: RLock for concurrent access
-
-### Parallel Query Execution
-
-**2-Thread Architecture for 15-30% Latency Reduction:**
-
-```
-Query Pipeline:
-┌─────────────────────────────────────────┐
-│  Thread 1: Index Loading (I/O bound)   │
-│  - Load HNSW graph (~5-15ms)           │
-│  - Load ID index via mmap (<20ms)      │
-└─────────────────────────────────────────┘
-           ⬇ Parallel Execution ⬇
-┌─────────────────────────────────────────┐
-│ Thread 2: Embedding (CPU/Network bound)│
-│  - Generate query embedding (5s API)   │
-└─────────────────────────────────────────┘
-           ⬇ Join ⬇
-┌─────────────────────────────────────────┐
-│  HNSW Graph Search + Filtering         │
-│  - Navigate graph: O(log N)            │
-│  - Load K candidates: O(K)             │
-│  - Apply filters and score             │
-│  - Return top-K results                │
-└─────────────────────────────────────────┘
-```
-
-**Typical Savings:** 175-265ms per query
-**Threading Overhead:** 7-16% (transparently reported)
-
-## Dual Model Architecture (v8.8+)
-
-CIDX v8.8 introduces **multimodal indexing** for markdown files with embedded images, using a dual-model architecture that maintains separate collections for code and multimodal content.
-
-### Model Selection
-
-**voyage-code-3** (Code Collection):
-- **Purpose**: Source code, configuration files, plain text documentation
-- **Dimensions**: 1024
-- **Strengths**: Optimized for code semantics, function/class relationships, programming patterns
-- **Collection**: `.code-indexer/index/voyage-code-3/`
-
-**voyage-multimodal-3** (Multimodal Collection):
-- **Purpose**: Markdown files containing embedded images (diagrams, screenshots, schemas)
-- **Dimensions**: 1024
-- **Strengths**: Combined text+image understanding, visual content semantics
-- **Collection**: `.code-indexer/index/voyage-multimodal-3/`
-
-### Storage Structure (Dual Collections)
-
-```
-.code-indexer/
-├── config.json                           # Project configuration
-└── index/
-    ├── voyage-code-3/                    # Code collection (always present)
-    │   ├── hnsw_index.bin
-    │   ├── id_index.bin
-    │   ├── collection_meta.json
-    │   └── vectors/
-    │       └── <quantized-path>/vector_<uuid>.json
-    │
-    └── voyage-multimodal-3/              # Multimodal collection (when images exist)
-        ├── hnsw_index.bin
-        ├── id_index.bin
-        ├── collection_meta.json
-        └── vectors/
-            └── <quantized-path>/vector_<uuid>.json
-```
-
-### Indexing Pipeline
-
-**Automatic Detection**: During `cidx index`, each file is analyzed:
-
-```
-File Processing:
-┌─────────────────────────────────────────┐
-│  1. File Discovery                      │
-│     - Scan codebase for indexable files │
-└─────────────────────────────────────────┘
-           ⬇
-┌─────────────────────────────────────────┐
-│  2. Content Analysis                    │
-│     - Is it markdown (.md)?             │
-│       → Parse ![alt](path) syntax       │
-│     - Is it HTML/HTMX (.html, .htmx)?   │
-│       → Parse <img src="path"> tags     │
-│     - Contains image references?        │
-└─────────────────────────────────────────┘
-           ⬇
-┌─────────────────────────────────────────┐
-│  3. Image Validation                    │
-│     - File exists on disk?              │
-│     - Supported format (PNG/JPG/WebP/GIF)?│
-│     - Not a remote URL (http://)?       │
-└─────────────────────────────────────────┘
-           ⬇
-┌─────────────────────────────────────────┐
-│  4. Model Selection                     │
-│     - Has valid images → voyage-multimodal-3│
-│     - Code/text only → voyage-code-3    │
-└─────────────────────────────────────────┘
-           ⬇
-┌─────────────────────────────────────────┐
-│  5. Embedding & Storage                 │
-│     - Generate embedding with selected model│
-│     - Store in corresponding collection │
-└─────────────────────────────────────────┘
-```
-
-**Supported Image Formats**: PNG, JPG/JPEG, WebP, GIF
-**Skipped**: Remote URLs (http://, https://), missing files, unsupported formats (.bmp, .svg)
-
-### Parallel Multi-Index Query
-
-When both collections exist, queries search them **concurrently** using ThreadPoolExecutor:
-
-```
-Multi-Index Query Pipeline:
-┌─────────────────────────────────────────────────────────────┐
-│  Check: Does voyage-multimodal-3 collection exist?          │
-│  - Yes → Parallel dual-index query                          │
-│  - No  → Single-index query (voyage-code-3 only)            │
-└─────────────────────────────────────────────────────────────┘
-           ⬇ (if multimodal exists)
-┌──────────────────────────┐     ┌──────────────────────────┐
-│  Thread 1: Code Index    │     │  Thread 2: Multimodal    │
-│  - voyage-code-3 query   │     │  - voyage-multimodal-3   │
-│  - HNSW search           │     │  - HNSW search           │
-│  - Return top N*2        │     │  - Return top N*2        │
-└──────────────────────────┘     └──────────────────────────┘
-           ⬇ Parallel Execution (wall-clock = max of both) ⬇
-┌─────────────────────────────────────────────────────────────┐
-│  Result Merging                                             │
-│  1. Combine results from both indexes                       │
-│  2. Deduplicate by (file_path, chunk_offset)                │
-│     - Keep highest score when duplicates exist              │
-│  3. Sort by score descending                                │
-│  4. Apply limit to final results                            │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Timing Semantics**:
-- `parallel_multi_index_ms`: Wall-clock time for both queries (= max of individual times)
-- `code_index_ms`: Wall-clock time for voyage-code-3 query
-- `multimodal_index_ms`: Wall-clock time for voyage-multimodal-3 query
-- `merge_deduplicate_ms`: Time to merge and deduplicate results
-
-**Invariant**: `parallel_multi_index_ms >= max(code_index_ms, multimodal_index_ms)`
-
-**Timeout Handling**: Each index has independent 30-second timeout. If one times out, partial results from the successful index are still returned.
-
-### Backward Compatibility
-
-- **No multimodal content**: System operates exactly as before (single voyage-code-3 collection)
-- **Existing indexes**: Multimodal collection only created when markdown files with valid images are indexed
-- **Query interface**: Same `cidx query` command works transparently
-- **CLI feedback**: Shows `Using: voyage-code-3, voyage-multimodal-3` when both active
-
-### Search Strategy Evolution
-
-**Version 6.x: Binary Index (O(N) Linear Scan)**
-```python
-# Load ALL vectors
-for vector_id in all_vectors:  # O(N)
-    vector = load_vector(vector_id)
-    similarity = cosine(query, vector)
-    results.append((vector_id, similarity))
-
-results.sort()  # O(N log N)
-return results[:limit]
-
-# Performance: 6+ seconds for 7K vectors
-```
-
-**Version 7.0: HNSW Index (O(log N) Graph Search)**
-```python
-# Load HNSW graph index
-hnsw = load_hnsw_index()  # O(1)
-
-# Navigate graph to find approximate nearest neighbors
-candidates = hnsw.search(query, k=limit*2)  # O(log N)
-
-# Load ONLY candidate vectors
-for candidate_id in candidates:  # O(K) where K << N
-    vector = load_vector(candidate_id)
-    similarity = exact_cosine(query, vector)
-    if filter_match(vector.payload):
-        results.append((candidate_id, similarity))
-
-results.sort()  # O(K log K)
-return results[:limit]
-
-# Performance: ~20ms for 37K vectors (300x faster)
-```
-
-## Incremental HNSW Updates (v7.2+)
-
-Code Indexer v7.2 introduced **incremental HNSW index updates**, eliminating expensive full rebuilds.
-
-**Performance:**
-- **Watch mode updates**: < 20ms per file (vs 5-10s full rebuild) - **99.6% improvement**
-- **Batch indexing**: 1.46x-1.65x speedup for incremental updates
-- **Zero query delay**: First query after changes returns instantly
-- **Overall**: **3.6x average speedup** in typical development workflows
-
-**How It Works:**
-- **Change Tracking**: Tracks added/updated/deleted vectors during indexing session
-- **Auto-Detection**: SmartIndexer automatically determines incremental vs full rebuild
-- **Label Management**: Efficient ID-to-label mapping maintains consistency
-- **Soft Delete**: Deleted vectors marked (not removed) to avoid rebuilds
-
-**When Incremental Updates Apply:**
-- ✅ **Watch mode**: File changes trigger real-time HNSW updates
-- ✅ **Re-indexing**: Subsequent `cidx index` runs use incremental updates
-- ✅ **Git workflow**: Changes after `git pull` indexed incrementally
-- ❌ **First-time indexing**: Full rebuild required (no existing index)
-- ❌ **Force reindex**: `cidx index --clear` explicitly forces full rebuild
-
-## Performance Decision Analysis
-
-**Why HNSW?**
-1. **vs FAISS**: Simpler integration, no external C++ dependencies, optimal for small-medium datasets (<100K vectors)
-2. **vs Annoy**: Better accuracy-speed tradeoff, superior graph connectivity
-3. **vs Product Quantization**: Maintains full precision, no accuracy loss
-4. **vs Brute Force**: 300x speedup justifies ~150MB index overhead
-
-**Quantization Strategy:**
-- **64-dim projection**: Optimal balance (tested 32, 64, 128, 256 dimensions)
-- **4-level depth**: Enables 64^4 = 16.8M unique paths (sufficient for large codebases)
-- **2-bit quantization**: Further reduces from 64 to 4 levels per dimension
-
-**Storage Trade-offs:**
-- **JSON vs Binary**: JSON chosen for git-trackability and debuggability (3-5x size acceptable)
-- **Individual files**: Enable incremental updates and git change tracking
-- **Binary exceptions**: ID index and HNSW use binary for performance-critical components
-
-## Parallel Processing Architecture
-
-Code Indexer uses slot-based parallel file processing for efficient throughput:
-
-**Architecture:**
-- **Dual thread pool design** - Frontend file processing (threadcount+2 workers) feeds backend vectorization (threadcount workers)
-- **File-level parallelism** - Multiple files processed concurrently with dedicated slot allocation
-- **Slot-based allocation** - Fixed-size display array (threadcount+2 slots) with natural worker slot reuse
-- **Real-time progress** - Individual file status visible during processing (starting → chunking → vectorizing → finalizing → complete)
-
-**Thread Configuration:**
-- **VoyageAI default**: 8 vectorization threads → 10 file processing workers (8+2)
-- **Ollama default**: 1 vectorization thread → 3 file processing workers (1+2)
-- **Frontend thread pool**: threadcount+2 workers handle file reading, chunking, and coordination
-- **Backend thread pool**: threadcount workers handle vector embedding calculations
-- **Pipeline design**: Frontend stays ahead of backend, ensuring continuous vector thread utilization
-
-## Model-Aware Chunking Strategy
-
-Code Indexer uses a **model-aware fixed-size chunking approach** optimized for different embedding models:
-
-**How it works:**
-- **Model-optimized chunk sizes**: Automatically selects optimal chunk size based on embedding model capabilities
-- **Consistent overlap**: 15% overlap between adjacent chunks (across all models)
-- **Simple arithmetic**: Next chunk starts at (chunk_size - overlap_size) from current start position
-- **Token optimization**: Uses larger chunk sizes for models with higher token capacity
-
-**Model-Specific Chunk Sizes:**
-- **voyage-code-3**: 4,096 characters (leverages 32K token capacity)
-- **voyage-code-2**: 4,096 characters (leverages 16K token capacity)
-- **voyage-large-2**: 4,096 characters (leverages large context capacity)
-- **nomic-embed-text**: 2,048 characters (512 tokens - Ollama limitation)
-- **Unknown models**: 1,000 characters (conservative fallback)
-
-**Example chunking (voyage-code-3):**
-```
-Chunk 1: characters 0-4095     (4096 chars)
-Chunk 2: characters 3482-7577  (4096 chars, overlaps 614 chars with Chunk 1)
-Chunk 3: characters 6964-11059 (4096 chars, overlaps 614 chars with Chunk 2)
-```
-
-**Benefits:**
-- **Model optimization**: Uses larger chunks for high-capacity models
-- **Better context**: More complete code sections per chunk
-- **Efficiency**: Fewer total chunks reduce storage requirements
-- **Model utilization**: Takes advantage of each model's token capacity
-
-## Full-Text Search (FTS) Architecture
-
-CIDX integrates Tantivy-based full-text search alongside semantic search.
-
-**Performance:**
-- **1.36x faster than grep** on indexed codebases
-- **Parallel execution** in hybrid mode (both searches run simultaneously)
-- **Real-time index updates** in watch mode
-- **Storage**: `.code-indexer/tantivy_index/`
-
-**FTS Incremental Indexing (v7.2+):**
-- **FileFinder integration**: 30-36x faster rebuild (6.3s vs 3+ minutes)
-- **Incremental updates**: Tantivy updates only changed documents
-- **Automatic detection**: Checks for `meta.json` to detect existing index
-
-## Git History Search (Temporal Indexing)
-
-CIDX can index and semantically search entire git commit history:
-
-**What Gets Indexed:**
-- Commit messages (full text, not truncated)
-- Code diffs for each commit
-- Commit metadata (author, date, hash)
-- Branch information
-
-**Query Capabilities:**
-- Search entire git history semantically
-- Filter by time ranges (specific dates or `--time-range-all`)
-- Filter by chunk type (`commit_message` or `commit_diff`)
-- Filter by author
-- Combine with language and path filters
-
-**Use Cases:**
-- Code archaeology - when was code introduced
-- Bug history research
-- Feature evolution tracking
-- Author code analysis
-
-## MCP Protocol Integration
-
-**Protocol Version**: `2025-06-18` (Model Context Protocol)
-
-**Initialize Handshake** (CRITICAL for Claude Code connection):
-- Method: `initialize` - MUST be first client-server interaction
-- Server Response: `{ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "Neo", "version": "__version__" } }` (dynamic value from `src/code_indexer/__init__.py`)
-- Required for OAuth flow completion - Claude Code calls `initialize` after authentication
-
-**Version Notes**:
-- Updated from `2024-11-05` to `2025-06-18` for Claude Desktop compatibility
-- 2025-06-18 breaking changes: Removed JSON-RPC batching support
-- 2025-06-18 new features: Structured tool output, OAuth resource parameter (RFC 8707), elicitation/create for server-initiated user input
-- Current implementation: Version updated, feature audit pending
-
-**Tool Response Format** (CRITICAL for Claude Code compatibility):
-- All tool results MUST return `content` as an **array of content blocks**, NOT a string
-- Each content block must have: `{ "type": "text", "text": "actual content here" }`
-- Empty content should be `[]`, NOT `""` or missing
-- Error responses must also include `content: []` (empty array is valid)
-
-## Vector Storage Backends
-
-### Filesystem Backend (Default)
-
-Container-free vector storage using the local filesystem:
-
-**Features:**
-- **No containers required** - Stores vector data directly in `.code-indexer/index/`
-- **Zero setup overhead** - Works immediately without Docker/Podman
-- **Lightweight** - Minimal resource footprint
-- **Portable** - Vector data travels with your repository
-
-**When to use**: Development environments, CI/CD pipelines, container-restricted systems
-
-### Qdrant Backend (Removed in v8.0)
-
-**Historical Note**: Qdrant container-based backend was removed in v8.0 as part of the architectural simplification. CIDX now uses only FilesystemVectorStore with HNSW indexing, providing comparable performance without container dependencies.
-
-For migration from v7.x Qdrant deployments, see [Migration Guide](../archive/migration-to-v8.md).
-
-## Cluster Mode Architecture (Epic #408)
-
-CIDX Server supports a cluster mode where multiple nodes share a PostgreSQL database. Cluster mode is enabled by setting `storage_mode: "postgres"` in `~/.cidx-server/config.json`.
-
-Key components:
-- Storage abstraction via Python Protocol interfaces (`src/code_indexer/server/storage/protocols.py`) with SQLite and PostgreSQL implementations selected by `StorageFactory`
-- Leader election via `pg_try_advisory_lock` ensures exactly one node runs scheduler services at a time (`src/code_indexer/server/services/leader_election_service.py`)
-- Node heartbeat tracking in the `cluster_nodes` PostgreSQL table (`src/code_indexer/server/services/node_heartbeat_service.py`)
-- Distributed job reconciliation that reclaims abandoned jobs from crashed nodes (`src/code_indexer/server/services/job_reconciliation_service.py`)
-- Per-node system metrics collection written to `node_metrics` PostgreSQL table (`src/code_indexer/server/services/node_metrics_writer_service.py`)
-- PostgreSQL schema managed by numbered migration files in `src/code_indexer/server/storage/postgres/migrations/sql/`
-
-Note: There are currently 29 numbered migration files (001-029). See `src/code_indexer/server/storage/postgres/migrations/sql/` for the complete list.
-
-For full details see [Cluster Architecture Guide](cluster.md).
-For setup and operations see [Cluster Setup Guide](../server/cluster-setup.md).
-
-## Self-Monitoring Architecture (v8.8.2+)
-
-CIDX Server includes automated self-monitoring using Claude CLI for intelligent log analysis.
-
-**Components:**
-- **SelfMonitoringService**: Background scheduler running at configurable intervals (default 60 min)
-- **LogScanner**: Executes Claude CLI with structured prompts for log analysis
-- **IssueManager**: Creates GitHub issues for detected bugs
-
-**Workflow:**
-```
-Scheduled Scan:
-1. Service submits job to BackgroundJobManager
-2. LogScanner assembles prompt with log database path
-3. Claude CLI queries SQLite logs directly (--allowedTools Bash)
-4. Claude analyzes logs and returns structured JSON (bugs found/not found)
-5. IssueManager creates GitHub issues for actionable bugs
-6. Scan results stored in self-monitoring database
-```
-
-**Key Design Decisions:**
-- **Claude queries DB directly**: Prompt contains database path, not embedded logs (5KB vs 548KB)
-- **Auto-detect github_repo**: Extracted from git remote origin (no env vars required)
-- **Actionable focus**: Prompt filters configuration noise, reports only development bugs
-- **Working directory context**: Claude runs with `cwd=repo_root` for full codebase access
-
-**Storage:**
-- Scan history: `~/.cidx-server/data/self_monitoring.db`
-- Server logs: `~/.cidx-server/logs.db` (SQLite structured logging)
-
-## Research Session Tracing (Langfuse) (v8.10.0+)
-
-Optional observability integration for tracking MCP tool usage patterns via Langfuse.
-
-**Purpose:**
-- Track research sessions with explicit start/end boundaries
-- Capture all MCP tool calls as spans with timing, inputs, outputs
-- Enable performance analysis and usage pattern discovery
-- Support session scoring and feedback for quality assessment
-
-**MCP Tools:**
-- `start_trace(name, metadata)` - Begin a research session trace
-- `end_trace(score, feedback)` - Complete trace with optional quality score (0.0-1.0)
-
-**Architecture Components:**
-- **LangfuseService** (`langfuse_service.py`) - Facade providing lazy-initialized access to Langfuse components
-- **LangfuseClient** (`langfuse_client.py`) - SDK wrapper using Langfuse 3.7.0 API
-- **TraceStateManager** (`trace_state_manager.py`) - Per-session trace context management
-- **AutoSpanLogger** (`auto_span_logger.py`) - Automatic span creation for MCP tool calls
-
-**Key Design Decisions:**
-- **Graceful degradation**: Langfuse errors never fail upstream MCP operations
-- **Opt-in tracing**: Disabled by default, configurable via Web UI
-- **Auto-trace mode**: Optional automatic trace creation on first tool call
-- **Session persistence**: HTTP clients use `?session_id=xxx` for trace continuity across requests
-- **RLock for thread safety**: Prevents deadlock during lazy initialization of nested components
-
-**Configuration** (Web UI: Admin > Configuration > Langfuse Settings):
-- `enabled` - Enable/disable Langfuse integration
-- `public_key` / `secret_key` - Langfuse API credentials
-- `host` - Langfuse server URL (default: cloud.langfuse.com)
-- `auto_trace_enabled` - Automatically create trace on first tool call
-
-**Storage:**
-- Configuration: `~/.cidx-server/config.json` (langfuse section)
-- Traces: Stored in Langfuse backend (cloud or self-hosted)
-
-## Inter-Repository Dependency Map (v9.0+)
-
-Multi-pass Claude CLI pipeline that analyzes source code across all registered golden repos to produce domain-level dependency documentation.
-
-**Pipeline Passes:**
-1. **Pass 1 (Synthesis)**: Single Claude CLI call clusters repos into semantic domains based on naming, README content, and shared patterns. Outputs JSON with domain names, descriptions, participating repos, and evidence.
-2. **Pass 2 (Per-Domain Analysis)**: One Claude CLI subprocess per domain. Each session has MCP tool access to CIDX for searching repos. Produces per-domain `.md` files with intra-domain dependencies, cross-domain connections, and file-level citations.
-3. **Pass 3 (Index Generation)**: Deterministic Python post-processing. Builds domain catalog, repo-to-domain matrix, and cross-domain dependency graph. No LLM involvement.
-
-**Cross-Domain Dependency Graph (v9.2+):**
-
-Pass 3 parses all domain `.md` files to construct a directed edge list showing which domains reference other domains' repositories. The algorithm:
-1. Builds a reverse mapping from repo aliases to their owning domains
-2. Extracts the "Cross-Domain Connections" section from each domain file
-3. Splits into paragraphs and filters out negation paragraphs (containing phrases like "zero results", "unrelated", "not functional")
-4. Searches non-negated text for other domains' repo aliases using word-boundary regex
-5. Produces a markdown table appended to `_index.md` with source domain, target domain, and connecting repos
-
-**Key Design Decisions:**
-- **Journal-based resumability**: `_journal.json` tracks pass completion for crash recovery
-- **Stage-then-swap atomicity**: Pipeline writes to staging directory, renamed to final on completion
-- **Inside-out analysis**: Pass 2 starts from the largest repo in each domain and works outward
-- **Conciseness enforcement**: PostToolUse hooks remind Claude CLI to stay within output size limits
-- **Paragraph-level negation filtering**: Prevents false positives from isolation confirmation text
-
-**Storage:**
-- Output: `~/.cidx-server/data/golden-repos/cidx-meta/dependency-map/`
-- Journal: `dependency-map/_journal.json`
-- Index: `dependency-map/_index.md`
-
-**Configuration** (Web UI: Admin > Configuration > Dependency Map):
-- `dependency_map_enabled`: Feature toggle (default: off)
-- `dependency_map_interval_hours`: Delta refresh interval (default: 168 hours / weekly)
-- `dependency_map_pass_timeout_seconds`: Per-pass timeout (default: 1800s)
-- `dependency_map_pass{1,2,3}_max_turns`: Claude CLI turn limits per pass
-
-## Server Memory Management (v9.20.13+)
-
-Long-running CIDX server deployments accumulate two classes of native-memory pressure under sustained background-job traffic. Bug #878 addressed both with a defensive runtime architecture.
-
-### SQLite Connection Lifecycle (Bug #878 Fix A)
-
-`DatabaseConnectionManager` keeps one `sqlite3.Connection` per OS thread via `threading.local` plus a class-level `_connections: Dict[thread_id, connection]` registry. Long-lived uvicorn worker threads hold these connections across request boundaries; short-lived `BackgroundJob` threads, however, can churn faster than any demand-driven cleanup can keep up. Three fixes address three distinct leak vectors:
-
-| Fix | Vector | Mitigation |
-|-----|--------|------------|
-| A.1 | **TID recycling** — Linux reuses thread IDs; a new thread landing on a dead thread's TID previously clobbered the old connection in `_connections` without closing it, leaking FDs until GC | `get_connection()` now checks the existing entry under `self._lock` and explicitly `.close()`s it before storing the new connection |
-| A.2 | **Demand-driven sweep** — piggyback cleanup fired from `get_connection()` lost races to bursty thread churn (observed cleanup gaps of 1-16 minutes) | Dedicated `DatabaseConnectionManager-cleanup-daemon` thread wakes every `DEFAULT_CLEANUP_INTERVAL_SECONDS` (60s) on a `threading.Event` and sweeps all registered instances. Started from FastAPI lifespan (`start_cleanup_daemon`), stopped with bounded join and identity-guarded reference clearing |
-| A.3 | **Daemon catch-up lag** — even a 60s-cadence daemon cannot reclaim connections opened by a worker thread that exits 500ms after spawning | `BackgroundJobManager._execute_job` outer finally + `_execute_with_cancellation_check` inner worker finally iterate `DatabaseConnectionManager._instances` and call `close_thread_connection()` on each, releasing FDs at the source of churn |
-
-Operational visibility: startup emits `DatabaseConnectionManager cleanup daemon started (interval=60.0s)`; each sweep that reaps connections emits `Cleaned up N stale SQLite connections`; shutdown emits `DatabaseConnectionManager cleanup daemon stopped`. Error codes `APP-GENERAL-034`/`035` wrap startup/shutdown failures.
-
-### HNSW/FTS Cache Size Cap (Bug #878 Fix B)
-
-`HNSWIndexCache` and `FTSIndexCache` are singletons with access-based TTL eviction. Without a hard byte cap, hot repositories that continuously refresh TTL kept growing native memory indefinitely. Two fixes:
-
-- **B.1 — opinionated default cap**: `src/code_indexer/server/cache/__init__.py` exports `DEFAULT_MAX_CACHE_SIZE_MB = 4096`. When `get_global_cache()` / `get_global_fts_cache()` constructs the singleton and finds `config.max_cache_size_mb is None`, the helper `_apply_default_size_cap()` overlays 4096MB and logs `Applying default max_cache_size_mb=4096MB for HNSW/FTS cache. Set an explicit value in server config to override.` Dataclass defaults remain `None`, so explicit operator configuration — including explicit "no cap" (a very large number) — is preserved verbatim.
-- **B.2 — runtime hot-reload**: `ConfigService._update_cache_setting()` detects writes to `index_cache_max_size_mb` or `fts_cache_max_size_mb` and calls `_hot_reload_cache_size_cap()`, which acquires the live singleton's `_cache_lock`, overwrites `cache.config.max_cache_size_mb`, and runs `_enforce_size_limit()`. Entries exceeding the new cap are evicted immediately — no server restart required. Scope is narrow by design: only the two size-cap keys hot-reload; all other cache settings write through to config only.
-
-### Where It Is Wired
-
-| Concern | Module | Symbol |
-|---------|--------|--------|
-| Cleanup daemon lifecycle | `src/code_indexer/server/startup/lifespan.py` | `DatabaseConnectionManager.start_cleanup_daemon()` / `stop_cleanup_daemon()` |
-| Close-on-clobber | `src/code_indexer/server/storage/database_manager.py` | `DatabaseConnectionManager.get_connection()` |
-| Finally-close | `src/code_indexer/server/repositories/background_jobs.py` | `BackgroundJobManager._close_thread_connections_on_all_managers()` |
-| Cap default | `src/code_indexer/server/cache/__init__.py` | `DEFAULT_MAX_CACHE_SIZE_MB`, `_apply_default_size_cap()` |
-| Cap hot-reload | `src/code_indexer/server/services/config_service.py` | `ConfigService._hot_reload_cache_size_cap()` |
-
-## v10.0 Architectural Additions
-
-This section documents architectural changes added between v8.0 and v10.0 -- features that have shipped since the v8.0 simplification. It is a roll-up of the per-feature design decisions described in their own sections above and in the linked story/epic notes.
-
-### Server Mode Subsystems
-
-CIDX server (since v8.x) now includes the following subsystems:
-
-**Research Assistant (admin-only, double-MFA gated)** -- privileged remediation agent that runs Claude CLI subprocesses with a closed-set permission allow/deny ruleset. HTTP fetches are bounded by the `cidx-curl.sh` wrapper (Story #929), which validates URLs against an operator-configured CIDR allowlist (always-on loopback, never disablable) and scrubs ambient routing/config state (proxy env vars, `~/.curlrc`, CA cert env vars) before exec'ing curl. Prompt-template loading is fail-closed -- there is no silent fallback to a stale `SECURITY_GUARDRAILS` template.
-
-**Memory Store (Story #877)** -- shared technical memory CRUD via the MCP `create_memory` / `edit_memory` / `delete_memory` tools, persisted to the cidx-meta repo. A coarse write lock is acquired via `RefreshScheduler.acquire_write_lock` to coordinate with the refresh cycle. A per-memory file lock prevents concurrent edits to the same memory.
-
-**Memory Retrieval Pipeline (Story #883)** -- when `search_code` runs with `search_mode` set to `semantic` or `hybrid`, a parallel pipeline retrieves stored memories and injects them into the `relevant_memories` response field. Stages: VoyageAI query vector -> HNSW candidates -> Voyage floor -> assembly -> ordering -> optional Cohere rerank -> body hydration -> empty-state nudge. Memory IDs are validated via `^[A-Za-z0-9_-]+$` regex and resolved with `Path.relative_to()` to prevent traversal. Body hydration faults log WARNING and drop the candidate; they do not raise.
-
-**Auto-trigger Dep-Map Repair (Story #927)** -- scheduled delta and refinement jobs optionally trigger a single repair pass when anomalies are detected. Default-off opt-in via the Web UI `dep_map_auto_repair_enabled` flag. Cluster-aware decision lock: PostgreSQL `pg_try_advisory_xact_lock` (cluster) or `threading.Lock` (solo) at three trigger sites. The lock is held only for the atomic claim window; long-running work runs outside the lock with the JobTracker entry serving as the cross-node in-flight signal. Anti-fallback on health-check error: skip auto-repair rather than repair against unknown anomaly state.
-
-**Codex CLI Integration (Epic #843, Story #885)** -- Codex GPT-5 background agents register `cidx-local` MCP at server startup with persistent `client_id:client_secret` credentials issued by `MCPCredentialManager` (no JWT, no TTL). Codex auth modes: `api_key` (delegates `auth.json` schema to `codex login --with-api-key` via stdin), `subscription` (OAuth lease-loop via `CodexCredentialsFileManager`), `none` (no-op).
-
-**TOTP Step-Up Elevation (Epic #922)** -- admin operations require an active TOTP elevation window (rolling 5-min idle, 30-min absolute max age, both runtime-configurable). `ElevatedSessionManager` has dual-backend support (SQLite solo / PostgreSQL cluster) with atomic touch and `ON CONFLICT (session_key) DO UPDATE` for atomic re-elevation. Three error codes: `totp_setup_required` (403, with `setup_url`), `elevation_required` (403), `elevation_failed` (401). The kill switch returns HTTP 503 (not 403) when the feature is administratively off -- 403 misleadingly implies "forbidden", 503 correctly signals "feature administratively off". Recovery codes grant `scope=totp_repair` narrow window for TOTP reset/regenerate/disable only -- full-scope endpoints reject.
-
-**Maintenance Mode Localhost-Only (Story #924)** -- write endpoints (`POST /api/admin/maintenance/enter` and `POST /api/admin/maintenance/exit`) are restricted to loopback callers via the `require_localhost` FastAPI dependency. These endpoints are auto-updater driven (system processes, not humans), so TOTP elevation does not apply -- a system process cannot satisfy a TOTP prompt. The MCP enter/exit tools were removed entirely. Read endpoints (`GET /api/admin/maintenance/status`, `GET /drain-status`, `GET /drain-timeout`) remain admin-auth only.
-
-**cidx-meta Backup (Story #926)** -- continuous git backup of the cidx-meta directory to a remote repository. All git operations execute against the mutable base path; never inside `.versioned/cidx-meta/v_{timestamp}/` snapshot directories. Index always runs after sync (deferred-failure pattern: a push failure becomes `sync_failure` on the `SyncResult`, which marks the job FAILED after indexing completes). Conflict resolution invokes Claude via `invoke_claude_cli()` with a 600s timeout (SIGTERM first, SIGKILL after a 30s grace period). Branch detection supports remotes whose default is `main`; falls back to `master` when detection fails.
-
-### Stability Mitigations (Bug #897, Bug #878)
-
-These are the long-running-process mitigations layered on top of the v9.20.13 connection lifecycle and cache-cap work:
-
-- **glibc malloc_trim (default ON, bootstrap-only flag `enable_malloc_trim`)**: calls `malloc_trim(0)` at the end of each HNSW cache cleanup cycle. Linux+glibc only; silently no-ops on musl/macOS. Bug #897 root cause was glibc multi-arena `brk` segments holding small `label_lookup_` / `linkLists_` allocations after bulk lifecycle backfills.
-- **MALLOC_ARENA_MAX=2 (default ON, bootstrap-only flag `enable_malloc_arena_max`)**: idempotently injected as `Environment=MALLOC_ARENA_MAX=2` into the cidx-server systemd unit file by the auto-updater on each cycle. Reverting the flag removes the line on the next auto-updater run.
-- **DatabaseConnectionManager-cleanup-daemon**: a single thread sweeps stale SQLite connections across all registered singletons every 60 seconds. Started and stopped from the FastAPI lifespan (error codes `APP-GENERAL-034` / `APP-GENERAL-035`). Identity-guarded clear on shutdown.
-- **HNSW/FTS cache cap**: singletons always carry a finite `max_cache_size_mb`. When config has `None`, `DEFAULT_MAX_CACHE_SIZE_MB = 4096` is overlaid at `get_global_cache()` / `get_global_fts_cache()` init. Hot-reload via `ConfigService._hot_reload_cache_size_cap()` is narrow-scoped to `index_cache_max_size_mb` and `fts_cache_max_size_mb` only.
-- **Omni search caps (Bug #881, Bug #894)**: per-pattern wildcard expansion cap (default 50) and total alias fan-out cap after wildcard expansion plus literal union (default 50). Both return `Union[List[str], CapBreach]` and callers handle via the cap-breach helper.
-
-### Fault Injection Harness (Bug #864 + Story #864)
-
-Non-production-only fault injection for end-to-end resiliency testing. Bootstrap-only config (`config.json`, never DB): `fault_injection_enabled` (default `false`) plus `fault_injection_nonprod_ack` (default `false`). Four startup scenarios. Enabled-without-ack or enabled-in-production triggers a CRITICAL log followed by `sys.exit(1)`. All outbound async HTTP to embedding/reranking providers MUST go through `HttpClientFactory`; direct `httpx.AsyncClient()` construction outside the factory is caught by the Scenario 18 anti-regression test in `test_http_client_factory.py`.
-
-## Git History Search (Temporal Queries)
-
-### Chunk Types
-
-When querying git history with `--chunk-type`:
-
-- **`commit_message`** - Search only commit messages
-  - Returns: Commit descriptions, not code
-  - Metadata: Hash, date, author, files changed count
-  - Use for: Finding when features were added, bug fix history
-
-- **`commit_diff`** - Search only code changes
-  - Returns: Actual code diffs from commits
-  - Metadata: File path, diff type (added/modified/deleted), language
-  - Use for: Finding specific code changes, implementation history
-
-- **(default)** - Search both messages and diffs
-  - Returns: Mixed results ranked by semantic relevance
-  - Use for: General historical code search
-
-### Time Range Formats
-
-```bash
-# All history (1970 to 2100)
---time-range-all
-
-# Specific date range
---time-range 2024-01-01..2024-12-31
-
-# Recent timeframe
---time-range 2024-06-01..2024-12-31
-
-# Single year
---time-range 2024-01-01..2024-12-31
-```
-
-### Temporal Search Use Cases
-
-**1. Code Archaeology - When Was This Added?**
-```bash
-# Find when JWT authentication was introduced
-cidx query "JWT token authentication" --time-range-all --quiet
-```
-
-**2. Bug History Research**
-```bash
-# Find all bug fixes related to database connections
-cidx query "database connection bug" --time-range-all --chunk-type commit_message --quiet
-```
-
-**3. Author Code Analysis**
-```bash
-# Find all authentication-related work by specific developer
-cidx query "authentication" --time-range-all --author "alice@example.com" --quiet
-```
-
-**4. Feature Evolution Tracking**
-```bash
-# See how API endpoints changed over time
-cidx query "API endpoint" --time-range 2023-01-01..2024-12-31 --language python --quiet
-```
-
-**5. Refactoring History**
-```bash
-# Find all refactoring work
-cidx query "refactor" --time-range-all --chunk-type commit_message --limit 20 --quiet
-```
-
-## Vector Storage
-
-Code Indexer uses FilesystemVectorStore for vector storage:
-
-- **Container-free**: No Docker/Podman containers required
-- **Instant startup**: No service initialization needed
-- **Local storage**: Vectors stored as JSON files in `.code-indexer/index/`
-- **Git-aware**: Uses blob hashes for clean files, content for dirty files
-
-## Real-time Progress Display
-
-During indexing, the progress display shows:
-- File processing progress with counts and percentages
-- Performance metrics: files/s, KB/s, active threads
-- Individual file status with processing stages
-
-Example progress: `15/100 files (15%) | 8.3 files/s | 156.7 KB/s | 12 threads`
-
-Individual file status display:
-```
-├─ main.py (15.2 KB) starting
-├─ utils.py (8.3 KB) chunking...
-├─ config.py (4.1 KB) vectorizing...
-├─ helpers.py (3.2 KB) finalizing...
-├─ models.py (12.5 KB) complete ✓
-```
-
-## Embedding Provider Token Counting
-
-### VoyageAI Token Counting
-
-**Token Counting Implementation**:
-- Uses `embedded_voyage_tokenizer.py`, NOT voyageai library
-- Critical for 120,000 token/batch API limit
-- Lazy imports, caches per model (0.03ms)
-- 100% identical to `voyageai.Client.count_tokens()`
-- **DO NOT remove/replace** without extensive testing
-
-**Batch Processing**:
-- 120,000 token limit per batch enforced
-- Automatic token-aware batching
-- Transparent batch splitting
-
-
-## Performance Notes
-
-### Filter Performance
-
-- Each exclusion filter adds minimal overhead (typically <2ms)
-- Filters are applied during the search phase, not during indexing
-- Use specific patterns when possible for better performance
-- Complex glob patterns may have slightly higher overhead
-- The order of filters does not affect performance
-
-### FTS Performance
-
-FTS queries use Tantivy index for efficient text search:
-- **1.36x faster than grep** on indexed codebases (benchmark: 1.046s vs 1.426s avg)
-- **Parallel execution** in hybrid mode (both searches run simultaneously)
-- **Real-time index updates** in watch mode
-- **Storage**: `.code-indexer/tantivy_index/`
-
-## Related Documentation
-
-- **[Indexing](indexing.md)** - Detailed algorithm descriptions and complexity analysis
-- **[CLI Reference](../reference/cli.md)** - Complete CLI reference and FTS options
-- **[Server Deployment](../server/deployment.md)** - Multi-user server setup and API reference
+# Architecture Overview
+
+A map of CIDX for maintainers and contributors: the components, the ways they are deployed, how data flows through
+indexing and querying, and where each subsystem is described in detail. Rules the code must keep are in
+[Invariants](invariants/README.md).
+
+## Components
+
+| Component | Code | Role |
+|-----------|------|------|
+| CLI | `src/code_indexer/cli.py` (`cidx`) | init, index, query, watch; also the client for remote mode |
+| Indexer | `src/code_indexer/services/` (`SmartIndexer`, `HighThroughputProcessor`, `FileChunkingManager`) | git-aware discovery, chunking, embedding, storage |
+| Vector store | `src/code_indexer/storage/filesystem_vector_store.py`, `hnsw_index_manager.py` | per-collection HNSW graph plus chunk records (JSON shards or `chunks.db`) |
+| Full-text index | `src/code_indexer/services/tantivy_index_manager.py` | Tantivy index for FTS and regex queries |
+| Temporal indexer | `src/code_indexer/services/temporal/` | one document per commit, quarterly shards per embedder |
+| Embedding providers | `src/code_indexer/services/voyage_ai.py`, `cohere_embedding.py` and multimodal variants | VoyageAI and Cohere, plus rerankers |
+| SCIP | `src/code_indexer/scip/` | precise definitions, references and call chains from `index.scip.db` |
+| X-Ray | `src/code_indexer/xray/`, `rust/xray-core`, `rust/xray-cli` | AST-aware search with user-supplied Rust evaluators |
+| Daemon | `src/code_indexer/daemon/` | per-project RPyC service that keeps indexes in memory |
+| Server | `src/code_indexer/server/` | FastAPI app: REST API, MCP endpoint (`/mcp`), Web UI, background jobs, schedulers |
+| Auto-updater | `src/code_indexer/server/auto_update/` | per-node systemd timer that deploys new code and applies launch settings |
+
+## Operating modes
+
+| Mode | How it runs | Storage |
+|------|-------------|---------|
+| CLI | `cidx index` / `cidx query` in a repository; each query loads indexes from disk | `.code-indexer/` in the repository |
+| Daemon | `cidx config --daemon`; the CLI forwards commands to a per-project RPyC daemon over a Unix socket under `/tmp/cidx/` (hash-named) that caches HNSW and FTS indexes and runs `cidx watch` | same as CLI |
+| Remote client | `cidx init --remote <url>`; commands marked remote in `cidx --help` call a CIDX server | the server's |
+| Proxy | `cidx init --proxy-mode`; one directory that fans commands out to several indexed repositories | each repository's own |
+| Server, solo | one node, `storage_mode: sqlite` | SQLite databases under `~/.cidx-server/`, repositories under `~/.cidx-server/data/` |
+| Server, cluster | several nodes, `storage_mode: postgres` | shared PostgreSQL plus one shared CoW storage mount per node |
+
+User-facing detail of the local modes: [Operating Modes](../getting-started/operating-modes.md). Cluster design:
+[Cluster](cluster.md).
+
+## Indexing data flow
+
+1. Discover files: full walk on the first run, git topology (`git diff` between commits, branch awareness) afterwards;
+   the same exclusion rules apply to both.
+2. Chunk each file with model-aware sizes and overlap; markdown or HTML with valid local images goes to the
+   multimodal collection.
+3. Embed chunks in token-aware batches through the provider; only per-request HTTP timeouts apply.
+4. Store: upsert points into the collection (one per embedding model), update the HNSW graph and the FTS index.
+   Clean git files store a blob reference, dirty and non-git files store the text.
+5. Temporal indexing (`cidx index --index-commits`) builds one document per commit into quarterly shards.
+
+Detail: [Indexing](indexing.md), [Storage](storage.md).
+
+## Query data flow
+
+1. Embed the query (server: query-embedding cache, then coalescer and per-lane concurrency governor; CLI: direct
+   provider call).
+2. Search the HNSW graph of each collection (code and multimodal in parallel), hydrate the top candidates from the
+   chunk store, apply filters, merge.
+3. FTS and regex queries use the Tantivy index; hybrid mode runs semantic and FTS together. Temporal queries search
+   the commit shards for a time range.
+4. Server only: optional reranking, memory retrieval for semantic and hybrid `search_code`, and payload truncation with
+   cached full payloads (`PayloadCache`).
+
+Detail: [Query Path](query-path.md).
+
+## Server
+
+- Startup (`src/code_indexer/server/startup/`): `service_init.py` builds the backend registry and services,
+  `lifespan.py` wires caches, schedulers and cluster services, `app_wiring.py` publishes them on `app.state`. Importing
+  `code_indexer.server.app` has no side effects; the app is built on first access.
+- Configuration: bootstrap keys in `~/.cidx-server/config.json` (`BOOTSTRAP_KEYS` in
+  `src/code_indexer/server/services/config_service.py`); every other setting is a runtime setting in the database,
+  changed through the Web UI. Operator view: [Deployment](../server/deployment.md).
+- Repositories: golden repositories are cloned and indexed on the server, published as immutable snapshots behind
+  `-global` aliases, and copied per user on activation. Detail: [Repository Lifecycle](repository-lifecycle.md).
+- Background work runs as jobs through `BackgroundJobManager` / `JobTracker`: golden-repository refresh, description
+  refresh, dependency-map analysis, HNSW orphan sweep, fleet migration, retention sweeps. Failed refreshes recover as
+  described in [Refresh Recovery](refresh-recovery.md).
+- Authentication: JWT sessions, API keys, MCP credentials, OIDC, TOTP step-up elevation for admin operations.
+  Operator view: [Login and Elevation](../server/auth/login-and-elevation.md).
+- Long-running process hygiene (connection cleanup daemon, cache caps, malloc mitigations):
+  [Server Runtime Invariants](invariants/server-runtime.md).
+
+## Where to read next
+
+| Subject | Document |
+|---------|----------|
+| Rules the code must keep | [Invariants](invariants/README.md) |
+| Indexing algorithm | [Indexing](indexing.md) |
+| Index storage, chunk layouts, migration | [Storage](storage.md) |
+| Query path and query-embedding cache | [Query Path](query-path.md) |
+| Golden, global and activated repositories | [Repository Lifecycle](repository-lifecycle.md) |
+| Refresh failure handling | [Refresh Recovery](refresh-recovery.md) |
+| Cluster mode | [Cluster](cluster.md) |
+| Dependency map and cidx-meta backup | [Dependency Map](dependency-map.md) |
+| X-Ray | [X-Ray architecture](xray/architecture.md), [Sandbox](xray/sandbox.md), [Graph binder](xray/graph-binder-internals.md) |
+| CLI reference | [CLI Reference](../reference/cli/README.md) |
+| Server operation | [Deployment](../server/deployment.md) |

@@ -182,5 +182,5 @@ registered branch is indexed. Indexing all branches is gated by the runtime sett
 ## Related
 
 - [Query Guide](query.md)
-- [Architecture Invariants](../architecture/invariants.md) (indexing and migrations)
+- [Architecture Invariants](../architecture/invariants/indexing-and-migrations.md) (indexing and migrations)
 - [Configuration](../getting-started/configuration.md)

@@ -157,6 +157,6 @@ There is no un-migrate operation.
 
 ## Related documents
 
-- [Architecture invariants](../architecture/invariants.md): chunk storage layout and temporal path rules
+- [Architecture invariants](../architecture/invariants/chunk-storage.md): chunk storage layout and temporal path rules
 - [Cluster Architecture](../architecture/cluster.md)
 - [Maintenance and Jobs](maintenance-and-jobs.md)

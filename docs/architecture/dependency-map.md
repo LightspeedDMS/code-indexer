@@ -1,280 +1,224 @@
-# Dependency Map Architecture
-
-## Depmap Parser Module Split and Anomaly Channels
-
-This document captures the depmap parser architecture invariants extracted from the project CLAUDE.md to keep that file focused on rules and rituals.
-
-The depmap parser was split from a single 1042-line `dep_map_mcp_parser.py` into four cohesive modules under the MESSI rule 6 soft cap (500 lines). Each module has a single responsibility:
-
-| Module | Responsibility | Lines |
-|--------|----------------|-------|
-| `dep_map_mcp_parser.py` | Orchestration + public API (2-tuple legacy + 4-tuple with-channels) | ~440 |
-| `dep_map_parser_tables.py` | Markdown table extraction | ~354 |
-| `dep_map_parser_hygiene.py` | Identifier normalization, `AnomalyEntry`/`AnomalyAggregate`/`AnomalyType` dataclasses, dedup + aggregation helpers | ~279 |
-| `dep_map_parser_graph.py` | Graph edge aggregation, filter hooks (reserved for future use), channel split | ~445 |
-
-**Public API dual-surface** (both are stable contracts):
-- `get_cross_domain_graph(output_dir) -> Tuple[List[Dict], List[Dict[str, str]]]` — legacy 2-tuple, anomalies as `{file, error}` dicts (backward-compat).
-- `get_cross_domain_graph_with_channels(output_dir) -> Tuple[List[Dict], List[Union[AnomalyEntry, AnomalyAggregate]], List[Union[AnomalyEntry, AnomalyAggregate]], List[Union[AnomalyEntry, AnomalyAggregate]]]` — rich 4-tuple `(edges, all, parser_anomalies, data_anomalies)` for callers that need channel separation.
-
-**Anomaly channel structure** (response envelope for all 5 `depmap_*` tools):
-- `parser_anomalies[]` — structural file defects: malformed YAML, truncated table, unreadable bytes, path-traversal rejected, missing required frontmatter keys, section-present-but-empty.
-- `data_anomalies[]` — source-graph drift: bidirectional mismatch, dual-source inconsistency (JSON↔markdown), garbage-domain rejected, self-loop, edge with no derivable types, case normalization applied.
-- `anomalies[]` — legacy concatenation of both, preserved for ONE release after the parser module split (to be dropped in vN+1 per the BREAKING CHANGES plan).
-
-**AnomalyType self-classifying enum**: each variant carries a bound `channel: Literal["parser", "data"]` attribute. Routing is `AnomalyType.channel` lookup — no manual classification logic. Aggregates route identically (the aggregate's `.type.channel` determines the channel).
-
-**Frozenset-keyed bidirectional dedup**: `_check_bidirectional_consistency` aggregates by `frozenset({normalize(source), normalize(target)})` so one anomaly emits per unordered edge pair. Prevents the pre-split pattern of ~170 anomalies for ~150 edges. Both sides of the frozenset are normalized (strip_backticks + lowercase) to prevent case/backtick drift from producing false mismatches.
-
-**Invariants (MESSI rule 15, stripped under `python -O`)**:
-- `strip_backticks()` postcondition: `assert not s.startswith("\`") and not s.endswith("\`")` — all wrapper backticks stripped via `while` loops (not just one pair).
-- Self-loop preservation unconditional: `finalize_graph_edges()` excludes self-loops from the empty-types drop filter (self-loops with empty types still emit the `GARBAGE_DOMAIN_REJECTED` anomaly AND are preserved as edges).
-- Late-anomaly routing: `finalize_graph_edges()` anomalies flow through `aggregate_anomalies()` + channel split before response assembly — no silent drops (MESSI rule 13).
-
-**Handler serialization**: `src/code_indexer/server/mcp/handlers/depmap.py::_anomaly_to_dict()` handles both `AnomalyEntry` and `AnomalyAggregate` — the same helper is reused at every response assembly site. Aggregates serialize as `{"file": "<aggregated>", "error": "N occurrences: <type>"}`.
-
-Files: `src/code_indexer/server/services/dep_map_{mcp_parser,parser_tables,parser_hygiene,parser_graph}.py`, `src/code_indexer/server/mcp/handlers/depmap.py`. Tests: `tests/unit/server/services/test_dep_map_887_*.py` (70 tests across 8 ACs + 4 remediation blocker files).
-
-## Phase 3.7 Dep-Map Graph-Channel Repair (Stories #908/#910/#911/#912, Epic #907)
-
-This document captures the Phase 3.7 dep-map graph-channel repair architecture invariants extracted from the project CLAUDE.md to keep that file focused on rules and rituals.
-
-Phase 3.7 is inserted in `_run_branch_a_dep_map` between Phase 3.5 (metadata backfill) and Phase 4 (index regeneration), at progress percent 78. It repairs graph-channel anomalies detected by the dep-map parser (SELF_LOOP in Story #908; MALFORMED_YAML in Story #910; GARBAGE_DOMAIN_REJECTED in Story #911; BIDIRECTIONAL_MISMATCH in Story #912).
-
-**Bootstrap flag**: `enable_graph_channel_repair` in `config.json` (bootstrap-only, not DB). Default `True`. Pattern follows Bug #897 `enable_malloc_trim`. When `False`, `_run_phase37` returns immediately without reading parser anomalies or touching the journal. Passed to `DepMapRepairExecutor.__init__` as `enable_graph_channel_repair: bool = True`.
-
-**Journal**: Append-only JSONL at `~/.cidx-server/dep_map_repair_journal.jsonl` (CIDX_DATA_DIR env var honored per Bug #879 IPC alignment). Each line is a 12-field JSON object: `timestamp`, `anomaly_type`, `source_domain`, `target_domain`, `source_repos`, `target_repos`, `verdict`, `action`, `citations`, `file_writes`, `claude_response_raw`, `effective_mode`. Atomic per-line writes via module-scope `_write_lock` (threading.Lock). `RepairJournal` class in `dep_map_repair_phase37.py`.
-
-**Action enum master list** (grows per story):
-- `self_loop_deleted` (Story #908) — deterministic; no Claude involved
-- `malformed_yaml_reemitted` (Story #910) — deterministic surgical frontmatter re-emit from `_domains.json`
-- `auto_backfilled` (Story #912) — Claude CONFIRMED; mirror row written to target incoming table
-- `claude_refuted_pending_operator_approval` (Story #912) — Claude REFUTED; no file written
-- `inconclusive_manual_review` (Story #912) — Claude INCONCLUSIVE; no file written
-- `claude_cited_but_unverifiable` (Story #912) — CONFIRMED but cited file absent; downgraded
-- `pleaser_effect_caught` (Story #912) — CONFIRMED but symbol absent from source repos; downgraded
-- `repo_not_in_domain` (Story #912) — cited repo not a member of either domain; downgraded
-- `verification_timeout` (Story #912) — rg subprocess timed out during AC6/AC7 check
-- `claude_output_unparseable` (Story #912) — Claude response did not match expected format
-
-**Verdict enum**: `CONFIRMED | REFUTED | INCONCLUSIVE | N_A` (deterministic repairs use `N_A`).
-
-**MALFORMED_YAML repair** (Story #910): `run_malformed_yaml_repairs()` in `dep_map_repair_malformed_yaml.py` called by `_run_phase37` after SELF_LOOP pass. Uses `_domains.json` as authoritative source for `name`/`participating_repos`/`last_analyzed`. Preserves body bytes using `body_byte_offset()` byte-level splice (mixed line-endings safe). Falls back to Phase 1 full re-analysis when `_locate_frontmatter_bounds` returns `None` (body unrecoverable). Body of `_repair_malformed_yaml` in executor is a thin shim (~12 lines) that delegates to `repair_single_malformed_yaml_anomaly()` — no orchestration logic in the executor.
-
-**File split** (MESSI Rule 6 extraction):
-- `src/code_indexer/server/services/dep_map_repair_executor.py` — orchestration, phase shims (~1590 lines)
-- `src/code_indexer/server/services/dep_map_repair_phase37.py` — journal types (`Action`, `JournalEntry`, `RepairJournal`), SELF_LOOP step functions, byte-level helpers (`body_byte_offset`, `reemit_frontmatter_from_domain_info`) (~616 lines)
-- `src/code_indexer/server/services/dep_map_repair_malformed_yaml.py` — MALFORMED_YAML repair cluster: `run_malformed_yaml_repairs`, `repair_single_malformed_yaml_anomaly`, `resolve_malformed_yaml_target`, `rewrite_malformed_yaml_file`, `apply_malformed_yaml_fallback` (~323 lines)
-- `src/code_indexer/server/services/dep_map_repair_bidirectional.py` — BIDIRECTIONAL_MISMATCH orchestration + re-exports; public entry point `audit_one_bidirectional_mismatch` (~529 lines)
-- `src/code_indexer/server/services/dep_map_repair_bidirectional_parser.py` — `CitationLine`, `EdgeAuditVerdict` dataclasses; `parse_audit_verdict` parser (~200 lines)
-- `src/code_indexer/server/services/dep_map_repair_bidirectional_verify.py` — `run_verification_gate`: AC6 (file existence), AC7 (source reverse check), AC10 (rg timeout), AC11 (repo membership) (~294 lines)
-
-**BIDIRECTIONAL_MISMATCH audit pipeline** (Story #912): `_run_phase37` invokes `audit_one_bidirectional_mismatch` for each BIDIRECTIONAL_MISMATCH anomaly **only when `invoke_claude_fn` is not None** (executors without Claude DI skip the pass). DI parameters `repo_path_resolver: Callable[[str], str]` and `invoke_claude_fn: Callable[[str, str, int, int], Tuple[bool, str]]` are passed to `DepMapRepairExecutor.__init__`. Prompt template externalized to `src/code_indexer/server/mcp/prompts/bidirectional_mismatch_audit.md`. Timeouts overridable via `CIDX_BIDI_CLAUDE_SHELL_TIMEOUT` and `CIDX_BIDI_CLAUDE_OUTER_TIMEOUT` env vars (defaults 270s/330s).
-
-The executor re-exports `Action`, `JournalEntry`, `RepairJournal` from phase37 for backward compat. Tests that import these symbols from the executor continue to work.
-
-`_repair_self_loop` stays on the executor class (tests call it there). `run_phase37` in phase37 module is the SELF_LOOP orchestrator. `_run_phase37` in executor is a thin shim that checks the enable flag, delegates to `run_phase37`, then calls `run_malformed_yaml_repairs`, then processes GARBAGE_DOMAIN_REJECTED and BIDIRECTIONAL_MISMATCH in a single anomaly loop.
-
-Tests: `tests/unit/server/services/test_dep_map_908_*.py` (29 tests, 8 ACs); `tests/unit/server/services/test_dep_map_910_*.py` (24 tests, 5 ACs + builder/helpers); `tests/unit/server/services/test_dep_map_912_*.py` (44 tests, 5 ACs: AC1 prompt template, AC2 handler, AC4 parser, AC5/AC6/AC7/AC10/AC11 verification gate, executor wiring).
-
-## Resumable Delta Dep-Map Analysis Architecture
-
-### Problem this design solves
-
-`run_delta_analysis` invokes the `claude` CLI once per affected domain plus one monolithic Claude call for new-repo discovery. On a large change set (e.g. 33 affected domains + 12 new repos) the total wall-clock and token cost is multi-hour. If the cidx-server process dies mid-flight — auto-updater `systemctl restart`, OOM, `pkill -KILL`, manual restart, machine reboot — the prior naive implementation re-ran from scratch on the next trigger, throwing away every domain Claude had already finished.
-
-This document describes the resume mechanism that eliminates that waste.
-
-### High-level approach
-
-**The artefact IS the journal.** Each `cidx-meta/dependency-map/<domain>.md` carries YAML frontmatter at the top of the file recording which delta was last applied to it. On a resumed run, the per-domain loop reads each affected file's frontmatter and skips domains whose `last_delta_applied` matches the current delta's fingerprint.
-
-There is **no separate cursor file**. The cursor-vs-file ambiguity window (file written successfully but cursor save fails before crash) is eliminated by writing the frontmatter and body together in a single atomic `os.replace`.
-
-### Five primitives
-
-All implemented in `src/code_indexer/server/services/dep_map_delta_journal.py`.
-
-#### 1. `compute_delta_fingerprint(changed, new, removed) -> str`
-
-```
-sha256(
-  json.dumps(
-    {"changed": sorted([r.alias for r in changed]),
-     "new":     sorted([r.alias for r in new]),
-     "removed": sorted(removed)},
-    sort_keys=True
-  ).encode()
-).hexdigest()
-```
-
-Deterministic across runs. Order-independent within each list. Used as the resume key. A different repo set → different fingerprint → journal invalidated, fresh run.
-
-#### 2. `parse_frontmatter(md_text) -> (dict, str)`
-
-Extracts the YAML frontmatter block delimited by `---\n`/`---\n` at the start of the file. Returns `({}, original_text)` on malformed YAML or absent frontmatter (with a structured WARNING log line in the malformed case). Tolerant by design: corruption recovers automatically by treating the file as "no journal recorded, must re-process".
-
-#### 3. `render_md(frontmatter: dict, body: str) -> str`
-
-`"---\n" + yaml.safe_dump(frontmatter, sort_keys=False) + "---\n\n" + body`. Order of frontmatter keys is preserved (operator-managed keys round-trip).
-
-#### 4. `write_atomic(path: Path, content: str) -> None`
-
-The central correctness primitive:
-
-```
-tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent))
-try:
-    with os.fdopen(tmp_fd, "w") as f:
-        f.write(content)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, str(path))
-except Exception:
-    try:
-        os.unlink(tmp_path)
-    finally:
-        raise
-```
-
-- **Same parent directory**: `os.replace` is atomic only within a single filesystem; using the same parent guarantees this on local FS and on NFSv4.
-- **`fsync` before `os.replace`**: ensures the temp file's bytes are flushed to the NFS server's stable storage before the rename.
-- **Temp-file cleanup on failure**: no orphan temp files on disk.
-
-#### 5. `all_new_repos_have_domain_assignments(new_repos, domains_json_path) -> bool`
-
-Returns True iff every alias in `new_repos` appears as a member of some entry in `_domains.json`. Defensive against three corruption modes:
-
-| Condition | Result |
-|---|---|
-| File missing | False |
-| `json.JSONDecodeError` (truncated / bad UTF-8) | False (+ structured WARNING log) |
-| Wrong shape (top-level is not list-of-dicts) | False (+ structured WARNING log) |
-| Valid but incomplete | False |
-| Valid and complete | True |
-
-Returning False forces the monolithic new-repo discovery Claude call to re-run, which overwrites `_domains.json` cleanly.
-
-### The resume loop
-
-In `dependency_map_service.py::_update_affected_domains` (the existing per-affected-domain refinement loop), when called with `fingerprint != None`:
-
-```python
-for i, domain_name in enumerate(sorted(affected_domains)):
-    if _cancel_event.is_set():
-        break  # pause; frontmatter preserves what's done
-
-    domain_file = dependency_map_dir / f"{domain_name}.md"
-    existing_text = domain_file.read_text() if domain_file.exists() else ""
-    fm, body = parse_frontmatter(existing_text)
-
-    if fm.get("last_delta_applied") == fingerprint:
-        activity_journal.log(f"Resume: skipping {domain_name} (already applied)")
-        continue
-
-    # Invoke Claude with existing body as baseline (no special prompt hint —
-    # the file content IS the input; Claude treats it the same regardless of
-    # whether it came from pre-delta or post-partial-prior-run).
-    claude_raw = invoke_claude_cli(prompt, ...)
-
-    # Strip any frontmatter Claude echoed back (it often reproduces the
-    # entire file as part of its output; without this strip we would stack
-    # frontmatter blocks).
-    _, new_body = parse_frontmatter(claude_raw)
-
-    # Empty / whitespace-only Claude response = failed domain; do NOT write
-    # frontmatter; do NOT advance the journal.
-    if not new_body.strip():
-        errors.append(f"{domain_name}: empty Claude response")
-        continue
-
-    # Build new frontmatter: preserve operator-added keys, overwrite only the
-    # two journal keys.
-    new_fm = {k: v for k, v in fm.items()
-              if k not in ("last_delta_applied", "last_applied_at")}
-    new_fm["domain"] = domain_name
-    new_fm["last_delta_applied"] = fingerprint
-    new_fm["last_applied_at"] = datetime.now(timezone.utc).isoformat()
-
-    write_atomic(domain_file, render_md(new_fm, new_body))
-```
-
-### Cluster correctness
-
-Resumability is single-writer-safe because the entire delta run executes inside the existing **`cidx-meta` write lock** acquired via `RefreshScheduler.acquire_write_lock("cidx-meta")`. That lock is backed by `WriteLockManager` (atomic `os.open(O_CREAT|O_EXCL|O_WRONLY)` on the NFS-shared `cidx-meta` filesystem — NFSv4-safe per RFC 7530). The same lock is already in production use across `MemoryStoreService`, `XrayPatternService`, dep-map full analysis, and the dashboard sentinel.
-
-Two concurrent runs (delta or full) cannot interleave because the second blocks on lock acquisition. Without this lock, two runs with different fingerprints could write conflicting `last_delta_applied` markers to the same domain file — so the per-domain frontmatter approach **depends on** the single-writer guarantee, it does NOT replace it.
-
-### Crash-durability scope (honest)
-
-The atomic co-write of frontmatter and body guarantees that completed-domain state survives:
-
-| Failure mode | Survives? |
-|---|---|
-| Process crash | ✅ |
-| `pkill -KILL` | ✅ |
-| `systemctl restart cidx-server` (auto-updater path) | ✅ |
-| Graceful node reboot | ✅ |
-| **Sudden node power loss while writes are in-flight** | ⚠️ NFS server export-mode dependent |
-| **NFS server crash during a write RPC** | ⚠️ `soft,timeo=30` returns an error rather than hanging — completed prior domains remain durable but the in-flight one is lost |
-
-Parent-directory `fsync(2)` after `os.replace` is intentionally **NOT** added. NFS client support for directory fsync is implementation-defined; adding it would create a false sense of safety without a real guarantee. The honest scope statement above is the chosen design.
-
-The recovery path for the unsupported failure modes is the same as any in-flight crash: the resumed run re-processes one domain at worst.
-
-### What the design does NOT do (rejected during 4 rounds of design + Codex pressure-test review)
-
-These were considered and explicitly rejected. Re-introducing any of them is a regression:
-
-- **No backup-by-N domains on resume.** A "redo the last N completed domains defensively" mechanism was proposed and rejected because (a) atomic co-write eliminates the cursor-vs-file window the backup was meant to defend against, (b) it wastes Claude calls re-doing work that was already correctly applied.
-- **No prompt context hint to Claude.** Telling Claude "the file may be from a partial prior run" adds prompt tokens for no behaviour change — the file IS the input either way.
-- **No separate cursor file.** This is the alternative the design was specifically chosen against. The cursor-vs-file atomicity window the cursor introduces is exactly what frontmatter eliminates.
-- **No batched / per-repo new-repo discovery.** The monolithic Claude call stays monolithic; skip-or-redo only.
-- **No fingerprint intersection / partial credit.** When the delta set changes between runs (e.g., an additional repo had a refresh-pulled commit), the entire journal is invalidated and a fresh run starts. No half-credit.
-- **No `run_full_analysis` hardening.** Out of scope. Full analysis has its own resume mechanism (separate journal under `cidx-meta/dependency-map.staging/`).
-- **No parent-directory `fsync`** — see scope statement above.
-
-### Regression guards
-
-| Layer | Location |
-|---|---|
-| Unit + integration tests (40 tests) | `tests/unit/server/services/test_dep_map_1053_delta_journal.py` |
-| Multi-domain delta fixture provisioner (`--dry-run` capable) | `tests/e2e/manual/provision_delta_fixture.sh` |
-| Cidx-server process-tree audit (matches `claude .*--print`, optional `--port` narrowing) | `tests/e2e/manual/audit_processes.sh` |
-| Manual E2E with SIGKILL (Scenario 16) | Trigger delta, wait for "Delta: domain 2/N complete", `sudo systemctl kill -s KILL cidx-server`, verify ALL DOWN, restart, re-trigger, assert wall-clock reduction + skip log lines + frontmatter fingerprint correctness |
-
-### How a resumed run is observed in production
-
-1. **Activity journal** (`<cidx-meta>/.scratch/dep_map_repair_journal.jsonl`) carries one `Resume: skipping {domain} (already applied)` line per skipped domain, plus a `Resume: skipping new-repo discovery (already complete)` line when Phase C is skipped.
-2. **Wall-clock**: a resumed run with K of N domains already completed takes proportionally less time than the first run (subject to Claude latency variance).
-3. **On-disk evidence**: every affected `<domain>.md` ends with frontmatter `last_delta_applied = <current_fingerprint>` after the resumed run completes, and exactly two `---\n` delimiters (no double frontmatter — the Claude-echo strip is the safeguard).
-
-### File layout
-
-- `src/code_indexer/server/services/dep_map_delta_journal.py` — helper module (the 5 primitives above)
-- `src/code_indexer/server/services/dependency_map_service.py` — modified `_update_affected_domains` to accept an optional `fingerprint` and engage the journal path when present
-- `tests/unit/server/services/test_dep_map_1053_delta_journal.py` — 40 tests
-- `tests/e2e/manual/provision_delta_fixture.sh` — multi-domain fixture provisioner
-- `tests/e2e/manual/audit_processes.sh` — process-tree audit
-
-## cidx-meta backup contract
-
-This document describes the cidx-meta backup contract invariants for the continuous git backup feature.
-
-The server can maintain a continuous git backup of the cidx-meta directory to a remote repository. Key invariants:
-
-**Mutable base path only**: All git operations (bootstrap, sync, rebase, push) execute against `<server_data_dir>/data/golden-repos/cidx-meta/`. NEVER operate inside `.versioned/cidx-meta/v_{timestamp}/` snapshot directories. Use `get_cidx_meta_path(server_data_dir)` from `src/code_indexer/server/services/cidx_meta_backup/paths.py` — single source of truth for both the route and the refresh scheduler.
-
-**Index always runs after sync**: `CidxMetaBackupSync.sync()` runs BEFORE indexing in the refresh path. If sync succeeds (or partially fails with push-only error), indexing still runs. This is the deferred-failure pattern — a push failure becomes a `sync_failure` on the `SyncResult`, which causes the job to be marked FAILED after indexing completes.
-
-**Push/fetch failure is deferred, conflict failure is immediate**: Network errors (fetch fail, push fail) are captured in `SyncResult.sync_failure` and surfaced as `RuntimeError` at the end of the refresh job. Conflict resolution failure raises `RuntimeError` immediately (after `git rebase --abort`) and short-circuits indexing.
-
-**URL-change idempotency**: Changing the remote URL in the Web UI triggers `CidxMetaBackupBootstrap.bootstrap()` at Save time. The refresh scheduler also calls bootstrap at the start of every backup-enabled refresh cycle (idempotent — reads `git remote get-url origin`, no-ops on match). URL changes applied via direct DB edits are thus applied on the next refresh without requiring a Save.
-
-**Externalized conflict-resolution prompt**: `src/code_indexer/server/mcp/prompts/cidx_meta_conflict_resolution.md` — editable by operators. Must contain `{conflict_files}`, `{branch}`, and `{repo_path}` format placeholders.
-
-**Claude CLI routing**: Conflict resolution invokes Claude via `invoke_claude_cli()` in `src/code_indexer/global_repos/repo_analyzer.py`. On 600 s timeout, SIGTERM is sent first; SIGKILL follows after `_CLAUDE_TERMINATION_GRACE_PERIOD_SECONDS` (30 s).
-
-**Branch detection**: `detect_default_branch(master_path)` from `src/code_indexer/server/services/cidx_meta_backup/branch_detect.py` is called at the start of each backup sync to support remotes with `main` as default. Falls back to `"master"` when detection fails.
-
-Files: `src/code_indexer/server/services/cidx_meta_backup/` (bootstrap, sync, conflict_resolver, branch_detect, paths), `src/code_indexer/global_repos/refresh_scheduler.py` (backup branch), `src/code_indexer/server/web/routes.py` (config save route).
+# Dependency Map
+
+Maintainer reference for the server's dependency map: the per-domain Markdown files Claude writes under
+`cidx-meta/dependency-map/`, the parser behind the `depmap_*` MCP tools, the Phase 3.7 graph repair, resumable
+delta analysis, the coordination that keeps one analysis running at a time, and the optional git backup of
+`cidx-meta`.
+
+All paths below are relative to `src/code_indexer/server/` unless they start with `src/`.
+
+## Contents
+
+- [On-disk layout](#on-disk-layout)
+- [Parser and anomaly channels](#parser-and-anomaly-channels)
+- [Coordination: sentinel and write lock](#coordination-sentinel-and-write-lock)
+- [Resumable delta analysis](#resumable-delta-analysis)
+- [Repair and Phase 3.7 graph-channel repair](#repair-and-phase-37-graph-channel-repair)
+- [cidx-meta backup mirror](#cidx-meta-backup-mirror)
+
+## On-disk layout
+
+The dependency map lives in the mutable `cidx-meta` golden repository:
+
+| Path | Content |
+|------|---------|
+| `<golden_repos_dir>/cidx-meta/dependency-map/<domain>.md` | One file per domain: YAML frontmatter plus the Markdown body Claude produced (tables of incoming and outgoing dependencies) |
+| `<golden_repos_dir>/cidx-meta/dependency-map/_domains.json` | Domain list with participating repositories |
+| `<golden_repos_dir>/cidx-meta/dependency-map/_index.md` | Index regenerated from the domain files |
+| `<golden_repos_dir>/cidx-meta/dependency-map.staging/` | Working directory of a full analysis before it is swapped in |
+| `<golden_repos_dir>/cidx-meta/dependency-map/_active_<op_type>.lock` | Re-entrancy sentinels (see below) |
+
+`DependencyMapService.get_sentinel_dir()` (`services/dependency_map_service.py`) is the single source of the
+sentinel directory. Analyses run as background jobs with operation types `dependency_map_full`,
+`dependency_map_delta` and `dependency_map_repair`. They are started by the MCP tool `trigger_dependency_analysis`
+(`mode` is `full` or `delta`), by the Web UI dependency-map routes (`web/dependency_map_routes.py`), and by the
+service's own scheduled delta, which is followed by an automatic repair attempt.
+
+## Parser and anomaly channels
+
+The read side is `DepMapMCPParser` (`services/dep_map_mcp_parser.py`), split into four modules:
+
+| Module | Responsibility |
+|--------|----------------|
+| `services/dep_map_mcp_parser.py` | Orchestration and the public API |
+| `services/dep_map_parser_tables.py` | Markdown table extraction |
+| `services/dep_map_parser_hygiene.py` | Identifier normalization, the anomaly types and dataclasses, dedup and aggregation |
+| `services/dep_map_parser_graph.py` | Graph edge aggregation, bidirectional consistency, channel split |
+
+`DepMapMCPParser(dep_map_path)` exposes `find_consumers`, `get_repo_domains`, `get_domain_summary`,
+`get_stale_domains` and two graph methods:
+
+- `get_cross_domain_graph()` returns `(edges, anomalies)`, with each anomaly as a plain `{file, error}` dict.
+- `get_cross_domain_graph_with_channels()` returns `(edges, all, parser_anomalies, data_anomalies)` with typed
+  `AnomalyEntry` / `AnomalyAggregate` objects. Phase 3.7 repair consumes this form.
+
+**Anomaly types.** `AnomalyType` (`services/dep_map_parser_hygiene.py`) binds each variant to its channel, so
+routing is a lookup on `AnomalyType.channel`:
+
+| Channel | Variants |
+|---------|----------|
+| `parser` | `MALFORMED_YAML`, `PATH_TRAVERSAL_REJECTED` |
+| `data` | `BIDIRECTIONAL_MISMATCH`, `SELF_LOOP`, `GARBAGE_DOMAIN_REJECTED`, `CASE_NORMALIZATION_APPLIED` |
+
+`aggregate_anomalies()` collapses a type whose total count exceeds 5 into one `AnomalyAggregate` carrying the first
+examples; it serializes as `{"file": "<aggregated>", "error": "<N> occurrences: <type>"}`.
+
+**Graph hygiene rules** (`services/dep_map_parser_graph.py`, `services/dep_map_parser_hygiene.py`):
+
+- `strip_backticks()` removes every leading and trailing backtick; domain names are normalized (backticks stripped,
+  lowercased) before comparison.
+- Bidirectional consistency is checked per unordered pair, keyed by `frozenset({source, target})`, so one mismatch
+  is reported per pair rather than per direction.
+- `finalize_graph_edges()` drops edges with no derivable dependency types, except self-loops, which are always
+  kept as edges and also reported. Anomalies it emits run through the same aggregation and channel split.
+
+**MCP responses** (`mcp/handlers/depmap.py`). `depmap_get_cross_domain_graph` returns `anomalies`,
+`parser_anomalies` and `data_anomalies`. `depmap_find_consumers`, `depmap_get_repo_domains`,
+`depmap_get_domain_summary` and `depmap_get_stale_domains` return only `anomalies`. `depmap_get_hub_domains`
+returns no anomaly field. The cross-domain-graph handler serializes the typed anomalies with `_anomaly_to_dict()`
+(handling both `AnomalyEntry` and `AnomalyAggregate`); the other four tools pass through the `{file, error}` dict
+lists the parser already serialized.
+
+## Coordination: sentinel and write lock
+
+Two independent mechanisms keep analyses from overlapping.
+
+**Re-entrancy sentinel** (`services/shared_job_sentinel.py`). `SharedJobSentinel.try_claim(op_type, job_id,
+node_id)` creates `_active_<op_type>.lock` with `os.open(O_CREAT | O_EXCL)` in the shared sentinel directory, so
+only one node can hold a given op type. A sentinel older than its stale timeout is replaced:
+
+| op_type | Stale timeout | Defined in |
+|---------|---------------|------------|
+| `analysis` | 14400 s (4 h) | `ANALYSIS_STALE_TIMEOUT_SECONDS`, `services/dependency_map_service.py` |
+| `dashboard` | 1800 s (30 min) | `DASHBOARD_STALE_TIMEOUT_SECONDS`, `web/dependency_map_routes.py` |
+
+`release()` deletes the sentinel only when its job id matches. Front doors claim synchronously before starting the
+background thread and pass `pre_claimed=True` to `run_full_analysis()` / `run_delta_analysis()`; a failed claim
+returns "already in progress" with the active job id. Job-row dedup across nodes uses
+`JobTracker.register_job_if_no_conflict()` (see [jobs-and-cluster-state.md](jobs-and-cluster-state.md)).
+
+**`cidx-meta` write lock.** `run_full_analysis()` and `run_delta_analysis()` first call
+`RefreshScheduler.acquire_write_lock("cidx-meta", owner_name="dependency_map_service")`
+(`src/code_indexer/global_repos/refresh_scheduler.py`). The acquire is non-blocking: when another writer, for
+example a refresh publish, holds the lock, the analysis is skipped and the job completes as a skip. The lock is
+provided by `AliasLockCoordinator` (`src/code_indexer/global_repos/alias_lock_coordinator.py`): a lock file under
+`<golden_repos_dir>/.locks/` by default, or a database-backed store when that rollout flag is on. Long phases call
+`raise_if_write_lock_ownership_lost()`, which renews the lock and aborts the run if ownership was lost. The
+per-domain journal below depends on this single-writer guarantee; it does not replace it.
+
+## Resumable delta analysis
+
+A delta analysis calls Claude once per affected domain plus once for new-repository discovery. To avoid repeating
+completed domains after a crash or restart, the domain file itself is the journal: its frontmatter records the
+last delta applied. There is no separate cursor file.
+
+Primitives, all in `services/dep_map_delta_journal.py`:
+
+| Function | Contract |
+|----------|----------|
+| `compute_delta_fingerprint(changed, new, removed)` | SHA-256 of canonical JSON of the sorted alias lists; order-independent; a different repository set gives a different fingerprint |
+| `parse_frontmatter(md_text)` | Splits `(dict, body)`; returns `({}, original_text)` with a WARNING on malformed YAML or a non-mapping block |
+| `render_md(frontmatter, body)` | `---` block plus body; key order preserved |
+| `validate_rendered_frontmatter(rendered, expected)` | Strict check before writing: the block must parse and `participating_repos` must match |
+| `write_atomic(path, content)` | Temp file in the same directory, `fsync`, `os.replace`; the temp file is removed on failure |
+| `all_new_repos_have_domain_assignments(new_repos, domains_json)` | True only when every new alias is a member of a domain in a readable, well-formed `_domains.json` |
+
+The per-domain loop (`DependencyMapService._update_affected_domains` with a `fingerprint`):
+
+1. A domain whose frontmatter `last_delta_applied` equals the current fingerprint is skipped; the activity journal
+   records `Resume: skipping <domain> (already applied)`.
+2. A file that starts with `---` but whose frontmatter does not parse is refused: no Claude call, no write, an
+   error is recorded. Phase 3.7's `MALFORMED_YAML` repair is the path that fixes it.
+3. Otherwise Claude is invoked with the existing body. Frontmatter echoed back by Claude is stripped. An empty or
+   whitespace-only response leaves the file unchanged and the journal unadvanced.
+4. The new frontmatter keeps every existing key, sets `domain`, `last_delta_applied` and `last_applied_at`, is
+   validated, and is written together with the body in one `write_atomic()`.
+
+New-repository discovery is skipped when `all_new_repos_have_domain_assignments()` is true. A changed repository set
+produces a new fingerprint, so every domain is processed again; there is no partial credit.
+
+**Durability scope.** The co-write of frontmatter and body survives process crashes, `SIGKILL` and service
+restarts. The directory is not `fsync`ed after the rename. A write that fails leaves the previous file in place,
+and a run interrupted mid-domain re-processes at most that domain. Cluster shared storage is described in
+[cluster.md](cluster.md).
+
+## Repair and Phase 3.7 graph-channel repair
+
+`DepMapRepairExecutor.execute()` (`services/dep_map_repair_executor.py`) repairs problems found by
+`DepMapHealthDetector` in phases: 0 discover uncovered repositories, 1 re-analyze broken domains with Claude,
+1.5 remove stale repository references, 2 remove orphan files, 3 reconcile `_domains.json`, 3.5 backfill JSON
+metadata from Markdown, **3.7 repair graph-channel anomalies**, 4 regenerate `_index.md`, 5 re-validate.
+
+Phase 3.7 (`_run_phase37`) reads the anomalies from `get_cross_domain_graph_with_channels()` and dispatches them by
+type:
+
+| Anomaly | Handler | Behaviour |
+|---------|---------|-----------|
+| `SELF_LOOP` | `run_phase37`, `services/dep_map_repair_phase37.py` | Deterministic deletion of the self-referencing row |
+| `MALFORMED_YAML` | `run_malformed_yaml_repairs`, `services/dep_map_repair_malformed_yaml.py` | Re-emits the frontmatter from `_domains.json` and splices it onto the original body bytes; when the frontmatter bounds cannot be located, falls back to Phase 1 re-analysis |
+| `GARBAGE_DOMAIN_REJECTED` | `services/dep_map_repair_garbage_domain.py` | Remaps the reference to a real domain, or records it for manual review when ambiguous |
+| `BIDIRECTIONAL_MISMATCH` | `audit_one_bidirectional_mismatch`, `services/dep_map_repair_bidirectional.py` | Asks an LLM to confirm or refute the missing direction with citations, then verifies the citations (`services/dep_map_repair_bidirectional_verify.py`) before back-filling; runs only when the executor has an LLM invoker |
+
+The BIDIRECTIONAL_MISMATCH prompt is `mcp/prompts/bidirectional_mismatch_audit.md`. The LLM call goes through
+`build_dep_map_dispatcher()` (`services/dep_map_dispatcher_factory.py`), which routes to Claude, or to Codex by the
+configured weight when Codex integration is enabled.
+
+**Flags.** All are bootstrap keys in `config.json` (`BOOTSTRAP_KEYS`, `services/config_service.py`):
+
+| Key | Values | Default |
+|-----|--------|---------|
+| `enable_graph_channel_repair` | `true` / `false` | `true`; `false` makes Phase 3.7 a no-op |
+| `graph_repair_self_loop`, `graph_repair_malformed_yaml`, `graph_repair_garbage_domain`, `graph_repair_bidirectional_mismatch` | `disabled`, `dry_run`, `enabled` | unset, which the executor treats as `dry_run` |
+
+With the defaults, Phase 3.7 detects and journals but writes nothing. `disabled` skips the type (recorded as
+`type_disabled_by_config`); `dry_run` runs the handler without file writes.
+
+**Dry-run report.** `trigger_dependency_analysis` with `dry_run_graph_only=true` calls
+`DependencyMapService.run_graph_repair_dry_run()`, which runs Phase 3.7 synchronously with invocation-level dry run
+(no writes, no journal) and returns per-type, per-verdict and per-action counts plus the writes that would happen.
+
+**Journal.** Every repair decision appends one line to `dep_map_repair_journal.jsonl` in `$CIDX_DATA_DIR`
+(default `~/.cidx-server`), written under a process-local lock (`RepairJournal`,
+`services/dep_map_repair_phase37.py`). Each line has 12 fields: `timestamp`, `anomaly_type`, `source_domain`,
+`target_domain`, `source_repos`, `target_repos`, `verdict`, `action`, `citations`, `file_writes`,
+`claude_response_raw`, `effective_mode`. `verdict` is `CONFIRMED`, `REFUTED`, `INCONCLUSIVE` or `N_A`. `action` is
+one of the `Action` enum values in the same module, for example `self_loop_deleted`, `malformed_yaml_reemitted`,
+`garbage_domain_remapped`, `auto_backfilled`, `claude_refuted_pending_operator_approval` or
+`pleaser_effect_caught`.
+
+## cidx-meta backup mirror
+
+The server can mirror the mutable `cidx-meta` directory to a git remote. The remote is a passive backup: local
+content is always authoritative and nothing is ever merged from the remote.
+
+**Configuration.** Runtime setting `cidx_meta_backup` (`enabled`, `remote_url`; `CidxMetaBackupConfig` in
+`utils/config_manager.py`), saved through the Web UI config screen. Saving with a non-HTTP(S), non-`file://` URL
+requires a managed SSH key for the URL's host. Saving with a remote URL runs `CidxMetaBackupBootstrap.bootstrap()`
+immediately.
+
+**Path.** All git operations run in `<server_data_dir>/data/golden-repos/cidx-meta/`
+(`get_cidx_meta_path()`, `services/cidx_meta_backup/paths.py`), never inside a `.versioned/` snapshot.
+
+**Bootstrap** (`services/cidx_meta_backup/bootstrap.py`), idempotent:
+
+- No `.git`: `git init`, check out the remote's default branch (`detect_default_branch()` via
+  `git remote show origin`, else `master`), write `.gitignore`, commit, add `origin`, push.
+- Existing repository: converge `.gitignore` to contain `.code-indexer/` and `.snapshot-reader-leases/`; when
+  `origin` differs from the configured URL, re-point it and push. A rejected push raises; bootstrap never
+  force-pushes.
+
+**Sync** (`CidxMetaBackupSync.sync()`, `services/cidx_meta_backup/sync.py`), during every refresh of
+`cidx-meta-global` while backup is enabled (`src/code_indexer/global_repos/refresh_scheduler.py`):
+
+1. `MetaDirectoryUpdater` writes description files, then bootstrap runs (cheap when nothing changed).
+2. Local changes are committed as `auto: cidx-meta refresh @ <timestamp>`.
+3. `git fetch origin` refreshes the lease. A fetch failure is recorded as a sync failure.
+4. If nothing was committed and local `HEAD` equals `origin/<branch>`, the sync reports "skipped" and the refresh
+   ends with "No changes detected", unless the refresh was started with `force_reset` or `regate`, in which case
+   it continues to indexing.
+5. Otherwise local `HEAD` is published with `git push --force-with-lease origin <branch>`. A lease mismatch or
+   other push failure is recorded as a sync failure and heals on the next cycle; a diverged remote is overwritten.
+
+Indexing runs after the sync whether or not it failed. A recorded sync failure makes the refresh job fail after
+indexing completes ("refresh complete, indexing succeeded, but backup ..."). Every backup git call is bound to the
+refresh job's cancel check.

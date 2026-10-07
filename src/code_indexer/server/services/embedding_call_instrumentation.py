@@ -3,7 +3,7 @@
 instrument_call() / instrument_call_async() are the single shared wrappers
 used at every embedding-provider / reranker-client HTTP call site (10
 injection points, see CLAUDE.md and
-docs/architecture/invariants.md#embedding--reranker-call-tracking).
+docs/architecture/invariants/query-path.md#embedding-and-reranker-call-tracking).
 ``fn`` MUST be the
 smallest unit of work that includes BOTH the outbound network call AND its
 status validation (``raise_for_status()`` or equivalent) -- never just the

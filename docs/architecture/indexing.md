@@ -1,329 +1,269 @@
-# Code Indexer - Indexing Algorithm Technical Documentation
+# Indexing Pipeline
 
-## Overview
+Maintainer reference for how `cidx index` turns a working tree into vector and full-text indexes. It covers the
+semantic (per-file) pipeline end to end and names the entry point of the separate temporal (git history)
+pipeline. On-disk collection layouts (`vector_*.json` versus `chunks.db`), HNSW maintenance and repair are
+documented in [storage.md](storage.md); how a server refresh runs this pipeline and recovers from failures is in
+[refresh-recovery.md](refresh-recovery.md).
 
-The Code Indexer employs a sophisticated two-phase parallel processing architecture designed to maximize throughput while maintaining file atomicity and providing real-time progress feedback. The system transforms source code files into searchable vector embeddings stored in FilesystemVectorStore for semantic search capabilities.
+All paths below are relative to `src/code_indexer/`.
 
-## Architecture Components
+## Contents
 
-### Core Processing Components
+- [Components](#components)
+- [Entry point and locks](#entry-point-and-locks)
+- [Choosing a strategy](#choosing-a-strategy)
+- [File discovery](#file-discovery)
+- [File identity and point ids](#file-identity-and-point-ids)
+- [Chunking](#chunking)
+- [Embedding: per-file batching and token budget](#embedding-per-file-batching-and-token-budget)
+- [Writing points and finalizing the session](#writing-points-and-finalizing-the-session)
+- [Branch isolation](#branch-isolation)
+- [Full-text index](#full-text-index)
+- [Reconcile](#reconcile)
+- [Failures, cancellation and exit codes](#failures-cancellation-and-exit-codes)
+- [Temporal indexing entry point](#temporal-indexing-entry-point)
 
-1. **SmartIndexer** - Orchestration layer managing the overall indexing workflow
-2. **HighThroughputProcessor** - Dual-phase parallel processing engine
-3. **FileChunkingManager** - Parallel file processing with lifecycle management
-4. **VectorCalculationManager** - Multi-threaded embedding generation
-5. **VoyageAI Client** - Embedding provider with dynamic batching
-6. **CleanSlotTracker** - Thread-safe progress tracking and resource management
-7. **FilesystemVectorStore** - Vector storage layer
+## Components
 
-## Two-Phase Processing Architecture
+| Component | Module | Role |
+|-----------|--------|------|
+| `SmartIndexer` | `services/smart_indexer.py` | Strategy selection (full, incremental, resume, reconcile, branch change), progressive metadata, session lifecycle |
+| `HighThroughputProcessor` | `services/high_throughput_processor.py` | Parallel hash phase, file submission, result collection, branch visibility |
+| `FileChunkingManager` | `services/file_chunking_manager.py` | Per-file lifecycle: chunk, reuse cached vectors, batch to the embedder, build points, write |
+| `VectorCalculationManager` | `services/vector_calculation_manager.py` | Thread pool that calls the embedding provider |
+| `FileFinder` | `indexing/file_finder.py` | File discovery and the canonical exclude rules |
+| `FileIdentifier` | `services/file_identifier.py` | Per-file metadata: content hash, git blob hash, branch, commit |
+| `FixedSizeChunker` | `indexing/fixed_size_chunker.py` | Character-based chunking with fixed overlap |
+| `ProgressiveMetadata` | `services/progressive_metadata.py` | Resume state and per-branch commit watermark |
+| `FilesystemVectorStore` | `storage/filesystem_vector_store.py` | `begin_indexing` / `upsert_points` / `end_indexing` session |
+| `TantivyIndexManager` | `services/tantivy_index_manager.py` | Full-text (FTS) index |
 
-### Phase 1: Parallel Hash Calculation
-The first phase performs parallel metadata extraction and file hashing to prepare files for vectorization:
+## Entry point and locks
 
-```
-Input: List of file paths
-↓
-Parallel Hash Workers (threadcount+2 threads)
-├── Calculate file hash (SHA-256)
-├── Extract git metadata (commit, branch, hash)
-├── Determine file size and modification time
-└── Build metadata dictionary
-↓
-Output: Hash results dictionary {file_path: (metadata, file_size)}
-```
+The `index` command in `cli.py` drives the run. Before any work it takes two locks:
 
-**Implementation Details:**
-- Worker threads pull from a shared queue of file paths
-- Each worker acquires a slot from CleanSlotTracker for progress visibility
-- Hash calculation uses git-aware metadata when available
-- Non-git projects fall back to filesystem metadata (mtime, size)
-- Results stored in thread-safe dictionary with lock protection
+1. The repo-scoped, non-blocking index-mutation lock `.code-indexer/.index-mutation.lock`
+   (`acquire_index_mutation_lock`, `services/chunk_migration_cli.py`). A second `cidx index` or a chunk-layout
+   migration in the same repository fails immediately with "Another cidx index or migration is already running".
+2. Inside `SmartIndexer.smart_index()`, a heartbeat lock in the metadata directory (`create_indexing_lock`,
+   `services/indexing_lock.py`: 30 s heartbeat, 300 s staleness timeout) so a crashed process does not block the
+   next run forever.
 
-### Phase 2: Parallel File Processing and Vectorization
-The second phase processes files through a dual-thread-pool architecture:
+`smart_index()` also refuses to start when `hnswlib` cannot be imported.
 
-```
-Hash Results from Phase 1
-↓
-FileChunkingManager (threadcount+2 workers)
-├── Read file content
-├── Chunk using FixedSizeChunker
-├── Token-aware batching (90% of model limit)
-├── Submit to VectorCalculationManager
-├── Wait for embeddings
-└── Write to vector store atomically
-    ↓
-    VectorCalculationManager (threadcount workers)
-    ├── Receive chunk batches
-    ├── Calculate embeddings via provider
-    ├── Handle rate limiting/throttling
-    └── Return vector results
-```
+**Providers.** `config.get_embedding_providers()` lists the configured providers; only those with an API key are
+used. The first one runs the primary pass (with FTS when `--fts` is given); each further provider runs its own
+`SmartIndexer` pass with FTS disabled, after a live credential check (`health_check(test_api=True)`). Each
+provider keeps its own resume file, `.code-indexer/metadata-<provider>.json` (`_get_provider_metadata_path`).
 
-**Key Design Principles:**
-- **File Atomicity**: All chunks from a file are written to vector store together
-- **Token-Aware Batching**: Chunks accumulated until approaching token limit (90% safety margin)
-- **Pipeline Architecture**: Frontend threads stay ahead of backend to ensure continuous utilization
-- **Slot-Based Progress**: Fixed-size array (threadcount+2) for real-time visibility
+**Thread count.** The vector thread count comes from `voyage_ai.parallel_requests` or `cohere.parallel_requests`
+in `.code-indexer/config.json` (default 8 for both, `config.py`); there is no command-line flag for it.
 
-## Detailed Algorithm Flow
+## Choosing a strategy
 
-### 1. Initialization Phase
-```python
-# SmartIndexer initialization
-- Load configuration (config.json)
-- Initialize embedding provider (VoyageAI)
-- Connect to FilesystemVectorStore
-- Load progressive metadata for resumability
-- Acquire indexing lock (prevents concurrent indexing)
-```
+`SmartIndexer.smart_index()` picks exactly one strategy, in this order:
 
-### 2. File Discovery
-```python
-# File finding and filtering
-- Scan codebase directory recursively
-- Apply file extension filters (e.g., .py, .js, .ts)
-- Respect .gitignore patterns
-- Apply exclude_dirs configuration
-- Check max_file_size limits
-- Output: List of absolute file paths
-```
+| Condition | Strategy |
+|-----------|----------|
+| Not `--clear`, not `--reconcile`, the stored branch differs from the current branch and the collection exists | Branch change: `GitTopologyService.analyze_branch_change()` then `process_branch_changes_high_throughput()` reindexes only files that differ and updates visibility of the rest |
+| The self-heal reprocess sidecar of the collection is corrupt | Forced reconcile (see [Reconcile](#reconcile)) |
+| Resume state is trusted and an interrupted run can resume | `_do_resume_interrupted()` continues the stored file list |
+| Resume state is not trusted (server-spawned run without a valid server seal, `services/resume_state_seal.py`) and the last run was interrupted | Reconcile instead of resume |
+| `--reconcile` | Reconcile |
+| `--clear` | Full index: progressive metadata cleared, collection cleared, every file processed |
+| Provider, model, git availability or project id changed since the last run | Full index |
+| Otherwise | Incremental index |
 
-### 3. Hash Calculation Phase (Parallel)
-```python
-# Parallel metadata extraction
-for each file in parallel (threadcount+2 workers):
-    slot_id = acquire_slot(file_data)
-    update_slot(PROCESSING)
+`cidx index` without flags therefore performs a full index on the first run (no resume timestamp) and an
+incremental index afterwards.
 
-    if git_repository:
-        metadata = {
-            'file_hash': calculate_sha256(file),
-            'commit_hash': get_git_commit(),
-            'branch': get_current_branch(),
-            'git_hash': get_git_file_hash(),
-            'project_id': get_project_id()
-        }
-    else:
-        metadata = {
-            'file_hash': calculate_sha256(file),
-            'file_mtime': get_modification_time(),
-            'file_size': get_file_size(),
-            'project_id': hash(codebase_dir)
-        }
+## File discovery
 
-    store_result(file_path, metadata)
-    update_slot(COMPLETE)
-    release_slot(slot_id)
-```
+### Full walk: `FileFinder.find_files()`
 
-### 4. File Processing Phase (Parallel)
-```python
-# FileChunkingManager processing (per file)
-for each file_result in parallel:
-    slot_id = acquire_slot(file_data)
+`os.walk()` over the codebase directory (symlinked directories are not followed). A file is indexed when all of
+these hold (`FileFinder._should_include_file`):
 
-    # Phase 1: Chunking
-    update_slot(CHUNKING)
-    chunks = FixedSizeChunker.chunk_file(file_path)
+- its extension is in `file_extensions` (`.code-indexer/config.json`);
+- its relative path does not match the exclude pathspec;
+- it is a text file: a configured extension, or the first 1024 bytes contain no NUL byte and decode;
+- its size is at most `indexing.max_file_size` (default 1048576 bytes, `IndexingConfig` in `config.py`);
+- in server context only (`config.confined_to_codebase_root`), a symlinked file must resolve inside the codebase
+  root. Local CLI indexing follows such symlinks.
 
-    # Phase 2: Token-aware batching
-    update_slot(VECTORIZING)
-    current_batch = []
-    current_tokens = 0
-    TOKEN_LIMIT = model_limit * 0.9  # 90% safety margin
+The exclude pathspec (`gitwildmatch`) is built once per `FileFinder`:
 
-    for chunk in chunks:
-        chunk_tokens = count_tokens(chunk.text)
+- every `exclude_dirs` entry and every `add_exclude_dirs` override entry, as `<dir>/**` and `**/<dir>/**`;
+- fixed patterns: Python bytecode and caches, compiled binaries (`*.so`, `*.dylib`, `*.dll`), OS artifacts,
+  editor temp files, `node_modules/`, `build/`, `dist/`, `target/`, `.git/`, and `.code-indexer-override.yaml`;
+- the patterns of the root `.gitignore` and of `.gitignore` files one directory level below the root (deeper
+  `.gitignore` files are not read).
 
-        if current_tokens + chunk_tokens > TOKEN_LIMIT and current_batch:
-            # Submit current batch
-            future = vector_manager.submit_batch(current_batch)
-            batch_futures.append(future)
-            current_batch = []
-            current_tokens = 0
+Directories matching the pathspec are pruned during the walk unless a `force_include_patterns` override could
+match something below them. When `.code-indexer-override.yaml` is present, `OverrideFilterService` makes the final
+include decision from the base result (`add_extensions`, `remove_extensions`, `force_include_patterns`, and so
+on).
 
-        current_batch.append(chunk.text)
-        current_tokens += chunk_tokens
+### Incremental discovery
 
-    # Submit final batch
-    if current_batch:
-        future = vector_manager.submit_batch(current_batch)
-        batch_futures.append(future)
+`_do_incremental_index()` builds the file set from two sources:
 
-    # Phase 3: Wait for embeddings
-    update_slot(WAITING)
-    embeddings = wait_for_all_futures(batch_futures)
+1. **Committed changes.** When the branch has a stored commit watermark that differs from `HEAD`,
+   `_get_git_deltas_since_commit()` runs `git diff --name-status <watermark>..<HEAD>`. Added and modified paths
+   are reindexed; deleted paths are removed from the index immediately; a rename is a delete of the old path plus
+   an add of the new one, each side filtered independently.
+2. **Working-tree changes.** `FileFinder.find_modified_files(resume_timestamp)` returns eligible files whose
+   mtime is newer than the last index time minus a safety buffer (`_INDEX_SAFETY_BUFFER_SECONDS = 60` in
+   `cli.py`).
 
-    # Phase 4: Atomic write to vector store
-    update_slot(FINALIZING)
-    points = create_vector_points(chunks, embeddings, metadata)
-    vector_store.upsert_batch(points)  # Atomic operation
+Paths from `git diff` cannot be stat'ed when deleted, so `SmartIndexer._should_index_file()` filters them with
+string rules only, but it applies the same rules as the full walk: extension, `exclude_dirs` as path components,
+`FileFinder.matches_exclude_pattern()` (the same pathspec `find_files()` uses), and the same
+`OverrideFilterService`. A new exclusion rule therefore applies to both discovery paths.
 
-    update_slot(COMPLETE)
-    release_slot(slot_id)
-```
+Files recorded as failed in the previous run, and paths waiting in the self-heal reprocess sidecar, are folded
+into the set as well. Standard incremental runs do not look for files deleted from disk outside git history;
+`--detect-deletions` adds that scan for non-git projects, and `--reconcile` always includes it.
 
-### 5. Vector Calculation (Backend Pool)
-```python
-# VectorCalculationManager worker thread
-def calculate_vector(task):
-    # Check for empty batch
-    if not task.chunk_texts:
-        return empty_result()
+## File identity and point ids
 
-    # Dynamic batching for API provider
-    if provider == 'voyage-ai':
-        embeddings = voyage_client.get_embeddings_batch(
-            texts=task.chunk_texts,
-            # Internally handles token-aware sub-batching
-        )
+`FileIdentifier.get_file_metadata()` (`services/file_identifier.py`) records for every file:
 
-    return VectorResult(
-        embeddings=embeddings,
-        processing_time=elapsed,
-        metadata=task.metadata
-    )
-```
+- `file_hash`: `sha256:<hex>` of the file content (always computed);
+- in a git repository: `git_hash` (`git hash-object` of the file on disk), plus the branch and `HEAD` commit, each
+  fetched once per run;
+- outside git: the file mtime (integer seconds) and size;
+- `project_id`: the basename of the `origin` remote URL, or the directory name, lowercased with `_` replaced by
+  `-`.
 
-### 6. Vector Storage
-```python
-# Point creation and storage
-for chunk, embedding in zip(chunks, embeddings):
-    point = {
-        'id': hash(f"{project_id}_{file_hash}_{chunk_index}"),
-        'vector': embedding,
-        'payload': {
-            'path': file_path,
-            'content': chunk.text,
-            'language': file_extension,
-            'chunk_index': chunk_index,
-            'total_chunks': len(chunks),
-            'line_start': chunk.line_start,
-            'line_end': chunk.line_end,
-            'project_id': project_id,
-            'file_hash': file_hash,
-            # Git metadata or filesystem metadata
-        }
-    }
-    points.append(point)
+The point id of a chunk is the MD5 hex digest of `"{project_id}_{file_hash}_{chunk_index}"`
+(`FileChunkingManager._create_vector_point`). Re-indexing identical content therefore produces identical ids.
 
-# Atomic batch write
-vector_store.upsert_batch(collection_name, points)
-```
+When the store writes a point (`FilesystemVectorStore._prepare_vector_data_batch`), it asks git for the blob hash
+of the path at `HEAD` (`git ls-tree HEAD`, 100 paths per call) and for uncommitted changes (`git status
+--porcelain`). For a clean tracked file it stores `git_blob_hash`, drops the chunk text and sets
+`indexed_with_uncommitted_changes` to false; queries read the text back from the git object. In a git repository, a
+modified or untracked file stores the chunk text (`chunk_text`) and sets `indexed_with_uncommitted_changes` to true.
+Outside git, the chunk text is stored and the flag is not set.
 
-## Performance Optimizations
+Reconcile compares content ids derived from these fields: `<path>:blob:<git_blob_hash>` for committed files and
+`<path>:working_dir:<mtime>:<size>` for working-tree or non-git files (`working_dir_content_id`,
+`services/smart_indexer.py`).
 
-### 1. Token-Aware Batching
-- **Problem**: VoyageAI API has 120,000 token limit per batch request for voyage-code-3
-- **Solution**: Dynamic batching with 90% safety margin (108,000 tokens)
-- **Implementation**: Accumulate chunks until approaching limit, then submit batch
+## Chunking
 
-### 2. Dual Thread Pool Design
-- **Frontend Pool**: threadcount+2 workers for file I/O and chunking
-- **Backend Pool**: threadcount workers for vector calculations
-- **Benefit**: Frontend stays ahead, ensuring backend threads never idle
+`FixedSizeChunker` (`indexing/fixed_size_chunker.py`) cuts text at fixed character positions, with no parsing:
 
-### 3. Slot-Based Progress Tracking
-- **Fixed Array**: threadcount+2 slots for O(1) access
-- **Natural Reuse**: Workers acquire/release slots dynamically
-- **Real-time Display**: Direct array scanning for UI updates
+| Model | Chunk size (characters) |
+|-------|-------------------------|
+| `voyage-code-3`, `voyage-code-2`, `voyage-large-2`, `voyage-3`, `voyage-3-large`, `embed-v4.0` | 4096 |
+| any other model | 1000 |
 
-### 4. File-Level Parallelism
-- **Granularity**: Process complete files in parallel, not individual chunks
-- **Atomicity**: All chunks from a file written together
-- **Efficiency**: Eliminates inter-chunk coordination overhead
+Overlap is 15 percent of the chunk size (614 characters for 4096), so each chunk starts `chunk_size - overlap`
+characters after the previous one. Each chunk records `line_start` and `line_end`. The `indexing.chunk_size` and
+`indexing.chunk_overlap` fields in `IndexingConfig` are not read by the chunker.
 
-### 5. Git-Aware Deduplication
-- **Content Hashing**: SHA-256 hash identifies identical files
-- **Branch Isolation**: Separate visibility per git branch
-- **Incremental Updates**: Only process modified files
+For `.md`, `.html`, `.htm` and `.htmx` files the chunker also extracts image references. A chunk with images is
+embedded separately through the provider's multimodal client into a separate multimodal collection.
 
-## Progress Reporting
+## Embedding: per-file batching and token budget
 
-### Real-time Metrics
-```
-Files: 234/567 (41%) | 12.5 files/s | 145.2 KB/s | 14 threads | current_file.py
-```
+`HighThroughputProcessor.process_files_high_throughput()` runs two phases:
 
-### File Status Progression
-```
-starting → chunking → vectorizing → waiting → finalizing → complete
-```
+1. **Hash phase.** `vector_thread_count` threads compute `FileIdentifier` metadata for every file. A file that
+   vanished since discovery is skipped with a warning; any other hash error aborts the run. Before this phase the
+   store's writability is checked (`preflight_chunk_store_writable`).
+2. **File phase.** Each file is submitted to `FileChunkingManager`, whose pool has `vector_thread_count + 2`
+   workers. `VectorCalculationManager` runs the embedding calls on `vector_thread_count` threads.
 
-### Concurrent Files Display
-The system maintains visibility of all files being processed simultaneously:
-- Each slot shows: filename, size, status, elapsed time
-- Updates occur in real-time as workers progress
-- Natural slot reuse as files complete and new ones begin
+Inside `FileChunkingManager._process_file_clean_lifecycle()`, per file:
 
-## Resumability and Fault Tolerance
+1. Chunk the file.
+2. **Reuse unchanged chunks.** Load the stored `content_hash` (SHA-256 of the chunk text) and vector for each
+   chunk index of this path (`get_existing_content_hashes`). A chunk whose hash is unchanged reuses the stored
+   vector and is not sent to the embedder.
+3. **Batch the rest by tokens.** Accumulate chunks until the next one would exceed 90 percent of the provider's
+   per-request token limit (`_get_model_token_limit()`; 120000 for `voyage-code-3` in `data/voyage_models.yaml`,
+   128000 for Cohere `embed-v4.0`), then submit the batch. Token counts come from `VoyageTokenizer`
+   (`services/embedded_voyage_tokenizer.py`) for VoyageAI and from `len(text) // 4` for other providers. The
+   provider clients split again internally with the same 90 percent rule.
+4. Wait for every batch of the file. A failed batch, a count mismatch, or an empty embedding fails the whole file;
+   no chunk is skipped silently.
+5. Build the points and write them with ONE `upsert_points()` call for the file.
 
-### Progressive Metadata
-- **Checkpoint Storage**: Progress saved to metadata.json
-- **Resumable State**: Track completed files, remaining queue
-- **Crash Recovery**: Resume from last checkpoint on restart
+Rate-limit retries happen inside the provider clients (`services/provider_backoff.py`); the indexing path has no
+wall-clock timeout on the job or on a file.
 
-### Cancellation Handling
-- **Graceful Shutdown**: Complete in-flight operations
-- **File Atomicity**: Never leave partial file data
-- **Clean State**: Resumable after cancellation
+## Writing points and finalizing the session
 
-## Configuration Parameters
+Every strategy brackets its writes in a store session:
 
-### Thread Configuration
-```json
-{
-  "voyage_ai": {
-    "parallel_requests": 12  // Backend thread count
-  }
-}
-```
-- Frontend threads: parallel_requests + 2
-- Backend threads: parallel_requests
+- `begin_indexing(collection)` loads the collection's `PathIndex` (path to point ids) and starts change tracking.
+- `upsert_points()` writes the points of one file. Old points of the same path that are not in the new set are
+  removed through the `PathIndex`, so a file that shrank loses its trailing chunks. On a `chunks.db` collection the
+  write is one `ChunkStore.write_batch()` call.
+- `end_indexing(collection)` updates or rebuilds the HNSW index and persists the indexes once per session.
 
-### Chunking Configuration
-- **Model-aware sizing**:
-  - voyage-code-3: 4096 tokens (chunk size; model context is 32,000 tokens)
-- **Overlap**: Configurable overlap between chunks
-- **Line boundaries**: Respect code structure
+When a chunk-store failure is classified as fatal (`ChunkStoreUnavailableError`), the processor cancels files not
+yet started and the session is aborted with `abort_indexing()` instead of being finalized, so the commit
+watermark does not advance (`SmartIndexer._finalize_or_abort_indexing_session`). After a successful full or
+incremental run, `ProgressiveMetadata` records the branch's commit watermark and marks the run completed.
 
-## Error Handling
+## Branch isolation
 
-### Retry Logic
-- **API Failures**: Exponential backoff with jitter
-- **Rate Limiting**: Server-driven backoff (Retry-After header)
-- **Network Issues**: Configurable max_retries
+Points carry branch visibility in their payload. After a full index in a git repository,
+`hide_files_not_in_branch_thread_safe()` hides points of files that do not exist on the current branch instead of
+deleting them, so switching back can reuse them. On a branch switch, `process_branch_changes_high_throughput()`
+reindexes only the files `GitTopologyService.analyze_branch_change()` reports as changed and updates visibility
+metadata for the rest.
 
-### Failure Isolation
-- **File-level**: Single file failure doesn't stop indexing
-- **Chunk-level**: Failed chunks logged, file marked incomplete
-- **Recovery**: Failed files retried on next run
+## Full-text index
 
-## Performance Characteristics
+`--fts` builds a Tantivy index at `.code-indexer/tantivy_index/` alongside the semantic index:
 
-### Throughput Metrics
-- **Small files (<10KB)**: 50-100 files/second with parallel processing
-- **Medium files (10-100KB)**: 10-50 files/second
-- **Large files (>100KB)**: 1-10 files/second
-- **Bottlenecks**: Network latency (VoyageAI)
+- A new index is created when none exists, on `--clear`, or when the existing index has an outdated schema
+  (`schema_needs_rebuild()`; the directory is cleared first). A newly created index that is not part of a full run
+  is filled immediately from every file on disk (`_populate_fts_from_all_files`).
+- Per processed file, `FileChunkingManager` calls `delete_document_deferred(path)` and then `add_document()` for
+  each chunk, so re-indexing a file never duplicates its rows.
+- The index is committed once, in the `finally` block of `smart_index()`.
+- If the Tantivy import or initialization fails, the run logs an error and continues without FTS; a commit
+  failure is logged and does not fail the semantic index.
 
-### Resource Usage
-- **Memory**: ~100MB base + cache for file content
-- **CPU**: Scales with thread count
-- **Network**: Batch requests minimize API calls
-- **Disk I/O**: Sequential reads, batch writes to vector store
+`--rebuild-fts-index` rebuilds only the FTS index from already-indexed files.
 
-## Summary
+## Reconcile
 
-The Code Indexer's indexing algorithm achieves high throughput through careful architectural decisions:
+`--reconcile` (`SmartIndexer._do_reconcile_with_database`) compares the disk with the store instead of trusting
+timestamps:
 
-1. **Two-phase processing** separates metadata extraction from vectorization
-2. **Dual thread pools** maintain continuous pipeline flow
-3. **Token-aware batching** maximizes API efficiency
-4. **File atomicity** ensures data consistency
-5. **Slot-based tracking** provides real-time visibility
-6. **Progressive metadata** enables resumability
+1. Walk all eligible files with `FileFinder.find_files()`.
+2. Read one snapshot of the indexed content points (`_get_indexed_files_snapshot`).
+3. For each file, compare the stored content id with the disk content id (see
+   [File identity and point ids](#file-identity-and-point-ids)); `HEAD` blob hashes are read in one batch
+   (`_get_head_blob_hash_map`). Missing or differing files are reindexed.
+4. Stored files that no longer exist, or that a filter now excludes, are hidden (git) or deleted (non-git).
 
-This architecture balances performance, reliability, and user experience to deliver efficient semantic code indexing at scale.
+A reconcile that completes without cancellation and without a file limit records that the whole store was
+verified (`mark_store_verified`).
+
+## Failures, cancellation and exit codes
+
+- A file that fails (chunking, embedding, write) counts as failed and is retried by the next run; other files
+  continue.
+- `cidx index` exits 1 when files failed and none were processed ("All files failed to index").
+- A fatal chunk-store failure exits with a reserved code: 86 when SQLite reports the store damaged, 87 for every
+  other fatal store failure (`services/index_failure_exit_codes.py`). The server's handling of these codes is in
+  [refresh-recovery.md](refresh-recovery.md).
+- Ctrl+C leaves the run resumable: completed files stay indexed and progressive metadata keeps the remaining
+  list.
+
+## Temporal indexing entry point
+
+`cidx index --index-commits` runs the temporal (git history) pipeline instead of the semantic pass and exits:
+`TemporalIndexer.index_commits()` in `services/temporal/temporal_indexer.py` aggregates each commit (message plus
+changed-file diffs) into one document, chunks it, and embeds it with every configured temporal embedder, sharded
+by calendar quarter. Options: `--all-branches`, `--max-commits`, `--since-date`, `--diff-context`, and
+`--reconcile` with `--reconcile-embedder`. The data model and query side are described in
+[guides/temporal-search.md](../guides/temporal-search.md).

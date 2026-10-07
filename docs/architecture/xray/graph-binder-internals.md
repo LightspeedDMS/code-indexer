@@ -7,11 +7,10 @@ rule an agent needs for that lives in the tool's own doc
 (`src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md`), which
 stands alone. This document exists for a maintainer auditing or extending
 the binder itself, and captures the exact conditions behind claims the
-tool doc states only as a short, actionable summary.
-
-Split out by issue #1961 from `analyze_graph.md` (previously part of
-its "Kotlin scope limits" prose and `edge_evidence`/`is_definitely_dead_code`
-table cells) to keep the agent-facing doc within its context budget.
+tool doc states only as a short, actionable summary. The order of all
+binder passes, and which of them remove candidates, is listed in
+[architecture.md](architecture.md#candidate-admission-contract). Binder source:
+`rust/xray-core/src/graph/bind/`.
 
 ## Kotlin extraction scope and the tag-only guarantee
 
@@ -82,7 +81,7 @@ never carry an uppercase field), while one that DOES declare `implements`
 disables the guard like any other type. None of this is an exhaustive
 proof against every legal Java shape.
 
-### Dotted (multi-level nested / fully-qualified) receivers (issue #1931)
+### Dotted (multi-level nested / fully-qualified) receivers
 
 A DOTTED (multi-level nested or fully-qualified) receiver
 (`Outer.Inner.m()`, `com.example.Target.m()`) IS consulted, under the
@@ -95,7 +94,7 @@ the final segment is declared in a file whose package exactly equals every
 segment before it, joined by `.` (never a prefix/suffix match). A
 fully-qualified NESTED spelling (`com.example.Outer.Inner.m()`, package +
 nested type together) is NOT resolved by either rule and stays exactly
-tag-only, unchanged from before #1931 -- the two-segment nested-type rule
+tag-only -- the two-segment nested-type rule
 requires exactly two segments, and the fully-qualified rule's own
 package-equality check never matches (a nested type's recorded package is
 its declaring FILE's package statement, e.g. `com.example`, never
@@ -150,17 +149,41 @@ collision. Once a qualifier (bare or dotted) positively confirms a subset
 this way, that subset is FINAL for this evidence tier: it is never subject
 to a second round of import-context re-narrowing (`SAME_FILE`/
 `SAME_PACKAGE`/import preference), which is reserved for genuinely
-UNQUALIFIED references -- a same-bare-name decoy declared in the CALLER's
-own file can no longer win over a real, fully-qualified, cross-package
-target just because it happens to be closer by file/package proximity.
-This has a real cost: a same-bare-name TYPE declared in an UNIMPORTED,
-unrelated OTHER package can now also receive an edge that import-context
-narrowing previously excluded on file/package-proximity grounds alone --
-always ADDITIVE (the pass never removes an edge, only sometimes admits one
-more decoy alongside a real one it was already keeping), so this never
-turns a real edge into a false negative. A Java instance-qualified call
+UNQUALIFIED references -- so a same-bare-name decoy declared in the CALLER's
+own file does not win over a real, fully-qualified, cross-package target
+just because it is closer by file/package proximity. The cost: a
+same-bare-name TYPE declared in an UNIMPORTED, unrelated OTHER package also
+receives an edge, because file/package proximity is not applied to this
+subset. The effect is always ADDITIVE (one more decoy alongside a real
+target that is kept), so it never turns a real edge into a false negative;
+when the import-proven conditions below hold, the separate exclusion pass
+removes such a decoy. A Java instance-qualified call
 (`g.helper(x)`) is untouched by this and stays tag-only exactly as
 described above.
+
+## Java import-proven receiver exclusion
+
+A second, narrower hard pass for type-qualified Java calls
+(`apply_receiver_qualified_type_narrowing`, `bind/receiver_qualified.rs`)
+runs after the per-reference pipeline and does NOT depend on the whole-file
+guard above. It removes candidates only when all three hold:
+
+1. The receiver's qualified identity is exact: an ORDINARY single-type
+   import in the calling file names the receiver's bare type by its last
+   dotted segment (no same-package guess).
+2. No field anywhere in the analysed repo shares the receiver's bare name
+   (`TypeIndex::is_known_field_name`).
+3. The calling site's enclosing type has a fully resolved ancestor chain:
+   every ancestor, at every depth, is a repo-declared, analysed type
+   (`TypeIndex::has_unresolved_external_supertype_transitively` is false).
+
+When they hold, it keeps only candidates whose enclosing type is the
+receiver's type with the matching qualified identity, or one of that type's
+bare transitive supertypes; everything else, including a same-bare-name
+type in a different package, is removed. It is a no-op when no candidate
+already matches the receiver's proven identity, and it never applies to
+Kotlin (whose extractor records no typed names, so an uppercase Kotlin
+property is indistinguishable from a type reference).
 
 ## Kotlin operator convention extraction
 
