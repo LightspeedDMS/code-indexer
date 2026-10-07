@@ -14,7 +14,6 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from . import _utils
 from ._git_seam import remote_get_url as _remote_get_url
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
@@ -158,9 +157,7 @@ def _get_pat_credential_for_remote(
 
     remote_url = ""
     try:
-        remote_url = _remote_get_url(
-            str(repo_path), remote, app_module=_utils.app_module
-        )
+        remote_url = _remote_get_url(str(repo_path), remote)
     except Exception as e:
         logger.warning(f"Failed to get remote URL for '{remote}': {e}")
         return None, None, f"Failed to get remote URL for '{remote}': {e}"

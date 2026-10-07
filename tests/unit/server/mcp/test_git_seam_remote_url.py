@@ -8,12 +8,12 @@ backend -- two different answers to the same question.
 
 from __future__ import annotations
 
+import types
 from typing import Any, List
 
-from code_indexer.server.mcp.handlers._git_seam import (
-    configured_git_backend,
-    remote_get_url,
-)
+import pytest
+
+from code_indexer.server.mcp.handlers import _git_seam, _utils
 from code_indexer.server.storage.shared.git_backend import LocalGitBackend
 
 
@@ -26,47 +26,62 @@ class _Backend:
         return "https://git.example.com/org/repo.git"
 
 
-class _State:
-    def __init__(self, backend: Any) -> None:
-        self.git_backend = backend
+def _module_with_app(backend: Any) -> types.ModuleType:
+    """A real ModuleType whose `app` is ALREADY constructed (in __dict__)."""
+    mod = types.ModuleType("fake_app_module")
+    app = types.SimpleNamespace(state=types.SimpleNamespace(git_backend=backend))
+    mod.app = app  # lands in __dict__, so no __getattr__ is involved
+    return mod
 
 
-class _App:
-    def __init__(self, backend: Any) -> None:
-        self.state = _State(backend)
+def _module_that_explodes_on_lazy_access() -> types.ModuleType:
+    """A real ModuleType whose `app` is LAZY -- touching it fails the test.
+
+    This is the regression guard: `app` is a PEP-562 lazy attribute, so probing it
+    with a bare getattr constructs the singleton as a side effect.
+    """
+
+    mod = types.ModuleType("lazy_app_module")
+
+    def _raiser(name: str) -> Any:
+        raise AssertionError(
+            f"probed lazy attribute {name!r} -- this constructs the singleton"
+        )
+
+    mod.__getattr__ = _raiser  # type: ignore[attr-defined]
+    return mod
 
 
-class _AppModule:
-    def __init__(self, backend: Any) -> None:
-        self.app = _App(backend)
-
-
-def test_uses_the_backend_parked_at_startup() -> None:
+def test_uses_the_backend_parked_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
     backend = _Backend()
-    assert configured_git_backend(_AppModule(backend)) is backend
+    monkeypatch.setattr(_utils, "app_module", _module_with_app(backend))
+    assert _git_seam.configured_git_backend() is backend
 
 
-def test_remote_get_url_delegates_to_that_backend() -> None:
+def test_remote_get_url_delegates_to_that_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     backend = _Backend()
-    url = remote_get_url("/repos/example", app_module=_AppModule(backend))
+    monkeypatch.setattr(_utils, "app_module", _module_with_app(backend))
+    url = _git_seam.remote_get_url("/repos/example")
     assert url == "https://git.example.com/org/repo.git"
     assert backend.calls == [("/repos/example", "origin")]
 
 
-def test_remote_name_is_forwarded() -> None:
+def test_remote_name_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
     backend = _Backend()
-    remote_get_url("/repos/example", "upstream", app_module=_AppModule(backend))
+    monkeypatch.setattr(_utils, "app_module", _module_with_app(backend))
+    _git_seam.remote_get_url("/repos/example", "upstream")
     assert backend.calls == [("/repos/example", "upstream")]
 
 
-def test_falls_back_to_local_when_startup_parked_nothing() -> None:
-    # Solo/CLI and unit tests never run lifespan; they must keep today's behaviour.
-    assert isinstance(configured_git_backend(_AppModule(None)), LocalGitBackend)
-    assert isinstance(configured_git_backend(None), LocalGitBackend)
+def test_does_not_construct_the_lazy_app_singleton(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RED against a bare getattr probe: `app` is lazily constructed (Bug #1638).
 
-
-def test_falls_back_when_app_module_has_no_app() -> None:
-    class _Bare:
-        pass
-
-    assert isinstance(configured_git_backend(_Bare()), LocalGitBackend)
+    Solo/CLI and unit tests are exactly the contexts this fallback serves, and
+    exactly where the singleton has deliberately never been built.
+    """
+    monkeypatch.setattr(_utils, "app_module", _module_that_explodes_on_lazy_access())
+    assert isinstance(_git_seam.configured_git_backend(), LocalGitBackend)

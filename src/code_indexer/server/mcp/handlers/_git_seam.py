@@ -13,29 +13,31 @@ delegated backend gets a consistent answer.
 
 from __future__ import annotations
 
-from typing import Any, Optional
-
 from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
 
+from ._utils import _lazy_module_attr_or_none
 
-def configured_git_backend(app_module: Any = None) -> GitBackend:
+
+def configured_git_backend() -> GitBackend:
     """The backend selected at startup, or a ``LocalGitBackend``.
 
     The startup path parks its single selection on ``app.state.git_backend`` so
     every caller shares it. The fallback keeps solo/CLI contexts and unit tests --
     which never run lifespan -- on exactly the behaviour they have today.
+
+    ``app`` is probed via ``_lazy_module_attr_or_none`` rather than ``getattr``:
+    it is a PEP-562 lazy attribute (Bug #1638), so a bare ``getattr`` probe
+    CONSTRUCTS the singleton as a side effect. That would be worst in precisely
+    the contexts this fallback exists for -- solo/CLI and unit tests, where it has
+    deliberately never been built.
     """
-    state: Optional[Any] = None
-    if app_module is not None:
-        state = getattr(getattr(app_module, "app", None), "state", None)
+    state = getattr(_lazy_module_attr_or_none("app"), "state", None)
     backend = getattr(state, "git_backend", None) if state is not None else None
     if backend is None:
         return LocalGitBackend()
     return backend  # type: ignore[no-any-return]
 
 
-def remote_get_url(
-    repo_path: str, remote: str = "origin", *, app_module: Any = None
-) -> str:
+def remote_get_url(repo_path: str, remote: str = "origin") -> str:
     """``git remote get-url <remote>`` through the configured seam."""
-    return configured_git_backend(app_module).remote_get_url(repo_path, remote)
+    return configured_git_backend().remote_get_url(repo_path, remote)

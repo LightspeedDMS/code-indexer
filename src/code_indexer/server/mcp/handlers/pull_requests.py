@@ -21,7 +21,6 @@ from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
 
-from . import _utils
 from ._utils import _mcp_response, _parse_json_string_array
 from ._git_seam import remote_get_url as _remote_get_url
 
@@ -131,7 +130,7 @@ def create_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Get remote URL to detect forge type (AC3)
         try:
-            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
+            remote_url = _remote_get_url(str(repo_path))
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -278,7 +277,7 @@ def list_pull_requests(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Get remote URL to detect forge type
         try:
-            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
+            remote_url = _remote_get_url(str(repo_path))
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -425,7 +424,7 @@ def get_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Get remote URL to detect forge type
         try:
-            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
+            remote_url = _remote_get_url(str(repo_path))
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -568,7 +567,7 @@ def list_pull_request_comments(args: Dict[str, Any], user: User) -> Dict[str, An
 
         # Get remote URL to detect forge type
         try:
-            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
+            remote_url = _remote_get_url(str(repo_path))
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -723,7 +722,7 @@ def comment_on_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         token = credential["token"]
 
         try:
-            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
+            remote_url = _remote_get_url(str(repo_path))
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -885,7 +884,7 @@ def update_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         token = credential["token"]
 
         try:
-            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
+            remote_url = _remote_get_url(str(repo_path))
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -1032,7 +1031,7 @@ def merge_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         token = credential["token"]
 
         try:
-            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
+            remote_url = _remote_get_url(str(repo_path))
         except Exception as e:
             return _mcp_response(
                 {"success": False, "error": f"Failed to get remote URL: {e}"}
@@ -1167,7 +1166,7 @@ def close_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         token = credential["token"]
 
         try:
-            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
+            remote_url = _remote_get_url(str(repo_path))
         except Exception as e:
             return _mcp_response(
                 {"success": False, "error": f"Failed to get remote URL: {e}"}
