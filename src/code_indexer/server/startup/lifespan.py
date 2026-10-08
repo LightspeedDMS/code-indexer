@@ -5458,23 +5458,16 @@ def make_lifespan(
             try:
                 # Drain in-flight records before stopping the listener.
                 _log_queue_listener.flush()
-                _log_queue_listener.stop()
             except Exception:
                 pass
-            # Detach the IdentityQueueHandler we installed on the root logger so
-            # it is not leaked across lifespan cycles (mirrors the Bug #1060
-            # symmetry below). removeHandler is a no-op if already detached.
-            try:
-                from code_indexer.server.services.async_logging import (
-                    IdentityQueueHandler,
-                )
+            # Stop the listener and detach the queue handler it installed on the
+            # root logger, clearing the module handles so a later teardown is a
+            # no-op. Never raises.
+            from code_indexer.server.services.async_logging import (
+                shutdown_queue_logging,
+            )
 
-                _root = logging.getLogger()
-                for _h in list(_root.handlers):
-                    if isinstance(_h, IdentityQueueHandler):
-                        _root.removeHandler(_h)
-            except Exception:
-                pass
+            shutdown_queue_logging()
 
         # Shutdown: Remove SQLiteLogHandler from root logger (Bug #1060).
         # Symmetric with the install in startup: without this, the handler remains
@@ -6187,7 +6180,15 @@ def make_lifespan(
         even if that await is cancelled. A cancellation absorbed there never
         replaces an exception that is already ending the lifespan; on a normal
         exit it is re-raised.
+
+        The same holds for async logging: a lifespan ended by an exception or
+        a cancellation (e.g. a startup or shutdown timeout) still stops the
+        queue listener and detaches the queue handler it put on the root
+        logger. After a normal shutdown this is a no-op.
         """
+        from code_indexer.server.services.async_logging import (
+            shutdown_queue_logging,
+        )
         from code_indexer.server.utils.stall_watchdog import (
             stop_stall_watchdog_on_exit,
         )
@@ -6196,7 +6197,10 @@ def make_lifespan(
             async with _lifespan_body(app):
                 yield
         except BaseException:
-            await stop_stall_watchdog_on_exit(app)
+            try:
+                await stop_stall_watchdog_on_exit(app)
+            finally:
+                shutdown_queue_logging()
             raise  # the exception ending the lifespan wins
         cancelled = await stop_stall_watchdog_on_exit(app)
         if cancelled is not None:
