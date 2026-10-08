@@ -361,6 +361,11 @@ def execute_via_daemon(argv: List[str], config_path: Path) -> int:
                 response = conn.root.exposed_query(
                     str(Path.cwd()), query_text, limit, **filters
                 )
+                # A failed search arrives as results=[] plus an error field:
+                # report it and fail, never render it as "no results".
+                if response.get("error"):
+                    console.print(f"[red]Search failed: {response['error']}[/red]")
+                    return 1
                 # CRITICAL FIX: Parse response dict with results and timing
                 result = response.get("results", [])
                 timing_info = response.get("timing", None)

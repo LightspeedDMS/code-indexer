@@ -475,6 +475,9 @@ def _query_via_daemon(
             except Exception:
                 pass  # Connection already closed
 
+            # _display_results printed a failed search's error; fail with it.
+            if isinstance(result, dict) and result.get("error"):
+                return 1
             return 0
 
         except Exception as e:
