@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from code_indexer.server.utils.index_command_layout import append_server_layout_args
 from code_indexer.server.services.index_freshness import (
     build_commit_is_current,
     record_build_commit,
@@ -255,7 +256,7 @@ def ensure_fts_index(
 
     result, launch_outcome = _run_or_fail(
         runner,
-        ["cidx", "index", "--rebuild-fts-index"],
+        append_server_layout_args(["cidx", "index", "--rebuild-fts-index"]),
         cwd=str(repo_path),
         env=subprocess_env,
         timeout=timeout,

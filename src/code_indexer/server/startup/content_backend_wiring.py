@@ -64,7 +64,18 @@ def build_content_backend(
         with no backend available.
     """
     backend_type = getattr(config, "content_backend", "local") or "local"
+    return build_content_backend_for(backend_type, delegated_backend=delegated_backend)
 
+
+def build_content_backend_for(
+    backend_type: str, *, delegated_backend: Optional[ContentBackend] = None
+) -> ContentBackend:
+    """Build the ContentBackend named by *backend_type*.
+
+    The selection rules of :func:`build_content_backend`, for a caller that
+    holds the name rather than a server config -- the ``cidx index`` child,
+    which receives it as ``--content-backend`` from the server that spawned it.
+    """
     if backend_type not in VALID_CONTENT_BACKENDS:
         raise RuntimeError(
             f"Unknown content_backend {backend_type!r}. "
@@ -101,14 +112,25 @@ def build_configured_content_backend(config: Any) -> ContentBackend:
     is never imported or instantiated and a plain ``LocalContentBackend`` is
     returned -- byte-for-byte the behaviour cidx has today.
     """
+    backend_type = getattr(config, "content_backend", "local") or "local"
+    return build_named_content_backend(backend_type)
+
+
+def build_named_content_backend(backend_type: str) -> ContentBackend:
+    """Resolve the delegated plugin (if *backend_type* asks for it) and build.
+
+    The by-name twin of :func:`build_configured_content_backend`, used where
+    only the selection travels -- the ``cidx index`` child process. The plugin
+    reads its endpoint and token from the environment, which the child
+    inherits from the server, so the name is all that needs passing.
+    """
     # Imported lazily so the local-default path never imports the plugin seam
     # (and so a plugin import error only surfaces when delegation is requested).
     from code_indexer.server.services.content_backend_plugin import (
         resolve_delegated_content_backend,
     )
 
-    backend_type = getattr(config, "content_backend", "local") or "local"
     delegated = (
         resolve_delegated_content_backend() if backend_type == "delegated" else None
     )
-    return build_content_backend(config, delegated_backend=delegated)
+    return build_content_backend_for(backend_type, delegated_backend=delegated)

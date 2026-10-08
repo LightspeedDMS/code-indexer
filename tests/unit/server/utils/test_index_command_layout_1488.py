@@ -53,3 +53,62 @@ class TestAppendServerLayoutArgs:
 
         assert original == ["cidx", "index", "--clear"]
         assert result is not original
+
+
+class TestContentBackendStamp:
+    """The server's content-backend selection reaches every spawned child.
+
+    The child cannot read the server config and must not take the choice from
+    the repository's (tenant-writable) config, so the helper is the only way
+    it can arrive -- and because every spawn site already routes through the
+    helper, none of them can forget it.
+    """
+
+    _BASE = [
+        "cidx",
+        "index",
+        "--new-collection-layout=chunks_db",
+        "--ignore-resume-state",
+        "--server-managed-provider-settings",
+    ]
+
+    def test_local_stamps_nothing(self) -> None:
+        """The default command line is byte-for-byte what it was."""
+        assert (
+            append_server_layout_args(["cidx", "index"], content_backend="local")
+            == self._BASE
+        )
+
+    def test_delegated_stamps_the_flag_last(self) -> None:
+        assert append_server_layout_args(
+            ["cidx", "index"], content_backend="delegated"
+        ) == [*self._BASE, "--content-backend=delegated"]
+
+    def test_unset_reads_the_server_config(self) -> None:
+        """Production callers pass nothing; the selection must still arrive."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        service = SimpleNamespace(
+            get_config=lambda: SimpleNamespace(content_backend="delegated")
+        )
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service",
+            return_value=service,
+        ):
+            result = append_server_layout_args(["cidx", "index"])
+
+        assert result[-1] == "--content-backend=delegated"
+
+    def test_unset_with_a_local_server_config_stamps_nothing(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        service = SimpleNamespace(
+            get_config=lambda: SimpleNamespace(content_backend="local")
+        )
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service",
+            return_value=service,
+        ):
+            assert append_server_layout_args(["cidx", "index"]) == self._BASE

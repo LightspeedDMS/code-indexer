@@ -3244,6 +3244,17 @@ def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
     "indexing delegates to a daemon. Every other provider setting (model, "
     "timeout, retries, ...) is left untouched.",
 )
+@click.option(
+    "--content-backend",
+    type=click.Choice(["local", "delegated"]),
+    default="local",
+    hidden=True,
+    help="Internal: where repository bytes are read from. 'local' (default) "
+    "reads this machine's disk. 'delegated' reads through the content-backend "
+    "plugin the server is configured with (CIDX_CONTENT_BACKEND or the "
+    "code_indexer.content_backend entry point), and fails rather than falling "
+    "back to the disk. Stamped by the server on the commands it spawns.",
+)
 @click.pass_context
 @require_mode("local")
 def index(
@@ -3268,6 +3279,7 @@ def index(
     migrate_chunks_to_sqlite: bool = False,
     ignore_resume_state: bool = False,
     server_managed_provider_settings: bool = False,
+    content_backend: str = "local",
 ):
     """Index the codebase for semantic search.
 
@@ -4530,8 +4542,20 @@ def index(
         metadata_path = _get_provider_metadata_path(
             config_manager.config_path.parent, _primary_provider
         )
+        # One backend for every indexer this run builds. None keeps the
+        # local default untouched; delegated fails here, before any work,
+        # if the plugin is missing -- never a silent read of the disk.
+        repo_content_backend = (
+            None
+            if content_backend == "local"
+            else _build_index_content_backend(content_backend)
+        )
         smart_indexer = SmartIndexer(
-            config, embedding_provider, vector_store_client, metadata_path
+            config,
+            embedding_provider,
+            vector_store_client,
+            metadata_path,
+            content_backend=repo_content_backend,
         )
 
         # Get git status and display
@@ -4960,7 +4984,11 @@ def index(
                 config_manager.config_path.parent, _extra_provider
             )
             _extra_indexer = SmartIndexer(
-                config, _extra_embedding, _extra_client, _extra_metadata
+                config,
+                _extra_embedding,
+                _extra_client,
+                _extra_metadata,
+                content_backend=repo_content_backend,
             )
             _extra_stats = _extra_indexer.smart_index(
                 force_full=clear,
@@ -5021,6 +5049,13 @@ def index(
         # EVERY exit path (normal return, sys.exit -> SystemExit, or any
         # exception) so it is never leaked past the mutation lifecycle.
         _index_mutation_lock_ctx.__exit__(None, None, None)
+
+
+def _build_index_content_backend(backend_type: str) -> Any:
+    """Build the content backend ``cidx index --content-backend`` selected."""
+    from .server.startup.content_backend_wiring import build_named_content_backend
+
+    return build_named_content_backend(backend_type)
 
 
 def _populate_fts_index_from_disk(
