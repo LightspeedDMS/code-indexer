@@ -40,7 +40,8 @@ must be caught by the read, not papered over from here.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+import os
+from pathlib import Path, PurePosixPath
 from typing import Dict, Iterator, Optional, Union
 
 from ..server.storage.shared.content_backend import (
@@ -100,11 +101,29 @@ class RepoManifest:
         )
 
     def _relative(self, file_path: Union[str, Path]) -> Optional[str]:
-        """The repo-relative POSIX key for a path, or None if it is not inside."""
-        try:
-            return Path(file_path).relative_to(self._root).as_posix()
-        except ValueError:
+        """The repo-relative POSIX key for a path, or None if it is not inside.
+
+        Accepts a path under the root OR one that is already repo-relative.
+        Callers legitimately hold both: the indexer walks absolute paths, while
+        the fetch planner and the wire format speak repo-relative ones, and a
+        manifest that understood only the first returned None for every lookup
+        the planner made. That failed SILENTLY -- the planner reads None as
+        "size unknown", sends each file in a request of its own, and quietly
+        becomes the per-file fetching it exists to prevent. Measured on EKS
+        against a real golden repo: 43 batches where one was correct.
+        """
+        candidate = Path(file_path)
+        if candidate.is_absolute():
+            try:
+                return candidate.relative_to(self._root).as_posix()
+            except ValueError:
+                return None
+        # Already relative. Normalise so "./a.py" and "a.py" are one key, and
+        # refuse anything climbing out of the repository.
+        key = PurePosixPath(os.path.normpath(candidate.as_posix())).as_posix()
+        if key == ".." or key.startswith("../"):
             return None
+        return key
 
     def blob_sha(self, file_path: Union[str, Path]) -> Optional[str]:
         """The git blob hash, or None when this manifest cannot vouch for it.

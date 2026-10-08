@@ -54,6 +54,14 @@ class FileIdentifier:
         self.project_dir = project_dir
         self.config = config
         self.git_available = self._detect_git()
+        # A manifest supplies git blob hashes by construction, so a repository it
+        # can describe IS git-addressable whether or not this container can see a
+        # .git directory. Without this a delegated pod probes a path it has no
+        # mount for, decides "not a git repo", and never asks the manifest for
+        # the hashes it is holding -- found by running the seam on EKS, where
+        # every hash came back None while the backend was answering perfectly.
+        if manifest is not None:
+            self.git_available = True
         self._project_id: Optional[str] = None
         # Issue #676: Memoized per-run invariants — branch and commit hash do not
         # change during a single indexing run, so we fetch them once and cache.
@@ -74,6 +82,9 @@ class FileIdentifier:
         warns about.
         """
         self._manifest = manifest
+        # Same reason as in __init__: attaching a manifest makes the repository
+        # git-addressable, and detaching one restores the local probe's answer.
+        self.git_available = True if manifest is not None else self._detect_git()
 
     def _detect_git(self) -> bool:
         """
@@ -124,7 +135,7 @@ class FileIdentifier:
                     self._project_id = repo_name.lower().replace("_", "-")
                     assert self._project_id is not None
                     return self._project_id
-            except subprocess.CalledProcessError:
+            except (subprocess.CalledProcessError, OSError):
                 pass
 
         # Fallback to directory name
@@ -259,6 +270,14 @@ class FileIdentifier:
     def _get_cached_branch(self) -> Optional[str]:
         """Return the current branch name, fetched exactly once per FileIdentifier instance.
 
+        Branch and commit still come from LOCAL git, and under a delegated
+        backend there may be no local checkout -- spawning git with a cwd that
+        does not exist raises FileNotFoundError from the spawn itself, not
+        CalledProcessError, so it used to escape. Those paths now degrade to
+        "unknown" the same way a failing git command does. The blob hash, which
+        is what seeds a chunk's identity, comes from the manifest and is
+        unaffected.
+
         Issue #676: the branch is invariant for the duration of an indexing run.
         After the first call the result is memoized; subsequent calls return the
         cached value without spawning a subprocess.
@@ -285,14 +304,14 @@ class FileIdentifier:
                             cwd=self.project_dir,
                         )
                         self._cached_branch = f"detached-{result.stdout.strip()}"
-                    except subprocess.CalledProcessError as exc:
+                    except (subprocess.CalledProcessError, OSError) as exc:
                         logger.debug(
                             "Could not resolve detached HEAD short hash in %s: %s",
                             self.project_dir,
                             exc,
                         )
                         self._cached_branch = "unknown"
-            except subprocess.CalledProcessError as exc:
+            except (subprocess.CalledProcessError, OSError) as exc:
                 logger.debug(
                     "git branch --show-current failed in %s: %s; falling back to 'unknown'",
                     self.project_dir,
@@ -319,7 +338,7 @@ class FileIdentifier:
                     cwd=self.project_dir,
                 )
                 self._cached_commit_hash = result.stdout.strip()
-            except subprocess.CalledProcessError as exc:
+            except (subprocess.CalledProcessError, OSError) as exc:
                 # Memoize failure as "unknown" so subsequent calls skip the subprocess
                 logger.debug(
                     "git rev-parse HEAD failed in %s: %s; memoizing as 'unknown'",
@@ -432,7 +451,7 @@ class FileIdentifier:
                     if file_path.exists():
                         files[file_path_str] = self.get_file_metadata(file_path)
 
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, OSError):
             # Fallback to filesystem if git command fails
             return self._get_filesystem_files()
 
