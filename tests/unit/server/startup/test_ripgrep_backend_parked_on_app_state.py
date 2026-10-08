@@ -42,14 +42,23 @@ def test_the_backend_is_parked_on_app_state() -> None:
 
 
 def test_the_parked_value_comes_from_the_configured_builder() -> None:
-    """Parking a bare LocalRipgrepBackend would ignore the operator's config.
+    """The parked object must be what the BUILDER returned.
 
-    The assignment existing is not enough -- it has to be the CONFIGURED
-    selection, or setting ripgrep_backend='delegated' would change nothing while
+    The assignment existing is not enough -- parking a bare
+    LocalRipgrepBackend would ignore the operator's config entirely while
     looking wired.
+
+    An earlier version of this test accepted either "the assigned expression
+    mentions the builder" OR "the assigned expression mentions a variable with
+    the right name". The assignment is a bare Name, so the first branch never
+    matched and only the name check ever ran: assigning
+    ``app.state.ripgrep_backend = LocalRipgrepBackend()`` to a variable called
+    ``configured_ripgrep_backend`` would have passed. The name is now traced back
+    to the call that bound it.
     """
     tree = _lifespan_tree()
-    sources = []
+
+    parked: list = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
             continue
@@ -60,16 +69,38 @@ def test_the_parked_value_comes_from_the_configured_builder() -> None:
                 and isinstance(target.value, ast.Attribute)
                 and target.value.attr == "state"
             ):
-                sources.append(node.value)
+                parked.append(node.value)
+    assert parked, "no app.state.ripgrep_backend assignment found"
 
-    assert sources, "no app.state.ripgrep_backend assignment found"
-    names = {ast.dump(src) for src in sources}
-    builder_used = any(
-        "build_configured_ripgrep_backend" in ast.dump(src) for src in sources
-    ) or any("configured_ripgrep_backend" in n for n in names)
-    assert builder_used, (
-        "app.state.ripgrep_backend is not assigned from the configured builder, "
-        "so ripgrep_backend='delegated' would be ignored"
+    def binds_from_builder(name: str) -> bool:
+        """Was `name` bound from a build_configured_ripgrep_backend(...) call?"""
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+                continue
+            call = node.value
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "build_configured_ripgrep_backend"
+            ):
+                return True
+        return False
+
+    def from_builder(expr: ast.expr) -> bool:
+        if (
+            isinstance(expr, ast.Call)
+            and isinstance(expr.func, ast.Name)
+            and expr.func.id == "build_configured_ripgrep_backend"
+        ):
+            return True
+        return isinstance(expr, ast.Name) and binds_from_builder(expr.id)
+
+    assert any(from_builder(expr) for expr in parked), (
+        "app.state.ripgrep_backend is not assigned from "
+        "build_configured_ripgrep_backend, so ripgrep_backend='delegated' would be "
+        "ignored"
     )
 
 
