@@ -179,6 +179,10 @@ smoke:
       tests/unit/server/mcp/test_query_audit_logs_datetime_serialization_1642.py
       tests/unit/server/mcp/test_datetime_serialization.py
       tests/unit/server/mcp/test_json_default_fallback_1645.py
+      tests/unit/server/services/test_backend_plugin_loader.py
+      tests/unit/server/services/test_content_backend_plugin.py
+      tests/unit/server/startup/test_content_backend_wiring.py
+      tests/unit/server/startup/test_content_backend_parked_on_app_state.py
       -v --tb=short
       --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
     # The plugins ship their own suites and NO job collected either of them.
