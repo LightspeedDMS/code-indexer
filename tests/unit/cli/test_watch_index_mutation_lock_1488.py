@@ -17,6 +17,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from code_indexer.cli import cli
+from code_indexer.cli_watch_helpers import semantic_collection_name
 from code_indexer.config import ConfigManager
 from code_indexer.services.chunk_migration_cli import acquire_index_mutation_lock
 
@@ -29,9 +30,11 @@ def _make_real_project(tmp_path: Path) -> Path:
     cm = ConfigManager(cfg_path)
     config = cm.create_default_config(codebase)
     cm.save(config)
-    # Minimal semantic index dir so auto-detection reports an index to watch
-    # (so the failure is the lock, not "No indexes found").
-    (codebase / ".code-indexer" / "index" / "code-indexer-HEAD").mkdir(parents=True)
+    # Minimal semantic index dir, at the collection `cidx index` writes for
+    # this config, so auto-detection reports an index to watch (so the
+    # failure is the lock, not "No indexes found").
+    collection = semantic_collection_name(config)
+    (codebase / ".code-indexer" / "index" / collection).mkdir(parents=True)
     return codebase
 
 
