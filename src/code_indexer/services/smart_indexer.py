@@ -1993,12 +1993,24 @@ class SmartIndexer(HighThroughputProcessor):
                 Path(""),
                 info="FTS index is new - scanning all files to build full-text index...",
             )
+        from ..indexing.file_texts import iter_file_texts
+
         codebase = Path(self.config.codebase_dir)
         files = list(self.file_finder.find_files())
         count = 0
-        for file_path in files:
+        # Inside smart_index's pass: under a delegated backend the manifest is
+        # open and the text is fetched in batches; otherwise it is read here.
+        manifest = getattr(self, "repo_manifest", None)
+        for file_path, text, error in iter_file_texts(
+            files,
+            codebase,
+            errors="replace",
+            manifest=manifest,
+            backend=self.content_backend if manifest is not None else None,
+        ):
             try:
-                text = file_path.read_text(encoding="utf-8", errors="replace")
+                if text is None:
+                    raise OSError(error)
                 lines = text.splitlines()
                 rel_path = str(file_path.relative_to(codebase))
                 language = file_path.suffix.lstrip(".") or "txt"

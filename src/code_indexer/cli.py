@@ -20,6 +20,7 @@ from typing import (
     Any,
     List,
     Literal,
+    Tuple,
     cast,
     TYPE_CHECKING,
 )
@@ -4344,6 +4345,14 @@ def index(
             # Use FileFinder to discover files from disk (respects gitignore, base + override config)
             # This is 60-180x faster than scanning vector JSONs for large codebases
             file_finder = FileFinder(config)
+            # The server's FTS backfill spawns exactly this command. Under a
+            # delegated backend there is no SmartIndexer pass, so the manifest
+            # is built here: discovery and text both come from it, not the disk.
+            fts_backend, fts_manifest = _delegated_fts_source(
+                content_backend, config.codebase_dir
+            )
+            if fts_manifest is not None:
+                file_finder.set_manifest(fts_manifest, fts_backend)
             discovered_files = list(file_finder.find_files())
 
             if not discovered_files:
@@ -4393,18 +4402,22 @@ def index(
                 indexed_count = 0
                 failed_count = 0
 
-                for file_path in discovered_files:
+                from .indexing.file_texts import iter_file_texts
+
+                for file_path, content, _read_error in iter_file_texts(
+                    discovered_files,
+                    config.codebase_dir,
+                    errors="ignore",
+                    manifest=fts_manifest,
+                    backend=fts_backend,
+                ):
                     try:
-                        # Read file content (file_path is already a Path object from FileFinder)
-                        if not file_path.exists():
+                        # A missing or unreadable file: counted, as the
+                        # exists() check here always counted it.
+                        if content is None:
                             failed_count += 1
                             progress.advance(task)
                             continue
-
-                        with open(
-                            file_path, "r", encoding="utf-8", errors="ignore"
-                        ) as f:
-                            content = f.read()
 
                         # Detect language from file extension
                         extension = file_path.suffix.lstrip(".")
@@ -5056,6 +5069,16 @@ def _build_index_content_backend(backend_type: str) -> Any:
     from .server.startup.content_backend_wiring import build_named_content_backend
 
     return build_named_content_backend(backend_type)
+
+
+def _delegated_fts_source(backend_type: str, codebase_dir: Path) -> Tuple[Any, Any]:
+    """(backend, manifest) for a delegated FTS rebuild, or (None, None) for local."""
+    if backend_type == "local":
+        return None, None
+    from .indexing.repo_manifest import RepoManifest
+
+    backend = _build_index_content_backend(backend_type)
+    return backend, RepoManifest.build(codebase_dir, backend=backend)
 
 
 def _populate_fts_index_from_disk(
