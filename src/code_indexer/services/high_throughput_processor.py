@@ -294,7 +294,14 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         # here rather than in __init__ and dropped again on the way out. A
         # manifest held between passes would serve the hash a file had before it
         # was edited. No-op unless a delegated backend is configured.
-        self.begin_manifest_pass()
+        #
+        # Inside smart_index the pass is already open -- it was opened around
+        # discovery -- and this one joins it, so the files are read against the
+        # snapshot they were discovered from. Called on its own (watch mode, the
+        # branch-change path), it opens and closes its own.
+        owns_pass = not getattr(self, "manifest_pass_open", False)
+        if owns_pass:
+            self.begin_manifest_pass()
         try:
             return self._process_files_high_throughput(
                 files,
@@ -305,7 +312,8 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 fts_manager,
             )
         finally:
-            self.end_manifest_pass()
+            if owns_pass:
+                self.end_manifest_pass()
 
     def _process_files_high_throughput(
         self,

@@ -78,6 +78,7 @@ def _processor(
     )
     # DocumentProcessor.__init__ is stubbed, so set what it would have set.
     proc.config = Config(codebase_dir=tmp_path)
+    proc.file_finder = MagicMock()
     return proc
 
 

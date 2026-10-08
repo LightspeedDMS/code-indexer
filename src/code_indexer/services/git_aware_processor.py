@@ -47,6 +47,12 @@ class GitAwareDocumentProcessor(DocumentProcessor):
         # reads disappear: 20.
         self.content_backend = content_backend
         self.repo_manifest: Optional["RepoManifest"] = None
+        # True between begin_manifest_pass and end_manifest_pass. Lets a pass
+        # that may run inside another (the high-throughput pass, inside
+        # smart_index) join the open one instead of opening its own, so files
+        # are discovered and read against ONE snapshot. begin itself stays
+        # unconditional: it always rebuilds.
+        self.manifest_pass_open = False
 
         self.file_identifier = FileIdentifier(config.codebase_dir, config)
         self.git_detection = GitDetectionService(config.codebase_dir, config)
@@ -66,23 +72,36 @@ class GitAwareDocumentProcessor(DocumentProcessor):
         which is the work it would save -- so it is never built there, and the
         default path does no extra work at all.
         """
+        self.manifest_pass_open = True
         if self.content_backend is None or getattr(
             self.content_backend, "is_local", True
         ):
             return
         from ..indexing.repo_manifest import RepoManifest
 
-        self.repo_manifest = RepoManifest.build(
-            self.config.codebase_dir, backend=self.content_backend
-        )
-        self.file_identifier.set_manifest(self.repo_manifest)
+        # Every step below is a remote call or depends on one, and the callers
+        # only reach their ``finally: end_manifest_pass()`` once this returns. A
+        # failure here must not leave the pass marked open -- a later standalone
+        # pass would then join it, find no manifest and read the local disk --
+        # nor leave a half-installed manifest serving stale hashes.
+        try:
+            self.repo_manifest = RepoManifest.build(
+                self.config.codebase_dir, backend=self.content_backend
+            )
+            self.file_identifier.set_manifest(self.repo_manifest)
+            self.file_finder.set_manifest(self.repo_manifest, self.content_backend)
+        except BaseException:
+            self.end_manifest_pass()
+            raise
 
     def end_manifest_pass(self) -> None:
         """Drop the snapshot, so nothing outside a pass can read a stale hash."""
+        self.manifest_pass_open = False
         if self.repo_manifest is None:
             return
         self.repo_manifest = None
         self.file_identifier.set_manifest(None)
+        self.file_finder.set_manifest(None)
 
     def _normalize_path_for_storage(self, file_path: Path) -> str:
         """
