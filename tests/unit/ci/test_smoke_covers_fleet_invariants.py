@@ -51,7 +51,9 @@ _DIRECTORY_ARG_SUFFIX = "/"
 _NEGATING_OPTIONS = ("--deselect", "--ignore")
 
 
-def _tokens_from_script(entries: "list[str]") -> Set[str]:
+def _tokens_from_script(
+    entries: "list[str]", prefixes: "tuple[str, ...]" = ("tests/",)
+) -> Set[str]:
     """Test-path arguments a job's ``script`` entries actually pass to pytest.
 
     Separated from the file read so tests can drive THIS function with synthetic
@@ -62,12 +64,22 @@ def _tokens_from_script(entries: "list[str]") -> Set[str]:
 
     Values of --deselect/--ignore are dropped: they are test paths that mean the
     opposite of "run this".
+
+    ``prefixes`` selects which path arguments count. It defaults to the tests/
+    tree this module guards; test_ci_runs_plugin_suites.py passes "plugins/" so
+    both guards read CI through the same parser rather than each growing its own
+    copy to drift.
     """
     import shlex
 
     tokens: Set[str] = set()
     for entry in entries:
         if "pytest" not in entry:
+            continue
+        # A script entry that is itself a shell comment runs nothing. YAML
+        # comments never reach here (safe_load drops them), but a commented-out
+        # invocation left in the script list would otherwise read as coverage.
+        if entry.lstrip().startswith("#"):
             continue
         skip_next = False
         for part in shlex.split(entry):
@@ -82,12 +94,14 @@ def _tokens_from_script(entries: "list[str]") -> Set[str]:
             # startswith("tests/") test below. An earlier version had such a
             # branch; mutation testing showed deleting it changed nothing, i.e.
             # it was dead code dressed as a safeguard.
-            if part.startswith("tests/"):
+            if part.startswith(prefixes):
                 tokens.add(part)
     return tokens
 
 
-def _pytest_test_tokens(job: str) -> Set[str]:
+def _pytest_test_tokens(
+    job: str, prefixes: "tuple[str, ...]" = ("tests/",)
+) -> Set[str]:
     """Test-path arguments actually passed to pytest by `job`.
 
     Parsed from the YAML, NOT substring-matched against the raw file. The first
@@ -101,7 +115,9 @@ def _pytest_test_tokens(job: str) -> Set[str]:
     import yaml
 
     config = yaml.safe_load(_CI.read_text(encoding="utf-8"))
-    return _tokens_from_script((config.get(job) or {}).get("script") or [])
+    return _tokens_from_script(
+        (config.get(job) or {}).get("script") or [], prefixes=prefixes
+    )
 
 
 def _covered_tokens() -> Set[str]:
