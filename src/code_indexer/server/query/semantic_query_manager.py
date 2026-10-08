@@ -76,6 +76,22 @@ class SearchFailedError(SemanticQueryError):
     pass
 
 
+class SearchRequestError(SemanticQueryError):
+    """The request itself was rejected. Its message describes only the
+    caller's own input and is safe to return to the client."""
+
+    pass
+
+
+class SearchRepositoryNotFoundError(SearchRequestError):
+    """The requested repository does not exist or is not accessible. The
+    message names only the caller's alias, never a disk path."""
+
+    def __init__(self, alias: str) -> None:
+        super().__init__(f"Repository '{alias}' not found")
+        self.alias = alias
+
+
 class QueryBudgetExceeded(Exception):
     """Raised when the query latency budget is exhausted (Bug #678)."""
 
@@ -882,7 +898,7 @@ class SemanticQueryManager:
         all_repos = user_repos + global_repos_list
 
         if not all_repos:
-            raise SemanticQueryError(
+            raise SearchRequestError(
                 f"No activated repositories found for user '{username}'"
             )
 
@@ -892,7 +908,7 @@ class SemanticQueryManager:
                 repo for repo in all_repos if repo["user_alias"] == repository_alias
             ]
             if not all_repos:
-                raise SemanticQueryError(
+                raise SearchRequestError(
                     f"Repository '{repository_alias}' not found for user '{username}'"
                 )
         elif search_mode in ("fts", "hybrid"):
@@ -1007,7 +1023,7 @@ class SemanticQueryManager:
         except TimeoutError as e:
             execution_time_ms = int((time.time() - start_time) * 1000)
             timeout_occurred = True
-            raise SemanticQueryError(f"Query timed out: {str(e)}")
+            raise SemanticQueryError(f"Query timed out: {str(e)}") from e
         except ValueError:
             # Propagate ValueError (e.g., temporal validation errors like invalid date format)
             execution_time_ms = int((time.time() - start_time) * 1000)
@@ -1190,13 +1206,13 @@ class SemanticQueryManager:
             SemanticQueryError: If parameters are invalid
         """
         if not query_text or not query_text.strip():
-            raise SemanticQueryError("Query text cannot be empty")
+            raise SearchRequestError("Query text cannot be empty")
 
         if limit <= 0:
-            raise SemanticQueryError("Limit must be greater than 0")
+            raise SearchRequestError("Limit must be greater than 0")
 
         if min_score is not None and (min_score < 0.0 or min_score > 1.0):
-            raise SemanticQueryError("Min score must be between 0.0 and 1.0")
+            raise SearchRequestError("Min score must be between 0.0 and 1.0")
 
     def _perform_search(
         self,
@@ -2483,7 +2499,7 @@ class SemanticQueryManager:
                 # temporal request explicitly instead of partially honoring
                 # it.
                 if time_range or time_range_all or at_commit:
-                    raise SemanticQueryError(
+                    raise SearchRequestError(
                         "Temporal queries are not supported for composite repositories"
                     )
                 # Use CLI integration for composite repos (supports all filters)
@@ -3347,7 +3363,7 @@ class SemanticQueryManager:
         # Check if FTS index exists
         fts_index_dir = repo_path / ".code-indexer" / "tantivy_index"
         if not fts_index_dir.exists():
-            raise SemanticQueryError(
+            raise SearchRequestError(
                 f"FTS index not available for repository '{repository_alias}'. "
                 "Build FTS index with 'cidx index --fts' in the repository."
             )

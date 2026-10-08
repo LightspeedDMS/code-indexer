@@ -113,9 +113,16 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
         return None, None, err
 
     if not Path(target_path).exists():
-        raise FileNotFoundError(
-            f"Global repository '{repository_alias}' not found at {target_path}"
+        from code_indexer.server.query.semantic_query_manager import (
+            SearchRepositoryNotFoundError,
         )
+
+        logger.error(
+            "Global repository %r target is missing on disk: %s",
+            repository_alias,
+            target_path,
+        )
+        raise SearchRepositoryNotFoundError(repository_alias)
 
     return repo_entry, target_path, None
 

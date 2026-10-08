@@ -25,7 +25,8 @@ from ..models.query import (
     FTSResultItem,
 )
 from ..models.api_models import QueryResultItem
-from ..query.semantic_query_manager import SearchFailedError, SemanticQueryError
+from ..query.search_error_policy import classify_search_error
+from ..query.semantic_query_manager import SearchFailedError, SearchRequestError
 from ...services.multi_index_query_service import MultiIndexQueryTimeoutError
 from ..auth import dependencies
 from ..logging_utils import format_error_log, public_error_message
@@ -794,12 +795,20 @@ def register_query_routes(
                                 format_error_log(
                                     "APP-GENERAL-033",
                                     f"FTS search failed: {e}",
-                                )
+                                ),
+                                exc_info=True,
                             )
                             if request.search_mode == "fts":
+                                _fts_outcome = classify_search_error(e)
                                 raise HTTPException(
-                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                                    detail=f"FTS search failed: {str(e)}",
+                                    status_code=(
+                                        status.HTTP_400_BAD_REQUEST
+                                        if _fts_outcome.client_error
+                                        else status.HTTP_504_GATEWAY_TIMEOUT
+                                        if _fts_outcome.timed_out
+                                        else status.HTTP_500_INTERNAL_SERVER_ERROR
+                                    ),
+                                    detail=_fts_outcome.message,
                                 )
                             # For hybrid mode, continue with semantic only
                             search_mode_actual = "semantic"
@@ -1129,21 +1138,16 @@ def register_query_routes(
                 detail=public_error_message("Search failed"),
             )
 
-        except SemanticQueryError as e:
+        except SearchRequestError as e:
+            # The request itself was rejected; its message names only the
+            # caller's own input. Every other failure falls through below.
             error_message = str(e)
-
-            # Determine appropriate HTTP status code based on error type
-            if "not found" in error_message.lower():
-                status_code = status.HTTP_404_NOT_FOUND
-            elif "timed out" in error_message.lower():
-                status_code = status.HTTP_408_REQUEST_TIMEOUT
-            elif "no activated repositories" in error_message.lower():
-                status_code = status.HTTP_400_BAD_REQUEST
-            else:
-                status_code = status.HTTP_400_BAD_REQUEST
-
             raise HTTPException(
-                status_code=status_code,
+                status_code=(
+                    status.HTTP_404_NOT_FOUND
+                    if "not found" in error_message.lower()
+                    else status.HTTP_400_BAD_REQUEST
+                ),
                 detail=error_message,
             )
 
@@ -1155,9 +1159,14 @@ def register_query_routes(
                 ),
                 exc_info=True,
             )
+            _outcome = classify_search_error(e)
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=public_error_message("Search failed"),
+                status_code=(
+                    status.HTTP_504_GATEWAY_TIMEOUT
+                    if _outcome.timed_out
+                    else status.HTTP_500_INTERNAL_SERVER_ERROR
+                ),
+                detail=_outcome.message,
             )
         finally:
             # Issue #1159: reset ctx and enqueue search event record.

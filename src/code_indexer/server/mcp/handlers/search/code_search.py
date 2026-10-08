@@ -19,7 +19,6 @@ import time
 from typing import Any, Dict, Optional
 
 from code_indexer.server.auth.user_manager import User
-from code_indexer.server.logging_utils import public_error_message
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
@@ -56,20 +55,13 @@ logger = logging.getLogger("code_indexer.server.mcp.handlers.search")
 def _search_error_message(error: Exception) -> str:
     """Client-facing message for a failed search_code call.
 
-    A timeout or an internal search failure (storage, provider,
-    configuration) answers a fixed message; its detail goes to the server
-    log only. Any other error describes the request itself and keeps its
-    message. The exception's ``__cause__`` is checked too, since the
-    repository search re-raises a timeout wrapped in a plain Exception.
+    Delegates to the shared allow-list classifier: only client errors keep
+    their text; every other failure answers a fixed message and its detail
+    goes to the server log only (logged by the caller).
     """
-    from code_indexer.server.query.semantic_query_manager import SearchFailedError
+    from code_indexer.server.query.search_error_policy import classify_search_error
 
-    chain = [error, error.__cause__]
-    if any(isinstance(link, TimeoutError) for link in chain):
-        return public_error_message("Search timed out")
-    if any(isinstance(link, SearchFailedError) for link in chain):
-        return public_error_message("Search failed")
-    return str(error)
+    return classify_search_error(error).message
 
 
 def search_code(
