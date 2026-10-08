@@ -7,7 +7,10 @@ aggregates, and returns timing information for parallel multi-index queries.
 
 import pytest
 from unittest.mock import Mock, patch
-from code_indexer.services.multi_index_query_service import MultiIndexQueryService
+from code_indexer.services.multi_index_query_service import (
+    MultiIndexQueryService,
+    MultiIndexQueryTimeoutError,
+)
 
 
 class TestMultiIndexTiming:
@@ -270,10 +273,11 @@ class TestMultiIndexTiming:
             "Merge timing should be reasonable (<100ms)"
         )
 
-    def test_timeout_flags_set_on_code_timeout(
+    def test_code_timeout_raises_typed_error_naming_code_index(
         self, service, mock_vector_store, mock_project_root
     ):
-        """Test that code_timed_out flag is set when code index query times out."""
+        """A code index timeout raises the typed error naming that index,
+        never a partial result from the other index."""
         # Create multimodal collection directory
         multimodal_dir = (
             mock_project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
@@ -297,24 +301,18 @@ class TestMultiIndexTiming:
 
         # Mock multimodal provider
         with patch.object(service, "_get_multimodal_provider"):
-            results, timing = service.query(
-                query_text="test query", limit=10, collection_name="voyage-code-3"
-            )
+            with pytest.raises(MultiIndexQueryTimeoutError) as excinfo:
+                service.query(
+                    query_text="test query", limit=10, collection_name="voyage-code-3"
+                )
 
-        # Verify timeout flag is set for code index
-        assert timing["code_timed_out"] is True, (
-            "code_timed_out should be True when code query times out"
-        )
-        assert timing["multimodal_timed_out"] is False, (
-            "multimodal_timed_out should be False (multimodal succeeded)"
-        )
-        # Should still return results from multimodal index
-        assert len(results) > 0, "Should return partial results from multimodal index"
+        assert excinfo.value.index_types == ["code"]
 
-    def test_timeout_flags_set_on_multimodal_timeout(
+    def test_multimodal_timeout_raises_typed_error_naming_multimodal_index(
         self, service, mock_vector_store, mock_project_root
     ):
-        """Test that multimodal_timed_out flag is set when multimodal index query times out."""
+        """A multimodal index timeout raises the typed error naming that index,
+        never a partial result from the code index."""
         # Create multimodal collection directory
         multimodal_dir = (
             mock_project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
@@ -338,19 +336,12 @@ class TestMultiIndexTiming:
 
         # Mock multimodal provider
         with patch.object(service, "_get_multimodal_provider"):
-            results, timing = service.query(
-                query_text="test query", limit=10, collection_name="voyage-code-3"
-            )
+            with pytest.raises(MultiIndexQueryTimeoutError) as excinfo:
+                service.query(
+                    query_text="test query", limit=10, collection_name="voyage-code-3"
+                )
 
-        # Verify timeout flag is set for multimodal index
-        assert timing["code_timed_out"] is False, (
-            "code_timed_out should be False (code succeeded)"
-        )
-        assert timing["multimodal_timed_out"] is True, (
-            "multimodal_timed_out should be True when multimodal query times out"
-        )
-        # Should still return results from code index
-        assert len(results) > 0, "Should return partial results from code index"
+        assert excinfo.value.index_types == ["multimodal"]
 
     def test_individual_index_timing_captured(
         self, service, mock_vector_store, mock_project_root
