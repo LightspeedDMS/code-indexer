@@ -261,7 +261,10 @@ class ReposAPIClient(CIDXRemoteAPIClient):
             AuthenticationError: If authentication fails
             APIClientError: If the request fails or source is invalid
         """
-        params = {"source": source}
+        from ..server.git.git_subprocess_env import remote_url_without_credentials
+
+        # URL credentials are never sent: the source is sent credential-free.
+        params = {"source": remote_url_without_credentials(source)}
 
         response = self._authenticated_request(
             "GET", "/api/repos/discover", params=params

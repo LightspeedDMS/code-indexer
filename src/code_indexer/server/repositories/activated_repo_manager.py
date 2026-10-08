@@ -4746,19 +4746,20 @@ class ActivatedRepoManager:
                 return False, "Empty origin URL"
 
             # Local file paths - fetching not needed for CoW repos
+            safe_origin = mask_url_credentials(origin_url)
             if origin_url.startswith("/") or origin_url.startswith("file://"):
                 self.logger.debug(
-                    f"Origin is local path: {origin_url}, skipping fetch",
+                    f"Origin is local path: {safe_origin}, skipping fetch",
                     extra={"correlation_id": get_correlation_id()},
                 )
-                return False, f"Local repository: {origin_url}"
+                return False, f"Local repository: {safe_origin}"
 
             # Relative paths - also local
             if not origin_url.startswith(("http://", "https://", "git@", "ssh://")):
                 self.logger.debug(
-                    f"Origin appears to be local path: {origin_url}, skipping fetch"
+                    f"Origin appears to be local path: {safe_origin}, skipping fetch"
                 )
-                return False, f"Local repository: {origin_url}"
+                return False, f"Local repository: {safe_origin}"
 
             # Remote URLs - attempt fetch
             self.logger.debug(

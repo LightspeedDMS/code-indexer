@@ -27,6 +27,7 @@ from ..remote.credential_manager import (
     CredentialDecryptionError,
 )
 from ..api_clients.base_client import NetworkError, AuthenticationError
+from ..utils.credential_redaction import mask_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +226,9 @@ def _establish_repository_link(project_root: Path) -> Optional[RepositoryLink]:
                 "Unable to determine git repository URL. Please ensure repository has a remote origin."
             )
 
-        logger.info(f"Attempting repository linking for: {repo_url}")
+        logger.info(
+            "Attempting repository linking for: %s", mask_url_credentials(repo_url)
+        )
 
         # Load remote configuration for server details
         remote_config = _load_remote_configuration(project_root)
@@ -253,7 +256,7 @@ def _establish_repository_link(project_root: Path) -> Optional[RepositoryLink]:
                 return repository_link
             else:
                 logger.warning(
-                    f"No matching repository found for {repo_url}. "
+                    f"No matching repository found for {mask_url_credentials(repo_url)}. "
                     "Please check that the repository exists on the remote server and has the correct branch."
                 )
                 return None

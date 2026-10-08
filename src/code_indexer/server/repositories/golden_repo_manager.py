@@ -2001,11 +2001,13 @@ class GoldenRepoManager:
                     # AC4 Story #163: Auto-create folder for local:// URLs
                     os.makedirs(clone_path, exist_ok=True)
                     logging.info(
-                        f"Created local repository directory for {repo_url}: {clone_path}"
+                        "Created local repository directory for "
+                        f"{mask_url_credentials(repo_url)}: {clone_path}"
                     )
                 else:
                     logging.info(
-                        f"Using existing local directory for {repo_url}: {clone_path}"
+                        "Using existing local directory for "
+                        f"{mask_url_credentials(repo_url)}: {clone_path}"
                     )
                 return clone_path
 

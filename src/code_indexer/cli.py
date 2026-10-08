@@ -13402,7 +13402,12 @@ def discover(ctx, source: str):
             sys.exit(1)
 
         # Create client and discover repositories
-        console.print(f"🔍 Discovering repositories from: {source}", style="blue")
+        from .utils.credential_redaction import mask_url_credentials
+
+        console.print(
+            f"🔍 Discovering repositories from: {mask_url_credentials(source)}",
+            style="blue",
+        )
 
         async def discover_repositories():
             client = ReposAPIClient(
@@ -14617,10 +14622,12 @@ def _display_repository_info(
 
     # Basic Information Section
     console.print("\n[bold]Basic Information:[/bold]")
+    from .utils.credential_redaction import mask_url_credentials
+
     basic_info = [
         f"  Alias: {repo_info.get('alias', 'N/A')}",
         f"  Golden Repository: {repo_info.get('golden_repository', 'N/A')}",
-        f"  Git URL: {repo_info.get('git_url', 'N/A')}",
+        f"  Git URL: {mask_url_credentials(repo_info.get('git_url', 'N/A'))}",
         f"  Current Branch: {repo_info.get('current_branch', 'N/A')}",
         f"  Activated: {repo_info.get('activation_date', 'N/A')}",
     ]
@@ -17554,8 +17561,11 @@ def admin_repos_add(
 
         try:
             if not json_output:
+                from .utils.credential_redaction import mask_url_credentials
+
                 console.print(
-                    f"📁 Adding golden repository '{alias}' from {git_url}...",
+                    f"📁 Adding golden repository '{alias}' from "
+                    f"{mask_url_credentials(git_url)}...",
                     style="blue",
                 )
 
@@ -17972,8 +17982,11 @@ def admin_repos_show(ctx, alias: str, json_output: bool):
 
             # Basic information
             console.print(f"[bold]Alias:[/bold] {target_repo.get('alias', 'N/A')}")
+            from .utils.credential_redaction import mask_url_credentials
+
             console.print(
-                f"[bold]Repository URL:[/bold] {target_repo.get('repo_url', 'N/A')}"
+                "[bold]Repository URL:[/bold] "
+                f"{mask_url_credentials(target_repo.get('repo_url', 'N/A'))}"
             )
             console.print(
                 f"[bold]Default Branch:[/bold] {target_repo.get('default_branch', 'N/A')}"
@@ -18635,8 +18648,11 @@ def admin_repos_delete(ctx, alias: str, confirm: bool, force: bool, json_output:
                         f"\n⚠️  This will permanently delete the golden repository '{alias}'.",
                         style="yellow bold",
                     )
+                    from .utils.credential_redaction import mask_url_credentials
+
                     console.print(
-                        f"📍 Repository: {target_repo.get('repo_url', 'N/A')}"
+                        "📍 Repository: "
+                        f"{mask_url_credentials(target_repo.get('repo_url', 'N/A'))}"
                     )
                     console.print(
                         f"📂 Description: {target_repo.get('description', 'No description')}"

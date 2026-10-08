@@ -142,8 +142,13 @@ class RepositoryDiscoveryService:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+            from code_indexer.server.git.git_subprocess_env import (
+                remote_url_without_credentials,
+            )
+
+            # The response never echoes the URL's credentials.
             return RepositoryDiscoveryResponse(
-                query_url=repo_url,
+                query_url=remote_url_without_credentials(repo_url),
                 normalized_url=normalized_url.canonical_form,
                 golden_repositories=golden_repositories,
                 activated_repositories=activated_repositories,

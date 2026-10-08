@@ -3180,7 +3180,9 @@ def _batch_create_repos(
                     "WEB-GENERAL-067",
                     "Batch golden repo create failed",
                     repo_alias=repo_data.get("alias", "unknown"),
-                    repo_url=repo_data.get("clone_url", "unknown"),
+                    repo_url=mask_url_credentials(
+                        repo_data.get("clone_url", "unknown")
+                    ),
                     submitter=submitter_username,
                 ),
                 extra=get_log_extra("WEB-GENERAL-067"),
@@ -9127,7 +9129,8 @@ async def fetch_discovery_branches(request: Request):
                 logger.warning(
                     format_error_log(
                         "STORE-GENERAL-045",
-                        f"Branch discovery shed load for {clone_url}: {overloaded}",
+                        "Branch discovery shed load for "
+                        f"{mask_url_credentials(clone_url)}: {overloaded}",
                     )
                 )
                 return {

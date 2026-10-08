@@ -37,6 +37,8 @@ import subprocess
 from typing import Dict, List, NamedTuple, Optional
 from urllib.parse import unquote
 
+from code_indexer.utils.git_remote_url import split_url_authority
+
 logger = logging.getLogger(__name__)
 
 # Repository credentials are supplied to git at run time and never stored in
@@ -104,12 +106,43 @@ def _split_http_userinfo(url: str) -> Optional[_HttpUserinfo]:
     )
 
 
+_SSH_SCHEMES = ("ssh", "git+ssh", "ssh+git")
+# An ssh login name kept in a credential-free URL.
+_PLAIN_SSH_LOGIN = re.compile(r"[A-Za-z0-9._~-]+")
+
+
 def remote_url_without_credentials(url: str) -> str:
-    """``url`` without http(s) userinfo -- the form git is given on a
-    command line and the form stored in a clone's configuration. Any other
-    URL (ssh, scp-like, local path) is returned unchanged."""
-    parts = _split_http_userinfo(url)
-    return url if parts is None else parts.clean_url
+    """``url`` without credentials -- the form git is given on a command
+    line and the form stored in a clone's configuration. Userinfo runs to
+    the authority's last '@' (``split_url_authority``). http(s) and other
+    schemes lose all of it; an ssh-family URL keeps only a plain login name
+    (needed, not secret) and never a password. A URL without userinfo
+    (including scp-like and local paths) is returned unchanged.
+
+    Raises:
+        ValueError: An http(s) username or password decodes to CR, LF or
+            NUL. The message never includes the value.
+    """
+    split = split_url_authority(url)
+    if split is None or split.userinfo is None:
+        return url
+    scheme = split.scheme.lower()
+    login = ""
+    if scheme in ("http", "https"):
+        username, _, password = split.userinfo.partition(":")
+        for value in (unquote(username), unquote(password)):
+            if any(char in value for char in _FORBIDDEN_CREDENTIAL_CHARS):
+                raise ValueError(
+                    "Repository URL credentials contain a line break or NUL "
+                    "character; the URL is refused"
+                )
+    elif scheme in _SSH_SCHEMES:
+        # The login is the raw text before the first literal ':', decoded
+        # only afterwards, and kept only when it is a plain name.
+        name = unquote(split.userinfo.partition(":")[0])
+        if _PLAIN_SSH_LOGIN.fullmatch(name):
+            login = f"{name}@"
+    return f"{split.scheme}://{login}{split.hostport}{split.rest}"
 
 
 def supply_remote_credentials(

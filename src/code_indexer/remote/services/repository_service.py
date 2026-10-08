@@ -4,6 +4,8 @@ from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 from dataclasses import dataclass
 import logging
 
+from ...utils.credential_redaction import mask_url_credentials
+
 if TYPE_CHECKING:
     from ...api_clients.base_client import CIDXRemoteAPIClient
     from ..staleness_detector import StalenessDetector
@@ -62,7 +64,9 @@ class RemoteRepositoryService:
             Complete repository analysis with staleness information
         """
         logger.debug(
-            f"Starting repository analysis for {local_repo_url}:{local_branch}"
+            "Starting repository analysis for %s:%s",
+            mask_url_credentials(local_repo_url),
+            local_branch,
         )
 
         # Get repositories from server
