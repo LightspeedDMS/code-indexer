@@ -1716,6 +1716,15 @@ def make_lifespan(
             payload_cache.start_background_cleanup()
             app.state.payload_cache = payload_cache
 
+            # Confirmation tokens for destructive git operations live in
+            # this cluster-shared store, so any worker or node can redeem
+            # a token issued by another.
+            from code_indexer.server.services.git_operations_service import (
+                git_operations_service,
+            )
+
+            git_operations_service.payload_cache = payload_cache
+
             logger.info(
                 f"PayloadCache initialized: {cache_db_path} "
                 f"(preview_size={payload_cache_config.preview_size_chars}, "
@@ -1785,6 +1794,13 @@ def make_lifespan(
             )
 
             reset_registered_payload_cache()
+            # Destructive git confirmations never use a cache this block
+            # declared unavailable: the service fails loudly instead.
+            from code_indexer.server.services.git_operations_service import (
+                git_operations_service,
+            )
+
+            git_operations_service.payload_cache = None
 
         # Bug fix: Early ConfigService PG pool so scheduler inits read merged runtime config.
         # In postgres/cluster mode, ConfigService.set_connection_pool() triggers

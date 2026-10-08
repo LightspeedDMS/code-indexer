@@ -154,17 +154,13 @@ class TestReentrantAccessDuringConstructionDoesNotDeadlock:
     rationale): this exercises the REAL, unmodified production
     __getattr__ / _ensure_initialized() lock+sentinel logic and the REAL
     GitOperationsService()/_get_git_operations_service() production code.
-    Only `TTLCache` -- a third-party EXTERNAL dependency (cachetools),
-    still constructed unconditionally inside GitOperationsService.__init__
-    even after the Bug #1650 Option A remediation moved
-    ActivatedRepoManager/config-service resolution off the __init__ call
-    chain entirely -- is replaced with a stand-in that performs a
-    re-entrant probe of the module's own lazy attribute before returning,
-    simulating a future/indirect call chain re-entering __getattr__ on the
-    same thread (exactly like #1638's _running_server_app_state() probe did
-    for app.py's create_app() -> ... -> registry chain). Verified
-    empirically that patching TTLCache here intercepts exactly the one call
-    __init__ makes, with no double-invocation.
+    GitOperationsService.__init__ is wrapped so that, before running the
+    real __init__, it counts the call and performs a re-entrant probe of
+    the module's own lazy attribute, simulating a future/indirect call
+    chain re-entering __getattr__ on the same thread (exactly like #1638's
+    _running_server_app_state() probe did for app.py's create_app() -> ...
+    -> registry chain). __init__ itself makes no external call to
+    intercept, so the wrapper is the probe seam.
     """
 
     def test_reentrant_probe_during_construction_returns_none_no_deadlock(
@@ -182,13 +178,16 @@ call_count = {{"n": 0}}
 captured = {{}}
 
 
-class ProbingTTLCache:
-    def __init__(self, *args, **kwargs):
-        call_count["n"] += 1
-        # Re-entrant probe from WITHIN the lazy-construction call chain, on
-        # the SAME thread -- exactly the shape of #1638's Blocker #1 (a
-        # re-entrant getattr() firing before the original call finishes).
-        captured["reentrant"] = getattr(gos_module, "git_operations_service", None)
+real_init = gos_module.GitOperationsService.__init__
+
+
+def probing_init(self, *args, **kwargs):
+    call_count["n"] += 1
+    # Re-entrant probe from WITHIN the lazy-construction call chain, on
+    # the SAME thread -- exactly the shape of #1638's Blocker #1 (a
+    # re-entrant getattr() firing before the original call finishes).
+    captured["reentrant"] = getattr(gos_module, "git_operations_service", None)
+    real_init(self, *args, **kwargs)
 
 
 result = {{}}
@@ -196,7 +195,9 @@ result = {{}}
 
 def worker():
     try:
-        with mock.patch.object(gos_module, "TTLCache", ProbingTTLCache):
+        with mock.patch.object(
+            gos_module.GitOperationsService, "__init__", probing_init
+        ):
             result["service"] = gos_module.git_operations_service
     except Exception as e:
         result["exception"] = repr(e)

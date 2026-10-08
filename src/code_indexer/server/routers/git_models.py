@@ -165,6 +165,9 @@ class GitResetResponse(BaseModel):
         None, description="Whether confirmation is required"
     )
     token: Optional[str] = Field(None, description="Confirmation token if required")
+    message: Optional[str] = Field(
+        None, description="Why a presented confirmation token was rejected"
+    )
 
 
 class GitCleanRequest(BaseModel):
@@ -184,6 +187,9 @@ class GitCleanResponse(BaseModel):
         None, description="Whether confirmation is required"
     )
     token: Optional[str] = Field(None, description="Confirmation token if required")
+    message: Optional[str] = Field(
+        None, description="Why a presented confirmation token was rejected"
+    )
 
 
 class GitMergeAbortResponse(BaseModel):
@@ -248,3 +254,6 @@ class GitBranchDeleteResponse(BaseModel):
         None, description="Whether confirmation is required"
     )
     token: Optional[str] = Field(None, description="Confirmation token if required")
+    message: Optional[str] = Field(
+        None, description="Why a presented confirmation token was rejected"
+    )

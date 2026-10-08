@@ -8,11 +8,10 @@ Provides 17 git operations across 5 feature groups:
 - F5: Recovery (git_reset, git_clean, git_merge_abort, git_checkout_file)
 - F6: Branch Management (git_branch_list, git_branch_create, git_branch_switch, git_branch_delete)
 
-Implements confirmation token system for destructive operations with:
-- 6-character alphanumeric tokens
-- 5-minute expiration
-- Single-use validation
-- In-memory storage
+Destructive operations (hard reset, clean, branch delete) require a
+confirmation token: 128-bit, valid for exactly 5 minutes on the store's clock,
+single-use, bound to user, repository alias, operation and parameters, and kept
+in the cluster-shared PayloadCache (see git_confirmation_tokens).
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
@@ -21,15 +20,16 @@ import json
 import logging
 import os
 import re
-import secrets
 import subprocess
 import threading
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from cachetools import TTLCache
-
+from code_indexer.server.services.git_confirmation_tokens import (
+    ConfirmationBinding,
+    issue_confirmation_token,
+    redeem_confirmation_token,
+)
 from code_indexer.server.utils.config_manager import ServerConfigManager
 from code_indexer.utils.git_runner import run_git_command
 from code_indexer.server.logging_utils import format_error_log
@@ -54,12 +54,10 @@ if TYPE_CHECKING:
     from code_indexer.server.repositories.activated_repo_manager import (
         ActivatedRepoManager,
     )
+    from code_indexer.server.cache.payload_cache import PayloadCache
 
 # Module logger
 logger = logging.getLogger(__name__)
-
-# Token expiry constant (not configurable - internal security setting)
-TOKEN_EXPIRY = 300  # 5 minutes for confirmation tokens
 
 
 class GitCommandError(Exception):
@@ -126,6 +124,12 @@ class GitOperationsService:
     _config_lazy_lock = threading.RLock()
     _activated_repo_manager_lock = threading.RLock()
 
+    # Cluster-shared store for confirmation tokens, wired by server startup
+    # (app.state.payload_cache). Class-level default so instances built via
+    # __new__ also read None; while unset, a destructive operation fails
+    # instead of keeping tokens in this process.
+    payload_cache: Optional["PayloadCache"] = None
+
     def __init__(self, config_manager: Optional[ServerConfigManager] = None):
         """
         Initialize GitOperationsService with configuration.
@@ -134,15 +138,6 @@ class GitOperationsService:
             config_manager: ServerConfigManager instance for loading git service config.
                           If None, creates a new ServerConfigManager internally.
         """
-        # Thread-safe TTLCache for automatic token expiration (Issue #1, #2)
-        # maxsize=10000: Reasonable limit for concurrent users
-        # ttl=TOKEN_EXPIRY: Automatic cleanup after 5 minutes
-        # timer=time.time: Use time.time() for testability (allows mocking)
-        self._tokens: TTLCache = TTLCache(
-            maxsize=10000, ttl=TOKEN_EXPIRY, timer=time.time
-        )
-        self._tokens_lock = threading.RLock()
-
         # Bug #1650 remediation: code review of the first fix attempt
         # (commit 2085fe9a, module-level PEP 562 lazy-init only) proved
         # deferring the module-level `git_operations_service` singleton
@@ -774,6 +769,8 @@ class GitOperationsService:
             mode=mode,
             commit_hash=commit_hash,
             confirmation_token=confirmation_token,
+            username=username,
+            repo_alias=repo_alias,
         )
         # Note: result already contains success field from git_reset
         # or requires_confirmation/token for hard reset
@@ -804,7 +801,12 @@ class GitOperationsService:
         repo_path = self.activated_repo_manager.get_activated_repo_path(
             username=username, user_alias=repo_alias
         )
-        result = self.git_clean(Path(repo_path), confirmation_token=confirmation_token)
+        result = self.git_clean(
+            Path(repo_path),
+            confirmation_token=confirmation_token,
+            username=username,
+            repo_alias=repo_alias,
+        )
         # Note: result already contains success field from git_clean
         # or requires_confirmation/token
         return result
@@ -969,6 +971,8 @@ class GitOperationsService:
             Path(repo_path),
             branch_name=branch_name,
             confirmation_token=confirmation_token,
+            username=username,
+            repo_alias=repo_alias,
         )
         # Note: result already contains success field from git_branch_delete
         # or requires_confirmation/token
@@ -2050,6 +2054,9 @@ class GitOperationsService:
         mode: str,
         commit_hash: Optional[str] = None,
         confirmation_token: Optional[str] = None,
+        *,
+        username: Optional[str] = None,
+        repo_alias: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Reset repository to a specific commit.
@@ -2059,12 +2066,17 @@ class GitOperationsService:
             mode: Reset mode ("soft", "mixed", "hard")
             commit_hash: Optional commit hash (default: HEAD)
             confirmation_token: Required for hard reset
+            username, repo_alias: Required for hard reset; the token is
+                bound to them and to the target commit
 
         Returns:
             Dict with success/reset_mode/target_commit OR requires_confirmation/token
+            (a fresh token when the presented one is missing, invalid,
+            expired, already used, or bound to something else)
 
         Raises:
-            ValueError: If hard reset attempted without valid token
+            ValueError: If a hard reset lacks username or repo_alias
+            RuntimeError: If no shared confirmation token store is wired
             GitCommandError: If git reset fails
         """
         # mode must be exactly one of the supported literal reset modes,
@@ -2086,18 +2098,18 @@ class GitOperationsService:
             commit_hash, repo_path, param_name="commit_hash"
         )
 
+        target = commit_hash or "HEAD"
         if mode == "hard":
-            if not confirmation_token:
-                token = self._generate_confirmation_token("git_reset_hard")
-                return {"requires_confirmation": True, "token": token}
-
-            if not self._validate_confirmation_token(
-                "git_reset_hard", confirmation_token
-            ):
-                raise ValueError("Invalid or expired confirmation token")
+            pending = self._confirmation_gate(
+                ConfirmationBinding.of(
+                    "git_reset_hard", username, repo_alias, commit=target
+                ),
+                confirmation_token,
+            )
+            if pending is not None:
+                return pending
 
         try:
-            target = commit_hash or "HEAD"
             cmd = ["git", "reset", f"--{mode}", target]
 
             run_git_command(
@@ -2119,7 +2131,12 @@ class GitOperationsService:
             raise GitCommandError(f"git reset timed out after {e.timeout}s", stderr="")
 
     def git_clean(
-        self, repo_path: Path, confirmation_token: Optional[str] = None
+        self,
+        repo_path: Path,
+        confirmation_token: Optional[str] = None,
+        *,
+        username: Optional[str] = None,
+        repo_alias: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Remove untracked files and directories.
@@ -2127,20 +2144,24 @@ class GitOperationsService:
         Args:
             repo_path: Path to git repository
             confirmation_token: Required for this destructive operation
+            username, repo_alias: Required; the token is bound to them
 
         Returns:
             Dict with success/removed_files OR requires_confirmation/token
+            (a fresh token when the presented one is missing, invalid,
+            expired, already used, or bound to something else)
 
         Raises:
-            ValueError: If attempted without valid token
+            ValueError: If username or repo_alias is missing
+            RuntimeError: If no shared confirmation token store is wired
             GitCommandError: If git clean fails
         """
-        if not confirmation_token:
-            token = self._generate_confirmation_token("git_clean")
-            return {"requires_confirmation": True, "token": token}
-
-        if not self._validate_confirmation_token("git_clean", confirmation_token):
-            raise ValueError("Invalid or expired confirmation token")
+        pending = self._confirmation_gate(
+            ConfirmationBinding.of("git_clean", username, repo_alias),
+            confirmation_token,
+        )
+        if pending is not None:
+            return pending
 
         try:
             result = run_git_command(
@@ -2775,6 +2796,9 @@ class GitOperationsService:
         repo_path: Path,
         branch_name: str,
         confirmation_token: Optional[str] = None,
+        *,
+        username: Optional[str] = None,
+        repo_alias: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Delete a branch.
@@ -2783,12 +2807,17 @@ class GitOperationsService:
             repo_path: Path to git repository
             branch_name: Branch to delete
             confirmation_token: Required for this destructive operation
+            username, repo_alias: Required; the token is bound to them and
+                to branch_name
 
         Returns:
             Dict with success/deleted_branch OR requires_confirmation/token
+            (a fresh token when the presented one is missing, invalid,
+            expired, already used, or bound to something else)
 
         Raises:
-            ValueError: If attempted without valid token
+            ValueError: If username or repo_alias is missing
+            RuntimeError: If no shared confirmation token store is wired
             GitCommandError: If git branch delete fails
         """
         # branch_name must not start with '-' (would be read as a git
@@ -2801,14 +2830,14 @@ class GitOperationsService:
         branch_name = validate_branch_name(branch_name, param_name="branch_name")
         assert branch_name is not None  # required parameter, never None here
 
-        if not confirmation_token:
-            token = self._generate_confirmation_token("git_branch_delete")
-            return {"requires_confirmation": True, "token": token}
-
-        if not self._validate_confirmation_token(
-            "git_branch_delete", confirmation_token
-        ):
-            raise ValueError("Invalid or expired confirmation token")
+        pending = self._confirmation_gate(
+            ConfirmationBinding.of(
+                "git_branch_delete", username, repo_alias, branch=branch_name
+            ),
+            confirmation_token,
+        )
+        if pending is not None:
+            return pending
 
         try:
             run_git_command(
@@ -2861,54 +2890,33 @@ class GitOperationsService:
 
     # Confirmation Token System
 
-    def _generate_confirmation_token(self, operation: str) -> str:
+    def _confirmation_gate(
+        self, binding: ConfirmationBinding, confirmation_token: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """Return None when `confirmation_token` is redeemed for `binding`
+        (the operation may run); otherwise the requires_confirmation
+        response carrying a fresh token bound to `binding`.
+
+        Tokens live in the cluster-shared PayloadCache, so any worker or
+        node can redeem them; redemption is atomic and single-use.
         """
-        Generate a 6-character confirmation token (thread-safe).
-
-        Args:
-            operation: Operation name for token validation
-
-        Returns:
-            6-character alphanumeric token
-        """
-        # Generate 6-character token using uppercase letters and digits
-        # Excluding ambiguous characters: 0, O, I, 1
-        chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-        token = "".join(secrets.choice(chars) for _ in range(6))
-
-        # Thread-safe token storage (TTLCache handles expiration automatically)
-        with self._tokens_lock:
-            # Store only operation name - TTLCache handles expiry via its TTL parameter
-            self._tokens[token] = operation
-
-        return token
-
-    def _validate_confirmation_token(self, operation: str, token: str) -> bool:
-        """
-        Validate a confirmation token (thread-safe, single-use).
-
-        Args:
-            operation: Expected operation name
-            token: Token to validate
-
-        Returns:
-            True if token is valid and not expired, False otherwise
-        """
-        # Thread-safe token validation
-        with self._tokens_lock:
-            # TTLCache automatically removes expired entries on access
-            if token not in self._tokens:
-                return False
-
-            stored_operation = self._tokens[token]
-
-            # Check operation match
-            if stored_operation != operation:
-                return False
-
-            # Token is valid - consume it (single-use)
-            del self._tokens[token]
-            return True
+        cache = self.payload_cache
+        if cache is None:
+            raise RuntimeError(
+                "Confirmation token store is not configured: the shared "
+                "payload cache is not wired into GitOperationsService"
+            )
+        if confirmation_token and redeem_confirmation_token(
+            cache, binding, confirmation_token
+        ):
+            return None
+        response: Dict[str, Any] = {
+            "requires_confirmation": True,
+            "token": issue_confirmation_token(cache, binding),
+        }
+        if confirmation_token:
+            response["message"] = "Invalid or expired confirmation token"
+        return response
 
     # -------------------------------------------------------------------------
     # Story #453: Git Stash Operations

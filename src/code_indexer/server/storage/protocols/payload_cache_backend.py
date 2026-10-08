@@ -92,6 +92,29 @@ class PayloadCacheBackend(Protocol):
         """
         ...
 
+    def store_expiring(self, cache_handle: str, content: str, ttl_seconds: int) -> None:
+        """Insert or replace one entry that lives exactly `ttl_seconds`.
+
+        The entry's creation time comes from the store's own clock (the
+        database clock), never the caller's, so every node agrees on when
+        it expires. Failures propagate.
+        """
+        ...
+
+    def consume(self, cache_handle: str) -> bool:
+        """Atomically delete a live (unexpired) entry.
+
+        Returns True only to the single caller whose delete removed the
+        entry; every concurrent or later caller, on any node, gets False.
+        An expired or missing entry yields False. Liveness is measured on
+        the store's own clock, the clock store_expiring() stamps entries
+        with. Failures propagate.
+
+        Args:
+            cache_handle: Unique identifier for the cache entry.
+        """
+        ...
+
     def cleanup_expired(self) -> int:
         """Delete all entries that have exceeded their TTL.
 

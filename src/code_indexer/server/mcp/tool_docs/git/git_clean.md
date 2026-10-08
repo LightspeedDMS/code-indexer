@@ -12,10 +12,9 @@ inputSchema:
       description: Repository alias
     confirmation_token:
       type: string
-      description: Confirmation token (must be 'CONFIRM_DELETE_UNTRACKED')
+      description: Token returned by a previous git_clean call for this repository. Omit it on the first call.
   required:
   - repository_alias
-  - confirmation_token
   additionalProperties: false
 outputSchema:
   oneOf:
@@ -30,15 +29,31 @@ outputSchema:
         items:
           type: string
         description: List of untracked files/directories removed
+    required:
+    - success
+    - removed_files
   - type: object
-    description: Confirmation token response
+    description: Confirmation required; nothing was removed
     properties:
-      requires_confirmation:
+      success:
         type: boolean
-        description: Confirmation required
-      token:
-        type: string
-        description: Confirmation token to use in next call
+        description: Always false
+      confirmation_token_required:
+        type: object
+        description: Token to send back as confirmation_token
+        properties:
+          token:
+            type: string
+            description: Single-use token, valid for 5 minutes, for this user and repository
+          message:
+            type: string
+            description: What to do next, and why a presented token was rejected
+        required:
+        - token
+        - message
+    required:
+    - success
+    - confirmation_token_required
 ---
 
-Remove untracked files from working tree (DESTRUCTIVE). USE CASES: (1) Remove build artifacts, (2) Clean untracked files, (3) Restore clean state. SAFETY: Requires confirmation_token to prevent accidental deletion. PERMISSIONS: Requires repository:admin (destructive operation). EXAMPLE: {"repository_alias": "my-repo", "confirmation_token": "CONFIRM_DELETE_UNTRACKED"}
+Remove untracked files from working tree (DESTRUCTIVE). USE CASES: (1) Remove build artifacts, (2) Clean untracked files, (3) Restore clean state. SAFETY: Two-step confirmation. Call first without confirmation_token: nothing is removed and the response carries confirmation_token_required.token. Call again with that token to perform the clean. The token is single-use, expires after 5 minutes, and is valid only for the same user and repository; a missing, invalid or expired token returns a fresh one instead. PERMISSIONS: Requires repository:admin (destructive operation). EXAMPLE: first {"repository_alias": "my-repo"}, then {"repository_alias": "my-repo", "confirmation_token": "<token from the first response>"} Returns: {"success": true, "removed_files": ["build/"]}

@@ -30,6 +30,9 @@ from code_indexer.server.services.git_operations_service import (
     GitCommandError,
     git_operations_service,
 )
+from tests.unit.server.services._git_confirm_helpers import (
+    singleton_confirmation_store_fixture,  # noqa: F401 -- registers the fixture
+)
 
 _LF_NAME = "line\nbreak.txt"
 
@@ -85,13 +88,18 @@ class TestBareDashReachesGitAtBranchSites:
 
         assert "not a valid branch name" in exc_info.value.stderr
 
-    def test_branch_delete_dash_is_resolved_by_git_itself(self, repo: Path):
-        first = git_operations_service.git_branch_delete(repo, branch_name="-")
+    def test_branch_delete_dash_is_resolved_by_git_itself(
+        self, repo: Path, singleton_confirmation_store
+    ):
+        binding = {"username": "alice", "repo_alias": "example-repo"}
+        first = git_operations_service.git_branch_delete(
+            repo, branch_name="-", **binding
+        )
         assert first["requires_confirmation"] is True
 
         with pytest.raises(GitCommandError) as exc_info:
             git_operations_service.git_branch_delete(
-                repo, branch_name="-", confirmation_token=first["token"]
+                repo, branch_name="-", confirmation_token=first["token"], **binding
             )
 
         assert "branch '-' not found" in exc_info.value.stderr

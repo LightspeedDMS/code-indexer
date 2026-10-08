@@ -9,7 +9,7 @@ import logging
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 
 from code_indexer.server.auth.dependencies import require_permission
 from code_indexer.server.auth.user_manager import User
@@ -1096,7 +1096,7 @@ def git_branch_switch(
 
 
 @router.delete(
-    "/branches/{name}",
+    "/branches/{name:path}",
     status_code=status.HTTP_200_OK,
     response_model=GitBranchDeleteResponse,
     responses={
@@ -1111,7 +1111,16 @@ def git_branch_switch(
 def git_branch_delete(
     alias: str,
     name: str,
-    confirmation_token: Optional[str] = Query(None, description="Confirmation token"),
+    confirmation_token: Optional[str] = Query(
+        None,
+        description=(
+            "Deprecated, kept for compatibility: send the token in the "
+            "X-Confirmation-Token header instead"
+        ),
+    ),
+    x_confirmation_token: Optional[str] = Header(
+        None, alias="X-Confirmation-Token", description="Confirmation token"
+    ),
     user: User = Depends(require_permission("repository:admin")),
 ) -> GitBranchDeleteResponse:
     """Delete a branch."""
@@ -1121,7 +1130,7 @@ def git_branch_delete(
         result = service.delete_branch(
             repo_alias=alias,
             branch_name=name,
-            confirmation_token=confirmation_token,
+            confirmation_token=x_confirmation_token or confirmation_token,
             username=user.username,
         )
         return GitBranchDeleteResponse(**result)

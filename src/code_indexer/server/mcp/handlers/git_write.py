@@ -352,32 +352,28 @@ def _handle_write_error(
 def _confirmation_response(
     result: Dict[str, Any], label: str
 ) -> Optional[Dict[str, Any]]:
-    """If result requires confirmation, return formatted token response; else None."""
+    """If result requires confirmation, return formatted token response; else None.
+
+    The service returns a fresh token both on the first call and when the
+    presented token is rejected; a rejection also carries ``message``.
+    """
     if result.get("requires_confirmation"):
+        # The token value travels only in its own field, never in prose.
+        prompt = (
+            f"{label} requires confirmation. Call again with "
+            "confirmation_token set to the value of the `token` field."
+        )
+        rejection = result.get("message")
         return _mcp_response(
             {
                 "success": False,
                 "confirmation_token_required": {
                     "token": result["token"],
-                    "message": (
-                        f"{label} requires confirmation. "
-                        f"Call again with confirmation_token='{result['token']}'"
-                    ),
+                    "message": f"{rejection}. {prompt}" if rejection else prompt,
                 },
             }
         )
     return None
-
-
-def _new_confirmation_token(action: str, exc: ValueError) -> Dict[str, Any]:
-    """Generate a fresh confirmation token response after validation failure."""
-    token = git_operations_service.generate_confirmation_token(action)
-    return _mcp_response(
-        {
-            "success": False,
-            "confirmation_token_required": {"token": token, "message": str(exc)},
-        }
-    )
 
 
 def _invalidate_wiki_cache(repository_alias: str, operation: str) -> None:
@@ -589,7 +585,11 @@ def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         result = git_operations_service.git_branch_delete(
-            Path(repo_path), branch_name, confirmation_token=confirmation_token
+            Path(repo_path),
+            branch_name,
+            confirmation_token=confirmation_token,
+            username=user.username,
+            repo_alias=repository_alias,
         )
         confirm = _confirmation_response(result, "Branch deletion")
         if confirm is not None:
@@ -603,7 +603,7 @@ def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     except GitArgumentValidationError as e:
         return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
-        return _new_confirmation_token("git_branch_delete", e)
+        return _mcp_response({"success": False, "error": str(e)})
     except GitCommandError as e:
         return _handle_write_error("git_branch_delete", _ERR_BRANCH_DELETE, e)
     except FileNotFoundError as e:
@@ -881,6 +881,8 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             mode=mode,
             commit_hash=target,
             confirmation_token=confirmation_token,
+            username=user.username,
+            repo_alias=repository_alias,
         )
         confirm = _confirmation_response(result, "Hard reset")
         if confirm is not None:
@@ -890,7 +892,7 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     except GitArgumentValidationError as e:
         return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
-        return _new_confirmation_token("git_reset_hard", e)
+        return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
         return _handle_write_error("git_reset", _ERR_RESET, e)
 
@@ -920,7 +922,10 @@ def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         result = git_operations_service.git_clean(
-            Path(repo_path), confirmation_token=confirmation_token
+            Path(repo_path),
+            confirmation_token=confirmation_token,
+            username=user.username,
+            repo_alias=repository_alias,
         )
         confirm = _confirmation_response(result, "Git clean")
         if confirm is not None:
@@ -930,7 +935,7 @@ def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     except GitArgumentValidationError as e:
         return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
-        return _new_confirmation_token("git_clean", e)
+        return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
         return _handle_write_error("git_clean", _ERR_CLEAN, e)
 
