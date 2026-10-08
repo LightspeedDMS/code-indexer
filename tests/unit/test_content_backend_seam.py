@@ -27,7 +27,7 @@ from code_indexer.server.storage.shared.content_backend import (
     FetchedFile,
     LocalContentBackend,
 )
-from code_indexer.utils.blob_hash import git_blob_hash
+from code_indexer.utils.blob_hash import git_blob_hash, git_blob_hash_bytes
 
 
 @pytest.fixture
@@ -49,6 +49,12 @@ def repo(tmp_path: Path) -> Path:
     # without it both rules emit the same order and the invariant is untested.
     (root / "sub.txt").write_text("sibling\n")
     os.symlink(root / "a.py", root / "link.py")
+    # A symlinked DIRECTORY, so "dirlink/escaped.txt" is lexically inside the repo
+    # yet resolves outside it -- the case plain prefix checks miss.
+    outside_dir = tmp_path / "outside-dir"
+    outside_dir.mkdir()
+    (outside_dir / "escaped.txt").write_text("SECRET\n")
+    os.symlink(outside_dir, root / "dirlink", target_is_directory=True)
     return root
 
 
@@ -191,31 +197,167 @@ def test_a_delegated_backend_reports_it_is_not_local() -> None:
 # --- 8: the two backends must agree ---------------------------------------------
 
 
-def test_local_and_delegated_manifests_are_identical_for_the_same_fixture(
-    repo: Path,
+# --- 8: the contract every backend must satisfy ---------------------------------
+#
+# An earlier version of this section compared the local backend's manifest to a
+# stand-in that replayed those same entries, so it compared local output to
+# itself and could not fail. What follows asserts the SHAPE instead, through a
+# fixture parametrised over backends: phase 4 adds its delegated backend to
+# ``_CONTRACT_BACKENDS`` and the whole suite runs against it unchanged, which is
+# what makes "both backends agree" a tested claim rather than a stated one.
+
+_CONTRACT_BACKENDS = {
+    "local": LocalContentBackend,
+}
+
+
+@pytest.fixture(params=sorted(_CONTRACT_BACKENDS))
+def contract_backend(request: pytest.FixtureRequest) -> ContentBackend:
+    return _CONTRACT_BACKENDS[request.param]()
+
+
+def test_contract_paths_are_repo_relative_posix(
+    contract_backend: ContentBackend, repo: Path
 ) -> None:
-    """Any hash or path-normalisation drift between the two shows up here.
+    entries = _all_entries(contract_backend, repo)
+    assert entries
+    for rel in entries:
+        assert not rel.startswith("/"), rel
+        assert "\\" not in rel, rel
+        assert ".." not in rel.split("/"), rel
+    assert "sub/b.py" in entries
 
-    The delegated stand-in replays what the local backend produced, so this pins
-    the SHAPE both must satisfy: repo-relative POSIX paths, .git excluded,
-    symlinks reported but never followed, and a stable order.
+
+def test_contract_git_directory_is_never_enumerated(
+    contract_backend: ContentBackend, repo: Path
+) -> None:
+    entries = _all_entries(contract_backend, repo)
+    assert not [p for p in entries if p == ".git" or p.startswith(".git/")]
+
+
+def test_contract_symlinks_are_reported_but_never_hashed(
+    contract_backend: ContentBackend, repo: Path
+) -> None:
+    link = _all_entries(contract_backend, repo)["link.py"]
+    assert link.is_symlink is True
+    assert link.blob_sha is None
+
+
+def test_contract_order_is_monotonic_in_the_path(
+    contract_backend: ContentBackend, repo: Path
+) -> None:
+    paths = [e.path for e in contract_backend.manifest(repo, page_size=1000).entries]
+    assert paths == sorted(paths)
+
+
+def test_contract_paging_matches_a_single_pass(
+    contract_backend: ContentBackend, repo: Path
+) -> None:
+    one_pass = [e.path for e in contract_backend.manifest(repo, page_size=1000).entries]
+    paged: List[str] = []
+    cursor: Optional[str] = None
+    for _ in range(200):
+        page = contract_backend.manifest(repo, cursor=cursor, page_size=2)
+        paged.extend(e.path for e in page.entries)
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+    assert paged == one_pass
+
+
+def test_contract_blob_sha_describes_the_bytes_returned(
+    contract_backend: ContentBackend, repo: Path
+) -> None:
+    rels = ["a.py", "binary.dat", "big.bin", "empty.txt"]
+    for item in contract_backend.fetch(repo, rels):
+        assert item.error is None, item.path
+        assert item.blob_sha == git_blob_hash_bytes(item.data), item.path
+
+
+def test_contract_an_unfetchable_path_is_a_record_not_an_exception(
+    contract_backend: ContentBackend, repo: Path
+) -> None:
+    results = {f.path: f for f in contract_backend.fetch(repo, ["missing.py", "a.py"])}
+    assert results["missing.py"].error is not None
+    assert results["missing.py"].data == b""
+    assert results["a.py"].error is None
+
+
+def test_contract_fetch_refuses_to_follow_a_symlink(
+    contract_backend: ContentBackend, repo: Path
+) -> None:
+    """manifest says a symlink is never followed; fetch must say the same.
+
+    Otherwise the two halves of the protocol disagree about the identity of the
+    same path, and phase 4 feeds manifest paths straight into fetch.
     """
-    local = _all_entries(LocalContentBackend(), repo)
+    (item,) = list(contract_backend.fetch(repo, ["link.py"]))
+    assert item.error is not None
+    assert item.data == b""
+    assert item.blob_sha is None
 
-    class _Replaying:
-        is_local = False
 
-        def manifest(self, repo_path, *, cursor=None, page_size=1000) -> ContentPage:
-            return ContentPage(
-                entries=tuple(sorted(local.values(), key=lambda e: e.path)),
-                next_cursor=None,
-            )
+@pytest.mark.parametrize(
+    "escape,because",
+    [
+        ("<absolute>", "absolute"),
+        ("../outside.txt", "parent-relative"),
+        ("sub/../../outside.txt", "parent-relative"),
+        ("dirlink/escaped.txt", "symlinked directory"),
+    ],
+)
+def test_contract_fetch_refuses_paths_that_leave_the_repository(
+    contract_backend: ContentBackend,
+    repo: Path,
+    tmp_path: Path,
+    escape: str,
+    because: str,
+) -> None:
+    """`Path("/repo") / "/etc/passwd"` is `/etc/passwd`: joining discards the root.
 
-        def fetch(self, repo_path, paths):  # pragma: no cover - not used here
-            return iter(())
+    The reason is asserted, not just the refusal. Each guard is defence in depth --
+    remove any one and the final containment check still refuses these paths -- so
+    without pinning WHICH guard fired, deleting one would pass unnoticed.
+    """
+    outside = tmp_path / "outside.txt"
+    outside.write_text("SECRET\n")
+    rel = str(outside) if escape == "<absolute>" else escape
 
-    delegated = _all_entries(_Replaying(), repo)
-    assert local == delegated
+    (item,) = list(contract_backend.fetch(repo, [rel]))
+    assert item.error is not None, f"{rel} was not refused"
+    assert because in item.error, f"{rel} refused for the wrong reason: {item.error}"
+    assert item.data == b""
+    assert item.blob_sha is None
+
+
+def test_contract_blob_sha_holds_even_if_the_file_changes_after_the_read(
+    contract_backend: ContentBackend, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """blob_sha must describe the bytes IN THIS RECORD, not whatever is on disk now.
+
+    Reading the file and then opening it again to hash it is not merely wasteful:
+    the content can change in between, and the record would carry a hash of bytes
+    the caller never saw. Since blob_sha seeds each chunk's point UUID, that is a
+    silent mis-identification rather than an error.
+
+    A static fixture cannot show this, which is why the file is changed underneath
+    the read on purpose.
+    """
+    target = repo / "a.py"
+    original = target.read_bytes()
+    real_read = Path.read_bytes
+
+    def read_then_change(self: Path) -> bytes:
+        data = real_read(self)
+        if self.name == "a.py":
+            target.write_bytes(b"DIFFERENT CONTENT ENTIRELY\n")
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", read_then_change)
+
+    (item,) = list(contract_backend.fetch(repo, ["a.py"]))
+    assert item.data == original
+    assert item.blob_sha == git_blob_hash_bytes(original)
 
 
 def test_manifest_excludes_git_reports_symlinks_and_uses_posix_relative_paths(

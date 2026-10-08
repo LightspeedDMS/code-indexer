@@ -44,12 +44,13 @@ indexes is cidx's policy and must not drift into the service that stores them.
 from __future__ import annotations
 
 import logging
+import ntpath
 import os
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterator, Optional, Protocol, Sequence, Tuple, Union
 
-from ....utils.blob_hash import git_blob_hash
+from ....utils.blob_hash import git_blob_hash, git_blob_hash_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -169,8 +170,17 @@ class LocalContentBackend:
         """A GENERATOR, deliberately: the caller streams, and materialising a list
         here would hold a repository's worth of bytes in this process."""
         root = Path(repo_path)
+        try:
+            root_real = os.path.realpath(root)
+        except OSError:
+            root_real = str(root)
+
         for rel in paths:
-            target = root / rel
+            target, refusal = self._confine(root, root_real, rel)
+            if refusal is not None:
+                yield FetchedFile(path=rel, blob_sha=None, data=b"", error=refusal)
+                continue
+            assert target is not None  # _confine returns one or the other
             try:
                 data = target.read_bytes()
             except OSError as exc:
@@ -183,9 +193,63 @@ class LocalContentBackend:
                     error=(os.strerror(exc.errno) if exc.errno else "unreadable"),
                 )
                 continue
-            yield FetchedFile(path=rel, blob_sha=git_blob_hash(target), data=data)
+            # Hashed from the bytes in hand, not by opening the file a second
+            # time. A second read could see different content, and blob_sha would
+            # then describe bytes this record never carried.
+            yield FetchedFile(path=rel, blob_sha=git_blob_hash_bytes(data), data=data)
 
     # ── internals ──────────────────────────────────────────────────────────
+
+    def _confine(
+        self, root: Path, root_real: str, rel: str
+    ) -> Tuple[Optional[Path], Optional[str]]:
+        """Resolve ``rel`` inside ``root``, or say why it is refused.
+
+        ``manifest`` reports a symlink and never follows it, because the target
+        may be outside the repository entirely. ``fetch`` has to agree, or the two
+        halves of the protocol disagree about the identity of the same path -- and
+        phase 4 feeds manifest paths straight into fetch.
+
+        Three refusals, each a per-file record rather than an exception, so one
+        bad path does not discard the batch:
+
+        * an ABSOLUTE ``rel``, because ``Path("/repo") / "/etc/passwd"`` is
+          ``/etc/passwd``: joining silently discards the root.
+        * a ``..`` component, which walks out lexically.
+        * a symlink anywhere in the path. The final component is checked with
+          ``lstat``; intermediate components are caught by requiring the parent to
+          resolve to exactly where the path says it is, which is the same equality
+          rule the workspace-mcp side applies, so both backends refuse the same
+          repositories.
+        """
+        pure = PurePosixPath(rel)
+        if pure.is_absolute() or ntpath.isabs(rel):
+            return None, "absolute path refused"
+        if ".." in pure.parts:
+            return None, "parent-relative component refused"
+
+        target = root / rel
+        if target.is_symlink():
+            return None, "symlink not followed"
+
+        parent = target.parent
+        try:
+            parent_real = os.path.realpath(parent)
+        except OSError:
+            return None, "unreadable parent"
+        # Equality, not containment: a symlinked intermediate directory resolves
+        # elsewhere even when that elsewhere is still inside the repository, and
+        # the manifest would not have enumerated anything through it.
+        if parent_real != os.path.normpath(str(parent)):
+            return None, "symlinked directory not followed"
+        # Backstop. Given the guards above this should be unreachable: a lexical
+        # parent can only sit outside the root via an absolute path or a ".."
+        # component, and both are already refused. It stays because those guards
+        # are LEXICAL while this one compares resolved paths, so if one is ever
+        # weakened the refusal still happens here rather than becoming a read.
+        if parent_real != root_real and not parent_real.startswith(root_real + os.sep):
+            return None, "path escapes the repository"
+        return target, None
 
     def _walk_ordered(self, root: Path) -> Iterator[str]:
         """Repo-relative POSIX paths in ascending path order, ``.git`` excluded.

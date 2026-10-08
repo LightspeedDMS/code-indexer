@@ -42,10 +42,36 @@ import os
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Union
 
-__all__ = ["git_blob_hash", "git_blob_hashes"]
+__all__ = ["git_blob_hash", "git_blob_hash_bytes", "git_blob_hashes"]
 
 # Read in chunks so a large file never lands in memory whole.
 _CHUNK = 1024 * 1024
+
+
+def _blob_digest(size: int) -> "hashlib._Hash":
+    """A sha1 primed with git's blob header.
+
+    The ONE place the header is written. Both entry points below start here, so
+    the formula cannot drift between the streaming and in-memory paths -- and a
+    drifting blob hash does not raise, it RE-IDENTIFIES chunks, because this value
+    seeds every indexed chunk's deterministic point UUID.
+    """
+    digest = hashlib.sha1()
+    digest.update(b"blob %d\0" % size)
+    return digest
+
+
+def git_blob_hash_bytes(data: bytes) -> str:
+    """The git blob hash of content already in memory.
+
+    For callers that have just read the bytes and would otherwise open the file a
+    second time to hash it. That second read is not merely wasteful: the file can
+    change in between, and the hash would then describe bytes the caller never
+    saw. Hashing what is in hand makes the pair atomic by construction.
+    """
+    digest = _blob_digest(len(data))
+    digest.update(data)
+    return digest.hexdigest()
 
 
 def git_blob_hash(path: Union[str, Path]) -> Optional[str]:
@@ -63,8 +89,7 @@ def git_blob_hash(path: Union[str, Path]) -> Optional[str]:
             # real. Streaming (rather than reading the file whole) keeps a large
             # file out of memory, so the size has to be known up front.
             size = os.fstat(handle.fileno()).st_size
-            digest = hashlib.sha1()
-            digest.update(b"blob %d\0" % size)
+            digest = _blob_digest(size)
             read = 0
             while True:
                 chunk = handle.read(_CHUNK)
