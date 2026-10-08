@@ -340,7 +340,10 @@ def test_multimodal_repo_fans_out_once(env, tmp_path) -> None:
         MultiIndexQueryService,
     )
     from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
-    from tests.unit.server.query.content_unavailable_env_1991 import VECTOR_DIM
+    from tests.unit.server.query.content_unavailable_env_1991 import (
+        VECTOR_DIM,
+        FakeEmbeddingProvider,
+    )
 
     (tmp_path / "mm").mkdir()
     repo = build_corpus_repo(tmp_path / "mm")
@@ -361,6 +364,11 @@ def test_multimodal_repo_fans_out_once(env, tmp_path) -> None:
             autospec=True,
             side_effect=MultiIndexQueryService.query_with_separate_kwargs,
         ) as fan_outs,
+        patch.object(
+            MultiIndexQueryService,
+            "_get_multimodal_provider",
+            return_value=FakeEmbeddingProvider(),
+        ),
     ):
         got = _mcp_search(repo, tmp_path, "semantic", ["md"], None)
 

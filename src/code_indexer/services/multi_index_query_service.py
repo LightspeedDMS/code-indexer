@@ -27,10 +27,10 @@ import logging
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 from ..config import VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL, VoyageAIConfig
-from ..storage.filesystem_vector_store import LocalIndexNotFoundError
 from .filtered_window import filtered_window_kwargs
 
 logger = logging.getLogger(__name__)
@@ -42,21 +42,52 @@ MULTIMODAL_MODELS = [VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL]
 QUERY_TIMEOUT = 30
 
 
+class MultiIndexQueryTimeoutError(TimeoutError):
+    """A multi-index search did not complete within its deadline.
+
+    Raised instead of returning a short or empty result, so a timeout is
+    never mistaken for a complete answer.
+    """
+
+    def __init__(self, index_types: List[str], timeout_seconds: float) -> None:
+        self.index_types = list(index_types)
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"search timed out after {timeout_seconds}s "
+            f"(index: {', '.join(self.index_types)})"
+        )
+
+
 def _store_limit_kwargs(
-    filter_conditions: Optional[Dict[str, Any]], limit: int
+    filter_conditions: Optional[Dict[str, Any]],
+    limit: int,
+    extra: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Store-search kwargs for a query asking this service for *limit* results.
 
     Each collection is asked for ``2 x limit`` results (more for merging), and
-    the #2047 filtered candidate window is derived from THAT store limit, here
-    and only here, so callers never pass ``prefetch_limit``/``lazy_load``.
+    the #2047 filtered candidate window is derived from THAT store limit.
     Unfiltered: only the limit (the store's default window is unchanged).
+
+    The caller's *extra* kwargs are merged in explicitly: a caller value for a
+    derived argument is accepted only when it equals the derived one.
+
+    Raises:
+        ValueError: a caller value conflicts with a derived argument.
     """
     store_limit = limit * 2
-    return {
+    merged: Dict[str, Any] = {
         "limit": store_limit,
         **filtered_window_kwargs(filter_conditions, store_limit),
     }
+    for key, value in extra.items():
+        if key in merged and merged[key] != value:
+            raise ValueError(
+                f"search argument {key}={value!r} conflicts with the value "
+                f"{merged[key]!r} derived from limit={limit}"
+            )
+        merged[key] = value
+    return merged
 
 
 class MultiIndexQueryService:
@@ -175,12 +206,12 @@ class MultiIndexQueryService:
             query=query_text,
             embedding_provider=self.embedding_provider,
             collection_name=collection_name,
-            # 2 x limit for merging, plus the #2047 window for that limit.
-            **_store_limit_kwargs(filter_conditions, limit),
+            # 2 x limit for merging, plus the #2047 window for that limit,
+            # merged with the caller's extra kwargs.
+            **_store_limit_kwargs(filter_conditions, limit, kwargs),
             filter_conditions=filter_conditions,
             subdirectory=None,  # Default code_index location
             return_timing=True,
-            **kwargs,
         )
         # Add actual wall-clock elapsed time (this is what we display)
         timing["elapsed_ms"] = (time.time() - query_start) * 1000
@@ -243,11 +274,10 @@ class MultiIndexQueryService:
                     query=query_text,
                     embedding_provider=provider,
                     collection_name=model_name,
-                    **_store_limit_kwargs(filter_conditions, limit),
+                    **_store_limit_kwargs(filter_conditions, limit, kwargs),
                     filter_conditions=filter_conditions,
                     subdirectory=None,
                     return_timing=True,
-                    **kwargs,
                 )
                 combined_results.extend(coll_results)
                 combined_timing.update(coll_timing)
@@ -266,11 +296,10 @@ class MultiIndexQueryService:
                     query=query_text,
                     embedding_provider=provider,
                     collection_name=collection_name,
-                    **_store_limit_kwargs(filter_conditions, limit),
+                    **_store_limit_kwargs(filter_conditions, limit, kwargs),
                     filter_conditions=filter_conditions,
                     subdirectory="multimodal_index",
                     return_timing=True,
-                    **kwargs,
                 )
             else:
                 logger.debug("No multimodal collection found, returning empty results")
@@ -331,8 +360,9 @@ class MultiIndexQueryService:
         Merges results in an order-independent way, deduplicates by
         (file_path, chunk_offset), sorts by score descending, and applies limit.
 
-        Handles timeouts gracefully by returning partial results from
-        successful queries.
+        A timed-out index raises MultiIndexQueryTimeoutError; any other
+        failure of either index propagates. A short answer is never returned
+        in place of a failed one.
 
         Args:
             query_text: Query string
@@ -447,8 +477,10 @@ class MultiIndexQueryService:
         Queries code_index and multimodal_index (if exists) concurrently,
         each with its own extra kwargs dict. Merges results in an
         order-independent way, deduplicates by (file_path, chunk_offset),
-        sorts by score descending, and applies limit. Handles timeouts
-        gracefully by returning partial results from successful queries.
+        sorts by score descending, and applies limit.
+
+        Raises:
+            MultiIndexQueryTimeoutError: an index did not answer in time.
         """
         has_multimodal = self.will_query_multimodal()
 
@@ -495,11 +527,20 @@ class MultiIndexQueryService:
 
             # Collect results and timing as they complete
             results: Dict[str, List[Any]] = {"code": [], "multimodal": []}
-
-            for future in as_completed(futures, timeout=QUERY_TIMEOUT):
-                index_type = futures[future]
-                try:
-                    result_list, result_timing = future.result()
+            # Only a genuine timeout counts as one: the coordinator's deadline
+            # or a worker raising TimeoutError. It is reported as a typed
+            # error, never as a short answer. Every other worker exception
+            # (storage failure, LocalIndexNotFoundError, ValueError, ...)
+            # propagates from future.result().
+            timed_out: List[str] = []
+            try:
+                for future in as_completed(futures, timeout=QUERY_TIMEOUT):
+                    index_type = futures[future]
+                    try:
+                        result_list, result_timing = future.result()
+                    except (TimeoutError, FuturesTimeoutError):
+                        timed_out.append(index_type)
+                        continue
                     results[index_type] = result_list
 
                     # Use the wall-clock elapsed_ms from the query method
@@ -510,32 +551,14 @@ class MultiIndexQueryService:
                         timing_dict["code_index_ms"] = elapsed_time
                     else:
                         timing_dict["multimodal_index_ms"] = elapsed_time
-
-                except TimeoutError:
-                    logger.warning(
-                        f"{index_type}_index query timed out after {QUERY_TIMEOUT}s"
-                    )
-                    if index_type == "code":
-                        timing_dict["code_timed_out"] = True
-                    else:
-                        timing_dict["multimodal_timed_out"] = True
-                except Exception as e:
-                    if isinstance(e, LocalIndexNotFoundError):
-                        # Bug #1496: this collection EXISTS on disk but its
-                        # index failed to load (e.g. missing/corrupt HNSW
-                        # file) -- a real failure, not a genuinely-absent
-                        # collection (that case is already handled earlier
-                        # by never submitting a future for it at all). Fail
-                        # loud instead of silently aggregating a partial
-                        # result set from the other index type as if it
-                        # were an authoritative, complete answer.
-                        raise
-                    logger.warning(f"{index_type}_index query failed: {e}")
-                    # Treat exceptions as timeouts for timing purposes
-                    if index_type == "code":
-                        timing_dict["code_timed_out"] = True
-                    else:
-                        timing_dict["multimodal_timed_out"] = True
+            except FuturesTimeoutError:
+                timed_out.extend(
+                    index_type
+                    for future, index_type in futures.items()
+                    if not future.done()
+                )
+            if timed_out:
+                raise MultiIndexQueryTimeoutError(timed_out, QUERY_TIMEOUT)
 
         # Calculate parallel wall-clock time (max of both, not sum)
         parallel_end = time.time()
