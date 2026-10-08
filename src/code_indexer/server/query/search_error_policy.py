@@ -5,9 +5,13 @@ Every search front door (REST ``/api/query`` and ``/api/query/multi``, MCP
 ``classify_search_error``. It is an allow-list: only errors that describe
 the caller's own request keep their text --
 
-* ``SearchRequestError`` (incl. ``SearchRepositoryNotFoundError``),
-* request validation errors (``ValueError``, incl. pydantic's),
+* ``SearchRequestError`` (incl. ``SearchRepositoryNotFoundError``) -- every
+  request-validation site on the search paths raises it,
+* ``AccessFilteringServiceUnavailableError`` (a fixed text),
 * an ``HTTPException`` with a 4xx status raised deliberately.
+
+A plain ``ValueError`` is NOT a client error: storage, JSON and provider
+code raise it too, sometimes with internal detail.
 
 Every other exception answers a fixed public message ("Search timed out"
 when a timeout is in its cause chain, else "Search failed"); the caller
@@ -22,10 +26,7 @@ from typing import List, Optional
 from fastapi import HTTPException
 
 from code_indexer.server.logging_utils import public_error_message
-from code_indexer.server.query.semantic_query_manager import (
-    SearchRequestError,
-    SemanticQueryError,
-)
+from code_indexer.server.query.semantic_query_manager import SearchRequestError
 
 SEARCH_FAILED = "Search failed"
 SEARCH_TIMED_OUT = "Search timed out"
@@ -60,8 +61,6 @@ def _client_text(error: BaseException) -> Optional[str]:
         return str(error)
     if isinstance(error, HTTPException) and 400 <= error.status_code < 500:
         return str(error.detail)
-    if isinstance(error, ValueError) and not isinstance(error, SemanticQueryError):
-        return str(error)
     return None
 
 

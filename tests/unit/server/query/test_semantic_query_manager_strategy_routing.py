@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from code_indexer.server.query.semantic_query_manager import (
+    SearchRequestError,
     SemanticQueryManager,
     QueryResult,
 )
@@ -180,16 +181,17 @@ class TestSpecificStrategyRouting:
     def teardown_method(self):
         shutil.rmtree(self.repo_path, ignore_errors=True)
 
-    def test_specific_strategy_raises_value_error_when_no_preferred_provider(self):
-        """SPECIFIC strategy without preferred_provider raises ValueError.
+    def test_specific_strategy_rejects_request_when_no_preferred_provider(self):
+        """SPECIFIC strategy without preferred_provider raises SearchRequestError.
 
         _is_composite_repository returns False naturally (no config file present).
-        The ValueError is raised before any external call is made.
+        The client error is raised before any external call is made.
         """
         manager = _make_manager()
 
         with pytest.raises(
-            ValueError, match="preferred_provider required for specific strategy"
+            SearchRequestError,
+            match="preferred_provider required for specific strategy",
         ):
             manager._search_single_repository(
                 repo_path=self.repo_path,
@@ -202,12 +204,13 @@ class TestSpecificStrategyRouting:
                 preferred_provider=None,
             )
 
-    def test_specific_strategy_raises_value_error_when_empty_preferred_provider(self):
-        """SPECIFIC strategy with empty string preferred_provider raises ValueError."""
+    def test_specific_strategy_rejects_request_when_empty_preferred_provider(self):
+        """SPECIFIC strategy with empty preferred_provider raises SearchRequestError."""
         manager = _make_manager()
 
         with pytest.raises(
-            ValueError, match="preferred_provider required for specific strategy"
+            SearchRequestError,
+            match="preferred_provider required for specific strategy",
         ):
             manager._search_single_repository(
                 repo_path=self.repo_path,
@@ -689,10 +692,10 @@ class TestSpecificStrategyErrorResponses:
         shutil.rmtree(self.repo_path, ignore_errors=True)
 
     def test_specific_strategy_none_provider_raises_clear_error(self):
-        """SPECIFIC strategy with None preferred_provider raises descriptive ValueError."""
+        """SPECIFIC strategy with None preferred_provider raises a client error."""
         manager = _make_manager()
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(SearchRequestError) as exc_info:
             manager._search_single_repository(
                 repo_path=self.repo_path,
                 repository_alias="test-repo",
@@ -709,7 +712,7 @@ class TestSpecificStrategyErrorResponses:
         """Error message for missing preferred_provider says 'required'."""
         manager = _make_manager()
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(SearchRequestError) as exc_info:
             manager._search_single_repository(
                 repo_path=self.repo_path,
                 repository_alias="test-repo",

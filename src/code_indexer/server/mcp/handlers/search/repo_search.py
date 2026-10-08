@@ -215,7 +215,7 @@ def _execute_tracked_search(
     """Execute _perform_search with query-tracker ref counting and timing.
 
     Args:
-        limit: must be > 0; raises ValueError otherwise.
+        limit: must be > 0; raises SearchRequestError otherwise.
 
     Returns:
         (results, execution_time_ms, timeout_occurred, effective_strategy)
@@ -227,7 +227,11 @@ def _execute_tracked_search(
     plain list the plain list is passed through unchanged.
     """
     if limit <= 0:
-        raise ValueError(f"limit must be > 0, got {limit}")
+        from code_indexer.server.query.semantic_query_manager import (
+            SearchRequestError,
+        )
+
+        raise SearchRequestError(f"limit must be > 0, got {limit}")
 
     query_tracker = _get_query_tracker()
     kwargs = _build_search_kwargs(params, user, user_repos, limit)

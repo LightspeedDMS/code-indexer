@@ -12,6 +12,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from code_indexer.server.query.semantic_query_manager import (
+    SearchRequestError,
     SemanticQueryManager,
     QueryResult,
 )
@@ -341,8 +342,9 @@ class TestSemanticQueryManagerFileExtensionBugReproduction:
             )
 
             # TEST: an empty extension is rejected by the #2047 rule (the same
-            # error at every door), never read as "match every file".
-            with pytest.raises(ValueError, match="empty"):
+            # error at every door), never read as "match every file". It is a
+            # client error, so its message reaches the caller.
+            with pytest.raises(SearchRequestError, match="empty"):
                 semantic_query_manager.query_user_repositories(
                     username="testuser",
                     query_text="test query",

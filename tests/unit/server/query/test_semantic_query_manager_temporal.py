@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch, MagicMock
 import pytest
 
 from code_indexer.server.query.semantic_query_manager import (
+    SearchRequestError,
     SemanticQueryManager,
 )
 from code_indexer.services.temporal.temporal_search_service import (
@@ -351,7 +352,7 @@ class TestTemporalErrorHandling:
             )
             MockTemporalService.return_value = mock_temporal_service
 
-            with pytest.raises(ValueError) as exc_info:
+            with pytest.raises(SearchRequestError) as exc_info:
                 semantic_query_manager.query_user_repositories(
                     username="testuser",
                     query_text="authentication",
@@ -386,7 +387,7 @@ class TestTemporalErrorHandling:
             )
             MockTemporalService.return_value = mock_temporal_service
 
-            with pytest.raises(ValueError) as exc_info:
+            with pytest.raises(SearchRequestError) as exc_info:
                 semantic_query_manager.query_user_repositories(
                     username="testuser",
                     query_text="authentication",
@@ -420,7 +421,7 @@ class TestTemporalErrorHandling:
             )
             MockTemporalService.return_value = mock_temporal_service
 
-            with pytest.raises(ValueError) as exc_info:
+            with pytest.raises(SearchRequestError) as exc_info:
                 semantic_query_manager.query_user_repositories(
                     username="testuser",
                     query_text="authentication",

@@ -297,18 +297,13 @@ def multi_repository_query(
 
         return response
 
-    except ValueError as e:
-        # Validation error from service
-        logger.error(
-            format_error_log(
-                "WEB-GENERAL-029", "Multi-repo search validation error", error=str(e)
-            ),
-            extra=get_log_extra("WEB-GENERAL-029"),
-        )
-        raise HTTPException(status_code=422, detail=str(e))
-
     except Exception as e:
-        # Unexpected error
+        # One client-error rule: only a client error keeps its text.
+        from ..query.search_error_policy import classify_search_error
+
+        outcome = classify_search_error(e)
+        if outcome.client_error:
+            raise HTTPException(status_code=422, detail=outcome.message)
         logger.error(
             format_error_log(
                 "WEB-GENERAL-030", "Multi-repo search failed", error=str(e)

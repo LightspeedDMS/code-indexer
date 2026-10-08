@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.config_service import get_config_service
-from code_indexer.server.logging_utils import format_error_log, public_error_message
+from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
@@ -86,28 +86,42 @@ def _build_multi_search_request(
     Args:
         limit: pre-validated via _coerce_int(default=10) and _compute_effective_limit
     """
-    from ....multi.models import InternalMultiSearchRequest
+    from pydantic import ValidationError
 
-    return InternalMultiSearchRequest(  # type: ignore[arg-type, call-arg]  # search_type validated to Literal values by _resolve_search_type; exclude=True defaults confuse mypy
-        repositories=repo_aliases,
-        query=params.get("query_text", ""),
-        search_type=search_type,  # type: ignore[arg-type]
-        limit=limit,
-        min_score=(
-            _coerce_float(params.get("min_score"), 0.0)
-            if params.get("min_score") is not None
-            else None
-        ),
-        language=params.get("language"),
-        path_filter=params.get("path_filter"),
-        exclude_language=params.get("exclude_language"),
-        exclude_path=params.get("exclude_path"),
-        # #2047: the same file_extensions rule as single-repository search.
-        file_extensions=params.get("file_extensions"),
-        accuracy=params.get("accuracy", "balanced"),
-        no_embedding_cache_shortcut=params.get("no_embedding_cache_shortcut", False),
-        temporal_embedder=params.get("temporal_embedder"),
-    )
+    from ....multi.models import InternalMultiSearchRequest
+    from ....query.semantic_query_manager import SearchRequestError
+
+    try:
+        return InternalMultiSearchRequest(  # type: ignore[arg-type, call-arg]  # search_type validated to Literal values by _resolve_search_type; exclude=True defaults confuse mypy
+            repositories=repo_aliases,
+            query=params.get("query_text", ""),
+            search_type=search_type,  # type: ignore[arg-type]
+            limit=limit,
+            min_score=(
+                _coerce_float(params.get("min_score"), 0.0)
+                if params.get("min_score") is not None
+                else None
+            ),
+            language=params.get("language"),
+            path_filter=params.get("path_filter"),
+            exclude_language=params.get("exclude_language"),
+            exclude_path=params.get("exclude_path"),
+            # #2047: the same file_extensions rule as single-repository search.
+            file_extensions=params.get("file_extensions"),
+            accuracy=params.get("accuracy", "balanced"),
+            no_embedding_cache_shortcut=params.get(
+                "no_embedding_cache_shortcut", False
+            ),
+            temporal_embedder=params.get("temporal_embedder"),
+        )
+    except ValidationError as e:
+        # Each error describes only the caller's own parameters.
+        raise SearchRequestError(
+            "; ".join(
+                f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+                for err in e.errors()
+            )
+        ) from e
 
 
 def _flatten_multi_results(
@@ -273,8 +287,10 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             ),
             exc_info=True,
         )
+        from ....query.search_error_policy import classify_search_error
+
         return _empty_omni_response(
-            errors={"service_error": public_error_message("Search failed")}
+            errors={"service_error": classify_search_error(e).message}
         )
 
     category_map = _load_category_map("_omni_search_code")

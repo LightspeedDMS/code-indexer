@@ -308,12 +308,15 @@ class MultiSearchService:
                     )
                 )
             except Exception as e:
-                # The response carries a fixed message; the detail (which
-                # can name on-disk paths) goes to the server log only.
-                errors[repo_id] = public_error_message(
-                    "Repository or index not found"
+                # One client-error rule: only a client error keeps its text;
+                # any other failure answers a fixed message and its detail
+                # (which can name on-disk paths) goes to the server log only.
+                from ..query.search_error_policy import classify_search_error
+
+                errors[repo_id] = (
+                    public_error_message("Repository or index not found")
                     if isinstance(e, FileNotFoundError)
-                    else "Search failed"
+                    else classify_search_error(e).message
                 )
                 logger.error(
                     format_error_log(
@@ -378,7 +381,7 @@ class MultiSearchService:
             List of search results for this repository
 
         Raises:
-            ValueError: If search type is not supported
+            SearchRequestError: If search type is not supported
             Exception: If search fails
         """
         search_type = request.search_type
@@ -390,7 +393,9 @@ class MultiSearchService:
         elif search_type == "temporal":
             return self._search_temporal_sync(repo_id, request)
         else:
-            raise ValueError(f"Unsupported search type: {search_type}")
+            from ..query.semantic_query_manager import SearchRequestError
+
+            raise SearchRequestError(f"Unsupported search type: {search_type}")
 
     def _search_semantic_sync(
         self, repo_id: str, request: MultiSearchRequest

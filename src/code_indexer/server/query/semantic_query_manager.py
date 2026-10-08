@@ -83,6 +83,16 @@ class SearchRequestError(SemanticQueryError):
     pass
 
 
+class SearchParameterError(SearchRequestError):
+    """A request parameter is invalid for every repository (e.g. a malformed
+    time range). A multi-repository search stops at it instead of skipping
+    one repository; a repository-scoped ``SearchRequestError`` (such as a
+    missing FTS index) is logged and skipped like any per-repository
+    failure."""
+
+    pass
+
+
 class SearchRepositoryNotFoundError(SearchRequestError):
     """The requested repository does not exist or is not accessible. The
     message names only the caller's alias, never a disk path."""
@@ -1024,8 +1034,8 @@ class SemanticQueryManager:
             execution_time_ms = int((time.time() - start_time) * 1000)
             timeout_occurred = True
             raise SemanticQueryError(f"Query timed out: {str(e)}") from e
-        except ValueError:
-            # Propagate ValueError (e.g., temporal validation errors like invalid date format)
+        except SearchRequestError:
+            # A rejected request keeps its type: never a server failure.
             execution_time_ms = int((time.time() - start_time) * 1000)
             raise
         except Exception as e:
@@ -1319,7 +1329,11 @@ class SemanticQueryManager:
             validate_file_extensions_field,
         )
 
-        file_extensions = validate_file_extensions_field(file_extensions)
+        try:
+            file_extensions = validate_file_extensions_field(file_extensions)
+        except ValueError as e:
+            # The message describes only the caller's own input.
+            raise SearchParameterError(str(e)) from e
 
         # Story #4 AC2: Track search metrics at service layer
         # This ensures both MCP and REST API calls are counted
@@ -1542,14 +1556,17 @@ class SemanticQueryManager:
                 # #2109: a search timeout keeps its type end to end.
                 if isinstance(e, MultiIndexQueryTimeoutError):
                     raise
+                # A parameter invalid for every repository (e.g. an invalid
+                # date format) is the caller's error, not one repository's:
+                # re-raise it unchanged. A repository-scoped request error
+                # (e.g. a missing FTS index) is logged and skipped below.
+                if isinstance(e, SearchParameterError):
+                    raise
                 # If it's a timeout or other critical error from one repo, propagate it
                 if isinstance(e, TimeoutError) or "timeout" in str(e).lower():
                     raise TimeoutError(
                         f"Query timed out while searching repository {repo_info['user_alias']}: {str(e)}"
                     )
-                # Propagate ValueError (e.g., temporal validation errors like invalid date format)
-                if isinstance(e, ValueError):
-                    raise
                 # For other errors, log warning and continue with other repos
                 logger.warning(
                     format_error_log(
@@ -1855,10 +1872,12 @@ class SemanticQueryManager:
         # Story #593: Handle SPECIFIC strategy routing before composite check
         if query_strategy == "specific" or preferred_provider:
             if not preferred_provider:
-                raise ValueError("preferred_provider required for specific strategy")
+                raise SearchParameterError(
+                    "preferred_provider required for specific strategy"
+                )
             _supported_providers = {"voyage-ai", "cohere"}
             if preferred_provider not in _supported_providers:
-                raise ValueError(
+                raise SearchParameterError(
                     f"Provider '{preferred_provider}' not available. "
                     f"Supported providers: {sorted(_supported_providers)}"
                 )
@@ -3296,7 +3315,8 @@ class SemanticQueryManager:
                 ),
                 extra=get_log_extra("QUERY-MIGRATE-010"),
             )
-            raise ValueError(str(e))
+            # The message describes only the caller's temporal parameters.
+            raise SearchParameterError(str(e)) from e
         except Exception as e:
             # Log error and propagate as SemanticQueryError
             logger.error(

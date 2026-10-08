@@ -45,8 +45,16 @@ LOGGER_NAME = "code_indexer.server"
         SemanticQueryError(f"FTS search failed: {SENTINEL}"),
         RuntimeError(SENTINEL),
         HTTPException(status_code=500, detail=SENTINEL),
+        ValueError(f"cannot decode chunk at {SENTINEL}"),
     ],
-    ids=["oserror", "filenotfound", "semantic-wrapper", "runtime", "http-500"],
+    ids=[
+        "oserror",
+        "filenotfound",
+        "semantic-wrapper",
+        "runtime",
+        "http-500",
+        "plain-valueerror",
+    ],
 )
 def test_internal_errors_answer_fixed_message(error: Exception) -> None:
     outcome = classify_search_error(error)
@@ -73,7 +81,7 @@ def test_timeout_in_chain_answers_timed_out() -> None:
     [
         (SearchRequestError("Limit must be greater than 0"), "Limit must be"),
         (SearchRepositoryNotFoundError("example-repo"), "example-repo"),
-        (ValueError("Invalid time range format"), "Invalid time range"),
+        (SearchRequestError("Invalid time range format"), "Invalid time range"),
         (HTTPException(status_code=404, detail="Not here"), "Not here"),
     ],
     ids=["request-error", "repo-not-found", "validation", "http-4xx"],

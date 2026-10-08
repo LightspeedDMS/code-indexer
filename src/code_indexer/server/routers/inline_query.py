@@ -247,6 +247,9 @@ def _execute_temporal_via_live_dispatch_rest(
         worker_input = build_temporal_worker_input_from_rest_request(
             request, current_user.username, fusion_fetch_limit
         )
+    except ValueError as exc:
+        # The builder only normalizes the caller's own parameters.
+        raise SearchRequestError(str(exc)) from exc
     except TemporalAliasRejectedError as exc:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -879,27 +882,17 @@ def register_query_routes(
                         ]
                         _hybrid_search_status = "success"
                         _hybrid_search_results_count = len(semantic_results_list)
-                    except ValueError as e:
-                        # Surface validation errors as HTTP 400
-                        logger.warning(
-                            format_error_log(
-                                "APP-GENERAL-034",
-                                f"Validation error in query: {e}",
-                            )
-                        )
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail={
-                                "error": "Invalid query parameters",
-                                "message": str(e),
-                            },
-                        )
                     except Exception as e:
+                        # One client-error rule: a client error is answered by
+                        # the handlers below with its own text.
+                        if classify_search_error(e).client_error:
+                            raise
                         logger.error(
                             format_error_log(
                                 "APP-GENERAL-035",
                                 f"Semantic search failed: {e}",
-                            )
+                            ),
+                            exc_info=True,
                         )
                         if search_mode_actual == "semantic":
                             raise
@@ -1089,19 +1082,6 @@ def register_query_routes(
             # Re-raise HTTP exceptions as-is
             raise
 
-        except ValueError as e:
-            # Surface validation errors from backend as HTTP 400
-            logger.warning(
-                format_error_log(
-                    "APP-GENERAL-036",
-                    f"Validation error in query: {e}",
-                )
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"error": "Invalid query parameters", "message": str(e)},
-            )
-
         except AccessFilteringServiceUnavailableError as e:
             # Query searches only repositories the caller can access; with
             # access control unavailable that cannot be verified -- refuse.
@@ -1162,7 +1142,9 @@ def register_query_routes(
             _outcome = classify_search_error(e)
             raise HTTPException(
                 status_code=(
-                    status.HTTP_504_GATEWAY_TIMEOUT
+                    status.HTTP_400_BAD_REQUEST
+                    if _outcome.client_error
+                    else status.HTTP_504_GATEWAY_TIMEOUT
                     if _outcome.timed_out
                     else status.HTTP_500_INTERNAL_SERVER_ERROR
                 ),
