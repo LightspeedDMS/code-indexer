@@ -5,12 +5,15 @@ Story #387: PAT-Authenticated Git Push with User Attribution & Security Hardenin
 """
 
 import logging
-import re
 import stat
 import uuid
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlsplit
+
+from code_indexer.utils.git_remote_url import (
+    credential_scope_host,
+    parse_git_remote_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +63,10 @@ class GitCredentialHelper:
     def convert_ssh_to_https(remote_url: str) -> str:
         """Convert SSH remote URL to HTTPS format for PAT-based auth.
 
-        Converts: git@github.com:owner/repo.git -> https://github.com/owner/repo.git
-        Passes through URLs that are already HTTPS or other formats.
+        Converts an SSH remote that scopes a credential (``git@host:path`` or
+        ``ssh://git@host[:port]/path``, see ``credential_scope_host``), e.g.
+        git@github.com:owner/repo.git -> https://github.com/owner/repo.git.
+        Returns every other value (already HTTPS, local paths) unchanged.
 
         Args:
             remote_url: Git remote URL (SSH or HTTPS)
@@ -69,58 +74,19 @@ class GitCredentialHelper:
         Returns:
             HTTPS URL suitable for PAT authentication
         """
-        url = remote_url.strip()
-
-        # Pattern: git@host:path (standard SSH format)
-        match = re.match(r"^git@([^:]+):(.+)$", url)
-        if match:
-            host = match.group(1)
-            path = match.group(2)
-            return f"https://{host}/{path}"
-
-        # Pattern: ssh://git@host/path or ssh://git@host:port/path
-        match = re.match(r"^ssh://git@([^:/]+)(?::\d+)?/(.+)$", url)
-        if match:
-            host = match.group(1)
-            path = match.group(2)
-            return f"https://{host}/{path}"
-
-        # Already HTTPS or unrecognized - return as-is
-        return url
+        parsed = parse_git_remote_url(remote_url)
+        if (
+            parsed is not None
+            and parsed.scheme == "ssh"
+            and parsed.path
+            and credential_scope_host(remote_url) is not None
+        ):
+            return parsed.to_https()
+        return remote_url.strip()
 
     @staticmethod
     def extract_host_from_remote_url(remote_url: str) -> Optional[str]:
-        """Extract the hostname from a git remote URL.
-
-        Handles both SSH and HTTPS formats:
-        - git@github.com:owner/repo.git -> github.com
-        - https://github.com/owner/repo.git -> github.com
-        - ssh://git@github.com/owner/repo.git -> github.com
-
-        Returns:
-            The hostname or None if unable to parse
-        """
-        if not remote_url:
-            return None
-
-        url = remote_url.strip()
-
-        # SSH: git@host:path
-        match = re.match(r"^git@([^:]+):", url)
-        if match:
-            return match.group(1)
-
-        # HTTPS/HTTP: https://host[:port]/path or http://host[:port]/path.
-        # The host is the netloc without its userinfo (a URL's
-        # ``user:token@`` is a credential, never part of the host); case and
-        # port are kept, as stored credentials are keyed by them.
-        if re.match(r"^https?://", url):
-            host = urlsplit(url).netloc.rpartition("@")[2]
-            return host or None
-
-        # SSH: ssh://git@host(:port)?/path
-        match = re.match(r"^ssh://git@([^:/]+)", url)
-        if match:
-            return match.group(1)
-
-        return None
+        """The host stored credentials are scoped by
+        (``credential_scope_host``); None when the URL scopes no
+        credential."""
+        return credential_scope_host(remote_url)

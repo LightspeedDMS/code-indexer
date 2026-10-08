@@ -5,19 +5,24 @@ Provides comprehensive git URL normalization to enable matching between differen
 URL formats (HTTP vs SSH, with/without .git suffix, etc.) for repository discovery.
 
 Supported URL forms:
-  - https://host/owner/repo[.git]
-  - http://host/owner/repo[.git]
-  - git@host:owner/repo[.git]  (SSH scp-style)
+  - https://[userinfo@]host[:port]/owner/repo[.git]
+  - http://[userinfo@]host[:port]/owner/repo[.git]
+  - ssh://[user@]host[:port]/owner/repo[.git]
+  - user@host:owner/repo[.git] (SSH scp-style, any user)
   - /absolute/path             (filesystem path)
   - file:///absolute/path      (file URI — normalized to same form as /absolute/path)
   - ~/relative/path            (tilde-expanded to absolute path)
+
+Remote URLs are parsed by the single shared parser,
+``code_indexer.utils.git_remote_url.parse_git_remote_url``.
 """
 
 import os
-import re
+
 from pydantic import BaseModel
 
 from code_indexer.utils.credential_redaction import mask_url_credentials
+from code_indexer.utils.git_remote_url import GitRemoteUrl, parse_git_remote_url
 
 
 class GitUrlNormalizationError(Exception):
@@ -49,12 +54,6 @@ class NormalizedGitUrl(BaseModel):
 class GitUrlNormalizer:
     """Service for normalizing git URLs to canonical forms."""
 
-    def __init__(self):
-        """Initialize the git URL normalizer."""
-        # Regex patterns for different git URL formats
-        self.https_pattern = re.compile(r"^https?://([^/]+)/(.+?)(?:\.git)?/?$")
-        self.ssh_pattern = re.compile(r"^(?:ssh://)?git@([^:/]+)[:/](.+?)(?:\.git)?/?$")
-
     def normalize(self, git_url: object) -> NormalizedGitUrl:
         """
         Normalize a git URL to canonical form.
@@ -85,20 +84,11 @@ class GitUrlNormalizer:
 
         git_url = git_url.strip()
 
-        # Try HTTPS/HTTP format first (canonical remote forms take priority)
-        https_match = self.https_pattern.match(git_url)
-        if https_match:
-            domain, path = https_match.groups()
-            # The userinfo (``user:token@``) is a credential, not part of
-            # the repository's identity.
-            domain = domain.rpartition("@")[2]
-            return self._create_normalized_url(git_url, domain, path)
-
-        # Try SSH format
-        ssh_match = self.ssh_pattern.match(git_url)
-        if ssh_match:
-            domain, path = ssh_match.groups()
-            return self._create_normalized_url(git_url, domain, path)
+        # Remote forms take priority. The identity is the forge web host and
+        # the repository path: userinfo and the SSH port are not part of it.
+        remote = parse_git_remote_url(git_url)
+        if remote is not None:
+            return self._create_normalized_url(git_url, remote)
 
         # Try filesystem path forms (after remote forms to preserve priority)
         if git_url.startswith("file:///"):
@@ -164,47 +154,28 @@ class GitUrlNormalizer:
         )
 
     def _create_normalized_url(
-        self, original_url: str, domain: str, path: str
+        self, original_url: str, remote: GitRemoteUrl
     ) -> NormalizedGitUrl:
         """
-        Create a normalized URL object from parsed components.
-
-        Args:
-            original_url: The original git URL
-            domain: The git server domain
-            path: The repository path
-
-        Returns:
-            NormalizedGitUrl object
+        Create a normalized URL object from a parsed remote URL; its
+        canonical form is the remote's identity (``web_host/repo_path``).
 
         Raises:
-            GitUrlNormalizationError: If path is invalid
+            GitUrlNormalizationError: If the path has no owner/repo
         """
-        # Clean up the path
-        path = path.strip("/")
-        if not path:
+        if not remote.repo_path:
             raise GitUrlNormalizationError("Repository path cannot be empty")
-
-        # Split path into components
-        path_parts = path.split("/")
-        if len(path_parts) < 2:
-            raise GitUrlNormalizationError(f"Invalid repository path format: {path}")
-
-        # For complex paths like "group/subgroup/project", the repo is the last part
-        # and the user/organization is everything before it
-        repo = path_parts[-1]
-        user = "/".join(path_parts[:-1])
-
-        if not repo or not user:
-            raise GitUrlNormalizationError(f"Invalid user/repo format in path: {path}")
-
-        # Create canonical form: domain/user/repo
-        canonical_form = f"{domain}/{path}"
+        try:
+            user, repo = remote.owner_repo()
+        except ValueError:
+            raise GitUrlNormalizationError(
+                f"Invalid repository path format: {remote.repo_path}"
+            ) from None
 
         return NormalizedGitUrl(
             original_url=original_url,
-            canonical_form=canonical_form,
-            domain=domain,
+            canonical_form=remote.identity,
+            domain=remote.web_host,
             user=user,
             repo=repo,
         )

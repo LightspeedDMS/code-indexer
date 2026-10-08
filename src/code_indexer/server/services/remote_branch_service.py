@@ -15,13 +15,16 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
-from urllib.parse import urlparse
 
 from ..middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.git.git_subprocess_env import (
     build_non_interactive_git_env,
     remote_url_without_credentials,
+)
+from code_indexer.utils.git_remote_url import (
+    credential_scope_host,
+    parse_git_remote_url,
 )
 from code_indexer.utils.credential_redaction import mask_url_credentials
 
@@ -41,11 +44,6 @@ logger = logging.getLogger(__name__)
 # Does NOT match lowercase words like: hotfix-123, bugfix-456
 ISSUE_TRACKER_PATTERN = re.compile(r"(?:^|/)([A-Z]+-\d+)(?:$|[-/])")
 
-# Regex pattern for SSH git URLs
-# Format: git@<host>:<path>
-# Examples: git@github.com:owner/repo.git, git@gitlab.com:group/subgroup/project.git
-SSH_URL_PATTERN = re.compile(r"^git@([^:]+):(.+)$")
-
 
 def _detect_platform_from_url(url: str) -> Optional[str]:
     """
@@ -60,27 +58,17 @@ def _detect_platform_from_url(url: str) -> Optional[str]:
     Returns:
         'github', 'gitlab', or None if cannot detect
     """
-    try:
-        # Handle SSH URLs: git@host:path
-        ssh_match = SSH_URL_PATTERN.match(url)
-        if ssh_match:
-            host = ssh_match.group(1).lower()
-        else:
-            # Handle HTTPS/HTTP URLs
-            parsed = urlparse(url)
-            host = (parsed.hostname or "").lower()
-
-        # Check for exact domain or subdomain for GitHub
-        if host == "github.com" or host.endswith(".github.com"):
-            return "github"
-        # Check for gitlab in hostname (gitlab.com, gitlab.company.com, etc.)
-        if "gitlab" in host:
-            return "gitlab"
-    except Exception as e:
-        logger.debug(
-            f"Failed to parse URL for platform detection: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
+    parsed = parse_git_remote_url(url)
+    if parsed is None:
+        return None
+    # A parsed URL always has a non-empty host.
+    host = parsed.host.lower()
+    # Check for exact domain or subdomain for GitHub
+    if host == "github.com" or host.endswith(".github.com"):
+        return "github"
+    # Check for gitlab in hostname (gitlab.com, gitlab.company.com, etc.)
+    if "gitlab" in host:
+        return "gitlab"
     return None
 
 
@@ -90,10 +78,13 @@ def _build_effective_url(
     """
     Build effective URL with credentials for git operations.
 
-    Handles:
-    1. SSH URLs (git@host:path) - converts to HTTPS with credentials
-    2. HTTPS URLs - inserts credentials
-    3. Platform-specific credential formats:
+    Credentials are attached only where the push credential would be
+    (``credential_scope_host``), and never over plain http:
+    1. SSH URLs that scope a credential (``git@host:path``,
+       ``ssh://git@host/path``) - converted to HTTPS with credentials
+    2. HTTPS URLs - any userinfo replaced with the credentials
+    3. Every other value - returned unchanged
+    4. Platform-specific credential formats:
        - GitLab: oauth2:<token>
        - GitHub: <token>
 
@@ -109,46 +100,21 @@ def _build_effective_url(
     if not credentials:
         return clone_url
 
+    parsed = parse_git_remote_url(clone_url)
+    if (
+        parsed is None
+        or parsed.scheme == "http"
+        or credential_scope_host(clone_url) is None
+    ):
+        return clone_url
+
     # Detect platform from URL if not provided
     effective_platform = platform or _detect_platform_from_url(clone_url)
-
-    # Handle SSH URLs: git@host:path -> https://[creds@]host/path
-    ssh_match = SSH_URL_PATTERN.match(clone_url)
-    if ssh_match:
-        host = ssh_match.group(1)
-        path = ssh_match.group(2)
-
-        # Build credential prefix based on platform
-        if effective_platform == "gitlab":
-            # GitLab requires oauth2:<token> format
-            cred_prefix = f"oauth2:{credentials}@"
-        else:
-            # GitHub uses just <token>@ format
-            cred_prefix = f"{credentials}@"
-
-        return f"https://{cred_prefix}{host}/{path}"
-
-    # Handle HTTPS URLs
-    if clone_url.startswith("https://"):
-        # Parse URL parts
-        url_without_scheme = clone_url[8:]  # Remove 'https://'
-
-        # Remove any existing credentials from URL
-        if "@" in url_without_scheme:
-            # Has existing credentials, replace them
-            at_pos = url_without_scheme.index("@")
-            url_without_scheme = url_without_scheme[at_pos + 1 :]
-
-        # Build credential prefix based on platform
-        if effective_platform == "gitlab":
-            cred_prefix = f"oauth2:{credentials}@"
-        else:
-            cred_prefix = f"{credentials}@"
-
-        return f"https://{cred_prefix}{url_without_scheme}"
-
-    # Unknown URL format - return original
-    return clone_url
+    # GitLab requires oauth2:<token>; GitHub uses just <token>
+    userinfo = (
+        f"oauth2:{credentials}" if effective_platform == "gitlab" else credentials
+    )
+    return parsed.to_https(userinfo=userinfo)
 
 
 @dataclass
@@ -170,7 +136,7 @@ class BranchFetchResult:
 
 
 def filter_issue_tracker_branches(branches: List[str]) -> List[str]:
-    """
+    r"""
     Filter out branches that contain issue-tracker patterns.
 
     Issue tracker patterns match: [A-Za-z]+-\d+ (e.g., SCM-1234, A-1, AB-99)

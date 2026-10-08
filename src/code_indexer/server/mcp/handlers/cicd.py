@@ -96,15 +96,22 @@ def _derive_base_url_from_repo_url(repo_url: str, platform: str) -> str:
     Returns:
         "{scheme}://{host}", or the platform default base_url when the
         clone URL isn't an https/http form.
+
+    Raises:
+        ValueError: An https/http clone URL that cannot be parsed; it never
+            falls back to the platform default.
     """
+    from code_indexer.utils.credential_redaction import mask_url_credentials
+    from code_indexer.utils.git_remote_url import parse_git_remote_url
+
     default = "https://github.com" if platform == "github" else "https://gitlab.com"
-    for prefix in ("https://", "http://"):
-        if repo_url.startswith(prefix):
-            rest = repo_url[len(prefix) :]
-            slash_idx = rest.find("/")
-            host = rest[:slash_idx] if slash_idx != -1 else rest
-            return f"{prefix}{host}"
-    return default
+    if not repo_url.startswith(("https://", "http://")):
+        return default
+    parsed = parse_git_remote_url(repo_url)
+    if parsed is None:
+        raise ValueError(f"Cannot parse repo URL: {mask_url_credentials(repo_url)}")
+    # The web host never holds the URL's userinfo.
+    return f"{parsed.scheme}://{parsed.web_host}"
 
 
 def _get_personal_credential_for_host(
@@ -424,11 +431,14 @@ def _legacy_shared_token_credential(
     caller-chosen one."""
     base_url: Optional[str] = None
     if platform == "gitlab":
-        base_url = (
-            _derive_base_url_from_repo_url(matched_repo_url, "gitlab")
-            if matched_repo_url
-            else _GITLAB_DEFAULT_BASE_URL
-        )
+        try:
+            base_url = (
+                _derive_base_url_from_repo_url(matched_repo_url, "gitlab")
+                if matched_repo_url
+                else _GITLAB_DEFAULT_BASE_URL
+            )
+        except ValueError as e:
+            return None, _mcp_response({"success": False, "error": str(e)})
     forge_host = _derive_forge_host(base_url, platform)
     token = _resolve_cicd_read_token(platform, user, forge_host)
     if not token:
@@ -1916,7 +1926,16 @@ def _resolve_repo_alias_for_cicd(
 
     # Step 5: Derive base_url for GitLab (extract scheme + host from repo_url)
     if forge_type == "gitlab":
-        base_url: Optional[str] = _derive_base_url_from_repo_url(repo_url, "gitlab")
+        try:
+            base_url: Optional[str] = _derive_base_url_from_repo_url(repo_url, "gitlab")
+        except ValueError as e:
+            return (
+                None,
+                None,
+                None,
+                None,
+                _mcp_response({"success": False, "error": str(e)}),
+            )
         forge_host = _derive_forge_host(base_url, "gitlab")
     else:
         base_url = None

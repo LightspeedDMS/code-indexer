@@ -41,43 +41,26 @@ def detect_forge_type(remote_url: str) -> Optional[str]:
 def extract_owner_repo(remote_url: str) -> Tuple[str, str]:
     """Extract (owner, repo) from a git remote URL.
 
-    Handles:
+    Handles every form of ``parse_git_remote_url``:
       git@github.com:owner/repo.git -> (owner, repo)
       https://github.com/owner/repo.git -> (owner, repo)
+      ssh://deploy@git.example.com:2222/owner/repo -> (owner, repo)
       git@gitlab.com:group/subgroup/repo.git -> (group/subgroup, repo)
 
     Raises:
         ValueError: If the URL cannot be parsed.
     """
-    url = remote_url.strip()
-    # Remove .git suffix
-    if url.endswith(".git"):
-        url = url[:-4]
+    from code_indexer.utils.git_remote_url import parse_git_remote_url
 
-    # SSH format: git@host:path  (has @ and : but no ://)
-    if "@" in url and ":" in url and "://" not in url:
-        path = url.split(":", 1)[1]
-    # HTTPS format
-    elif "://" in url:
-        # Remove protocol and host — path starts after the 3rd slash segment
-        parts = url.split("/")
-        if len(parts) < 4:
-            raise ValueError(
-                f"Cannot extract owner/repo from: {mask_url_credentials(remote_url)}"
-            )
-        path = "/".join(parts[3:])
-    else:
+    parsed = parse_git_remote_url(remote_url)
+    if parsed is None:
         raise ValueError(f"Cannot parse remote URL: {mask_url_credentials(remote_url)}")
-
-    segments = path.split("/")
-    if len(segments) < 2:
+    try:
+        return parsed.owner_repo()
+    except ValueError:
         raise ValueError(
             f"Cannot extract owner/repo from: {mask_url_credentials(remote_url)}"
-        )
-
-    repo = segments[-1]
-    owner = "/".join(segments[:-1])
-    return (owner, repo)
+        ) from None
 
 
 class ForgeAuthenticationError(Exception):

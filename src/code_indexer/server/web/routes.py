@@ -28,7 +28,7 @@ import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, cast
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -9433,15 +9433,6 @@ async def update_langfuse_pull_config(
         )
 
 
-def _extract_git_hostname(remote_url: str) -> Optional[str]:
-    """Extract hostname from git@host:path or ssh:// URLs."""
-    if remote_url.startswith("git@") and ":" in remote_url:
-        return remote_url.split("@", 1)[1].split(":", 1)[0]
-    if remote_url.startswith("ssh://"):
-        return urlparse(remote_url).hostname
-    return None
-
-
 @web_router.post(
     "/config/cidx_meta_backup",
     response_class=HTMLResponse,
@@ -9454,6 +9445,7 @@ async def update_cidx_meta_backup_config(
     """Update cidx-meta backup config with SSH validation and bootstrap."""
     from ..services.cidx_meta_backup.bootstrap import CidxMetaBackupBootstrap
     from ..services.config_service import get_config_service
+    from code_indexer.utils.git_remote_url import git_remote_host
 
     session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
@@ -9476,7 +9468,7 @@ async def update_cidx_meta_backup_config(
         or remote_url.startswith("https://")
         or remote_url.startswith("http://")
     ):
-        hostname = _extract_git_hostname(remote_url)
+        hostname = git_remote_host(remote_url)
         key_list = _get_ssh_key_manager().list_keys()
         if hostname and not any(hostname in key.hosts for key in key_list.managed):
             return _create_config_page_response(

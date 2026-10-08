@@ -20,38 +20,25 @@ no row, so no per-repository audit work happens at fleet scale.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, Dict, List, Optional, Tuple, cast
-from urllib.parse import urlsplit
 
 from code_indexer.server.services.audit_outcome import (
     AuditActor,
     conforming_details,
     record_outcome,
 )
+from code_indexer.utils.git_remote_url import parse_git_remote_url
 
 logger = logging.getLogger(__name__)
 
-_URL_SCHEMES_WITH_HOST = frozenset({"http", "https", "ssh", "git", "git+ssh"})
-# scp-like ``user@host:path`` (no scheme): the host sits between "@" and ":".
-_SCP_LIKE = re.compile(r"^[^@/\s]+@([^:/\s]+):")
-
 
 def repo_host(repo_url: object) -> Optional[str]:
-    """The host name of a clone URL, or None; never the URL or its userinfo."""
-    if not isinstance(repo_url, str) or not repo_url:
+    """The host name of a clone URL, lower-cased, or None; never the URL,
+    its port or its userinfo."""
+    if not isinstance(repo_url, str):
         return None
-    scp = _SCP_LIKE.match(repo_url)
-    if scp is not None and "://" not in repo_url:
-        return scp.group(1).lower()
-    try:
-        parts = urlsplit(repo_url)
-        host = parts.hostname
-    except ValueError:
-        return None
-    if parts.scheme.lower() not in _URL_SCHEMES_WITH_HOST or not host:
-        return None
-    return host.lower()
+    parsed = parse_git_remote_url(repo_url)
+    return parsed.host.lower() if parsed is not None else None
 
 
 def record_repo_outcome(

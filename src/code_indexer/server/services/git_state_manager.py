@@ -24,6 +24,7 @@ from typing import Optional, Any, List, Union, cast
 
 from code_indexer.utils.git_runner import run_git_command
 from code_indexer.utils.credential_redaction import mask_url_credentials
+from code_indexer.utils.git_remote_url import parse_git_remote_url
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
@@ -694,14 +695,12 @@ class GitHubPRClient:
             # Parse GitHub URL (supports both HTTPS and SSH)
             # HTTPS: https://github.com/owner/repo.git
             # SSH: git@github.com:owner/repo.git
-            if "github.com" not in remote_url:
+            parsed = parse_git_remote_url(remote_url)
+            if "github.com" not in remote_url or parsed is None:
                 raise ValueError(
                     f"Not a GitHub repository: {mask_url_credentials(remote_url)}"
                 )
-
-            parts = remote_url.replace(".git", "").split("/")
-            repo = parts[-1]
-            owner = parts[-2].split(":")[-1]  # Handle SSH format
+            owner, repo = parsed.owner_repo()
 
         except subprocess.CalledProcessError as e:
             raise Exception(f"Failed to get remote URL: {e}")
@@ -797,14 +796,12 @@ class GitLabPRClient:
             # Parse GitLab URL
             # HTTPS: https://gitlab.com/owner/repo.git
             # SSH: git@gitlab.com:owner/repo.git
-            if "gitlab.com" not in remote_url:
+            parsed = parse_git_remote_url(remote_url)
+            if "gitlab.com" not in remote_url or parsed is None:
                 raise ValueError(
                     f"Not a GitLab repository: {mask_url_credentials(remote_url)}"
                 )
-
-            parts = remote_url.replace(".git", "").split("/")
-            repo = parts[-1]
-            owner = parts[-2].split(":")[-1]
+            owner, repo = parsed.owner_repo()
 
             # GitLab uses URL-encoded project path (owner/repo)
             project_path = f"{owner}/{repo}"
