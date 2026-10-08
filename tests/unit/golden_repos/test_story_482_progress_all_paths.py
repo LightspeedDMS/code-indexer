@@ -385,6 +385,12 @@ class TestPathDChangeBranchCoarseProgress:
             # Register a fake repo with different branch so change_branch proceeds
             created_at = datetime.now(timezone.utc).isoformat()
             clone_path = str(Path(tmpdir) / "golden-repos" / "test-alias")
+            # A real base clone: its stored remote URLs must be readable.
+            import subprocess
+
+            subprocess.run(
+                ["git", "init", "-q", clone_path], check=True, capture_output=True
+            )
             manager.golden_repos["test-alias"] = GoldenRepo(
                 alias="test-alias",
                 repo_url="https://github.com/example/test.git",
