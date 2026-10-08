@@ -13,7 +13,7 @@ inputSchema:
   required: [credential_id]
 ---
 
-TL;DR: Delete a previously configured git forge credential. Requires MCP elevation (TOTP step-up). You can only delete your own credentials.
+TL;DR: Delete a previously configured git forge credential. Requires MCP elevation (TOTP step-up) when elevation enforcement is on. You can only delete your own credentials.
 
 USE CASES:
 - Remove a credential when the PAT has been revoked

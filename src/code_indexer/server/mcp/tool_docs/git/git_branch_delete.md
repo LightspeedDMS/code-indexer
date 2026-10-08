@@ -58,4 +58,13 @@ outputSchema:
     - confirmation_token_required
 ---
 
-TL;DR: Delete a git branch (DESTRUCTIVE). USE CASES: (1) Delete merged feature branch, (2) Remove obsolete branch, (3) Clean up branches. SAFETY: Two-step confirmation. Call first without confirmation_token: nothing is deleted and the response carries confirmation_token_required.token. Call again with the same branch_name and that token to delete. The token is single-use, expires after 5 minutes, and is valid only for the same user, repository and branch; a missing, invalid or expired token returns a fresh one instead. Cannot delete current branch. PERMISSIONS: Requires repository:admin (destructive operation). EXAMPLE: first {"repository_alias": "my-repo", "branch_name": "old-feature"}, then {"repository_alias": "my-repo", "branch_name": "old-feature", "confirmation_token": "<token from the first response>"} Returns: {"success": true, "deleted_branch": "old-feature"}
+TL;DR: Delete a local git branch (DESTRUCTIVE). Runs `git branch -d <branch_name>`, so git refuses to delete the current branch or a branch that is not fully merged. USE CASES: (1) Delete merged feature branch, (2) Remove obsolete branch, (3) Clean up branches.
+
+CONFIRMATION (two calls):
+1. Call without confirmation_token (an empty string counts as none). Nothing is deleted; the response carries confirmation_token_required.token.
+2. Call again with the same branch_name and that token. The branch is deleted.
+The token is single-use, expires after 5 minutes, and is valid only for the same user, repository and branch; a missing, invalid or expired token returns a fresh one instead.
+
+PERMISSIONS: Requires repository:admin (destructive operation).
+
+EXAMPLE: first {"repository_alias": "my-repo", "branch_name": "old-feature"}, then {"repository_alias": "my-repo", "branch_name": "old-feature", "confirmation_token": "<token from the first response>"} Returns: {"success": true, "deleted_branch": "old-feature"}

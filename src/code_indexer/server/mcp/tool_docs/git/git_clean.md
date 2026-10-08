@@ -56,4 +56,13 @@ outputSchema:
     - confirmation_token_required
 ---
 
-Remove untracked files from working tree (DESTRUCTIVE). USE CASES: (1) Remove build artifacts, (2) Clean untracked files, (3) Restore clean state. SAFETY: Two-step confirmation. Call first without confirmation_token: nothing is removed and the response carries confirmation_token_required.token. Call again with that token to perform the clean. The token is single-use, expires after 5 minutes, and is valid only for the same user and repository; a missing, invalid or expired token returns a fresh one instead. PERMISSIONS: Requires repository:admin (destructive operation). EXAMPLE: first {"repository_alias": "my-repo"}, then {"repository_alias": "my-repo", "confirmation_token": "<token from the first response>"} Returns: {"success": true, "removed_files": ["build/"]}
+TL;DR: Remove untracked files from working tree (DESTRUCTIVE). Runs `git clean -fd`: removes untracked files and untracked directories. Ignored files are kept. USE CASES: (1) Remove build artifacts, (2) Clean untracked files, (3) Restore clean state.
+
+CONFIRMATION (two calls):
+1. Call without confirmation_token (an empty string counts as none). Nothing is removed; the response carries confirmation_token_required.token.
+2. Call again with that token. The clean runs and returns {"success": true, "removed_files": [...]}.
+The token is single-use, expires after 5 minutes, and is valid only for the same user and repository; a missing, invalid or expired token returns a fresh one instead.
+
+PERMISSIONS: Requires repository:admin (destructive operation).
+
+EXAMPLE: first {"repository_alias": "my-repo"}, then {"repository_alias": "my-repo", "confirmation_token": "<token from the first response>"} Returns: {"success": true, "removed_files": ["build/"]}

@@ -148,7 +148,7 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 | `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage), 6 parallel chunks | Touching `src/code_indexer/server/` | ~12 min (chunk 1 `services/` is the long pole) |
 | `slow-automation.sh` | `@pytest.mark.slow` unit tests (Bug #1798) | Not yet in the required gate sequence | ~45 min |
 | `rust-automation.sh` | Rust X-Ray engine: `cargo test --workspace` (447 tests incl. AC18 PREAMBLE parity) + `cargo clippy --workspace --all-targets -D warnings` | Touching `rust/` | seconds warm |
-| `e2e-automation.sh` | 6-phase E2E (CLI standalone/daemon, server in-process, CLI remote, fault-injection, PostgreSQL parity). No mocks. | Final regression gate -- ALL completed work | ~45-90 min |
+| `e2e-automation.sh` | 7-phase E2E (CLI standalone/daemon, server in-process, CLI remote, fault-injection, PostgreSQL parity, SIEM delivery). No mocks. | Final regression gate -- ALL completed work | ~45-90 min |
 
 `fast-automation.sh` does NOT run server tests -- touching server code without `server-fast-automation.sh` = untested. All three pytest suites ignore `rust/` -- touching `rust/` without `rust-automation.sh` = untested. `e2e-automation.sh` (Epic #700) is non-negotiable for epic/story completion; pure doc/config edits may waive with explicit user approval. The `@pytest.mark.slow` marker routes a test INTO `slow-automation.sh`, not nowhere -- confirm that lane covers its path.
 
@@ -183,13 +183,14 @@ In between, pick tests strategically: (1) tests for the specific capability bein
 ### e2e-automation.sh Usage
 
 ```bash
-./e2e-automation.sh              # All 6 phases
+./e2e-automation.sh              # All 7 phases
 ./e2e-automation.sh --phase 1    # CLI standalone
 ./e2e-automation.sh --phase 2    # CLI daemon
 ./e2e-automation.sh --phase 3    # Server in-process (FastAPI TestClient)
 ./e2e-automation.sh --phase 4    # CLI remote (live uvicorn subprocess)
 ./e2e-automation.sh --phase 5    # Fault-injection resiliency (live fault server)
 ./e2e-automation.sh --phase 6    # PostgreSQL parity (port 8901)
+./e2e-automation.sh --phase 7    # SIEM delivery (live server + SecOps sidecar)
 ```
 
 Credentials from `.e2e-automation` (gitignored) or env: `E2E_ADMIN_USER`, `E2E_ADMIN_PASS`, `E2E_VOYAGE_API_KEY`. Exits immediately if admin credentials missing. (The fresh E2E servers seed the default `admin`/`admin` account -- not the dev/staging admin password.)
@@ -234,7 +235,7 @@ Three CI sync constraints, all learned by breaking them:
 
 ## Critical Architecture Invariants
 
-Full detail for every entry below lives in `docs/architecture-invariants.md` (and the per-topic docs each entry names).
+Full detail for every entry below lives in `docs/architecture/invariants/` (index: `docs/architecture/invariants/README.md`; plus the per-topic docs each entry names).
 
 ### Production Scale — DESIGN EVERYTHING FOR IT
 
@@ -245,7 +246,7 @@ Full detail for every entry below lives in `docs/architecture-invariants.md` (an
 | NEVER call a synchronous filesystem/network function directly inside `async def` | Blocks the WHOLE event loop -- offload with `anyio.to_thread.run_sync(...)` (idiom: `_run_orphan_sweep` in `startup/lifespan.py`). |
 | Any O(number of repos) work must be offloaded AND paced | ~18 fs ops/repo x 900 = ~16,000 NFS metadata ops (~80s at 5ms). |
 | Never put O(fleet) work on the STARTUP path unbacked | Delays readiness fleet-wide; a failure there takes the node down at boot. |
-| Treat `hard` NFS as able to block FOREVER | cow-storage is `hard` NFSv3: `os.stat` blocks in uninterruptible kernel retry when the host is unresponsive -- a permanently hung node on the event loop. |
+| Treat NFS as able to block for a long time, `hard` NFS FOREVER | the CoW mount is `soft` NFSv3 (`timeo=30,retrans=3`, installer): a dead host still stalls each `os.stat` for many seconds before EIO; ONTAP mounts (`scripts/cluster-join.sh`) are `hard`: `os.stat` blocks in uninterruptible kernel retry -- a permanently hung node on the event loop. |
 | No settings, no manual steps, no babysitting | One operator cannot flip switches or sweep leftovers across 900 repos. |
 | Cleanup/repair must self-heal and converge | Anything left behind accumulates permanently. |
 
@@ -264,19 +265,19 @@ Before shipping anything touching repos, ask "what does this do at 900?" for BOT
 
 `PayloadCache` (wired at `app.state.payload_cache` in lifespan; PG `payload_cache` table in cluster; TTL-evicted, default 900s) is the designated cross-node store. Key methods `store_with_key`/`has_key`/`retrieve`. **Bug #1181**: the query hot path must use `store_batch(contents) -> handles` (ONE transaction, `SET LOCAL synchronous_commit=off`), NEVER `store()` per result in a loop; any new query-path truncation helper must use `store_batch`. **Registered-but-unwired trap (Bug #1665)**: a `*PostgresBackend` sitting on `BackendRegistry` does nothing if consumers still construct their own object with a bare SQLite path -- wire via `resolve_backend_registry_attr(attr_name, caller_name=...)` (`server/utils/registry_factory.py`) at each construction site, and grep every `XCache(db_path)`/`XManager(db_path)` before declaring registry wiring complete. Applies to ALL contexts incl. reviewers. See memory: `feedback_cluster_aware_state_only.md`.
 
--> Detail: docs/architecture-invariants.md#cluster-aware-state
+-> Detail: docs/architecture/invariants/cluster-and-jobs.md#cluster-aware-state
 
 ### Module-Level Service Singletons Must Be Lazy (PEP 562) (Bug #1638, Bug #1650)
 
-NEVER bind a heavy service to a bare module-level name (`foo = HeavyService()`) that runs at import time -- any import then pays full construction (DB loads, `bgm-worker` threads) as a side effect. **A module-level `__getattr__` deferral of the BINDING is necessary but NOT sufficient**: PEP 562 fires on `from module import name` too, so any consumer's module-scope import still forces construction. **The actual fix makes the CONSTRUCTOR cheap ("Option A")**: defer expensive sub-constructions inside `__init__` into lazy properties (getters+setters) guarded by a CLASS-LEVEL `threading.RLock` (never a plain `Lock` -- re-entrant same-thread probes must re-acquire; class-level so `Cls.__new__(Cls)` test instances still have a lock). Keep the layer-1 module `__getattr__` (RLock + `_initialized`/`_initializing` sentinels + `_lazy_values` snapshot dict) as defense-in-depth. Verify with the issue's OWN repro (import a real MCP handler -> assert zero threads/DB loads) plus a re-entrancy discriminating test. Canonical: `server/app.py` (layer 1 only), `server/services/git_operations_service.py`, `server/services/file_service.py` (both layers). Distinct from Bug #1467/#1468 (which is about avoiding heavy cross-layer IMPORTS, not eager construction).
+NEVER bind a heavy service to a bare module-level name (`foo = HeavyService()`) that runs at import time -- any import then pays full construction (DB loads, `bgm-worker` threads) as a side effect. **A module-level `__getattr__` deferral of the BINDING is necessary but NOT sufficient**: PEP 562 fires on `from module import name` too, so any consumer's module-scope import still forces construction. **The actual fix makes the CONSTRUCTOR cheap ("Option A")**: defer expensive sub-constructions inside `__init__` into lazy properties (getters+setters) guarded by a CLASS-LEVEL `threading.RLock` (never a plain `Lock` -- re-entrant same-thread probes must re-acquire; class-level so `Cls.__new__(Cls)` test instances still have a lock). Keep the layer-1 module `__getattr__` (RLock + `_initialized`/`_initializing` sentinels + `_lazy_values` snapshot dict) as defense-in-depth. Verify with the issue's OWN repro (import a real MCP handler -> assert zero threads/DB loads) plus a re-entrancy discriminating test. Canonical: `server/app.py` (layer 1 only), `server/services/git_operations_service.py`, `server/services/file_service.py` (cheap constructor, eager module binding). Distinct from Bug #1467/#1468 (which is about avoiding heavy cross-layer IMPORTS, not eager construction).
 
--> Detail: docs/architecture-invariants.md#module-level-singletons
+-> Detail: docs/architecture/invariants/server-runtime.md#module-level-singletons
 
 ### Shared-Storage Protocol Is Pinned to NFSv3 — NFSv4 Is Off The Table
 
-Cluster mounts (golden-repos, cow-storage) are pinned to NFSv3 (`vers=3,nolock,hard` / `soft,timeo=30,retrans=3`). NFSv4 was deployed and rolled back after three live failures (lock loss, git pack corruption, state-recovery hangs) -- do not propose it without addressing all three. Direction: need LESS from the filesystem (coordination moved to PostgreSQL); any storage proposal must preserve local `cp --reflink`.
+Cluster shared storage is ONE CoW mount pinned to NFSv3 (`/mnt/cow-storage`, `vers=3,nolock,soft,timeo=30,retrans=3`, installer), with `golden-repos` and `activated-repos` symlinked into it; ONTAP joins (`scripts/cluster-join.sh`) mount `hard`. NFSv4 was deployed and rolled back after three live failures (lock loss, git pack corruption, state-recovery hangs) -- do not propose it without addressing all three. Direction: need LESS from the filesystem (coordination moved to PostgreSQL); any storage proposal must preserve local `cp --reflink`.
 
--> Detail: docs/architecture-invariants.md#shared-storage-protocol-nfs
+-> Detail: docs/architecture/invariants/shared-storage.md#shared-storage-protocol-nfs
 
 ### Query Is Everything
 
@@ -287,7 +288,7 @@ Query capability is the core product value. NEVER remove or break: query functio
 - `tree_sitter`/`tree_sitter_languages` imported ONLY inside `AstSearchEngine.__init__` (CI-gated by `tests/unit/xray/test_lazy_load.py`); raw `tree_sitter.Node` NEVER exposed to evaluator code (wrap in `XRayNode`).
 - **Compile cache identity (Bug #1784)**: the key is `compute_cache_identity(assembled_source, XRAY_ABI_VERSION, rustc_version)` (`compiler.rs`) -- SHA-256 over the FULL assembled source (PREAMBLE + user code + EPILOGUE) + ABI + rustc, NEVER `sha256(user_code)` alone. Any PREAMBLE/EPILOGUE refactor MUST go through this fn. Python obtains it ONLY via `xray-cli --print-cache-identity` (no re-implementation). Written as the existing `source_hash` PK, so an ABI bump makes a new row. TTL is read-only enforced; deletion is lazy (do not say "ages out via TTL"). `XRAY_ABI_VERSION` has ONE definition (`compiler::XRAY_ABI_VERSION`); PREAMBLE uses a placeholder substituted at assemble time. The identity subprocess runs at most once per `run_batch()`, its timeout clamped to the caller's remaining deadline, never in solo/CLI mode; every failure path records `cidx.xray.cache_identity_failures`.
 
--> Detail: docs/architecture-invariants.md#x-ray | docs/xray-architecture.md | docs/xray-sandbox.md
+-> Detail: docs/architecture/invariants/xray.md | docs/architecture/xray/architecture.md | docs/architecture/xray/sandbox.md
 
 ### Auth: TOTP Elevation / JWT Logout / Maintenance Mode
 
@@ -297,7 +298,7 @@ Query capability is the core product value. NEVER remove or break: query functio
 - **Maintenance mode (Epic #922/#924)**: write endpoints (`POST .../maintenance/enter|exit`) are loopback-only via `require_localhost`; reverse-proxy must NOT forward them; MCP enter/exit tools removed.
 - **Login throttle, no lock state**: `auth/login_rate_limiter.py`. Every door RESERVES the attempt with `begin_attempt(subject, scope=...)` BEFORE checking the password/code (reserve-then-check, so concurrent requests never exceed the allowance). It first READS the row with a plain SELECT and refuses at once while `blocked_until > now` (a refusal takes no database write lock and no process-wide lock; solo mode shares `cidx_server.db` with every other store); otherwise one row-locked transaction re-checks, counts and admits, so a burst admits at most 5, then 1 per window. Solo SQLite runs through the throttle's OWN per-thread connection, NEVER the shared `DatabaseConnectionManager` connection (whose RLock would stall every co-tenant store and whose transactions it would share); each reservation is a durable write to that shared DB, so a process caps new login reservations at 10/s, burst 10 (per-process `TokenBucket`, `RESERVATIONS_PER_SECOND`/`RESERVATION_BURST`, no setting -- a deliberate trade-off bounding the throttle's write load); beyond that it raises `ThrottleStoreBusy` at once (never waits for a token), and the reservation transaction itself waits at most `RESERVATION_BUSY_TIMEOUT_SECONDS` (2 s) for SQLite's write lock; on `ThrottleStoreBusy` login doors answer 503 "Login is busy, try again shortly.", the step-up returns `StepUpOutcome.BUSY` (503 "Elevation is busy, try again shortly."; MCP `busy`); refusals and the success-path delete take no token (the tree-wide `tests/unit/server/conftest.py` gives each test an unlimited bucket; the shipped cap is pinned in `test_login_throttle.py`), WARNING at most once per 60 s; a busy `record_success` keeps the row and logs. The 5th attempt starts a 5 s window that doubles per further admitted attempt, capped at 120 s. Only a COMPLETED login clears its key, through `clear_completed_login` (deletes the row; any store error there is logged at WARNING with the exception type only and never fails the already-issued login): a correct password with MFA pending clears nothing, and every code (TOTP or recovery) answered at a login challenge (REST `/auth/mfa/verify`, Web `/admin/mfa/challenge/verify`, OAuth `/oauth/mfa/verify`) is reserved before it is checked under the challenge's own `MfaChallenge.throttle_scope`: a password challenge on the SAME `SCOPE_LOGIN` key as the password, an SSO-started one (`first_factor="sso"`, set by the OIDC callback and stored on the challenge -- PG migration 066, NULL reads as password) on `SCOPE_SSO_MFA`, so wrong passwords never block an SSO sign-in while wrong codes after SSO are still throttled; a completed login clears only its own key, and audit rows record the challenge's first factor as `method`: peek the challenge (`get_challenge`), reserve, then consume; a refusal answers 429/503 without checking the code and keeps the challenge (Web/OAuth re-render it via `mfa_routes.reserve_challenge_attempt`), and the failed code that starts the throttle is audited `rate_limited` (else `mfa_code_invalid`). A correct password that is itself the 5th attempt still opens its challenge (no audit row). 15 idle minutes forget the count. Keys are SHA-256 of `scope + NUL + subject` (`surrogatepass`): `SCOPE_LOGIN` (typed username; REST `/auth/login`, Web `/login`, OAuth `/oauth/authorize`) and `SCOPE_STEP_UP` (authenticated username only, no IP; TOTP step-up), so a login can never hit a step-up key. The key is the username; while a name is throttled its owner can still sign in with an API key, MCP credentials or SSO. Unknown usernames are throttled identically; all three password doors run `auth_error_handler.perform_dummy_password_work()` ONLY when the account does not exist (known and unknown names each cost one hash). A refused attempt gets 429 + `Retry-After` (step-up REST/AJAX/form too; MCP returns `rate_limited` in a 200 tool result) and writes NO audit row; the admitted attempt that starts the throttle is audited `rate_limited` (`account_locked` is legacy). State: table `login_throttle`, one row per key; SQLite `cidx_server.db` through the throttle's own per-thread connection (wired in `service_init.py`), PG migration 065 (wired in `lifespan.py`); expired rows are pruned only when a new row is inserted (bound proof in the module docstring). Never sleep to slow a login. Legacy `login_failures`/`login_lockouts` are no longer written.
 
--> Detail: docs/architecture-invariants.md#auth-totp-jwt | docs/totp-elevation.md
+-> Detail: docs/architecture/invariants/auth.md | docs/server/auth/login-and-elevation.md
 
 ### Golden Repo and Versioned Snapshots
 
@@ -308,7 +309,7 @@ Query capability is the core product value. NEVER remove or break: query functio
 - **clone_backend wiring (Story #1034/Bug #1044)**: CoW clones route through `self._clone_backend.create_clone_at_path(...)` (hard-raises if None), wired POST-HOC in `lifespan.py` (`arm._clone_backend = snapshot_manager._clone_backend`); preserve that assignment (guard `test_lifespan_clone_backend_wiring_bug1044.py`).
 - **Temporal enable-flag reconciliation (Bug #1390)**: `enable_temporal` between `golden_repos_metadata` and `global_repos` is ONE-WAY -- stored `True` downgrades to `False` when no real data on disk, but `False` is NEVER auto-flipped to `True` (an operator disable is never silently reversed).
 
--> Detail: docs/architecture-invariants.md#golden-repo-and-versioned-snapshots
+-> Detail: docs/architecture/invariants/golden-repos.md | docs/architecture/repository-lifecycle.md
 
 ### Query Path and Embedding Caches
 
@@ -318,7 +319,7 @@ Query capability is the core product value. NEVER remove or break: query functio
 - **FSV skip_staleness_check (Bug #1181)**: `FilesystemVectorStore.__init__(skip_staleness_check=False)` default; only `FilesystemBackend.get_vector_store_client()` sets True, and ONLY when `is_immutable_versioned_snapshot(project_root)` proves it. Never skip for an unproven path.
 - **Embedding coalescer + 4-lane governor (Story #1079)**: server-side query-embed coalescing behind a self-tuning 4-lane (`{provider}:{embed|rerank}`) concurrency governor; CLI/solo untouched (registry None). One sealed batch == exactly ONE provider HTTP call. `provider_backoff.is_rate_limited` is the canonical 429 classifier -- NEVER re-mask a 429. ALL query-path embed calls pass `embedding_purpose="query"` (Bug #1104). Registry built once in `lifespan.py`; preserve `set/clear_coalescer_registry`.
 
--> Detail: docs/architecture-invariants.md#query-path-and-embedding-caches | #embedding-coalescer-and-governor | docs/query-embedding-cache.md
+-> Detail: docs/architecture/invariants/query-path.md | docs/architecture/invariants/query-path.md#embedding-coalescer-and-governor | docs/architecture/query-path.md
 
 ### Indexing and Migrations
 
@@ -333,18 +334,18 @@ Query capability is the core product value. NEVER remove or break: query functio
 - **Migrations backward-compatible**: rolling restarts share schema. Allowed: `CREATE TABLE/INDEX IF NOT EXISTS`, `ALTER TABLE ADD COLUMN`, new nullable/defaulted columns. NEVER: `DROP TABLE`, `DROP COLUMN`, `RENAME`, `ALTER COLUMN TYPE`, removing NOT NULL. Under `--workers N` (Story #1164), `MigrationRunner.run()` takes a PG SESSION advisory lock (`pg_advisory_lock`, key `_MIGRATION_ADVISORY_LOCK_KEY`) at entry, releases in `finally`, always parameterized `%s`; SQLite path never references it.
 - **JSONB/TEXT normalization (Bug #1622/#1652/#1655)**: any column that is JSONB in PG and TEXT in SQLite MUST be read through `parse_json_column(raw, expected_type, field_name)` (`server/storage/json_column.py`), never a bare `json.loads()` (psycopg pre-deserializes JSONB; `json.loads` on a dict raises `TypeError`). Do not reintroduce a fourth copy.
 
--> Detail: docs/architecture-invariants.md#indexing-and-migrations | #epic-1454-chunk-storage-consolidation-and-fleet-migration
+-> Detail: docs/architecture/invariants/indexing-and-migrations.md | docs/architecture/invariants/chunk-storage.md | docs/architecture/storage.md | docs/architecture/refresh-recovery.md
 
 ### Config, Auto-Updater, Pace-Maker
 
 - **No env vars for server settings**: runtime settings belong in the Web UI Config Screen via `get_config_service().get_config()`. Never `os.environ["CIDX_SETTING"]`.
 - **Every runtime-row write is a compare-and-set (Bug #2017)**: every runtime (server-process) writer's `server_config` SQL lives in `services/config_runtime_row.py` (guarded by `test_runtime_row_write_sql_lives_only_in_config_runtime_row`); some read-only queries still live in `config_service.py`. The one exception is the OFFLINE operator tool `tools/migrate_to_postgres.py` (unconditional upsert, table name built at runtime): never run it against a live cluster. A write names the version it was applied to (SQLite `BEGIN IMMEDIATE` re-read + check; PG `UPDATE ... AND version = %s RETURNING version`); the only other write is insert-only first-boot seeding; after EITHER seed outcome (won or lost) the process adopts the committed row and its version from ONE read (`_adopt_committed_row`, SQLite and PG), since a peer may have saved after the insert. Writers, with `updated_by`: setting changes (`_change_config` via `update_settings_*`/`apply_audited_change` = `web-ui`, `apply_system_change` = `system`: re-read the committed row, mutate, retry up to `_CHANGE_ATTEMPTS`, else `ConfigChangeConflict`), startup migrations (`_rewrite_committed_row` = `startup-migration`; a no-op still adopts the row it read), `save_config` (`web-ui`; compare-and-set on the version this process loaded; a stale whole config raises `ConfigChangeConflict`), and `bump_launch_restart_generation` (`launch-restart`; compare-and-set + retry, and it does NOT advance `_db_config_version`, so the poll still detects it). No DB lock is held across mutate/`before_publish`. NEVER write `get_config()`'s cached copy back; use `apply_system_change(mutate)`. READS can still be stale (SQLite workers never reload; cluster polls every 30 s).
 - **SIEM canary lifetime (Bug #2018)**: arming and `capture_active` require `canary_config_epoch` == the committed `siem_delivery_config.arming_epoch` (`state_store.CANARY_FOR`/`CANARY_CONFIRMED_FOR`). The epoch is stamped in `_change_config` by `boundary.carry_arming_epoch`, renewed on disable/clear/destination change/CA change. The scheduler subscribes to config commits at `register_process` (`register_on_commit_callback`, whose returned unregister handle `deregister_process` releases) and applies a SIEM change in the saving process at once (`apply_committed_change`, version-monotonic snapshot publish); other processes follow at their next cycle. A key replace/remove calls `invalidate_canary` in the credential transaction. `record_canary` refuses (changing nothing) a canary of a replaced key, of an ended lifetime, or superseded by a later-issued run: runs are ordered by a durable ordinal taken under the state-row lock BEFORE the send (`issue_canary_run`; `canary_run_seq`, PG migration 057), never by clocks.
-- **Config bootstrap vs runtime (Story #578)**: `config.json` is BOOTSTRAP ONLY (`server_dir`, `host`, `port`, `workers`, `log_level`, `storage_mode`, `postgres_dsn`, `ontap`, `cluster.node_id`); runtime settings in DB. NEVER call `ServerConfigManager().load_config()` -- use `get_config_service().get_config()`.
+- **Config bootstrap vs runtime (Story #578)**: `config.json` is BOOTSTRAP ONLY -- the keys in `BOOTSTRAP_KEYS` (`services/config_service.py`: `server_dir`, `storage_mode`, `postgres_dsn`, `ontap`, `cluster`, `clone_backend`, `cow_daemon`, `pace_maker_clone_path`, fault-injection flags, pool/malloc knobs, graph-repair flags); everything else is runtime in the DB. `host`, `port`, `workers`, `log_level` are RUNTIME since Story #1197 (seeded at first boot, stripped from config.json). NEVER call `ServerConfigManager().load_config()` -- use `get_config_service().get_config()`.
 - **Auto-updater idempotent deployment (ABSOLUTE, NO EXCEPTIONS)**: any bootstrap change (systemd unit, env, PATH, file locations, service wiring) MUST be automated in BOTH the installer (`scripts/install-cidx-server.sh` / `server/auto_update/templates/`) AND the auto-updater (an idempotent `_ensure_X_config()` self-heal in `deployment_executor.py`). A template/installer-only fix is NOT done -- Bug #1440 left 3 already-running nodes silently broken because nothing re-renders a deployed unit. A live-host bootstrap gap is fixed only when an automated self-heal provably repairs that host via the REAL auto-update firing naturally (not manual SSH). Flow: `git pull` -> `pip install` -> `DeploymentExecutor.execute()` -> `systemctl restart`. See memory: `feedback_bootstrap_changes_need_installer_and_autoupdater.md`.
 - **Pace-Maker guard (Story #997)**: auto-updater installs/updates pace-maker (fresh install = master switch OFF; updates never touch config). Config split `pace_maker_clone_path` (bootstrap) + `pace_maker_mode` (runtime Web UI, default `"disabled"`); three-way `enforce_pace_maker_config()`. Injected at `ClaudeInvoker.invoke()` and `ResearchAssistantService._run_claude_background()` (NOT CodexInvoker); non-fatal.
 
--> Detail: docs/architecture-invariants.md#auto-updater-and-pace-maker | docs/auto-update.md
+-> Detail: docs/architecture/invariants/auto-update.md | docs/server/auto-update.md
 
 ### Dep-Map, cidx-meta, Description-Refresh
 
@@ -355,7 +356,7 @@ Query capability is the core product value. NEVER remove or break: query functio
 - **Phase 3.7 graph-channel repair (Epic #907)**: repairs SELF_LOOP/MALFORMED_YAML/GARBAGE_DOMAIN_REJECTED deterministically, BIDIRECTIONAL_MISMATCH Claude-audited; bootstrap flag `enable_graph_channel_repair` (default True); append-only JSONL journal.
 - **Description-refresh**: circuit-breaker quarantines a repo after `PROMPT_FAILURE_QUARANTINE_THRESHOLD = 3` consecutive failures, auto-clear ONLY on a real on-disk commit change. Cross-worker dedup MUST use `register_job_if_no_conflict` (DB `idx_active_job_per_repo` is the cluster-atomic arbiter; handle `DuplicateJobError` before the generic `except`). Scheduler shares the SAME `tracking_backend` as `meta_description_hook` (wired in `lifespan.py`). The single live path is the lifecycle-unified pipeline (`LifecycleBatchRunner._process_one_repo` -> `LifecycleClaudeCliInvoker`); a refresh REFINES the existing description (Bug #1094); frontmatter merge preserve-by-default (Bug #1101); descriptions are timeless -- temporal phrasing BANNED (Bug #1102). See memory: `feedback_description_refresh_scheduler_requires_staging_validation.md`.
 
--> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta | #description-refresh | docs/cidx-meta-backup.md
+-> Detail: docs/architecture/invariants/depmap-and-description-refresh.md#dep-map-and-cidx-meta | docs/architecture/invariants/depmap-and-description-refresh.md#description-refresh | docs/architecture/dependency-map.md
 
 ### SIEM Delivery (Google SecOps)
 
@@ -365,19 +366,19 @@ Query capability is the core product value. NEVER remove or break: query functio
 - **Health is DEGRADED only** (`siem_delivery/health.py`). The fault-injection gate selects a compressed HARNESS timing profile (`siem_delivery/timings.py`) used by e2e Phase 7; production values never change.
 - `submit_job` raises `repositories.background_jobs.DuplicateJobError` (not the job_tracker one). google-auth's service-account grant always signs `aud=https://oauth2.googleapis.com/token`.
 
--> Detail: docs/siem-delivery.md
+-> Detail: docs/server/siem/operations.md
 
 ### Global Repo Alias Fallback (Story #1039)
 
 31 read-only MCP handlers promote a bare alias to its `-global` form when the user lacks it and the golden repo is globally active -- via `try_global_fallback()` (`_global_fallback.py`), pre-check pattern, activated-repo takes precedence. All write/mutation handlers MUST stay strict: `_global_fallback.py` MUST NEVER be imported from them.
 
--> Detail: docs/architecture-invariants.md#global-repo-alias-fallback
+-> Detail: docs/architecture/invariants/global-alias-fallback.md
 
 ### Server Memory (Bug #878/#881/#897)
 
 Cleanup daemon once per app lifetime (started/stopped in lifespan; never piggyback in `get_connection()`). HNSW/FTS cache `DEFAULT_MAX_CACHE_SIZE_MB = 4096`; `initialize_caches(worker_count)` divides the per-node cap by `config.workers` (floor 256 MB) in `service_init.py` BEFORE the eager getters -- single source of truth, do NOT add a second call in `lifespan.py`. Bug #897 malloc mitigations default ON.
 
--> Detail: docs/architecture-invariants.md#server-memory-and-pooling | docs/server-memory-invariants.md
+-> Detail: docs/architecture/invariants/server-runtime.md#server-memory-and-pooling
 
 ---
 
@@ -386,9 +387,9 @@ Cleanup daemon once per app lifetime (started/stopped in lifespan; never piggyba
 | Mode | Storage | Use Case |
 |------|---------|----------|
 | **CLI** | FilesystemVectorStore (`.code-indexer/index/`) | Single dev, local |
-| **Daemon** | Same + in-memory cache, Unix socket `.code-indexer/daemon.sock` | ~5ms cached vs ~1s disk |
+| **Daemon** | Same + in-memory cache, Unix socket under `/tmp/cidx/` (hash-named, `config.py` daemon socket path) | ~5ms cached vs ~1s disk |
 
-Container-free, instant setup. Git-aware: blob hashes (clean) / text content (dirty). VoyageAI dims: 1024 (voyage-code-3), 1536 (voyage-large-2). **Server mode**: separate deployment; cluster (`storage_mode: postgres`) shares PostgreSQL. See `docs/server-deployment.md`, `docs/cluster-architecture.md`.
+Container-free, instant setup. Git-aware: blob hashes (clean) / text content (dirty). VoyageAI dims: 1024 (voyage-code-3), 1536 (voyage-large-2). **Server mode**: separate deployment; cluster (`storage_mode: postgres`) shares PostgreSQL. See `docs/server/deployment.md`, `docs/architecture/cluster.md`.
 
 ---
 
@@ -427,7 +428,7 @@ Primary provider; Cohere also supported since v9.8. Tokenizer: `embedded_voyage_
 - **OTEL metrics wiring (Story #1586)**: `ApplicationMetrics`/`JobMetrics` are wired across search/FTS/embedding/job/refresh/spans. All call sites use `peek_telemetry_manager()` (NEVER `get_telemetry_manager()`) to avoid the "first call wins, disabled fallback" init race. REST `/api/query` (`inline_query.py`) is instrumented SEPARATELY from the MCP handler (it calls `semantic_query_manager`/`TantivyIndexManager` directly, not `_execute_tracked_search`). Embedding metrics are recorded at each provider's lowest real-HTTP boundary (one event per real attempt incl. retries), never at the public delegating methods (double-count). Repository-counts gauge is an O(1) background-refreshed cache (`_RepositoryCountsCache`), NEVER a synchronous fleet walk (OTEL holds a lock across all callbacks; an O(900) NFS walk would block/discard the cycle). Observable-gauge callbacks must yield an `Observation` object, not a tuple.
 - **Log correlation_id (Bug #1641)**: `SQLiteLogHandler` populates `correlation_id` only when a record carries it. `logging_utils.inject_correlation_id(record)` is the single helper, called from `async_logging.IdentityQueueHandler.prepare()` (runs on the request thread BEFORE `enqueue()` -- `contextvars` do not cross the QueueListener thread boundary) and defensively from `SQLiteLogHandler.emit()`. Never overrides an explicit value; never fabricates one.
 
--> Detail: docs/architecture-invariants.md#server-memory-and-pooling
+-> Detail: docs/architecture/invariants/server-runtime.md#server-memory-and-pooling | docs/architecture/invariants/query-path.md
 
 ---
 
@@ -474,9 +475,9 @@ Any new background job MUST: (1) integrate with `BackgroundJobManager` + `JobTra
 - GAP (follow-up): `execute_refresh_for_claimed_job` (cluster-reclaimed refreshes run by `DistributedJobWorkerService`) passes NO `cancel_check`, so those refreshes still cannot stop their subprocesses on cancel.
 - Publish rechecks: cancellation is re-checked before indexing, after indexing, after the integrity gate, before snapshot creation and before the alias swap. A snapshot created but not yet published goes to `cleanup_manager.schedule_cleanup`, and the job ends `cancelled`.
 - A failed cancel-flag read never stops a job (no wall-clock limit). It logs WARNING with traceback on the 1st and every `CANCEL_READ_WARN_EVERY`-th consecutive failure, ERROR once at `CANCEL_READ_ESCALATE_AFTER`, and a successful read resets the streak.
-- Process-group termination has ONE implementation, `code_indexer/utils/process_group.py`. It watches the whole group through the grace period, SIGKILLs survivors (a grandchild ignoring SIGTERM), and never signals the caller's own process group.
+- Process-group termination belongs in ONE implementation, `code_indexer/utils/process_group.py`; route all group termination through it (some call sites still carry their own copy -- consolidation pending, do not add another). It watches the whole group through the grace period, SIGKILLs survivors (a grandchild ignoring SIGTERM), and never signals the caller's own process group.
 
--> Detail: docs/architecture-invariants.md#background-jobs
+-> Detail: docs/architecture/invariants/cluster-and-jobs.md#background-jobs
 
 ---
 
@@ -490,7 +491,7 @@ Externalized to `src/code_indexer/server/mcp/tool_docs/` (YAML frontmatter + mar
 
 ## Version Bump
 
-Versioning MAJOR.MINOR.HOTFIX: MAJOR only when the user says "major version" (resets Y.Z); MINOR on normal dev cycles on `development` (resets Z); HOTFIX on production hotfixes on `master` only (never on development). Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update: `README.md` badge (line 5), `CHANGELOG.md`, `docs/architecture.md`, `docs/query-guide.md`. Verify: `grep -r "OLD_VERSION" --include="*.md" --include="*.py" .`. Do NOT bump `server/app.py` OpenAPI spec or `test-fixtures/`.
+Versioning MAJOR.MINOR.HOTFIX: MAJOR only when the user says "major version" (resets Y.Z); MINOR on normal dev cycles on `development` (resets Z); HOTFIX on production hotfixes on `master` only (never on development). Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update: `CHANGELOG.md` (the README release badge is dynamic; no doc carries the version string). Verify: `grep -r "OLD_VERSION" --include="*.md" --include="*.py" .`. Do NOT bump `server/app.py` OpenAPI spec or `test-fixtures/`.
 
 ## Python Compatibility
 
@@ -500,21 +501,21 @@ Always `python3 -m pip install --break-system-packages` -- never bare `pip`.
 
 Bootstrap-only config (`fault_injection_enabled` + `fault_injection_nonprod_ack`, both false). Enabled without ack OR in production = `sys.exit(1)`. All outbound async HTTP MUST go through `HttpClientFactory`.
 
--> Detail: docs/architecture-invariants.md#fault-injection-and-memory-retrieval | docs/fault-injection-operator-guide.md
+-> Detail: docs/architecture/invariants/fault-injection-and-memory-retrieval.md#fault-injection-harness | docs/server/fault-injection.md
 
 ## Memory Retrieval (Story #883)
 
 Parallel pipeline on semantic/hybrid search (VoyageAI vector -> HNSW -> floors -> hydration -> nudge). Kill switch `memory_retrieval_enabled = false` (Web UI, immediate). Path confinement via `Path.relative_to()`; body-hydration faults drop the candidate with WARNING, never raise.
 
--> Detail: docs/architecture-invariants.md#fault-injection-and-memory-retrieval | docs/memory-retrieval-operator-guide.md
+-> Detail: docs/architecture/invariants/fault-injection-and-memory-retrieval.md#memory-retrieval | docs/server/memory-retrieval.md
 
 ---
 
 ## Further Reading
 
-- Architecture: `docs/architecture.md`
-- Architecture invariants (detailed): `docs/architecture-invariants.md`
-- Server deployment: `docs/server-deployment.md`
-- Cluster architecture: `docs/cluster-architecture.md`
-- Fault injection: `docs/fault-injection-operator-guide.md`
-- Memory retrieval: `docs/memory-retrieval-operator-guide.md`
+- Architecture: `docs/architecture/overview.md`
+- Architecture invariants (detailed): `docs/architecture/invariants/README.md`
+- Server deployment: `docs/server/deployment.md`
+- Cluster architecture: `docs/architecture/cluster.md`
+- Fault injection: `docs/server/fault-injection.md`
+- Memory retrieval: `docs/server/memory-retrieval.md`

@@ -3,7 +3,7 @@ name: git_commit
 category: git
 required_permission: repository:write
 tl_dr: Create a commit with staged changes.
-slim_description: "Create a git commit from currently staged files, with required message and optional author_name/author_email for attribution."
+slim_description: "Create a git commit from currently staged files, with a required message and an optional author_name; author email and committer identity come from your stored credential when a credential with an email is stored for the origin host, otherwise your account email (or <username>@cidx.local) is used and the committer equals the author."
 inputSchema:
   type: object
   properties:
@@ -15,7 +15,8 @@ inputSchema:
       description: Commit message
     author_name:
       type: string
-      description: Optional author name for commit attribution
+      description: Optional author name (letters, digits, space, hyphen, underscore). Overridden by the stored name of
+        your git credential for the origin host when that credential has both a name and an email.
   required:
   - repository_alias
   - message
@@ -45,4 +46,12 @@ outputSchema:
       description: List of files included in commit
 ---
 
-TL;DR: Create a commit with staged changes. Create a git commit with staged changes. USE CASES: (1) Commit staged files, (2) Create checkpoint with message, (3) Record changes with attribution. REQUIREMENTS: Must have staged files. OPTIONAL: author_name for custom commit author name. NOTE: Commit email is always derived from the authenticated user's stored credential (user.email or the PAT credential's git_user_email) and cannot be overridden per-call -- there is no author_email parameter. PERMISSIONS: Requires repository:write. EXAMPLE: {"repository_alias": "my-repo", "message": "Fix authentication bug", "author_name": "John Doe"} Returns: {"success": true, "commit_hash": "abc123def...", "short_hash": "abc123d", "message": "Fix bug", "author": "John Doe", "files_committed": ["src/file.py"]}
+TL;DR: Create a commit with staged changes. USE CASES: (1) Commit staged files, (2) Create checkpoint with message, (3) Record changes with attribution. REQUIREMENTS: Must have staged files. Staged `.code-indexer/` files or `.code-indexer-override.yaml` block the commit.
+
+IDENTITY: When a git credential (configure_git_credential) exists for the forge host of the origin remote and carries an email, that email is the author email and the committer email; the credential's name, when stored, is both the author name and the committer name, and when the credential has no name the committer name falls back to the author name (author_name or your username). Otherwise the author email is your account email (or `<username>@cidx.local`), the author name is author_name or your username, and the committer equals the author. There is no author_email parameter.
+
+MESSAGE: The server appends two trailers to your message: `Actual-Author: <author email>` and `Committed-Via: CIDX API`. Lines in your message that start with either trailer key are removed first.
+
+PERMISSIONS: Requires repository:write.
+
+EXAMPLE: {"repository_alias": "my-repo", "message": "Fix authentication bug", "author_name": "Example Dev"} Returns: {"success": true, "commit_hash": "<40-character SHA>", "message": "Fix authentication bug", "author": "dev@example.com", "committer": "dev@example.com"}

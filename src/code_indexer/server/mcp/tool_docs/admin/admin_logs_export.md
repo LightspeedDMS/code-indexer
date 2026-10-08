@@ -62,10 +62,18 @@ outputSchema:
   - filters
 ---
 
-Export operational logs in JSON or CSV format for offline analysis or external tool import. Requires MCP elevation (TOTP step-up). USE CASES: (1) Download filtered logs for support tickets, (2) Import into Excel/log analysis tools, (3) Share error logs with team, (4) Archive logs. RETURNS: ALL logs matching filter criteria (no pagination) formatted as JSON or CSV. Includes export metadata with count and applied filters. PERMISSIONS: Requires admin role (admin only).
+Export operational logs in JSON or CSV format for offline analysis or external tool import. USE CASES: (1) Download filtered logs for support tickets, (2) Import into spreadsheet or log analysis tools, (3) Share error logs with team, (4) Archive logs.
 
-ERRORS:
-- elevation_required: TOTP step-up needed
-- totp_setup_required: TOTP not yet configured for this account (setup_url provided)
+PERMISSIONS: Requires the admin role and, when elevation enforcement is on, an active elevation window (TOTP step-up via `elevate_session`).
+
+RETURNS: `{"success": true, "format": "...", "count": N, "data": "...", "filters": {"search", "level", "correlation_id"}}`. Every log matching the filters is included, newest first, in one response: there is no pagination and no size limit, so narrow the filters on a busy server. For `json`, `data` is a JSON string `{"metadata": {"exported_at", "filters", "count"}, "logs": [...]}`; for `csv`, `data` is CSV text with a UTF-8 BOM.
+
+LIMITATION: On the SQLite log store (solo mode), a database read error is logged on the server and the export is returned as `success: true` with `count: 0`. A zero-count export is therefore not proof that no logs matched; cross-check with admin_logs_query.
+
+ERRORS (returned as `{"success": false, "error": "..."}` except the elevation codes):
+- `Permission denied: admin role required`
+- `elevation_required` / `totp_setup_required` (only when elevation enforcement is on)
+- `Invalid format '<format>'. Must be 'json' or 'csv'.`
+- `Log database not configured`
 
 EXAMPLE: {"format": "json", "search": "OAuth", "level": "ERROR"}

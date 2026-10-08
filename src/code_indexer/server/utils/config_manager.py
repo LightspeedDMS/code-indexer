@@ -337,7 +337,7 @@ class SearchTimeoutsConfig:
     from the MCP tool-call layer and the embedding/reranking pipeline into a
     single Web-UI-editable config section, following the exact
     SearchLimitsConfig pattern. Each field replaces one specific hardcoded
-    constant -- see docs/architecture-invariants.md for the full mapping.
+    constant -- see docs/architecture/invariants/query-path.md for the full mapping.
     """
 
     # Replaces protocol.py's SEARCH_HANDLER_TIMEOUT_SECONDS (Bug #1319):

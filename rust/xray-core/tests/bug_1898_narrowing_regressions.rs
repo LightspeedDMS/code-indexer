@@ -29,7 +29,7 @@
 //! match or not, Positive evidence or Advisory. This retired the AC3
 //! "binds ONLY within the qualified type" guarantee this file originally
 //! proved, deferring exclusive receiver-type binding to a follow-up issue
-//! named in `docs/xray-architecture.md`'s candidate-admission section.
+//! named in `docs/architecture/xray/architecture.md`'s candidate-admission section.
 //! The arity-based tests in this file
 //! (`ac2_unique_wrong_arity_external_receiver_call_yields_zero_callees`
 //! and the P1-1/P1-2 same-class-or-super shapes) are UNCHANGED --

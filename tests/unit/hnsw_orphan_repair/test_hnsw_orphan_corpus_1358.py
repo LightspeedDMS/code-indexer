@@ -3,7 +3,7 @@ Tests for the synthetic HNSW orphan-corpus generator utility (Story #1358 AC4).
 
 Validates that tests/utils/hnsw_orphan_corpus.py reliably reproduces both
 orphan-producing regimes measured in spike #1330
-(docs/research/hnsw-temporal-orphans-1330.md) against the REAL project
+(docs/archive/hnsw-temporal-orphans-1330.md) against the REAL project
 hnswlib fork -- no mocks, real check_integrity() calls throughout.
 """
 

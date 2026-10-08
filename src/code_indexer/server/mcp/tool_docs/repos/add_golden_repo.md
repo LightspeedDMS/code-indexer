@@ -20,7 +20,7 @@ inputSchema:
       type: boolean
       default: false
       description: 'Enable temporal indexing (git history search). When true, repository is indexed with --index-commits flag
-        to support time-based queries. Default: false for backward compatibility.'
+        to support time-based queries. Default: false.'
     temporal_options:
       type: object
       description: Temporal indexing configuration options. Only used when enable_temporal=true.
@@ -64,14 +64,18 @@ outputSchema:
 
 Register a new repository for indexing (ASYNC operation). Returns immediately but indexing runs in background.
 
-WORKFLOW: (1) Call add_golden_repo(url, alias), (2) Poll get_job_statistics() until active=0 and pending=0, (3) Repository becomes available as '{alias}-global' for querying.
+WORKFLOW: (1) Call add_golden_repo(url="https://example.com/org/example-repo.git", alias="example-repo"); it returns `{"success": true, "job_id": "...", "message": "Golden repository '<alias>' addition started"}`, (2) Poll get_job_details(job_id=...) until the job status is completed or failed, (3) Repository becomes available as '{alias}-global' for querying.
 
 NAMING: Use descriptive aliases; '-global' suffix added automatically. NAMING WARNING: Avoid aliases that already end in '-global' as this creates confusing double-suffixed names like 'myrepo-global-global'.
 
-TEMPORAL: Set enable_temporal=true to index git history for time-based searches. Indexing time ranges from seconds (small repos) to hours (very large repos). Monitor progress with get_job_statistics.
+TEMPORAL: Set enable_temporal=true to index git history for time-based searches. Indexing time ranges from seconds (small repos) to hours (very large repos). Monitor progress with get_job_details. A `temporal_options.all_branches: true` request is rejected unless the server's all-branches temporal setting is enabled.
 
 ELEVATION: Matches the REST (POST /api/admin/golden-repos) and Web twins: requires the admin role and, when elevation enforcement is on, an active elevation window (call `elevate_session` first; MCP-credential and OAuth callers are elevated automatically).
 
-ERRORS:
+ERRORS (returned as `{"success": false, "error": "..."}` except the elevation codes):
+- `Permission denied: admin role required`
 - elevation_required: TOTP step-up needed (only when elevation enforcement is on)
 - totp_setup_required: TOTP not yet configured for this account (setup_url provided)
+- `Missing required parameters: url and alias`
+- `All-branches temporal indexing is disabled on this server (temporal_all_branches_enabled=false). Contact your administrator to enable it.`
+- Registration failures (for example a duplicate alias) return the underlying error message

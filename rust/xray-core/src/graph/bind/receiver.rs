@@ -335,7 +335,7 @@ fn return_type_of_method_on_type(
 /// the AC4 Level 5 unique-name shortcut's admission gate, which still
 /// consults Positive receiver-type evidence) rather than preventing a
 /// deletion -- it becomes load-bearing for deletion again once a
-/// follow-up issue (named in `docs/xray-architecture.md`'s
+/// follow-up issue (named in `docs/architecture/xray/architecture.md`'s
 /// candidate-admission section) restores a safe hard filter.
 fn is_pseudo_type(declared_type: &str, type_index: &TypeIndex) -> bool {
     declared_type.is_empty()
@@ -369,7 +369,7 @@ pub(crate) enum ReceiverEvidence {
     /// candidate on any evidence tier -- this tier instead drives
     /// `RECEIVER_TYPE_MATCH` confidence and the AC4 Level 5 unique-name
     /// shortcut's admission gate, until a follow-up issue (named in
-    /// `docs/xray-architecture.md`'s candidate-admission section) restores
+    /// `docs/architecture/xray/architecture.md`'s candidate-admission section) restores
     /// hard filtering.
     Positive(String),
     /// Resolved only via one of the two OPEN-WORLD fallback heuristics
@@ -386,7 +386,7 @@ pub(crate) enum ReceiverEvidence {
     /// trusted enough to treat a ZERO match as proof of an external
     /// target -- see `apply_receiver_type_narrowing`'s own doc comment,
     /// which matters again once a follow-up issue (named in
-    /// `docs/xray-architecture.md`'s candidate-admission section) restores
+    /// `docs/architecture/xray/architecture.md`'s candidate-admission section) restores
     /// hard filtering.
     Advisory(String),
     /// No evidence at all (unresolved receiver, a pseudo-type, or a

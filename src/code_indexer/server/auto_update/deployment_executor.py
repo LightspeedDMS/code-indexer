@@ -1505,7 +1505,7 @@ class DeploymentExecutor:
             f"{expected_commit or 'unknown'}. Real cidx indexing subprocesses "
             "under this interpreter may fail with AttributeError on "
             "check_integrity()/repair_orphans(). See "
-            "docs/hnswlib-custom-build.md for the manual rebuild procedure."
+            "docs/server/hnswlib-custom-build.md for the manual rebuild procedure."
         )
 
     def _ensure_cli_hnswlib_capability(self) -> bool:
@@ -4211,7 +4211,7 @@ class DeploymentExecutor:
                     "CLI system-wide hnswlib capability sync failed -- "
                     "indexing subprocesses may still fail with AttributeError "
                     "on check_integrity()/repair_orphans(). See "
-                    "docs/hnswlib-custom-build.md.",
+                    "docs/server/hnswlib-custom-build.md.",
                 )
             )
 

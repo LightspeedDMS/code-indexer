@@ -69,4 +69,13 @@ outputSchema:
     - confirmation_token_required
 ---
 
-TL;DR: Reset working tree to specific state (DESTRUCTIVE). USE CASES: (1) Discard commits, (2) Reset to specific commit, (3) Clean working tree. MODES: soft (keep changes staged), mixed (keep changes unstaged), hard (discard all changes). SAFETY: Requires explicit mode. A hard reset uses two-step confirmation: call first without confirmation_token and nothing is reset; the response carries confirmation_token_required.token. Call again with the same mode and commit_hash plus that token to reset. The token is single-use, expires after 5 minutes, and is valid only for the same user, repository and commit; a missing, invalid or expired token returns a fresh one instead. PERMISSIONS: Requires repository:admin (destructive operation). EXAMPLE: first {"repository_alias": "my-repo", "mode": "hard", "commit_hash": "abc123"}, then {"repository_alias": "my-repo", "mode": "hard", "commit_hash": "abc123", "confirmation_token": "<token from the first response>"} Returns: {"success": true, "reset_mode": "hard", "target_commit": "abc123"}
+TL;DR: Reset working tree to specific state (DESTRUCTIVE). Runs `git reset --<mode> <commit_hash>` (commit_hash defaults to HEAD). USE CASES: (1) Discard commits, (2) Reset to specific commit, (3) Discard uncommitted changes (hard). MODES: soft (keep changes staged), mixed (keep changes unstaged), hard (discard all changes). SAFETY: Requires explicit mode.
+
+HARD RESET CONFIRMATION (two calls): soft and mixed run immediately. A hard reset uses two-step confirmation:
+1. Call without confirmation_token. Nothing is reset; the response carries confirmation_token_required.token.
+2. Call again with the same mode and commit_hash plus that token. The reset runs.
+The token is single-use, expires after 5 minutes, and is valid only for the same user, repository and commit; a missing, invalid or expired token returns a fresh one instead.
+
+PERMISSIONS: Requires repository:admin (destructive operation).
+
+EXAMPLE: first {"repository_alias": "my-repo", "mode": "hard", "commit_hash": "abc123"}, then {"repository_alias": "my-repo", "mode": "hard", "commit_hash": "abc123", "confirmation_token": "<token from the first response>"} Returns: {"success": true, "reset_mode": "hard", "target_commit": "abc123"}

@@ -1,10 +1,9 @@
 # Development Tools
 
-This directory contains utility scripts used during development and testing.
+Utility scripts used during development and testing.
 
 ## Scripts
 
-- **`cleanup_test_containers.py`** - Utility for cleaning up test containers during development
-- **`parse_test_results.py`** - Tool for parsing and analyzing test results
-
-These scripts were moved from the root directory to keep the project organized.
+- **`parse_test_results.py`**: reads the `test_summary.json` and per-test-file `.log` files that
+  `full-automation.sh` writes to its output directory, and prints the failed files grouped by error type.
+  Usage: `python3 dev/tools/parse_test_results.py <test_output_directory>`.

@@ -10175,7 +10175,7 @@ def fix_config(ctx, dry_run: bool, verbose: bool, force: bool):
 @click.option(
     "--issuer-url",
     type=str,
-    help="OAuth issuer URL for remote access (e.g., https://your-domain.com:8383)",
+    help="OAuth issuer URL for remote access (e.g., https://cidx.example.com)",
 )
 @click.option(
     "--voyage-api-key",

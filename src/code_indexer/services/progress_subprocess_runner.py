@@ -403,7 +403,7 @@ def _fd_is_open(fd: int) -> bool:
 # _stderr_reader_loop and the WARNING logged near their join() below.
 #
 # This project targets Linux-only server deployments (systemd units, see
-# docs/server-deployment.md) -- selectors.DefaultSelector resolves to the
+# docs/server/deployment.md) -- selectors.DefaultSelector resolves to the
 # epoll-backed selector there. It would fall back to a plain
 # SelectSelector (same FD_SETSIZE ceiling this fix exists to remove) only
 # on a platform lacking epoll/kqueue/poll, which this project does not

@@ -77,7 +77,7 @@ inputSchema:
   required: []
 ---
 
-Query the audit log with optional filtering (admin only). Requires MCP elevation (TOTP step-up). The Web Audit Logs page, this tool and REST `GET /api/v1/audit-logs` read through the same query, so the same filters return the same rows, order, counts and paging tokens.
+Query the audit log with optional filtering (admin only). Requires MCP elevation (TOTP step-up) when elevation enforcement is on. The Web Audit Logs page, this tool and REST `GET /api/v1/audit-logs` read through the same query, so the same filters return the same rows, order, counts and paging tokens.
 
 USE CASES:
 - Investigate security incidents

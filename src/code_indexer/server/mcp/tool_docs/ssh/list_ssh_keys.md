@@ -69,7 +69,7 @@ outputSchema:
   - success
 ---
 
-TL;DR: List all SSH keys (CIDX-managed and unmanaged). Renamed from cidx_ssh_key_list in Story #992 — same signature, same response shape. ADMIN ONLY. Requires MCP elevation (TOTP step-up), like REST GET /api/ssh-keys.
+TL;DR: List all SSH keys (CIDX-managed and unmanaged). ADMIN ONLY. Requires MCP elevation (TOTP step-up) when elevation enforcement is on, like REST GET /api/ssh-keys.
 
 ERRORS:
 - elevation_required: TOTP step-up needed (call elevate_session, then retry)

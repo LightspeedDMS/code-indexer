@@ -19,6 +19,7 @@
 - [Versioned path trap](feedback_versioned_path_trap.md) - resolver returns the VERSIONED path; never write to it
 - [convert_tool_docs](feedback_convert_tool_docs_destructive.md) - never run tools/convert_tool_docs.py — breaks the MCP tool surface
 - [Never assert on whole env](feedback_never_assert_on_whole_environment.md) - a failing `"X" not in env` dumps every inherited secret into transcripts; assert scalars only
+- [No leaked literals in guards](feedback_never_store_leaked_literals_in_public_guards.md) - never put a leaked value in a public denylist/test to block its return; the checker was deleted for this
 - [No secrets in memory](feedback_no_secrets_in_memory.md) - memory files are versioned: no secrets, PII, or topology
 - [Secrets in local output OK](feedback_staging_creds_local_exposure_ok.md) - any secret in local output/transcripts is NOT an incident, never ask to rotate; never commit/publish secrets
 - [Auth retry loops](feedback_never_retry_loop_auth_endpoint.md) - auth rejection is terminal; retrying locks the account
@@ -101,6 +102,7 @@
 - [Session trailer OK](feedback_claude_session_trailer_ok.md) - Claude-Session commit trailer is owner-approved for public commits; don't re-raise
 - [Codex exhausted](feedback_codex_exhausted_fallback_to_claude.md) - codex out of credits/auth: coordinator switches pair->tdd-engineer, codex review->code-reviewer, announced
 - [Concurrent codex relays](feedback_concurrent_codex_relays_clobber_scratch.md) - parallel codex relays overwrite shared scratch files; use unique filenames, take verdicts from each run's own session log
+- [Relay scratch collision](feedback_parallel_codex_relays_scratchpad_collision.md) - parallel codex relays overwrite each other's scratch prompt files; per-run subdir + verify scope in sessions
 - [Verify codex ran](feedback_verify_codex_actually_ran.md) - codex wrappers fall back to Claude silently — verify via ~/.codex/sessions
 - [find is bfs](feedback_find_is_bfs_use_mmin.md) - `find` here is bfs: use -mmin, not relative -newermt
 - [Gate flakes](project_test_gates_flake_under_load.md) - gate flakiness = hardcoded 15s pytest timeout under load, NOT SQLite contention; grep .test-telemetry for "from pytest-timeout" before re-rolling
