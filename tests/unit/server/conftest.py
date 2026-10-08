@@ -552,7 +552,13 @@ def _teardown_all_background_job_managers_impl(
 
     yield
 
-    seen_ids: Set[int] = set()
+    # The `code_indexer.server.app` singleton is built once per session (by
+    # whichever test first touches it) and its routes stay bound to its
+    # BackgroundJobManager. Shutting that one down would leave every later
+    # test's submitted job unexecuted, so it lives for the session. Read
+    # without triggering the lazy initialization.
+    session_manager = _server_app_module._lazy_values.get("background_job_manager")
+    seen_ids: Set[int] = {id(session_manager)} if session_manager else set()
     for instance in created_instances:
         if id(instance) in seen_ids:
             continue
