@@ -1,14 +1,26 @@
 """One manifest of a repository, built once per indexing pass.
 
-Today an indexing pass opens each file up to three times -- the text probe, the
-blob hash, and chunking -- on top of an ``os.walk`` and a ``stat``. The blob hash
-read is pure waste: the hash is a function of the bytes, and a content backend
-already reports it for every file in one paged call. Asking the manifest instead
-removes that read entirely, which on the golden-repos NFS mount removes a round
-trip per file.
+A pass asks each file for its git blob hash and then reads it again to chunk it.
+The hash is a function of the bytes, and a content backend already reports it for
+every file in one paged call, so asking the manifest removes that read.
 
-Built from ``ContentBackend.manifest``, so the same object serves the local
-backend today and a delegated one later without the caller knowing which.
+NOT WIRED INTO THE INDEXER YET, on purpose. ``build`` goes through
+``ContentBackend.manifest``, and the LOCAL backend computes those hashes by
+reading every file -- so wiring this against the local backend moves the hash
+reads to the front of the pass instead of removing them. Measured over a 20-file
+repository: 40 opens without the manifest (20 hash + 20 chunk), 40 with it (20 to
+build + 20 to chunk). Exactly a wash, plus the whole manifest held in memory and
+hashes computed for files the indexer would have filtered out.
+
+The saving is real only when the manifest costs no local reads -- a delegated
+backend serving hashes over its own paged call, where the same 20-file pass does
+20 opens instead of 40. This module is the piece that makes that switch a
+constructor argument rather than a rewrite of the hash phase; selecting a
+delegated backend still needs the config key and plugin loader that the other
+seams have.
+
+Built from ``ContentBackend.manifest``, so the same object serves either backend
+without the caller knowing which.
 
 WHAT THIS IS NOT. It is not a cache of file contents, and it is not consulted to
 decide whether a file still exists. It answers "what did the repository look like

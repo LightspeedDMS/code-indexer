@@ -179,3 +179,49 @@ def test_bytes_in_hand_still_win_over_the_manifest(repo: Path) -> None:
     assert identifier.get_file_metadata(target, content=data).get(
         "git_hash"
     ) == identifier.get_file_metadata(target).get("git_hash")
+
+
+def test_building_the_manifest_locally_costs_one_read_per_file(repo: Path) -> None:
+    """Why this is not wired into the indexer yet.
+
+    The local backend computes blob hashes by reading, so building the manifest
+    opens every file in the repository. Wiring it against the local backend
+    therefore MOVES the hash reads to the front of the pass rather than removing
+    them -- the saving only appears when a delegated backend reports the hashes
+    without the client reading anything.
+
+    Pinned as a measurement because it is the kind of claim that quietly stops
+    being true: if the local backend ever learns to read hashes out of the git
+    index instead, this test fails and wiring it locally becomes a real win.
+    """
+    hashable = [repo / name for name in SHAPES if not (repo / name).is_symlink()]
+    names = {str(p) for p in hashable}
+
+    opened: List[str] = []
+    real_open = builtins.open
+    real_read_bytes = Path.read_bytes
+
+    def spy(file: Any, *a: Any, **k: Any) -> Any:
+        if str(file) in names:
+            opened.append(str(file))
+        return real_open(file, *a, **k)
+
+    def spy_rb(self: Path) -> bytes:
+        if str(self) in names:
+            opened.append(str(self))
+        return real_read_bytes(self)
+
+    builtins.open = spy  # type: ignore[assignment]
+    Path.read_bytes = spy_rb  # type: ignore[method-assign]
+    try:
+        manifest = RepoManifest.build(repo)
+    finally:
+        builtins.open = real_open  # type: ignore[assignment]
+        Path.read_bytes = real_read_bytes  # type: ignore[method-assign]
+
+    assert len(manifest) >= len(hashable), "fixture did not reach the whole repo"
+    assert len(opened) >= len(hashable), (
+        f"building the manifest over {len(hashable)} files opened only "
+        f"{len(opened)} of them -- if the local backend no longer reads to hash, "
+        "re-measure whether wiring the manifest into the indexer now pays off"
+    )
