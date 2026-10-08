@@ -2,14 +2,16 @@
 
 Invariant: every redaction entry point finishes a ~1 MB adversarial input in
 well under a second (no regex backtracking or rescanning that grows
-quadratically with the input), and the supplied-secret scan still masks the
-raw and percent-encoded secret inside a token too long to decode.
+quadratically with the input), and the supplied-secret scan decodes every
+token whatever its length, so any encoded echo of the secret is masked.
 """
 
 from __future__ import annotations
 
+import random
 import time
 from typing import Callable, List
+from urllib.parse import unquote, unquote_plus
 
 import pytest
 
@@ -17,6 +19,8 @@ from code_indexer.server.utils.access_log_redaction import (
     redact_sensitive_query_values,
 )
 from code_indexer.utils.credential_redaction import (
+    _percent_decode,
+    _percent_decode_plus,
     mask_url_credentials,
     redact_command_output,
     redact_secret_fields,
@@ -90,3 +94,53 @@ def test_long_tokens_still_mask_supplied_secret(secret: str, form: str) -> None:
     assert form not in redacted
     assert redacted.startswith("failed: ")
     assert redacted.endswith(" end")
+
+
+@pytest.mark.parametrize("length", [4_095, 4_096, 4_097, _SIZE])
+def test_supplied_secret_masked_in_partly_encoded_token_of_any_length(
+    length: int,
+) -> None:
+    form = "Example%2f%53ecret"
+    token = "x" * (length - len(form)) + form
+    text = f"failed: {token} end"
+
+    started = time.perf_counter()
+    redacted = redact_command_output(text, _ARGS, ["Example/Secret"])
+    elapsed = time.perf_counter() - started
+
+    assert "ecret" not in redacted
+    assert redacted.startswith("failed: ")
+    assert redacted.endswith(" end")
+    assert elapsed < _LIMIT_SECONDS, f"{length}: {elapsed:.2f}s"
+
+
+def test_percent_decoders_match_stdlib_unquote() -> None:
+    crafted = [
+        "",
+        "%",
+        "%%",
+        "%4",
+        "%4g",
+        "%2f%53ecret",
+        "%2F%2f",
+        "%C3%A9",
+        "%c3%a9x",
+        "%C3x%A9",
+        "%E2%82",
+        "%E2%82%",
+        "%FF%FE",
+        "é%41ü",
+        "%C3é",
+        "a+b%2B%2b+",
+        "%%41%2541",
+    ]
+    rng = random.Random(1234)
+    alphabet = ["%", "2", "f", "F", "C", "3", "a", "9", "+", "x", "é"]
+    fuzzed = [
+        "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 24)))
+        for _ in range(2_000)
+    ]
+
+    for text in crafted + fuzzed:
+        assert _percent_decode(text) == unquote(text), repr(text)
+        assert _percent_decode_plus(text) == unquote_plus(text), repr(text)

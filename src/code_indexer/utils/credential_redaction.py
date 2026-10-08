@@ -14,7 +14,7 @@ import functools
 import json
 import re
 from typing import Any, Dict, FrozenSet, Iterator, List, Sequence, Set, Tuple
-from urllib.parse import quote, quote_plus, unquote, unquote_plus
+from urllib.parse import unquote
 
 _MASK = "***"
 
@@ -308,6 +308,25 @@ def redact_command(args: Any) -> Any:
 # plus the secret's own characters, so a partly encoded echo is one token.
 _ENCODED_TOKEN_CHARS = r"A-Za-z0-9._~%+\-"
 _PERCENT_DECODE_PASSES = 2
+_PERCENT_ESCAPE_RUN_RE = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
+
+
+def _decode_escape_run(match: "re.Match[str]") -> str:
+    return bytes.fromhex(match.group().replace("%", "")).decode("utf-8", "replace")
+
+
+def _percent_decode(text: str) -> str:
+    """The same result as ``urllib.parse.unquote(text)`` (UTF-8, invalid
+    bytes replaced), in one regex scan: ``unquote`` splits on every '%',
+    which is several times slower on '%'-dense input. Each run of
+    consecutive escapes is one byte sequence; a literal character always
+    ends a UTF-8 sequence, so decoding runs separately changes nothing."""
+    return _PERCENT_ESCAPE_RUN_RE.sub(_decode_escape_run, text)
+
+
+def _percent_decode_plus(text: str) -> str:
+    """``urllib.parse.unquote_plus(text)``: '+' read as a space."""
+    return _percent_decode(text.replace("+", " "))
 
 
 def _decoded_forms(token: str) -> Set[str]:
@@ -315,26 +334,12 @@ def _decoded_forms(token: str) -> Set[str]:
     without '+' read as a space (escapes in any letter case)."""
     forms = {token}
     for _ in range(_PERCENT_DECODE_PASSES):
-        forms |= {decode(form) for form in forms for decode in (unquote, unquote_plus)}
+        forms |= {
+            decode(form)
+            for form in forms
+            for decode in (_percent_decode, _percent_decode_plus)
+        }
     return forms
-
-
-# A token longer than this (far beyond any credential) is not decoded; the
-# raw and percent-encoded forms of a supplied secret are masked in it by
-# plain substring search instead, so the scan stays linear.
-_MAX_DECODED_TOKEN_CHARS = 4096
-_PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-F]{2}")
-
-
-def _encoded_forms(secret: str) -> List[str]:
-    """``secret`` raw and percent-encoded (``%XX`` and ``+``-for-space,
-    once and twice, upper and lower-case escapes), longest first."""
-    forms = {secret}
-    for encode in (quote, quote_plus):
-        once = encode(secret, safe="")
-        forms |= {once, quote(once, safe="")}
-    forms |= {_PERCENT_ESCAPE_RE.sub(lambda m: m.group().lower(), f) for f in forms}
-    return sorted(forms, key=len, reverse=True)
 
 
 def _base64_forms(value: str) -> List[str]:
@@ -362,19 +367,16 @@ def _basic_auth_values(args: Any, secret: str) -> List[str]:
 def _mask_supplied_secret(text: str, args: Any, secret: str) -> str:
     """Mask ``secret`` in ``text``: every whole token whose decoded forms
     (``_decoded_forms``) contain it, then every remaining raw occurrence,
-    then the base64 of each ``_basic_auth_values`` entry."""
+    then the base64 of each ``_basic_auth_values`` entry. Every token is
+    decoded whatever its length: decoding is linear in the token, and the
+    tokens of one scan never overlap, so the whole scan stays linear."""
     extra = "".join(re.escape(char) for char in sorted(set(secret)))
     token_re = re.compile(f"[{_ENCODED_TOKEN_CHARS}{extra}]+")
-    encoded = _encoded_forms(secret)
 
     def mask_token(match: "re.Match[str]") -> str:
         token = match.group()
         # Decoding never lengthens a token, so a shorter one cannot hold it.
         if len(token) < len(secret):
-            return token
-        if len(token) > _MAX_DECODED_TOKEN_CHARS:
-            for form in encoded:
-                token = token.replace(form, _MASK)
             return token
         return _MASK if any(secret in form for form in _decoded_forms(token)) else token
 
