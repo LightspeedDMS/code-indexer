@@ -44,10 +44,46 @@ from tests.unit.server.query.test_search_failures_front_doors_2109 import (
 )
 
 # The #2047 / #2109 fixtures, shared by binding them here.
-omni_env = omni_2047.omni_env
 multi_client = omni_2047.multi_client
 env = fd_2109.env
 rest = fd_2109.rest
+
+# Two aliases, as the omni / multi doors need; every assertion here is driven by
+# a patched failure, so both may resolve to the module's one indexed repo.
+OMNI_ALIASES = ("repo-a-global", "repo-b-global")
+
+
+@pytest.fixture(scope="module")
+def _omni_access(env, tmp_path_factory: pytest.TempPathFactory) -> Any:
+    from code_indexer.server.services.access_filtering_service import (
+        AccessFilteringService,
+    )
+    from code_indexer.server.services.group_access_manager import (
+        GroupAccessManager,
+    )
+
+    groups = GroupAccessManager(tmp_path_factory.mktemp("omni-groups") / "groups.db")
+    admins = groups.get_group_by_name("admins")
+    assert admins is not None
+    groups.assign_user_to_group(ADMIN.username, admins.id, assigned_by="test")
+    return AccessFilteringService(groups)
+
+
+@pytest.fixture
+def omni_env(env, _omni_access, tmp_path, monkeypatch) -> Any:
+    """The #2047 ``omni_env`` shape over the module's ``env`` app (one app per
+    module instead of two): what the lifespan would install on ``app.state``
+    is set for this test only, so ``rest`` tests see the app untouched."""
+    app, repo = env
+    (tmp_path / "golden-repos").mkdir()
+    monkeypatch.setattr(
+        app.state, "golden_repos_dir", str(tmp_path / "golden-repos"), raising=False
+    )
+    monkeypatch.setattr(
+        app.state, "access_filtering_service", _omni_access, raising=False
+    )
+    return app, {alias: Path(repo) for alias in OMNI_ALIASES}
+
 
 LOGGER_NAME = "code_indexer.server"
 INTERNAL_VALUE_ERROR = ValueError(f"cannot decode chunk stored at {SENTINEL}")
