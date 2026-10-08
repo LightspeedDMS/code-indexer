@@ -255,6 +255,9 @@ CREATE TABLE IF NOT EXISTS chunk_store_meta (
     value TEXT NOT NULL
 );
 """
+# The same DDL one statement at a time, for running inside an explicit
+# transaction (executescript() would commit it first).
+_SCHEMA_STATEMENTS = tuple(s.strip() for s in _SCHEMA_SQL.split(";") if s.strip())
 
 _RESERVED_KEYS = ("id", "vector")
 
@@ -449,9 +452,32 @@ class ChunkStore:
         return conn
 
     def _ensure_schema(self) -> None:
-        self._conn.executescript(_SCHEMA_SQL)
-        self._ensure_type_column()
-        self._conn.commit()
+        if self._has_chunks_table():
+            # Existing store: idempotent no-op DDL, no write lock taken.
+            self._conn.executescript(_SCHEMA_SQL)
+            self._ensure_type_column()
+            self._conn.commit()
+            return
+        # Fresh store: the whole schema in ONE durable transaction (each
+        # autocommitted DDL statement would be its own fsync round -- 15
+        # fdatasync calls instead of 3 under synchronous=FULL). IMMEDIATE so a
+        # racing creator waits for this one instead of deadlocking on the
+        # read->write lock upgrade; its IF NOT EXISTS DDL then no-ops.
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            for statement in _SCHEMA_STATEMENTS:
+                self._conn.execute(statement)
+            self._ensure_type_column()
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+
+    def _has_chunks_table(self) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks'"
+        ).fetchone()
+        return row is not None
 
     def _ensure_type_column(self) -> None:
         """Bug #1575 Part A (AC5): backward-compatible migration adding an

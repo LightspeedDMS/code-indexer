@@ -473,6 +473,12 @@ class TestConcurrentTypeColumnMigrationFreshDatabase:
         opened successfully and the schema ends up correct.
         """
         db_path = tmp_path / "chunks_deterministic_race.db"
+        # A brand-new file now gets its whole schema under one BEGIN
+        # IMMEDIATE lock (no other writer can interleave there), so the
+        # race is constructed on an EMPTY store whose schema predates the
+        # `type` column -- the open path where the TOCTOU still exists.
+        with _real_connection(db_path) as conn:
+            conn.executescript(_SCHEMA_SQL)
 
         store = _open_chunk_store_with_deterministic_race(db_path)
         store.close()
