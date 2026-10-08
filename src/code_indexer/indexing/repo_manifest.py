@@ -4,20 +4,28 @@ A pass asks each file for its git blob hash and then reads it again to chunk it.
 The hash is a function of the bytes, and a content backend already reports it for
 every file in one paged call, so asking the manifest removes that read.
 
-NOT WIRED INTO THE INDEXER YET, on purpose. ``build`` goes through
+Built ONLY for a delegated backend. ``build`` goes through
 ``ContentBackend.manifest``, and the LOCAL backend computes those hashes by
-reading every file -- so wiring this against the local backend moves the hash
-reads to the front of the pass instead of removing them. Measured over a 20-file
-repository: 40 opens without the manifest (20 hash + 20 chunk), 40 with it (20 to
-build + 20 to chunk). Exactly a wash, plus the whole manifest held in memory and
-hashes computed for files the indexer would have filtered out.
+reading every file -- so against local it would move the hash reads to the front
+of the pass instead of removing them. Measured over a 20-file repository: 40
+opens without the manifest (20 hash + 20 chunk), 40 with it (20 to build + 20 to
+chunk). Exactly a wash, plus the whole manifest held in memory and hashes
+computed for files the indexer would have filtered out.
 
 The saving is real only when the manifest costs no local reads -- a delegated
 backend serving hashes over its own paged call, where the same 20-file pass does
-20 opens instead of 40. This module is the piece that makes that switch a
-constructor argument rather than a rewrite of the hash phase; selecting a
-delegated backend still needs the config key and plugin loader that the other
-seams have.
+20 opens instead of 40.
+
+SYMLINKS ARE NOT SPECIAL-CASED HERE. A delegated manifest reports them with no
+hash, and an earlier version of this module dropped them from the pass on the
+grounds that a symlink's chunks are byte-identical to its target's and carry the
+same point ids, so indexing one adds nothing. That is true only when the target
+is itself in the pass. A symlink pointing outside the repository root, at an
+excluded or generated path, or at nothing at all, carries content that is
+reachable NO other way -- and ``ContentEntry`` has no target field, so there is
+no way from here to tell those apart. Dropping them would silently index less in
+exactly the cases that matter. They take the ordinary path instead and end as
+counted failures.
 
 Built from ``ContentBackend.manifest``, so the same object serves either backend
 without the caller knowing which.
@@ -47,9 +55,20 @@ logger = logging.getLogger(__name__)
 class RepoManifest:
     """Path -> entry for one repository, as of when it was built."""
 
-    def __init__(self, root: Path, entries: Dict[str, ContentEntry]) -> None:
+    def __init__(
+        self,
+        root: Path,
+        entries: Dict[str, ContentEntry],
+        *,
+        backend_is_local: bool = True,
+    ) -> None:
         self._root = root
         self._entries = entries
+        # Whether the backend that produced these entries reads THIS container's
+        # disk. It decides what an entry with no hash means: with a local
+        # backend the file is still right there to be read, and with a delegated
+        # one it may not exist here at all.
+        self._backend_is_local = backend_is_local
 
     @classmethod
     def build(
@@ -74,7 +93,11 @@ class RepoManifest:
             if page.next_cursor is None:
                 break
             cursor = page.next_cursor
-        return cls(root, entries)
+        return cls(
+            root,
+            entries,
+            backend_is_local=bool(getattr(chosen, "is_local", True)),
+        )
 
     def _relative(self, file_path: Union[str, Path]) -> Optional[str]:
         """The repo-relative POSIX key for a path, or None if it is not inside."""

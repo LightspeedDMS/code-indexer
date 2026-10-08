@@ -115,8 +115,11 @@ class SmartIndexer(HighThroughputProcessor):
         embedding_provider: EmbeddingProvider,
         vector_store_client: Any,  # FilesystemVectorStore (vector store backend)
         metadata_path: Path,
+        content_backend: Optional[Any] = None,  # ContentBackend
     ):
-        super().__init__(config, embedding_provider, vector_store_client)
+        super().__init__(
+            config, embedding_provider, vector_store_client, content_backend
+        )
         self.progressive_metadata = ProgressiveMetadata(metadata_path)
 
         # Initialize branch topology services

@@ -288,6 +288,34 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         fts_manager: Optional[Any] = None,
     ) -> ProcessingStats:
         """Process files with maximum throughput using pre-queued chunks."""
+        # The manifest describes the repository as of NOW, and this instance is
+        # reused across passes (watch mode, the reprocess pass), so it is built
+        # here rather than in __init__ and dropped again on the way out. A
+        # manifest held between passes would serve the hash a file had before it
+        # was edited. No-op unless a delegated backend is configured.
+        self.begin_manifest_pass()
+        try:
+            return self._process_files_high_throughput(
+                files,
+                vector_thread_count,
+                batch_size,
+                progress_callback,
+                slot_tracker,
+                fts_manager,
+            )
+        finally:
+            self.end_manifest_pass()
+
+    def _process_files_high_throughput(
+        self,
+        files: List[Path],
+        vector_thread_count: int,
+        batch_size: int = 50,
+        progress_callback: Optional[Callable] = None,
+        slot_tracker: Optional[CleanSlotTracker] = None,
+        fts_manager: Optional[Any] = None,
+    ) -> ProcessingStats:
+        """The pass itself. Split out so the manifest's lifetime is a try/finally."""
 
         # Create local slot tracker for this processing phase
         local_slot_tracker = CleanSlotTracker(max_slots=vector_thread_count + 2)

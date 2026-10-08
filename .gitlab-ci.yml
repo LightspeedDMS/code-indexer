@@ -184,6 +184,7 @@ smoke:
       tests/unit/server/startup/test_content_backend_wiring.py
       tests/unit/server/startup/test_content_backend_parked_on_app_state.py
       tests/unit/indexing/test_fetch_planner.py
+      tests/unit/indexing/test_manifest_pass_lifetime.py
       -v --tb=short
       --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
     # The plugins ship their own suites and NO job collected either of them.
