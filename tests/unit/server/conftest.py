@@ -365,6 +365,46 @@ def _reset_correlation_id_contextvar() -> Generator[None, None, None]:
         _correlation_id_var.set(None)
 
 
+def _all_logging_handlers() -> List[logging.Handler]:
+    """Every handler on the root logger and on every registered logger."""
+    loggers: List[logging.Logger] = [logging.getLogger()]
+    loggers.extend(
+        candidate
+        for candidate in list(logging.Logger.manager.loggerDict.values())
+        if isinstance(candidate, logging.Logger)
+    )
+    return [handler for each in loggers for handler in list(each.handlers)]
+
+
+@pytest.fixture(autouse=True)
+def _detach_redacting_filter_added_by_test() -> Generator[None, None, None]:
+    """A test that runs the server startup attaches the redacting filter to
+    EVERY handler in the process (``attach_redacting_filter_to_all_handlers``)
+    -- including pytest's own session-long log capture handlers. The filter
+    turns each record's ``exc_info`` into a redacted ``exc_text`` (correct
+    in production), so once it is left on a capture handler every later
+    test's ``caplog`` record loses ``exc_info``. Remove the filter from
+    each handler that gained it during the test; handlers that already
+    carried it keep it.
+    """
+    from code_indexer.server.logging_utils import REDACTING_LOG_FILTER
+
+    already_filtered = {
+        id(handler)
+        for handler in _all_logging_handlers()
+        if REDACTING_LOG_FILTER in handler.filters
+    }
+    try:
+        yield
+    finally:
+        for handler in _all_logging_handlers():
+            if (
+                id(handler) not in already_filtered
+                and REDACTING_LOG_FILTER in handler.filters
+            ):
+                handler.removeFilter(REDACTING_LOG_FILTER)
+
+
 @pytest.fixture(autouse=True)
 def _restore_audit_capture_binding() -> Generator[None, None, None]:
     """Start every test from clean audit capture process wiring.
