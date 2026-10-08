@@ -151,6 +151,37 @@ def test_with_masked_repo_url_masks_a_copy() -> None:
     assert record["repo_url"].startswith("https://example-user:")
 
 
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        (
+            "https://git.example.com/repo.git?access_token=example-token-123",
+            "https://git.example.com/repo.git?access_token=***",
+        ),
+        (
+            "https://git.example.com/repo.git?ref=main&private_token=example-token-123",
+            "https://git.example.com/repo.git?ref=main&private_token=***",
+        ),
+        (
+            "https://git.example.com/r.git?access%5Ftoken=example-token-123&ref=main",
+            "https://git.example.com/r.git?access%5Ftoken=***&ref=main",
+        ),
+        (
+            "https://u:p@git.example.com/r.git?pass%77ord=example-token-123",
+            "https://***@git.example.com/r.git?pass%77ord=***",
+        ),
+        (
+            "https://git.example.com/r.git?ref=main&depth=1",
+            "https://git.example.com/r.git?ref=main&depth=1",
+        ),
+    ],
+)
+def test_secret_named_query_parameters_are_masked(url: str, expected: str) -> None:
+    assert mask_url_credentials(url) == expected
+    assert mask_url_credentials(expected) == expected
+    assert with_masked_repo_url({"repo_url": url}) == {"repo_url": expected}
+
+
 def test_with_masked_repo_url_keeps_records_without_a_url() -> None:
     assert with_masked_repo_url({"alias": "example-repo"}) == {"alias": "example-repo"}
     assert with_masked_repo_url({"repo_url": None}) == {"repo_url": None}

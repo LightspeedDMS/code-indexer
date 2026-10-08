@@ -12,7 +12,7 @@ captured output that are logged, raised or returned.
 import base64
 import json
 import re
-from typing import Any, Dict, Iterator, List, Sequence, Set, Tuple
+from typing import Any, Dict, FrozenSet, Iterator, List, Sequence, Set, Tuple
 from urllib.parse import unquote, unquote_plus
 
 _MASK = "***"
@@ -83,6 +83,37 @@ def is_display_mask(value: Any) -> bool:
     )
 
 
+# A query parameter: its name (possibly percent-encoded) and its value. A
+# query is split only on '&', and a URL or request target ends at
+# whitespace, so the value runs to the next '&' or whitespace -- quotes,
+# ';' and ',' are part of it.
+_QUERY_PARAM_RE = re.compile(
+    r"(?P<prefix>(?:^|[?&])(?P<name>[\w.%~+\-]+)=)(?P<value>[^&\s]*)"
+)
+
+# A ``scheme://`` URL in text, to its end at whitespace: the span whose
+# query parameters mask_url_credentials masks.
+_SCHEME_URL_RE = re.compile(r"[A-Za-z][\w+.\-]*://\S*")
+
+
+def mask_secret_query_values(
+    text: str, mask: str = _MASK, also_names: FrozenSet[str] = frozenset()
+) -> str:
+    """Replace the value of every query parameter in `text` whose DECODED
+    name is secret by is_secret_field (a query value is always a string, so
+    no flag-like name is exempt), or whose decoded lowercase name is in
+    `also_names`. A percent-encoded name (``pass%77ord``) is recognised too.
+    Only the value is replaced; the rest of `text` is kept."""
+
+    def mask_param(match: "re.Match[str]") -> str:
+        name = unquote(match.group("name"))
+        if name.lower() in also_names or is_secret_field(name):
+            return match.group("prefix") + mask
+        return match.group(0)
+
+    return _QUERY_PARAM_RE.sub(mask_param, text)
+
+
 def mask_url_credentials(url: Any) -> Any:
     """Strip embedded credentials from a git/HTTP URL for safe exposure.
 
@@ -96,15 +127,21 @@ def mask_url_credentials(url: Any) -> Any:
     * ``https://TOKEN@host:8443/repo.git`` -> ``https://***@host:8443/repo.git``
     * ``ssh://git@host/org/repo.git`` -> ``ssh://***@host/org/repo.git``
 
-    Scheme, host, port and path are unchanged. scp-style addresses
-    (``git@host:org/repo.git``) have no ``://`` and are returned unchanged,
-    as are local paths, ``file:///...`` and scheme-only forms such as
-    ``local://alias``. Non-string input (``None``) and ``""`` pass through.
-    Idempotent: masking an already-masked URL is a no-op.
+    The value of every secret-named query parameter is replaced by ``***``
+    too (mask_secret_query_values):
+    ``https://host/repo.git?access_token=X`` ->
+    ``https://host/repo.git?access_token=***``.
+
+    Scheme, host, port, path and other query parameters are unchanged.
+    scp-style addresses (``git@host:org/repo.git``) have no ``://`` and keep
+    their userinfo, as do local paths, ``file:///...`` and scheme-only forms
+    such as ``local://alias``. Non-string input (``None``) and ``""`` pass
+    through. Idempotent: masking an already-masked URL is a no-op.
     """
     if not isinstance(url, str):
         return url
-    return _URL_USERINFO_RE.sub(r"\1***@", url)
+    masked = _URL_USERINFO_RE.sub(r"\1***@", url)
+    return _SCHEME_URL_RE.sub(lambda m: mask_secret_query_values(m.group()), masked)
 
 
 def with_masked_repo_url(entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -171,7 +208,27 @@ def _mask_assignments(text: str) -> str:
     return "".join(parts)
 
 
+# A PEM private-key block of any label (``PRIVATE KEY``, ``RSA PRIVATE
+# KEY``, ...): its body is masked through the matching END line, or to the
+# end of the text when the block is truncated (fail closed).
+_PRIVATE_KEY_BLOCK_RE = re.compile(
+    r"(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)"
+    r"(?:.*?(-----END [A-Z0-9 ]*PRIVATE KEY-----)|.*)",
+    re.DOTALL,
+)
+
+# A JWT-shaped token: ``eyJ`` (base64url of ``{"``) header, payload and a
+# possibly empty signature, each base64url.
+_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]*")
+
+
+def _mask_private_key_block(match: "re.Match[str]") -> str:
+    return f"{match.group(1)}{_MASK}{match.group(2) or ''}"
+
+
 def _mask_text(text: str) -> str:
+    text = _PRIVATE_KEY_BLOCK_RE.sub(_mask_private_key_block, text)
+    text = _JWT_RE.sub(_MASK, text)
     text = _AUTH_HEADER_RE.sub(r"\1***", mask_url_credentials(text))
     text = _COOKIE_HEADER_RE.sub(rf"\1{_MASK}", text)
     text = _FLAG_RE.sub(_mask_flag, text)
@@ -337,12 +394,12 @@ _SECRET_KEY_SUBSTRING_RE = re.compile(
 _SECRET_KEY_SEGMENTS = frozenset(
     {"pw", "pwd", "pass", "auth", "pin", "otp", "totp", "mfa", "2fa", "pat", "session"}
 )
-# Names that only identify, type, count, bound, scope or switch a secret
-# hold none (``credential_id``, ``token_type``, ``secret_count``,
-# ``total_tokens``, ``token_scope``, ``mfa_enabled``, ``onetime_flag``).
-_NON_SECRET_KEY_RE = re.compile(
-    r"(?i)(?:_ids?|_type|_count|_enabled|_scopes?|_flag)$|^(?:total|max)_"
-)
+# Names that only identify, type, count or bound a secret hold none
+# (``credential_id``, ``token_type``, ``secret_count``, ``total_tokens``).
+# Flag-like names (``mfa_enabled``, ``token_scope``, ``api_key_flag``) are NOT
+# exempt by name: they stay secret, and only a real flag value (bool, int,
+# None -- see _holds_secret) under them is kept visible.
+_NON_SECRET_KEY_RE = re.compile(r"(?i)(?:_ids?|_type|_count)$|^(?:total|max)_")
 _CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
 _KEY_SEGMENT_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 REDACTED_FIELD = "***REDACTED***"
@@ -359,7 +416,10 @@ def _key_segments(name: str) -> List[str]:
 
 def is_secret_field(name: Any) -> bool:
     """True when a key or assignment name may hold a credential. Fails
-    closed: over-redaction is acceptable, under-redaction is not."""
+    closed: over-redaction is acceptable, under-redaction is not. A bytes
+    name (a bytes dictionary key) is checked by its decoded text."""
+    if isinstance(name, (bytes, bytearray)):
+        name = bytes(name).decode("utf-8", errors="replace")
     if not isinstance(name, str) or _NON_SECRET_KEY_RE.search(name):
         return False
     if _SECRET_KEY_SUBSTRING_RE.search(name):

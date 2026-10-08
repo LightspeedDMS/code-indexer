@@ -95,6 +95,19 @@ def test_secret_names_are_classified_by_the_shared_rule() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "name", ["api_key_flag", "secret_scope", "password_enabled", "token_scopes"]
+)
+def test_flag_suffixed_secret_names_are_redacted(name: str) -> None:
+    """A query value is always a string, so a flag-like suffix never exempts
+    a secret-looking parameter name."""
+    raw = f"GET /api/example?{name}={_VALUE}&keep=1 HTTP/1.1"
+
+    assert redact_sensitive_query_values(raw) == (
+        f"GET /api/example?{name}={REDACTED}&keep=1 HTTP/1.1"
+    )
+
+
 @pytest.mark.parametrize("name", ["confirmation_token", "source"])
 @pytest.mark.parametrize(
     "value",

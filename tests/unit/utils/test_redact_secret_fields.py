@@ -74,11 +74,32 @@ def test_identifier_and_ordinary_keys_are_kept(key: str) -> None:
         "onetime_flag",
     ],
 )
-def test_flag_and_scope_names_keep_their_non_secret_values(key: str) -> None:
-    """Names that switch or bound a secret hold none: their values (often
-    strings, such as "true" or "read write") stay visible."""
-    assert not is_secret_field(key)
-    assert redact_secret_fields({key: "read write"}) == {key: "read write"}
+def test_flag_and_scope_names_keep_flag_values_visible(key: str) -> None:
+    """A secret-looking flag or scope name keeps a real flag value (bool,
+    int, None) visible."""
+    for value in (True, False, 0, 1, None):
+        assert redact_secret_fields({key: value}) == {key: value}
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "otp_enabled",
+        "mfa_enabled",
+        "token_scope",
+        "auth_scope",
+        "onetime_flag",
+        "api_key_flag",
+        "secret_scope",
+        "password_enabled",
+    ],
+)
+def test_flag_and_scope_names_mask_string_values(key: str) -> None:
+    """A string under a secret-looking name is masked, whatever its suffix,
+    in structured data and in free-text ``name=value`` forms."""
+    assert is_secret_field(key)
+    assert redact_secret_fields({key: _VALUE}) == {key: REDACTED_FIELD}
+    assert _VALUE not in redact_secret_fields(f"failed: {key}={_VALUE}")
 
 
 @pytest.mark.parametrize(
@@ -371,3 +392,69 @@ def test_more_false_positives_are_left_intact(sample: str) -> None:
 )
 def test_free_text_value_is_masked_to_its_real_end(sample: str, expected: str) -> None:
     assert redact_secret_fields({"text": sample}) == {"text": expected}
+
+
+def test_bytes_keys_are_checked_by_their_decoded_name() -> None:
+    data = {
+        b"api_key": _VALUE,
+        b"username": "example",
+        7: "example",
+        ("pair", "key"): "example",
+    }
+
+    redacted = redact_secret_fields(data)
+
+    assert redacted[b"api_key"] == REDACTED_FIELD
+    assert redacted[b"username"] == "example"
+    assert redacted[7] == "example"
+    assert redacted[("pair", "key")] == "example"
+    # A bytearray is unhashable (never a dict key), but the predicate itself
+    # decodes it the same way.
+    assert is_secret_field(bytearray(b"password"))
+    assert not is_secret_field(None)
+
+
+_KEY_BODY = "ExampleKeyBodyLineOne\nExampleKeyBodyLineTwo"
+
+
+@pytest.mark.parametrize("label", ["", "RSA ", "EC ", "OPENSSH ", "ENCRYPTED "])
+def test_private_key_blocks_are_masked_in_free_text(label: str) -> None:
+    block = (
+        f"-----BEGIN {label}PRIVATE KEY-----\n{_KEY_BODY}\n"
+        f"-----END {label}PRIVATE KEY-----"
+    )
+
+    redacted = redact_secret_fields(f"before\n{block}\nafter")
+
+    assert "ExampleKeyBody" not in redacted
+    assert redacted.startswith("before\n")
+    assert redacted.endswith("\nafter")
+
+
+def test_truncated_private_key_block_is_masked_to_the_end() -> None:
+    redacted = redact_secret_fields(f"-----BEGIN PRIVATE KEY-----\n{_KEY_BODY}")
+
+    assert "ExampleKeyBody" not in redacted
+
+
+def test_public_key_and_certificate_blocks_are_kept() -> None:
+    text = "-----BEGIN PUBLIC KEY-----\nExamplePublicBody\n-----END PUBLIC KEY-----"
+
+    assert redact_secret_fields(text) == text
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "eyJhbGciOiJub25lIn0.eyJzdWIiOiJleGFtcGxlIn0.ExampleSignature_-1",
+        "eyJhbGciOiJIUzI1NiJ9.ExamplePayload.ExampleSignature",
+        "eyJhbGciOiJub25lIn0.eyJzdWIiOiJleGFtcGxlIn0.",
+    ],
+)
+def test_jwt_shaped_tokens_are_masked_in_free_text(token: str) -> None:
+    redacted = redact_secret_fields(f"request failed with {token} (expired)")
+
+    assert "Example" not in redacted
+    assert "eyJ" not in redacted
+    assert redacted.startswith("request failed with ")
+    assert redacted.endswith(" (expired)")

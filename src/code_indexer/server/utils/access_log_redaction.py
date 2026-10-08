@@ -10,46 +10,26 @@ clear, the value of a sensitive query parameter:
 
 A parameter is recognised by its DECODED name, so a percent-encoded name
 (``%63onfirmation_token``, ``pass%77ord``, ``sour%63e``) is redacted too.
-Only the value is replaced; the rest of the line is kept as logged.
+Only the value is replaced; the rest of the line is kept as logged. The
+decode-and-classify rule is the shared ``mask_secret_query_values``.
 """
 
 from __future__ import annotations
 
 import logging
-import re
-from urllib.parse import unquote
 
-from code_indexer.utils.credential_redaction import is_secret_field
+from code_indexer.utils.credential_redaction import mask_secret_query_values
 
 ACCESS_LOGGER_NAME = "uvicorn.access"
 REDACTED = "[REDACTED]"
 
 # Not a secret name, but its value is a URL that may carry userinfo.
-_URL_PARAM = "source"
-
-# A query parameter: its name (possibly percent-encoded) and its value. The
-# server splits a query only on '&', and a request target ends at
-# whitespace, so the value runs to the next '&' or whitespace -- quotes,
-# ';' and ',' are part of it.
-_QUERY_PARAM_RE = re.compile(
-    r"(?P<prefix>(?:^|[?&])(?P<name>[\w.%~+\-]+)=)(?P<value>[^&\s]*)"
-)
-
-
-def _is_sensitive_param(encoded_name: str) -> bool:
-    name = unquote(encoded_name)
-    return name.lower() == _URL_PARAM or is_secret_field(name)
-
-
-def _mask_param(match: "re.Match[str]") -> str:
-    if not _is_sensitive_param(match.group("name")):
-        return match.group(0)
-    return match.group("prefix") + REDACTED
+_URL_PARAMS = frozenset({"source"})
 
 
 def redact_sensitive_query_values(text: str) -> str:
     """Replace the value of every sensitive query parameter in `text`."""
-    return _QUERY_PARAM_RE.sub(_mask_param, text)
+    return mask_secret_query_values(text, REDACTED, also_names=_URL_PARAMS)
 
 
 class SensitiveQueryRedactionFilter(logging.Filter):
