@@ -2,12 +2,18 @@
 
 import os
 from pathlib import Path
-from typing import Iterator, Dict
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
 import pathspec
 
 from ..config import Config
 from ..services.override_filter_service import OverrideFilterService
 from ..utils.path_confinement import is_resolved_within_root
+
+if TYPE_CHECKING:
+    from .repo_manifest import RepoManifest
+
+#: Directories whose own .gitignore is never read (local walk and manifest alike).
+_GITIGNORE_SKIP_DIRS = frozenset({".git", "__pycache__", ".mypy_cache", "node_modules"})
 
 
 class FileFinder:
@@ -19,7 +25,13 @@ class FileFinder:
         # run), never per candidate file -- every containment check below
         # reuses this same value.
         self.resolved_codebase_dir = Path(self.config.codebase_dir).resolve()
+        # Set for the duration of a delegated pass (see set_manifest). While set,
+        # discovery reads the manifest and never the local disk.
+        self._manifest: Optional["RepoManifest"] = None
         self._create_gitignore_spec()
+        # Kept so ending a delegated pass restores it without re-reading a disk
+        # that, on a delegated pod, may not hold the repository.
+        self._local_exclude_spec = self.exclude_spec
 
         # Initialize override filter service if override config is available
         self.override_filter_service = None
@@ -114,10 +126,62 @@ class FileFinder:
             ]
         )
 
+        self._base_patterns = list(patterns)
+
         # Check for .gitignore files (root and nested)
         self._add_gitignore_patterns(self.config.codebase_dir, patterns)
 
         self.exclude_spec = pathspec.PathSpec.from_lines("gitwildmatch", patterns)
+
+    def set_manifest(
+        self, manifest: Optional["RepoManifest"], backend: Optional[Any] = None
+    ) -> None:
+        """Discover from ``manifest`` (a delegated pass) or, with None, the disk.
+
+        While set, ``find_files`` enumerates the manifest, sizes and mtimes come
+        from it, and the .gitignore files are fetched through ``backend`` -- the
+        same root and first-level files the local walk reads. Clearing it
+        restores the spec built from the disk at construction, without reading
+        the disk again.
+        """
+        self._manifest = manifest
+        if manifest is None:
+            self.exclude_spec = self._local_exclude_spec
+            return
+        patterns = list(self._base_patterns)
+        patterns.extend(self._fetched_gitignore_patterns(manifest, backend))
+        self.exclude_spec = pathspec.PathSpec.from_lines("gitwildmatch", patterns)
+
+    def _fetched_gitignore_patterns(
+        self, manifest: "RepoManifest", backend: Optional[Any]
+    ) -> List[str]:
+        """The local walk's .gitignore rules, from bytes fetched in ONE call.
+
+        Root first, then first-level directories in sorted order (the local walk
+        uses iterdir order; the nested patterns are prefixed with their own
+        directory, so the order between directories does not change a match).
+        An unreadable .gitignore is skipped, as the local reader skips one.
+        """
+        listed = set(manifest.paths())
+        wanted = [".gitignore"] if ".gitignore" in listed else []
+        top_dirs = sorted(
+            {
+                rel.split("/", 1)[0]
+                for rel in listed
+                if "/" in rel and rel.split("/", 1)[0] not in _GITIGNORE_SKIP_DIRS
+            }
+        )
+        wanted += [f"{d}/.gitignore" for d in top_dirs if f"{d}/.gitignore" in listed]
+        if not wanted or backend is None:
+            return []
+        patterns: List[str] = []
+        for record in backend.fetch(self.config.codebase_dir, wanted):
+            if record.error is not None:
+                continue
+            relative_dir = record.path.rsplit("/", 1)[0] if "/" in record.path else None
+            text = record.data.decode("utf-8", errors="ignore")
+            patterns.extend(_gitignore_lines(text, relative_dir))
+        return patterns
 
     def _add_gitignore_patterns(self, directory: Path, patterns: list) -> None:
         """Add patterns from .gitignore files recursively."""
@@ -125,17 +189,13 @@ class FileFinder:
         if gitignore_path.exists():
             try:
                 with open(gitignore_path, "r", encoding="utf-8", errors="ignore") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            # For nested .gitignore files, make patterns relative to the directory
-                            if directory != self.config.codebase_dir:
-                                relative_dir = directory.relative_to(
-                                    self.config.codebase_dir
-                                )
-                                if not line.startswith("/"):
-                                    line = f"{relative_dir}/{line}"
-                            patterns.append(line)
+                    text = f.read()
+                relative_dir = (
+                    None
+                    if directory == self.config.codebase_dir
+                    else directory.relative_to(self.config.codebase_dir).as_posix()
+                )
+                patterns.extend(_gitignore_lines(text, relative_dir))
             except (OSError, UnicodeDecodeError):
                 pass  # Skip files that can't be read
 
@@ -145,8 +205,7 @@ class FileFinder:
             for subdir in directory.iterdir():
                 if (
                     subdir.is_dir()
-                    and subdir.name
-                    not in {".git", "__pycache__", ".mypy_cache", "node_modules"}
+                    and subdir.name not in _GITIGNORE_SKIP_DIRS
                     and directory == self.config.codebase_dir
                 ):  # Only check immediate subdirectories
                     self._add_gitignore_patterns(subdir, patterns)
@@ -228,16 +287,30 @@ class FileFinder:
             # on that final component; the full resolve()+containment
             # check (several stats, one per path component) only runs
             # when it fires, instead of unconditionally on every file.
-            if (
-                self.config.confined_to_codebase_root
-                and file_path.is_symlink()
-                and not is_resolved_within_root(file_path, self.resolved_codebase_dir)
-            ):
-                return False
+            if self._manifest is not None:
+                # Delegated: the manifest answers, and nothing touches the disk.
+                # A symlink is never followed (its target may be outside the
+                # root, and fetch refuses it); an in-root target is listed, and
+                # indexed, as its own entry. Absent means it was not there when
+                # the pass began -- not eligible, never a stat.
+                if self._manifest.is_symlink(file_path) is not False:
+                    return False
+                size = self._manifest.size(file_path)
+                if size is None or size > self.config.indexing.max_file_size:
+                    return False
+            else:
+                if (
+                    self.config.confined_to_codebase_root
+                    and file_path.is_symlink()
+                    and not is_resolved_within_root(
+                        file_path, self.resolved_codebase_dir
+                    )
+                ):
+                    return False
 
-            # Check file size
-            if file_path.stat().st_size > self.config.indexing.max_file_size:
-                return False
+                # Check file size
+                if file_path.stat().st_size > self.config.indexing.max_file_size:
+                    return False
 
             # Apply override filtering if available
             if self.override_filter_service:
@@ -283,6 +356,62 @@ class FileFinder:
         except (OSError, ValueError):
             return False
 
+    def _should_prune_dir(self, dir_str: str) -> bool:
+        """Whether discovery skips everything under this repo-relative directory.
+
+        One decision for both discovery modes: the local walk asks it as it
+        descends, the manifest asks it of every ancestor of a path.
+        """
+        # Check if directory matches exclude patterns
+        if not self.exclude_spec.match_file(dir_str + "/"):
+            return False
+        # Before pruning, check if force_include_patterns might match files in this dir
+        if self._force_include_spec:
+            # Check if any force_include pattern could match files under this directory
+            # by testing if pattern would match a hypothetical file in this directory
+            test_path = dir_str + "/test_file.txt"
+            if self._force_include_spec.match_file(test_path):
+                return False
+            # Also check glob patterns like "projects/**/*.jsonl"
+            for pattern in (
+                self.config.override_config.force_include_patterns
+                if hasattr(self.config, "override_config")
+                and self.config.override_config
+                and self.config.override_config.force_include_patterns
+                else []
+            ):
+                if pattern.startswith(dir_str) or dir_str.startswith(
+                    pattern.split("/")[0]
+                ):
+                    return False
+        return True
+
+    def _find_files_in_manifest(self, manifest: "RepoManifest") -> Iterator[Path]:
+        """The walk's answer, from the manifest: same pruning, same filters.
+
+        A path is skipped when ANY ancestor directory would have been pruned --
+        the walk never descends into a pruned directory, so nothing under it is
+        ever offered. Symlinks are never yielded (see _should_include_file),
+        which also covers the walk's dangling-link skip.
+        """
+        root = Path(self.config.codebase_dir)
+        pruned: Dict[str, bool] = {}
+        for rel in manifest.paths():
+            parts = rel.split("/")
+            skip = False
+            for depth in range(1, len(parts)):
+                ancestor = "/".join(parts[:depth])
+                if ancestor not in pruned:
+                    pruned[ancestor] = self._should_prune_dir(ancestor)
+                if pruned[ancestor]:
+                    skip = True
+                    break
+            if skip:
+                continue
+            file_path = root / rel
+            if self._should_include_file(file_path):
+                yield file_path
+
     def find_files(self) -> Iterator[Path]:
         """Find all files that should be indexed."""
         # Debug logging
@@ -296,6 +425,10 @@ class FileFinder:
                 f"[{datetime.datetime.now().isoformat()}] FileFinder.find_files started for {self.config.codebase_dir}\n"
             )
             f.flush()
+
+        if self._manifest is not None:
+            yield from self._find_files_in_manifest(self._manifest)
+            return
 
         if not self.config.codebase_dir.exists():
             raise ValueError(
@@ -318,32 +451,8 @@ class FileFinder:
                 relative_dir = dir_path.relative_to(self.config.codebase_dir)
                 dir_str = str(relative_dir)
 
-                # Check if directory matches exclude patterns
-                if self.exclude_spec.match_file(dir_str + "/"):
-                    # Before pruning, check if force_include_patterns might match files in this dir
-                    should_keep = False
-                    if self._force_include_spec:
-                        # Check if any force_include pattern could match files under this directory
-                        # by testing if pattern would match a hypothetical file in this directory
-                        test_path = dir_str + "/test_file.txt"
-                        if self._force_include_spec.match_file(test_path):
-                            should_keep = True
-                        # Also check glob patterns like "projects/**/*.jsonl"
-                        for pattern in (
-                            self.config.override_config.force_include_patterns
-                            if hasattr(self.config, "override_config")
-                            and self.config.override_config
-                            and self.config.override_config.force_include_patterns
-                            else []
-                        ):
-                            if pattern.startswith(dir_str) or dir_str.startswith(
-                                pattern.split("/")[0]
-                            ):
-                                should_keep = True
-                                break
-
-                    if not should_keep:
-                        dirs_to_remove.append(dir_name)
+                if self._should_prune_dir(dir_str):
+                    dirs_to_remove.append(dir_name)
 
             for dir_name in dirs_to_remove:
                 dirs.remove(dir_name)
@@ -382,6 +491,12 @@ class FileFinder:
     def find_modified_files(self, since_timestamp: float) -> Iterator[Path]:
         """Find files modified since the given timestamp."""
         for file_path in self.find_files():
+            if self._manifest is not None:
+                # Unknown mtime: skipped, as the walk skips a file it cannot stat.
+                mtime = self._manifest.mtime(file_path)
+                if mtime is not None and mtime > since_timestamp:
+                    yield file_path
+                continue
             try:
                 if file_path.stat().st_mtime > since_timestamp:
                     yield file_path
@@ -438,7 +553,11 @@ class FileFinder:
         for file_path in self.find_files():
             total_files += 1
             try:
-                size = file_path.stat().st_size
+                size = (
+                    self._manifest.size(file_path) or 0
+                    if self._manifest is not None
+                    else file_path.stat().st_size
+                )
                 total_size += size
 
                 ext = file_path.suffix.lstrip(".") or "no_extension"
@@ -452,3 +571,21 @@ class FileFinder:
             "total_size": total_size,
             "extensions": extensions,
         }
+
+
+def _gitignore_lines(text: str, relative_dir: Optional[str]) -> List[str]:
+    """Patterns from one .gitignore's text, as the walk has always read them.
+
+    Universal newlines (the text-mode read the walk used), comments and blanks
+    dropped, and a nested file's patterns scoped to its own directory unless
+    anchored with a leading "/".
+    """
+    patterns: List[str] = []
+    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if relative_dir is not None and not line.startswith("/"):
+            line = f"{relative_dir}/{line}"
+        patterns.append(line)
+    return patterns

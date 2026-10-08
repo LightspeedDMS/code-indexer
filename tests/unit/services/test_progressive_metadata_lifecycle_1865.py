@@ -137,6 +137,9 @@ def test_branch_change_reports_remaining_files_for_current_run(tmp_path, monkeyp
 
     indexer = SmartIndexer.__new__(SmartIndexer)
     indexer.config = SimpleNamespace(codebase_dir=tmp_path)  # type: ignore[assignment]
+    # smart_index opens a content-seam pass; None is the local default.
+    indexer.content_backend = None
+    indexer.repo_manifest = None
     indexer.embedding_provider = _Provider()  # type: ignore[assignment]
     indexer.vector_store_client = _VectorStore()
     indexer.progressive_metadata = ProgressiveMetadata(metadata_path)

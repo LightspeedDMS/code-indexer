@@ -348,6 +348,45 @@ class SmartIndexer(HighThroughputProcessor):
         enable_fts: bool = False,
         trust_resume_state: bool = True,
     ) -> ProcessingStats:
+        """Run one indexing pass; see ``_smart_index`` for the behaviour.
+
+        The manifest pass opens HERE, around discovery as well as processing,
+        so a delegated pass discovers its files from the same snapshot it then
+        reads them against (the high-throughput pass nests inside and reuses
+        it). A no-op for a local backend.
+        """
+        self.begin_manifest_pass()
+        try:
+            return self._smart_index(
+                force_full=force_full,
+                reconcile_with_database=reconcile_with_database,
+                batch_size=batch_size,
+                progress_callback=progress_callback,
+                safety_buffer_seconds=safety_buffer_seconds,
+                files_count_to_process=files_count_to_process,
+                quiet=quiet,
+                vector_thread_count=vector_thread_count,
+                detect_deletions=detect_deletions,
+                enable_fts=enable_fts,
+                trust_resume_state=trust_resume_state,
+            )
+        finally:
+            self.end_manifest_pass()
+
+    def _smart_index(
+        self,
+        force_full: bool = False,
+        reconcile_with_database: bool = False,
+        batch_size: int = 50,
+        progress_callback: Optional[Callable] = None,
+        safety_buffer_seconds: int = 60,
+        files_count_to_process: Optional[int] = None,
+        quiet: bool = False,
+        vector_thread_count: Optional[int] = None,
+        detect_deletions: bool = False,
+        enable_fts: bool = False,
+        trust_resume_state: bool = True,
+    ) -> ProcessingStats:
         """
         Smart indexing that automatically chooses between full and incremental indexing.
 
