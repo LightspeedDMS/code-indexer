@@ -312,6 +312,8 @@ def multi_repository_query(
             exc_info=True,
         )
         # The body is a fixed message; the detail is in the log above.
+        if outcome.timed_out:
+            raise HTTPException(status_code=504, detail=outcome.message)
         raise HTTPException(
             status_code=500,
             detail=public_error_message("Multi-repository search failed"),

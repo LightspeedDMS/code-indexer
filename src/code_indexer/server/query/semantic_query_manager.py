@@ -3188,6 +3188,7 @@ class SemanticQueryManager:
         )
         from ...services.temporal.temporal_search_service import (
             ALL_TIME_RANGE,
+            TemporalParameterError,
             parse_date_range,
         )
 
@@ -3307,7 +3308,7 @@ class SemanticQueryManager:
 
             return query_results
 
-        except ValueError as e:
+        except TemporalParameterError as e:
             # Clear error messages for invalid parameters (Acceptance Criterion 10)
             logger.error(
                 format_error_log(
@@ -3315,7 +3316,8 @@ class SemanticQueryManager:
                 ),
                 extra=get_log_extra("QUERY-MIGRATE-010"),
             )
-            # The message describes only the caller's temporal parameters.
+            # Only a temporal parameter error describes the caller's input;
+            # any other ValueError is internal and handled below.
             raise SearchParameterError(str(e)) from e
         except Exception as e:
             # Log error and propagate as SemanticQueryError

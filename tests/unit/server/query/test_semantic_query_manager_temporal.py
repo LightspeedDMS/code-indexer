@@ -430,6 +430,36 @@ class TestTemporalErrorHandling:
 
             assert "End date must be after start date" in str(exc_info.value)
 
+    def test_internal_value_error_from_temporal_setup_is_not_a_client_error(
+        self, semantic_query_manager
+    ):
+        """Only temporal parameter validation is a client error; any other
+        ValueError (backend or index-root setup) answers a fixed message."""
+        from code_indexer.server.query.search_error_policy import (
+            classify_search_error,
+        )
+        from code_indexer.server.query.semantic_query_manager import (
+            SemanticQueryError,
+        )
+
+        sentinel = "/srv/example-internal-root/temporal"
+        with patch(
+            "code_indexer.server.query.semantic_query_manager"
+            ".reconstruct_temporal_backend",
+            side_effect=ValueError(f"cannot open temporal index at {sentinel}"),
+        ):
+            with pytest.raises(SemanticQueryError) as exc_info:
+                semantic_query_manager.query_user_repositories(
+                    username="testuser",
+                    query_text="authentication",
+                    time_range="2023-01-01..2024-01-01",
+                )
+
+        assert not isinstance(exc_info.value, SearchRequestError), exc_info.value
+        outcome = classify_search_error(exc_info.value)
+        assert outcome.client_error is False
+        assert sentinel not in outcome.message
+
 
 @pytest.mark.e2e
 class TestPerformanceRequirements:

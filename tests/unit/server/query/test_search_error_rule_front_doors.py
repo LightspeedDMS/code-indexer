@@ -247,6 +247,34 @@ def test_mcp_client_validation_keeps_its_message(env, tmp_path, extra, text) -> 
     assert text in body["error"], body
 
 
+def test_reversed_time_range_keeps_its_message(rest, env, tmp_path) -> None:
+    _, repo = env
+    text = "End date must be after start date"
+    response = _post(rest, time_range="2024-02-01..2024-01-01")
+    assert 400 <= response.status_code < 500, response.text
+    assert text in response.text, response.text
+    body = _mcp_search(repo, tmp_path, {"time_range": "2024-02-01..2024-01-01"})
+    assert body["success"] is False, body
+    assert text in body["error"], body
+
+
+def test_rest_multi_service_timeout_answers_504(multi_client, caplog) -> None:
+    from code_indexer.server.routes import multi_query_routes
+
+    client, repos = multi_client
+    caplog.set_level(logging.ERROR, logger=LOGGER_NAME)
+    with patch.object(
+        multi_query_routes.MultiSearchService,
+        "search",
+        side_effect=TimeoutError(f"deadline passed at {SENTINEL}"),
+    ):
+        response = _post_multi(client, repos)
+    assert response.status_code == 504, response.text
+    assert "Search timed out" in response.text
+    assert SENTINEL not in response.text
+    assert SENTINEL in _logged(caplog)
+
+
 def test_tracked_search_limit_check_is_a_client_error() -> None:
     from code_indexer.server.mcp.handlers.search import repo_search
 
