@@ -122,6 +122,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
         min_score: Optional[float] = None,
         language: Optional[str] = None,
         path_filter: Optional[str] = None,
+        file_extensions: Optional[List[str]] = None,
     ) -> List[QueryResultItem]:
         """Execute semantic search query on remote repository.
 
@@ -133,6 +134,9 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
             min_score: Minimum relevance score threshold
             language: Filter results by programming language
             path_filter: Filter results by file path pattern
+            file_extensions: Keep only files with these extensions (#2047),
+                sent as the REST ``file_extensions`` field (the server
+                validates and applies the rule)
 
         Returns:
             List of query result items sorted by relevance score
@@ -210,6 +214,8 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
             payload["language"] = language.strip()
         if path_filter:
             payload["path_filter"] = path_filter.strip()
+        if file_extensions:
+            payload["file_extensions"] = list(file_extensions)
 
         try:
             response = self._authenticated_request("POST", query_endpoint, json=payload)
@@ -633,6 +639,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
         path_filter: Optional[List[str]] = None,
         exclude_path: Optional[List[str]] = None,
         accuracy: Optional[str] = None,
+        file_extensions: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Execute multi-repository search via /api/query/multi endpoint.
 
@@ -668,6 +675,9 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
         payload = self._build_multi_repo_payload(
             repositories, query, limit, search_type, min_score, language, path_filter
         )
+        # #2047: the MultiSearchRequest file_extensions field (server validates).
+        if file_extensions:
+            payload["file_extensions"] = list(file_extensions)
 
         # Note: exclude_language, exclude_path, and accuracy are accepted for API consistency
         # but not currently supported by server MultiSearchRequest model

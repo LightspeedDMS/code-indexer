@@ -244,6 +244,24 @@ def multi_repository_query(
     )
     _enforce_repo_access(access_filtering_service, user.username, request.repositories)
 
+    # The SAME repository-count cap MCP omni search enforces (Bug #894,
+    # multi_search_limits_config.omni_max_repos_per_search, read fresh so a
+    # Web UI change applies at once): one fan-out bound for both doors.
+    from ..mcp.handlers._utils import _enforce_repo_count_cap
+
+    repo_count_breach = _enforce_repo_count_cap(request.repositories)
+    if repo_count_breach is not None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error_code": repo_count_breach.error_code,
+                "detail": (
+                    f"Maximum {repo_count_breach.configured_cap} repositories "
+                    f"per search, got {repo_count_breach.observed_count}"
+                ),
+            },
+        )
+
     try:
         # Bug #350: Track REST API call in metrics
         api_metrics_service.increment_other_api_call(username=user.username)

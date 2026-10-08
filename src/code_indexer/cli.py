@@ -211,26 +211,36 @@ _RERANK_OVERFETCH_MULTIPLIER = 4
 def _parse_file_extensions(raw: Optional[str]) -> List[str]:
     """Parse --file-extensions CLI flag into a normalized list (Story #906).
 
-    Comma-separated input. Each token is whitespace-stripped, then any leading
-    dots are stripped (so '.py' and 'py' are equivalent). Tokens that are empty
-    after BOTH normalization steps are skipped (handles inputs like '.' or
-    '.,py' that would otherwise produce empty entries). Returns [] when input
-    is None, empty, or whitespace-only.
+    Comma-separated input; EVERY token goes through the shared #2047 rule
+    (services/extension_filter.normalize_extension): stripped,
+    lowercased, one leading dot dropped. A blank token, or one that can never
+    be a file suffix, raises the same ValueError every other door raises --
+    nothing is silently dropped. Returns [] (no filter) when the flag is
+    absent or its whole value is empty, as the --file-extensions help states.
 
     Examples:
       _parse_file_extensions(None)           == []
       _parse_file_extensions("")             == []
       _parse_file_extensions("py")           == ["py"]
-      _parse_file_extensions("py,js")        == ["py", "js"]
-      _parse_file_extensions(".py,.js")      == ["py", "js"]
+      _parse_file_extensions(".py,.JS")      == ["py", "js"]
       _parse_file_extensions("py, js, ts")   == ["py", "js", "ts"]
-      _parse_file_extensions(".")            == []
-      _parse_file_extensions(".,py")         == ["py"]
+      _parse_file_extensions("py, ")         -> ValueError (blank token)
     """
-    if not raw:
+    from .services.extension_filter import normalize_extension
+
+    if raw is None or not raw.strip():
         return []
-    normalized = (ext.strip().lstrip(".") for ext in raw.split(","))
-    return [ext for ext in normalized if ext]
+    return [normalize_extension(token) for token in raw.split(",")]
+
+
+def _file_extension_condition(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    """--file-extensions as ONE vector-store condition (#2047), built by the
+    builder the server and daemon share: the store's ``any_ext`` operator on
+    the ``path`` payload, so several extensions are OR-ed and the condition
+    still intersects with --language inside ``must``. None if empty."""
+    from .services.extension_filter import vector_store_extension_condition
+
+    return vector_store_extension_condition(_parse_file_extensions(raw))
 
 
 def _log_skipped_provider_warning(provider_name: str) -> None:
@@ -1416,16 +1426,12 @@ def _execute_semantic_search(
                         {"key": "path", "match": {"text": path_filter[0]}}
                     )
 
-            # Story #906: --file-extensions wiring into filter_conditions_list.
-            # The "language" field IS cidx's file-extension field (test helper
-            # _must_extension_conditions matches c.get("key") == "language").
-            # Multiple extensions appended as DIRECT must-entries (cidx
-            # vector_store OR-merges multiple direct entries with same key).
-            # Composes with --language as INTERSECTION.
-            for ext in _parse_file_extensions(file_extensions):
-                filter_conditions_list.append(
-                    {"key": "language", "match": {"value": ext}}
-                )
+            # Story #906 / #2047: --file-extensions is ONE any_ext condition
+            # on the "path" payload (shared builder, values OR-ed); inside
+            # `must` it composes with --language as INTERSECTION.
+            extension_condition = _file_extension_condition(file_extensions)
+            if extension_condition is not None:
+                filter_conditions_list.append(extension_condition)
 
             # Build filter conditions preserving both must and must_not conditions
             query_filter_conditions = (
@@ -1440,6 +1446,7 @@ def _execute_semantic_search(
                 query_text=query,
                 limit=limit * 2,
                 collection_name=collection_name,
+                # #2047: the service applies the filtered window.
                 filter_conditions=query_filter_conditions,
             )
 
@@ -1468,6 +1475,7 @@ def _execute_semantic_search(
                 query_text=query,
                 limit=limit * 2,
                 collection_name=collection_name,
+                # #2047: the service applies the filtered window.
                 filter_conditions=filter_conditions if filter_conditions else None,
             )
 
@@ -5768,11 +5776,13 @@ def _annotate_staleness(
     default=None,
     type=str,
     help=(
-        'Comma-separated list of file extensions to include (e.g., "py,js,ts"). '
+        'Comma-separated list of file extensions to include (e.g., "py,js,ts"), '
+        "OR-ed, case-insensitive, in semantic, --fts and hybrid search. "
         "Leading dot optional (.py and py both work). "
         "Whitespace around commas is tolerated. "
         "Composes with --language as intersection (both filters must match). "
-        "Empty string is treated as no filter."
+        "Empty string is treated as no filter; a blank entry, or one "
+        "containing '.' or '/', is an error."
     ),
 )
 # --show-unchanged removed: Story 2 - all temporal results are changes now
@@ -5902,6 +5912,12 @@ def query(
     Results show file paths, matched content, and similarity scores.
     Filter conflicts are automatically detected and warnings are displayed.
     """
+    # #2047: reject an invalid --file-extensions token before any search runs.
+    try:
+        _parse_file_extensions(file_extensions)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--file-extensions") from exc
+
     # AC5: Validate --chunk-type requires temporal flags (Story #476)
     if chunk_type and not (time_range or time_range_all):
         console = Console()
@@ -6007,6 +6023,8 @@ def query(
                 exclude_paths=exclude_paths,
                 min_score=min_score,
                 accuracy=accuracy,
+                # #2047: sent as the REST file_extensions field.
+                file_extensions=_parse_file_extensions(file_extensions) or None,
             )
 
             # AC4: Format and display multi-repo results
@@ -6158,6 +6176,10 @@ def query(
                             edit_distance=edit_distance,
                             snippet_lines=snippet_lines,
                             regex=regex,
+                            # #2047: the daemon applies the same rule
+                            # (validated up front by this command).
+                            file_extensions=_parse_file_extensions(file_extensions)
+                            or None,
                         )
                         sys.exit(exit_code)
         except Exception:
@@ -6712,6 +6734,8 @@ def query(
                         path_filters=list(path_filter) if path_filter else None,
                         exclude_paths=list(exclude_paths) if exclude_paths else None,
                         use_regex=regex,  # Pass regex flag
+                        # #2047: same extension rule as the semantic half.
+                        file_extensions=_parse_file_extensions(file_extensions) or None,
                     )
                 except Exception as e:
                     console.print(f"[yellow]⚠️  FTS search failed: {e}[/yellow]")
@@ -6818,6 +6842,8 @@ def query(
                         list(exclude_languages) if exclude_languages else None
                     ),
                     use_regex=regex,  # Pass regex flag
+                    # #2047: same extension rule as semantic search.
+                    file_extensions=_parse_file_extensions(file_extensions) or None,
                 )
 
                 # Story #694: apply reranker stage if effective_rerank_query is set.
@@ -6919,6 +6945,8 @@ def query(
                 min_score=min_score,
                 include_source=True,
                 accuracy=accuracy,
+                # #2047: sent as the REST file_extensions field.
+                file_extensions=_parse_file_extensions(file_extensions) or None,
             )
 
             # Cast to help MyPy understand the actual return type
@@ -7450,16 +7478,12 @@ def query(
                         {"key": "path", "match": {"text": path_filter[0]}}
                     )
 
-            # Story #906: --file-extensions wiring into filter_conditions_list.
-            # The "language" field IS cidx's file-extension field (test helper
-            # _must_extension_conditions matches c.get("key") == "language").
-            # Multiple extensions appended as DIRECT must-entries (cidx
-            # vector_store OR-merges multiple direct entries with same key).
-            # Composes with --language as INTERSECTION.
-            for ext in _parse_file_extensions(file_extensions):
-                filter_conditions_list.append(
-                    {"key": "language", "match": {"value": ext}}
-                )
+            # Story #906 / #2047: --file-extensions is ONE any_ext condition
+            # on the "path" payload (shared builder, values OR-ed); inside
+            # `must` it composes with --language as INTERSECTION.
+            extension_condition = _file_extension_condition(file_extensions)
+            if extension_condition is not None:
+                filter_conditions_list.append(extension_condition)
 
             # Build filter conditions preserving both must and must_not conditions
             query_filter_conditions = (
@@ -7489,6 +7513,7 @@ def query(
                     query_text=query,
                     limit=_semantic_fetch_limit,
                     collection_name=collection_name,
+                    # #2047: the service applies the filtered window.
                     filter_conditions=query_filter_conditions,
                 )
                 # Use multi-index timing from service
@@ -7578,6 +7603,7 @@ def query(
                     query_text=query,
                     limit=limit * 2,
                     collection_name=collection_name,
+                    # #2047: the service applies the filtered window.
                     filter_conditions=filter_conditions if filter_conditions else None,
                 )
                 # Use multi-index timing from service

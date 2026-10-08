@@ -17,7 +17,7 @@ import jwt
 import uvicorn
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import Body, FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, field_validator
 
@@ -120,6 +120,8 @@ class QueryRequest(BaseModel):
     min_score: float = Field(default=0.0, ge=0.0, le=1.0)
     language: Optional[str] = None
     path_filter: Optional[str] = None
+    # #2047: mirrors SemanticQueryRequest.file_extensions.
+    file_extensions: Optional[List[str]] = None
 
 
 class ElevateRequest(BaseModel):
@@ -254,6 +256,8 @@ class TestCIDXServer:
         self.should_simulate_server_error = False
         self.should_simulate_timeout = False
         self.error_endpoints: List[str] = []
+        # Bodies the /api/query route received, in order (what a client sent).
+        self.query_requests: List[Dict[str, Any]] = []
 
         # Bug #1737: opt-in TOTP elevation simulation toggle. Defaults to
         # False (current behavior -- role-only gating), so the 12+ existing
@@ -306,6 +310,7 @@ class TestCIDXServer:
 
         # Query endpoints
         app.post("/api/query")(self._query_code)
+        app.post("/api/query/multi")(self._multi_query)
 
         # Admin endpoints - Foundation #1 compliant (no mocking, real implementation)
         app.post("/api/admin/users", status_code=201)(self._create_user)
@@ -841,6 +846,16 @@ class TestCIDXServer:
             "status": "cancelled",
         }
 
+    async def _multi_query(self, body: Dict[str, Any] = Body(...)):
+        """Record a /api/query/multi body and answer with no results."""
+        self.query_requests.append(body)
+        metadata = {
+            "total_results": 0,
+            "total_repos_searched": 0,
+            "execution_time_ms": 0,
+        }
+        return {"results": {}, "metadata": metadata}
+
     async def _query_code(
         self, query_request: QueryRequest, user=Depends(lambda: None)
     ):
@@ -852,6 +867,8 @@ class TestCIDXServer:
         Returns:
             Query results
         """
+        self.query_requests.append(query_request.model_dump())
+
         # Check for error simulation on /api/query endpoint
         if "/api/query" in self.error_endpoints and self.should_simulate_server_error:
             raise HTTPException(status_code=500, detail="Simulated server error")

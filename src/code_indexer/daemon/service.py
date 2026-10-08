@@ -2063,6 +2063,18 @@ class CIDXDaemonService(Service):
                         {"key": "path", "match": {"text": pf}}
                     )
 
+            # #2047: --file-extensions as the ONE any_ext condition the CLI
+            # and the server build too (intersects with the filters above).
+            from code_indexer.services.extension_filter import (
+                vector_store_extension_condition,
+            )
+
+            extension_condition = vector_store_extension_condition(
+                kwargs.get("file_extensions")
+            )
+            if extension_condition is not None:
+                filter_conditions.setdefault("must", []).append(extension_condition)
+
             # Build language exclusion filters (must_not conditions)
             if exclude_languages:
                 from code_indexer.services.language_validator import LanguageValidator
@@ -2121,6 +2133,10 @@ class CIDXDaemonService(Service):
             ef_map = {"fast": 50, "balanced": 100, "high": 200}
             ef = ef_map.get(accuracy, 100)  # Default to balanced if unknown
 
+            # #2047: a filtered query uses the candidate window the CLI and
+            # the server use (prefetch_limit + lazy_load; {} when unfiltered).
+            from code_indexer.services.filtered_window import filtered_window_kwargs
+
             # Execute search using FilesystemVectorStore.search() with timing
             # This uses HNSW index for fast approximate nearest neighbor search
             results_raw = vector_store.search(
@@ -2132,6 +2148,7 @@ class CIDXDaemonService(Service):
                 filter_conditions=filter_conditions,
                 return_timing=True,  # CRITICAL FIX: Request timing information
                 ef=ef,  # Pass accuracy-based ef parameter
+                **filtered_window_kwargs(filter_conditions, limit),
             )
 
             # Parse return value (tuple when return_timing=True)
@@ -2205,6 +2222,9 @@ class CIDXDaemonService(Service):
             exclude_languages = kwargs.get("exclude_languages", [])
             path_filters = kwargs.get("path_filters", [])
             exclude_paths = kwargs.get("exclude_paths", [])
+            # #2047: same rule and push-down as the CLI and the server
+            # (None = no filter).
+            file_extensions = kwargs.get("file_extensions")
 
             # Execute FTS search using TantivyIndexManager
             results = tantivy_manager.search(
@@ -2218,6 +2238,7 @@ class CIDXDaemonService(Service):
                 exclude_languages=exclude_languages,
                 path_filters=path_filters,
                 exclude_paths=exclude_paths,
+                file_extensions=file_extensions,
             )
 
             logger.info(f"FTS search returned {len(results)} results")

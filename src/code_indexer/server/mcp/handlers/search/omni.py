@@ -75,15 +75,20 @@ def _build_multi_search_request(
     params: Dict[str, Any],
     search_type: str,
     limit: int,
-) -> Any:  # Returns MultiSearchRequest — local import, not in module type contract
-    """Build a MultiSearchRequest from MCP params.
+) -> (
+    Any
+):  # Returns InternalMultiSearchRequest — local import, not in module type contract
+    """Build the server-side multi-search request from MCP params.
+
+    Only the listed parameters are taken from the caller; the internal
+    fields (query vector, its digest, deadline) are set by the server.
 
     Args:
         limit: pre-validated via _coerce_int(default=10) and _compute_effective_limit
     """
-    from ....multi.models import MultiSearchRequest
+    from ....multi.models import InternalMultiSearchRequest
 
-    return MultiSearchRequest(  # type: ignore[arg-type, call-arg]  # search_type validated to Literal values by _resolve_search_type; precomputed_query_vector has default None but exclude=True confuses mypy
+    return InternalMultiSearchRequest(  # type: ignore[arg-type, call-arg]  # search_type validated to Literal values by _resolve_search_type; exclude=True defaults confuse mypy
         repositories=repo_aliases,
         query=params.get("query_text", ""),
         search_type=search_type,  # type: ignore[arg-type]
@@ -97,6 +102,8 @@ def _build_multi_search_request(
         path_filter=params.get("path_filter"),
         exclude_language=params.get("exclude_language"),
         exclude_path=params.get("exclude_path"),
+        # #2047: the same file_extensions rule as single-repository search.
+        file_extensions=params.get("file_extensions"),
         accuracy=params.get("accuracy", "balanced"),
         no_embedding_cache_shortcut=params.get("no_embedding_cache_shortcut", False),
         temporal_embedder=params.get("temporal_embedder"),

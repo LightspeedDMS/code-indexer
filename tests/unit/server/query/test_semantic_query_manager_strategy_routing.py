@@ -1054,6 +1054,7 @@ class TestHealthGatedParallelDispatch:
             provider_name,
             no_embedding_cache_shortcut=False,
             activation_id=None,
+            extension_deadline=None,
         ):
             dispatched_providers.append(provider_name)
             return []
@@ -1148,6 +1149,7 @@ class TestHealthGatedParallelDispatch:
             provider_name,
             no_embedding_cache_shortcut=False,
             activation_id=None,
+            extension_deadline=None,
         ):
             dispatched_providers.append(provider_name)
             return []

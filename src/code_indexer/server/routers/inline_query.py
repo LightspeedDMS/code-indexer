@@ -539,6 +539,14 @@ def register_query_routes(
 
             # Story 5: Handle FTS and Hybrid modes
             if request.search_mode in ["fts", "hybrid"]:
+                from ..query.filtered_search import extension_overfetch_deadline
+
+                # #2047: ONE extension over-fetch time budget for this
+                # request, shared by the FTS half and the semantic half.
+                extension_deadline = extension_overfetch_deadline(
+                    request.file_extensions
+                )
+
                 # Get user's activated repositories
                 activated_repos = activated_repo_manager.list_activated_repositories(
                     current_user.username
@@ -734,26 +742,26 @@ def register_query_routes(
                             if request.fuzzy and edit_dist == 0:
                                 edit_dist = 1
 
-                            # Execute FTS query
+                            from ..query.filtered_search import fts_filter_kwargs
+
+                            # Execute FTS query; the filters come from the one
+                            # shared builder (Story #503 Phase 1 excludes,
+                            # #2047 file_extensions under the request deadline).
                             fts_raw_results = tantivy_manager.search(
                                 query_text=request.query_text,
                                 case_sensitive=request.case_sensitive,
                                 edit_distance=edit_dist,
                                 snippet_lines=request.snippet_lines,
                                 limit=request.limit,
-                                language_filter=request.language,
-                                path_filter=request.path_filter,
-                                exclude_languages=(
-                                    [request.exclude_language]
-                                    if request.exclude_language
-                                    else None
-                                ),  # Story #503 Phase 1
-                                exclude_paths=(
-                                    [request.exclude_path]
-                                    if request.exclude_path
-                                    else None
-                                ),  # Story #503 Phase 1
                                 use_regex=request.regex,  # Story #503 Phase 1
+                                **fts_filter_kwargs(
+                                    language=request.language,
+                                    path_filter=request.path_filter,
+                                    exclude_language=request.exclude_language,
+                                    exclude_path=request.exclude_path,
+                                    file_extensions=request.file_extensions,
+                                    deadline=extension_deadline,
+                                ),
                             )
 
                             # Convert to API response format
@@ -834,6 +842,8 @@ def register_query_routes(
                                 limit=request.limit,
                                 min_score=request.min_score,
                                 file_extensions=request.file_extensions,
+                                # #2047: intersect with language, as FTS does.
+                                language=request.language,
                                 # Phase 1 parameters (Story #503)
                                 exclude_language=request.exclude_language,
                                 exclude_path=request.exclude_path,
@@ -850,6 +860,8 @@ def register_query_routes(
                                 no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
                                 # Story #1291 AC7/AC8: explicit embedder override
                                 temporal_embedder=request.temporal_embedder,
+                                # #2047: the budget shared with the FTS half
+                                extension_deadline=extension_deadline,
                             )
                         semantic_results_list = [
                             QueryResultItem(**result)
@@ -986,6 +998,8 @@ def register_query_routes(
                         limit=_fetch_limit,
                         min_score=request.min_score,
                         file_extensions=request.file_extensions,
+                        # #2047: intersect with language, as FTS does.
+                        language=request.language,
                         # Phase 1 parameters (Story #503)
                         exclude_language=request.exclude_language,
                         exclude_path=request.exclude_path,

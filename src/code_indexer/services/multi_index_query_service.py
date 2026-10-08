@@ -31,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
 from ..config import VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL, VoyageAIConfig
 from ..storage.filesystem_vector_store import LocalIndexNotFoundError
+from .filtered_window import filtered_window_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,23 @@ MULTIMODAL_MODELS = [VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL]
 
 # Query timeout per index (seconds)
 QUERY_TIMEOUT = 30
+
+
+def _store_limit_kwargs(
+    filter_conditions: Optional[Dict[str, Any]], limit: int
+) -> Dict[str, Any]:
+    """Store-search kwargs for a query asking this service for *limit* results.
+
+    Each collection is asked for ``2 x limit`` results (more for merging), and
+    the #2047 filtered candidate window is derived from THAT store limit, here
+    and only here, so callers never pass ``prefetch_limit``/``lazy_load``.
+    Unfiltered: only the limit (the store's default window is unchanged).
+    """
+    store_limit = limit * 2
+    return {
+        "limit": store_limit,
+        **filtered_window_kwargs(filter_conditions, store_limit),
+    }
 
 
 class MultiIndexQueryService:
@@ -157,7 +175,8 @@ class MultiIndexQueryService:
             query=query_text,
             embedding_provider=self.embedding_provider,
             collection_name=collection_name,
-            limit=limit * 2,  # Get more results for better merging
+            # 2 x limit for merging, plus the #2047 window for that limit.
+            **_store_limit_kwargs(filter_conditions, limit),
             filter_conditions=filter_conditions,
             subdirectory=None,  # Default code_index location
             return_timing=True,
@@ -224,7 +243,7 @@ class MultiIndexQueryService:
                     query=query_text,
                     embedding_provider=provider,
                     collection_name=model_name,
-                    limit=limit * 2,
+                    **_store_limit_kwargs(filter_conditions, limit),
                     filter_conditions=filter_conditions,
                     subdirectory=None,
                     return_timing=True,
@@ -247,7 +266,7 @@ class MultiIndexQueryService:
                     query=query_text,
                     embedding_provider=provider,
                     collection_name=collection_name,
-                    limit=limit * 2,
+                    **_store_limit_kwargs(filter_conditions, limit),
                     filter_conditions=filter_conditions,
                     subdirectory="multimodal_index",
                     return_timing=True,

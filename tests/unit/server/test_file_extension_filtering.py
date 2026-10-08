@@ -169,39 +169,51 @@ class TestFileExtensionFiltering:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    def test_semantic_query_validates_file_extension_format(
+    def test_semantic_query_accepts_file_extensions_without_dot(
         self, mock_dep_user_manager, mock_jwt_manager, client, mock_user
     ):
-        """Test semantic query validates file extensions start with dot."""
-        # Setup authentication
+        """#2047: the leading dot is optional; values reach the query manager."""
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",
             "role": "normal_user",
         }
         mock_dep_user_manager.get_user.return_value = mock_user
-
-        # Request with invalid file extension format (missing dot)
-        response = client.post(
-            "/api/query",
-            json={
+        empty = {
+            "results": [],
+            "total_results": 0,
+            "query_metadata": {
                 "query_text": "test",
-                "file_extensions": ["py", "js"],  # Invalid - missing dots
-                "limit": 10,
+                "execution_time_ms": 1,
+                "repositories_searched": 1,
+                "timeout_occurred": False,
             },
-            headers={"Authorization": "Bearer test-token"},
-        )
+        }
 
-        # Should fail validation
-        assert response.status_code == 422  # Pydantic validation error
-        data = response.json()
-        assert "detail" in data
+        with patch.object(
+            client.app.state.semantic_query_manager,
+            "query_user_repositories",
+            return_value=empty,
+        ) as query:
+            response = client.post(
+                "/api/query",
+                json={
+                    "query_text": "test",
+                    "file_extensions": ["py", ".JS"],
+                    "limit": 10,
+                },
+                headers={"Authorization": "Bearer test-token"},
+            )
+
+        assert response.status_code == 200, response.text
+        assert query.call_args.kwargs["file_extensions"] == ["py", ".JS"]
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_validates_file_extension_characters(
         self, mock_dep_user_manager, mock_jwt_manager, client, mock_user
     ):
-        """Test semantic query validates file extensions contain valid characters."""
+        """#2047: a value that can never be a file suffix ('.' or '/' inside)
+        is rejected, as at every other door."""
         # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",
@@ -209,12 +221,11 @@ class TestFileExtensionFiltering:
         }
         mock_dep_user_manager.get_user.return_value = mock_user
 
-        # Request with invalid characters in file extension
         response = client.post(
             "/api/query",
             json={
                 "query_text": "test",
-                "file_extensions": [".py!", ".js*"],  # Invalid characters
+                "file_extensions": [".tar.gz", "a/b"],  # never a suffix
                 "limit": 10,
             },
             headers={"Authorization": "Bearer test-token"},

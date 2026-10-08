@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `file_extensions` follows one rule in semantic, FTS and hybrid search on every door: REST `/api/query`, MCP `search_code` (single repository and omni), REST `/api/query/multi`, and the CLI in standalone and daemon mode. Values are case-insensitive, the leading dot is optional, several values are OR-ed (the CLI used to AND them), files without an extension never match, and the filter is intersected with `language`. A non-list, an empty value, or a value containing `.` or `/` is rejected (HTTP 422, MCP error, CLI usage error). FTS pushes the values into the existing index field (no re-index); semantic search filters inside the vector store in one query per repository over the first 400 candidates. An extension-filtered request uses 80% of the search handler timeout as its budget: no further repository search starts after it, and a short answer is never wrong and is logged at INFO. Any filtered semantic search (`language`, path, exclude-path or `file_extensions`) on the server, the standalone CLI and the CLI daemon searches the same first 400 candidates (or twice the requested store limit, if larger) and returns up to `limit` matches, so a selective filter no longer comes back empty while matches exist; unfiltered searches are unchanged. REST `/api/query` semantic search now applies `language` (it was ignored); REST FTS now splits `exclude_path` on commas into independent patterns (as in Bug #1095); FTS `language` combined with `exclude_language` now intersects (the `language` inclusion used to be dropped); and REST `/api/query/multi` enforces the same repository-count cap as MCP omni search (`omni_max_repos_per_search`, HTTP 422 `repo_count_cap_exceeded`).
+
 ## [12.83.0] - 2026-10-06
 
 ### Fixed

@@ -8,9 +8,10 @@ providing fast exact text search capabilities.
 import json
 import logging
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
 
 if TYPE_CHECKING:
     from tantivy import Index, Schema  # type: ignore[import-untyped]
@@ -87,6 +88,23 @@ _REGEX_STATE_LIMIT_ERROR_MARKER = "size limit"
 # regex-extraction step in search() below. See that method's use of this
 # constant for the full rationale and fallback behavior.
 _MAX_REGEX_EXTRACTION_CANDIDATES = 2000
+
+# The "effectively unlimited" hit count used for limit=0 (grep-like) searches.
+# No search() ever asks Tantivy for more hits than this; a limit above it
+# returns at most this many results.
+_FTS_UNLIMITED_HITS = 100000
+
+# #2047: a filtered FTS search inspects at most this many hits per requested
+# result in one repository (50 x limit; 500 for the default limit of 10).
+# Why 50: the extension push-down already restricts hits to the requested
+# extensions for every alphanumeric value, so the refetch only compensates for
+# hits the suffix re-check drops -- extensionless files (stored as "txt") when
+# "txt" is requested, and every hit for a value that cannot be pushed down
+# ("c++", "foo-bar"). 50 x limit lets matching files be outnumbered 49:1 by
+# dropped hits before the answer can come up short, while a fleet-wide
+# filtered query over 900 repositories stays near 450k inspected hits at the
+# default limit, all under one request time budget.
+_FTS_FILL_HITS_PER_RESULT = 50
 
 
 def _is_regex_state_limit_error(exc: Exception) -> bool:
@@ -1162,6 +1180,8 @@ class TantivyIndexManager:
         path_filter: Optional[str] = None,  # Deprecated: use path_filters
         query: Optional[str] = None,  # Backwards compatibility
         use_regex: bool = False,  # NEW: Enable regex pattern matching
+        file_extensions: Optional[List[str]] = None,
+        deadline: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search the FTS index with configurable options.
@@ -1171,7 +1191,9 @@ class TantivyIndexManager:
             case_sensitive: Enable case-sensitive matching (default: False)
             edit_distance: Fuzzy matching tolerance (0-3, default: 0)
             snippet_lines: Context lines to include in snippet (0 for list only, default: 5)
-            limit: Maximum number of results (default: 10, use 0 for unlimited grep-like output)
+            limit: Maximum number of results (default: 10, use 0 for unlimited grep-like output).
+                No search asks Tantivy for more than _FTS_UNLIMITED_HITS hits, so a
+                larger limit returns at most that many results.
             language_filter: Filter by single programming language (deprecated, use languages)
             languages: Filter by multiple programming languages (e.g., ["py", "js"])
             path_filters: Filter by path patterns (e.g., ["*/tests/*", "*/src/*"]) - OR logic
@@ -1180,6 +1202,18 @@ class TantivyIndexManager:
             path_filter: Filter by single path pattern (deprecated, use path_filters)
             query: Backwards compatibility parameter (deprecated, use query_text)
             use_regex: Interpret query_text as regex pattern (incompatible with edit_distance > 0)
+            file_extensions: Keep only files with one of these extensions
+                (#2047 rule, see services/extension_filter.py:
+                case-insensitive, leading dot optional, OR-ed, extensionless
+                files never match), intersected with the language filters.
+                When hits fail the suffix re-check, further pages are fetched
+                (each hit inspected once) up to _FTS_FILL_HITS_PER_RESULT x
+                limit inspected hits; if that bound or ``deadline`` stops the
+                search with fewer than ``limit`` results, it is logged at INFO.
+            deadline: A time.monotonic() reading (the request's time budget,
+                shared with its other repositories): no further extension
+                refetch page is fetched once it has passed. The first page
+                always runs.
 
         Returns:
             List of dictionaries with keys:
@@ -1212,6 +1246,14 @@ class TantivyIndexManager:
             active_language_filter = languages if languages else None
         elif language_filter is not None:
             active_language_filter = [language_filter]
+
+        from code_indexer.services.extension_filter import (
+            fts_pushdown_terms,
+            normalize_extensions,
+            path_matches_extensions,
+        )
+
+        extension_set = normalize_extensions(file_extensions)
 
         if self._index is None:
             raise RuntimeError("Index not initialized")
@@ -1324,15 +1366,21 @@ class TantivyIndexManager:
             # Add language filter to query if specified AND no exclusions present
             # If exclusions present, we do post-processing for correct precedence
             if active_language_filter and not exclude_languages:
-                # Build language facet queries (OR semantics: match any specified language)
+                # Build language facet queries (OR semantics: match any specified language).
+                # The facet holds the stored suffix ("/py"), so a language name
+                # ("python") is expanded to its extensions; an unknown name or a
+                # bare extension maps to itself.
                 from tantivy import Facet
+                from code_indexer.services.language_mapper import LanguageMapper
 
                 assert self._schema is not None  # For mypy
+                facet_mapper = LanguageMapper()
                 language_queries = [
                     TantivyQuery.term_query(
-                        self._schema, "language_facet", Facet.from_string(f"/{lang}")
+                        self._schema, "language_facet", Facet.from_string(f"/{ext}")
                     )
                     for lang in active_language_filter
+                    for ext in sorted(facet_mapper.get_extensions(lang))
                 ]
 
                 # Combine language queries with OR semantics (any language matches)
@@ -1354,10 +1402,40 @@ class TantivyIndexManager:
             else:
                 tantivy_query = text_query
 
+            # #2047: push the extension filter down as an OR group of terms on
+            # the tokenized `language` field (lowercased by the default
+            # tokenizer; present in every schema version). Wrapped in a zero
+            # constant score so it filters without changing the ranking.
+            # Each hit is still post-verified below (extensionless files are
+            # stored as "txt").
+            pushdown_terms = (
+                fts_pushdown_terms(extension_set) if extension_set else None
+            )
+            if pushdown_terms:
+                assert self._schema is not None  # For mypy
+                extension_query = TantivyQuery.boolean_query(
+                    [
+                        (
+                            tantivy.Occur.Should,
+                            TantivyQuery.term_query(self._schema, "language", term),
+                        )
+                        for term in pushdown_terms
+                    ]
+                )
+                tantivy_query = TantivyQuery.boolean_query(
+                    [
+                        (tantivy.Occur.Must, tantivy_query),
+                        (
+                            tantivy.Occur.Must,
+                            TantivyQuery.const_score_query(extension_query, 0.0),
+                        ),
+                    ]
+                )
+
             # Handle limit=0 for unlimited results (grep-like output)
             # Tantivy requires limit > 0, so use very large limit and disable snippets
             if limit == 0:
-                search_limit = 100000  # Effectively unlimited
+                search_limit = _FTS_UNLIMITED_HITS  # Effectively unlimited
                 snippet_lines = 0  # Disable snippets for grep-like output
             else:
                 # Execute search with increased limit to account for filtering
@@ -1367,8 +1445,14 @@ class TantivyIndexManager:
                     or exclude_paths
                     or exclude_languages
                     or (languages and exclude_languages)
+                    or extension_set
                 )
-                search_limit = limit * 3 if needs_increased_limit else limit
+                # Never ask Tantivy for more than the cap (a larger limit
+                # returns at most _FTS_UNLIMITED_HITS results).
+                search_limit = min(
+                    limit * 3 if needs_increased_limit else limit,
+                    _FTS_UNLIMITED_HITS,
+                )
 
             search_results = searcher.search(tantivy_query, search_limit).hits
 
@@ -1467,58 +1551,124 @@ class TantivyIndexManager:
                 if words
             ]
 
+            def _path_and_language(doc: Any) -> Tuple[str, Optional[str]]:
+                language = doc.get_first("language")
+                # Parse language from facet format (/language_name)
+                return (
+                    doc.get_first("path") or "",
+                    str(language).strip("/") if language else language,
+                )
+
+            def _passes_filters(path: str, language: Optional[str]) -> bool:
+                """Per-hit filters. CRITICAL PRECEDENCE ORDER: 1. language
+                exclusions, 2. language inclusions, 3. path exclusions,
+                4. path inclusions (#2047's suffix re-check sits after 2)."""
+                # 1. Exclusions take precedence over inclusions.
+                if excluded_extensions and language in excluded_extensions:
+                    return False
+                # 2. Language filtering was already done in the query for
+                # performance, but exclude_languages needs post-processing.
+                if allowed_extensions and language not in allowed_extensions:
+                    return False
+                # #2047: post-verify the pushed-down extension filter on the
+                # path itself (drops extensionless "txt" documents).
+                if extension_set and not path_matches_extensions(path, extension_set):
+                    return False
+                # 3. Path exclusions before path inclusions.
+                if (
+                    exclude_matcher
+                    and exclude_paths
+                    and any(
+                        exclude_matcher.matches_pattern(path, p) for p in exclude_paths
+                    )
+                ):
+                    return False
+                # 4. Path inclusions: ANY path filter (OR), PathPatternMatcher
+                # for consistency with semantic search (** recursive globs).
+                if (
+                    path_matcher
+                    and active_path_filters
+                    and not any(
+                        path_matcher.matches_pattern(path, p)
+                        for p in active_path_filters
+                    )
+                ):
+                    return False
+                return True
+
+            # #2047: hits that fail the suffix re-check (extensionless "txt"
+            # files, or values that cannot be pushed down) must not leave the
+            # answer short. Fetch the NEXT page only (offset paging, so no hit
+            # is inspected twice; the total doubles per page) until `limit`
+            # hits pass, Tantivy has no more matches, the per-repository bound
+            # of _FTS_FILL_HITS_PER_RESULT x limit inspected hits is reached,
+            # or the request's `deadline` has passed. Every inspected hit's
+            # stored document is kept (None when it fails the filters) and
+            # reused by the result loop, so no document is fetched twice.
+            # Bound: at most bit_length(_FTS_UNLIMITED_HITS) + 1 pages.
+            inspected: Dict[Tuple[int, int], Any] = {}
+            if extension_set and limit > 0:
+                search_results = list(search_results)
+                fill_bound = min(limit * _FTS_FILL_HITS_PER_RESULT, _FTS_UNLIMITED_HITS)
+                page, requested = search_results, search_limit
+                passing = 0
+                stopped_by: Optional[str] = None
+                for _ in range(_FTS_UNLIMITED_HITS.bit_length() + 1):
+                    for _score, hit in page:
+                        hit_doc = searcher.doc(hit)
+                        kept_doc: Optional[Any] = None
+                        if _passes_filters(*_path_and_language(hit_doc)):
+                            passing += 1
+                            kept_doc = hit_doc
+                        inspected[(hit.segment_ord, hit.doc)] = kept_doc
+                    if passing >= limit or len(page) < requested:
+                        break  # filled, or Tantivy has no more matches
+                    if len(search_results) >= fill_bound:
+                        stopped_by = "per-repository hit bound"
+                        break
+                    if deadline is not None and time.monotonic() >= deadline:
+                        stopped_by = "search time budget"
+                        break
+                    requested = min(
+                        len(search_results), fill_bound - len(search_results)
+                    )
+                    page = searcher.search(
+                        tantivy_query,
+                        requested,
+                        count=False,
+                        offset=len(search_results),
+                    ).hits
+                    search_results.extend(page)
+                if stopped_by is not None:
+                    logger.info(
+                        "FTS file_extensions filter stopped at the %s after "
+                        "inspecting %d hits; returning %d of %d requested "
+                        "results (%s)",
+                        stopped_by,
+                        len(search_results),
+                        passing,
+                        limit,
+                        self.index_dir,
+                    )
+
             # Process results
             docs = []
             for score, address in search_results:
-                doc = searcher.doc(address)
+                hit_key = (address.segment_ord, address.doc)
+                if hit_key in inspected:
+                    doc = inspected[hit_key]
+                    if doc is None:
+                        continue  # already rejected by the filters
+                else:
+                    doc = searcher.doc(address)
 
                 # Extract fields
-                path = doc.get_first("path") or ""
+                path, language = _path_and_language(doc)
                 content_raw = doc.get_first("content_raw") or ""
-                language = doc.get_first("language")
                 line_start = doc.get_first("line_start")
 
-                # Parse language from facet format (/language_name)
-                if language:
-                    language = str(language).strip("/")
-
-                # CRITICAL FILTER PRECEDENCE ORDER:
-                # 1. Language exclusions (FIRST - takes precedence)
-                # 2. Language inclusions (SECOND)
-                # 3. Path exclusions (THIRD)
-                # 4. Path inclusions (FOURTH)
-
-                # 1. Apply language exclusions FIRST (before inclusions)
-                # Exclusions take precedence - if language matches any excluded extension, exclude it
-                if excluded_extensions and language in excluded_extensions:
-                    continue  # Skip this result
-
-                # 2. Apply language inclusions SECOND (after exclusions)
-                # Language filtering was already done in query for performance,
-                # but we need post-processing for exclude_languages since they're not in query
-                if allowed_extensions and language not in allowed_extensions:
-                    continue  # Skip this result
-
-                # 3. Apply path exclusions THIRD (before path inclusions)
-                # Exclusions take precedence - if path matches any exclusion pattern, exclude it
-                if exclude_matcher and exclude_paths:
-                    if any(
-                        exclude_matcher.matches_pattern(path, pattern)
-                        for pattern in exclude_paths
-                    ):
-                        continue  # Skip this result
-
-                # 4. Apply path inclusions FOURTH (after all exclusions)
-                if path_matcher and active_path_filters:
-                    # Use PathPatternMatcher for consistency with semantic search
-                    # PathPatternMatcher provides cross-platform path normalization
-                    # and consistent glob pattern support including ** for recursive matching
-                    # Include result if it matches ANY of the path filters (OR semantics)
-                    if not any(
-                        path_matcher.matches_pattern(path, pattern)
-                        for pattern in active_path_filters
-                    ):
-                        continue
+                if not _passes_filters(path, language):
+                    continue
 
                 # Find match position in content
                 # CRITICAL (Bug #1497 follow-up): Tantivy's DFA-based regex engine

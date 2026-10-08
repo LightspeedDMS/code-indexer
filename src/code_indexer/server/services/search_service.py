@@ -18,6 +18,7 @@ from ..models.api_models import (
 from ...config import ConfigManager
 from ...backends.backend_factory import BackendFactory
 from ...services.embedding_factory import EmbeddingProviderFactory
+from ...services.filtered_window import filtered_window_kwargs
 from ...utils.content_availability import is_content_unavailable
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.search_embed_event_emit import (
@@ -234,6 +235,7 @@ class SemanticSearchService:
         hnsw_cache: object = _HNSW_CACHE_USE_SERVER_DEFAULT,
         precomputed_query_vector: Optional[List[float]] = None,
         activation_id: Optional[str] = None,
+        file_extensions: Optional[List[str]] = None,
     ) -> SemanticSearchResponse:
         """
         Perform semantic search in repository using direct path.
@@ -248,6 +250,8 @@ class SemanticSearchService:
             precomputed_query_vector: Optional pre-computed Voyage embedding vector.
                 When supplied (Story #883 Phase C), the vector is forwarded to
                 _perform_semantic_search to avoid a duplicate Voyage API call.
+            file_extensions: #2047 values, pushed into the vector store as
+                one ``any_ext`` condition (see _perform_semantic_search).
 
         Returns:
             Semantic search response with ranked results
@@ -284,6 +288,7 @@ class SemanticSearchService:
             no_embedding_cache_shortcut=search_request.no_embedding_cache_shortcut,
             activation_id=activation_id,
             enable_multimodal=True,
+            file_extensions=file_extensions,
         )
 
         return SemanticSearchResponse(
@@ -298,6 +303,7 @@ class SemanticSearchService:
         search_request: SemanticSearchRequest,
         provider_name: Optional[str] = None,
         activation_id: Optional[str] = None,
+        file_extensions: Optional[List[str]] = None,
     ) -> SemanticSearchResponse:
         """
         Perform semantic search using an explicitly named embedding provider.
@@ -309,6 +315,8 @@ class SemanticSearchService:
             repo_path: Direct path to repository directory
             search_request: Search request parameters
             provider_name: Override embedding provider name (e.g. 'cohere', 'voyage-ai')
+            file_extensions: #2047 values, pushed into the vector store as
+                one ``any_ext`` condition (see _perform_semantic_search).
 
         Returns:
             Semantic search response with ranked results
@@ -329,6 +337,7 @@ class SemanticSearchService:
             provider_name_override=provider_name,
             no_embedding_cache_shortcut=search_request.no_embedding_cache_shortcut,
             activation_id=activation_id,
+            file_extensions=file_extensions,
         )
 
         return SemanticSearchResponse(
@@ -343,15 +352,22 @@ class SemanticSearchService:
         language: Optional[str],
         exclude_language: Optional[str],
         exclude_path: Optional[str],
+        file_extensions: Optional[List[str]] = None,
     ) -> dict:
         """
         Build filter_conditions dict for FilesystemVectorStore.search().
 
         Uses LanguageMapper for proper language-to-extension mapping,
-        following the same pattern as the CLI (cli.py).
+        following the same pattern as the CLI (cli.py). ``file_extensions``
+        (#2047) becomes the ONE ``any_ext`` condition the CLI builds too
+        (services/extension_filter.vector_store_extension_condition); inside
+        ``must`` it intersects with the other filters.
 
         Returns an empty dict when no filters are given (no filtering applied).
         """
+        from code_indexer.services.extension_filter import (
+            vector_store_extension_condition,
+        )
         from code_indexer.services.language_mapper import LanguageMapper
 
         mapper = LanguageMapper()
@@ -364,6 +380,10 @@ class SemanticSearchService:
         if language:
             lang_filter = mapper.build_language_filter(language)
             must.append(lang_filter)
+
+        extension_condition = vector_store_extension_condition(file_extensions)
+        if extension_condition is not None:
+            must.append(extension_condition)
 
         if exclude_language:
             extensions = mapper.get_extensions(exclude_language)
@@ -414,6 +434,7 @@ class SemanticSearchService:
         no_embedding_cache_shortcut: bool = False,
         activation_id: Optional[str] = None,
         enable_multimodal: bool = False,
+        file_extensions: Optional[List[str]] = None,
     ) -> List[SearchResultItem]:
         """
         Perform real semantic search using repository-specific configuration.
@@ -440,6 +461,10 @@ class SemanticSearchService:
                 (REST/MCP) never queried multimodal collections the CLI
                 already indexes. Default False so every existing caller is
                 unaffected.
+            file_extensions: #2047 values. Pushed into the store as ONE
+                ``any_ext`` condition (_build_filter_conditions) in a single
+                store query whose candidate window is widened and read with
+                early exit (services/filtered_window) -- see its RECALL RULE.
 
         Returns:
             List of search results ranked by semantic similarity
@@ -508,6 +533,7 @@ class SemanticSearchService:
                 language=language,
                 exclude_language=exclude_language,
                 exclude_path=exclude_path,
+                file_extensions=file_extensions,
             )
 
             # Real vector search - different parameter patterns for different backends
@@ -522,6 +548,12 @@ class SemanticSearchService:
                 # Map accuracy to HNSW ef parameter
                 accuracy_to_ef = {"fast": 20, "balanced": 50, "high": 200}
                 ef_value = accuracy_to_ef.get(accuracy, 50) if accuracy else 50
+                # ANY filter: ONE store query over the candidate window the
+                # CLI and daemon share (empty without filters: unchanged).
+                # Only for the DIRECT store search below (store limit =
+                # limit); the multimodal path's MultiIndexQueryService
+                # derives its own window from the store limit it sends.
+                extension_window = filtered_window_kwargs(filter_conditions, limit)
 
                 # Story #883 Component 1 / Bug #1148: reuse a precomputed vector when
                 # provided (avoids a second API call in the parallel memory branch and
@@ -547,6 +579,7 @@ class SemanticSearchService:
                     # falls back to a per-call pool).
                     parallel_executor=_get_query_executor(),
                     no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    **extension_window,
                 )
                 if precomputed_query_vector is not None:
                     # Omni per-repo reuse: supply the precomputed vector so FSV skips
@@ -588,7 +621,8 @@ class SemanticSearchService:
                     # the multimodal-collection call ALWAYS forces
                     # no_embedding_cache_shortcut=True, isolating its cache
                     # interaction from the code path regardless of the
-                    # caller's own flag (Bug #1480).
+                    # caller's own flag (Bug #1480). #2047: no window here --
+                    # the service derives it from the store limit it sends.
                     code_kwargs = dict(
                         ef=ef_value,
                         parallel_executor=_get_query_executor(),
@@ -618,6 +652,13 @@ class SemanticSearchService:
                     )
             else:
                 # Backend: sequential execution with pre-computed embedding.
+                # #2047: this call cannot apply filter conditions -- refuse a
+                # filtered query rather than answer it unfiltered.
+                if filter_conditions:
+                    raise RuntimeError(
+                        f"{type(vector_store_client).__name__} cannot apply "
+                        "filter conditions"
+                    )
                 # Bug #1078: gate through concurrency governor to cap concurrent
                 # provider HTTP calls per account-level rate budget.
                 from code_indexer.server.services.governed_call import (
@@ -742,8 +783,12 @@ class SemanticSearchService:
         exclude_path: Optional[str] = None,
         accuracy: Optional[str] = None,
         activation_id: Optional[str] = None,
+        file_extensions: Optional[List[str]] = None,
     ) -> List[SearchResultItem]:
         """Query ONLY the multimodal collection(s) for a repo (Bug #1480 follow-up).
+
+        ``file_extensions`` (#2047) is pushed into the store exactly as on
+        the code-collection path (_perform_semantic_search).
 
         The parallel/failover query strategies dispatch per-provider via
         SemanticSearchService.search_repository_path_with_provider(), which
@@ -806,6 +851,7 @@ class SemanticSearchService:
                 language=language,
                 exclude_language=exclude_language,
                 exclude_path=exclude_path,
+                file_extensions=file_extensions,
             )
 
             accuracy_to_ef = {"fast": 20, "balanced": 50, "high": 200}
@@ -826,6 +872,8 @@ class SemanticSearchService:
                 filter_conditions=filter_conditions or None,
                 ef=ef_value,
                 parallel_executor=_get_query_executor(),
+                # #2047: the service applies the filtered window from the
+                # store limit it sends.
                 no_embedding_cache_shortcut=True,
             )
 
