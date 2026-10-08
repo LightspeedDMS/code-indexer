@@ -444,6 +444,43 @@ def hold_gil_in_c_call_in_process(microseconds: int) -> None:
     ctypes.PyDLL(None).usleep(microseconds)
 
 
+_STALL_FRAME = "hold_gil_in_c_call_in_process"
+# A loaded machine can starve this process past the 0.5 s timeout on its own:
+# that real stall is dumped too, and if it fires the one-shot timer just
+# before the deliberate stall begins, nothing can re-arm it during the stall.
+# Each attempt is a full deliberate stall; the bound keeps the test finite.
+_STALL_ATTEMPTS = 5
+
+
+def _evidence_bytes(log_dir: Path) -> int:
+    return sum(p.stat().st_size for p in log_dir.glob("*.evidence"))
+
+
+def _await_heartbeat(log_dir: Path) -> None:
+    """Return just after a tick: its re-arm restarted the dump timer."""
+    before = _evidence_bytes(log_dir)
+    deadline = time.monotonic() + _ARMED_WAIT_S
+    while _evidence_bytes(log_dir) == before:
+        assert time.monotonic() < deadline, "the watchdog stopped ticking"
+        time.sleep(0.005)
+
+
+def _await_stall_log(log_dir: Path, wait_s: float) -> Optional[Path]:
+    """The finalized log whose DUMP shows the deliberate stall's frame, among
+    every log written so far (load may have added logs of real stalls)."""
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        for log in log_dir.glob("worker-stall-*-*.log"):
+            text = log.read_text()
+            if (
+                _DUMP_SECTION_LINE.search(text)
+                and _STALL_FRAME in _split_at_dump(text)[1]
+            ):
+                return log
+        time.sleep(0.02)
+    return None
+
+
 def test_core_mechanism_in_process_gil_stall_leaves_stack_and_samples(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -451,6 +488,7 @@ def test_core_mechanism_in_process_gil_stall_leaves_stack_and_samples(
     mechanism, with short timings, in this process."""
     log_dir = tmp_path / "logs"
     watchdog = StallWatchdog(log_dir, dump_timeout_s=0.5, interval_s=0.1)
+    stall_log: Optional[Path] = None
     with caplog.at_level(logging.ERROR, logger=_LOGGER):
         watchdog.start()
         try:
@@ -459,21 +497,21 @@ def test_core_mechanism_in_process_gil_stall_leaves_stack_and_samples(
                 assert time.monotonic() < deadline, "watchdog never armed"
                 time.sleep(0.02)
             time.sleep(0.3)  # a few heartbeats: samples in the ring
-            hold_gil_in_c_call_in_process(1_000_000)  # 1 s > 0.5 s timeout
-            deadline = time.monotonic() + 5
-            while not list(log_dir.glob("worker-stall-*-*.log")):
-                assert time.monotonic() < deadline, "the stall dump was not finalized"
-                time.sleep(0.02)
+            for _ in range(_STALL_ATTEMPTS):
+                _await_heartbeat(log_dir)
+                hold_gil_in_c_call_in_process(1_500_000)  # 1.5 s = 3x the timeout
+                stall_log = _await_stall_log(log_dir, wait_s=5.0)
+                if stall_log is not None:
+                    break
         finally:
             watchdog.stop()
 
-    dumps = list(log_dir.glob("worker-stall-*-*.log"))
-    assert len(dumps) == 1, dumps
-    samples, stack = _split_at_dump(dumps[0].read_text())
+    assert stall_log is not None, sorted(p.name for p in log_dir.iterdir())
+    samples, stack = _split_at_dump(stall_log.read_text())
     assert "rss_kb=" in samples
-    assert stack.startswith("Timeout (") and "hold_gil_in_c_call_in_process" in stack
+    assert stack.startswith("Timeout (") and _STALL_FRAME in stack
     assert any(
-        r.levelno == logging.ERROR and str(dumps[0]) in r.getMessage()
+        r.levelno == logging.ERROR and str(stall_log) in r.getMessage()
         for r in caplog.records
     ), [r.getMessage() for r in caplog.records]
 
