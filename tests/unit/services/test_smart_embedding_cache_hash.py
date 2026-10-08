@@ -83,7 +83,10 @@ class FakeChunker:
         self._chunks = chunks_by_path or {}
 
     def chunk_file(
-        self, file_path: Path, repo_root: Optional[Path] = None
+        self,
+        file_path: Path,
+        repo_root: Optional[Path] = None,
+        content: Optional[bytes] = None,
     ) -> List[Dict]:
         key = str(file_path)
         if key in self._chunks:

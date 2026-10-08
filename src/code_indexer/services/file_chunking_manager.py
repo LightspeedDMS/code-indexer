@@ -457,6 +457,32 @@ class FileChunkingManager:
                 processing_time=time.time() - start_time,
                 error=f"File vanished before processing: {e}",
             )
+        # Read ONCE here and let everything downstream work from these bytes.
+        # The hash phase used to read the whole file just to sha256 it, and this
+        # worker read it again to chunk it. Reading here collapses that pair, and
+        # it also closes the window between them: two separate reads could see
+        # different content, leaving the stored hash describing bytes that were
+        # never chunked.
+        #
+        # A read failure is the same TOCTOU case the stat above already handles,
+        # so it gets the same vanished result rather than a new failure mode.
+        try:
+            content = file_path.read_bytes()
+        except OSError as e:
+            logger.warning(f"Skipping file that vanished during chunking: {file_path}")
+            return FileProcessingResult(
+                success=False,
+                vanished=True,
+                file_path=file_path,
+                chunks_processed=0,
+                processing_time=time.time() - start_time,
+                error=f"File vanished before processing: {e}",
+            )
+
+        # Fill in a hash the metadata phase deferred rather than read for.
+        if metadata.get("file_hash") is None:
+            metadata["file_hash"] = "sha256:" + hashlib.sha256(content).hexdigest()
+
         filename = file_path.name
 
         # Single acquire at start - create clean FileData
@@ -480,7 +506,9 @@ class FileChunkingManager:
 
             # Phase 1: Chunk the file
             logger.debug(f"Starting chunking for {file_path}")
-            chunks = self.chunker.chunk_file(file_path, repo_root=self.codebase_dir)
+            chunks = self.chunker.chunk_file(
+                file_path, repo_root=self.codebase_dir, content=content
+            )
 
             if not chunks:
                 # Empty files are valid but don't need indexing

@@ -19,6 +19,7 @@ import pytest
 
 from code_indexer.config import Config, IndexingConfig
 from code_indexer.indexing.fixed_size_chunker import FixedSizeChunker
+from code_indexer.indexing.repo_manifest import RepoManifest
 from code_indexer.services.file_identifier import FileIdentifier
 
 SHAPES: Dict[str, bytes] = {
@@ -141,3 +142,63 @@ def test_handing_bytes_over_removes_the_second_read(repo: Path) -> None:
     assert reads_after == 0, (
         f"handing bytes over still read the file {reads_after} time(s)"
     )
+
+
+def test_the_deferred_hash_is_filled_from_the_same_bytes_and_matches(
+    repo: Path,
+) -> None:
+    """Deferring the sha256 must not change it.
+
+    The high-throughput path has two phases: metadata, then chunking. The metadata
+    phase used to read every file purely to sha256 it, and the chunking worker
+    then read the same file again. Deferring that hash to the worker -- which has
+    to read anyway -- removes one whole read per file. It is only safe if the
+    deferred value is identical.
+    """
+    import hashlib
+
+    identifier = FileIdentifier(repo, Config(codebase_dir=repo))
+
+    for name in sorted(SHAPES):
+        target = repo / name
+        eager = identifier.get_file_metadata(target)
+        deferred = identifier.get_file_metadata(target, defer_content_hash=True)
+
+        assert deferred["file_hash"] is None, f"{name}: deferral did not defer"
+
+        # what FileChunkingManager does with the bytes it read
+        data = target.read_bytes()
+        deferred["file_hash"] = "sha256:" + hashlib.sha256(data).hexdigest()
+
+        assert deferred["file_hash"] == eager["file_hash"], (
+            f"{name}: deferred hash differs"
+        )
+        # and the blob hash is unaffected by deferring the other one
+        assert deferred.get("git_hash") == eager.get("git_hash"), (
+            f"{name}: blob hash changed"
+        )
+
+
+def test_deferring_does_not_read_the_file(repo: Path) -> None:
+    """The point of the deferral: the metadata phase stops opening files."""
+    target = repo / "lf.py"
+    identifier = FileIdentifier(
+        repo, Config(codebase_dir=repo), manifest=RepoManifest.build(repo)
+    )
+
+    opened: List[str] = []
+    real_open = builtins.open
+
+    def spy(file: Any, *a: Any, **k: Any) -> Any:
+        if str(file) == str(target):
+            opened.append("open")
+        return real_open(file, *a, **k)
+
+    builtins.open = spy  # type: ignore[assignment]
+    try:
+        opened.clear()
+        identifier.get_file_metadata(target, defer_content_hash=True)
+    finally:
+        builtins.open = real_open  # type: ignore[assignment]
+
+    assert opened == [], f"metadata phase still opened the file {len(opened)} time(s)"

@@ -199,7 +199,10 @@ class FileIdentifier:
         return True
 
     def get_file_metadata(
-        self, file_path: Path, content: Optional[bytes] = None
+        self,
+        file_path: Path,
+        content: Optional[bytes] = None,
+        defer_content_hash: bool = False,
     ) -> Dict[str, Any]:
         """
         Get comprehensive file metadata (git-aware or fallback).
@@ -215,7 +218,17 @@ class FileIdentifier:
         metadata = {
             "project_id": self.get_project_id(),
             "file_path": rel_path,
-            "file_hash": self._get_file_content_hash(file_path, content),
+            # The sha256 is the one value that cannot come from the manifest: it is
+            # a different algorithm, it is stored, and it is the point-UUID
+            # signature when git is unavailable. So it needs the bytes. Deferring
+            # it lets a caller that will read the file anyway compute it there,
+            # instead of this phase reading the whole file just to hash it.
+            # The deferring caller MUST fill it before the metadata is used.
+            "file_hash": (
+                None
+                if (content is None and defer_content_hash)
+                else self._get_file_content_hash(file_path, content)
+            ),
             "indexed_at": datetime.now(timezone.utc).isoformat() + "Z",
             "git_available": self.git_available,
         }
