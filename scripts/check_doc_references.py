@@ -100,6 +100,7 @@ FIXTURE_ALLOWLIST: Mapping[str, str] = {
     "tests/unit/server/mcp/test_wiki_url_enrichment.py": _PATH_AS_DATA,
     "tests/unit/server/query/extension_filter_env_2047.py": _SYNTHETIC_REPO,
     "tests/unit/server/query/test_extension_filter_2047.py": _PATH_AS_DATA,
+    "tests/unit/services/test_multi_index_query_errors_2109.py": _PATH_AS_DATA,
     "tests/unit/server/services/test_file_crud_service_symlink_escape_1891.py": (
         _SYNTHETIC_REPO
     ),

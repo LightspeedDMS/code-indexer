@@ -144,8 +144,8 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 
 | Suite | Scope | When Required | Time |
 |-------|-------|---------------|------|
-| `fast-automation.sh` | CLI, core logic, chunking, storage (ignores `tests/unit/server/`) | ALL changes | ~27 min (grows faster than test count -- re-measure) |
-| `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage), 6 parallel chunks | Touching `src/code_indexer/server/` | ~12 min (chunk 1 `services/` is the long pole) |
+| `fast-automation.sh` | CLI, core logic, chunking, storage (ignores `tests/unit/server/`) | ALL changes | ~50 min alone (49 min measured 2026-10-08; grows faster than test count -- re-measure); use `timeout 3600` |
+| `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage), 6 parallel chunks | Touching `src/code_indexer/server/` | ~22 min (measured 2026-10-08; chunk 6 "rest2" and chunk 4 `web/repositories/routers` are the long poles) |
 | `slow-automation.sh` | `@pytest.mark.slow` unit tests (Bug #1798) | Not yet in the required gate sequence | ~45 min |
 | `rust-automation.sh` | Rust X-Ray engine: `cargo test --workspace` (447 tests incl. AC18 PREAMBLE parity) + `cargo clippy --workspace --all-targets -D warnings` | Touching `rust/` | seconds warm |
 | `e2e-automation.sh` | 7-phase E2E (CLI standalone/daemon, server in-process, CLI remote, fault-injection, PostgreSQL parity, SIEM delivery). No mocks. | Final regression gate -- ALL completed work | ~45-90 min |
