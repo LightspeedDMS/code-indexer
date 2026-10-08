@@ -47,9 +47,20 @@ logger = logging.getLogger(__name__)
 class RepoManifest:
     """Path -> entry for one repository, as of when it was built."""
 
-    def __init__(self, root: Path, entries: Dict[str, ContentEntry]) -> None:
+    def __init__(
+        self,
+        root: Path,
+        entries: Dict[str, ContentEntry],
+        *,
+        backend_is_local: bool = True,
+    ) -> None:
         self._root = root
         self._entries = entries
+        # Whether the backend that produced these entries reads THIS container's
+        # disk. It decides what an entry with no hash means: with a local
+        # backend the file is still right there to be read, and with a delegated
+        # one it may not exist here at all.
+        self._backend_is_local = backend_is_local
 
     @classmethod
     def build(
@@ -74,7 +85,11 @@ class RepoManifest:
             if page.next_cursor is None:
                 break
             cursor = page.next_cursor
-        return cls(root, entries)
+        return cls(
+            root,
+            entries,
+            backend_is_local=bool(getattr(chosen, "is_local", True)),
+        )
 
     def _relative(self, file_path: Union[str, Path]) -> Optional[str]:
         """The repo-relative POSIX key for a path, or None if it is not inside."""
@@ -100,6 +115,41 @@ class RepoManifest:
         if entry is None or entry.is_symlink:
             return None
         return entry.blob_sha
+
+    def unindexable_reason(self, file_path: Union[str, Path]) -> Optional[str]:
+        """Why this pass cannot index *file_path*, or None if it can.
+
+        Only ever non-None for a DELEGATED backend. With a local backend the
+        file is on this disk and everything stays exactly as it is today.
+
+        The one reason is a symlink. A delegated backend enumerates symlinks and
+        refuses to read them -- deliberately, so that fetch can never return
+        bytes the manifest would not list -- so there is no way to obtain the
+        content, from the backend or from a disk this pod may not have.
+
+        Skipping costs nothing. A chunk's point UUID is seeded from
+        ``{project_id}:{blob_sha}:{index}`` with NO path, so a symlink's chunks
+        are byte-identical to its target's and carry the same ids: following one
+        overwrites the target's chunks with a copy of themselves. Measured on a
+        fixture containing both, the ids matched exactly. What the symlink points
+        at is indexed under its real path either way.
+
+        Returns a short reason string rather than a bool so the caller can report
+        WHY a file was left out. A run that silently indexes less is the failure
+        this whole seam exists to avoid.
+        """
+        if self._backend_is_local:
+            return None
+        key = self._relative(file_path)
+        if key is None:
+            return None
+        entry = self._entries.get(key)
+        if entry is None:
+            # A manifest MISS is not a refusal: the file may have been added
+            # after the pass began. Let it take the normal path and fail there
+            # if it truly cannot be read.
+            return None
+        return "symlink" if entry.is_symlink else None
 
     def size(self, file_path: Union[str, Path]) -> Optional[int]:
         key = self._relative(file_path)

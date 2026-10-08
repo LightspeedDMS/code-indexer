@@ -4,7 +4,7 @@ Git-aware document processor that extends the base DocumentProcessor.
 
 import logging
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from code_indexer.config import Config
 from code_indexer.services.embedding_provider import EmbeddingProvider
@@ -28,9 +28,34 @@ class GitAwareDocumentProcessor(DocumentProcessor):
         config: Config,
         embedding_provider: EmbeddingProvider,
         vector_store_client: Any,  # FilesystemVectorStore (vector store backend)
+        content_backend: Optional[Any] = None,  # ContentBackend
     ):
         super().__init__(config, embedding_provider, vector_store_client)
-        self.file_identifier = FileIdentifier(config.codebase_dir, config)
+
+        # The content seam. None (the default) and a LOCAL backend both mean
+        # "read this container's disk", which is what every caller does today.
+        #
+        # The manifest is built ONLY for a delegated backend, and that is not a
+        # tuning choice. Building it asks the backend to hash every file, and the
+        # local backend hashes by reading -- so against local it would move the
+        # per-file hash reads to the front of the pass rather than remove them.
+        # Measured over a 20-file repository: 40 opens either way. Against a
+        # delegated backend the hashes arrive over its own paged call and those
+        # reads disappear: 20.
+        self.content_backend = content_backend
+        self.repo_manifest = None
+        if content_backend is not None and not getattr(
+            content_backend, "is_local", True
+        ):
+            from ..indexing.repo_manifest import RepoManifest
+
+            self.repo_manifest = RepoManifest.build(
+                config.codebase_dir, backend=content_backend
+            )
+
+        self.file_identifier = FileIdentifier(
+            config.codebase_dir, config, manifest=self.repo_manifest
+        )
         self.git_detection = GitDetectionService(config.codebase_dir, config)
 
     def _normalize_path_for_storage(self, file_path: Path) -> str:
