@@ -16,7 +16,8 @@ from typing import Dict, Any, Optional
 
 from ..config import Config
 from ..utils.git_runner import run_git_command, is_git_repository
-from ..utils.blob_hash import git_blob_hash
+from ..indexing.repo_manifest import RepoManifest
+from ..utils.blob_hash import git_blob_hash, git_blob_hash_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +31,25 @@ class FileIdentifier:
     with non-git projects.
     """
 
-    def __init__(self, project_dir: Path, config: Optional[Config] = None):
+    def __init__(
+        self,
+        project_dir: Path,
+        config: Optional[Config] = None,
+        manifest: Optional["RepoManifest"] = None,
+    ):
         """
         Initialize FileIdentifier with project directory and optional configuration.
 
         Args:
             project_dir: Path to the project directory
             config: Optional project configuration for file filtering
+            manifest: a manifest of the repository taken at the start of this
+                indexing pass. When it can vouch for a file, the blob hash comes
+                from it and the file is NOT opened to hash it -- on the
+                golden-repos NFS mount that is one round trip per file removed.
+                None keeps the read, so every existing caller is unchanged.
         """
+        self._manifest = manifest
         self.project_dir = project_dir
         self.config = config
         self.git_available = self._detect_git()
@@ -104,7 +116,9 @@ class FileIdentifier:
         assert self._project_id is not None
         return self._project_id
 
-    def _get_file_content_hash(self, file_path: Path) -> str:
+    def _get_file_content_hash(
+        self, file_path: Path, content: Optional[bytes] = None
+    ) -> str:
         """
         Generate SHA256 hash of file content.
 
@@ -114,6 +128,11 @@ class FileIdentifier:
         Returns:
             SHA256 hash of file content with 'sha256:' prefix
         """
+        if content is not None:
+            # Already in hand: hashing it avoids opening the file again, and
+            # removes the window in which the file could change between the two
+            # reads and leave the two hashes describing different bytes.
+            return "sha256:" + hashlib.sha256(content).hexdigest()
         hasher = hashlib.sha256()
         try:
             with open(file_path, "rb") as f:
@@ -179,7 +198,9 @@ class FileIdentifier:
 
         return True
 
-    def get_file_metadata(self, file_path: Path) -> Dict[str, Any]:
+    def get_file_metadata(
+        self, file_path: Path, content: Optional[bytes] = None
+    ) -> Dict[str, Any]:
         """
         Get comprehensive file metadata (git-aware or fallback).
 
@@ -194,13 +215,13 @@ class FileIdentifier:
         metadata = {
             "project_id": self.get_project_id(),
             "file_path": rel_path,
-            "file_hash": self._get_file_content_hash(file_path),
+            "file_hash": self._get_file_content_hash(file_path, content),
             "indexed_at": datetime.now(timezone.utc).isoformat() + "Z",
             "git_available": self.git_available,
         }
 
         if self.git_available:
-            metadata.update(self._get_git_metadata(file_path))
+            metadata.update(self._get_git_metadata(file_path, content))
         else:
             metadata.update(self._get_filesystem_metadata(file_path))
 
@@ -279,7 +300,9 @@ class FileIdentifier:
                 self._cached_commit_hash = "unknown"
         return self._cached_commit_hash
 
-    def _get_git_metadata(self, file_path: Path) -> Dict[str, Any]:
+    def _get_git_metadata(
+        self, file_path: Path, content: Optional[bytes] = None
+    ) -> Dict[str, Any]:
         """
         Get git-specific metadata for a file.
 
@@ -306,7 +329,25 @@ class FileIdentifier:
         # left unset, caller falls back to file_hash) when the file cannot be
         # read -- the same outcome the old non-zero git exit produced. See
         # utils/blob_hash.py for the equivalence argument and its one limit.
-        git_metadata["git_hash"] = git_blob_hash(file_path)
+        # Order matters, cheapest first: bytes already in hand, then the
+        # manifest (no I/O at all), then finally reading the file.
+        #
+        # A manifest MISS is not an error and must not be treated as "no hash" --
+        # the file may have been added after the pass began, or be a symlink the
+        # manifest reports but never follows. Falling through to the read keeps
+        # the answer correct; trusting a None here would change the point UUID of
+        # every such chunk, silently.
+        if content is not None:
+            git_metadata["git_hash"] = git_blob_hash_bytes(content)
+        else:
+            from_manifest = (
+                self._manifest.blob_sha(file_path)
+                if self._manifest is not None
+                else None
+            )
+            git_metadata["git_hash"] = (
+                from_manifest if from_manifest is not None else git_blob_hash(file_path)
+            )
 
         return git_metadata
 

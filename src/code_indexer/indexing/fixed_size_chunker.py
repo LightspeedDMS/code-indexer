@@ -273,7 +273,10 @@ class FixedSizeChunker:
         return chunks
 
     def chunk_file(
-        self, file_path: Path, repo_root: Optional[Path] = None
+        self,
+        file_path: Path,
+        repo_root: Optional[Path] = None,
+        content: Optional[bytes] = None,
     ) -> List[Dict[str, Any]]:
         """Read and chunk a file using fixed-size algorithm.
 
@@ -288,12 +291,15 @@ class FixedSizeChunker:
             ValueError: If file cannot be read or processed
         """
         try:
-            return self._chunk_file_standard(file_path, repo_root)
+            return self._chunk_file_standard(file_path, repo_root, content)
         except Exception as e:
             raise ValueError(f"Failed to process file {file_path}: {e}")
 
     def _chunk_file_standard(
-        self, file_path: Path, repo_root: Optional[Path] = None
+        self,
+        file_path: Path,
+        repo_root: Optional[Path] = None,
+        content: Optional[bytes] = None,
     ) -> List[Dict[str, Any]]:
         """Standard file chunking - reads entire file into memory."""
         # Server context: containment against the codebase root is
@@ -313,11 +319,17 @@ class FixedSizeChunker:
             if not is_resolved_within_root(file_path, resolved_root):
                 raise ValueError("file does not resolve inside the codebase root")
 
-        # Bytes first, then decode. Reading bytes is what a content backend
+        # Bytes first, then decode. `content` lets a caller that has ALREADY
+        # read this file hand the bytes over, instead of the file being
+        # opened again: one indexing pass opens a file up to three times
+        # today (text probe, blob hash, chunking). None keeps the read
+        # here, so every existing caller is unchanged. Reading bytes is what a content backend
         # returns, so this is the single place the byte source changes when the
         # read moves off the local filesystem; the decode below must stay
         # identical either way, since chunk text feeds each chunk's point UUID.
-        text = decode_like_text_mode(file_path.read_bytes())
+        text = decode_like_text_mode(
+            file_path.read_bytes() if content is None else content
+        )
 
         if text is None:
             raise ValueError(f"Could not decode file {file_path}")
