@@ -32,6 +32,8 @@ from typing import Any, Dict
 
 import pytest
 
+from tests.unit.server.telemetry.otlp_sink import OtlpHttpSink
+
 _TELEMETRY_DIR = Path(__file__).parent
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
@@ -91,6 +93,16 @@ def _run_harness(
     return result
 
 
+def _run_span_harness(tmp_path: Path, sink: OtlpHttpSink) -> Dict[str, Any]:
+    """Run the span harness, exporting to the listening `sink`."""
+    return _run_harness(
+        _SPAN_HARNESS,
+        "REPRO_1676_AC5_OUTPUT_FILE",
+        tmp_path,
+        {"REPRO_1676_AC5_COLLECTOR_ENDPOINT": sink.endpoint},
+    )
+
+
 @pytest.mark.slow
 class TestRealHttpxSpanCreationForHermeticServerCall:
     """Story #1676 AC5 requirements 6 and 7: a real outbound HTTP call
@@ -99,8 +111,10 @@ class TestRealHttpxSpanCreationForHermeticServerCall:
     existing cidx.embedding.requests counter for the SAME call.
     """
 
-    def test_real_call_produces_span_with_expected_attributes(self, tmp_path: Path):
-        result = _run_harness(_SPAN_HARNESS, "REPRO_1676_AC5_OUTPUT_FILE", tmp_path, {})
+    def test_real_call_produces_span_with_expected_attributes(
+        self, tmp_path: Path, otlp_sink: OtlpHttpSink
+    ):
+        result = _run_span_harness(tmp_path, otlp_sink)
 
         assert result["instrument_httpx_result"] is True, result
         assert result["embedding_result_has_data"] is True, result
@@ -120,13 +134,15 @@ class TestRealHttpxSpanCreationForHermeticServerCall:
         assert "/v1/embeddings" in attrs["http.url"], attrs
         assert "127.0.0.1" in attrs["http.url"], attrs
 
-    def test_real_call_increments_embedding_requests_counter_too(self, tmp_path: Path):
+    def test_real_call_increments_embedding_requests_counter_too(
+        self, tmp_path: Path, otlp_sink: OtlpHttpSink
+    ):
         """Requirement 7: the span above and the pre-existing
         cidx.embedding.requests counter (Story #1586 AC2) must BOTH fire
         for the same real call -- neither replaces nor double-counts the
         other.
         """
-        result = _run_harness(_SPAN_HARNESS, "REPRO_1676_AC5_OUTPUT_FILE", tmp_path, {})
+        result = _run_span_harness(tmp_path, otlp_sink)
 
         assert result["app_metrics_active"] is True, result
         assert result["httpx_span_count"] == 1, result
@@ -180,10 +196,13 @@ class TestLifespanWiresHttpxInstrumentation:
         config_file.write_text(
             json.dumps(
                 {
+                    # Only the startup wiring is under test, so nothing may
+                    # export to a collector that does not exist: its bounded
+                    # (~10 s) retry outlasts asgi_lifespan's 5 s shutdown.
                     "telemetry_config": {
                         "enabled": telemetry_enabled,
-                        "export_traces": True,
-                        "collector_endpoint": "http://localhost:4317",
+                        "export_traces": False,
+                        "export_metrics": False,
                     }
                 }
             )
