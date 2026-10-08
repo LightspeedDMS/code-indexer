@@ -98,6 +98,8 @@ import importlib
 import logging
 import os
 import sqlite3
+import sys
+import threading
 from pathlib import Path
 from typing import Any, Callable, Generator, List, Set, Type
 
@@ -564,6 +566,85 @@ def _teardown_all_background_job_managers_impl(
             continue
         seen_ids.add(id(instance))
         _safe_shutdown(instance)
+
+
+GOVERNOR_THREAD = "memory-governor-sampler"
+TRACKER_THREAD = "DependencyLatencyTracker-writer"
+# Thread name -> the owner's real stop API (both bounded joins, idempotent).
+_SERVICE_THREAD_STOPS = {
+    GOVERNOR_THREAD: lambda owner: owner.stop(timeout=5.0),
+    TRACKER_THREAD: lambda owner: owner.shutdown(timeout=10),
+}
+
+
+def _guarded_service_threads() -> List[Any]:
+    return [
+        t
+        for t in threading.enumerate()
+        if t.name in _SERVICE_THREAD_STOPS and t.is_alive()
+    ]
+
+
+def _installed_service_singletons() -> Set[int]:
+    """ids of the process-wide governor / latency tracker (canonical and
+    ``src.``-alias module trees): later code may still read these, so they
+    keep running until something replaces them."""
+    ids: Set[int] = set()
+    for prefix in ("", "src."):
+        governors = sys.modules.get(f"{prefix}{_GOVERNOR_MODULE}")
+        trackers = sys.modules.get(f"{prefix}{_TRACKER_MODULE}")
+        for owner in (
+            governors.get_memory_governor() if governors else None,
+            trackers.get_instance() if trackers else None,
+        ):
+            if owner is not None:
+                ids.add(id(owner))
+    return ids
+
+
+_GOVERNOR_MODULE = "code_indexer.server.services.memory_governor"
+_TRACKER_MODULE = "code_indexer.server.services.dependency_latency_tracker"
+
+
+def _stop_leaked_service_threads_impl() -> Generator[None, None, None]:
+    """Core of the ``_stop_leaked_service_threads`` autouse fixture, a plain
+    generator so tests/unit/server/test_service_thread_teardown.py can drive
+    it directly.
+
+    ``create_app()`` starts a memory-governor sampler and a latency-tracker
+    writer that only the app's lifespan shutdown stops, so every test that
+    builds an app without its lifespan (or starts either service directly)
+    used to leave both threads running for the rest of the process. After
+    the test this stops the owner of EVERY live guarded thread (found from
+    the thread's bound target) through its real stop API, except the
+    installed singletons; then fails if a guarded thread the test started is
+    still alive."""
+    before = set(_guarded_service_threads())
+    yield
+    keep = _installed_service_singletons()
+    for thread in _guarded_service_threads():
+        owner = getattr(getattr(thread, "_target", None), "__self__", None)
+        if owner is None or id(owner) in keep:
+            continue
+        try:
+            _SERVICE_THREAD_STOPS[thread.name](owner)
+        except Exception:
+            logger.exception("Stopping leaked %s thread failed", thread.name)
+    survivors = [
+        t.name
+        for t in _guarded_service_threads()
+        if t not in before
+        and id(getattr(getattr(t, "_target", None), "__self__", None)) not in keep
+    ]
+    if survivors:
+        pytest.fail(f"test left service threads running: {survivors}")
+
+
+@pytest.fixture(autouse=True)
+def _stop_leaked_service_threads() -> Generator[None, None, None]:
+    """Stop the governor / latency-tracker threads a test leaves behind and
+    fail the test if one cannot be stopped (see the impl above)."""
+    yield from _stop_leaked_service_threads_impl()
 
 
 @pytest.fixture(autouse=True)
