@@ -77,6 +77,10 @@ watchdog.stop()
 """
 
 
+# The child deliberately holds its GIL six times amid heavy thread churn;
+# under load it outlasts the 15 s gate ceiling. 90 s sits above the child's
+# own 60 s subprocess timeout.
+@pytest.mark.timeout(90)
 def test_stall_during_heartbeat_appends_leaves_an_intact_dump(tmp_path: Path) -> None:
     log_dir = tmp_path / "logs"
     child = subprocess.run(

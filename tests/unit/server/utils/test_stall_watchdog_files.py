@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -316,6 +317,9 @@ def _run_child(
     )
 
 
+# The child deliberately holds its GIL; under load it outlasts the 15 s gate
+# ceiling. 60 s sits above the child's own 45 s subprocess timeout.
+@pytest.mark.timeout(60)
 def test_worker_that_survives_a_stall_reports_its_own_dump(tmp_path: Path) -> None:
     log_dir = tmp_path / "logs"
     child = _run_child(_SURVIVED_STALL_CHILD, log_dir)
@@ -448,8 +452,22 @@ _STALL_FRAME = "hold_gil_in_c_call_in_process"
 # A loaded machine can starve this process past the 0.5 s timeout on its own:
 # that real stall is dumped too, and if it fires the one-shot timer just
 # before the deliberate stall begins, nothing can re-arm it during the stall.
-# Each attempt is a full deliberate stall; the bound keeps the test finite.
-_STALL_ATTEMPTS = 5
+# Each attempt is a full deliberate stall; the bound keeps the test finite:
+# worst case 3 x (10 s heartbeat wait + 1.5 s stall + 3 s log wait) = 43.5 s,
+# inside its 60 s timeout.
+_STALL_ATTEMPTS = 3
+_STALL_LOG_WAIT_S = 3.0
+
+
+def _stall_on_newest_thread(microseconds: int) -> None:
+    """Hold the GIL from a thread started now: faulthandler dumps the newest
+    100 threads only, so the stalling frame is dumped however many threads
+    this (pytest) process already has."""
+    staller = threading.Thread(
+        target=hold_gil_in_c_call_in_process, args=(microseconds,), daemon=True
+    )
+    staller.start()
+    staller.join()
 
 
 def _evidence_bytes(log_dir: Path) -> int:
@@ -481,12 +499,21 @@ def _await_stall_log(log_dir: Path, wait_s: float) -> Optional[Path]:
     return None
 
 
+# Deliberately holds this process's GIL (pytest-timeout's timer thread cannot
+# run meanwhile) up to 3 times: the 15 s gate ceiling does not fit under load.
+@pytest.mark.timeout(60)
 def test_core_mechanism_in_process_gil_stall_leaves_stack_and_samples(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Fast-lane twin of the slow real-uvicorn test: the same faulthandler
     mechanism, with short timings, in this process."""
     log_dir = tmp_path / "logs"
+    # A gate's pytest worker already runs hundreds of threads (leaked by
+    # earlier tests); faulthandler dumps only the newest 100 of them.
+    release = threading.Event()
+    idle = [threading.Thread(target=release.wait, daemon=True) for _ in range(120)]
+    for thread in idle:
+        thread.start()
     watchdog = StallWatchdog(log_dir, dump_timeout_s=0.5, interval_s=0.1)
     stall_log: Optional[Path] = None
     with caplog.at_level(logging.ERROR, logger=_LOGGER):
@@ -499,12 +526,13 @@ def test_core_mechanism_in_process_gil_stall_leaves_stack_and_samples(
             time.sleep(0.3)  # a few heartbeats: samples in the ring
             for _ in range(_STALL_ATTEMPTS):
                 _await_heartbeat(log_dir)
-                hold_gil_in_c_call_in_process(1_500_000)  # 1.5 s = 3x the timeout
-                stall_log = _await_stall_log(log_dir, wait_s=5.0)
+                _stall_on_newest_thread(1_500_000)  # 1.5 s = 3x the timeout
+                stall_log = _await_stall_log(log_dir, wait_s=_STALL_LOG_WAIT_S)
                 if stall_log is not None:
                     break
         finally:
             watchdog.stop()
+            release.set()
 
     assert stall_log is not None, sorted(p.name for p in log_dir.iterdir())
     samples, stack = _split_at_dump(stall_log.read_text())
@@ -546,6 +574,9 @@ release.set()
 """
 
 
+# The child deliberately holds its GIL; under load it outlasts the 15 s gate
+# ceiling. 60 s sits above the child's own 30 s subprocess timeout.
+@pytest.mark.timeout(60)
 def test_main_thread_stack_is_kept_when_faulthandler_truncates_at_100_threads(
     tmp_path: Path,
 ) -> None:
