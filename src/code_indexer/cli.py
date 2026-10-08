@@ -2153,8 +2153,8 @@ def init(
 
     \b
     INITIALIZATION MODES:
-      🏠 Local Mode (default): Creates local configuration with VoyageAI embeddings
-      ☁️  Remote Mode: Connects to existing CIDX server (--remote option)
+      • Local Mode (default): Creates local configuration with VoyageAI embeddings
+      • Remote Mode: Connects to existing CIDX server (--remote option)
 
     \b
     CONFIGURATION OPTIONS:
@@ -3283,8 +3283,8 @@ def index(
       • Processing speed and time estimates
       • Error reporting for failed files
       • Throttling status indicators (VoyageAI only):
-        ⚡ Full speed - no throttling detected
-        🔴 Server throttling - API rate limits detected, backing off automatically
+        - Full speed: no throttling detected
+        - Server throttling: API rate limits detected, backing off automatically
 
     \b
     SMART INDEXING:

@@ -234,8 +234,8 @@ PROGRESS TRACKING:
   • Processing speed and time estimates
   • Error reporting for failed files
   • Throttling status indicators (VoyageAI only):
-    ⚡ Full speed - no throttling detected
-    🔴 Server throttling - API rate limits detected, backing off automatically
+    - Full speed: no throttling detected
+    - Server throttling: API rate limits detected, backing off automatically
 
 SMART INDEXING:
   • Automatically detects previous indexing state
@@ -313,8 +313,8 @@ a default configuration will be created automatically with VoyageAI provider
 and standard settings. Only use init if you want to customize settings.
 
 INITIALIZATION MODES:
-  🏠 Local Mode (default): Creates local configuration with VoyageAI embeddings
-  ☁️  Remote Mode: Connects to existing CIDX server (--remote option)
+  • Local Mode (default): Creates local configuration with VoyageAI embeddings
+  • Remote Mode: Connects to existing CIDX server (--remote option)
 
 CONFIGURATION OPTIONS:
   • Exclude directories: Edit exclude_dirs in config.json
