@@ -225,6 +225,8 @@ def test_the_pass_hands_its_manifest_to_the_chunking_manager(
     proc.vector_store_client = MagicMock()
     proc.fixed_size_chunker = MagicMock()
     proc.repo_manifest = _manifest(tmp_path)
+    # A manifest also means a content source is built from the backend.
+    proc.content_backend = MagicMock()
     # Rate tracking is __init__ state this bare instance never got; irrelevant here.
     monkeypatch.setattr(proc, "_initialize_file_rate_tracking", lambda: None)
 

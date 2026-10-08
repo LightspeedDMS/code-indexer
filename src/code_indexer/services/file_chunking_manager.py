@@ -38,6 +38,10 @@ import threading
 if TYPE_CHECKING:
     from ..indexing.repo_manifest import RepoManifest
 
+    # Type only: the prefetcher pulls in the server's content seam, which
+    # local-only indexing never constructs and must not have to import.
+    from ..indexing.content_prefetcher import ContentPrefetcher
+
 # Token counting for large file handling - using embedded tokenizer
 # No imports needed here - lazy import in _count_tokens_accurately()
 
@@ -49,6 +53,10 @@ logger = logging.getLogger(__name__)
 # bound on the indexing path; the only legitimate timeout is the per-request
 # outbound embedding-provider HTTP call inside the provider itself.
 THREAD_POOL_SHUTDOWN_TIMEOUT = 30.0  # 30 seconds for graceful shutdown
+
+
+class ContentUnavailableError(RuntimeError):
+    """A content source could not supply a file's bytes (not merely: it is gone)."""
 
 
 @dataclass
@@ -96,6 +104,7 @@ class FileChunkingManager:
         fts_manager=None,  # Optional FTS index manager
         multimodal_client=None,  # Optional VoyageMultimodalClient for multimodal embeddings
         manifest: Optional["RepoManifest"] = None,
+        content_source: Optional["ContentPrefetcher"] = None,
     ):
         """
         Initialize FileChunkingManager with complete functionality.
@@ -111,6 +120,9 @@ class FileChunkingManager:
             multimodal_client: Optional VoyageMultimodalClient for multimodal embeddings
             manifest: The pass's delegated manifest, if any. When set, file size
                 and mtime come from it instead of a local stat.
+            content_source: Where file bytes come from. None (the default) reads
+                this container's disk; a ContentPrefetcher serves them from a
+                delegated content backend, with no local read.
 
         Raises:
             ValueError: If thread_count is invalid or dependencies are None
@@ -137,6 +149,7 @@ class FileChunkingManager:
         self.fts_manager = fts_manager
         self.multimodal_client = multimodal_client
         self.manifest = manifest
+        self.content_source = content_source
 
         # CRITICAL FIX: Single cancellation event shared with VectorCalculationManager
         self._cancellation_requested = False
@@ -430,6 +443,23 @@ class FileChunkingManager:
 
         return vector_point
 
+    def _read_content(self, file_path: Path) -> bytes:
+        """This file's bytes: from the content source when there is one, else disk.
+
+        A delegated source never falls back to the disk -- the pod may not mount
+        the repository. Its "gone" is raised as FileNotFoundError so the caller's
+        vanished-file handling is the same for both; any other refusal (changed
+        since the manifest, a transport failure) is an ordinary failure.
+        """
+        if self.content_source is None:
+            return file_path.read_bytes()
+        fetched = self.content_source.take(file_path)
+        if fetched.vanished:
+            raise FileNotFoundError(fetched.error)
+        if fetched.error is not None or fetched.data is None:
+            raise ContentUnavailableError(f"{file_path}: {fetched.error}")
+        return fetched.data
+
     def _process_file_clean_lifecycle(
         self,
         file_path: Path,
@@ -501,7 +531,7 @@ class FileChunkingManager:
             # chunk_file, instead of dropping the file while the run reports
             # clean stats.
             try:
-                content = file_path.read_bytes()
+                content = self._read_content(file_path)
             except FileNotFoundError as e:
                 logger.warning(
                     f"Skipping file that vanished during chunking: {file_path}"

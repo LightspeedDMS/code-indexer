@@ -315,6 +315,36 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             if owns_pass:
                 self.end_manifest_pass()
 
+    def _build_content_source(self, files: List[Path]) -> Optional[Any]:
+        """A prefetcher serving this pass's bytes, or None to read the disk.
+
+        Only when a delegated manifest was built for this pass -- the same
+        condition under which the hash phase already takes blob hashes from it.
+        Planned over the whole submission list in order, so batches line up with
+        the order the workers drain the pool.
+        """
+        manifest = getattr(self, "repo_manifest", None)
+        if manifest is None:
+            return None
+        from ..indexing.content_prefetcher import ContentPrefetcher
+
+        root = Path(self.config.codebase_dir)
+        rel_paths = []
+        for file_path in files:
+            try:
+                rel_paths.append(Path(file_path).relative_to(root).as_posix())
+            except ValueError:
+                # Outside the root: the prefetcher refuses it at take() time,
+                # which fails that one file rather than reading the disk.
+                continue
+        return ContentPrefetcher(
+            self.content_backend,
+            root,
+            rel_paths,
+            size_of=manifest.size,
+            expected_blob_sha=manifest.blob_sha,
+        )
+
     def _process_files_high_throughput(
         self,
         files: List[Path],
@@ -384,6 +414,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 fts_manager=fts_manager,
                 multimodal_client=multimodal_client,
                 manifest=self.repo_manifest,
+                content_source=self._build_content_source(files),
             ) as file_manager:
                 # Bug #1746 Change 4 (M1 fix): preflight the target chunk
                 # store's writability BEFORE any file is hashed, chunked,
