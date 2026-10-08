@@ -21,6 +21,9 @@ from rich.console import Console
 logger = logging.getLogger(__name__)
 console = Console()
 
+# Connect timeout for the liveness probe before removing a daemon socket.
+_STALE_SOCKET_PROBE_TIMEOUT_SECONDS = 0.5
+
 
 def _find_config_file() -> Optional[Path]:
     """
@@ -151,16 +154,39 @@ def _connect_to_daemon(
 
 def _cleanup_stale_socket(socket_path: Path) -> None:
     """
-    Remove stale socket file.
+    Remove the socket file only if no daemon is listening on it.
+
+    A live daemon holds the repo's index-mutation lock for its lifetime
+    (Story #1488), so a replacement daemon can never start while it runs:
+    unlinking a live daemon's socket would only leave it serving on an
+    unreachable path while still holding the lock.
 
     Args:
         socket_path: Path to socket file to remove
     """
+    import socket
+
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(_STALE_SOCKET_PROBE_TIMEOUT_SECONDS)
     try:
-        socket_path.unlink()
-    except (FileNotFoundError, OSError):
-        # Socket might not exist or already removed
-        pass
+        probe.connect(str(socket_path))
+    except FileNotFoundError:
+        return  # Already removed
+    except ConnectionRefusedError:
+        # Nobody listens: a dead daemon's leftover.
+        try:
+            socket_path.unlink()
+        except FileNotFoundError:
+            pass  # Removed concurrently
+        except OSError as e:
+            logger.warning(f"Could not remove stale socket {socket_path}: {e}")
+        return
+    except OSError as e:
+        logger.debug(f"Socket probe on {socket_path} failed, keeping it: {e}")
+        return
+    finally:
+        probe.close()
+    logger.debug(f"A daemon is listening on {socket_path}; not removing it")
 
 
 def _start_daemon(config_path: Path) -> None:
@@ -468,6 +494,11 @@ def _query_via_daemon(
 
             # Display results first (while connection is still open)
             _display_results(result, query_time)
+            # _display_results printed a failed search's error; fail with it.
+            # Read it BEFORE closing: `result` is an RPyC netref, and touching
+            # it after close raises, which the except below would mistake for
+            # a dead daemon and unlink the LIVE daemon's socket.
+            search_failed = bool(isinstance(result, dict) and result.get("error"))
 
             # Close connection after displaying results
             try:
@@ -475,10 +506,7 @@ def _query_via_daemon(
             except Exception:
                 pass  # Connection already closed
 
-            # _display_results printed a failed search's error; fail with it.
-            if isinstance(result, dict) and result.get("error"):
-                return 1
-            return 0
+            return 1 if search_failed else 0
 
         except Exception as e:
             # Close connection on error to prevent resource leaks
