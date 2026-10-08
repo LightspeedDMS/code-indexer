@@ -31,8 +31,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from code_indexer.services.query_strategy import (
     apply_score_gate,
-    PARALLEL_FETCH_MULTIPLIER,
-    MAX_PARALLEL_FETCH,
+    parallel_fetch_limit,
     PARALLEL_TIMEOUT_SECONDS,
 )
 from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
@@ -2030,10 +2029,9 @@ class SemanticQueryManager:
             )
 
             # Story #638: Over-fetch each provider to widen the candidate pool
-            # before score-gated filtering and fusion.
-            _provider_fetch_limit = min(
-                limit * PARALLEL_FETCH_MULTIPLIER, MAX_PARALLEL_FETCH
-            )
+            # before score-gated filtering and fusion; #2108: never below the
+            # requested limit.
+            _provider_fetch_limit = parallel_fetch_limit(limit)
 
             # Story #619 Gap 1: health-gated parallel dispatch — skip "down" providers
             _health_monitor = ProviderHealthMonitor.get_instance()

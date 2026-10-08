@@ -54,6 +54,17 @@ SCORE_GATE_RATIO = 0.80
 SCORE_GATE_FLOOR = 0.70
 PARALLEL_TIMEOUT_SECONDS = 20
 
+
+def parallel_fetch_limit(limit: int) -> int:
+    """Results each provider fetches in a parallel query (Story #638, #2108).
+
+    Small requests over-fetch (up to MAX_PARALLEL_FETCH) to widen the pool
+    before the score gate and fusion; every request fetches at least ``limit``
+    from each provider, so a limit above the cap can still be filled.
+    """
+    return max(limit, min(limit * PARALLEL_FETCH_MULTIPLIER, MAX_PARALLEL_FETCH))
+
+
 # Neutral score used for a missing/single provider in fuse_multiply and
 # fuse_average (midpoint of the [0, 1] normalized range -- neither rewards
 # nor penalizes a document that only one provider returned).
