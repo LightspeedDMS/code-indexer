@@ -72,13 +72,14 @@ class TestFixedSizeChunkerCoverage:
         temp_path = Path(temp_file.name)
 
         try:
-            # Mock all encodings to fail
-            with patch("builtins.open") as mock_open_func:
-                mock_open_func.side_effect = UnicodeDecodeError(
-                    "utf-8", b"", 0, 1, "invalid"
-                )
-
-                # This should raise ValueError covering lines 161-162
+            # latin-1 decodes any byte sequence, so the ladder cannot fail on
+            # real input -- force the "nothing decoded" return instead. Patched
+            # where it is USED, not where it is defined, so the chunker's own
+            # reference is the one replaced.
+            with patch(
+                "code_indexer.indexing.fixed_size_chunker.decode_like_text_mode",
+                return_value=None,
+            ):
                 with pytest.raises(ValueError, match="Could not decode file"):
                     chunker.chunk_file(temp_path)
 
@@ -94,9 +95,12 @@ class TestFixedSizeChunkerCoverage:
         temp_path = Path(temp_file.name)
 
         try:
-            # Mock open to raise PermissionError
-            with patch(
-                "builtins.open", side_effect=PermissionError("Permission denied")
+            # The chunker reads bytes via Path.read_bytes. Patching
+            # builtins.open would NOT intercept it (Path.read_bytes resolves
+            # io.open directly), so the test would pass without the file ever
+            # being unreadable.
+            with patch.object(
+                Path, "read_bytes", side_effect=PermissionError("Permission denied")
             ):
                 # This should raise ValueError covering lines 166-167
                 with pytest.raises(ValueError, match="Failed to process file"):
@@ -113,8 +117,10 @@ class TestFixedSizeChunkerCoverage:
         temp_path = Path(temp_file.name)
 
         try:
-            # Mock open to raise a general exception
-            with patch("builtins.open", side_effect=OSError("General I/O error")):
+            # Same reason as above: intercept the real read.
+            with patch.object(
+                Path, "read_bytes", side_effect=OSError("General I/O error")
+            ):
                 # This should raise ValueError covering lines 166-167
                 with pytest.raises(ValueError, match="Failed to process file"):
                     chunker.chunk_file(temp_path)

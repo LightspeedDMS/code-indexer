@@ -670,6 +670,88 @@ class TestFileChunkingManagerAcceptanceCriteria:
             # Should call existing Filesystem client interface
             assert len(self.mock_filesystem_client.upsert_calls) == 1
 
+    def test_a_file_deleted_mid_run_is_vanished_not_a_failure(self):
+        """The paired half: ENOENT *is* the benign skip.
+
+        Without this, the FileNotFoundError arm only has to not-crash -- flipping
+        vanished=True to False keeps every other test green, and a file deleted
+        between the scan and the read starts being reported as a hard failure.
+        """
+        original = Path.read_bytes
+
+        def gone(self_path):
+            if str(self_path) == str(self.test_file_path):
+                raise FileNotFoundError(2, "No such file or directory")
+            return original(self_path)
+
+        with FileChunkingManager(
+            vector_manager=self.mock_vector_manager,
+            chunker=self.mock_chunker,
+            vector_store_client=self.mock_filesystem_client,
+            thread_count=2,
+            slot_tracker=CleanSlotTracker(max_slots=4),
+            codebase_dir=self.test_file_path.parent,
+        ) as manager:
+            self._add_voyage_client_mock(manager)
+            Path.read_bytes = gone
+            try:
+                future: Future[Any] = manager.submit_file_for_processing(
+                    self.test_file_path, {"project_id": "test", "file_hash": None}, None
+                )
+                result = future.result(timeout=5.0)
+            finally:
+                Path.read_bytes = original
+
+        assert result.success is False
+        assert result.vanished is True, (
+            "a file that disappeared mid-run must be marked vanished so the "
+            "collector skips it benignly instead of counting a failed file"
+        )
+
+    def test_an_unreadable_file_is_a_FAILURE_not_a_silent_vanish(self):
+        """Only ENOENT is "vanished". Everything else must count as a failure.
+
+        The collector treats `vanished` as a benign skip: it increments neither
+        files_processed nor failed_files, and the path never reaches
+        _failed_relative_paths. So catching every OSError on the read would make a
+        PermissionError, an NFS stale handle or an EIO drop the file from the
+        index while the run still reported clean stats -- which is strictly worse
+        than before this read existed, when those errors came out of chunk_file as
+        ordinary failures.
+        """
+        original = Path.read_bytes
+
+        def deny(self_path):
+            if str(self_path) == str(self.test_file_path):
+                raise PermissionError(13, "Permission denied")
+            return original(self_path)
+
+        with FileChunkingManager(
+            vector_manager=self.mock_vector_manager,
+            chunker=self.mock_chunker,
+            vector_store_client=self.mock_filesystem_client,
+            thread_count=2,
+            slot_tracker=CleanSlotTracker(max_slots=4),
+            codebase_dir=self.test_file_path.parent,
+        ) as manager:
+            self._add_voyage_client_mock(manager)
+            Path.read_bytes = deny
+            try:
+                future: Future[Any] = manager.submit_file_for_processing(
+                    self.test_file_path, {"project_id": "test", "file_hash": None}, None
+                )
+                result = future.result(timeout=5.0)
+            finally:
+                Path.read_bytes = original
+
+        assert result.success is False, (
+            "an unreadable file must not be reported as success"
+        )
+        assert result.vanished is False, (
+            "a PermissionError was reported as 'vanished', which the collector "
+            "skips silently -- the file would be dropped with clean stats"
+        )
+
     def test_a_deferred_file_hash_is_filled_from_the_bytes_this_worker_read(self):
         """The metadata phase may hand over file_hash=None; the worker must fill it.
 

@@ -457,32 +457,6 @@ class FileChunkingManager:
                 processing_time=time.time() - start_time,
                 error=f"File vanished before processing: {e}",
             )
-        # Read ONCE here and let everything downstream work from these bytes.
-        # The hash phase used to read the whole file just to sha256 it, and this
-        # worker read it again to chunk it. Reading here collapses that pair, and
-        # it also closes the window between them: two separate reads could see
-        # different content, leaving the stored hash describing bytes that were
-        # never chunked.
-        #
-        # A read failure is the same TOCTOU case the stat above already handles,
-        # so it gets the same vanished result rather than a new failure mode.
-        try:
-            content = file_path.read_bytes()
-        except OSError as e:
-            logger.warning(f"Skipping file that vanished during chunking: {file_path}")
-            return FileProcessingResult(
-                success=False,
-                vanished=True,
-                file_path=file_path,
-                chunks_processed=0,
-                processing_time=time.time() - start_time,
-                error=f"File vanished before processing: {e}",
-            )
-
-        # Fill in a hash the metadata phase deferred rather than read for.
-        if metadata.get("file_hash") is None:
-            metadata["file_hash"] = "sha256:" + hashlib.sha256(content).hexdigest()
-
         filename = file_path.name
 
         # Single acquire at start - create clean FileData
@@ -503,6 +477,39 @@ class FileChunkingManager:
         try:
             # ALL work in try block
             slot_tracker.update_slot(slot_id, FileStatus.CHUNKING)
+
+            # Read ONCE and let everything downstream work from these bytes. The
+            # metadata phase used to read the whole file just to sha256 it and
+            # this worker read it again to chunk it; one read collapses that pair
+            # and closes the window between them, where the two reads could see
+            # different content and leave the stored hash describing bytes that
+            # were never chunked.
+            #
+            # INSIDE this try on purpose. Only ENOENT is the "vanished" case,
+            # which the collector skips benignly -- it increments neither
+            # files_processed nor failed_files and never records the path. Any
+            # other OSError (PermissionError, an NFS stale handle, EIO) must stay
+            # an ordinary failure, exactly as it was when it came out of
+            # chunk_file, instead of dropping the file while the run reports
+            # clean stats.
+            try:
+                content = file_path.read_bytes()
+            except FileNotFoundError as e:
+                logger.warning(
+                    f"Skipping file that vanished during chunking: {file_path}"
+                )
+                return FileProcessingResult(
+                    success=False,
+                    vanished=True,
+                    file_path=file_path,
+                    chunks_processed=0,
+                    processing_time=time.time() - start_time,
+                    error=f"File vanished before processing: {e}",
+                )
+
+            # Fill in a hash the metadata phase deferred rather than read for.
+            if metadata.get("file_hash") is None:
+                metadata["file_hash"] = "sha256:" + hashlib.sha256(content).hexdigest()
 
             # Phase 1: Chunk the file
             logger.debug(f"Starting chunking for {file_path}")
