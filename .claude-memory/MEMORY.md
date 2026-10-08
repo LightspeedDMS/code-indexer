@@ -18,10 +18,12 @@
 - [systemd restart](feedback_ssh_systemd_restart.md) - never kill+nohup to restart a server — systemd only
 - [Versioned path trap](feedback_versioned_path_trap.md) - resolver returns the VERSIONED path; never write to it
 - [convert_tool_docs](feedback_convert_tool_docs_destructive.md) - never run tools/convert_tool_docs.py — breaks the MCP tool surface
+- [Never assert on whole env](feedback_never_assert_on_whole_environment.md) - a failing `"X" not in env` dumps every inherited secret into transcripts; assert scalars only
 - [No secrets in memory](feedback_no_secrets_in_memory.md) - memory files are versioned: no secrets, PII, or topology
-- [Staging creds local](feedback_staging_creds_local_exposure_ok.md) - staging creds in local output are not an incident; never commit credentials anywhere
+- [Secrets in local output OK](feedback_staging_creds_local_exposure_ok.md) - any secret in local output/transcripts is NOT an incident, never ask to rotate; never commit/publish secrets
 - [Auth retry loops](feedback_never_retry_loop_auth_endpoint.md) - auth rejection is terminal; retrying locks the account
 - [Own all changes](feedback_own_all_repo_changes.md) - never revert another subagent's changes; own everything in the tree
+- [Partial stage exact content](feedback_partial_stage_exact_content.md) - commit some hunks of a shared file via hash-object + update-index; never --unidiff-zero; --no-verify (pre-commit stashes)
 - [Shared tree git ops](feedback_parallel_agents_shared_tree_no_broad_git_ops.md) - N agents, one tree: forbid git checkout/restore/reset/clean/stash per prompt
 - [No rogue agents](feedback_no_rogue_agents.md) - unexpected repo state is never "rogue agents"
 - [Local dev server](project_own_local_dev_cidx_server.md) - I own the local cidx-server.service; keep it healthy, no auto-update
@@ -32,10 +34,12 @@
 - [Reliability over purity](feedback_reliability_over_dependency_purity.md) - prefer installing the dependency over install-footprint purity
 - [No nested subagents](feedback_no_subagent_to_subagent_delegation.md) - subagents act directly; never spawn nested Task/Agent calls
 - [Verify subagent commits](feedback_subagent_committed_against_explicit_instruction.md) - verify via git log; never trust a subagent's self-report on commits
-- [Dispatch cap 4](feedback_parallel_dispatch_cap_4_on_20x.md) - parallel subagent dispatch cap is 4
+- [Bound every agent run](feedback_bound_every_agent_run.md) - every brief carries a turn/time budget + coordinator check-ins; S15 pair ran 87 rounds/13 h unchecked
+- [Dispatch cap 1+1](feedback_parallel_dispatch_cap_4_on_20x.md) - 5x account: ONE worker + at most ONE reviewer at a time; Codex for the hardest reviews
 
 ## Quality Standards
 - [Zero failures](feedback_zero_failures_no_excuses.md) - never dismiss failures as "pre-existing"
+- [Kill duplicates now](feedback_eliminate_duplicates_in_same_change.md) - a fix that introduces a shared implementation converts EVERY duplicate in the same change; never defer one
 - [Fix every issue](feedback_fix_every_issue_found_no_deferral.md) - fix every issue found in the same session, even out-of-scope
 - [Cluster edge cases: file and move on](feedback_cluster_edge_cases_document_and_move_on.md) - cluster-only races NEVER block a release; file a follow-up, keep moving (prod is solo)
 - [Review P1-P2 block](feedback_review_findings_fix_p1_p2_tolerate_p3_p4.md) - review findings block shipping only at P1-P2; P3-P4 get filed as follow-ups (rubric inside)
@@ -66,6 +70,7 @@
 - [Autonomous iterate](feedback_autonomous_overnight_file_fix_iterate.md) - work autonomously; every defect = file + fix + iterate until clean
 - [Bug report = report](feedback_bug_report_means_report_not_fix.md) - "root cause + bug report" = investigate, file, STOP
 - [Issue routing](feedback_issue_routing_public_vs_security.md) - ALL regular issues -> PRIVATE dev repo (issue_manager's default origin); security -> private security repo; never file on public
+- [Commit issue refs](feedback_commit_issue_refs_overlap.md) - never bare #N in commits: private/public numbers overlap; use LightspeedDMS/code-indexer#N, no closing keyword
 - [Commit on development](feedback_always_checkout_development_before_commit.md) - always commit on development, never master/staging
 - [Bump before staging](feedback_bump_version_before_staging.md) - bump version + tag BEFORE promoting to staging
 - [Lint before commit](feedback_lint_before_commit.md) - run ruff/mypy before staging; the hook is a safety net
@@ -82,6 +87,7 @@
 - [Local work no permission](feedback_no_permission_asking_local_machine_work.md) - never ask permission for routine local-machine work
 - [implement-story non-stop](feedback_implement_story_agentic_no_stops.md) - /implement-story-spec runs non-stop, no pre-flight questions
 - [Progress reporting](feedback_progress_reporting_delicate.md) - ask before ANY change to progress reporting
+- [CLI bugs reach server](feedback_cli_defects_reach_server.md) - never defer as "CLI-only" without proving no server path; the server spawns cidx and runs CLI services in-process
 - [Release inclusion bar](feedback_release_inclusion_bar.md) - mid-release additions only for high-severity security or P1/P2 showstoppers
 - [Targeted scope](feedback_targeted_scope_discipline.md) - targeted requests must not trigger unrelated rewrites
 - [Validation on scope](feedback_validation_runs_stay_on_scope.md) - staging validation proves the shipped fix only; side anomalies = one-line notes, never investigations

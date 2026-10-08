@@ -1,23 +1,22 @@
 ---
 name: project-release-package-2087-resume-state
-description: "Resume state for the post-12.83.0 release package (re-embed fix #2087 G1, S12, S21, docs-overhaul merge, defect-list validation) -- read first after a reset (2026-10-06 night, owner asleep)"
+description: "Resume state for the post-12.83.0 release work: 12.84.0 (near-done fixes) then 12.85.0 (G1-lite pay-once for solo). Read first after a reset."
 metadata:
-  node_type: memory
   type: project
-  originSessionId: 5d72bd7f-835f-4bea-a38d-c51aea1db2c4
-  modified: 2026-10-07T03:54:00.014Z
 ---
 
-Owner instruction (2026-10-06 night): continue agentically; no staging needed until the owner provides NEW Voyage keys (all staging provider keys were revoked after the re-embed incident [[project-reembed-cost-incident-2026-10-06]]). Never push to master. Agents: Opus for engineering; Codex available for reviews/pairing (relays must use unique scratch filenames, verdict from own session log [[feedback-concurrent-codex-relays-clobber-scratch]]). Release inclusion bar: [[feedback-release-inclusion-bar]].
+**Owner decisions (2026-10-07, final):**
+- TWO CUTS. 12.84.0 = the near-done work below. 12.85.0 = "G1-lite": pay-once indexing for SOLO (reuse stored vectors before any provider call, no up-front delete, no implicit wipe, retire resume-from-list, a slim side-state store, spend meter plus volume alarm). Codex's draft story set: gitignored `.analysis/g1lite_plan_codex_20261007.md` (unverified).
+- DEFERRED to later releases: the S15 per-repo lease (park its uncommitted code on a feature branch after a git-safety backup) and every cluster-grade story of the design `plans/designs/crash_safe_reconcile_2087_20261006.md` (S16, S14, S5, S17, S19, S13, S9, S10, S20/public #2045, S18); private #2093 and #2095; the remaining dedup-epic items (private #2103); S22 (public #2049); small cleanups (orphan Tantivy methods; sanitizing and committing the design doc).
+- Review loops: after a structural round, an Opus arbiter rules materiality; non-material variants become follow-ups.
+- RELEASE GATING: test everything locally first (fast, server-fast, e2e incl. the PostgreSQL phase, local front-door REST/MCP runs of each new capability with a FAKE embedding provider, log audit). Only then ask the owner for new Voyage credentials for staging, then staging front-door validation (solo and cluster). No staging before that.
+- Working mode on the 5x account: ONE worker agent + at most ONE reviewer ([[feedback-parallel-dispatch-cap-4-on-20x]]); fresh short-brief agents; mechanical staging/committing in the main context.
 
-Committed on development (not pushed after the 12.83.0 tag): 8b0431f2f installer /healthz, fda620da4 CLAUDE.md /healthz rule, 1da289710 a security-hardening commit (see its message), e5a4116f4 CLAUDE.md note + memory notes. Security item status lives ONLY in the private security tracker, never here.
+**12.84.0 status:**
+- Committed on development (unpushed): the installer /healthz check, S12 stall watchdog, S0 reproduction harness, public #2038 #2039 #2060 #2064 #2076 #2094, the public #2056/#2057 FTS-integrity series, auto-updater non-interactive git, one git URL parser, URL credential stripping, S21 `file_extensions` (public #2047), git confirmation tokens (public #2087 part 2, #2099), plus security hardening commits (status only in the private security tracker).
+- Remaining for 12.84.0, in order: commit the push consolidation and the telemetry/log redaction work after their final review; merge `origin/feature/docs-overhaul` (blocked until push work, S15 parking and memory notes are committed; resolve cluster docs by porting the /healthz text, and keep development's wording in the git tool docs and bulk provider-index doc); fix private #2109 (multi-index query reports every error as a timeout) and private #2108 (parallel strategy caps each provider fetch at 40; root-cause notes in gitignored `.analysis/rootcause_2108_2109_codex_20261007.md`); full local gates; version bump 12.84.0 (CHANGELOG operator note: after rolling back below this version and upgrading again, run `cidx index --rebuild-fts-index`); then ask for keys.
 
-In progress (uncommitted, separate agents): S12 stall watchdog (Codex re-review fixes: separate faulthandler dump file, failed-unlink recovery, caps); S21 #2047 file_extensions filter (Codex P2 fixes); S0 harness extensions (`scripts/analysis/reembed_repro/`, version-agnostic checks must FAIL on 12.83.0); S15 per-repo indexing lease (paired Claude+Codex engineer).
-
-Design: `plans/designs/crash_safe_reconcile_2087_20261006.md` v3.5 (final; owner decisions in section 14). Story order: S0, S0b census, S12 independent; then deployment gate G1 (shipped together, dark until complete): S15 lease, S2 store/registry/writer, S16 HNSW gen, S14 FTS gen (#2056), S3, S4 reuse, S5 ownership, S17 multimodal, S6 resume retired, S7, S19, S13, S8, S9, S10, S11 alarm, S20 drain (#2045), S18 hard mounts; S21 (#2047) and S22 (#2049) separate query releases.
-
-Pending merges: branch `feature/docs-overhaul` on origin (22 docs commits, owner-approved incl. removal of the disclosure checker) merges into development once S21 is committed (blocking dirty files: cli.py, search_code.md). Conflicts: docs/cluster-architecture.md and docs/cluster-setup.md (deleted by branch, modified by the /healthz fix) -> take branch layout and port the /healthz text.
-
-Pending validation: Codex and Opus independently validating an owner-provided list (two private security-tracker items plus public P2 issues #2038-#2099; the full list is in the session scratchpad, not in git). Include per the bar; anything security-related is tracked and described only in the private security tracker.
-
-Staging bring-up checklist (gitignored): `.analysis/staging_bringup_2087_20261006.md`; Langfuse lookback 3 days first [[project-staging-langfuse-lookback-3-days]].
+**Mechanics that work:**
+- Mixed-file commits: an assembler builds HEAD + one group's hunks as blobs (`patch --fuzz=0`, `hash-object`, `update-index`; preserve CRLF files), exports the index with `checkout-index`, runs imports, ruff, mypy and the group's tests there, then commits with `--no-verify` ([[feedback-partial-stage-exact-content]]).
+- Commit messages never carry a bare `#N` ([[feedback-commit-issue-refs-overlap]]).
+- Review every memory file before committing it: this file is public.
