@@ -181,6 +181,21 @@ smoke:
       tests/unit/server/mcp/test_json_default_fallback_1645.py
       -v --tb=short
       --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
+    # The plugins ship their own suites and NO job collected either of them.
+    # Not something a test count could have revealed: pytest's testpaths is
+    # ["tests"], so a bare run never descends into plugins/ at all -- 52 tests
+    # that reported nothing, passing or failing. These are the delegated seams
+    # (git, and the orchestrator invoker), where a regression is cidx reaching
+    # past a boundary it is supposed to go through.
+    #
+    # PYTHONPATH per plugin because each is its own distribution, deliberately
+    # not installed into the image. Separate invocations rather than one: the
+    # two would shadow each other's top-level package directory.
+    #
+    # tests/unit/ci/test_ci_runs_plugin_suites.py derives this requirement from
+    # what is on disk, so a NEW plugin cannot land uncollected the way these did.
+    - PYTHONPATH=plugins/cidx_orchestrator_invoker python -m pytest -q plugins/cidx_orchestrator_invoker
+    - PYTHONPATH=plugins/cidx_git_backend python -m pytest -q plugins/cidx_git_backend
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "master"

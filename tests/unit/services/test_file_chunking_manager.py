@@ -110,22 +110,35 @@ class MockFixedSizeChunker:
 
     def __init__(self):
         self.chunk_calls = []
+        self.chunk_contents = []
 
     def chunk_file(
-        self, file_path: Path, repo_root: Optional[Path] = None
+        self,
+        file_path: Path,
+        repo_root: Optional[Path] = None,
+        content: Optional[bytes] = None,
     ) -> List[Dict]:
         """Mock chunk_file method -- signature mirrors the REAL
-        FixedSizeChunker.chunk_file(file_path, repo_root=...) API that
-        FileChunkingManager actually calls (repo_root is accepted, and
-        unused here since this mock never performs image extraction)."""
+        FixedSizeChunker.chunk_file(file_path, repo_root=..., content=...) API
+        that FileChunkingManager actually calls. `content` is the bytes the
+        caller already read, so the file is not opened twice; it is accepted and
+        unused here, as is repo_root, since this mock never reads or extracts
+        images."""
         self.chunk_calls.append(file_path)
+        # Recorded so a caller that stops handing its bytes over is visible: the
+        # whole point of `content` is that this file is not opened twice.
+        self.chunk_contents.append(content)
 
-        # Simulate chunking based on file content
-        try:
-            with open(file_path, "r") as f:
-                content = f.read()
-        except (IOError, OSError):
-            content = "mock content"
+        # Simulate chunking. Use the handed-over bytes when given, exactly as the
+        # real chunker does -- reading anyway would hide the regression above.
+        if content is not None:
+            text = content.decode("utf-8", errors="replace")
+        else:
+            try:
+                with open(file_path, "r") as f:
+                    text = f.read()
+            except (IOError, OSError):
+                text = "mock content"
 
         # Return mock chunks -- shape mirrors the REAL chunker's chunk
         # dict exactly (text/chunk_index/total_chunks/size/file_path/
@@ -133,10 +146,10 @@ class MockFixedSizeChunker:
         return (
             [
                 {
-                    "text": content[:500] if len(content) > 500 else content,
+                    "text": text[:500] if len(text) > 500 else text,
                     "chunk_index": 0,
-                    "total_chunks": 2 if len(content) > 500 else 1,
-                    "size": min(500, len(content)),
+                    "total_chunks": 2 if len(text) > 500 else 1,
+                    "size": min(500, len(text)),
                     "file_path": str(file_path),
                     "file_extension": file_path.suffix.lstrip("."),
                     "line_start": 1,
@@ -144,10 +157,10 @@ class MockFixedSizeChunker:
                     "images": [],
                 },
                 {
-                    "text": content[400:] if len(content) > 500 else "",
+                    "text": text[400:] if len(text) > 500 else "",
                     "chunk_index": 1,
-                    "total_chunks": 2 if len(content) > 500 else 1,
-                    "size": max(0, len(content) - 400),
+                    "total_chunks": 2 if len(text) > 500 else 1,
+                    "size": max(0, len(text) - 400),
                     "file_path": str(file_path),
                     "file_extension": file_path.suffix.lstrip("."),
                     "line_start": 8,
@@ -155,13 +168,13 @@ class MockFixedSizeChunker:
                     "images": [],
                 },
             ]
-            if len(content) > 500
+            if len(text) > 500
             else [
                 {
-                    "text": content,
+                    "text": text,
                     "chunk_index": 0,
                     "total_chunks": 1,
-                    "size": len(content),
+                    "size": len(text),
                     "file_path": str(file_path),
                     "file_extension": file_path.suffix.lstrip("."),
                     "line_start": 1,
@@ -656,6 +669,136 @@ class TestFileChunkingManagerAcceptanceCriteria:
 
             # Should call existing Filesystem client interface
             assert len(self.mock_filesystem_client.upsert_calls) == 1
+
+    def test_a_file_deleted_mid_run_is_vanished_not_a_failure(self):
+        """The paired half: ENOENT *is* the benign skip.
+
+        Without this, the FileNotFoundError arm only has to not-crash -- flipping
+        vanished=True to False keeps every other test green, and a file deleted
+        between the scan and the read starts being reported as a hard failure.
+        """
+        original = Path.read_bytes
+
+        def gone(self_path):
+            if str(self_path) == str(self.test_file_path):
+                raise FileNotFoundError(2, "No such file or directory")
+            return original(self_path)
+
+        with FileChunkingManager(
+            vector_manager=self.mock_vector_manager,
+            chunker=self.mock_chunker,
+            vector_store_client=self.mock_filesystem_client,
+            thread_count=2,
+            slot_tracker=CleanSlotTracker(max_slots=4),
+            codebase_dir=self.test_file_path.parent,
+        ) as manager:
+            self._add_voyage_client_mock(manager)
+            Path.read_bytes = gone
+            try:
+                future: Future[Any] = manager.submit_file_for_processing(
+                    self.test_file_path, {"project_id": "test", "file_hash": None}, None
+                )
+                result = future.result(timeout=5.0)
+            finally:
+                Path.read_bytes = original
+
+        assert result.success is False
+        assert result.vanished is True, (
+            "a file that disappeared mid-run must be marked vanished so the "
+            "collector skips it benignly instead of counting a failed file"
+        )
+
+    def test_an_unreadable_file_is_a_FAILURE_not_a_silent_vanish(self):
+        """Only ENOENT is "vanished". Everything else must count as a failure.
+
+        The collector treats `vanished` as a benign skip: it increments neither
+        files_processed nor failed_files, and the path never reaches
+        _failed_relative_paths. So catching every OSError on the read would make a
+        PermissionError, an NFS stale handle or an EIO drop the file from the
+        index while the run still reported clean stats -- which is strictly worse
+        than before this read existed, when those errors came out of chunk_file as
+        ordinary failures.
+        """
+        original = Path.read_bytes
+
+        def deny(self_path):
+            if str(self_path) == str(self.test_file_path):
+                raise PermissionError(13, "Permission denied")
+            return original(self_path)
+
+        with FileChunkingManager(
+            vector_manager=self.mock_vector_manager,
+            chunker=self.mock_chunker,
+            vector_store_client=self.mock_filesystem_client,
+            thread_count=2,
+            slot_tracker=CleanSlotTracker(max_slots=4),
+            codebase_dir=self.test_file_path.parent,
+        ) as manager:
+            self._add_voyage_client_mock(manager)
+            Path.read_bytes = deny
+            try:
+                future: Future[Any] = manager.submit_file_for_processing(
+                    self.test_file_path, {"project_id": "test", "file_hash": None}, None
+                )
+                result = future.result(timeout=5.0)
+            finally:
+                Path.read_bytes = original
+
+        assert result.success is False, (
+            "an unreadable file must not be reported as success"
+        )
+        assert result.vanished is False, (
+            "a PermissionError was reported as 'vanished', which the collector "
+            "skips silently -- the file would be dropped with clean stats"
+        )
+
+    def test_a_deferred_file_hash_is_filled_from_the_bytes_this_worker_read(self):
+        """The metadata phase may hand over file_hash=None; the worker must fill it.
+
+        That phase used to read every file purely to sha256 it, while this worker
+        read the same file again to chunk it. Deferring the hash to here removes a
+        whole read per file -- but only if the worker actually computes it, from
+        the bytes it read. A None reaching the payload would be stored as the
+        file's identity, and a hash of the wrong bytes would describe content that
+        was never chunked.
+        """
+        import hashlib
+
+        expected = (
+            "sha256:" + hashlib.sha256(self.test_file_path.read_bytes()).hexdigest()
+        )
+
+        with FileChunkingManager(
+            vector_manager=self.mock_vector_manager,
+            chunker=self.mock_chunker,
+            vector_store_client=self.mock_filesystem_client,
+            thread_count=2,
+            slot_tracker=CleanSlotTracker(max_slots=4),
+            codebase_dir=self.test_file_path.parent,
+        ) as manager:
+            self._add_voyage_client_mock(manager)
+
+            deferred = {"project_id": "test", "file_hash": None}
+            future: Future[Any] = manager.submit_file_for_processing(
+                self.test_file_path, deferred, None
+            )
+            result = future.result(timeout=5.0)
+
+        assert result.success, f"processing failed: {result.error}"
+        assert self.mock_chunker.chunk_contents, "the chunker was never called"
+        assert all(c is not None for c in self.mock_chunker.chunk_contents), (
+            "the worker did not hand its bytes to the chunker, so the file is read twice"
+        )
+        assert deferred["file_hash"] == expected, (
+            "the worker did not fill the deferred hash"
+        )
+
+        assert self.mock_filesystem_client.upsert_calls, "nothing was upserted"
+        for call in self.mock_filesystem_client.upsert_calls:
+            for point in call["points"]:
+                stored = point.get("payload", {}).get("file_hash")
+                assert stored is not None, "a None file_hash reached the stored payload"
+                assert stored == expected, f"stored hash {stored!r} is not the file's"
 
     def test_addresses_user_problems_efficiency_and_feedback(self):
         """Test that FileChunkingManager addresses the specific user problems.

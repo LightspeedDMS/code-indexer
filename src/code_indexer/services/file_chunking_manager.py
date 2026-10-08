@@ -478,9 +478,44 @@ class FileChunkingManager:
             # ALL work in try block
             slot_tracker.update_slot(slot_id, FileStatus.CHUNKING)
 
+            # Read ONCE and let everything downstream work from these bytes. The
+            # metadata phase used to read the whole file just to sha256 it and
+            # this worker read it again to chunk it; one read collapses that pair
+            # and closes the window between them, where the two reads could see
+            # different content and leave the stored hash describing bytes that
+            # were never chunked.
+            #
+            # INSIDE this try on purpose. Only ENOENT is the "vanished" case,
+            # which the collector skips benignly -- it increments neither
+            # files_processed nor failed_files and never records the path. Any
+            # other OSError (PermissionError, an NFS stale handle, EIO) must stay
+            # an ordinary failure, exactly as it was when it came out of
+            # chunk_file, instead of dropping the file while the run reports
+            # clean stats.
+            try:
+                content = file_path.read_bytes()
+            except FileNotFoundError as e:
+                logger.warning(
+                    f"Skipping file that vanished during chunking: {file_path}"
+                )
+                return FileProcessingResult(
+                    success=False,
+                    vanished=True,
+                    file_path=file_path,
+                    chunks_processed=0,
+                    processing_time=time.time() - start_time,
+                    error=f"File vanished before processing: {e}",
+                )
+
+            # Fill in a hash the metadata phase deferred rather than read for.
+            if metadata.get("file_hash") is None:
+                metadata["file_hash"] = "sha256:" + hashlib.sha256(content).hexdigest()
+
             # Phase 1: Chunk the file
             logger.debug(f"Starting chunking for {file_path}")
-            chunks = self.chunker.chunk_file(file_path, repo_root=self.codebase_dir)
+            chunks = self.chunker.chunk_file(
+                file_path, repo_root=self.codebase_dir, content=content
+            )
 
             if not chunks:
                 # Empty files are valid but don't need indexing

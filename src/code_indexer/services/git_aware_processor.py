@@ -78,15 +78,31 @@ class GitAwareDocumentProcessor(DocumentProcessor):
         """Process a single file with git-aware metadata using parallel vector calculation."""
         try:
             # Step 1: File reading & chunking (main thread)
+            #
+            # Read ONCE and feed both consumers. Chunking and metadata each used
+            # to open this file themselves, so a single pass read it twice -- and
+            # between those two reads the file could change, leaving the blob hash
+            # describing bytes that were never chunked. Since the blob hash seeds
+            # each chunk's point UUID, that mismatch re-identifies chunks rather
+            # than failing. One read makes the pair atomic as well as cheaper.
+            try:
+                content = file_path.read_bytes()
+            except OSError:
+                # Unreadable: fall back to the previous behaviour and let the
+                # chunker surface the error, rather than failing differently here.
+                content = None
+
             chunks = self.fixed_size_chunker.chunk_file(
-                file_path, repo_root=self.config.codebase_dir
+                file_path, repo_root=self.config.codebase_dir, content=content
             )
 
             if not chunks:
                 return []
 
-            # Get git-aware metadata (main thread)
-            file_metadata = self.file_identifier.get_file_metadata(file_path)
+            # Get git-aware metadata (main thread), from the same bytes.
+            file_metadata = self.file_identifier.get_file_metadata(
+                file_path, content=content
+            )
 
             # Step 2: Submit vector calculation tasks to worker threads
             chunk_futures = []
