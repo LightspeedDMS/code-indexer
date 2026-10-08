@@ -21,6 +21,7 @@ from __future__ import annotations
 import pytest
 
 from code_indexer.server.services import git_backend_plugin
+from code_indexer.server.services import backend_plugin_loader
 from code_indexer.server.services.git_backend_plugin import (
     ENV_VAR,
     GitBackendPluginError,
@@ -43,8 +44,12 @@ def _clear(monkeypatch):
     monkeypatch.delenv(ENV_VAR, raising=False)
     # Deterministic regardless of what is pip-installed in the dev venv: the
     # cidx_git_backend plugin may be installed locally but is not in CI.
+    # The env-var/entry-point mechanism moved to backend_plugin_loader when the
+    # content seam needed the same resolution. Patch it where it now LIVES:
+    # patching git_backend_plugin would silently intercept nothing, and these
+    # tests would pass against whatever is pip-installed in the dev venv.
     monkeypatch.setattr(
-        git_backend_plugin, "entry_points", _fake_entry_points_no_plugin
+        backend_plugin_loader, "entry_points", _fake_entry_points_no_plugin
     )
     git_backend_plugin.reset_cache()
     yield
@@ -118,9 +123,9 @@ class TestPython39EntryPointsRealSignature:
             return {git_backend_plugin.ENTRY_POINT_GROUP: [_FakeEntryPoint()]}
 
         monkeypatch.setattr(
-            git_backend_plugin, "entry_points", _fake_entry_points_py39_signature
+            backend_plugin_loader, "entry_points", _fake_entry_points_py39_signature
         )
-        monkeypatch.setattr(git_backend_plugin.sys, "version_info", (3, 9, 0))
+        monkeypatch.setattr(backend_plugin_loader.sys, "version_info", (3, 9, 0))
         git_backend_plugin.reset_cache()
 
         factory = get_git_backend_factory()

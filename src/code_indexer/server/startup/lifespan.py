@@ -1469,6 +1469,27 @@ def make_lifespan(
                 getattr(configured_git_backend, "owns_credentials", "unknown"),
             )
 
+            # Content seam: ONE selection, parked alongside the git backend so
+            # every consumer reads repository bytes through the same backend.
+            # Local by default, so this is inert until an operator sets
+            # content_backend='delegated'.
+            from code_indexer.server.startup.content_backend_wiring import (
+                build_configured_content_backend,
+            )
+
+            configured_content_backend = build_configured_content_backend(server_config)
+            app.state.content_backend = configured_content_backend
+            # Logged for the same reason the git parking is: app.state cannot be
+            # inspected from outside the process, so a parking that silently
+            # failed would leave consumers on LocalContentBackend -- reading a
+            # mount that a delegated pod may not have, and reporting an empty
+            # repository rather than an error.
+            logger.info(
+                "ContentBackend parked on app.state: %s (is_local=%s)",
+                type(configured_content_backend).__name__,
+                getattr(configured_content_backend, "is_local", "unknown"),
+            )
+
             global_lifecycle_manager = GlobalReposLifecycleManager(
                 str(golden_repos_dir),
                 background_job_manager=background_job_manager,

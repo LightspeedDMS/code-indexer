@@ -1977,6 +1977,12 @@ class ServerConfig:
     git_backend: str = (
         "local"  # EVO-64678: "local" (in-process git) or "delegated" (git-mcp)
     )
+    # Content seam: where repository BYTES come from. "local" reads this
+    # container's filesystem (the default, and what every deployment does
+    # today); "delegated" reads them through the service that owns filesystem
+    # access, so cidx needs no repository mount. There is deliberately no
+    # fallback -- see server/startup/content_backend_wiring.py.
+    content_backend: str = "local"
     cow_daemon: Optional[CowDaemonConfig] = None  # Story #510: CoW daemon settings
     workspace_mcp: Optional[WorkspaceMcpConfig] = (
         None  # EVO-64616: workspace-mcp delegated clone backend settings

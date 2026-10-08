@@ -44,14 +44,9 @@ backend is available).
 
 from __future__ import annotations
 
-import logging
-import os
-import sys
-from importlib import import_module
-from importlib.metadata import entry_points
-from typing import Any, Callable, List, Optional, cast
+from typing import Any, Callable, Optional
 
-logger = logging.getLogger(__name__)
+from code_indexer.server.services.backend_plugin_loader import BackendPluginResolver
 
 ENV_VAR = "CIDX_GIT_BACKEND"
 ENTRY_POINT_GROUP = "code_indexer.git_backend"
@@ -64,59 +59,15 @@ class GitBackendPluginError(RuntimeError):
     """A plugin was configured but could not be loaded or is not callable."""
 
 
-_NO_PLUGIN = object()
-_cached: object = None
-
-
-def _load_from_path(spec: str) -> GitBackendFactory:
-    if ":" not in spec:
-        raise GitBackendPluginError(
-            f"{ENV_VAR}={spec!r} is not in 'package.module:factory' form"
-        )
-    module_name, _, attr = spec.partition(":")
-    try:
-        module = import_module(module_name)
-    except ImportError as exc:
-        raise GitBackendPluginError(
-            f"{ENV_VAR}={spec!r}: cannot import module {module_name!r}: {exc}"
-        ) from exc
-    factory = getattr(module, attr, None)
-    if factory is None:
-        raise GitBackendPluginError(
-            f"{ENV_VAR}={spec!r}: module {module_name!r} has no attribute {attr!r}"
-        )
-    if not callable(factory):
-        raise GitBackendPluginError(f"{ENV_VAR}={spec!r}: {attr!r} is not callable")
-    return cast(GitBackendFactory, factory)
-
-
-def _load_from_entry_points() -> Optional[GitBackendFactory]:
-    # importlib.metadata.entry_points() only accepts the `group=` keyword
-    # starting in Python 3.10 (SelectableGroups). On 3.9 the function takes NO
-    # parameters at all and returns a plain dict of group -> List[EntryPoint];
-    # `.get(group, [])` is the pre-3.10 equivalent lookup. This repo's CI
-    # matrix still targets 3.9, so both call shapes must be supported.
-    candidates: List[Any]
-    if sys.version_info >= (3, 10):
-        candidates = list(entry_points(group=ENTRY_POINT_GROUP))
-    else:
-        candidates = list(entry_points().get(ENTRY_POINT_GROUP, []))
-    selected = next(iter(candidates), None)
-    if selected is None:
-        return None
-    try:
-        factory = selected.load()
-    except Exception as exc:  # noqa: BLE001 - surfaced as a config error
-        raise GitBackendPluginError(
-            f"entry point {selected.name!r} in group {ENTRY_POINT_GROUP!r} "
-            f"failed to load: {exc}"
-        ) from exc
-    if not callable(factory):
-        raise GitBackendPluginError(
-            f"entry point {selected.name!r} in group {ENTRY_POINT_GROUP!r} "
-            "did not resolve to a callable"
-        )
-    return cast(GitBackendFactory, factory)
+# The resolution mechanism is shared with the other delegated seams
+# (backend_plugin_loader); only the names below are this seam's own. Behaviour,
+# message wording and the public functions are unchanged.
+_resolver = BackendPluginResolver(
+    env_var=ENV_VAR,
+    entry_point_group=ENTRY_POINT_GROUP,
+    error_type=GitBackendPluginError,
+    seam_name="git",
+)
 
 
 def get_git_backend_factory() -> Optional[GitBackendFactory]:
@@ -126,25 +77,7 @@ def get_git_backend_factory() -> Optional[GitBackendFactory]:
         GitBackendPluginError: a plugin was configured but is unusable. Raised
             rather than silently returning None -- see module docstring.
     """
-    global _cached
-    if _cached is not None:
-        return None if _cached is _NO_PLUGIN else cast(GitBackendFactory, _cached)
-
-    spec = os.environ.get(ENV_VAR, "").strip()
-    factory: Optional[GitBackendFactory]
-    if spec:
-        factory = _load_from_path(spec)
-        logger.info("git backend plugin loaded from %s=%s", ENV_VAR, spec)
-    else:
-        factory = _load_from_entry_points()
-        if factory is not None:
-            logger.info(
-                "git backend plugin loaded from entry-point group %r",
-                ENTRY_POINT_GROUP,
-            )
-
-    _cached = factory if factory is not None else _NO_PLUGIN
-    return factory
+    return _resolver.get_factory()
 
 
 def resolve_delegated_git_backend() -> Optional[Any]:
@@ -154,13 +87,9 @@ def resolve_delegated_git_backend() -> Optional[Any]:
     A configured-but-broken factory still raises (via ``get_git_backend_factory``
     or the factory call itself) -- fail loud, never a silent local fallback.
     """
-    factory = get_git_backend_factory()
-    if factory is None:
-        return None
-    return factory()
+    return _resolver.resolve()
 
 
 def reset_cache() -> None:
     """Clear the resolved plugin. For tests."""
-    global _cached
-    _cached = None
+    _resolver.reset_cache()
