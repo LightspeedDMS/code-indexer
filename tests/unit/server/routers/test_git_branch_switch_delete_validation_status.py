@@ -75,6 +75,14 @@ def test_client(mock_user, tmp_path):
     def override():
         return mock_user
 
+    # A process-wide chunk-store cache left by an earlier test without a
+    # lease root makes the real PayloadCache startup step fail; start from
+    # a clean one.
+    from code_indexer.storage.shared.chunk_store_cache import (
+        reset_global_chunk_store_cache,
+    )
+
+    reset_global_chunk_store_cache()
     app.dependency_overrides[get_current_user] = override
     try:
         with TestClient(app) as client:
