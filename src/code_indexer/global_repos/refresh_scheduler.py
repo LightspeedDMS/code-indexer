@@ -418,18 +418,24 @@ def _git_pull_updater_for(
     userinfo) is handed to every fetch/pull as a run-time credential, and the
     base clone's stored origin URL is first rewritten to its credential-free
     form (idempotent). Only the base clone is rewritten -- never a versioned
-    snapshot. A failed rewrite is logged and does not abort the refresh (the
-    stored URL still authenticates). Raises OrphanedRepoError (before any
-    rewrite) when the clone is missing. Runs in the refresh job's thread."""
+    snapshot. A failed rewrite fails the refresh before any network command
+    (RuntimeError): a clone that may still store a credential is never
+    fetched or pulled. Raises OrphanedRepoError (before any rewrite) when
+    the clone is missing. Runs in the refresh job's thread."""
     updater = GitPullUpdater(
         master_path, cancel_check=cancel_check, credentials_url=repo_url
     )
-    if not ensure_remote_url_without_credentials(master_path).ok:
-        logger.warning(
-            "Stored remote URLs of %s could not all be made credential-free; "
-            "the refresh continues",
-            master_path,
-        )
+    from code_indexer.server.services.git_operations_service import (
+        GitCommandError,
+    )
+
+    try:
+        ensure_remote_url_without_credentials(master_path)
+    except GitCommandError as exc:
+        raise RuntimeError(
+            f"Stored remote URLs of {master_path} could not all be made "
+            f"credential-free ({exc}); the refresh is not run"
+        ) from exc
     return updater
 
 

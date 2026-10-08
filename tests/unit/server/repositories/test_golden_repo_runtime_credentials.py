@@ -95,3 +95,46 @@ def test_branch_change_fetch_and_pull_use_runtime_credentials(
     manager._cb_checkout_and_pull(str(clone), "main", 60, credentials_url=remote)
 
     _assert_no_credentials(argv_log, clone)
+
+
+def test_branch_change_stops_before_any_credentialed_git_call_when_sanitization_fails(
+    remote: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No credential is handed to git for a clone whose stored remote URLs
+    could not be made credential-free: the branch change fails first."""
+    from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+    from code_indexer.server.services.git_operations_service import (
+        GitCommandError,
+    )
+
+    clone = tmp_path / "golden" / "repo"
+    _manager()._clone_remote_repository(remote, str(clone))
+    manager = _manager()
+    golden = GoldenRepo(
+        alias="example-repo",
+        repo_url=remote,
+        default_branch="main",
+        clone_path=str(clone),
+        created_at="2025-01-01T00:00:00Z",
+    )
+    monkeypatch.setattr(
+        manager, "_resolve_golden_repo_authoritative", lambda alias: golden
+    )
+    credentialed: List[List[str]] = []
+    real_run = subprocess.run
+
+    def recording_run(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        if "CIDX_GIT_REMOTE_PASSWORD" in (kwargs.get("env") or {}):
+            credentialed.append([str(part) for part in cmd])
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", recording_run)
+    config = clone / ".git" / "config"
+    config.chmod(0)
+    try:
+        with pytest.raises(GitCommandError, match="removing credentials"):
+            manager.change_branch("example-repo", "other")
+    finally:
+        config.chmod(0o644)
+
+    assert credentialed == []

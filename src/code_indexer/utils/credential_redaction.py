@@ -9,9 +9,10 @@ Never applied to what a subprocess actually receives -- only to argv and
 captured output that are logged, raised or returned.
 """
 
+import base64
 import re
-from typing import Any, Dict, Iterator, List, Tuple
-from urllib.parse import unquote
+from typing import Any, Dict, Iterator, List, Sequence, Set, Tuple
+from urllib.parse import unquote, unquote_plus
 
 _MASK = "***"
 
@@ -176,19 +177,85 @@ def redact_command(args: Any) -> Any:
     return [display for display, _secrets in _walk_argv(args)]
 
 
-def redact_command_output(text: Any, args: Any) -> Any:
-    """Safe-to-log copy of a subprocess's captured output: URL userinfo and
-    Authorization values are masked, and every credential value the argv
-    carried (at least _MIN_OUTPUT_SECRET_CHARS long) is masked wherever the
-    output echoes it as a whole word. Bytes (subprocess.run's TimeoutExpired
-    keeps raw bytes even in text mode) are redacted and returned as bytes;
-    any other non-str input is returned unchanged."""
+# Characters an encoded echo of a secret is made of: URL-unreserved, '%'
+# escapes and '+' (a form-encoded space). A token is a maximal run of these
+# plus the secret's own characters, so a partly encoded echo is one token.
+_ENCODED_TOKEN_CHARS = r"A-Za-z0-9._~%+\-"
+_PERCENT_DECODE_PASSES = 2
+
+
+def _decoded_forms(token: str) -> Set[str]:
+    """``token`` percent-decoded up to twice, each pass both with and
+    without '+' read as a space (escapes in any letter case)."""
+    forms = {token}
+    for _ in range(_PERCENT_DECODE_PASSES):
+        forms |= {decode(form) for form in forms for decode in (unquote, unquote_plus)}
+    return forms
+
+
+def _base64_forms(value: str) -> List[str]:
+    """Standard and URL-safe base64 of ``value``, padded and unpadded,
+    longest first."""
+    forms = set()
+    for encode in (base64.b64encode, base64.urlsafe_b64encode):
+        encoded = encode(value.encode("utf-8")).decode("ascii")
+        forms |= {encoded, encoded.rstrip("=")}
+    return sorted(forms, key=len, reverse=True)
+
+
+def _basic_auth_values(args: Any, secret: str) -> List[str]:
+    """What a Basic credential for ``secret`` encodes: the secret itself,
+    and ``user:secret`` for every argv URL userinfo whose password it is."""
+    values = [secret]
+    for arg in [args] if isinstance(args, str) else list(args or ()):
+        for _sep, userinfo in _URL_USERINFO_RE.findall(str(arg)):
+            user, colon, password = userinfo.partition(":")
+            if colon and unquote(password) == secret:
+                values.append(f"{unquote(user)}:{secret}")
+    return values
+
+
+def _mask_supplied_secret(text: str, args: Any, secret: str) -> str:
+    """Mask ``secret`` in ``text``: every whole token whose decoded forms
+    (``_decoded_forms``) contain it, then every remaining raw occurrence,
+    then the base64 of each ``_basic_auth_values`` entry."""
+    extra = "".join(re.escape(char) for char in sorted(set(secret)))
+    token_re = re.compile(f"[{_ENCODED_TOKEN_CHARS}{extra}]+")
+
+    def mask_token(match: "re.Match[str]") -> str:
+        token = match.group()
+        return _MASK if any(secret in form for form in _decoded_forms(token)) else token
+
+    text = token_re.sub(mask_token, text)
+    text = text.replace(secret, _MASK)
+    for value in _basic_auth_values(args, secret):
+        for form in _base64_forms(value):
+            text = text.replace(form, _MASK)
+    return text
+
+
+def redact_command_output(
+    text: Any, args: Any, supplied_secrets: Sequence[str] = ()
+) -> Any:
+    """Safe-to-log copy of a subprocess's captured output. Every value in
+    ``supplied_secrets`` -- secrets the caller supplied, so known exactly --
+    is masked at EVERY occurrence, whatever its length or neighbouring
+    characters: raw, inside any token that percent-decodes to it
+    (partial, double, '+'-as-space, any escape case), and as the base64 of
+    it or of ``user:secret`` (``_mask_supplied_secret``). Then URL userinfo
+    and Authorization values are masked, and every credential value the
+    argv carried (at least _MIN_OUTPUT_SECRET_CHARS long) is masked wherever
+    the output echoes it as a whole word. Bytes (subprocess.run's
+    TimeoutExpired keeps raw bytes even in text mode) are redacted and
+    returned as bytes; any other non-str input is returned unchanged."""
     if isinstance(text, bytes):
         decoded = text.decode("utf-8", errors="surrogateescape")
-        redacted = redact_command_output(decoded, args)
+        redacted = redact_command_output(decoded, args, supplied_secrets)
         return redacted.encode("utf-8", errors="surrogateescape")
     if not isinstance(text, str):
         return text
+    for secret in sorted(filter(None, set(supplied_secrets)), key=len, reverse=True):
+        text = _mask_supplied_secret(text, args, secret)
     text = _mask_text(text)
     for _display, secrets in _walk_argv(args):
         for secret in secrets:

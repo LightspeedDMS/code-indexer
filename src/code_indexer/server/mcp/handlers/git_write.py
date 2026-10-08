@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -156,6 +157,7 @@ def _get_pat_credential_for_remote(
         (credential, remote_url, error_msg) tuple.
     """
     from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+    from code_indexer.utils import git_runner
     from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
 
     remote_url = ""
@@ -164,8 +166,13 @@ def _get_pat_credential_for_remote(
             ["git", "remote", "get-url", remote],
             cwd=Path(repo_path),
             check=True,
+            timeout=git_runner.REMOTE_RESOLVE_TIMEOUT_SECONDS,
         )
         remote_url = url_result.stdout.strip()
+    except subprocess.TimeoutExpired as e:
+        message = f"resolving remote '{remote}' timed out after {e.timeout}s"
+        logger.warning(message)
+        return None, None, message
     except Exception as e:
         logger.warning(f"Failed to get remote URL for '{remote}': {e}")
         return None, None, f"Failed to get remote URL for '{remote}': {e}"
@@ -988,7 +995,9 @@ def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             repo_path, user.username, repository_alias
         )
         # The stored origin converges to its credential-free URL before the
-        # push resolves it (a versioned snapshot is never rewritten).
+        # push resolves it (a versioned snapshot is never rewritten). No PAT
+        # is selected for a clone whose stored URL could not be sanitized:
+        # the sanitization raises GitCommandError first.
         ensure_remote_url_without_credentials(repo_path)
 
         credential, remote_url, cred_error = _get_pat_credential_for_remote(

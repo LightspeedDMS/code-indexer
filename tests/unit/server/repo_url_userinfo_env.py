@@ -177,15 +177,28 @@ def _grant(app: Any) -> None:
 def app(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Any]:
     root = tmp_path_factory.mktemp("repo-url-userinfo-app")
     with isolated_app(root) as real_app:
+        from code_indexer.server.services.git_operations_service import (
+            git_operations_service,
+        )
+
         accounts = real_app.state.user_manager
         accounts.create_user(ADMIN, PASSWORD, UserRole.ADMIN)
         accounts.create_user(USER, PASSWORD, UserRole.NORMAL_USER)
         xray_executor = _wire_lifespan_state(real_app, root / "server")
+        # The process-wide git service resolves activations through THIS
+        # app's manager, whatever an earlier test module bound it to.
+        service_binding = pytest.MonkeyPatch()
+        service_binding.setattr(
+            git_operations_service,
+            "_activated_repo_manager_lazy",
+            real_app.state.activated_repo_manager,
+        )
         try:
             _seed_repository(real_app)
             _grant(real_app)
             yield real_app
         finally:
+            service_binding.undo()
             xray_executor.shutdown(wait=True)
 
 

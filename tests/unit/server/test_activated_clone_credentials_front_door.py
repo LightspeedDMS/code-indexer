@@ -13,10 +13,12 @@ are neutral placeholders.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterator, List, Tuple
 
 import pytest
 from fastapi.testclient import TestClient
@@ -30,6 +32,8 @@ from tests.unit.server.repo_url_userinfo_env import (  # noqa: F401 - fixtures
     store_userinfo_origin,
     activate_for_user,
     app,
+    assert_no_userinfo,
+    bearer,
     client,
     mcp_call,
 )
@@ -147,30 +151,145 @@ def test_mcp_git_push_rewrites_stored_credentials_before_resolving_the_remote(
         assert not any(SECRET in part for part in argv), argv
 
 
-def test_prepare_remote_operation_continues_with_a_warning_when_sanitization_fails(
+def test_rest_git_push_answers_200_and_supplies_credentials_at_run_time(
+    client: TestClient,
+    app: Any,
+    admin_activation: Path,
+    network_calls: List[Tuple[List[str], Dict[str, str]]],
+) -> None:
+    """REST push through the real ActivatedRepoManager: a successful push
+    answers 200 with the documented GitPushResponse body, the response
+    carries no userinfo, and the registered URL's credentials reach git
+    only through the environment (never argv, never the clone config)."""
+    _store_userinfo_origin(admin_activation)
+    client.cookies.clear()
+
+    response = client.post(
+        f"/api/v1/repos/{ADMIN_ACTIVATION}/git/push",
+        json={"remote": "origin", "branch": "main"},
+        headers=bearer(app, ADMIN),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "success": True,
+        "remote": "origin",
+        "branch": "main",
+        "commits_pushed": 0,
+    }
+    assert_no_userinfo(response.text)
+    assert [argv[1] for argv, _env in network_calls] == ["push"]
+    assert "--set-upstream" in network_calls[0][0]  # set_upstream defaults on
+    _assert_credentials_only_at_run_time(network_calls, admin_activation)
+
+
+def test_rest_git_push_without_branch_answers_200(
+    client: TestClient,
+    app: Any,
+    admin_activation: Path,
+    network_calls: List[Tuple[List[str], Dict[str, str]]],
+) -> None:
+    """``branch`` is optional on the request (git pushes per its own
+    push.default); the response then reports no branch. (A branchless
+    set_upstream push needs an existing upstream, which this activation
+    has none of -- covered in test_git_push_refspec.py.)"""
+    client.cookies.clear()
+
+    response = client.post(
+        f"/api/v1/repos/{ADMIN_ACTIVATION}/git/push",
+        json={"remote": "origin", "set_upstream": False},
+        headers=bearer(app, ADMIN),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "success": True,
+        "remote": "origin",
+        "branch": None,
+        "commits_pushed": 0,
+    }
+    _assert_credentials_only_at_run_time(network_calls, admin_activation)
+
+
+def test_prepare_remote_operation_fails_when_sanitization_fails(
     app: Any, activation: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The stored URL still authenticates, so the operation is not aborted."""
+    """A clone whose stored URLs cannot be made credential-free gets no
+    credentials: the operation fails, saying what failed."""
+    from code_indexer.server.services.git_operations_service import GitCommandError
+
     _store_userinfo_origin(activation)
     config = activation / ".git" / "config"
     config.chmod(0)
     try:
         with caplog.at_level(logging.WARNING):
-            url = app.state.activated_repo_manager.prepare_remote_operation(
-                USER, USER_ACTIVATION
-            )
+            with pytest.raises(GitCommandError) as exc_info:
+                app.state.activated_repo_manager.prepare_remote_operation(
+                    USER, USER_ACTIVATION
+                )
     finally:
         config.chmod(0o644)
 
-    assert url is not None and SECRET in url  # the registered URL, as given
-    caller_warnings = [
-        r
-        for r in caplog.records
-        if r.levelno == logging.WARNING and r.name.endswith("activated_repo_manager")
-    ]
-    assert caller_warnings, [(r.name, r.getMessage()) for r in caplog.records]
-    assert str(activation) in caller_warnings[0].getMessage()
+    message = str(exc_info.value)
+    assert "removing credentials from the stored remote URL failed" in message
+    assert SECRET not in message
     assert all(SECRET not in r.getMessage() for r in caplog.records)
+
+
+@contextlib.contextmanager
+def _block_configuration(repo: Path, tmp_path: Path) -> Iterator[None]:
+    """Include a FIFO in the clone's configuration while inside: every git
+    command that reads it blocks until its timeout. The original
+    configuration is restored on exit (the activation is shared)."""
+    fifo = tmp_path / "blocking-include"
+    os.mkfifo(fifo)
+    config = repo / ".git" / "config"
+    original = config.read_text()
+    config.write_text(original + f"[include]\n\tpath = {fifo}\n")
+    try:
+        yield
+    finally:
+        config.write_text(original)
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("door", ["mcp_push", "rest_push", "rest_pull", "rest_fetch"])
+def test_stored_url_sanitization_timeout_fails_the_operation_before_credentials(
+    client: TestClient,
+    app: Any,
+    admin_activation: Path,
+    network_calls: List[Tuple[List[str], Dict[str, str]]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    door: str,
+) -> None:
+    from code_indexer.utils import git_runner
+
+    _store_userinfo_origin(admin_activation)
+    monkeypatch.setattr(git_runner, "REMOTE_RESOLVE_TIMEOUT_SECONDS", 0.5)
+    expected = "removing credentials from the stored remote URL timed out after 0.5s"
+
+    with _block_configuration(admin_activation, tmp_path):
+        if door == "mcp_push":
+            body = mcp_call(
+                client, app, ADMIN, "git_push", {"repository_alias": ADMIN_ACTIVATION}
+            )
+            text = str(body)
+            assert '"success": false' in text.lower(), text
+        else:
+            client.cookies.clear()
+            response = client.post(
+                f"/api/v1/repos/{ADMIN_ACTIVATION}/git/{door.split('_')[1]}",
+                json={"remote": "origin"},
+                headers=bearer(app, ADMIN),
+            )
+            assert response.status_code >= 400, response.text
+            text = response.text
+
+    assert expected in text, text
+    assert "resolving remote" not in text
+    assert SECRET not in text
+    assert network_calls == []
 
 
 def test_sync_rewrites_stored_credentials(app: Any, activation: Path) -> None:

@@ -17,9 +17,12 @@ from urllib.parse import unquote
 import pytest
 
 from code_indexer.server.git.git_subprocess_env import (
+    append_run_time_git_config,
     build_non_interactive_git_env,
     ensure_remote_url_without_credentials,
+    http_credentials_url,
     remote_url_without_credentials,
+    supply_remote_credentials,
 )
 from tests.unit.server.git.auth_http_git_server import served_bare_remote
 
@@ -157,8 +160,7 @@ def test_existing_clone_origin_is_rewritten_once_and_still_fetches(
         first = ensure_remote_url_without_credentials(str(clone))
         second = ensure_remote_url_without_credentials(str(clone))
 
-    assert (first.rewritten, first.ok) == (1, True)
-    assert (second.rewritten, second.ok) == (0, True)
+    assert (first, second) == (1, 0)
     config = (clone / ".git" / "config").read_text()
     assert SECRET not in config and USER not in config, config
     assert _git("remote", "get-url", "origin", cwd=clone).strip() == (
@@ -183,8 +185,7 @@ def test_versioned_snapshot_is_never_rewritten(remote: str, tmp_path: Path) -> N
     )
     before = (snapshot / ".git" / "config").read_text()
 
-    result = ensure_remote_url_without_credentials(str(snapshot))
-    assert (result.rewritten, result.ok) == (0, True)
+    assert ensure_remote_url_without_credentials(str(snapshot)) == 0
     assert (snapshot / ".git" / "config").read_text() == before
 
 
@@ -203,9 +204,7 @@ def test_every_stored_remote_url_and_pushurl_is_sanitized(
 
     monkeypatch.setattr(subprocess, "run", recording_run)
 
-    result = ensure_remote_url_without_credentials(str(clone))
-
-    assert (result.rewritten, result.failed, result.ok) == (3, 0, True)
+    assert ensure_remote_url_without_credentials(str(clone)) == 3
     config = (clone / ".git" / "config").read_text()
     assert SECRET not in config and USER not in config, config
     clean = remote_url_without_credentials(remote)
@@ -215,19 +214,107 @@ def test_every_stored_remote_url_and_pushurl_is_sanitized(
         assert not any(SECRET in part for part in argv), argv
 
 
-def test_unreadable_configuration_is_reported_and_logged_without_the_url(
+def test_unreadable_configuration_is_raised_and_logged_without_the_url(
     remote: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    from code_indexer.server.services.git_operations_service import (
+        GitCommandError,
+    )
+
     clone = _clone_with_stored_userinfo(remote, tmp_path, "golden/repo")
     config = clone / ".git" / "config"
     config.chmod(0)
     try:
         with caplog.at_level(logging.WARNING):
-            result = ensure_remote_url_without_credentials(str(clone))
+            with pytest.raises(GitCommandError) as raised:
+                ensure_remote_url_without_credentials(str(clone))
     finally:
         config.chmod(0o644)
 
-    assert result.ok is False and result.failed >= 1, result
+    assert "removing credentials" in str(raised.value)
+    assert (SECRET in str(raised.value)) is False
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert warnings, caplog.records
     assert all(SECRET not in r.getMessage() for r in caplog.records)
+
+
+def test_http_credentials_url_round_trips_through_run_time_supply() -> None:
+    username, password = "ex ample:user@x/y", "p@ss:w/rd%2F tok"
+    url = http_credentials_url(
+        "https://git.example.com:8443/owner/repo.git", username, password
+    )
+    assert url is not None
+    env: dict = {}
+
+    supply_remote_credentials(env, url)
+
+    assert env["CIDX_GIT_REMOTE_USERNAME"] == username
+    assert env["CIDX_GIT_REMOTE_PASSWORD"] == password
+    assert env["GIT_CONFIG_KEY_0"] == "credential.https://git.example.com:8443.helper"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ssh://git@git.example.com/owner/repo.git",
+        "git@git.example.com:owner/repo.git",
+        "/srv/example/repo.git",
+    ],
+)
+def test_http_credentials_url_is_none_for_other_transports(url: str) -> None:
+    assert http_credentials_url(url, USER, SECRET) is None
+
+
+def test_http_credentials_url_refuses_a_url_that_already_carries_credentials() -> None:
+    with pytest.raises(ValueError) as exc_info:
+        http_credentials_url(
+            f"https://{USER}:{SECRET}@git.example.com/owner/repo.git", USER, "other"
+        )
+
+    assert SECRET not in str(exc_info.value)
+
+
+@pytest.mark.parametrize("variable", ["GIT_ASKPASS", "SSH_ASKPASS"])
+def test_inherited_askpass_program_is_never_invoked(
+    remote: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+) -> None:
+    record = tmp_path / "askpass-invoked"
+    script = tmp_path / "askpass.sh"
+    script.write_text(f"#!/bin/sh\ntouch '{record}'\necho wrong-password\n")
+    script.chmod(0o700)
+    monkeypatch.setenv(variable, str(script))
+
+    result = subprocess.run(
+        ["git", "ls-remote", remote_url_without_credentials(remote)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env=build_non_interactive_git_env(),
+        timeout=60,
+    )
+
+    assert result.returncode != 0
+    assert not record.exists(), f"{variable} program was invoked"
+
+
+def test_append_run_time_git_config_appends_after_existing_entries() -> None:
+    env = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": "/srv/example",
+    }
+
+    append_run_time_git_config(env, [("a.b", "1"), ("c.d", "2")])
+
+    assert env == {
+        "GIT_CONFIG_COUNT": "3",
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": "/srv/example",
+        "GIT_CONFIG_KEY_1": "a.b",
+        "GIT_CONFIG_VALUE_1": "1",
+        "GIT_CONFIG_KEY_2": "c.d",
+        "GIT_CONFIG_VALUE_2": "2",
+    }

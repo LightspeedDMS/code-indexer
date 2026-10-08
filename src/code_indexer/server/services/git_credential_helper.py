@@ -5,9 +5,6 @@ Story #387: PAT-Authenticated Git Push with User Attribution & Security Hardenin
 """
 
 import logging
-import stat
-import uuid
-from pathlib import Path
 from typing import Optional
 
 from code_indexer.utils.git_remote_url import (
@@ -19,45 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class GitCredentialHelper:
-    """Manages GIT_ASKPASS scripts and URL conversion for PAT-based git push."""
-
-    def __init__(self, tmp_dir: Optional[Path] = None):
-        self.tmp_dir = tmp_dir or Path.home() / ".tmp"
-        self.tmp_dir.mkdir(parents=True, exist_ok=True)
-
-    def create_askpass_script(self, token: str) -> Path:
-        """Create a temporary GIT_ASKPASS script that echoes the token.
-
-        The script is created with 0700 permissions (owner-only read/write/execute).
-        Caller MUST call cleanup_askpass_script() in a finally block.
-
-        Args:
-            token: The PAT to echo
-
-        Returns:
-            Path to the created script
-
-        Raises:
-            OSError: If unable to create the script
-        """
-        script_name = f"git_askpass_{uuid.uuid4().hex[:12]}.sh"
-        script_path = self.tmp_dir / script_name
-        # Escape single quotes for safe shell embedding: ' -> '\''
-        escaped = token.replace("'", "'\\''")
-        script_path.write_text(f"#!/bin/sh\nprintf '%s\\n' '{escaped}'\n")
-        script_path.chmod(stat.S_IRWXU)  # 0700 - owner only
-        return script_path
-
-    def cleanup_askpass_script(self, script_path: Path) -> None:
-        """Remove a temporary GIT_ASKPASS script.
-
-        Safe to call even if file doesn't exist.
-        """
-        try:
-            if script_path.exists():
-                script_path.unlink()
-        except OSError as e:
-            logger.warning(f"Failed to cleanup askpass script {script_path}: {e}")
+    """URL conversion for PAT-based git push."""
 
     @staticmethod
     def convert_ssh_to_https(remote_url: str) -> str:

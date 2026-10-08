@@ -451,7 +451,9 @@ class GitStateManager:
 
     def _push_branch_to_remote(self, repo_path: Path, branch_name: str) -> None:
         """
-        Push branch to remote repository.
+        Push branch to remote repository, tracking it, through the server's
+        single push implementation with the server's own git
+        authentication as the credential source.
 
         Args:
             repo_path: Path to repository
@@ -460,14 +462,26 @@ class GitStateManager:
         Raises:
             GitStateError: If push fails
         """
+        # Imported here: the server.git package imports this module.
+        from code_indexer.server.git.git_push import push
+        from code_indexer.server.services.git_argv_safety import (
+            GitArgumentValidationError,
+        )
+
         try:
-            run_git_command(
-                ["git", "push", "-u", "origin", branch_name], cwd=repo_path, check=True
+            push(
+                repo_path,
+                "origin",
+                branch_name,
+                set_upstream=True,
+                credentials_url=None,
             )
             logger.info(
                 f"Pushed branch {branch_name} to remote",
                 extra={"correlation_id": get_correlation_id()},
             )
+        except GitArgumentValidationError as e:
+            raise GitStateError(f"git push refused: {e}")
         except subprocess.CalledProcessError as e:
             error_detail = e.stderr if hasattr(e, "stderr") else str(e)
             raise GitStateError(f"git push failed: {error_detail}")

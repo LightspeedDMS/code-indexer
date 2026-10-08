@@ -4122,6 +4122,8 @@ class GoldenRepoManager:
             previous_branch = golden_repo.default_branch
             # The base clone (never a versioned snapshot) converges to a
             # credential-free origin; credentials are supplied at run time.
+            # A failed sanitization raises GitCommandError here, before any
+            # credentialed git call.
             ensure_remote_url_without_credentials(base)
             self._cb_git_fetch_and_validate(
                 base, target_branch, git_t, credentials_url=golden_repo.repo_url

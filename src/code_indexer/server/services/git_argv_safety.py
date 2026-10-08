@@ -109,8 +109,15 @@ def validate_remote_name(remote: str, repo_path: Path) -> str:
         return remote
     validate_remote_syntax(remote)
 
+    from code_indexer.utils import git_runner
+
     try:
-        result = run_git_command(["git", "remote"], cwd=repo_path, check=True)
+        result = run_git_command(
+            ["git", "remote"],
+            cwd=repo_path,
+            check=True,
+            timeout=git_runner.REMOTE_RESOLVE_TIMEOUT_SECONDS,
+        )
     except subprocess.CalledProcessError as e:
         raise GitArgumentValidationError(
             f"Unable to list configured remotes for repository: {e}"

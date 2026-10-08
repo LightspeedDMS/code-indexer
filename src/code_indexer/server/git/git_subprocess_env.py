@@ -34,9 +34,10 @@ import logging
 import os
 import re
 import subprocess
-from typing import Dict, List, NamedTuple, Optional
-from urllib.parse import unquote
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+from urllib.parse import quote, unquote
 
+from code_indexer.utils import git_runner
 from code_indexer.utils.git_remote_url import split_url_authority
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,63 @@ def remote_url_without_credentials(url: str) -> str:
     return f"{split.scheme}://{login}{split.hostport}{split.rest}"
 
 
+_HTTP_URL = re.compile(r"^(https?://)([^/?#]*)(.*)$", re.I | re.S)
+
+
+def http_credentials_url(url: str, username: str, password: str) -> Optional[str]:
+    """``url`` (an http(s) URL without userinfo) carrying ``username`` and
+    ``password`` as percent-encoded userinfo, to hand to
+    ``supply_remote_credentials`` / ``credentials_url=`` only -- never to a
+    command line, a log or a clone's configuration. None for any other URL:
+    only the http(s) transports take credentials this way.
+
+    Raises:
+        ValueError: ``url`` already carries userinfo.
+    """
+    match = _HTTP_URL.match(url)
+    if match is None:
+        return None
+    scheme, authority, rest = match.groups()
+    if "@" in authority:
+        raise ValueError("The URL already carries credentials")
+    userinfo = f"{quote(username, safe='')}:{quote(password, safe='')}"
+    return f"{scheme}{userinfo}@{authority}{rest}"
+
+
+def append_run_time_git_config(
+    env: Dict[str, str], entries: Sequence[Tuple[str, str]]
+) -> None:
+    """Append ``entries`` (key, value) to ``env`` (in place) as git
+    configuration for this run only (GIT_CONFIG_COUNT/KEY/VALUE), after any
+    GIT_CONFIG_* entries ``env`` already holds. Nothing is stored."""
+    count = int(env.get("GIT_CONFIG_COUNT") or 0)
+    for offset, (key, value) in enumerate(entries):
+        env[f"GIT_CONFIG_KEY_{count + offset}"] = key
+        env[f"GIT_CONFIG_VALUE_{count + offset}"] = value
+    env["GIT_CONFIG_COUNT"] = str(count + len(entries))
+
+
+def credential_scope(url: Optional[str]) -> Optional[str]:
+    """The lowercase ``scheme://host[:port]`` an http(s) URL's credential
+    is scoped to (userinfo excluded); None for any other URL."""
+    match = _HTTP_URL.match(url or "")
+    if match is None:
+        return None
+    # The first group is the scheme WITH its "://" separator.
+    scheme_and_sep, authority, _rest = match.groups()
+    return f"{scheme_and_sep}{authority.rpartition('@')[2]}".lower()
+
+
+def supplied_credential_secret(credentials_url: Optional[str]) -> Optional[str]:
+    """The decoded secret ``supply_remote_credentials`` hands git for
+    ``credentials_url``: the password, or the username when the userinfo
+    carries no password. None when it carries no http(s) userinfo."""
+    parts = _split_http_userinfo(credentials_url) if credentials_url else None
+    if parts is None:
+        return None
+    return parts.password or parts.username or None
+
+
 def supply_remote_credentials(
     env: Dict[str, str], credentials_url: Optional[str]
 ) -> None:
@@ -152,54 +210,54 @@ def supply_remote_credentials(
     ``credentials_url``, the repository URL as registered. A no-op when it
     carries no http(s) userinfo. Entries are appended after any
     GIT_CONFIG_* entries ``env`` already holds; the helper list for the
-    remote's scope is reset first so only this credential is offered."""
+    remote's scope is reset first so only this credential is offered.
+
+    While a credential is present git may use only its http(s) transport
+    (GIT_ALLOW_PROTOCOL): no other transport program -- ext, file, ssh --
+    runs with the credential in its environment."""
     parts = _split_http_userinfo(credentials_url) if credentials_url else None
     if parts is None:
         return
-    count = int(env.get("GIT_CONFIG_COUNT") or 0)
     key = f"credential.{parts.scope}.helper"
-    env[f"GIT_CONFIG_KEY_{count}"] = key
-    env[f"GIT_CONFIG_VALUE_{count}"] = ""
-    env[f"GIT_CONFIG_KEY_{count + 1}"] = key
-    env[f"GIT_CONFIG_VALUE_{count + 1}"] = _CREDENTIAL_HELPER
-    env["GIT_CONFIG_COUNT"] = str(count + 2)
+    append_run_time_git_config(env, [(key, ""), (key, _CREDENTIAL_HELPER)])
+    env["GIT_ALLOW_PROTOCOL"] = (
+        "https:http" if parts.scope.startswith("http://") else "https"
+    )
     env[_USERNAME_VAR] = parts.username
     env[_PASSWORD_VAR] = parts.password
 
 
-_LOCAL_GIT_TIMEOUT_SECONDS = 30
+class _LocalGitFailure(Exception):
+    """A local git command did not complete; the message says how (it names
+    no URL)."""
 
 
-def _run_local_git(
-    repo_path: str, args: list
-) -> Optional["subprocess.CompletedProcess[str]"]:
-    """Run a local (no network) git command in ``repo_path``; None, with a
-    WARNING, when it times out or cannot be started."""
+def _run_local_git(repo_path: str, args: list) -> "subprocess.CompletedProcess[str]":
+    """Run a local (no network) git command in ``repo_path``. Raises
+    _LocalGitFailure, after a WARNING, when it times out or cannot start."""
     try:
         return subprocess.run(
             ["git", *args],
             cwd=repo_path,
             capture_output=True,
             text=True,
-            timeout=_LOCAL_GIT_TIMEOUT_SECONDS,
+            timeout=git_runner.REMOTE_RESOLVE_TIMEOUT_SECONDS,
         )
-    except (subprocess.TimeoutExpired, OSError) as exc:
+    except subprocess.TimeoutExpired as exc:
+        logger.warning("git %s timed out in %s", args[:1], repo_path)
+        raise _LocalGitFailure(f"timed out after {exc.timeout}s") from None
+    except OSError as exc:
         logger.warning(
-            "git %s did not complete in %s: %s", args[0], repo_path, type(exc).__name__
+            "git %s could not start in %s: %s",
+            args[:1],
+            repo_path,
+            type(exc).__name__,
         )
-        return None
+        raise _LocalGitFailure(f"failed ({type(exc).__name__})") from None
 
 
-class RemoteUrlSanitization(NamedTuple):
-    """Outcome of ``ensure_remote_url_without_credentials``: how many stored
-    remote URL keys were rewritten, and how many reads/rewrites failed."""
-
-    rewritten: int
-    failed: int
-
-    @property
-    def ok(self) -> bool:
-        return self.failed == 0
+# What a failed sanitization reports to the caller, before what happened.
+_SANITIZATION = "removing credentials from the stored remote URL"
 
 
 # Every stored remote URL and push URL, e.g. remote.origin.url.
@@ -217,13 +275,11 @@ def _strip_http_userinfo(url: str) -> Optional[str]:
     return f"{scheme}{host}{rest}"
 
 
-def _stored_remote_urls(repo_path: str) -> Optional[Dict[str, List[str]]]:
+def _stored_remote_urls(repo_path: str) -> Dict[str, List[str]]:
     """Every stored ``remote.*.url`` / ``remote.*.pushurl`` value, grouped by
-    key in stored order; None (with a WARNING naming no URL) when they
-    cannot be read."""
+    key in stored order. Raises _LocalGitFailure (after a WARNING naming no
+    URL) when they cannot be read."""
     listed = _run_local_git(repo_path, ["config", "--get-regexp", _REMOTE_URL_KEYS])
-    if listed is None:
-        return None
     if listed.returncode == 1:  # no such key stored
         return {}
     if listed.returncode != 0:
@@ -232,7 +288,7 @@ def _stored_remote_urls(repo_path: str) -> Optional[Dict[str, List[str]]]:
             repo_path,
             listed.returncode,
         )
-        return None
+        raise _LocalGitFailure(f"failed (git exit {listed.returncode})")
     values: Dict[str, List[str]] = {}
     for line in listed.stdout.splitlines():
         key, _, value = line.partition(" ")
@@ -240,27 +296,44 @@ def _stored_remote_urls(repo_path: str) -> Optional[Dict[str, List[str]]]:
     return values
 
 
-def ensure_remote_url_without_credentials(repo_path: str) -> RemoteUrlSanitization:
+def _sanitization_failed(exc: _LocalGitFailure) -> Exception:
+    """The GitCommandError a failed sanitization raises (naming no URL)."""
+    from code_indexer.server.services.git_operations_service import (
+        GitCommandError,
+    )
+
+    return GitCommandError(f"{_SANITIZATION} {exc}", stderr="")
+
+
+def ensure_remote_url_without_credentials(repo_path: str) -> int:
     """Rewrite every stored remote URL and push URL of the clone at
     ``repo_path`` that still carries http(s) userinfo to its credential-free
-    form. Repository credentials are supplied to git at run time and never
-    stored in a clone's configuration. Idempotent. The old value is never
-    placed on a command line, and no log line names a URL. Local git calls
-    only -- run it from a worker/job thread, never on the event loop.
+    form, and return how many stored keys were rewritten. Repository
+    credentials are supplied to git at run time and never stored in a
+    clone's configuration. Idempotent. The old value is never placed on a
+    command line, and no log line names a URL. Local git calls only -- run
+    it from a worker/job thread, never on the event loop.
 
     A versioned snapshot (``.versioned/<alias>/v_<ts>``) is NEVER modified:
     snapshots are immutable once published and are not used for network
-    operations; the base clone they are taken from is the one rewritten."""
+    operations; the base clone they are taken from is the one rewritten.
+
+    Raises:
+        GitCommandError: The stored URLs could not be read or one could not
+            be rewritten (after a WARNING); the message says what failed and
+            names no URL. No credential may be handed to git for the clone.
+    """
     from code_indexer.server.storage.shared.snapshot_paths import (
         is_versioned_snapshot,
     )
 
     if is_versioned_snapshot(repo_path):
-        return RemoteUrlSanitization(rewritten=0, failed=0)
-    stored = _stored_remote_urls(repo_path)
-    if stored is None:
-        return RemoteUrlSanitization(rewritten=0, failed=1)
-    rewritten = failed = 0
+        return 0
+    try:
+        stored = _stored_remote_urls(repo_path)
+    except _LocalGitFailure as exc:
+        raise _sanitization_failed(exc) from None
+    rewritten = 0
     for key, values in stored.items():
         stripped = [_strip_http_userinfo(value) for value in values]
         if all(clean is None for clean in stripped):
@@ -271,25 +344,27 @@ def ensure_remote_url_without_credentials(repo_path: str) -> RemoteUrlSanitizati
         commands = [["config", "--replace-all", key, cleaned[0]]]
         commands += [["config", "--add", key, value] for value in cleaned[1:]]
         for command in commands:
-            result = _run_local_git(repo_path, command)
-            if result is None or result.returncode != 0:
+            try:
+                # Always a CompletedProcess; a timeout or start failure raises.
+                result = _run_local_git(repo_path, command)
+                if result.returncode != 0:
+                    raise _LocalGitFailure(f"failed (git exit {result.returncode})")
+            except _LocalGitFailure as exc:
                 logger.warning(
-                    "Could not store the credential-free %s for %s (git exit %s)",
+                    "Could not store the credential-free %s for %s: %s",
                     key,
                     repo_path,
-                    "none" if result is None else result.returncode,
+                    exc,
                 )
-                failed += 1
-                break
-        else:
-            rewritten += 1
-            logger.info(
-                "Stored the credential-free %s for %s; repository credentials "
-                "are supplied to git at run time",
-                key,
-                repo_path,
-            )
-    return RemoteUrlSanitization(rewritten=rewritten, failed=failed)
+                raise _sanitization_failed(exc) from None
+        rewritten += 1
+        logger.info(
+            "Stored the credential-free %s for %s; repository credentials "
+            "are supplied to git at run time",
+            key,
+            repo_path,
+        )
+    return rewritten
 
 
 def build_non_interactive_git_env(
@@ -332,6 +407,11 @@ def build_non_interactive_git_env(
         " -o PubkeyAuthentication=yes"
     )
     env["GIT_TERMINAL_PROMPT"] = "0"
+    # An empty GIT_ASKPASS stops git from running any askpass program
+    # (core.askPass and SSH_ASKPASS included): an inherited desktop askpass
+    # is never launched. Credential helpers are unaffected.
+    env["GIT_ASKPASS"] = ""
+    env["SSH_ASKPASS"] = ""
     env.setdefault("GIT_EDITOR", "true")
     env.setdefault("GIT_SEQUENCE_EDITOR", "true")
     supply_remote_credentials(env, credentials_url)

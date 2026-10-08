@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_indexer.server.git.git_subprocess_env import RemoteUrlSanitization
 from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepo,
     GoldenRepoManager,
@@ -29,7 +28,7 @@ def _origin_already_credential_free():
     with patch(
         "code_indexer.server.repositories.golden_repo_manager."
         "ensure_remote_url_without_credentials",
-        return_value=RemoteUrlSanitization(rewritten=0, failed=0),
+        return_value=0,
     ):
         yield
 

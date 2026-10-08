@@ -3,12 +3,8 @@
 argv element, so only a leading '-' on the whole element is rejected; a
 side such as `-` in `main:-` is a ref name that git itself handles.
 
-NOTE: asserts the git-level effect (the remote's `main` ref advances to
-`feature`'s tip), not a clean HTTP 200 -- `GitPushResponse` requires
-`branch`/`remote`/`commits_pushed` fields that the plain `git_push()`
-result dict does not populate, a pre-existing, unrelated field-shape
-mismatch that surfaces as an HTTP 500 on any real push success (not
-specific to this test's inputs).
+Each test asserts both the HTTP 200 response and the git-level effect
+(e.g. the remote's `main` ref advances to `feature`'s tip).
 
 Exercised through the real REST route against a REAL throwaway git
 repository with a local bare remote (no mocking of git itself, per this
@@ -74,6 +70,10 @@ def _rev_parse(repo_path: Path, ref: str) -> str:
 def _arm_repo(repo_path: Path):
     mock_arm = Mock()
     mock_arm.get_activated_repo_path.return_value = str(repo_path)
+    # prepare_remote_operation -> Optional[str]: the registered repository
+    # URL whose credentials are supplied at run time; None when no golden
+    # repository is registered (the local "golden" remote needs none).
+    mock_arm.prepare_remote_operation.return_value = None
     original = git_operations_service.activated_repo_manager
     git_operations_service.activated_repo_manager = mock_arm
     try:
@@ -125,6 +125,7 @@ class TestGitPushSrcDstRefspec:
                 json={"remote": "golden", "branch": "feature:main"},
             )
 
+        assert response.status_code == 200, response.text
         assert "must not start with" not in response.text, (
             f"POST push branch='feature:main' (a src:dst refspec) must not "
             f"be rejected by validate_branch_name, got "
@@ -146,6 +147,7 @@ class TestGitPushSrcDstRefspec:
                 json={"remote": "golden", "branch": "main:-"},
             )
 
+        assert response.status_code == 200, response.text
         assert "must not start with" not in response.text, response.text
         assert _rev_parse(remote, "refs/heads/-") == _rev_parse(repo, "main")
 
@@ -163,6 +165,7 @@ class TestGitPushSrcDstRefspec:
                 json={"remote": "golden", "branch": "feature~1:refs/heads/older"},
             )
 
+        assert response.status_code == 200, response.text
         assert "must not start with" not in response.text, (
             f"branch='feature~1:refs/heads/older' must not be rejected, got "
             f"{response.status_code}: {response.text}"
@@ -181,8 +184,108 @@ class TestGitPushSrcDstRefspec:
                 json={"remote": "golden", "branch": "refs/heads/*:refs/heads/*"},
             )
 
+        assert response.status_code == 200, response.text
         assert "must not start with" not in response.text, (
             f"branch='refs/heads/*:refs/heads/*' must not be rejected, got "
             f"{response.status_code}: {response.text}"
         )
         assert _rev_parse(remote, "refs/heads/feature") == feature_head
+
+
+def _upstream(repo_path: Path, branch: str) -> str:
+    """The branch's upstream (e.g. 'golden/feature'); '' when none is set."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", f"{branch}@{{u}}"],
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+class TestGitPushSetUpstream:
+    def test_set_upstream_true_sets_the_pushed_branch_upstream(
+        self, test_client, tmp_path
+    ):
+        repo, remote = _make_repo_with_golden_remote(tmp_path)
+        assert _upstream(repo, "feature") == ""
+
+        with _arm_repo(repo):
+            response = test_client.post(
+                f"{_BASE}/push",
+                json={"remote": "golden", "branch": "feature", "set_upstream": True},
+            )
+
+        assert response.status_code == 200, response.text
+        assert _rev_parse(remote, "feature") == _rev_parse(repo, "feature")
+        assert _upstream(repo, "feature") == "golden/feature"
+
+    def test_set_upstream_without_branch_and_no_upstream_is_rejected_400(
+        self, test_client, tmp_path
+    ):
+        """With no branch named, -u can only re-state an existing upstream;
+        on a branch that has none the request is refused before any push."""
+        repo, remote = _make_repo_with_golden_remote(tmp_path)
+        _git(["checkout", "-q", "feature"], repo)
+
+        with _arm_repo(repo):
+            response = test_client.post(
+                f"{_BASE}/push",
+                json={"remote": "golden", "set_upstream": True},
+            )
+
+        assert response.status_code == 400, response.text
+        detail = response.json()["detail"]
+        assert "branch" in detail and "set_upstream" in detail, detail
+        remote_refs = _git(["for-each-ref", "refs/heads/feature"], remote)
+        assert remote_refs.stdout == ""
+        assert _upstream(repo, "feature") == ""
+
+    def test_set_upstream_false_leaves_no_upstream(self, test_client, tmp_path):
+        repo, remote = _make_repo_with_golden_remote(tmp_path)
+
+        with _arm_repo(repo):
+            response = test_client.post(
+                f"{_BASE}/push",
+                json={"remote": "golden", "branch": "feature", "set_upstream": False},
+            )
+
+        assert response.status_code == 200, response.text
+        assert _rev_parse(remote, "feature") == _rev_parse(repo, "feature")
+        assert _upstream(repo, "feature") == ""
+
+    def test_set_upstream_without_branch_restates_existing_upstream(
+        self, test_client, tmp_path
+    ):
+        """A branch that already tracks a remote branch needs no name: the
+        push goes to its upstream, which stays set."""
+        repo, remote = _make_repo_with_golden_remote(tmp_path)
+        assert _upstream(repo, "main") == "golden/main"
+        (repo / "f.txt").write_text("second commit\n")
+        _git(["commit", "-q", "-am", "second"], repo)
+
+        with _arm_repo(repo):
+            response = test_client.post(
+                f"{_BASE}/push",
+                json={"remote": "golden", "set_upstream": True},
+            )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["branch"] is None
+        assert _rev_parse(remote, "main") == _rev_parse(repo, "main")
+        assert _upstream(repo, "main") == "golden/main"
+
+    def test_set_upstream_without_branch_on_detached_head_is_rejected_400(
+        self, test_client, tmp_path
+    ):
+        repo, _remote = _make_repo_with_golden_remote(tmp_path)
+        _git(["checkout", "-q", "--detach"], repo)
+
+        with _arm_repo(repo):
+            response = test_client.post(
+                f"{_BASE}/push",
+                json={"remote": "golden", "set_upstream": True},
+            )
+
+        assert response.status_code == 400, response.text
+        assert "detached HEAD" in response.json()["detail"]

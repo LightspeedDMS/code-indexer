@@ -17,7 +17,7 @@ from code_indexer.server.utils.cancellable_subprocess import (
     run_with_cancel,
 )
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
-from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.utils.git_runner import run_git_command
 from code_indexer.utils.credential_redaction import (
     redact_command,
     redact_command_output,
@@ -30,6 +30,10 @@ from .update_strategy import UpdateStrategy
 
 
 logger = logging.getLogger(__name__)
+
+# The remote every refresh fetch/pull names, and the one its credential
+# decision is made for.
+_REMOTE = "origin"
 
 
 def _stream_to_str(value: Optional[Union[str, bytes]]) -> str:
@@ -200,6 +204,29 @@ class GitPullUpdater(UpdateStrategy):
         exactly subprocess.run(args, **run_kwargs) when no job owns it."""
         return run_with_cancel(args, self._cancel_check, **run_kwargs)
 
+    def _run_network(
+        self, args: list, timeout: float
+    ) -> "subprocess.CompletedProcess[str]":
+        """One fetch/pull against ``origin`` (named in ``args``): the
+        registered credential is supplied only where
+        ``credentials_for_remote`` allows it, and the shared runner redacts
+        it from the output. Cancellable by the owning job (Bug #2012)."""
+        from code_indexer.server.git.remote_credentials import (
+            credentials_for_remote,
+        )
+
+        decision = credentials_for_remote(
+            self.repo_path, _REMOTE, self._credentials_url, push=False
+        )
+        return run_git_command(
+            args,
+            cwd=self.repo_path,
+            check=False,
+            timeout=timeout,
+            credentials_url=decision.credentials_url,
+            cancel_check=self._cancel_check,
+        )
+
     def has_changes(self) -> bool:
         """
         Check if repository has remote changes using git fetch and log.
@@ -216,14 +243,7 @@ class GitPullUpdater(UpdateStrategy):
         try:
             # First, fetch latest refs from remote
             try:
-                fetch_result = self._run(
-                    ["git", "fetch", "origin"],
-                    cwd=str(self.repo_path),
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    env=build_non_interactive_git_env(self._credentials_url),
-                )
+                fetch_result = self._run_network(["git", "fetch", _REMOTE], timeout=30)
             except subprocess.TimeoutExpired as e:
                 # Bug #1830 AC1/AC4: a fetch that TIMES OUT must be classified
                 # exactly like a fetch that fails with a non-zero exit code --
@@ -406,14 +426,7 @@ class GitPullUpdater(UpdateStrategy):
         Raises:
             RuntimeError: If fetch or reset fails
         """
-        fetch_result = self._run(
-            ["git", "fetch", "origin"],
-            cwd=str(self.repo_path),
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=build_non_interactive_git_env(self._credentials_url),
-        )
+        fetch_result = self._run_network(["git", "fetch", _REMOTE], timeout=30)
         if fetch_result.returncode != 0:
             # Bug #1832: name exit code + both streams, not stderr alone.
             raise RuntimeError(
@@ -561,14 +574,7 @@ class GitPullUpdater(UpdateStrategy):
 
             logger.info(f"Executing git pull for {self.repo_path}")
 
-            result = self._run(
-                ["git", "pull"],
-                cwd=str(self.repo_path),
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env=build_non_interactive_git_env(self._credentials_url),
-            )
+            result = self._run_network(["git", "pull", _REMOTE], timeout=120)
 
             if result.returncode != 0:
                 stderr = result.stderr
@@ -609,14 +615,7 @@ class GitPullUpdater(UpdateStrategy):
                             logger.info(
                                 f"Removed conflicting untracked file: {artifact}"
                             )
-                    retry = self._run(
-                        ["git", "pull"],
-                        cwd=str(self.repo_path),
-                        capture_output=True,
-                        text=True,
-                        timeout=120,
-                        env=build_non_interactive_git_env(self._credentials_url),
-                    )
+                    retry = self._run_network(["git", "pull", _REMOTE], timeout=120)
                     if retry.returncode == 0:
                         logger.info(
                             f"Git pull retry successful after removing untracked files: "

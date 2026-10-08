@@ -10,14 +10,19 @@ Hosts, usernames and secrets are neutral placeholders.
 
 from __future__ import annotations
 
+import base64
 import logging
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterator, List
+from typing import Any, Iterator, List, Tuple
+from urllib.parse import quote
 
 import pytest
 
 from code_indexer.global_repos import refresh_scheduler
+from code_indexer.global_repos.git_error_classifier import GitFetchError
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.server.git.git_subprocess_env import (
     build_non_interactive_git_env,
@@ -124,10 +129,7 @@ def test_refresh_rewrites_stored_userinfo_and_pulls_with_runtime_credentials(
     _assert_no_credentials_logged(caplog)
 
 
-def test_refresh_continues_with_a_warning_when_stored_urls_cannot_be_sanitized(
-    remote: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The stored URL still authenticates, so the refresh is not aborted."""
+def _clone_with_stored_userinfo(remote: str, tmp_path: Path) -> Path:
     master = tmp_path / "golden-repos" / "repo"
     master.parent.mkdir()
     subprocess.run(
@@ -137,22 +139,106 @@ def test_refresh_continues_with_a_warning_when_stored_urls_cannot_be_sanitized(
         env=build_non_interactive_git_env(remote),
     )
     _git("config", "remote.origin.url", remote, cwd=master)
+    return master
+
+
+def _network_calls(argv_log: List[List[str]]) -> List[List[str]]:
+    return [a for a in argv_log if len(a) > 1 and a[1] in ("fetch", "pull")]
+
+
+def test_refresh_fails_before_any_network_call_when_stored_urls_cannot_be_sanitized(
+    remote: str,
+    tmp_path: Path,
+    argv_log: List[List[str]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A clone whose stored URLs could not be made credential-free never
+    reaches the network: the refresh flow fails before its pull."""
+    master = _clone_with_stored_userinfo(remote, tmp_path)
     config = master / ".git" / "config"
+    argv_log.clear()
     config.chmod(0)
     try:
-        with caplog.at_level(logging.WARNING):
-            updater = refresh_scheduler._git_pull_updater_for(str(master), remote, None)
+        with pytest.raises(RuntimeError) as raised:
+            refresh_scheduler._git_pull_updater_for(str(master), remote, None).update()
     finally:
         config.chmod(0o644)
 
-    assert isinstance(updater, refresh_scheduler.GitPullUpdater)
-    caller_warnings = [
-        r
-        for r in caplog.records
-        if r.levelno == logging.WARNING and r.name == refresh_scheduler.__name__
-    ]
-    assert caller_warnings, [(r.name, r.getMessage()) for r in caplog.records]
-    assert str(master) in caller_warnings[0].getMessage()
+    assert "credential-free" in str(raised.value)
+    assert _network_calls(argv_log) == []
+    assert _git("config", "remote.origin.url", cwd=master).strip() == remote
+    assert all(SECRET not in r.getMessage() for r in caplog.records)
+
+
+@pytest.fixture
+def recording_server() -> Iterator[Tuple[str, List[str]]]:
+    """An HTTP endpoint on another scope that records every Authorization
+    header it receives and always asks for credentials."""
+    seen: List[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            pass
+
+        def do_GET(self) -> None:  # noqa: N802 - http.server API
+            seen.append(self.headers.get("Authorization", ""))
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="example"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/remote.git", seen
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+
+
+def test_refresh_whose_origin_resolves_to_another_host_sends_no_credential(
+    remote: str, tmp_path: Path, recording_server: Tuple[str, List[str]]
+) -> None:
+    other_url, seen = recording_server
+    master = _clone_with_stored_userinfo(remote, tmp_path)
+    _git("config", "remote.origin.url", other_url, cwd=master)
+
+    updater = refresh_scheduler._git_pull_updater_for(str(master), remote, None)
+    with pytest.raises(GitFetchError):
+        updater.has_changes()
+    with pytest.raises(RuntimeError):
+        updater.update()
+
+    assert seen, "expected the other host to be contacted"
+    decoded = [base64.b64decode(h.split(" ", 1)[1]) for h in seen if h]
+    assert all(SECRET.encode() not in value for value in decoded), decoded
+
+
+def test_refresh_git_output_is_redacted(
+    remote: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Output a refresh's git command prints (here: a hook echoing the
+    supplied secret, percent-encoded and raw) never reaches an exception
+    or a log record."""
+    caplog.set_level(logging.DEBUG)
+    master = _clone_with_stored_userinfo(remote, tmp_path)
+    hook = master / ".git" / "hooks" / "reference-transaction"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f'echo "token={SECRET} enc={quote(SECRET, safe="")}" >&2\n'
+        f'echo "token={SECRET}"\n'
+        "exit 1\n"
+    )
+    hook.chmod(0o755)
+    _push_new_remote_commit(tmp_path)
+
+    updater = refresh_scheduler._git_pull_updater_for(str(master), remote, None)
+    with pytest.raises(RuntimeError) as raised:
+        updater.update()
+
+    assert SECRET not in str(raised.value)
     assert all(SECRET not in r.getMessage() for r in caplog.records)
 
 

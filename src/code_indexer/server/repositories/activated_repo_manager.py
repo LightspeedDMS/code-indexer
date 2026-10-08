@@ -4220,17 +4220,14 @@ class ActivatedRepoManager:
         carries credentials (idempotent), and the golden repository's
         registered URL is returned so the caller hands its credentials to
         git at run time. None when the golden repository is not registered.
-        A failed rewrite is logged and does not abort the operation (the
-        stored URL still authenticates). Local git calls only -- call from a
+        Raises GitCommandError, naming what failed or timed out, when the
+        stored URLs cannot all be made credential-free: no credentials are
+        selected for such a clone. Local git calls only -- call from a
         worker/request thread.
         """
         repo_dir = self._safe_user_scoped_path(username, user_alias)
-        if not ensure_remote_url_without_credentials(repo_dir).ok:
-            self.logger.warning(
-                "Stored remote URLs of %s could not all be made "
-                "credential-free; the git operation continues",
-                repo_dir,
-            )
+        # Raises GitCommandError when the stored URLs cannot be sanitized.
+        ensure_remote_url_without_credentials(repo_dir)
         repo_data = self._load_metadata(username, user_alias)
         golden_alias = repo_data.get("golden_repo_alias") if repo_data else None
         if not golden_alias:

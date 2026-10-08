@@ -536,6 +536,12 @@ def git_commit(
     response_model=GitPushResponse,
     responses={
         200: {"description": "Push completed successfully"},
+        400: {
+            "description": (
+                "Invalid remote/branch, or set_upstream with no branch on a "
+                "branch without an upstream"
+            )
+        },
         401: {"description": "Missing or invalid authentication"},
         403: {"description": "Missing repository:write permission"},
         404: {"description": "Repository not found"},
@@ -560,7 +566,14 @@ def git_push(
             branch=request.branch,
             set_upstream=request.set_upstream,
         )
-        return GitPushResponse(**result)
+        # The service reports {"success", "pushed_commits"}; the REST
+        # response names the remote and branch as requested.
+        return GitPushResponse(
+            success=result["success"],
+            remote=request.remote,
+            branch=request.branch,
+            commits_pushed=result["pushed_commits"],
+        )
     except FileNotFoundError as e:
         logger.warning(
             format_error_log(

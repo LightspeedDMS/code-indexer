@@ -27,6 +27,14 @@ own overall deadline via the optional `timeout` kwarg (e.g. LocalCloneBackend
 preserves its existing `cow_clone_timeout` from Bug #1285); when `timeout`
 is None (the indexing-path default), the subprocess runs until it finishes
 naturally or `cancel_check()` fires — never both a fixed deadline.
+
+Every text this module logs, returns or puts in an exception passes through
+the caller's ``redact`` callable (identity by default): a caller that knows
+an exact secret the child may echo masks it before the text leaves here,
+including the lines logged while the child is still running. Logged and
+raised text additionally gets the generic argv-based output redaction;
+returned output gets only the caller's redactor, so callers that parse it
+see it unchanged under the identity default.
 """
 
 import logging
@@ -34,7 +42,7 @@ import re
 import subprocess
 import threading
 import time
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 # Bug #2012: the single, layer-neutral group-termination implementation
 # (watches the whole group through the grace period, KILLs survivors, never
@@ -70,13 +78,42 @@ SHORT_POLL_SECONDS = 2.0
 # immediately in practice.
 _DRAIN_JOIN_TIMEOUT_SECONDS = 5.0
 
+# A caller-supplied text redactor (str -> str).
+Redactor = Callable[[str], str]
+
+
+def _no_redaction(text: str) -> str:
+    """Default redactor: the text unchanged."""
+    return text
+
+
+def _caller_redacted(value: Any, redact: Redactor) -> Any:
+    """``value`` with the caller's redactor applied: str directly, bytes
+    through a lossless decode/encode, any other value (None) unchanged."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, bytes):
+        decoded = value.decode("utf-8", errors="surrogateescape")
+        return redact(decoded).encode("utf-8", errors="surrogateescape")
+    return value
+
+
+def _redacted(value: Any, args: Any, redact: Redactor) -> Any:
+    """Logged/raised form of ``value``: the generic output redaction for
+    ``args``, then the caller's redactor."""
+    return _caller_redacted(redact_command_output(value, args), redact)
+
 
 class SubprocessCancelledError(RuntimeError):
     """Raised when a cancellable subprocess is terminated due to job cancellation."""
 
 
 def _drain_stream(
-    stream, chunks: List[str], stream_label: str, subprocess_args: List[str]
+    stream,
+    chunks: List[str],
+    stream_label: str,
+    subprocess_args: List[str],
+    redact: Redactor = _no_redaction,
 ) -> None:
     """Background-thread reader: drains a pipe line-by-line into chunks.
 
@@ -97,13 +134,14 @@ def _drain_stream(
         for line in iter(stream.readline, ""):
             if _ERROR_TOKEN_PATTERN.search(line):
                 # Bug #2012 follow-up: argv and the echoed line are logged
-                # redacted (URL userinfo, token-bearing option values).
+                # redacted (URL userinfo, token-bearing option values, and
+                # every secret the caller's redactor masks).
                 logger.error(
                     "Subprocess %s emitted an ERROR-level %s line while "
                     "still running: %s",
                     redact_command(subprocess_args),
                     stream_label,
-                    redact_command_output(line.rstrip(), subprocess_args),
+                    _redacted(line.rstrip(), subprocess_args, redact),
                 )
             chunks.append(line)
     finally:
@@ -118,6 +156,7 @@ def run_cancellable_subprocess(
     cancel_check: Optional[Callable[[], bool]] = None,
     poll_interval: float = SHORT_POLL_SECONDS,
     timeout: Optional[float] = None,
+    redact: Redactor = _no_redaction,
 ) -> "subprocess.CompletedProcess[str]":
     """Run args as a subprocess, cooperatively cancellable via cancel_check().
 
@@ -145,9 +184,12 @@ def run_cancellable_subprocess(
             subprocess.run(timeout=...) semantics for callers (e.g. the CoW
             clone step, Bug #1285) that still want a deadline. None means
             no deadline (the Bug #1218 default for the indexing path).
+        redact: Applied to every text this call logs, returns or raises
+            (identity by default).
 
     Returns:
-        subprocess.CompletedProcess with returncode/stdout/stderr populated.
+        subprocess.CompletedProcess with returncode/stdout/stderr populated
+        (stdout/stderr passed through ``redact``).
 
     Raises:
         SubprocessCancelledError: cancel_check() returned True.
@@ -169,12 +211,12 @@ def run_cancellable_subprocess(
     stderr_chunks: List[str] = []
     stdout_thread = threading.Thread(
         target=_drain_stream,
-        args=(proc.stdout, stdout_chunks, "stdout", args),
+        args=(proc.stdout, stdout_chunks, "stdout", args, redact),
         daemon=True,
     )
     stderr_thread = threading.Thread(
         target=_drain_stream,
-        args=(proc.stderr, stderr_chunks, "stderr", args),
+        args=(proc.stderr, stderr_chunks, "stderr", args, redact),
         daemon=True,
     )
     stdout_thread.start()
@@ -214,8 +256,10 @@ def run_cancellable_subprocess(
 
     if cancelled:
         raise SubprocessCancelledError(
-            f"Subprocess {redact_command(args)!r} cancelled during execution "
-            "(job cancellation requested)"
+            redact(
+                f"Subprocess {redact_command(args)!r} cancelled during execution "
+                "(job cancellation requested)"
+            )
         )
     if timed_out:
         # timed_out is only ever set True when deadline is not None, which
@@ -226,15 +270,15 @@ def run_cancellable_subprocess(
         raise subprocess.TimeoutExpired(
             cmd=redact_command(args),
             timeout=timeout if timeout is not None else poll_interval,
-            output=redact_command_output("".join(stdout_chunks), args),
-            stderr=redact_command_output("".join(stderr_chunks), args),
+            output=_redacted("".join(stdout_chunks), args, redact),
+            stderr=_redacted("".join(stderr_chunks), args, redact),
         )
 
     return subprocess.CompletedProcess(
         args=args,
         returncode=proc.returncode,
-        stdout="".join(stdout_chunks),
-        stderr="".join(stderr_chunks),
+        stdout=_caller_redacted("".join(stdout_chunks), redact),
+        stderr=_caller_redacted("".join(stderr_chunks), redact),
     )
 
 
@@ -244,9 +288,38 @@ _RUN_WITH_CANCEL_ARGS = frozenset(
 )
 
 
+def _redacted_run(
+    args: List[str], redact: Redactor, run_kwargs: dict
+) -> "subprocess.CompletedProcess[str]":
+    """``subprocess.run(args, **run_kwargs)`` whose returned output and
+    raised errors leave redacted. `from None` drops the unredacted original
+    from the traceback."""
+    try:
+        result = subprocess.run(args, **run_kwargs)
+    except subprocess.CalledProcessError as exc:
+        raise subprocess.CalledProcessError(
+            exc.returncode,
+            redact_command(exc.cmd),
+            output=_redacted(exc.output, exc.cmd, redact),
+            stderr=_redacted(exc.stderr, exc.cmd, redact),
+        ) from None
+    except subprocess.TimeoutExpired as exc:
+        raise subprocess.TimeoutExpired(
+            redact_command(exc.cmd),
+            exc.timeout,
+            output=_redacted(exc.output, exc.cmd, redact),
+            stderr=_redacted(exc.stderr, exc.cmd, redact),
+        ) from None
+    result.stdout = _caller_redacted(result.stdout, redact)
+    result.stderr = _caller_redacted(result.stderr, redact)
+    return result
+
+
 def run_with_cancel(
     args: List[str],
     cancel_check: Optional[Callable[[], bool]],
+    *,
+    redact: Redactor = _no_redaction,
     **run_kwargs,
 ) -> "subprocess.CompletedProcess[str]":
     """Bug #2012: drop-in for ``subprocess.run(args, **run_kwargs)`` that the
@@ -259,32 +332,20 @@ def run_with_cancel(
     ``SubprocessCancelledError`` is raised; ``timeout`` and ``check=True``
     keep their ``subprocess.run`` meaning (output is always captured as
     text). Arguments that cannot be honoured raise ``TypeError``.
+
+    ``redact`` (identity by default) is applied to every text logged,
+    returned or raised, on both paths.
     """
     if cancel_check is None:
-        # Bug #2012: the errors leave this module redacted on this path too;
-        # `from None` drops the unredacted original from the traceback.
-        try:
-            return subprocess.run(args, **run_kwargs)
-        except subprocess.CalledProcessError as exc:
-            raise subprocess.CalledProcessError(
-                exc.returncode,
-                redact_command(exc.cmd),
-                output=redact_command_output(exc.output, exc.cmd),
-                stderr=redact_command_output(exc.stderr, exc.cmd),
-            ) from None
-        except subprocess.TimeoutExpired as exc:
-            raise subprocess.TimeoutExpired(
-                redact_command(exc.cmd),
-                exc.timeout,
-                output=redact_command_output(exc.output, exc.cmd),
-                stderr=redact_command_output(exc.stderr, exc.cmd),
-            ) from None
+        return _redacted_run(args, redact, run_kwargs)
 
     unsupported = set(run_kwargs) - _RUN_WITH_CANCEL_ARGS
     if unsupported:
         raise TypeError(
-            f"run_with_cancel cannot honour {sorted(unsupported)} "
-            f"for {redact_command(args)!r}"
+            redact(
+                f"run_with_cancel cannot honour {sorted(unsupported)} "
+                f"for {redact_command(args)!r}"
+            )
         )
     result = run_cancellable_subprocess(
         args,
@@ -292,12 +353,13 @@ def run_with_cancel(
         env=run_kwargs.get("env"),
         cancel_check=cancel_check,
         timeout=run_kwargs.get("timeout"),
+        redact=redact,
     )
     if run_kwargs.get("check") and result.returncode != 0:
         raise subprocess.CalledProcessError(
             result.returncode,
             redact_command(args),
-            output=redact_command_output(result.stdout, args),
-            stderr=redact_command_output(result.stderr, args),
+            output=_redacted(result.stdout, args, redact),
+            stderr=_redacted(result.stderr, args, redact),
         )
     return result
