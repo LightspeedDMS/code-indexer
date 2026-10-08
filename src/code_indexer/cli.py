@@ -1560,11 +1560,11 @@ def _execute_semantic_search(
         return results
 
     except Exception as e:
-        if not quiet:
-            console.print(f"[yellow]⚠️  Semantic search failed: {e}[/yellow]")
+        # #2109: a failed search is reported by the caller, never returned
+        # as an empty result.
         logger = logging.getLogger(__name__)
         logger.error(f"Semantic search error: {e}", exc_info=True)
-        return []
+        raise
 
 
 def _display_hybrid_results(
@@ -6773,8 +6773,11 @@ def query(
                 try:
                     semantic_results = semantic_future.result()
                 except Exception as e:
-                    console.print(f"[yellow]⚠️  Semantic search failed: {e}[/yellow]")
-                    semantic_results = []
+                    # #2109: a failed semantic half fails the query.
+                    console.print(
+                        f"❌ Semantic search failed: {e}", style="red", markup=False
+                    )
+                    sys.exit(1)
 
             # Story #694: apply reranker stage to each sub-list independently.
             if effective_rerank_query:

@@ -36,6 +36,9 @@ from code_indexer.services.query_strategy import (
     PARALLEL_TIMEOUT_SECONDS,
 )
 from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+from code_indexer.services.multi_index_query_service import (
+    MultiIndexQueryTimeoutError,
+)
 
 from code_indexer.services.extension_filter import (
     normalize_extensions,
@@ -63,6 +66,13 @@ logger = logging.getLogger(__name__)
 
 class SemanticQueryError(Exception):
     """Base exception for semantic query operations."""
+
+    pass
+
+
+class SearchFailedError(SemanticQueryError):
+    """The search itself failed (storage, provider, configuration) -- a
+    server-side failure, distinct from a rejected request (#2109)."""
 
     pass
 
@@ -992,6 +1002,9 @@ class SemanticQueryManager:
                 results = _raw
             execution_time_ms = int((time.time() - start_time) * 1000)
             timeout_occurred = False
+        except MultiIndexQueryTimeoutError:
+            # #2109: keep the type so the front doors answer a timeout.
+            raise
         except TimeoutError as e:
             execution_time_ms = int((time.time() - start_time) * 1000)
             timeout_occurred = True
@@ -1005,7 +1018,7 @@ class SemanticQueryManager:
             execution_time_ms = int((time.time() - start_time) * 1000)
             if "timeout" in str(e).lower():
                 raise SemanticQueryError(f"Query timed out: {str(e)}")
-            raise SemanticQueryError(f"Search failed: {str(e)}")
+            raise SearchFailedError(f"Search failed: {str(e)}") from e
 
         # Create metadata — AC7 (Bug #1202): include effective routing decision
         # from the per-request out-param (no singleton state).
@@ -1511,6 +1524,9 @@ class SemanticQueryManager:
                 all_results.extend(results)
 
             except (TimeoutError, Exception) as e:
+                # #2109: a search timeout keeps its type end to end.
+                if isinstance(e, MultiIndexQueryTimeoutError):
+                    raise
                 # If it's a timeout or other critical error from one repo, propagate it
                 if isinstance(e, TimeoutError) or "timeout" in str(e).lower():
                     raise TimeoutError(

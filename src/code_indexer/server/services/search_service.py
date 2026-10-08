@@ -473,41 +473,50 @@ class SemanticSearchService:
             RuntimeError: If embedding generation or vector search fails
         """
         try:
-            # Load repository-specific configuration.
-            # Story #1082: served from the drift-safe RepoConfigCache when the
-            # server lifespan has wired it (NO-TTL for proven-immutable
-            # .versioned/ snapshots, SHORT-TTL otherwise); identical direct load
-            # under CLI in-process. Removes per-query json.load + path resolve()
-            # from the GIL-bound hot path.
-            config = _load_repo_config(repo_path)
+            # #2109: only OPENING the repository's index may skip the repo.
+            # The config load and BackendFactory raise ValueError when the
+            # repo has no valid index (e.g. an orphaned repo registered
+            # without a valid .code-indexer/ directory). A ValueError from
+            # any LATER step (a missing provider key, a store argument
+            # conflict) is a failure: it reaches the outer handler and is
+            # raised, never answered with an empty result.
+            try:
+                # Story #1082: served from the drift-safe RepoConfigCache when
+                # the server lifespan has wired it; identical direct load
+                # under CLI in-process.
+                config = _load_repo_config(repo_path)
 
-            # py-spy logging-lock fix (follow-up to Bug #1078): the per-query
-            # "Loaded repository config" INFO log was removed from this hot path.
+                # Story #526 / Bug #881 Phase 3: fan-out callers pass
+                # hnsw_cache=None to prevent global cache pollution; the
+                # single-repo hot path uses the server singleton.
+                # resolved_hnsw_cache is Any: the parameter is typed `object`
+                # to hold the sentinel.
+                if hnsw_cache is _HNSW_CACHE_USE_SERVER_DEFAULT:
+                    from ..app import _server_hnsw_cache
 
-            # Create backend using BackendFactory (Story #526: pass server cache).
-            # Bug #881 Phase 3: fan-out callers pass hnsw_cache=None to prevent
-            # global cache pollution; single-repo hot path uses server singleton.
-            # resolved_hnsw_cache is Any: the parameter is typed `object` to hold
-            # the sentinel, but the resolved value is Optional[HNSWIndexCache].
-            # The type system cannot narrow from sentinel identity check to the
-            # concrete cache type without Any.
-            if hnsw_cache is _HNSW_CACHE_USE_SERVER_DEFAULT:
-                from ..app import _server_hnsw_cache
+                    resolved_hnsw_cache: Any = _server_hnsw_cache
+                else:
+                    resolved_hnsw_cache = hnsw_cache
 
-                resolved_hnsw_cache: Any = _server_hnsw_cache
-            else:
-                resolved_hnsw_cache = hnsw_cache
+                from ..services.memory_governor import get_memory_governor
 
-            from ..services.memory_governor import get_memory_governor
-
-            backend = BackendFactory.create(
-                config=config,
-                project_root=Path(repo_path),
-                hnsw_cache=resolved_hnsw_cache,
-                memory_governor=get_memory_governor(),
-                activation_id=activation_id,
-            )
-            vector_store_client = backend.get_vector_store_client()
+                backend = BackendFactory.create(
+                    config=config,
+                    project_root=Path(repo_path),
+                    hnsw_cache=resolved_hnsw_cache,
+                    memory_governor=get_memory_governor(),
+                    activation_id=activation_id,
+                )
+                vector_store_client = backend.get_vector_store_client()
+            except ValueError as e:
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-171",
+                        f"Skipping repo {repo_path}: no valid index configured",
+                        error=str(e),
+                    )
+                )
+                return []
 
             # py-spy logging-lock fix: per-query "Using backend" INFO removed.
 
@@ -715,17 +724,10 @@ class SemanticSearchService:
 
             return self._format_search_results(search_results, include_source)
 
-        except ValueError as e:
-            # Graceful handling for repos with missing/incomplete index configuration
-            # (e.g. orphaned repos registered without a valid .code-indexer/ directory)
-            logger.warning(
-                format_error_log(
-                    "MCP-GENERAL-171",
-                    f"Skipping repo {repo_path}: no valid index configured",
-                    error=str(e),
-                )
-            )
-            return []
+        except TimeoutError:
+            # #2109: keep the timeout type (e.g. MultiIndexQueryTimeoutError)
+            # so the front doors can answer it as a timeout.
+            raise
         except Exception as e:
             logger.error(
                 format_error_log(
@@ -733,7 +735,7 @@ class SemanticSearchService:
                     f"Semantic search failed for repo {repo_path}: {e}",
                 )
             )
-            raise RuntimeError(f"Semantic search failed: {e}")
+            raise RuntimeError(f"Semantic search failed: {e}") from e
 
     def _format_search_results(
         self, search_results: List[Dict[str, Any]], include_source: bool

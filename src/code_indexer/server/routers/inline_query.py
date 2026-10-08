@@ -25,7 +25,8 @@ from ..models.query import (
     FTSResultItem,
 )
 from ..models.api_models import QueryResultItem
-from ..query.semantic_query_manager import SemanticQueryError
+from ..query.semantic_query_manager import SearchFailedError, SemanticQueryError
+from ...services.multi_index_query_service import MultiIndexQueryTimeoutError
 from ..auth import dependencies
 from ..logging_utils import format_error_log
 from code_indexer.server.telemetry.correlation_bridge import (
@@ -1096,6 +1097,28 @@ def register_query_routes(
             # Query searches only repositories the caller can access; with
             # access control unavailable that cannot be verified -- refuse.
             raise access_control_unavailable_error(e)
+
+        except MultiIndexQueryTimeoutError as e:
+            # #2109: the search ran out of time -- never a short answer.
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail=f"Search timed out: {e}",
+            )
+
+        except SearchFailedError as e:
+            # #2109: the search itself failed (storage, provider or
+            # configuration) -- a server-side failure, not a bad request.
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-037",
+                    f"Search failed in unified search: {e}",
+                ),
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(e),
+            )
 
         except SemanticQueryError as e:
             error_message = str(e)
