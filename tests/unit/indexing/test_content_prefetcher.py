@@ -247,6 +247,25 @@ def test_an_unreadable_file_is_a_failure_not_a_vanish(repo: Path) -> None:
     assert not got.vanished
 
 
+def test_a_transport_failure_says_what_failed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The type alone ("ContentMcpError") cannot tell a 503 from a timeout."""
+    (tmp_path / "a.py").write_bytes(b"1")
+
+    class _Down(_Delegated):
+        def fetch(self, repo_path: Any, ps: Sequence[str]) -> Iterator[Any]:
+            raise ConnectionError("/content/fetch returned 503: overloaded" + "x" * 900)
+
+    pf = _prefetcher(_Down(), tmp_path, ["a.py"])
+    with caplog.at_level("ERROR"):
+        got = pf.take(tmp_path / "a.py")
+
+    assert got.error is not None and "returned 503: overloaded" in got.error
+    assert "returned 503: overloaded" in caplog.text
+    assert len(got.error) < 400, "an unbounded body excerpt reached every file"
+
+
 def test_a_transport_failure_fails_its_batch_only(tmp_path: Path) -> None:
     root = tmp_path / "r"
     root.mkdir()

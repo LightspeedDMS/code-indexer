@@ -49,6 +49,9 @@ logger = logging.getLogger(__name__)
 #: ``os.strerror(errno)``; workspace-mcp reports the bare errno name.
 _VANISHED_ERRORS = frozenset({"ENOENT", os.strerror(errno.ENOENT)})
 
+#: Longest transport-failure reason kept, in the log and on each failed file.
+_MAX_REASON_CHARS = 300
+
 #: Recorded for a file whose fetched bytes no longer hash to the manifest's value.
 CHANGED_SINCE_MANIFEST = "changed since the manifest was taken"
 
@@ -146,9 +149,14 @@ class ContentPrefetcher:
                 for record in self._backend.fetch(self._root, batch.paths)
             }
         except Exception as exc:  # the backend's transport, whatever it is
+            # The message, not just the type: "ContentMcpError" alone cannot
+            # tell a 503 from a timeout from a refused connection. The plugin's
+            # messages carry the route, status and a capped body excerpt --
+            # never the token -- and are capped again here.
+            reason = f"{type(exc).__name__}: {exc}"[:_MAX_REASON_CHARS]
             logger.error(
                 "Content fetch failed for a batch of %d files: %s",
                 len(batch.paths),
-                type(exc).__name__,
+                reason,
             )
-            batch.failure = f"content fetch failed: {type(exc).__name__}"
+            batch.failure = f"content fetch failed: {reason}"
