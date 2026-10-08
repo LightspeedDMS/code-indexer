@@ -360,6 +360,69 @@ def test_contract_blob_sha_holds_even_if_the_file_changes_after_the_read(
     assert item.blob_sha == git_blob_hash_bytes(original)
 
 
+@pytest.mark.parametrize("shape", ["symlinked-ancestor", "relative"])
+def test_fetch_works_when_the_repo_path_is_not_already_canonical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    """manifest and fetch must agree about a repo reached through a symlink.
+
+    `os.scandir` follows a symlinked root quite happily, so manifest lists the
+    files. An earlier confinement check compared a fully resolved parent against a
+    merely lexically normalised one, so it only held for an already-canonical
+    absolute root -- and refused EVERY file otherwise, silently, as per-file error
+    records.
+
+    Both shapes here are ordinary for this fleet: golden repos are reached through
+    alias pointers and .versioned snapshot links, and an NFS mount point is often
+    a symlink itself.
+    """
+    real = tmp_path / "real"
+    (real / "sub").mkdir(parents=True)
+    (real / "a.py").write_text("x\n")
+    (real / "sub" / "b.py").write_text("y\n")
+
+    if shape == "symlinked-ancestor":
+        repo_arg: Union[str, Path] = tmp_path / "alias"
+        os.symlink(real, repo_arg, target_is_directory=True)
+    else:
+        monkeypatch.chdir(tmp_path)
+        repo_arg = "real"
+
+    backend = LocalContentBackend()
+    listed = [e.path for e in backend.manifest(repo_arg, page_size=100).entries]
+    assert listed == ["a.py", "sub/b.py"]
+
+    fetched = {f.path: f for f in backend.fetch(repo_arg, listed)}
+    for rel in listed:
+        assert fetched[rel].error is None, (
+            f"{shape}: {rel} refused with {fetched[rel].error}"
+        )
+        assert fetched[rel].data == (real / rel).read_bytes()
+
+
+def test_a_symlinked_directory_is_still_refused_through_a_symlinked_root(
+    tmp_path: Path,
+) -> None:
+    """Making the non-canonical cases work must not loosen the escape guard."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "keep.py").write_text("ok\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("SECRET\n")
+    os.symlink(outside, real / "dirlink", target_is_directory=True)
+    alias = tmp_path / "alias"
+    os.symlink(real, alias, target_is_directory=True)
+
+    results = {
+        f.path: f
+        for f in LocalContentBackend().fetch(alias, ["keep.py", "dirlink/secret.txt"])
+    }
+    assert results["keep.py"].error is None
+    assert "symlinked directory" in (results["dirlink/secret.txt"].error or "")
+    assert results["dirlink/secret.txt"].data == b""
+
+
 def test_paging_cost_tracks_depth_not_tree_size(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -236,10 +236,23 @@ class LocalContentBackend:
             parent_real = os.path.realpath(parent)
         except OSError:
             return None, "unreadable parent"
-        # Equality, not containment: a symlinked intermediate directory resolves
-        # elsewhere even when that elsewhere is still inside the repository, and
-        # the manifest would not have enumerated anything through it.
-        if parent_real != os.path.normpath(str(parent)):
+        # Compare resolved against resolved. An earlier version compared
+        # realpath(parent) -- absolute and fully resolved -- with
+        # normpath(str(parent)), which is only lexically normalised and keeps
+        # whatever form repo_path arrived in. That equality held ONLY for an
+        # already-canonical absolute root, so a relative repo_path, or any
+        # symlinked ancestor (a golden-repo alias, a .versioned snapshot pointer,
+        # an NFS mount-point link) made every single file fail -- while manifest,
+        # whose scandir follows a symlinked root quite happily, went on listing
+        # them. Silent per-file errors for an entire repository.
+        #
+        # root_real is resolved once by the caller, and rel is already known to be
+        # relative and free of "..", so joining them gives where this file's parent
+        # MUST resolve to. Anything else means a symlink was traversed on the way.
+        expected_parent = os.path.normpath(
+            os.path.join(root_real, os.path.dirname(rel))
+        )
+        if parent_real != expected_parent:
             return None, "symlinked directory not followed"
         # Backstop. Given the guards above this should be unreachable: a lexical
         # parent can only sit outside the root via an absolute path or a ".."
