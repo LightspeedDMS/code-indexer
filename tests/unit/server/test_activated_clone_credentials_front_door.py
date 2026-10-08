@@ -236,6 +236,51 @@ def test_prepare_remote_operation_fails_when_sanitization_fails(
     assert all(SECRET not in r.getMessage() for r in caplog.records)
 
 
+_MISSING_ALIAS = "never-activated-repo"
+
+
+@pytest.mark.parametrize(
+    "door", ["mcp_fetch", "mcp_pull", "rest_fetch", "rest_pull", "rest_push"]
+)
+def test_remote_operation_on_a_missing_clone_is_not_found_before_sanitization(
+    client: TestClient,
+    app: Any,
+    network_calls: List[Tuple[List[str], Dict[str, str]]],
+    caplog: pytest.LogCaptureFixture,
+    door: str,
+) -> None:
+    """A repository with no clone on disk is a client error ("not found")
+    at every door, decided before the stored URLs are sanitized: no
+    sanitization failure, no ERROR log, no network call."""
+    operation = door.split("_")[1]
+    with caplog.at_level(logging.WARNING):
+        if door.startswith("mcp"):
+            body = mcp_call(
+                client,
+                app,
+                ADMIN,
+                f"git_{operation}",
+                {"repository_alias": _MISSING_ALIAS},
+            )
+            text = str(body)
+            assert '"success": false' in text.lower(), text
+        else:
+            client.cookies.clear()
+            response = client.post(
+                f"/api/v1/repos/{_MISSING_ALIAS}/git/{operation}",
+                json={"remote": "origin"},
+                headers=bearer(app, ADMIN),
+            )
+            assert response.status_code == 404, response.text
+            text = response.text
+
+    assert "not found" in text.lower(), text
+    assert "removing credentials" not in text, text
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors == [], errors
+    assert network_calls == []
+
+
 @contextlib.contextmanager
 def _block_configuration(repo: Path, tmp_path: Path) -> Iterator[None]:
     """Include a FIFO in the clone's configuration while inside: every git

@@ -4224,8 +4224,16 @@ class ActivatedRepoManager:
         stored URLs cannot all be made credential-free: no credentials are
         selected for such a clone. Local git calls only -- call from a
         worker/request thread.
+
+        Raises FileNotFoundError, before any sanitization, when the
+        repository has no clone on disk: that is a client error (the
+        repository is not activated), not a failed sanitization.
         """
         repo_dir = self._safe_user_scoped_path(username, user_alias)
+        if not os.path.isdir(repo_dir):
+            raise FileNotFoundError(
+                f"Activated repository '{user_alias}' not found for user '{username}'"
+            )
         # Raises GitCommandError when the stored URLs cannot be sanitized.
         ensure_remote_url_without_credentials(repo_dir)
         repo_data = self._load_metadata(username, user_alias)
