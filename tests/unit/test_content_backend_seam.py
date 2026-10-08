@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Iterator, List, Optional, Sequence
+from typing import Iterator, List, Optional, Sequence, Union
 
 import pytest
 
@@ -358,6 +358,74 @@ def test_contract_blob_sha_holds_even_if_the_file_changes_after_the_read(
     (item,) = list(contract_backend.fetch(repo, ["a.py"]))
     assert item.data == original
     assert item.blob_sha == git_blob_hash_bytes(original)
+
+
+def test_paging_cost_tracks_depth_not_tree_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resuming must not replay the walk from the root on every page.
+
+    The first implementation restarted at the root each page and discarded
+    everything up to the cursor, so exhausting a repository cost O(pages x tree).
+    On this fixture that was 525 scandir calls where resuming needs 102, and on a
+    real repo -- 60 pages over thousands of directories -- it is hundreds of
+    thousands of NFS round trips.
+
+    Counted, not timed: the call count is deterministic on any machine, where
+    wall clock would be dominated by the page cache and would not fail on a fast
+    disk even if the behaviour came back.
+    """
+    root = tmp_path / "repo"
+    packages, modules, per_module = 8, 6, 8
+    directories = 1
+    for a in range(packages):
+        directories += 1
+        for b in range(modules):
+            directory = root / f"pkg{a:02d}" / f"mod{b:02d}"
+            directory.mkdir(parents=True)
+            directories += 1
+            for f in range(per_module):
+                (directory / f"f{f}.py").write_text("x")
+    files = packages * modules * per_module
+
+    real_scandir = os.scandir
+    calls = {"n": 0}
+
+    def counting(
+        path: Union[str, "os.PathLike[str]"] = ".",
+    ) -> Iterator["os.DirEntry[str]"]:
+        calls["n"] += 1
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", counting)
+
+    backend = LocalContentBackend()
+    page_size = 25
+    cursor: Optional[str] = None
+    pages, seen = 0, 0
+    while True:
+        page = backend.manifest(root, cursor=cursor, page_size=page_size)
+        seen += len(page.entries)
+        pages += 1
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+
+    assert seen == files
+    assert pages > 10, "fixture must span enough pages for the difference to show"
+
+    # Resuming reads one directory per cursor component, plus each directory once
+    # as the walk reaches it: pages * depth + directories. Re-walking would cost
+    # pages * directories, which is an order of magnitude more here.
+    depth = 3
+    resume_budget = pages * depth + directories
+    rewalk_cost = pages * directories
+    assert calls["n"] <= resume_budget, (
+        f"{calls['n']} scandir calls exceeds the resume budget {resume_budget}"
+    )
+    assert calls["n"] < rewalk_cost // 2, (
+        f"{calls['n']} is close to the re-walk cost {rewalk_cost}"
+    )
 
 
 def test_manifest_excludes_git_reports_symlinks_and_uses_posix_relative_paths(

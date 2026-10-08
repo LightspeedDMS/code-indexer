@@ -43,12 +43,13 @@ indexes is cidx's policy and must not drift into the service that stores them.
 
 from __future__ import annotations
 
+import bisect
 import logging
 import ntpath
 import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterator, Optional, Protocol, Sequence, Tuple, Union
+from typing import Iterator, List, Optional, Protocol, Sequence, Tuple, Union
 
 from ....utils.blob_hash import git_blob_hash, git_blob_hash_bytes
 
@@ -154,9 +155,7 @@ class LocalContentBackend:
         collected: list = []
         last: Optional[str] = None
 
-        for rel in self._walk_ordered(root):
-            if cursor is not None and rel <= cursor:
-                continue
+        for rel in self._walk_ordered(root, cursor):
             collected.append(self._describe(root, rel))
             last = rel
             if len(collected) >= page_size:
@@ -251,7 +250,73 @@ class LocalContentBackend:
             return None, "path escapes the repository"
         return target, None
 
-    def _walk_ordered(self, root: Path) -> Iterator[str]:
+    def _sorted_children(
+        self, directory: Path, prefix: str
+    ) -> List[Tuple[str, "os.DirEntry[str]", str]]:
+        """One directory's entries as ``(sort key, entry, prefix)``, ascending.
+
+        A directory sorts under ``name + "/"`` because that is the prefix every
+        path inside it carries; comparing the bare name would order ``sub``
+        against ``sub.txt`` wrongly and break the monotonicity the cursor relies
+        on. The key is computed once here and kept, so resuming can binary-search
+        it without re-deriving anything.
+
+        An unreadable directory yields nothing rather than aborting the walk: one
+        bad directory must not abandon the rest of the repository.
+        """
+        try:
+            scanned = list(os.scandir(directory))
+        except OSError:
+            return []
+        children = [
+            (
+                entry.name + "/" if entry.is_dir(follow_symlinks=False) else entry.name,
+                entry,
+                prefix,
+            )
+            for entry in scanned
+        ]
+        children.sort(key=lambda item: item[0])
+        return children
+
+    def _resume_stack(self, root: Path, cursor: Optional[str]) -> List[Iterator]:
+        """Rebuild the walk's stack so iteration continues just after ``cursor``.
+
+        The previous implementation restarted at the root every page and threw
+        away everything up to the cursor, so exhausting a repository cost
+        O(pages x tree): 13 pages over 13 directories issued 103 scandir calls,
+        and a 60k-file repo at page_size 1000 would have issued hundreds of
+        thousands. On NFS each of those is a round trip.
+
+        A sorted depth-first walk needs no replay. After emitting ``a/b/c.py`` the
+        stack is exactly: root positioned after ``a``, ``a`` positioned after
+        ``b``, ``b`` positioned after ``c.py``. That is reconstructible from the
+        cursor alone by reading one directory per component and binary-searching
+        for the position, which costs O(depth) directories instead of all of them.
+
+        Intermediate components are skipped past as ``name + "/"`` because the walk
+        is INSIDE them; the final component is a file or symlink, so its own name
+        is the key. A cursor naming an entry that has since been deleted still
+        lands in the right place, because the search is by key, not by identity.
+        """
+        if cursor is None:
+            return [iter(self._sorted_children(root, ""))]
+
+        stack: List[Iterator] = []
+        parts = [part for part in cursor.split("/") if part]
+        directory, prefix = root, ""
+        for index, part in enumerate(parts):
+            children = self._sorted_children(directory, prefix)
+            is_last = index == len(parts) - 1
+            target = part if is_last else part + "/"
+            position = bisect.bisect_right([key for key, _, _ in children], target)
+            stack.append(iter(children[position:]))
+            if not is_last:
+                directory = directory / part
+                prefix = f"{prefix}{part}/"
+        return stack
+
+    def _walk_ordered(self, root: Path, cursor: Optional[str] = None) -> Iterator[str]:
         """Repo-relative POSIX paths in ascending path order, ``.git`` excluded.
 
         The order must be MONOTONIC in the emitted path, because the cursor is a
@@ -261,42 +326,22 @@ class LocalContentBackend:
         ``unicode.ts`` would skip it entirely. So files and directories are walked
         as ONE sorted sequence, descending when a directory's turn arrives.
 
-        A directory sorts under ``name + "/"`` because that is the prefix every
-        path inside it carries; comparing the bare name would place ``sub``
-        against ``sub.txt`` wrongly. This is the same rule the server seam uses,
-        so both sides agree on order and a cursor means the same thing to each.
-
         One directory is materialised at a time, never the whole tree.
         """
-
-        def children(directory: Path, prefix: str) -> Iterator[tuple]:
-            try:
-                entries = sorted(
-                    os.scandir(directory),
-                    key=lambda e: (
-                        e.name + "/" if e.is_dir(follow_symlinks=False) else e.name
-                    ),
-                )
-            except OSError:
-                # An unreadable directory is skipped, not fatal: one bad directory
-                # must not abandon the rest of the repository.
-                return iter(())
-            return iter([(entry, prefix) for entry in entries])
-
-        stack = [children(root, "")]
+        stack = self._resume_stack(root, cursor)
         while stack:
             nxt = next(stack[-1], None)
             if nxt is None:
                 stack.pop()
                 continue
-            entry, prefix = nxt
+            _key, entry, prefix = nxt
             rel = f"{prefix}{entry.name}"
             if entry.is_symlink():
                 yield rel
             elif entry.is_dir(follow_symlinks=False):
                 if entry.name == ".git":
                     continue
-                stack.append(children(Path(entry.path), f"{rel}/"))
+                stack.append(iter(self._sorted_children(Path(entry.path), f"{rel}/")))
             elif entry.is_file(follow_symlinks=False):
                 yield rel
 
