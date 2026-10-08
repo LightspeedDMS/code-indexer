@@ -1490,6 +1490,21 @@ def make_lifespan(
                 getattr(configured_content_backend, "is_local", "unknown"),
             )
 
+            # Ripgrep seam, same shape: one selection, parked so regex search
+            # reads it rather than constructing its own. Local by default, so
+            # this is inert until an operator sets ripgrep_backend='delegated'.
+            from code_indexer.server.startup.ripgrep_backend_wiring import (
+                build_configured_ripgrep_backend,
+            )
+
+            configured_ripgrep_backend = build_configured_ripgrep_backend(server_config)
+            app.state.ripgrep_backend = configured_ripgrep_backend
+            logger.info(
+                "RipgrepBackend parked on app.state: %s (is_local=%s)",
+                type(configured_ripgrep_backend).__name__,
+                getattr(configured_ripgrep_backend, "is_local", "unknown"),
+            )
+
             global_lifecycle_manager = GlobalReposLifecycleManager(
                 str(golden_repos_dir),
                 background_job_manager=background_job_manager,

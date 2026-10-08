@@ -1983,6 +1983,11 @@ class ServerConfig:
     # access, so cidx needs no repository mount. There is deliberately no
     # fallback -- see server/startup/content_backend_wiring.py.
     content_backend: str = "local"
+    # Where a ripgrep argv is executed. "local" runs the binary in this
+    # container (the default); "delegated" hands it to the service that owns
+    # the repositories, so cidx needs neither the mount nor the binary. No
+    # fallback -- see server/startup/ripgrep_backend_wiring.py.
+    ripgrep_backend: str = "local"
     cow_daemon: Optional[CowDaemonConfig] = None  # Story #510: CoW daemon settings
     workspace_mcp: Optional[WorkspaceMcpConfig] = (
         None  # EVO-64616: workspace-mcp delegated clone backend settings

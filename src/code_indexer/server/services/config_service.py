@@ -300,6 +300,7 @@ BOOTSTRAP_KEYS = frozenset(
         "clone_backend",  # Story #510 / #1034 - needed pre-DB by build_snapshot_manager() at lifespan startup
         "git_backend",  # EVO-64678 - needed pre-DB by build_git_backend() at lifespan startup
         "content_backend",  # content seam - read pre-DB by build_configured_content_backend() at lifespan startup (parallels clone_backend/git_backend; without it config.json is stripped and content silently falls back to 'local', i.e. reading a mount a delegated pod may not have)
+        "ripgrep_backend",  # ripgrep seam - read pre-DB by build_configured_ripgrep_backend() at startup (parallels content_backend; without it config.json is stripped and regex search silently falls back to the local binary)
         "scip_backend",  # EVO-65365 - SCIP backend selector, read pre-DB by validate_scip_backend_config/build_scip_generator at lifespan startup (parallels clone_backend/git_backend; without it config.json is stripped and scip falls back to 'local')
         "workspace_mcp",  # EVO-64616 - endpoint/api_key read pre-DB by the delegated clone/git backends at startup
         "scip_sandbox",  # EVO-65365 - endpoint/api_key read pre-DB by the delegated SCIP backend at startup (sandbox-mcp, distinct from workspace_mcp)
