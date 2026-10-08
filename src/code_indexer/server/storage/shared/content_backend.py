@@ -98,6 +98,32 @@ class FetchedFile:
     error: Optional[str] = None
 
 
+def _unsafe_relative_reason(rel: str) -> Optional[str]:
+    """Why ``rel`` may not be used as a repo-relative path, or None if it may.
+
+    ONE rule, shared by the two places that take a caller-supplied path: the list
+    handed to ``fetch``, and the ``cursor`` handed back to ``manifest``. They were
+    separate once and immediately drifted -- ``fetch`` refused ``..`` while the
+    cursor, which had just become a filesystem path, did not, so ``manifest``
+    would enumerate and hash a sibling repository while ``fetch`` refused the very
+    same path.
+    """
+    if not rel:
+        return "empty path refused"
+    if PurePosixPath(rel).is_absolute() or ntpath.isabs(rel):
+        return "absolute path refused"
+    # The RAW components, not PurePosixPath's: pathlib normalises "." away, so
+    # asking it would never see the "." that _resume_stack would otherwise descend
+    # into -- and a "./a" cursor then yields paths carrying a "./" prefix that no
+    # longer match the canonical form the rest of the protocol uses.
+    raw_parts = rel.split("/")
+    if ".." in raw_parts:
+        return "parent-relative component refused"
+    if "." in raw_parts:
+        return "current-directory component refused"
+    return None
+
+
 class ContentBackend(Protocol):
     """Structural interface for enumerating and reading a repository's files."""
 
@@ -221,11 +247,9 @@ class LocalContentBackend:
           rule the workspace-mcp side applies, so both backends refuse the same
           repositories.
         """
-        pure = PurePosixPath(rel)
-        if pure.is_absolute() or ntpath.isabs(rel):
-            return None, "absolute path refused"
-        if ".." in pure.parts:
-            return None, "parent-relative component refused"
+        unsafe = _unsafe_relative_reason(rel)
+        if unsafe is not None:
+            return None, unsafe
 
         target = root / rel
         if target.is_symlink():
@@ -314,6 +338,17 @@ class LocalContentBackend:
         """
         if cursor is None:
             return [iter(self._sorted_children(root, ""))]
+
+        # The cursor is opaque to callers but it is INPUT here, and since the walk
+        # resumes by descending it, an unvalidated one is a path traversal: a
+        # cursor of "../other-repo/a" made manifest enumerate and hash a sibling
+        # repository, which on the golden-repos mount is every other repository.
+        # Raised rather than silently restarted: a caller round-tripping a cursor
+        # it did not get from us is a bug, and restarting would hide it behind a
+        # duplicate first page.
+        unsafe = _unsafe_relative_reason(cursor)
+        if unsafe is not None:
+            raise ValueError(f"invalid manifest cursor: {unsafe}")
 
         stack: List[Iterator] = []
         parts = [part for part in cursor.split("/") if part]

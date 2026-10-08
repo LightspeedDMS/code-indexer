@@ -15,6 +15,7 @@ rather than quietly reading a path that may not exist in that container.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Iterator, List, Optional, Sequence, Union
 
@@ -421,6 +422,96 @@ def test_a_symlinked_directory_is_still_refused_through_a_symlinked_root(
     assert results["keep.py"].error is None
     assert "symlinked directory" in (results["dirlink/secret.txt"].error or "")
     assert results["dirlink/secret.txt"].data == b""
+
+
+@pytest.mark.parametrize(
+    "bad,because",
+    [
+        ("../other-repo/a", "parent-relative"),
+        ("../", "parent-relative"),
+        ("sub/../../other-repo/a", "parent-relative"),
+        ("/etc/passwd", "absolute"),
+        ("./x", "current-directory"),
+        ("", "empty"),
+    ],
+)
+def test_a_hostile_cursor_cannot_walk_out_of_the_repository(
+    tmp_path: Path, bad: str, because: str
+) -> None:
+    """The cursor is opaque to callers, but it is INPUT here.
+
+    While paging only compared the cursor it was harmless. Resuming descends it,
+    so an unvalidated cursor is a path traversal: "../other-repo/a" returned
+    entries and real blob hashes for a SIBLING repository, which on the
+    golden-repos mount is every other repository -- while fetch refused the very
+    same path. The two halves must apply one rule.
+    """
+    repo = tmp_path / "repo"
+    (repo / "sub").mkdir(parents=True)
+    (repo / "own.py").write_text("mine\n")
+    sibling = tmp_path / "other-repo"
+    sibling.mkdir()
+    (sibling / "secret.py").write_text("NOT MINE\n")
+
+    with pytest.raises(ValueError) as err:
+        LocalContentBackend().manifest(repo, cursor=bad, page_size=10)
+    assert because in str(err.value)
+
+
+def test_manifest_and_fetch_refuse_a_bad_path_for_the_same_reason(
+    tmp_path: Path,
+) -> None:
+    """One rule, so the two halves cannot drift apart again."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x\n")
+    backend = LocalContentBackend()
+
+    for bad in ["../elsewhere/x", "./x", "/etc/passwd"]:
+        (fetched,) = list(backend.fetch(repo, [bad]))
+        with pytest.raises(ValueError) as err:
+            backend.manifest(repo, cursor=bad, page_size=10)
+        assert fetched.error is not None
+        assert fetched.error in str(err.value), (
+            f"{bad}: {fetched.error!r} vs {err.value}"
+        )
+
+
+def test_resume_survives_the_cursor_entry_being_deleted(tmp_path: Path) -> None:
+    """Documented behaviour that nothing covered: the search is by key, not identity."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for name in ["a.py", "b.py", "c.py", "d.py"]:
+        (repo / name).write_text(name)
+    backend = LocalContentBackend()
+
+    first = backend.manifest(repo, page_size=2)
+    assert [e.path for e in first.entries] == ["a.py", "b.py"]
+
+    (repo / "b.py").unlink()  # the cursor now names a file that is gone
+
+    rest = backend.manifest(repo, cursor=first.next_cursor, page_size=10)
+    assert [e.path for e in rest.entries] == ["c.py", "d.py"]
+
+
+def test_resume_survives_an_intermediate_directory_being_deleted(
+    tmp_path: Path,
+) -> None:
+    """_sorted_children returns [] for an unreadable directory; the walk continues."""
+    repo = tmp_path / "repo"
+    (repo / "mid").mkdir(parents=True)
+    (repo / "mid" / "x.py").write_text("x")
+    (repo / "mid" / "y.py").write_text("y")
+    (repo / "zz.py").write_text("z")
+    backend = LocalContentBackend()
+
+    first = backend.manifest(repo, page_size=1)
+    assert [e.path for e in first.entries] == ["mid/x.py"]
+
+    shutil.rmtree(repo / "mid")  # the directory the cursor points inside is gone
+
+    rest = backend.manifest(repo, cursor=first.next_cursor, page_size=10)
+    assert [e.path for e in rest.entries] == ["zz.py"]
 
 
 def test_paging_cost_tracks_depth_not_tree_size(
