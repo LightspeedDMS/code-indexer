@@ -92,6 +92,26 @@ def isolated_server_data_dir(
             os.environ["CIDX_SERVER_DATA_DIR"] = previous_data_dir
 
 
+def stop_in_process_stall_watchdog(app: FastAPI) -> None:
+    """Stop the worker-stall watchdog (Story S12) an in-process app started.
+
+    The watchdog is one per uvicorn WORKER process: it re-arms the
+    process-global faulthandler timer every second and reports when no
+    Python thread of that worker ran for 3 s. This phase runs the shared
+    app, any app a test builds, the TestClient and the test code in ONE
+    interpreter, so here it would report the harness's own GIL use or the
+    machine starving the pytest process, and several in-process apps would
+    re-arm and cancel the same process-global timer. Call it right after a
+    long-lived in-process app's lifespan has started. Real workers stay
+    covered: Phase 4 runs a live uvicorn server with the watchdog on.
+    """
+    watchdog = getattr(app.state, "stall_watchdog", None)
+    if watchdog is None:
+        return
+    app.state.stall_watchdog = None
+    watchdog.stop()
+
+
 @contextmanager
 def preserve_root_logging_handlers() -> Iterator[None]:
     """Restore shared logging after a throwaway in-process app shuts down."""
@@ -878,6 +898,7 @@ def test_client(test_client_data_dir) -> Iterator[TestClient]:
     # the TestClient lifespan so admin_logs_query reads the right state.
     _app_module.app = fresh_app
     with TestClient(fresh_app, raise_server_exceptions=False) as client:
+        stop_in_process_stall_watchdog(fresh_app)
         yield client
 
 
