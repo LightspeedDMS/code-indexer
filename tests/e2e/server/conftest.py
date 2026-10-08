@@ -62,15 +62,30 @@ def isolated_server_data_dir(
     exist for another dir, and then startup logs APP-GENERAL-008.  So
     config.json is written first: *config*, or a minimal one.  The env var
     is unguarded by a lock: this suite runs single-threaded and sequential.
+
+    The ConfigService singleton is bound to *data_dir* explicitly: the
+    shared session app keeps serving during the test, and any of its
+    requests or threads calling get_config_service() after the per-test
+    reset would otherwise bind it to the SESSION dir, so the throwaway app
+    would silently read the session's configuration.  The previously bound
+    singleton is restored on exit.
     """
+    from code_indexer.server.services import config_service as config_module
+
     previous_data_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+    previous_service = config_module._config_service
     data_dir.mkdir(parents=True, exist_ok=True)
     bootstrap = config if config is not None else {"server_dir": str(data_dir)}
     (data_dir / "config.json").write_text(json.dumps(bootstrap))
     os.environ["CIDX_SERVER_DATA_DIR"] = str(data_dir)
     try:
+        config_module.set_config_service(config_module.ConfigService(str(data_dir)))
         yield
     finally:
+        if previous_service is None:
+            config_module.reset_config_service()
+        else:
+            config_module.set_config_service(previous_service)
         if previous_data_dir is None:
             os.environ.pop("CIDX_SERVER_DATA_DIR", None)
         else:
