@@ -87,7 +87,8 @@ def _add_doc(
             "identifiers": ids,
             "line_start": 1,
             "line_end": body.count("\n") + 1,
-            "language": "python",
+            # The file suffix, as the indexer stores it (chunk_fts_documents).
+            "language": "py",
         }
     )
 
@@ -514,9 +515,9 @@ class TestQueryFailureLogging:
 
         assert _error(html) is not None
         message = self._assert_refusal_logged_as_warning(caplog)
-        # A repository the user cannot access is refused as not found; that
-        # message names only the repository and the user, so it is logged.
-        assert "SemanticQueryError" in message
+        # A repository the user cannot access is refused as not found: a
+        # client error (classify_search_error), so its message is logged.
+        assert "SearchRequestError" in message
         assert UNGRANTED_GLOBAL in message
 
     def test_invalid_time_range_logs_warning_not_error(
@@ -532,9 +533,10 @@ class TestQueryFailureLogging:
                 time_range="not-a-range",
             )
 
-        assert _error(html) is not None
+        # A client error: the user sees its reason.
+        assert "YYYY-MM-DD..YYYY-MM-DD" in (_error(html) or "")
         message = self._assert_refusal_logged_as_warning(caplog)
-        assert "ValueError" in message
+        assert "SearchParameterError" in message
 
     def test_provider_error_text_is_not_logged_by_the_web_page(
         self, web_app, env, handler, caplog
@@ -548,9 +550,13 @@ class TestQueryFailureLogging:
             with caplog.at_level(logging.WARNING):
                 html = _query(web_app, handler, GRANTED_GLOBAL, "find", "semantic")
 
-        assert _error(html) is not None
+        # Not a client error: the page shows only the fixed public message.
+        error = _error(html)
+        assert error is not None
+        assert "Search failed" in error
+        assert token not in html
         message = self._assert_refusal_logged_as_warning(caplog)
-        assert "SemanticQueryError" in message
+        assert "SearchFailedError" in message
         assert token not in message
 
     def test_unexpected_failure_logs_error_with_traceback(

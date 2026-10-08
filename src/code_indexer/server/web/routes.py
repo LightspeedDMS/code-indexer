@@ -5712,8 +5712,6 @@ def query_submit(
 
     backend_registry = getattr(request.app.state, "backend_registry", None)
 
-    from code_indexer.server.query.semantic_query_manager import SemanticQueryError
-
     try:
         # Handle SCIP query mode
         if search_mode == "scip":
@@ -5988,11 +5986,12 @@ def query_submit(
                         fuzzy=fuzzy,
                         regex=regex,
                     )
-                except (SemanticQueryError, ValueError) as e:
+                except WebQueryNotCompleted as e:
                     # The query was not completed (access refused, invalid
                     # parameters, provider outage, timeout, missing index):
-                    # shown to the user; _execute_text_query logged it.
-                    error_message = f"Query failed: {str(e)}"
+                    # _execute_text_query logged it and classified the text
+                    # the user is shown (classify_search_error).
+                    error_message = f"Query failed: {e}"
                 else:
                     results.extend(text_rows)
 
@@ -6273,6 +6272,12 @@ def _execute_scip_query(
     return results, None
 
 
+class WebQueryNotCompleted(Exception):
+    """A Web text query the query layer did not complete. ``str()`` is what
+    the user is shown: the ``classify_search_error`` message (a client
+    error's own text, else the fixed public failure message)."""
+
+
 def _execute_text_query(
     query_manager: Any,
     target_repo: Dict[str, Any],
@@ -6304,8 +6309,11 @@ def _execute_text_query(
     applies (a repository the user cannot access is refused like an unknown
     one); an activated repository is queried as its owner. Failures raise;
     a query the query layer did not complete (SemanticQueryError, ValueError)
-    is logged here once, at WARNING, before it is re-raised.
+    is classified with ``classify_search_error``, logged here once at
+    WARNING, and raised as ``WebQueryNotCompleted`` carrying the message the
+    user is shown.
     """
+    from code_indexer.server.query.search_error_policy import classify_search_error
     from code_indexer.server.query.semantic_query_manager import SemanticQueryError
 
     if target_repo.get("is_global"):
@@ -6331,15 +6339,17 @@ def _execute_text_query(
             regex=regex,
         )
     except (SemanticQueryError, ValueError) as e:
-        # Only a repository-not-found refusal (also how a repository the user
-        # cannot access is refused) is logged with its message: it names just
-        # the repository and the user. Other messages can carry a provider's
-        # error text, so only the class is logged; the user sees the reason.
-        message = str(e)
-        not_found = (
-            message.startswith("Repository '") and "' not found for user '" in message
-        ) or message.startswith("No activated repositories found for user '")
-        detail = message if not_found else "reason shown to the user, not logged"
+        # One rule for every search front door (classify_search_error): only
+        # a client error's text (it describes the caller's own request) is
+        # logged and shown; any other failure can carry a provider's or the
+        # server's internal text, so only its class is logged and the user
+        # sees the fixed public message. The query layer logged the detail.
+        outcome = classify_search_error(e)
+        detail = (
+            outcome.message
+            if outcome.client_error
+            else "not a client error, detail not logged"
+        )
         logger.warning(
             format_error_log(
                 "STORE-GENERAL-053",
@@ -6347,7 +6357,7 @@ def _execute_text_query(
             ),
             extra={"correlation_id": get_correlation_id()},
         )
-        raise
+        raise WebQueryNotCompleted(outcome.message) from e
 
     rows = [
         {
@@ -6454,8 +6464,6 @@ def query_results_partial_post(
     warning_message: Optional[str] = None
     backend_registry = getattr(request.app.state, "backend_registry", None)
 
-    from code_indexer.server.query.semantic_query_manager import SemanticQueryError
-
     try:
         query_manager = _get_semantic_query_manager()
         if not query_manager:
@@ -6512,11 +6520,12 @@ def query_results_partial_post(
                         fuzzy=fuzzy,
                         regex=regex,
                     )
-                except (SemanticQueryError, ValueError) as e:
+                except WebQueryNotCompleted as e:
                     # The query was not completed (access refused, invalid
                     # parameters, provider outage, timeout, missing index):
-                    # shown to the user; _execute_text_query logged it.
-                    error_message = f"Query failed: {str(e)}"
+                    # _execute_text_query logged it and classified the text
+                    # the user is shown (classify_search_error).
+                    error_message = f"Query failed: {e}"
                 else:
                     results.extend(text_rows)
 
