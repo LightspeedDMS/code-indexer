@@ -458,6 +458,49 @@ def test_a_hostile_cursor_cannot_walk_out_of_the_repository(
     assert because in str(err.value)
 
 
+def test_a_cursor_cannot_resume_THROUGH_a_symlinked_directory(tmp_path: Path) -> None:
+    """Resuming must not reach what a fresh walk cannot.
+
+    The walk emits a symlink as a LEAF and never descends it
+    (is_dir(follow_symlinks=False)). os.scandir, which the resume uses, follows
+    links happily. So a repo containing a committed "dirlink -> ../other-repo"
+    plus a cursor of "dirlink/a" listed and hashed the sibling repository -- which
+    on the golden-repos mount is every other repository -- while fetch refused the
+    identical path.
+
+    Lexical validation cannot catch this: "dirlink/a" has no "..", no ".", and is
+    relative. It is the filesystem that escapes, not the string.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "own.py").write_text("mine\n")
+    sibling = tmp_path / "other-repo"
+    sibling.mkdir()
+    (sibling / "secret.py").write_text("NOT MINE\n")
+    os.symlink("../other-repo", repo / "dirlink")
+
+    backend = LocalContentBackend()
+
+    # A fresh walk sees the link as a leaf and never enumerates through it.
+    assert [e.path for e in backend.manifest(repo, page_size=50).entries] == [
+        "dirlink",
+        "own.py",
+    ]
+
+    with pytest.raises(ValueError) as err:
+        backend.manifest(repo, cursor="dirlink/a", page_size=50)
+    assert "symlinked directory component" in str(err.value)
+
+    # fetch already refused it; the two halves agree.
+    (fetched,) = list(backend.fetch(repo, ["dirlink/secret.py"]))
+    assert fetched.error is not None
+    assert fetched.data == b""
+
+    # And paging past the link itself still works normally.
+    rest = backend.manifest(repo, cursor="dirlink", page_size=50)
+    assert [e.path for e in rest.entries] == ["own.py"]
+
+
 def test_manifest_and_fetch_refuse_a_bad_path_for_the_same_reason(
     tmp_path: Path,
 ) -> None:

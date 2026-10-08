@@ -360,7 +360,23 @@ class LocalContentBackend:
             position = bisect.bisect_right([key for key, _, _ in children], target)
             stack.append(iter(children[position:]))
             if not is_last:
-                directory = directory / part
+                nxt = directory / part
+                # The walk never DESCENDS a symlink -- it emits one as a leaf and
+                # moves on (is_dir(follow_symlinks=False)). Resuming must not be
+                # able to reach what a fresh walk cannot, or the cursor becomes a
+                # way to enumerate THROUGH a committed symlink: os.scandir follows
+                # links, so a repo containing "dirlink -> ../other-repo" plus a
+                # cursor of "dirlink/a" listed and hashed the sibling repository,
+                # while fetch refused the very same path.
+                #
+                # Lexical validation above cannot see this: "dirlink/a" has no
+                # "..", no ".", and is relative. It is the filesystem, not the
+                # string, that escapes.
+                if os.path.islink(nxt):
+                    raise ValueError(
+                        "invalid manifest cursor: symlinked directory component"
+                    )
+                directory = nxt
                 prefix = f"{prefix}{part}/"
         return stack
 
