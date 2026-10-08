@@ -5467,6 +5467,9 @@ def make_lifespan(
             )
 
             _logging_cancelled = await shutdown_queue_logging_off_loop()
+            # The outer ``lifespan`` wrapper re-raises this even if a later
+            # step below raises first.
+            app.state.pending_shutdown_cancellation = _logging_cancelled
 
         # Shutdown: Remove SQLiteLogHandler from root logger (Bug #1060).
         # Symmetric with the install in startup: without this, the handler remains
@@ -6197,16 +6200,30 @@ def make_lifespan(
             stop_stall_watchdog_on_exit,
         )
 
+        # Scoped to this run: a value left by an earlier run on the same app
+        # never replaces this run's exception.
+        app.state.pending_shutdown_cancellation = None
         try:
             async with _lifespan_body(app):
                 yield
-        except BaseException:
+        except BaseException as exc:
+            pending = app.state.pending_shutdown_cancellation
+            app.state.pending_shutdown_cancellation = None
             try:
                 await stop_stall_watchdog_on_exit(app)
             finally:
                 # Bounded, in a worker thread; a cancellation it absorbs is
                 # dropped -- the exception ending the lifespan wins.
                 await shutdown_queue_logging_off_loop()
+            if pending is not None and isinstance(exc, Exception):
+                # A shutdown step after the logging shutdown failed: the
+                # saved cancellation still ends the lifespan, carrying it.
+                # A second cancellation (any BaseException) ends it as is.
+                logger.error(
+                    "Shutdown step failed after a pending cancellation",
+                    exc_info=exc,
+                )
+                raise pending from exc
             raise  # the exception ending the lifespan wins
         cancelled = await stop_stall_watchdog_on_exit(app)
         if cancelled is not None:

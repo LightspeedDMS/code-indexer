@@ -15,9 +15,12 @@ import json
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import pytest
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 
 def _run_lifespan(
@@ -25,6 +28,7 @@ def _run_lifespan(
     monkeypatch: pytest.MonkeyPatch,
     config_extra: Dict[str, Any],
     body: Any,
+    app: Optional["FastAPI"] = None,
 ) -> Tuple[Optional[BaseException], List[logging.Handler], Any]:
     """Run the real lifespan around ``body``.
 
@@ -47,7 +51,8 @@ def _run_lifespan(
     monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(data_dir))
     config = {"server_dir": str(data_dir), "log_level": "INFO", **config_extra}
     (data_dir / "config.json").write_text(json.dumps(config))
-    app = FastAPI()
+    if app is None:
+        app = FastAPI()
     lifespan_fn = make_lifespan(**_make_minimal_lifespan_deps())
 
     async def _run() -> None:
@@ -191,6 +196,141 @@ def test_cancellation_during_logging_shutdown_still_finishes_the_shutdown_chain(
     for step in ("sqlite_close", "discovery", "deep_fidelity"):
         assert step in calls, f"shutdown chain skipped {step}: {calls}"
     assert calls.index("logging") < calls.index("sqlite_close"), calls
+    assert leaked == []
+    assert active_listener is None
+
+
+def test_pending_cancellation_survives_a_later_shutdown_step_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancellation returned by the logging shutdown is still raised when a
+    later shutdown step fails; that failure is logged and chained, never
+    dropped."""
+    from code_indexer.server.services import async_logging
+    from code_indexer.server.web import routes as web_routes
+
+    real_off_loop = async_logging.shutdown_queue_logging_off_loop
+    seen: List[str] = []
+
+    async def _cancelled_on_first_call(
+        timeout: float = 5.0,
+    ) -> Optional[asyncio.CancelledError]:
+        result = await real_off_loop(timeout)
+        seen.append("logging")
+        if seen.count("logging") == 1:
+            return asyncio.CancelledError("cancelled during logging shutdown")
+        return result
+
+    def _failing_step() -> None:
+        raise RuntimeError("later shutdown step failed")
+
+    monkeypatch.setattr(
+        async_logging, "shutdown_queue_logging_off_loop", _cancelled_on_first_call
+    )
+    monkeypatch.setattr(
+        web_routes, "shutdown_discovery_branch_fetch_executor", _failing_step
+    )
+    logged_errors: List[Tuple[str, str]] = []
+
+    class _Collect(logging.Handler):
+        # The server's redacting filter is attached to every handler,
+        # including this one: it formats ``exc_info`` into a redacted
+        # ``exc_text`` and clears ``exc_info``, so the traceback is read as
+        # text.
+        def emit(self, record: logging.LogRecord) -> None:
+            logged_errors.append((record.getMessage(), record.exc_text or ""))
+
+    lifespan_logger = logging.getLogger("code_indexer.server.startup.lifespan")
+    collector = _Collect(level=logging.ERROR)
+    lifespan_logger.addHandler(collector)
+    try:
+        raised, leaked, active_listener = _run_lifespan(
+            tmp_path / "server", monkeypatch, {}, _serve_briefly
+        )
+    finally:
+        lifespan_logger.removeHandler(collector)
+    assert isinstance(raised, asyncio.CancelledError), repr(raised)
+    shutdown_failures = [
+        text
+        for message, text in logged_errors
+        if message == "Shutdown step failed after a pending cancellation"
+    ]
+    assert len(shutdown_failures) == 1, logged_errors
+    assert "RuntimeError: later shutdown step failed" in shutdown_failures[0]
+    assert leaked == []
+    assert active_listener is None
+
+
+def test_second_cancellation_after_a_pending_one_is_not_logged_as_a_step_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an ``Exception`` from a later shutdown step is a step failure; a
+    second cancellation (or any other ``BaseException``) ends the lifespan
+    as itself, with no step-failure ERROR."""
+    from code_indexer.server.services import async_logging
+    from code_indexer.server.web import routes as web_routes
+
+    real_off_loop = async_logging.shutdown_queue_logging_off_loop
+    calls: List[str] = []
+
+    async def _cancelled_on_first_call(
+        timeout: float = 5.0,
+    ) -> Optional[asyncio.CancelledError]:
+        result = await real_off_loop(timeout)
+        calls.append("logging")
+        if len(calls) == 1:
+            return asyncio.CancelledError("cancelled during logging shutdown")
+        return result
+
+    second = asyncio.CancelledError("second cancellation")
+
+    def _cancelled_step() -> None:  # the real step is a sync, un-awaited call
+        raise second
+
+    monkeypatch.setattr(
+        async_logging, "shutdown_queue_logging_off_loop", _cancelled_on_first_call
+    )
+    monkeypatch.setattr(
+        web_routes, "shutdown_discovery_branch_fetch_executor", _cancelled_step
+    )
+    messages: List[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    lifespan_logger = logging.getLogger("code_indexer.server.startup.lifespan")
+    collector = _Collect(level=logging.ERROR)
+    lifespan_logger.addHandler(collector)
+    try:
+        raised, leaked, active_listener = _run_lifespan(
+            tmp_path / "server", monkeypatch, {}, _serve_briefly
+        )
+    finally:
+        lifespan_logger.removeHandler(collector)
+    # asyncio.run re-creates a cancelled task's CancelledError, so only the
+    # type survives; the discriminating check is the absent ERROR.
+    assert isinstance(raised, asyncio.CancelledError), repr(raised)
+    assert "Shutdown step failed after a pending cancellation" not in messages
+    assert leaked == []
+    assert active_listener is None
+
+
+def test_stale_pending_cancellation_from_an_earlier_run_is_never_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pending shutdown cancellation is scoped to one lifespan run: a value
+    already on ``app.state`` when the lifespan starts never replaces the
+    exception that ends this run."""
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.state.pending_shutdown_cancellation = asyncio.CancelledError("stale")
+    raised, leaked, active_listener = _run_lifespan(
+        tmp_path / "server", monkeypatch, {}, _fail_while_serving, app=app
+    )
+    assert isinstance(raised, RuntimeError), repr(raised)
+    assert app.state.pending_shutdown_cancellation is None
     assert leaked == []
     assert active_listener is None
 
