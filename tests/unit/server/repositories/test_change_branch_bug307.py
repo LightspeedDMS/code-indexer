@@ -13,6 +13,7 @@ change_branch() AFTER _cb_cow_snapshot(). This method:
 """
 
 import contextlib
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -61,13 +62,19 @@ def data_dir(tmp_path):
 
 @pytest.fixture
 def manager(data_dir):
-    """GoldenRepoManager pre-populated with one golden repo on branch 'main'."""
+    """GoldenRepoManager pre-populated with one golden repo on branch 'main'.
+
+    The base clone is a real git repository: change_branch removes
+    credentials from its stored remote URL before any other step and fails
+    when the clone does not exist."""
+    clone_path = f"{data_dir}/golden-repos/my-repo"
+    subprocess.run(["git", "init", "-q", clone_path], check=True, capture_output=True)
     mgr = GoldenRepoManager(data_dir=data_dir)
     mgr.golden_repos["my-repo"] = GoldenRepo(
         alias="my-repo",
         repo_url="https://github.com/org/repo.git",
         default_branch="main",
-        clone_path="/golden-repos/my-repo",
+        clone_path=clone_path,
         created_at="2025-01-01T00:00:00Z",
     )
     mgr._sqlite_backend = MagicMock()
@@ -79,7 +86,7 @@ def manager(data_dir):
         "alias": "my-repo",
         "repo_url": "https://github.com/org/repo.git",
         "default_branch": "main",
-        "clone_path": "/golden-repos/my-repo",
+        "clone_path": clone_path,
         "created_at": "2025-01-01T00:00:00Z",
         "enable_temporal": False,
         "temporal_options": None,
