@@ -10,10 +10,11 @@ captured output that are logged, raised or returned.
 """
 
 import base64
+import functools
 import json
 import re
 from typing import Any, Dict, FrozenSet, Iterator, List, Sequence, Set, Tuple
-from urllib.parse import unquote, unquote_plus
+from urllib.parse import quote, quote_plus, unquote, unquote_plus
 
 _MASK = "***"
 
@@ -25,8 +26,9 @@ _MASK = "***"
 _URL_USERINFO_RE = re.compile(r"(://)([^/?#\s]+)@")
 
 # ``Authorization: <scheme> <credentials>`` in free text or a header value;
-# group 3 is the credential itself.
-_AUTH_HEADER_RE = re.compile(r"(?i)(authorization\s*[:=]\s*)(\S+)\s+(\S+)")
+# group 3 is the credential itself. The scheme is bounded (real schemes are
+# short) so a failed attempt never rescans an unbounded run: linear time.
+_AUTH_HEADER_RE = re.compile(r"(?i)(authorization\s*[:=]\s*)(\S{1,64})\s+(\S+)")
 
 # Option / env-style names whose VALUE is a credential (``--token X``,
 # ``--password=X``, ``GIT_ASKPASS_TOKEN=X``, ``http.extraHeader=...``).
@@ -92,8 +94,9 @@ _QUERY_PARAM_RE = re.compile(
 )
 
 # A ``scheme://`` URL in text, to its end at whitespace: the span whose
-# query parameters mask_url_credentials masks.
-_SCHEME_URL_RE = re.compile(r"[A-Za-z][\w+.\-]*://\S*")
+# query parameters mask_url_credentials masks. A scheme starts only at the
+# start of its character run, so no run is rescanned: linear time.
+_SCHEME_URL_RE = re.compile(r"(?<![\w+.\-])[A-Za-z][\w+.\-]*://\S*")
 
 
 def mask_secret_query_values(
@@ -162,12 +165,13 @@ _COOKIE_HEADER_RE = re.compile(r"(?im)\b((?:set-)?cookie\s*:\s*)[^\r\n]*")
 # A value that opens with a quote ends at its matching closing quote; any
 # other value runs to the next whitespace, ';' or '&' -- quotes, commas and
 # brackets inside it are part of it, so it is masked whole. Only names that
-# is_secret_field() classifies have their value masked.
-_ASSIGNMENT_RE = re.compile(
-    r"""(?<![\w.\-])(?P<kq>["']?)(?P<name>[A-Za-z_][\w.\-]*)(?P=kq)"""
-    r"""(?P<sep>\s*[=:]\s*)"""
-    r"""(?P<value>"[^"\n]*"|'[^'\n]*'|[^\s&;]+)"""
+# is_secret_field() classifies have their value masked. The value is matched
+# only after the name is classified secret, so a non-secret name never
+# consumes the rest of the line and no text is rescanned: linear time.
+_ASSIGNMENT_NAME_RE = re.compile(
+    r"""(?<![\w.\-])(?P<kq>["']?)(?P<name>[A-Za-z_][\w.\-]*)(?P=kq)\s*[=:]\s*"""
 )
+_ASSIGNMENT_VALUE_RE = re.compile(r""""[^"\n]*"|'[^'\n]*'|[^\s&;]+""")
 
 # Command-line flags: ``--name=value`` and ``--name value`` (a value never
 # starts with '-'). ``--no-*`` flags are boolean and take no value.
@@ -190,36 +194,43 @@ def _mask_assignments(text: str) -> str:
     scan position strictly increases, so the loop ends."""
     parts: List[str] = []
     pos = 0
+    flushed = 0  # text[:flushed] is already in parts
     while True:
-        match = _ASSIGNMENT_RE.search(text, pos)
+        match = _ASSIGNMENT_NAME_RE.search(text, pos)
         if match is None:
             break
-        if not is_secret_field(match.group("name")):
-            parts.append(text[pos : match.end("name")])
+        found = None
+        if _is_secret_name(match.group("name")):
+            found = _ASSIGNMENT_VALUE_RE.match(text, match.end())
+        if found is None:
             pos = match.end("name")
             continue
-        value = match.group("value")
+        value = found.group()
         closed = len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]
         quote = value[0] if closed else ""
-        parts.append(text[pos : match.start("value")])
+        parts.append(text[flushed : found.start()])
         parts.append(f"{quote}{_MASK}{quote}")
-        pos = match.end()
-    parts.append(text[pos:])
+        pos = flushed = found.end()
+    parts.append(text[flushed:])
     return "".join(parts)
 
 
 # A PEM private-key block of any label (``PRIVATE KEY``, ``RSA PRIVATE
 # KEY``, ...): its body is masked through the matching END line, or to the
 # end of the text when the block is truncated (fail closed).
+# The label is bounded, so an attempt never rescans an unbounded run.
 _PRIVATE_KEY_BLOCK_RE = re.compile(
-    r"(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)"
-    r"(?:.*?(-----END [A-Z0-9 ]*PRIVATE KEY-----)|.*)",
+    r"(-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----)"
+    r"(?:.*?(-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----)|.*)",
     re.DOTALL,
 )
 
 # A JWT-shaped token: ``eyJ`` (base64url of ``{"``) header, payload and a
-# possibly empty signature, each base64url.
-_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]*")
+# possibly empty signature, each base64url. It starts only at the start of a
+# base64url run, so no run is rescanned: linear time.
+_JWT_RE = re.compile(
+    r"(?<![A-Za-z0-9_\-])eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]*"
+)
 
 
 def _mask_private_key_block(match: "re.Match[str]") -> str:
@@ -308,6 +319,24 @@ def _decoded_forms(token: str) -> Set[str]:
     return forms
 
 
+# A token longer than this (far beyond any credential) is not decoded; the
+# raw and percent-encoded forms of a supplied secret are masked in it by
+# plain substring search instead, so the scan stays linear.
+_MAX_DECODED_TOKEN_CHARS = 4096
+_PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-F]{2}")
+
+
+def _encoded_forms(secret: str) -> List[str]:
+    """``secret`` raw and percent-encoded (``%XX`` and ``+``-for-space,
+    once and twice, upper and lower-case escapes), longest first."""
+    forms = {secret}
+    for encode in (quote, quote_plus):
+        once = encode(secret, safe="")
+        forms |= {once, quote(once, safe="")}
+    forms |= {_PERCENT_ESCAPE_RE.sub(lambda m: m.group().lower(), f) for f in forms}
+    return sorted(forms, key=len, reverse=True)
+
+
 def _base64_forms(value: str) -> List[str]:
     """Standard and URL-safe base64 of ``value``, padded and unpadded,
     longest first."""
@@ -336,9 +365,17 @@ def _mask_supplied_secret(text: str, args: Any, secret: str) -> str:
     then the base64 of each ``_basic_auth_values`` entry."""
     extra = "".join(re.escape(char) for char in sorted(set(secret)))
     token_re = re.compile(f"[{_ENCODED_TOKEN_CHARS}{extra}]+")
+    encoded = _encoded_forms(secret)
 
     def mask_token(match: "re.Match[str]") -> str:
         token = match.group()
+        # Decoding never lengthens a token, so a shorter one cannot hold it.
+        if len(token) < len(secret):
+            return token
+        if len(token) > _MAX_DECODED_TOKEN_CHARS:
+            for form in encoded:
+                token = token.replace(form, _MASK)
+            return token
         return _MASK if any(secret in form for form in _decoded_forms(token)) else token
 
     text = token_re.sub(mask_token, text)
@@ -420,7 +457,16 @@ def is_secret_field(name: Any) -> bool:
     name (a bytes dictionary key) is checked by its decoded text."""
     if isinstance(name, (bytes, bytearray)):
         name = bytes(name).decode("utf-8", errors="replace")
-    if not isinstance(name, str) or _NON_SECRET_KEY_RE.search(name):
+    if not isinstance(name, str):
+        return False
+    return _is_secret_name(name)
+
+
+@functools.lru_cache(maxsize=4096)
+def _is_secret_name(name: str) -> bool:
+    """is_secret_field for a text name. Cached: text repeating the same
+    names (``a=a=a=...``) classifies each distinct name once."""
+    if _NON_SECRET_KEY_RE.search(name):
         return False
     if _SECRET_KEY_SUBSTRING_RE.search(name):
         return True
