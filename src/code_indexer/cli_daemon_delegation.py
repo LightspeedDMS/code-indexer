@@ -15,7 +15,7 @@ import time
 import subprocess
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any, cast
+from typing import Optional, Dict, Any, List, cast
 from rich.console import Console
 
 logger = logging.getLogger(__name__)
@@ -150,6 +150,59 @@ def _connect_to_daemon(
                     ) from e
                 # Re-raise other errors
                 raise last_error
+
+
+DAEMON_RESULT_MAX_DEPTH = 32
+DAEMON_RESULT_MAX_ITEMS = 1_000_000
+_DAEMON_SCALAR_TYPES = (str, int, float, bool, bytes, type(None))
+
+
+def obtain_daemon_result(result: Any) -> Any:
+    """Copy a daemon RPC result into plain Python values.
+
+    Call this while the connection is still OPEN, before reading the result.
+    A daemon call that returns a dict/list arrives as an RPyC netref; touching
+    it after ``conn.close()`` raises "stream has been closed", which callers
+    would mistake for a dead daemon.
+
+    The copy is a type-restricted walk and NEVER uses pickle: whoever owns the
+    socket must not be able to make the CLI execute code. Scalars are kept,
+    mappings become ``dict`` with ``str`` keys, lists/tuples become ``list``,
+    and any other type raises ``TypeError``. Depth and total item count are
+    bounded so a hostile peer cannot make the walk run forever.
+
+    Raises:
+        TypeError: a value is not a scalar, mapping or list/tuple.
+        ValueError: the result is nested deeper than DAEMON_RESULT_MAX_DEPTH
+            or holds more than DAEMON_RESULT_MAX_ITEMS values.
+    """
+    items_left = [DAEMON_RESULT_MAX_ITEMS]
+    return _copy_daemon_value(result, 0, items_left)
+
+
+def _copy_daemon_value(value: Any, depth: int, items_left: List[int]) -> Any:
+    if depth > DAEMON_RESULT_MAX_DEPTH:
+        raise ValueError(
+            f"daemon result nested deeper than {DAEMON_RESULT_MAX_DEPTH} levels"
+        )
+    items_left[0] -= 1
+    if items_left[0] < 0:
+        raise ValueError(
+            f"daemon result holds more than {DAEMON_RESULT_MAX_ITEMS} values"
+        )
+    # Exact type: RPyC passes these by value, so they are never netrefs.
+    if type(value) in _DAEMON_SCALAR_TYPES:
+        return value
+    # A netref of a builtin dict/list/tuple reports that class, so these
+    # checks cover both local values and netrefs.
+    if isinstance(value, dict):
+        return {
+            str(key): _copy_daemon_value(value[key], depth + 1, items_left)
+            for key in value.keys()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_copy_daemon_value(item, depth + 1, items_left) for item in value]
+    raise TypeError("unexpected daemon result type")
 
 
 def _cleanup_stale_socket(socket_path: Path) -> None:
@@ -490,14 +543,13 @@ def _query_via_daemon(
                     str(Path.cwd()), query_text, limit=limit, **kwargs
                 )
 
+            # Copy while the connection is open: a netref read after close
+            # raises, which the except below would mistake for a dead daemon.
+            result = obtain_daemon_result(result)
             query_time = time.perf_counter() - start_time
 
-            # Display results first (while connection is still open)
             _display_results(result, query_time)
             # _display_results printed a failed search's error; fail with it.
-            # Read it BEFORE closing: `result` is an RPyC netref, and touching
-            # it after close raises, which the except below would mistake for
-            # a dead daemon and unlink the LIVE daemon's socket.
             search_failed = bool(isinstance(result, dict) and result.get("error"))
 
             # Close connection after displaying results
@@ -567,7 +619,9 @@ def _clean_via_daemon(**kwargs) -> int:
         conn = _connect_to_daemon(socket_path, daemon_config)
 
         console.print("[yellow]Clearing vectors (via daemon)...[/yellow]")
-        result = conn.root.exposed_clean(str(Path.cwd()), **kwargs)
+        result = obtain_daemon_result(
+            conn.root.exposed_clean(str(Path.cwd()), **kwargs)
+        )
         conn.close()
 
         console.print("[green]✓ Vectors cleared[/green]")
@@ -612,7 +666,9 @@ def _clean_data_via_daemon(**kwargs) -> int:
         conn = _connect_to_daemon(socket_path, daemon_config)
 
         console.print("[yellow]Clearing project data (via daemon)...[/yellow]")
-        result = conn.root.exposed_clean_data(str(Path.cwd()), **kwargs)
+        result = obtain_daemon_result(
+            conn.root.exposed_clean_data(str(Path.cwd()), **kwargs)
+        )
         conn.close()
 
         console.print("[green]✓ Project data cleared[/green]")
@@ -655,7 +711,7 @@ def _status_via_daemon(**kwargs) -> int:
 
     try:
         conn = _connect_to_daemon(socket_path, daemon_config)
-        result = conn.root.exposed_status(str(Path.cwd()))
+        result = obtain_daemon_result(conn.root.exposed_status(str(Path.cwd())))
 
         # Extract data while connection is still open
         daemon_info = result.get("daemon", {})
@@ -978,10 +1034,12 @@ def _index_via_daemon(
 
             # Execute indexing (BLOCKS until complete, streams progress via callback)
             # RPyC automatically handles callback streaming to client
-            result = conn.root.exposed_index_blocking(
-                project_path=str(Path.cwd()),
-                callback=progress_callback,  # Real-time progress streaming
-                **daemon_kwargs,
+            result = obtain_daemon_result(
+                conn.root.exposed_index_blocking(
+                    project_path=str(Path.cwd()),
+                    callback=progress_callback,  # Real-time progress streaming
+                    **daemon_kwargs,
+                )
             )
 
             # Extract result data FIRST (while connection and proxies still valid)
@@ -1309,12 +1367,14 @@ def _watch_via_daemon(
         conn = _connect_to_daemon(socket_path, daemon_config)
 
         # Execute watch via daemon
-        result = conn.root.exposed_watch_start(
-            project_path=str(Path.cwd()),
-            debounce_seconds=debounce,
-            batch_size=batch_size,
-            initial_sync=initial_sync,
-            enable_fts=enable_fts,
+        result = obtain_daemon_result(
+            conn.root.exposed_watch_start(
+                project_path=str(Path.cwd()),
+                debounce_seconds=debounce,
+                batch_size=batch_size,
+                initial_sync=initial_sync,
+                enable_fts=enable_fts,
+            )
         )
 
         # Extract result data BEFORE closing connection
@@ -1431,6 +1491,7 @@ def _query_temporal_via_daemon(
                 chunk_type=chunk_type,
                 temporal_embedder=temporal_embedder,
             )
+            result = obtain_daemon_result(result)
 
             # Check for errors
             if "error" in result:
@@ -1507,9 +1568,11 @@ def rebuild_fts_via_daemon(config_manager, console) -> int:
         else:
             console.print(f"📄 {current}/{total}: {file_path}")
 
-    result = conn.root.exposed_rebuild_fts_index(
-        project_path=str(Path.cwd()),
-        callback=progress_callback,
+    result = obtain_daemon_result(
+        conn.root.exposed_rebuild_fts_index(
+            project_path=str(Path.cwd()),
+            callback=progress_callback,
+        )
     )
 
     # Extract data BEFORE closing connection (RPyC proxies become invalid after close)
@@ -1563,7 +1626,7 @@ def start_watch_via_daemon(project_root: Path, **kwargs: Any) -> bool:
             conn = _connect_to_daemon(socket_path, daemon_config)
 
             # Check if daemon is running
-            ping_result = conn.root.ping()
+            ping_result = obtain_daemon_result(conn.root.ping())
             if not ping_result or ping_result.get("status") != "ok":
                 logger.debug("Daemon not responding, falling back to standalone")
                 conn.close()
@@ -1571,7 +1634,11 @@ def start_watch_via_daemon(project_root: Path, **kwargs: Any) -> bool:
 
             # Start watch via daemon (non-blocking)
             console.print("🚀 Starting watch mode via daemon...", style="blue")
-            result = conn.root.watch_start(str(project_root), **kwargs)
+            result = obtain_daemon_result(
+                conn.root.watch_start(str(project_root), **kwargs)
+            )
+            if not isinstance(result, dict):
+                result = {"status": "error", "message": "Unexpected daemon answer"}
 
             if result.get("status") == "success":
                 console.print(
@@ -1616,14 +1683,15 @@ def stop_watch_via_daemon(project_root: Path) -> Dict[str, Any]:
 
         try:
             conn = _connect_to_daemon(socket_path, daemon_config)
-
-            # Stop watch via daemon
-            result = conn.root.watch_stop(str(project_root))
-            conn.close()
-            return result  # type: ignore[no-any-return]
+            try:
+                result = obtain_daemon_result(conn.root.watch_stop(str(project_root)))
+            finally:
+                conn.close()
+            # The daemon answers watch_stop with a dict; the copy is typed Any.
+            return cast(Dict[str, Any], result)
 
         except Exception as e:
-            return {"status": "error", "message": f"Failed to connect to daemon: {e}"}
+            return {"status": "error", "message": f"Daemon watch-stop failed: {e}"}
 
     except Exception as e:
         logger.error(f"Failed to stop watch via daemon: {e}")
@@ -1648,14 +1716,15 @@ def get_watch_status_via_daemon(project_root: Path) -> Dict[str, Any]:
 
         try:
             conn = _connect_to_daemon(socket_path, daemon_config)
-
-            # Get watch status via daemon
-            result = conn.root.watch_status()
-            conn.close()
-            return result  # type: ignore[no-any-return]
+            try:
+                result = obtain_daemon_result(conn.root.watch_status())
+            finally:
+                conn.close()
+            # The daemon answers watch_status with a dict; the copy is typed Any.
+            return cast(Dict[str, Any], result)
 
         except Exception as e:
-            return {"running": False, "message": f"Failed to connect to daemon: {e}"}
+            return {"running": False, "message": f"Daemon watch-status failed: {e}"}
 
     except Exception as e:
         logger.error(f"Failed to get watch status via daemon: {e}")
