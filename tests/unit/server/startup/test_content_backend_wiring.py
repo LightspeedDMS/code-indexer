@@ -202,3 +202,69 @@ def test_the_local_backend_really_reads_this_filesystem(tmp_path: Path) -> None:
     backend = build_content_backend(SimpleNamespace())
     page = backend.manifest(tmp_path)
     assert [entry.path for entry in page.entries] == ["a.py"]
+
+
+# ── by name: the cidx index child's entry point ────────────────────────────
+#
+# The child process cannot see the server's config; it receives the selection
+# as --content-backend and builds from the name alone. Same rules, same
+# refusal -- a child that silently fell back to local would index an empty
+# repository on a pod with no mount.
+
+
+def test_by_name_local_never_resolves_the_plugin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_indexer.server.services import content_backend_plugin
+    from code_indexer.server.startup.content_backend_wiring import (
+        build_named_content_backend,
+    )
+
+    def explode() -> Any:
+        raise AssertionError("the plugin was resolved on the local path")
+
+    monkeypatch.setattr(
+        content_backend_plugin, "resolve_delegated_content_backend", explode
+    )
+    assert isinstance(build_named_content_backend("local"), LocalContentBackend)
+
+
+def test_by_name_delegated_resolves_through_the_plugin_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_indexer.server.services import content_backend_plugin
+    from code_indexer.server.startup.content_backend_wiring import (
+        build_named_content_backend,
+    )
+
+    stub = _StubDelegatedBackend()
+    monkeypatch.setattr(
+        content_backend_plugin, "resolve_delegated_content_backend", lambda: stub
+    )
+    assert build_named_content_backend("delegated") is stub
+
+
+def test_by_name_delegated_with_no_plugin_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_indexer.server.services import content_backend_plugin
+    from code_indexer.server.startup.content_backend_wiring import (
+        build_named_content_backend,
+    )
+
+    monkeypatch.setattr(
+        content_backend_plugin, "resolve_delegated_content_backend", lambda: None
+    )
+    with pytest.raises(RuntimeError, match="no delegated backend"):
+        build_named_content_backend("delegated")
+
+
+@pytest.mark.parametrize("value", ["", "Local", "remote"])
+def test_by_name_an_unrecognised_value_raises(value: str) -> None:
+    """Unlike a config field, a name has no 'unset' -- empty is a typo too."""
+    from code_indexer.server.startup.content_backend_wiring import (
+        build_content_backend_for,
+    )
+
+    with pytest.raises(RuntimeError, match="Unknown content_backend"):
+        build_content_backend_for(value)

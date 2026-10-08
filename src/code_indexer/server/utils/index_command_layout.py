@@ -36,11 +36,18 @@ embedding-provider request goes, or force daemon delegation.
 server-managed provider settings (the embedding-provider endpoint and
 daemon-mode selection), never a repository-authored override, stamped in
 this same helper for the same reason.
+
+The content seam's backend selection travels the same way. The child cannot
+read the server's config, and must never take the choice from the repository's
+own config (tenant-writable, as above), so when the server is configured with
+``content_backend='delegated'`` this helper stamps ``--content-backend=delegated``
+and the child builds the same backend the server did. ``local`` stamps nothing,
+so the default command line is unchanged.
 """
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 #: The explicit server-context layout arg. Single `--opt=value` token so it
 #: is a single, greppable list element that Click parses identically to the
@@ -55,24 +62,48 @@ SERVER_IGNORE_RESUME_STATE_ARG = "--ignore-resume-state"
 #: repository-authored embedding-provider endpoint or daemon-mode override.
 SERVER_MANAGED_PROVIDER_SETTINGS_ARG = "--server-managed-provider-settings"
 
+#: Hand the server's delegated content-backend selection to the child. Only
+#: ever stamped for ``delegated``; ``local`` is the child's own default.
+SERVER_DELEGATED_CONTENT_BACKEND_ARG = "--content-backend=delegated"
 
-def append_server_layout_args(cmd: List[str]) -> List[str]:
+
+def append_server_layout_args(
+    cmd: List[str], *, content_backend: Optional[str] = None
+) -> List[str]:
     """Return a NEW command list with the explicit CHUNKS_DB new-collection
-    layout arg, the resume-state-distrust arg, and the
-    server-managed-provider-settings arg appended.
+    layout arg, the resume-state-distrust arg, the
+    server-managed-provider-settings arg and, when delegated, the
+    content-backend arg appended.
 
     Args:
         cmd: A server-context ``cidx index`` command list (e.g.
             ``["cidx", "index", "--fts", "--progress-json"]``).
+        content_backend: The server's content-backend selection. ``None``
+            (every production caller) reads it from the server config, so a
+            spawn site cannot forget to pass it.
 
     Returns:
         A new list equal to ``cmd`` with ``--new-collection-layout=chunks_db``,
-        ``--ignore-resume-state``, and ``--server-managed-provider-settings``
-        appended, in that order. The input list is not mutated.
+        ``--ignore-resume-state``, ``--server-managed-provider-settings`` and,
+        for ``delegated`` only, ``--content-backend=delegated`` appended, in
+        that order. The input list is not mutated.
     """
-    return [
+    if content_backend is None:
+        content_backend = _configured_content_backend()
+    stamped = [
         *cmd,
         SERVER_NEW_COLLECTION_LAYOUT_ARG,
         SERVER_IGNORE_RESUME_STATE_ARG,
         SERVER_MANAGED_PROVIDER_SETTINGS_ARG,
     ]
+    if content_backend == "delegated":
+        stamped.append(SERVER_DELEGATED_CONTENT_BACKEND_ARG)
+    return stamped
+
+
+def _configured_content_backend() -> str:
+    """The server config's ``content_backend``, ``local`` when unset."""
+    from code_indexer.server.services.config_service import get_config_service
+
+    config = get_config_service().get_config()
+    return getattr(config, "content_backend", "local") or "local"
