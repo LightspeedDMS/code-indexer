@@ -7,6 +7,7 @@ from pathlib import Path
 from ..config import IndexingConfig
 from .image_extractor import ImageExtractorFactory
 from ..logging import AdaptiveLogger
+from .text_decoding import decode_like_text_mode
 
 
 class TextChunker:
@@ -962,17 +963,11 @@ class TextChunker:
             f.flush()
 
         try:
-            # Try different encodings
-            encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1252"]
-            text = None
-
-            for encoding in encodings:
-                try:
-                    with open(file_path, "r", encoding=encoding) as f:
-                        text = f.read()
-                    break
-                except UnicodeDecodeError:
-                    continue
+            # Bytes first, then decode. Reading bytes is what a content backend
+            # returns, so this is the single place the byte source changes when
+            # the read moves off the local filesystem; the decode below must stay
+            # identical either way, since chunk text feeds each chunk's point UUID.
+            text = decode_like_text_mode(file_path.read_bytes())
 
             if text is None:
                 raise ValueError(f"Could not decode file {file_path}")
