@@ -27,6 +27,7 @@ from typing import List, Dict, Any, Optional, Callable, Tuple
 from queue import Queue, Empty
 import threading
 
+from ..indexing import file_facts
 from ..indexing.processor import ProcessingStats
 from ..services.git_aware_processor import GitAwareDocumentProcessor
 from .vector_calculation_manager import VectorCalculationManager
@@ -374,6 +375,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 codebase_dir=self.config.codebase_dir,
                 fts_manager=fts_manager,
                 multimodal_client=multimodal_client,
+                manifest=self.repo_manifest,
             ) as file_manager:
                 # Bug #1746 Change 4 (M1 fix): preflight the target chunk
                 # store's writability BEFORE any file is hashed, chunked,
@@ -445,7 +447,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         slot_id = None
                         try:
                             # Get file size for slot tracking
-                            file_size = file_path.stat().st_size
+                            file_size = file_facts.file_size(
+                                file_path, self.repo_manifest
+                            )
 
                             # Acquire slot with FileData for display
                             file_data = FileData(
@@ -796,7 +800,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
                             # Track source bytes for KB/s calculation when file completes
                             try:
-                                file_size = file_result.file_path.stat().st_size
+                                file_size = file_facts.file_size(
+                                    file_result.file_path, self.repo_manifest
+                                )
                                 self._add_source_bytes_processed(file_size)
                             except Exception as e:
                                 logger.warning(

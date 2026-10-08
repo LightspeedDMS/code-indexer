@@ -600,12 +600,29 @@ class TestEmbeddingFailurePropagates:
         mock_slot_tracker.update_slot.return_value = None
         mock_slot_tracker.release_slot.return_value = None
 
-        manager = FileChunkingManager.__new__(FileChunkingManager)
-        manager.vector_manager = mock_vector_mgr
-        manager.slot_tracker = mock_slot_tracker
-        manager.thread_count = 1
-        manager.chunk_size = 512
-        manager.overlap = 0
+        # Built through the real constructor. A bare __new__ instance lacked
+        # `chunker`, so the lifecycle failed on that AttributeError before ever
+        # reaching the embedding call -- this test passed without exercising the
+        # failure it is named for. The error assertion below now pins the cause.
+        chunker = MagicMock()
+        chunker.chunk_file.return_value = [
+            {
+                "text": "def foo():\n    pass\n",
+                "chunk_index": 0,
+                "total_chunks": 1,
+                "file_extension": "py",
+                "line_start": 1,
+                "line_end": 2,
+            }
+        ]
+        manager = FileChunkingManager(
+            vector_manager=mock_vector_mgr,
+            chunker=chunker,
+            vector_store_client=MagicMock(),
+            thread_count=1,
+            slot_tracker=mock_slot_tracker,
+            codebase_dir=tmp_path,
+        )
 
         # Create a real file to process
         test_file = tmp_path / "test.py"
@@ -630,6 +647,9 @@ class TestEmbeddingFailurePropagates:
         )
         assert result.error is not None, (
             "FileChunkingManager returned no error message after embedding failure."
+        )
+        assert "503 Service Unavailable" in result.error, (
+            f"failed for a reason other than the embedding failure: {result.error}"
         )
 
 

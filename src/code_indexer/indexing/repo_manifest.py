@@ -148,6 +148,25 @@ class RepoManifest:
         entry = self._entries.get(key) if key is not None else None
         return None if entry is None else entry.size
 
+    def mtime(self, file_path: Union[str, Path]) -> Optional[float]:
+        """The file's ``st_mtime`` exactly as ``os.stat`` would report it, or None.
+
+        Rebuilt from the integer nanoseconds the way CPython builds ``st_mtime``
+        (``sec + nsec * 1e-9``), so it is the SAME float a local stat of the
+        unchanged file returns, bit for bit. That matters: mtimes are stored in
+        point payloads and compared on later passes, and a value off in the last
+        bit reads as "modified" forever. ``ns / 1e9`` is not that float.
+        """
+        key = self._relative(file_path)
+        entry = self._entries.get(key) if key is not None else None
+        # getattr, not attribute access: a delegated plugin's entries are its own
+        # type, and one built before the field existed has no such attribute.
+        mtime_ns = getattr(entry, "mtime_ns", None) if entry is not None else None
+        if not isinstance(mtime_ns, int):
+            return None
+        sec, nsec = divmod(mtime_ns, 1_000_000_000)
+        return sec + nsec * 1e-9
+
     def is_symlink(self, file_path: Union[str, Path]) -> Optional[bool]:
         key = self._relative(file_path)
         entry = self._entries.get(key) if key is not None else None

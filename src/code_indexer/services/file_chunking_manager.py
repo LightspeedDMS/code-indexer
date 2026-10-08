@@ -22,17 +22,21 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
-from typing import Dict, Any, Optional, Callable, List
+from typing import TYPE_CHECKING, Dict, Any, Optional, Callable, List
 from dataclasses import dataclass
 
 from .vector_calculation_manager import VectorCalculationManager
 from ..indexing.fixed_size_chunker import FixedSizeChunker
+from ..indexing import file_facts
 from .clean_slot_tracker import CleanSlotTracker, FileData, FileStatus
 from ..storage.sqlite_chunk_store import (
     ChunkStoreUnavailableError,
     is_fatal_chunk_store_write_error,
 )
 import threading
+
+if TYPE_CHECKING:
+    from ..indexing.repo_manifest import RepoManifest
 
 # Token counting for large file handling - using embedded tokenizer
 # No imports needed here - lazy import in _count_tokens_accurately()
@@ -91,6 +95,7 @@ class FileChunkingManager:
         codebase_dir: Path,  # CRITICAL FOR COW CLONING: Needed for path normalization
         fts_manager=None,  # Optional FTS index manager
         multimodal_client=None,  # Optional VoyageMultimodalClient for multimodal embeddings
+        manifest: Optional["RepoManifest"] = None,
     ):
         """
         Initialize FileChunkingManager with complete functionality.
@@ -104,6 +109,8 @@ class FileChunkingManager:
             codebase_dir: Repository root directory for path normalization
             fts_manager: Optional FTS index manager
             multimodal_client: Optional VoyageMultimodalClient for multimodal embeddings
+            manifest: The pass's delegated manifest, if any. When set, file size
+                and mtime come from it instead of a local stat.
 
         Raises:
             ValueError: If thread_count is invalid or dependencies are None
@@ -129,6 +136,7 @@ class FileChunkingManager:
         self.codebase_dir = codebase_dir
         self.fts_manager = fts_manager
         self.multimodal_client = multimodal_client
+        self.manifest = manifest
 
         # CRITICAL FIX: Single cancellation event shared with VectorCalculationManager
         self._cancellation_requested = False
@@ -346,9 +354,9 @@ class FileChunkingManager:
 
         # UNIVERSAL TIMESTAMP COLLECTION: Always collect file modification timestamp
         try:
-            file_stat = file_path.stat()
-            file_last_modified = file_stat.st_mtime
-            file_size = file_stat.st_size
+            file_last_modified, file_size = file_facts.file_mtime_and_size(
+                file_path, self.manifest
+            )
         except (OSError, IOError) as e:
             # Don't fail indexing for timestamp issues - set to None and continue
             logger.warning(f"Failed to get file stats for {file_path}: {e}")
@@ -442,7 +450,7 @@ class FileChunkingManager:
         """
         start_time = time.time()
         try:
-            file_size = file_path.stat().st_size
+            file_size = file_facts.file_size(file_path, self.manifest)
         except FileNotFoundError as e:
             # Bug #1118 — TOCTOU: file vanished between enumeration and chunking.
             # Return a vanished result (not raise) so the collector skips it gracefully.

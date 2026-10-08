@@ -73,6 +73,11 @@ class ContentEntry:
     size: int
     blob_sha: Optional[str]
     is_symlink: bool
+    #: Modification time in integer nanoseconds, exactly as the filesystem holds
+    #: it (a symlink's own time, never its target's). None when unknown -- an
+    #: unreadable entry, or a delegated server predating the field -- which a
+    #: caller must treat as "unknown", never as the epoch.
+    mtime_ns: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -420,7 +425,11 @@ class LocalContentBackend:
             # Reported, never followed: the bytes behind a link belong to whatever
             # the link points at, which may be outside the repository entirely.
             return ContentEntry(
-                path=rel, size=stat.st_size, blob_sha=None, is_symlink=True
+                path=rel,
+                size=stat.st_size,
+                blob_sha=None,
+                is_symlink=True,
+                mtime_ns=stat.st_mtime_ns,
             )
 
         return ContentEntry(
@@ -428,6 +437,7 @@ class LocalContentBackend:
             size=stat.st_size,
             blob_sha=git_blob_hash(target),
             is_symlink=False,
+            mtime_ns=stat.st_mtime_ns,
         )
 
 
