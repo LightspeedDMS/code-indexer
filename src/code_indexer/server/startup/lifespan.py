@@ -5453,6 +5453,9 @@ def make_lifespan(
         # so a healthy listener drains them all before exiting. Must run before
         # any other shutdown step that could raise and skip it. Idempotent and
         # non-fatal — never abort the remaining shutdown chain.
+        # A cancellation returned by the logging shutdown is held and re-raised
+        # at the very end of this chain, so every later step still runs.
+        _logging_cancelled: Optional[asyncio.CancelledError] = None
         _log_queue_listener = getattr(app.state, "log_queue_listener", None)
         if _log_queue_listener is not None:
             # Stop the listener (bounded wait, in a worker thread so a stuck
@@ -5464,8 +5467,6 @@ def make_lifespan(
             )
 
             _logging_cancelled = await shutdown_queue_logging_off_loop()
-            if _logging_cancelled is not None:
-                raise _logging_cancelled
 
         # Shutdown: Remove SQLiteLogHandler from root logger (Bug #1060).
         # Symmetric with the install in startup: without this, the handler remains
@@ -6162,6 +6163,11 @@ def make_lifespan(
             "Server shutdown: Cleaning up resources",
             extra={"correlation_id": get_correlation_id()},
         )
+
+        # The whole chain has run: now honour a cancellation that arrived
+        # during the logging shutdown.
+        if _logging_cancelled is not None:
+            raise _logging_cancelled
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

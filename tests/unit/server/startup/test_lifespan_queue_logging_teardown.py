@@ -133,6 +133,68 @@ def test_exception_at_yield_removes_queue_handler(
     assert active_listener is None
 
 
+def test_cancellation_during_logging_shutdown_still_finishes_the_shutdown_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancellation returned by the logging shutdown on the normal path is
+    honoured only after the rest of the shutdown chain has run: the SQLite
+    log handler is closed and the process-wide pools are shut down, and the
+    cancellation still ends the lifespan."""
+    from code_indexer.server.services import async_logging
+    from code_indexer.server.web import routes as web_routes
+    from code_indexer.storage import filesystem_vector_store
+
+    real_off_loop = async_logging.shutdown_queue_logging_off_loop
+    calls: List[str] = []
+
+    async def _cancelled_on_first_call(
+        timeout: float = 5.0,
+    ) -> Optional[asyncio.CancelledError]:
+        result = await real_off_loop(timeout)
+        calls.append("logging")
+        if calls.count("logging") == 1:
+            return asyncio.CancelledError("cancelled during logging shutdown")
+        return result
+
+    def _spy(name: str, real: Any) -> Any:
+        def _call(*args: Any, **kwargs: Any) -> Any:
+            calls.append(name)
+            return real(*args, **kwargs)
+
+        return _call
+
+    monkeypatch.setattr(
+        async_logging, "shutdown_queue_logging_off_loop", _cancelled_on_first_call
+    )
+    monkeypatch.setattr(
+        web_routes,
+        "shutdown_discovery_branch_fetch_executor",
+        _spy("discovery", web_routes.shutdown_discovery_branch_fetch_executor),
+    )
+    monkeypatch.setattr(
+        filesystem_vector_store,
+        "shutdown_deep_fidelity_audit_executor",
+        _spy(
+            "deep_fidelity",
+            filesystem_vector_store.shutdown_deep_fidelity_audit_executor,
+        ),
+    )
+
+    async def _spy_on_sqlite_handler(app: Any) -> None:
+        handler = app.state.sqlite_log_handler
+        monkeypatch.setattr(handler, "close", _spy("sqlite_close", handler.close))
+
+    raised, leaked, active_listener = _run_lifespan(
+        tmp_path / "server", monkeypatch, {}, _spy_on_sqlite_handler
+    )
+    assert isinstance(raised, asyncio.CancelledError), repr(raised)
+    for step in ("sqlite_close", "discovery", "deep_fidelity"):
+        assert step in calls, f"shutdown chain skipped {step}: {calls}"
+    assert calls.index("logging") < calls.index("sqlite_close"), calls
+    assert leaked == []
+    assert active_listener is None
+
+
 TICK_INTERVAL_S = 0.01
 WAIT_LIMIT_S = 10.0
 MIN_TICKS_DURING_SHUTDOWN = 100
