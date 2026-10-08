@@ -779,6 +779,22 @@ def make_lifespan(
                 exc_info=True,
             )
 
+        # Access lines never carry a confirmation_token query value in clear.
+        from code_indexer.server.utils.access_log_redaction import (
+            install_access_log_redaction,
+        )
+
+        install_access_log_redaction()
+
+        # Every handler in the process -- the HTTP server's own console
+        # handlers and handlers attached before the queue listener --
+        # masks credentials, not only those behind the listener.
+        from code_indexer.server.services.async_logging import (
+            attach_redacting_filter_to_all_handlers,
+        )
+
+        attach_redacting_filter_to_all_handlers()
+
         # Story S12 (#2087): worker-stall watchdog, one per uvicorn worker (this
         # lifespan runs once per worker). It leaves every thread's stack and the
         # memory samples in <server_dir>/logs/worker-stall-<pid>-<UTC>.log when no

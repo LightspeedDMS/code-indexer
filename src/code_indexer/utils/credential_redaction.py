@@ -10,6 +10,7 @@ captured output that are logged, raised or returned.
 """
 
 import base64
+import json
 import re
 from typing import Any, Dict, Iterator, List, Sequence, Set, Tuple
 from urllib.parse import unquote, unquote_plus
@@ -25,7 +26,7 @@ _URL_USERINFO_RE = re.compile(r"(://)([^/?#\s]+)@")
 
 # ``Authorization: <scheme> <credentials>`` in free text or a header value;
 # group 3 is the credential itself.
-_AUTH_HEADER_RE = re.compile(r"(?i)(authorization:\s*)(\S+)\s+(\S+)")
+_AUTH_HEADER_RE = re.compile(r"(?i)(authorization\s*[:=]\s*)(\S+)\s+(\S+)")
 
 # Option / env-style names whose VALUE is a credential (``--token X``,
 # ``--password=X``, ``GIT_ASKPASS_TOKEN=X``, ``http.extraHeader=...``).
@@ -116,8 +117,65 @@ def with_masked_repo_url(entry: Dict[str, Any]) -> Dict[str, Any]:
     return masked
 
 
+# ``Cookie:`` / ``Set-Cookie:`` header: the whole value to end of line.
+_COOKIE_HEADER_RE = re.compile(r"(?im)\b((?:set-)?cookie\s*:\s*)[^\r\n]*")
+
+# ``name=value`` / ``name: value`` in free text -- query strings, env
+# assignments, headers, JSON-ish and repr fragments. The name may be quoted.
+# A value that opens with a quote ends at its matching closing quote; any
+# other value runs to the next whitespace, ';' or '&' -- quotes, commas and
+# brackets inside it are part of it, so it is masked whole. Only names that
+# is_secret_field() classifies have their value masked.
+_ASSIGNMENT_RE = re.compile(
+    r"""(?<![\w.\-])(?P<kq>["']?)(?P<name>[A-Za-z_][\w.\-]*)(?P=kq)"""
+    r"""(?P<sep>\s*[=:]\s*)"""
+    r"""(?P<value>"[^"\n]*"|'[^'\n]*'|[^\s&;]+)"""
+)
+
+# Command-line flags: ``--name=value`` and ``--name value`` (a value never
+# starts with '-'). ``--no-*`` flags are boolean and take no value.
+_FLAG_RE = re.compile(
+    r"(?<![\w-])(?P<flag>--?(?P<name>[A-Za-z][\w.\-]*))(?P<sep>=|\s+)"
+    r"(?P<value>[^\s\-]\S*)"
+)
+
+
+def _mask_flag(match: "re.Match[str]") -> str:
+    name = match.group("name")
+    if name.lower().startswith(("no-", "no_")) or not is_secret_field(name):
+        return match.group(0)
+    return f"{match.group('flag')}{match.group('sep')}{_MASK}"
+
+
+def _mask_assignments(text: str) -> str:
+    """Mask the value of every secret-named assignment. A non-secret name's
+    value is rescanned (``failed: GIT_TOKEN=x`` still masks ``x``); the
+    scan position strictly increases, so the loop ends."""
+    parts: List[str] = []
+    pos = 0
+    while True:
+        match = _ASSIGNMENT_RE.search(text, pos)
+        if match is None:
+            break
+        if not is_secret_field(match.group("name")):
+            parts.append(text[pos : match.end("name")])
+            pos = match.end("name")
+            continue
+        value = match.group("value")
+        closed = len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]
+        quote = value[0] if closed else ""
+        parts.append(text[pos : match.start("value")])
+        parts.append(f"{quote}{_MASK}{quote}")
+        pos = match.end()
+    parts.append(text[pos:])
+    return "".join(parts)
+
+
 def _mask_text(text: str) -> str:
-    return _AUTH_HEADER_RE.sub(r"\1***", mask_url_credentials(text))
+    text = _AUTH_HEADER_RE.sub(r"\1***", mask_url_credentials(text))
+    text = _COOKIE_HEADER_RE.sub(rf"\1{_MASK}", text)
+    text = _FLAG_RE.sub(_mask_flag, text)
+    return _mask_assignments(text)
 
 
 def _userinfo_secrets(arg: str) -> List[str]:
@@ -262,3 +320,128 @@ def redact_command_output(
             if len(secret) >= _MIN_OUTPUT_SECRET_CHARS:
                 text = re.sub(rf"(?<![\w-]){re.escape(secret)}(?![\w-])", _MASK, text)
     return text
+
+
+# The ONE credential-name rule, for structured keys and for free-text
+# ``name=value`` / ``Name: value`` / ``--name value`` names alike. It FAILS
+# CLOSED: any name containing a credential word is secret (``password_hash``,
+# ``access_tokens``, ``apiKeys``, ``recoveryCode``), and so is any name with
+# a short form as a WHOLE segment (``pass_hash``, ``totp_code``,
+# ``GITHUB_PAT``) -- whole segments, so ``passed``, ``compass``, ``pinned``,
+# ``footprint`` and ``path`` are not.
+_SECRET_KEY_SUBSTRING_RE = re.compile(
+    r"(?i)(token|secret|passw|passphrase|pwd|api[-_]?key|apikey"
+    r"|private[-_]?key|access[-_]?key|authorization|cookie"
+    r"|credential(?!\.helper)|recovery[-_]?codes?|one[-_]?time)"
+)
+_SECRET_KEY_SEGMENTS = frozenset(
+    {"pw", "pwd", "pass", "auth", "pin", "otp", "totp", "mfa", "2fa", "pat", "session"}
+)
+# Names that only identify, type, count, bound, scope or switch a secret
+# hold none (``credential_id``, ``token_type``, ``secret_count``,
+# ``total_tokens``, ``token_scope``, ``mfa_enabled``, ``onetime_flag``).
+_NON_SECRET_KEY_RE = re.compile(
+    r"(?i)(?:_ids?|_type|_count|_enabled|_scopes?|_flag)$|^(?:total|max)_"
+)
+_CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
+_KEY_SEGMENT_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+REDACTED_FIELD = "***REDACTED***"
+# Bounds recursion through nested containers and JSON-in-JSON strings;
+# anything deeper is replaced whole (fail closed).
+_MAX_REDACTION_DEPTH = 64
+
+
+def _key_segments(name: str) -> List[str]:
+    """Lowercase segments of a name, splitting separators and camelCase."""
+    snake = _CAMEL_BOUNDARY_RE.sub(r"\1_\2", name).lower()
+    return [s for s in _KEY_SEGMENT_SPLIT_RE.split(snake) if s]
+
+
+def is_secret_field(name: Any) -> bool:
+    """True when a key or assignment name may hold a credential. Fails
+    closed: over-redaction is acceptable, under-redaction is not."""
+    if not isinstance(name, str) or _NON_SECRET_KEY_RE.search(name):
+        return False
+    if _SECRET_KEY_SUBSTRING_RE.search(name):
+        return True
+    return any(s in _SECRET_KEY_SEGMENTS for s in _key_segments(name))
+
+
+def _holds_secret(value: Any) -> bool:
+    """Numbers, booleans and None under a secret-named key are counts or
+    flags, never credentials."""
+    return not (value is None or isinstance(value, (bool, int, float)))
+
+
+def redact_secret_fields(data: Any) -> Any:
+    """Safe-to-export copy of structured data, for anything that leaves the
+    process (tracing spans, logs).
+
+    At any depth of dicts, lists and tuples, the value of every secret-named
+    key (see is_secret_field) is replaced by ``REDACTED_FIELD`` when it is a
+    string or a container. A string holding a JSON object or array (how MCP
+    responses carry their payload) is redacted inside and re-serialized; any
+    other string (and any bytes value, decoded to text) has URL userinfo,
+    Authorization and Cookie values and ``name=value`` credential
+    assignments masked. The input is never modified.
+    """
+    return _redact_value(data, 0)
+
+
+_BARE_NAME_RE = re.compile(r"[A-Za-z][\w.\-]*")
+
+
+def _is_header_pair(data: Any) -> bool:
+    """A (name, value) pair whose bare name says the value is secret."""
+    return (
+        len(data) == 2
+        and isinstance(data[0], str)
+        and _BARE_NAME_RE.fullmatch(data[0]) is not None
+        and is_secret_field(data[0])
+        and _holds_secret(data[1])
+    )
+
+
+def _redact_value(data: Any, depth: int) -> Any:
+    if depth > _MAX_REDACTION_DEPTH:
+        return REDACTED_FIELD
+    if isinstance(data, dict):
+        return {
+            key: (
+                REDACTED_FIELD
+                if is_secret_field(key) and _holds_secret(value)
+                else _redact_value(value, depth + 1)
+            )
+            for key, value in data.items()
+        }
+    if isinstance(data, (list, tuple)):
+        items = [_redact_value(item, depth + 1) for item in data]
+        if _is_header_pair(data):
+            items[1] = REDACTED_FIELD
+        return items if isinstance(data, list) else tuple(items)
+    if isinstance(data, (set, frozenset)):
+        return type(data)(_redact_value(item, depth + 1) for item in data)
+    if isinstance(data, str):
+        return _redact_text(data, depth)
+    if isinstance(data, (bytes, bytearray)):
+        # Raw bytes never leave unredacted: decode, mask, export as text.
+        return _redact_text(bytes(data).decode("utf-8", errors="replace"), depth)
+    if not _holds_secret(data):
+        return data
+    # Any other object (an exception, a model) is exported by its text, so
+    # its text is masked; it is kept as-is only when that text holds none.
+    text = str(data)
+    masked = _mask_text(text)
+    return data if masked == text else masked
+
+
+def _redact_text(text: str, depth: int) -> str:
+    if text.lstrip()[:1] in ("{", "["):
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, (dict, list)):
+            redacted = _redact_value(parsed, depth + 1)
+            return text if redacted == parsed else json.dumps(redacted)
+    return _mask_text(text)

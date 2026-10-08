@@ -1,5 +1,7 @@
 """Unit tests for Langfuse tracing MCP handlers."""
 
+import sys
+
 import pytest
 from typing import Dict, Any
 from unittest.mock import Mock, patch, MagicMock
@@ -9,10 +11,17 @@ from code_indexer.server.mcp.handlers import (
 )
 from code_indexer.server.auth.user_manager import User, UserRole
 
-# Prevent real Langfuse SDK initialization
-import sys
 
-sys.modules["langfuse"] = MagicMock()
+@pytest.fixture(autouse=True)
+def stub_langfuse_sdk(monkeypatch):
+    """Prevent real Langfuse SDK initialization in these tests only.
+
+    monkeypatch.setitem restores just the ``langfuse`` entry afterwards, so
+    the stub never leaks into other test files. (patch.dict on sys.modules
+    would also evict every module imported during a test, leaving @patch
+    targets and the handlers' own imports on different module objects.)
+    """
+    monkeypatch.setitem(sys.modules, "langfuse", MagicMock())
 
 
 @pytest.fixture

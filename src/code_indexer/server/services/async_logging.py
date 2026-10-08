@@ -311,10 +311,14 @@ def install_queue_logging(
 
     log_queue: "queue.Queue" = queue.Queue(maxsize=maxsize)
 
-    # Detach the real handlers from the root -- they now live behind the listener.
+    from code_indexer.server.logging_utils import REDACTING_LOG_FILTER
+
+    # Detach the real handlers from the root -- they now live behind the
+    # listener -- and redact every record before any of them formats it.
     for h in real_handlers:
         if h in target.handlers:
             target.removeHandler(h)
+        h.addFilter(REDACTING_LOG_FILTER)
 
     listener = DrainableQueueListener(log_queue, *real_handlers)
     listener.start()
@@ -326,6 +330,41 @@ def install_queue_logging(
     _active_queue_handler = queue_handler
     _active_target_logger = target
     return listener
+
+
+def attach_redacting_filter_to_all_handlers() -> int:
+    """Attach the redacting filter to EVERY handler in the process: those of
+    the root logger and of every logger in ``logging.Logger.manager``'s
+    registry (placeholders hold no handlers) -- the HTTP server's own
+    console handlers, audit file handlers and any handler attached before
+    startup included. Idempotent: a handler already carrying the filter is
+    left as is. The active queue handler is skipped: what it enqueues is
+    redacted by the listener's handlers, off the request thread.
+
+    Handlers added later are covered where they are added
+    (``register_additional_listener_handler``).
+
+    Returns:
+        The number of handlers that newly received the filter.
+    """
+    from code_indexer.server.logging_utils import REDACTING_LOG_FILTER
+
+    loggers: List[logging.Logger] = [logging.getLogger()]
+    loggers.extend(
+        candidate
+        for candidate in list(logging.Logger.manager.loggerDict.values())
+        if isinstance(candidate, logging.Logger)
+    )
+    attached = 0
+    for each_logger in loggers:
+        for handler in list(each_logger.handlers):
+            if handler is _active_queue_handler:
+                continue
+            if REDACTING_LOG_FILTER in handler.filters:
+                continue
+            handler.addFilter(REDACTING_LOG_FILTER)
+            attached += 1
+    return attached
 
 
 def get_active_listener() -> Optional[DrainableQueueListener]:
@@ -374,6 +413,9 @@ def register_additional_listener_handler(
             return False
         if handler in listener.handlers:
             return False
+        from code_indexer.server.logging_utils import REDACTING_LOG_FILTER
+
+        handler.addFilter(REDACTING_LOG_FILTER)
         listener.handlers = tuple(listener.handlers) + (handler,)
         return True
 
