@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import logging
 
 from ...utils.credential_redaction import mask_url_credentials
+from ...utils.git_remote_url import parse_git_remote_url
 
 if TYPE_CHECKING:
     from ...api_clients.base_client import CIDXRemoteAPIClient
@@ -166,18 +167,13 @@ class RemoteRepositoryService:
             url: Repository URL to normalize
 
         Returns:
-            Normalized URL
+            The repository identity (``GitRemoteUrl.identity``), lower-cased;
+            a value that is not a git remote URL compares by its own text.
         """
-        # Remove trailing slashes and .git suffix
-        normalized = url.rstrip("/").rstrip(".git")
-
-        # Convert SSH to HTTPS format for comparison
-        if normalized.startswith("git@"):
-            # Convert git@github.com:user/repo to https://github.com/user/repo
-            parts = normalized.replace("git@", "").replace(":", "/")
-            normalized = f"https://{parts}"
-
-        return normalized.lower()
+        parsed = parse_git_remote_url(url)
+        if parsed is None:
+            return url.strip().rstrip("/").lower()
+        return parsed.identity.lower()
 
     def _calculate_staleness_for_repos(
         self, repositories: List[RepositoryInfo], local_branch: str
