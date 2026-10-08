@@ -391,3 +391,121 @@ def test_a_delegated_pass_serves_its_files_through_the_backend(repo: Path) -> No
     for rel, raw in SHAPES.items():
         assert source.take(repo / rel).data == raw
     assert len(proc.content_backend.calls) == 1, "one batch for a small repo"
+
+
+# ── the lifecycle: what the worker does with each kind of take() ───────────
+
+
+def _run_lifecycle(tmp_path: Path, take_result: Any) -> Any:
+    """Push one file through the real worker lifecycle with a stub source.
+
+    The file IS on disk with different bytes from the source's, so a worker that
+    read the disk instead of the source would chunk "on disk" (or, for the
+    refusals, succeed) and fail these assertions. The stat is still local in this
+    slice, which is why the file has to exist at all.
+    """
+    from code_indexer.services.clean_slot_tracker import CleanSlotTracker
+    from code_indexer.services.file_chunking_manager import FileChunkingManager
+
+    target = tmp_path / "a.py"
+    target.write_bytes(b"on disk")
+    source = MagicMock()
+    source.take.return_value = take_result
+    chunker = MagicMock()
+    chunker.chunk_file.return_value = []  # nothing to embed: success, no upsert
+    store = MagicMock()
+    with FileChunkingManager(
+        vector_manager=MagicMock(),
+        chunker=chunker,
+        vector_store_client=store,
+        thread_count=1,
+        slot_tracker=CleanSlotTracker(max_slots=3),
+        codebase_dir=tmp_path,
+        content_source=source,
+    ) as manager:
+        result = manager.submit_file_for_processing(
+            target, {"file_hash": "sha256:x", "collection_name": "c"}, None
+        ).result(timeout=10)
+    return result, chunker, store
+
+
+def test_the_lifecycle_chunks_the_sources_bytes_not_the_disks(tmp_path: Path) -> None:
+    result, chunker, _ = _run_lifecycle(
+        tmp_path, MagicMock(vanished=False, error=None, data=b"from source")
+    )
+    assert result.success is True
+    assert chunker.chunk_file.call_args.kwargs["content"] == b"from source"
+
+
+def test_the_lifecycle_skips_a_vanished_file_without_failing_it(
+    tmp_path: Path,
+) -> None:
+    result, chunker, _ = _run_lifecycle(
+        tmp_path, MagicMock(vanished=True, error="ENOENT", data=None)
+    )
+    assert result.success is False and result.vanished is True
+    chunker.chunk_file.assert_not_called()
+
+
+def test_the_lifecycle_fails_a_refused_file_and_stores_nothing(
+    tmp_path: Path,
+) -> None:
+    """Changed since the manifest is a FAILURE: counted, never a silent skip."""
+    result, chunker, store = _run_lifecycle(
+        tmp_path, MagicMock(vanished=False, error=CHANGED_SINCE_MANIFEST, data=None)
+    )
+    assert result.success is False and result.vanished is False
+    assert CHANGED_SINCE_MANIFEST in (result.error or "")
+    chunker.chunk_file.assert_not_called()
+    store.upsert_points.assert_not_called()
+    store.upsert_points_batched.assert_not_called()
+
+
+# ── the wiring: the pass hands its prefetcher to the chunking manager ──────
+
+
+def _content_source_handed_over(tmp_path: Path, backend: Any) -> Any:
+    """Run a real pass and return the content_source the manager was built with."""
+    from unittest.mock import patch
+
+    from code_indexer.config import Config
+    from code_indexer.services.high_throughput_processor import (
+        HighThroughputProcessor,
+    )
+
+    (tmp_path / "a.py").write_bytes(b"x = 1\n")
+    provider = MagicMock()
+    provider.get_current_model.return_value = "voyage-code-3"
+    provider._get_model_token_limit.return_value = 120_000
+    proc = HighThroughputProcessor(
+        config=Config(codebase_dir=tmp_path),
+        embedding_provider=provider,
+        vector_store_client=MagicMock(),
+        content_backend=backend,
+    )
+    module = "code_indexer.services.high_throughput_processor"
+    with (
+        patch(f"{module}.VectorCalculationManager") as vcm,
+        patch(f"{module}.FileChunkingManager") as fcm,
+    ):
+        vcm.return_value.__enter__.return_value.cancellation_event = threading.Event()
+        fcm.return_value.__enter__.return_value.submit_file_for_processing.side_effect = RuntimeError(
+            "stop after construction"
+        )
+        try:
+            proc.process_files_high_throughput(
+                files=[tmp_path / "a.py"], vector_thread_count=1
+            )
+        except Exception:
+            pass  # only the constructor call is under test
+    assert fcm.call_count == 1
+    return fcm.call_args.kwargs["content_source"]
+
+
+def test_a_delegated_pass_hands_the_manager_a_prefetcher(tmp_path: Path) -> None:
+    source = _content_source_handed_over(tmp_path, _Delegated())
+    assert isinstance(source, ContentPrefetcher)
+
+
+def test_a_local_pass_hands_the_manager_no_source(tmp_path: Path) -> None:
+    assert _content_source_handed_over(tmp_path, None) is None
