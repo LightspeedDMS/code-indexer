@@ -278,44 +278,6 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 else:
                     return 0.0
 
-    def _drop_unindexable(self, files: List[Path]) -> List[Path]:
-        """Remove files this pass has no way to read, and say so.
-
-        Only ever drops anything under a DELEGATED content backend; with the
-        default local backend there is no manifest and this returns the list
-        unchanged. See ``RepoManifest.unindexable_reason`` for why a symlink is
-        the one case, and why dropping it costs no indexed content.
-
-        Logged at WARNING with a count and examples rather than dropped quietly.
-        A pass that indexes fewer files than it was given, and reports success,
-        is exactly the silent-shortfall failure the content seam exists to make
-        impossible -- so the one place that legitimately indexes less has to be
-        the loudest.
-        """
-        manifest = getattr(self, "repo_manifest", None)
-        if manifest is None:
-            return files
-
-        kept: List[Path] = []
-        dropped: Dict[str, List[Path]] = {}
-        for file_path in files:
-            reason = manifest.unindexable_reason(file_path)
-            if reason is None:
-                kept.append(file_path)
-            else:
-                dropped.setdefault(reason, []).append(file_path)
-
-        for reason, paths in sorted(dropped.items()):
-            examples = ", ".join(str(p) for p in paths[:3])
-            logger.warning(
-                "Content backend cannot serve %d file(s) (%s); not indexed: %s%s",
-                len(paths),
-                reason,
-                examples,
-                " ..." if len(paths) > 3 else "",
-            )
-        return kept
-
     def process_files_high_throughput(
         self,
         files: List[Path],
@@ -326,8 +288,34 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         fts_manager: Optional[Any] = None,
     ) -> ProcessingStats:
         """Process files with maximum throughput using pre-queued chunks."""
+        # The manifest describes the repository as of NOW, and this instance is
+        # reused across passes (watch mode, the reprocess pass), so it is built
+        # here rather than in __init__ and dropped again on the way out. A
+        # manifest held between passes would serve the hash a file had before it
+        # was edited. No-op unless a delegated backend is configured.
+        self.begin_manifest_pass()
+        try:
+            return self._process_files_high_throughput(
+                files,
+                vector_thread_count,
+                batch_size,
+                progress_callback,
+                slot_tracker,
+                fts_manager,
+            )
+        finally:
+            self.end_manifest_pass()
 
-        files = self._drop_unindexable(files)
+    def _process_files_high_throughput(
+        self,
+        files: List[Path],
+        vector_thread_count: int,
+        batch_size: int = 50,
+        progress_callback: Optional[Callable] = None,
+        slot_tracker: Optional[CleanSlotTracker] = None,
+        fts_manager: Optional[Any] = None,
+    ) -> ProcessingStats:
+        """The pass itself. Split out so the manifest's lifetime is a try/finally."""
 
         # Create local slot tracker for this processing phase
         local_slot_tracker = CleanSlotTracker(max_slots=vector_thread_count + 2)

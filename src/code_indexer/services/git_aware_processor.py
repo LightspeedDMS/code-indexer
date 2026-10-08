@@ -4,7 +4,7 @@ Git-aware document processor that extends the base DocumentProcessor.
 
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import TYPE_CHECKING, List, Dict, Any, Optional
 
 from code_indexer.config import Config
 from code_indexer.services.embedding_provider import EmbeddingProvider
@@ -16,6 +16,9 @@ from code_indexer.services.metadata_schema import (
     MetadataValidator,
 )
 from code_indexer.services.vector_calculation_manager import VectorCalculationManager
+
+if TYPE_CHECKING:
+    from ..indexing.repo_manifest import RepoManifest
 
 logger = logging.getLogger(__name__)
 
@@ -43,20 +46,43 @@ class GitAwareDocumentProcessor(DocumentProcessor):
         # delegated backend the hashes arrive over its own paged call and those
         # reads disappear: 20.
         self.content_backend = content_backend
-        self.repo_manifest = None
-        if content_backend is not None and not getattr(
-            content_backend, "is_local", True
-        ):
-            from ..indexing.repo_manifest import RepoManifest
+        self.repo_manifest: Optional["RepoManifest"] = None
 
-            self.repo_manifest = RepoManifest.build(
-                config.codebase_dir, backend=content_backend
-            )
-
-        self.file_identifier = FileIdentifier(
-            config.codebase_dir, config, manifest=self.repo_manifest
-        )
+        self.file_identifier = FileIdentifier(config.codebase_dir, config)
         self.git_detection = GitDetectionService(config.codebase_dir, config)
+
+    def begin_manifest_pass(self) -> None:
+        """Build the manifest describing the repository as it is RIGHT NOW.
+
+        Called at the start of each indexing pass, never from ``__init__``. The
+        manifest is a snapshot, and an indexer outlives a pass: watch mode keeps
+        one for a whole session and the reprocess pass reuses the same instance.
+        Building it once per instance would serve the blob hash a file had before
+        it was edited, and because the point UUID is seeded from that hash the
+        new content would be written over the old version's ids.
+
+        A no-op unless a DELEGATED backend is configured. Against the local
+        backend the manifest is a measured wash -- building it reads every file,
+        which is the work it would save -- so it is never built there, and the
+        default path does no extra work at all.
+        """
+        if self.content_backend is None or getattr(
+            self.content_backend, "is_local", True
+        ):
+            return
+        from ..indexing.repo_manifest import RepoManifest
+
+        self.repo_manifest = RepoManifest.build(
+            self.config.codebase_dir, backend=self.content_backend
+        )
+        self.file_identifier.set_manifest(self.repo_manifest)
+
+    def end_manifest_pass(self) -> None:
+        """Drop the snapshot, so nothing outside a pass can read a stale hash."""
+        if self.repo_manifest is None:
+            return
+        self.repo_manifest = None
+        self.file_identifier.set_manifest(None)
 
     def _normalize_path_for_storage(self, file_path: Path) -> str:
         """

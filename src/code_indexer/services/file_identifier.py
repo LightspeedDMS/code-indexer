@@ -50,6 +50,7 @@ class FileIdentifier:
                 None keeps the read, so every existing caller is unchanged.
         """
         self._manifest = manifest
+
         self.project_dir = project_dir
         self.config = config
         self.git_available = self._detect_git()
@@ -58,6 +59,21 @@ class FileIdentifier:
         # change during a single indexing run, so we fetch them once and cache.
         self._cached_branch: Optional[str] = None
         self._cached_commit_hash: Optional[str] = None
+
+    def set_manifest(self, manifest: Optional["RepoManifest"]) -> None:
+        """Point at the manifest for the CURRENT pass, or None for no manifest.
+
+        The manifest describes the repository as of when it was built, so its
+        lifetime has to be one pass. An indexer is reused -- watch mode holds one
+        for a whole session, and the reprocess pass runs on the same instance --
+        and a manifest held across passes would keep serving the blob hash a file
+        had before it was edited. The new bytes would then be chunked under the
+        old hash, and since the point UUID is seeded from that hash the chunks
+        would be written over the previous version's ids: silent
+        re-identification, which is the exact failure this value's own docstring
+        warns about.
+        """
+        self._manifest = manifest
 
     def _detect_git(self) -> bool:
         """

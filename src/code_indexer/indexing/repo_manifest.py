@@ -4,20 +4,28 @@ A pass asks each file for its git blob hash and then reads it again to chunk it.
 The hash is a function of the bytes, and a content backend already reports it for
 every file in one paged call, so asking the manifest removes that read.
 
-NOT WIRED INTO THE INDEXER YET, on purpose. ``build`` goes through
+Built ONLY for a delegated backend. ``build`` goes through
 ``ContentBackend.manifest``, and the LOCAL backend computes those hashes by
-reading every file -- so wiring this against the local backend moves the hash
-reads to the front of the pass instead of removing them. Measured over a 20-file
-repository: 40 opens without the manifest (20 hash + 20 chunk), 40 with it (20 to
-build + 20 to chunk). Exactly a wash, plus the whole manifest held in memory and
-hashes computed for files the indexer would have filtered out.
+reading every file -- so against local it would move the hash reads to the front
+of the pass instead of removing them. Measured over a 20-file repository: 40
+opens without the manifest (20 hash + 20 chunk), 40 with it (20 to build + 20 to
+chunk). Exactly a wash, plus the whole manifest held in memory and hashes
+computed for files the indexer would have filtered out.
 
 The saving is real only when the manifest costs no local reads -- a delegated
 backend serving hashes over its own paged call, where the same 20-file pass does
-20 opens instead of 40. This module is the piece that makes that switch a
-constructor argument rather than a rewrite of the hash phase; selecting a
-delegated backend still needs the config key and plugin loader that the other
-seams have.
+20 opens instead of 40.
+
+SYMLINKS ARE NOT SPECIAL-CASED HERE. A delegated manifest reports them with no
+hash, and an earlier version of this module dropped them from the pass on the
+grounds that a symlink's chunks are byte-identical to its target's and carry the
+same point ids, so indexing one adds nothing. That is true only when the target
+is itself in the pass. A symlink pointing outside the repository root, at an
+excluded or generated path, or at nothing at all, carries content that is
+reachable NO other way -- and ``ContentEntry`` has no target field, so there is
+no way from here to tell those apart. Dropping them would silently index less in
+exactly the cases that matter. They take the ordinary path instead and end as
+counted failures.
 
 Built from ``ContentBackend.manifest``, so the same object serves either backend
 without the caller knowing which.
@@ -115,41 +123,6 @@ class RepoManifest:
         if entry is None or entry.is_symlink:
             return None
         return entry.blob_sha
-
-    def unindexable_reason(self, file_path: Union[str, Path]) -> Optional[str]:
-        """Why this pass cannot index *file_path*, or None if it can.
-
-        Only ever non-None for a DELEGATED backend. With a local backend the
-        file is on this disk and everything stays exactly as it is today.
-
-        The one reason is a symlink. A delegated backend enumerates symlinks and
-        refuses to read them -- deliberately, so that fetch can never return
-        bytes the manifest would not list -- so there is no way to obtain the
-        content, from the backend or from a disk this pod may not have.
-
-        Skipping costs nothing. A chunk's point UUID is seeded from
-        ``{project_id}:{blob_sha}:{index}`` with NO path, so a symlink's chunks
-        are byte-identical to its target's and carry the same ids: following one
-        overwrites the target's chunks with a copy of themselves. Measured on a
-        fixture containing both, the ids matched exactly. What the symlink points
-        at is indexed under its real path either way.
-
-        Returns a short reason string rather than a bool so the caller can report
-        WHY a file was left out. A run that silently indexes less is the failure
-        this whole seam exists to avoid.
-        """
-        if self._backend_is_local:
-            return None
-        key = self._relative(file_path)
-        if key is None:
-            return None
-        entry = self._entries.get(key)
-        if entry is None:
-            # A manifest MISS is not a refusal: the file may have been added
-            # after the pass began. Let it take the normal path and fail there
-            # if it truly cannot be read.
-            return None
-        return "symlink" if entry.is_symlink else None
 
     def size(self, file_path: Union[str, Path]) -> Optional[int]:
         key = self._relative(file_path)
