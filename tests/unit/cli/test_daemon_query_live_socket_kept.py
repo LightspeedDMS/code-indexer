@@ -218,6 +218,34 @@ def test_watch_commands_return_plain_dict(
     _assert_no_recovery(output, spawned, socket_kept)
 
 
+def test_lifecycle_watch_stop_reports_daemon_stats(
+    project: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """``cidx watch-stop`` reads the daemon's stats after closing the connection.
+
+    Reading a netref after close raised, and the command reported
+    "Daemon not running" although the daemon had already stopped the watch.
+    """
+    from code_indexer import cli_daemon_lifecycle
+    from code_indexer.config import ConfigManager
+
+    project.write_text(
+        json.dumps(
+            {"codebase_dir": str(project.parent.parent), "daemon": {"enabled": True}}
+        )
+    )
+    socket_path = ConfigManager.create_with_backtrack(Path.cwd()).get_socket_path()
+    with live_daemon_socket(socket_path, WATCH_STOP_DAEMON_RESPONSE):
+        exit_code = cli_daemon_lifecycle.watch_stop_command()
+
+    output = capsys.readouterr().out
+    assert exit_code == 0, output
+    assert "Daemon not running" not in output, output
+    assert "Watch stopped" in output, output
+    assert "Files processed: 3" in output, output
+    assert "Updates applied: 2" in output, output
+
+
 def test_daemon_result_copy_never_unpickles(
     project: Path, spawned: List[Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
