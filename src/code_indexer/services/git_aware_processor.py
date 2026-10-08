@@ -79,11 +79,20 @@ class GitAwareDocumentProcessor(DocumentProcessor):
             return
         from ..indexing.repo_manifest import RepoManifest
 
-        self.repo_manifest = RepoManifest.build(
-            self.config.codebase_dir, backend=self.content_backend
-        )
-        self.file_identifier.set_manifest(self.repo_manifest)
-        self.file_finder.set_manifest(self.repo_manifest, self.content_backend)
+        # Every step below is a remote call or depends on one, and the callers
+        # only reach their ``finally: end_manifest_pass()`` once this returns. A
+        # failure here must not leave the pass marked open -- a later standalone
+        # pass would then join it, find no manifest and read the local disk --
+        # nor leave a half-installed manifest serving stale hashes.
+        try:
+            self.repo_manifest = RepoManifest.build(
+                self.config.codebase_dir, backend=self.content_backend
+            )
+            self.file_identifier.set_manifest(self.repo_manifest)
+            self.file_finder.set_manifest(self.repo_manifest, self.content_backend)
+        except BaseException:
+            self.end_manifest_pass()
+            raise
 
     def end_manifest_pass(self) -> None:
         """Drop the snapshot, so nothing outside a pass can read a stale hash."""

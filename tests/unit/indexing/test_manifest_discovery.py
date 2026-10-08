@@ -300,3 +300,56 @@ def test_a_lone_cr_gitignore_splits_like_a_text_mode_read(tmp_path: Path) -> Non
         "pkg/b.py",
         "pkg/c.py",
     ]
+
+
+class _GitignoreFetchFails(_CountingDelegated):
+    """The manifest builds; the .gitignore fetch -- the LAST step of begin -- fails."""
+
+    def __init__(self, source: Path) -> None:
+        super().__init__(source)
+        self.fail = True
+
+    def fetch(self, repo_path: Any, paths: Sequence[str]) -> Iterator[FetchedFile]:
+        if self.fail:
+            raise ConnectionError("content backend unreachable")
+        return super().fetch(repo_path, paths)
+
+
+def test_a_failed_begin_leaves_no_pass_open_and_no_manifest_installed(
+    repo: Path,
+) -> None:
+    """Fails after the manifest is built and handed to the identifier, so a
+    begin that only reset the flag would still leave a stale manifest behind."""
+    backend = _GitignoreFetchFails(repo)
+    proc = _ht_processor(repo, backend)
+
+    with pytest.raises(ConnectionError):
+        proc.begin_manifest_pass()
+
+    assert not proc.manifest_pass_open
+    assert proc.repo_manifest is None
+    assert proc.file_identifier._manifest is None
+    assert proc.file_finder._manifest is None
+
+
+def test_after_a_failed_begin_the_next_pass_opens_its_own(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Watch mode keeps the instance: the next standalone pass must build a
+    manifest, not join the failed one and fall back to the local disk."""
+    backend = _GitignoreFetchFails(repo)
+    proc = _ht_processor(repo, backend)
+    seen: List[Any] = []
+    monkeypatch.setattr(
+        proc,
+        "_process_files_high_throughput",
+        lambda *a, **k: seen.append(proc.repo_manifest),
+    )
+    with pytest.raises(ConnectionError):
+        proc.begin_manifest_pass()  # what smart_index does, before its try
+
+    backend.fail = False
+    proc.process_files_high_throughput([], vector_thread_count=1)
+
+    assert seen and seen[0] is not None, "joined a pass that never opened"
+    assert backend.builds == 2
