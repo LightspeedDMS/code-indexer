@@ -188,7 +188,7 @@ def test_seam_invariants_hold_for_generated_repositories(
 
     # P1 -- paging equals a single pass, for several page sizes.
     for size in (1, 2, 3, 7):
-        assert [e.path for e in _paged(backend, root, size)] == paths, (
+        assert [e.path for e in _paged(backend, repo, size)] == paths, (
             f"seed={seed}/{addressing} page_size={size}"
         )
     assert paths == sorted(paths), f"seed={seed}/{addressing}: order is not monotonic"
@@ -220,7 +220,6 @@ def test_seam_invariants_hold_for_generated_repositories(
             assert got.data == b"", (
                 f"seed={seed}/{addressing}: symlink {entry.path} returned bytes"
             )
-            assert SECRET not in got.data
         else:
             assert got.error is None, (
                 f"seed={seed}/{addressing}: listed {entry.path} refused as {got.error!r}"
@@ -259,6 +258,39 @@ def test_seam_invariants_hold_for_generated_repositories(
             )
 
     # P6 -- a hostile path is refused by fetch, and was never listed.
+    # Paths that go THROUGH a listed directory symlink. Without these, every
+    # generated fetch input is either something manifest listed (which by
+    # construction never goes beneath a link) or something refused LEXICALLY, so
+    # _confine's resolved-parent comparison is never reached. Removing only that
+    # branch left this suite entirely green -- the example suite caught it, which
+    # is the "testing doors" approach this file is meant to replace.
+    through_links: List[str] = []
+    for entry in listed:
+        if not entry.is_symlink:
+            continue
+        target = root / entry.path
+        if not target.is_dir():  # follows the link on purpose: is it a DIRECTORY link?
+            continue
+        try:
+            names = sorted(
+                child.name for child in os.scandir(os.path.realpath(target))
+            )[:2]
+        except OSError:
+            names = []
+        through_links.extend(f"{entry.path}/{name}" for name in (names or ["a"]))
+
+    for bad in through_links:
+        assert bad not in by_path, (
+            f"seed={seed}/{addressing}: manifest listed through a link: {bad!r}"
+        )
+        (got,) = list(backend.fetch(repo, [bad]))
+        assert got.error is not None, (
+            f"seed={seed}/{addressing}: fetch followed a directory symlink for {bad!r}"
+        )
+        assert got.data == b"", (
+            f"seed={seed}/{addressing}: bytes returned through a link for {bad!r}"
+        )
+
     hostile_paths = [
         str(outside / "secret.txt"),
         "../outside/secret.txt",
@@ -278,20 +310,20 @@ def test_seam_invariants_hold_for_generated_repositories(
             f"seed={seed}/{addressing}: fetch returned bytes for {bad!r}"
         )
 
-        assert SECRET not in got.data
-
 
 def test_the_generator_actually_produces_the_shapes_that_broke_this_seam(
     tmp_path: Path,
 ) -> None:
     """A generator that happened to emit only plain files would make the suite vacuous."""
-    kinds = {"symlink": 0, "nested": 0, "outward_link": 0, "entries": 0}
+    kinds = {"symlink": 0, "nested": 0, "outward_link": 0, "dir_link": 0, "entries": 0}
     for seed in SEEDS:
         root, _ = _make_repo(tmp_path / f"s{seed}", seed)
         for entry in _full(LocalContentBackend(), root):
             kinds["entries"] += 1
             if entry.is_symlink:
                 kinds["symlink"] += 1
+                if (root / entry.path).is_dir():
+                    kinds["dir_link"] += 1
                 if not os.path.realpath(root / entry.path).startswith(
                     os.path.realpath(root) + os.sep
                 ):
@@ -302,3 +334,5 @@ def test_the_generator_actually_produces_the_shapes_that_broke_this_seam(
     assert kinds["symlink"] > 10, kinds
     assert kinds["outward_link"] > 0, kinds
     assert kinds["nested"] > 10, kinds
+    # Without directory links, P6's through-a-link paths would all be vacuous.
+    assert kinds["dir_link"] > 0, kinds
