@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,7 +35,6 @@ def _run_lifespan(
 
     from code_indexer.server.services import async_logging
     from code_indexer.server.services.async_logging import IdentityQueueHandler
-    from code_indexer.server.services.sqlite_log_handler import SQLiteLogHandler
     from code_indexer.server.startup.lifespan import make_lifespan
     from tests.unit.server.startup.test_lifespan_sqlite_handler_leak_bug1060 import (
         _make_minimal_lifespan_deps,
@@ -42,6 +42,7 @@ def _run_lifespan(
 
     root = logging.getLogger()
     before = list(root.handlers)
+    before_level = root.level
     data_dir.mkdir()
     monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(data_dir))
     config = {"server_dir": str(data_dir), "log_level": "INFO", **config_extra}
@@ -65,13 +66,17 @@ def _run_lifespan(
         if isinstance(h, IdentityQueueHandler) and h not in before
     ]
     active_listener = async_logging.get_active_listener()
-    # ... hygiene second, so a failing run never leaks into other tests.
-    for handler in list(root.handlers):
-        if handler not in before and isinstance(
-            handler, (SQLiteLogHandler, IdentityQueueHandler)
-        ):
-            root.removeHandler(handler)
+    # ... hygiene second, so a failing run never leaks into other tests:
+    # startup moved the original root handlers into the queue listener, so
+    # put back exactly the handlers and level the root logger started with.
     async_logging.shutdown_queue_logging()
+    for handler in list(root.handlers):
+        if handler not in before:
+            root.removeHandler(handler)
+    for handler in before:
+        if handler not in root.handlers:
+            root.addHandler(handler)
+    root.setLevel(before_level)
     watchdog = getattr(app.state, "stall_watchdog", None)
     if watchdog is not None:
         watchdog.stop()
@@ -126,3 +131,63 @@ def test_exception_at_yield_removes_queue_handler(
     assert isinstance(raised, RuntimeError), repr(raised)
     assert leaked == [], "the lifespan ended by exception but left the queue handler"
     assert active_listener is None
+
+
+TICK_INTERVAL_S = 0.01
+WAIT_LIMIT_S = 10.0
+MIN_TICKS_DURING_SHUTDOWN = 100
+
+
+class _BlockingSink(logging.Handler):
+    """A root sink whose emit() blocks until ``unblock`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.entered = threading.Event()
+        self.unblock = threading.Event()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.entered.set()
+        self.unblock.wait()
+
+
+def test_shutdown_with_blocked_log_sink_keeps_event_loop_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bounded logging shutdown waits on a stuck sink in a worker
+    thread: the event loop keeps running other tasks meanwhile."""
+    sink = _BlockingSink()
+    root = logging.getLogger()
+    root.addHandler(sink)
+    ticks_after_body: List[int] = []
+
+    async def _block_sink_then_return(app: Any) -> None:
+        loop = asyncio.get_running_loop()
+        state = {"body_done": False, "ticks": 0}
+
+        async def _ticker() -> None:
+            while True:
+                if state["body_done"]:
+                    state["ticks"] += 1
+                    ticks_after_body[:] = [state["ticks"]]
+                await asyncio.sleep(TICK_INTERVAL_S)
+
+        app.state.test_ticker = asyncio.ensure_future(_ticker())
+        logging.getLogger("tests.lifespan.blocked_sink").warning("block the sink")
+        entered = await loop.run_in_executor(None, sink.entered.wait, WAIT_LIMIT_S)
+        assert entered, "the listener never reached the blocking sink"
+        state["body_done"] = True
+
+    try:
+        raised, leaked, active_listener = _run_lifespan(
+            tmp_path / "server", monkeypatch, {}, _block_sink_then_return
+        )
+    finally:
+        sink.unblock.set()
+        root.removeHandler(sink)
+    assert raised is None, repr(raised)
+    assert leaked == []
+    assert active_listener is None
+    assert ticks_after_body and ticks_after_body[0] >= MIN_TICKS_DURING_SHUTDOWN, (
+        f"event loop starved during logging shutdown: {ticks_after_body}"
+    )

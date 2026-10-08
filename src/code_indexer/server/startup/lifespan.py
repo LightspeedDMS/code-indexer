@@ -5449,25 +5449,23 @@ def make_lifespan(
 
         # Shutdown: Stop the async-logging QueueListener FIRST (py-spy logging
         # follow-up to Bug #1078). The listener owns the real handlers behind the
-        # root QueueHandler; stop() drains every queued record and then closes the
-        # real handlers, so no logs are lost on a clean shutdown. Must run before
+        # root QueueHandler; its stop sentinel queues after every pending record,
+        # so a healthy listener drains them all before exiting. Must run before
         # any other shutdown step that could raise and skip it. Idempotent and
         # non-fatal — never abort the remaining shutdown chain.
         _log_queue_listener = getattr(app.state, "log_queue_listener", None)
         if _log_queue_listener is not None:
-            try:
-                # Drain in-flight records before stopping the listener.
-                _log_queue_listener.flush()
-            except Exception:
-                pass
-            # Stop the listener and detach the queue handler it installed on the
-            # root logger, clearing the module handles so a later teardown is a
-            # no-op. Never raises.
+            # Stop the listener (bounded wait, in a worker thread so a stuck
+            # sink never blocks the event loop) and detach the queue handler it
+            # installed on the root logger, clearing the module handles so a
+            # later teardown is a no-op. Never raises.
             from code_indexer.server.services.async_logging import (
-                shutdown_queue_logging,
+                shutdown_queue_logging_off_loop,
             )
 
-            shutdown_queue_logging()
+            _logging_cancelled = await shutdown_queue_logging_off_loop()
+            if _logging_cancelled is not None:
+                raise _logging_cancelled
 
         # Shutdown: Remove SQLiteLogHandler from root logger (Bug #1060).
         # Symmetric with the install in startup: without this, the handler remains
@@ -6187,7 +6185,7 @@ def make_lifespan(
         logger. After a normal shutdown this is a no-op.
         """
         from code_indexer.server.services.async_logging import (
-            shutdown_queue_logging,
+            shutdown_queue_logging_off_loop,
         )
         from code_indexer.server.utils.stall_watchdog import (
             stop_stall_watchdog_on_exit,
@@ -6200,7 +6198,9 @@ def make_lifespan(
             try:
                 await stop_stall_watchdog_on_exit(app)
             finally:
-                shutdown_queue_logging()
+                # Bounded, in a worker thread; a cancellation it absorbs is
+                # dropped -- the exception ending the lifespan wins.
+                await shutdown_queue_logging_off_loop()
             raise  # the exception ending the lifespan wins
         cancelled = await stop_stall_watchdog_on_exit(app)
         if cancelled is not None:

@@ -53,7 +53,7 @@ def test_watchdog_stopped_in_shutdown_before_log_listener_stops() -> None:
     _, shutdown = _split_at_yield()
     stop_pos = shutdown.find(_STOP_CALL)
     assert stop_pos != -1, f"lifespan shutdown must call {_STOP_CALL}"
-    listener_stop_pos = shutdown.find("shutdown_queue_logging()")
+    listener_stop_pos = shutdown.find("shutdown_queue_logging_off_loop()")
     assert listener_stop_pos != -1
     assert stop_pos < listener_stop_pos, (
         "stop the watchdog before the log listener drains so a stall reported "

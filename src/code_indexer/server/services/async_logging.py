@@ -35,6 +35,7 @@ Design notes
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import logging.handlers
 import queue
@@ -251,6 +252,33 @@ class DrainableQueueListener(logging.handlers.QueueListener):
                         f"[async_logging] handler flush failed during drain: {exc!r}\n"
                     )
 
+    def stop_within(self, timeout: float) -> bool:
+        """Stop the listener, waiting at most ``timeout`` seconds in total.
+
+        Enqueues the stop sentinel (after every record already queued, so a
+        healthy listener drains them first) and joins the listener thread
+        with the remaining time. The stdlib ``stop()`` joins with no limit,
+        so one sink that never returns would block its caller forever.
+
+        Returns:
+            True when the listener thread has exited (or was never started);
+            False when the sentinel could not be queued or the thread is still
+            running at the deadline.
+        """
+        thread: Optional[threading.Thread] = getattr(self, "_thread", None)
+        if thread is None:
+            return True
+        deadline = time.monotonic() + timeout
+        try:
+            self._q.put(_SENTINEL, timeout=max(timeout, 0.0))
+        except queue.Full:
+            return False
+        thread.join(max(deadline - time.monotonic(), 0.0))
+        if thread.is_alive():
+            return False
+        setattr(self, "_thread", None)
+        return True
+
     def handle(self, record: logging.LogRecord) -> None:
         """Process a record, intercepting the flush-barrier marker.
 
@@ -455,10 +483,13 @@ def _report_shutdown_failure(context: str, exc: BaseException) -> None:
     A broken/replaced stderr stream must not itself violate this function's
     documented "never raises" contract, so the write is guarded too.
     """
+    _write_stderr(f"[async_logging] shutdown_queue_logging: {context}: {exc!r}\n")
+
+
+def _write_stderr(message: str) -> None:
+    """Write ``message`` to stderr, never through logging and never raising."""
     try:
-        sys.stderr.write(
-            f"[async_logging] shutdown_queue_logging: {context}: {exc!r}\n"
-        )
+        sys.stderr.write(message)
     except Exception:  # pragma: no cover - reporting is best-effort only
         pass
 
@@ -475,6 +506,11 @@ def shutdown_queue_logging(timeout: float = 5.0) -> None:
     _HIGH_SEVERITY_QUEUE_TIMEOUT_S blocking put -- this is the exact
     mechanism behind Bug #1820's ~50-minute test-suite near-stall.
 
+    Bounded: waits at most ``timeout`` seconds for the listener to drain and
+    exit. A sink that never returns leaves the listener thread running; a
+    warning goes to stderr (never through the queue) and the queue handler is
+    detached anyway, so shutdown always finishes.
+
     Non-fatal: never raises -- mirrors the lifespan belt-and-suspenders shutdown
     discipline so a logging-shutdown error cannot abort the remaining chain.
     """
@@ -484,9 +520,15 @@ def shutdown_queue_logging(timeout: float = 5.0) -> None:
     _active_listener = None
     if listener is not None:
         try:
-            listener.stop()
+            stopped = listener.stop_within(timeout)
         except Exception as exc:  # pragma: no cover - shutdown best-effort
-            _report_shutdown_failure("listener.stop() failed", exc)
+            _report_shutdown_failure("listener stop failed", exc)
+        else:
+            if not stopped:
+                _write_stderr(
+                    "[async_logging] WARNING: log queue listener did not stop "
+                    f"within {timeout}s; detaching the queue handler anyway\n"
+                )
 
     queue_handler = _active_queue_handler
     target = _active_target_logger
@@ -497,3 +539,28 @@ def shutdown_queue_logging(timeout: float = 5.0) -> None:
             target.removeHandler(queue_handler)
         except Exception as exc:  # pragma: no cover - shutdown best-effort
             _report_shutdown_failure("removeHandler() failed", exc)
+
+
+async def shutdown_queue_logging_off_loop(
+    timeout: float = 5.0,
+) -> "Optional[asyncio.CancelledError]":
+    """Run :func:`shutdown_queue_logging` in a worker thread.
+
+    The bounded join can wait up to ``timeout`` seconds, which must never
+    happen on the event loop. The await is shielded from anyio cancel scopes,
+    so a lifespan that is already being cancelled still shuts logging down. A
+    native cancellation arriving during the await is RETURNED rather than
+    raised (the shutdown still finishes in its thread), so the caller decides
+    whether it may replace an exception already ending the lifespan -- the
+    same contract as ``stop_stall_watchdog_on_exit``. Never raises.
+    """
+    import anyio
+
+    try:
+        with anyio.CancelScope(shield=True):
+            await anyio.to_thread.run_sync(shutdown_queue_logging, timeout)
+    except asyncio.CancelledError as cancelled:
+        return cancelled
+    except Exception as exc:  # pragma: no cover - shutdown best-effort
+        _report_shutdown_failure("off-loop shutdown failed", exc)
+    return None
