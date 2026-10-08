@@ -37,7 +37,7 @@ from ..query.filtered_search import (
     filtered_semantic_search,
     fts_filter_kwargs,
 )
-from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.logging_utils import format_error_log, public_error_message
 
 logger = logging.getLogger(__name__)
 
@@ -308,11 +308,18 @@ class MultiSearchService:
                     )
                 )
             except Exception as e:
-                errors[repo_id] = f"Search failed: {str(e)}"
+                # The response carries a fixed message; the detail (which
+                # can name on-disk paths) goes to the server log only.
+                errors[repo_id] = public_error_message(
+                    "Repository or index not found"
+                    if isinstance(e, FileNotFoundError)
+                    else "Search failed"
+                )
                 logger.error(
                     format_error_log(
                         "REPO-GENERAL-024", f"Search error for repo {repo_id}: {e}"
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Aggregate results with optional score filtering

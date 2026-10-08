@@ -1,10 +1,11 @@
 """Search failures are reported at the server front doors, never answered
-with an empty result.
+with an empty result, and never with internal detail in the body.
 
-REST ``/api/query``: a store failure answers 5xx, a search timeout 504 and a
-missing provider key an explicit 5xx error; a client validation error stays
-4xx. MCP ``search_code``: the same failures answer ``success: false`` with the
-error message.
+REST ``/api/query``: a store failure or a missing provider key answers 500
+with a fixed public message, a search timeout 504 with a fixed public
+message; a client validation error stays 4xx. MCP ``search_code``: the same
+failures answer ``success: false`` with the same fixed messages. The full
+failure detail reaches the server log only.
 
 Real route / handler, real SemanticQueryManager, SemanticSearchService and
 FilesystemVectorStore over a real git repo. Replaced: the embedding provider
@@ -16,6 +17,7 @@ does.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Iterator, Tuple
@@ -42,12 +44,26 @@ STORE_SEARCH = (
 PROVIDER_FACTORY = (
     "code_indexer.server.services.search_service.EmbeddingProviderFactory.create"
 )
-STORE_FAILURE = OSError("index storage is unavailable")
-MISSING_KEY = ValueError("VOYAGE_API_KEY environment variable is required")
+# Internal detail a failure may carry: it must reach the log, never a body.
+SENTINEL = "/srv/sentinel-internal-path/index"
+STORE_FAILURE = OSError(f"index storage is unavailable at {SENTINEL}")
+MISSING_KEY = ValueError(f"VOYAGE_API_KEY is required ({SENTINEL})")
+LOGGER_NAME = "code_indexer.server"
+CORRELATION_ID = "corr-2109-example"
 
 
 def _timeout() -> MultiIndexQueryTimeoutError:
-    return MultiIndexQueryTimeoutError(["code"], 5.0)
+    return MultiIndexQueryTimeoutError([SENTINEL], 5.0)
+
+
+def _logged(caplog: pytest.LogCaptureFixture) -> str:
+    """Every captured record's message plus its exception text."""
+    parts = []
+    for record in caplog.records:
+        parts.append(record.getMessage())
+        if record.exc_info and record.exc_info[1] is not None:
+            parts.append(repr(record.exc_info[1]))
+    return "\n".join(parts)
 
 
 @pytest.fixture(scope="module")
@@ -85,7 +101,7 @@ def rest(env: Tuple[Any, Path]) -> Iterator[TestClient]:
         app.dependency_overrides.pop(get_current_user, None)
 
 
-def _post(client: TestClient, **extra: Any) -> Any:
+def _post(client: TestClient, headers: Any = None, **extra: Any) -> Any:
     body: Dict[str, Any] = {
         "query_text": QUERY,
         "repository_alias": REPO_ALIAS,
@@ -93,7 +109,7 @@ def _post(client: TestClient, **extra: Any) -> Any:
         "search_mode": "semantic",
     }
     body.update(extra)
-    return client.post("/api/query", json=body)
+    return client.post("/api/query", json=body, headers=headers)
 
 
 # --------------------------------------------------------------------- REST
@@ -105,25 +121,33 @@ def test_rest_healthy_search_answers_200_with_results(rest) -> None:
     assert response.json()["results"], response.text
 
 
-def test_rest_store_failure_answers_5xx(rest) -> None:
+@pytest.mark.parametrize(
+    "target, failure, status, message",
+    [
+        (STORE_SEARCH, STORE_FAILURE, 500, "Search failed"),
+        (PROVIDER_FACTORY, MISSING_KEY, 500, "Search failed"),
+        (STORE_SEARCH, _timeout(), 504, "Search timed out"),
+    ],
+    ids=["store-failure", "missing-provider-key", "timeout"],
+)
+def test_rest_failure_body_holds_no_internal_detail_and_log_does(
+    rest, caplog, target, failure, status, message
+) -> None:
+    caplog.set_level(logging.ERROR, logger=LOGGER_NAME)
+    with patch(target, side_effect=failure):
+        response = _post(rest)
+    assert response.status_code == status, response.text
+    assert message in response.text
+    assert SENTINEL not in response.text
+    assert SENTINEL in _logged(caplog)
+
+
+def test_rest_failure_body_carries_the_request_correlation_id(rest) -> None:
     with patch(STORE_SEARCH, side_effect=STORE_FAILURE):
-        response = _post(rest)
-    assert response.status_code >= 500, response.text
-    assert "index storage is unavailable" in response.text
-
-
-def test_rest_search_timeout_answers_504(rest) -> None:
-    with patch(STORE_SEARCH, side_effect=_timeout()):
-        response = _post(rest)
-    assert response.status_code == 504, response.text
-    assert "timed out" in response.text
-
-
-def test_rest_missing_provider_key_answers_explicit_5xx(rest) -> None:
-    with patch(PROVIDER_FACTORY, side_effect=MISSING_KEY):
-        response = _post(rest)
-    assert response.status_code >= 500, response.text
-    assert "VOYAGE_API_KEY" in response.text
+        response = _post(rest, headers={"X-Correlation-ID": CORRELATION_ID})
+    assert response.status_code == 500, response.text
+    assert CORRELATION_ID in response.text
+    assert SENTINEL not in response.text
 
 
 def test_rest_client_validation_error_stays_4xx(rest) -> None:
@@ -175,22 +199,22 @@ def _mcp_body(
     return body
 
 
-def test_mcp_store_failure_answers_error(env, tmp_path) -> None:
+@pytest.mark.parametrize(
+    "target, failure, message",
+    [
+        (STORE_SEARCH, STORE_FAILURE, "Search failed"),
+        (PROVIDER_FACTORY, MISSING_KEY, "Search failed"),
+        (STORE_SEARCH, _timeout(), "Search timed out"),
+    ],
+    ids=["store-failure", "missing-provider-key", "timeout"],
+)
+def test_mcp_failure_body_holds_no_internal_detail_and_log_does(
+    env, tmp_path, caplog, target, failure, message
+) -> None:
     _, repo = env
-    body = _mcp_body(repo, tmp_path, STORE_SEARCH, STORE_FAILURE)
+    caplog.set_level(logging.ERROR, logger=LOGGER_NAME)
+    body = _mcp_body(repo, tmp_path, target, failure)
     assert body["success"] is False, body
-    assert "index storage is unavailable" in body["error"]
-
-
-def test_mcp_search_timeout_answers_timed_out_error(env, tmp_path) -> None:
-    _, repo = env
-    body = _mcp_body(repo, tmp_path, STORE_SEARCH, _timeout())
-    assert body["success"] is False, body
-    assert "timed out" in body["error"]
-
-
-def test_mcp_missing_provider_key_answers_error(env, tmp_path) -> None:
-    _, repo = env
-    body = _mcp_body(repo, tmp_path, PROVIDER_FACTORY, MISSING_KEY)
-    assert body["success"] is False, body
-    assert "VOYAGE_API_KEY" in body["error"]
+    assert message in body["error"], body
+    assert SENTINEL not in json.dumps(body)
+    assert SENTINEL in _logged(caplog)

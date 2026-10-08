@@ -103,6 +103,23 @@ def get_log_extra(error_code: str) -> Dict[str, Any]:
     return extra
 
 
+def public_error_message(message: str) -> str:
+    """
+    Return a fixed client-facing failure message, suffixed with the active
+    request's correlation id when there is one.
+
+    Front doors answer internal failures with this instead of exception
+    text; the full detail belongs in the server log only, where the
+    correlation id links the two.
+    """
+    from code_indexer.server.middleware.correlation import get_correlation_id
+
+    correlation_id = get_correlation_id()
+    if correlation_id:
+        return f"{message} (correlation id: {correlation_id})"
+    return message
+
+
 def inject_correlation_id(record: logging.LogRecord) -> None:
     """
     Populate ``record.correlation_id`` from the ambient request context,

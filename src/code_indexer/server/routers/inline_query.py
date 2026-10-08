@@ -28,7 +28,7 @@ from ..models.api_models import QueryResultItem
 from ..query.semantic_query_manager import SearchFailedError, SemanticQueryError
 from ...services.multi_index_query_service import MultiIndexQueryTimeoutError
 from ..auth import dependencies
-from ..logging_utils import format_error_log
+from ..logging_utils import format_error_log, public_error_message
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
@@ -1099,15 +1099,24 @@ def register_query_routes(
             raise access_control_unavailable_error(e)
 
         except MultiIndexQueryTimeoutError as e:
-            # #2109: the search ran out of time -- never a short answer.
+            # #2109: the search ran out of time -- never a short answer. The
+            # body is a fixed message; the detail goes to the server log.
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-037",
+                    f"Search timed out in unified search: {e}",
+                ),
+                exc_info=True,
+            )
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail=f"Search timed out: {e}",
+                detail=public_error_message("Search timed out"),
             )
 
         except SearchFailedError as e:
             # #2109: the search itself failed (storage, provider or
             # configuration) -- a server-side failure, not a bad request.
+            # The body is a fixed message; the detail goes to the server log.
             logger.error(
                 format_error_log(
                     "APP-GENERAL-037",
@@ -1117,7 +1126,7 @@ def register_query_routes(
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=str(e),
+                detail=public_error_message("Search failed"),
             )
 
         except SemanticQueryError as e:
@@ -1148,7 +1157,7 @@ def register_query_routes(
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Internal search error: {str(e)}",
+                detail=public_error_message("Search failed"),
             )
         finally:
             # Issue #1159: reset ctx and enqueue search event record.

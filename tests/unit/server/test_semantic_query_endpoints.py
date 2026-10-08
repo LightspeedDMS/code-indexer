@@ -416,7 +416,9 @@ class TestSemanticQueryEndpoint:
         assert response.status_code == 500
         data = response.json()
         assert "detail" in data
-        assert "search error" in data["detail"]
+        # A fixed public message; the exception text stays in the server log.
+        assert "Search failed" in data["detail"]
+        assert "Internal search error" not in data["detail"]
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")

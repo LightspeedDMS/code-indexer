@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.config_service import get_config_service
-from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.logging_utils import format_error_log, public_error_message
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
@@ -265,13 +265,17 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         response = service.search(request)
     except Exception as e:
-        logger.warning(
+        # The response carries a fixed message; the detail goes to the log.
+        logger.error(
             format_error_log(
                 "MCP-GENERAL-031",
                 f"MultiSearchService failed: {e}",
-            )
+            ),
+            exc_info=True,
         )
-        return _empty_omni_response(errors={"service_error": str(e)})
+        return _empty_omni_response(
+            errors={"service_error": public_error_message("Search failed")}
+        )
 
     category_map = _load_category_map("_omni_search_code")
     all_results = _flatten_multi_results(

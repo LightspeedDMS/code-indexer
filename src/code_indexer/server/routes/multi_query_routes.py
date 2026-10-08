@@ -11,7 +11,11 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import Optional, Dict, List, Any
 
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import (
+    format_error_log,
+    get_log_extra,
+    public_error_message,
+)
 
 from ..auth.dependencies import get_current_user
 from ..auth.user_manager import User
@@ -312,8 +316,10 @@ def multi_repository_query(
             extra=get_log_extra("WEB-GENERAL-030"),
             exc_info=True,
         )
+        # The body is a fixed message; the detail is in the log above.
         raise HTTPException(
-            status_code=500, detail=f"Multi-repository search failed: {str(e)}"
+            status_code=500,
+            detail=public_error_message("Multi-repository search failed"),
         )
 
 
