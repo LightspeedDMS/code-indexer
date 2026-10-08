@@ -1,0 +1,100 @@
+"""
+Ripgrep backend wiring helper for CIDX server startup.
+
+The ripgrep sibling of ``content_backend_wiring``. Builds the ``RipgrepBackend``
+that regex search runs through, selected by the ``ripgrep_backend`` server
+config field.
+
+Fail-fast policy (mirrors the git, clone and content wiring):
+- ``local``     : runs the binary in this container. The DEFAULT, so an unset or
+                  absent config behaves exactly as cidx does today.
+- ``delegated`` : the argv is executed by the service that owns the
+                  repositories. There is deliberately **no silent fallback**.
+- anything else : raises immediately, so a typo'd config cannot degrade into a
+                  surprising default.
+
+An image built for delegation may not ship the ripgrep binary at all, so a
+fallback would not quietly do the wrong thing -- it would fail at exec time,
+somewhere far from the configuration that caused it.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Optional
+
+from code_indexer.server.storage.shared.ripgrep_backend import (
+    RipgrepBackend,
+    RipgrepBackendFactory,
+)
+
+logger = logging.getLogger(__name__)
+
+VALID_RIPGREP_BACKENDS = ("local", "delegated")
+
+
+def build_ripgrep_backend(
+    config: Any,
+    *,
+    delegated_backend: Optional[RipgrepBackend] = None,
+    max_workers: int = 2,
+) -> RipgrepBackend:
+    """Build the RipgrepBackend configured by *config*.
+
+    ``config`` is read via ``getattr`` so a partial/bootstrap config still gets
+    the ``local`` default rather than an AttributeError.
+
+    Raises:
+        RuntimeError: if ``ripgrep_backend`` is unrecognised, or ``delegated``
+            was selected with no backend available.
+    """
+    backend_type = getattr(config, "ripgrep_backend", "local") or "local"
+
+    if backend_type not in VALID_RIPGREP_BACKENDS:
+        raise RuntimeError(
+            f"Unknown ripgrep_backend {backend_type!r}. "
+            f"Valid values are {VALID_RIPGREP_BACKENDS}."
+        )
+
+    if backend_type == "delegated":
+        if delegated_backend is None:
+            raise RuntimeError(
+                "ripgrep_backend='delegated' selected but no delegated backend "
+                "is available. Install a plugin registering a factory on the "
+                "code_indexer.ripgrep_backend entry point, or set "
+                "CIDX_RIPGREP_BACKEND='package.module:factory'. Refusing to "
+                "fall back to local ripgrep: an image built for delegation may "
+                "not ship the binary at all."
+            )
+        backend = RipgrepBackendFactory.create(
+            "delegated", delegated_backend=delegated_backend
+        )
+        logger.info("RipgrepBackend: using delegated backend")
+        return backend
+
+    backend = RipgrepBackendFactory.create("local", max_workers=max_workers)
+    logger.info("RipgrepBackend: using LocalRipgrepBackend (this container)")
+    return backend
+
+
+def build_configured_ripgrep_backend(
+    config: Any, *, max_workers: int = 2
+) -> RipgrepBackend:
+    """Resolve the delegated plugin (if any) and build the configured backend.
+
+    With ``ripgrep_backend`` unset/``local`` (the default) the plugin is never
+    imported or instantiated and a plain ``LocalRipgrepBackend`` is returned --
+    byte-for-byte the behaviour cidx has today.
+    """
+    # Imported lazily so the local-default path never imports the plugin seam.
+    from code_indexer.server.services.ripgrep_backend_plugin import (
+        resolve_delegated_ripgrep_backend,
+    )
+
+    backend_type = getattr(config, "ripgrep_backend", "local") or "local"
+    delegated = (
+        resolve_delegated_ripgrep_backend() if backend_type == "delegated" else None
+    )
+    return build_ripgrep_backend(
+        config, delegated_backend=delegated, max_workers=max_workers
+    )
