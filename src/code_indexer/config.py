@@ -1,5 +1,6 @@
 """Configuration management for Code Indexer."""
 
+from .utils.index_store import INDEX_DIRNAME, index_root
 import json
 import logging
 import os
@@ -765,7 +766,7 @@ class Config(BaseModel):
             ".next",
             ".nuxt",
             "dist-*",
-            ".code-indexer",
+            INDEX_DIRNAME,
         ],
         description="Directories to exclude from indexing",
     )
@@ -959,7 +960,7 @@ class ConfigCorruptionError(ValueError):
 class ConfigManager:
     """Manages configuration loading, saving, and validation."""
 
-    DEFAULT_CONFIG_PATH = Path(".code-indexer/config.json")
+    DEFAULT_CONFIG_PATH = index_root(Path(".")) / "config.json"
 
     # Daemon configuration defaults
     DAEMON_DEFAULTS = {
@@ -971,9 +972,29 @@ class ConfigManager:
         "eviction_check_interval_seconds": 60,
     }
 
-    def __init__(self, config_path: Optional[Path] = None):
+    def __init__(
+        self, config_path: Optional[Path] = None, project_root: Optional[Path] = None
+    ):
         self.config_path = config_path or self.DEFAULT_CONFIG_PATH
+        # The repository this config belongs to, when the caller knows it --
+        # discovery does: it found the config by asking the IndexStore about
+        # that very directory. See the project_root property.
+        self._project_root = project_root
         self._config: Optional[Config] = None
+
+    @property
+    def project_root(self) -> Path:
+        """The repository this config describes.
+
+        Recorded at discovery when known. Otherwise derived from the config's
+        own location -- ``<repo>/.code-indexer/config.json`` -- which is true
+        only while the IndexStore keeps the index inside the repository (the
+        local backend). A store that relocates it (content seam step 2) must
+        record the root instead; this is the ONE place that derivation lives.
+        """
+        if self._project_root is not None:
+            return self._project_root
+        return self.config_path.parent.parent
 
     def load(self) -> Config:
         """Load configuration from file or create default with dynamic path resolution."""
@@ -1011,12 +1032,11 @@ class ConfigManager:
                 path = Path(data["codebase_dir"])
                 if not path.is_absolute():
                     # If relative, resolve relative to config directory
-                    config_dir = self.config_path.parent.parent
-                    path = (config_dir / path).resolve()
+                    path = (self.project_root / path).resolve()
                 data["codebase_dir"] = str(path)
                 # Bug #1033: reconcile against actual config file location.
                 # On NFS clusters, nodes may mount the same share at different paths.
-                actual_dir = self.config_path.resolve().parent.parent
+                actual_dir = self.project_root.resolve()
                 if path.is_absolute() and actual_dir != path.resolve():
                     # Story #1082: the reconciliation (override) below is
                     # LOAD-BEARING and runs every load; only the WARNING is
@@ -1046,9 +1066,8 @@ class ConfigManager:
             # Config() defaults codebase_dir to Path(".") which is relative.
             # Resolve it against the project root (parent of .code-indexer/).
             if not self._config.codebase_dir.is_absolute():
-                config_dir = self.config_path.parent.parent
                 self._config.codebase_dir = (
-                    config_dir / self._config.codebase_dir
+                    self.project_root / self._config.codebase_dir
                 ).resolve()
         else:
             self._config = Config()
@@ -1260,7 +1279,7 @@ code-indexer index --clear
         # CRITICAL: Must stop at first match to support nested projects
         search_paths = [current] + list(current.parents)
         for path in search_paths:
-            config_path = path / ".code-indexer" / "config.json"
+            config_path = index_root(path) / "config.json"
             if config_path.exists():
                 # DEFENSIVE: Ensure we return immediately at first match
                 # This prevents any issues with continued searching
@@ -1303,7 +1322,7 @@ code-indexer index --clear
 
         # Walk up the directory tree looking for .code-indexer/config.json
         while current != current.parent:
-            config_dir = current / ".code-indexer"
+            config_dir = index_root(current)
             config_file = config_dir / "config.json"
 
             if config_file.exists():
@@ -1366,11 +1385,15 @@ code-indexer index --clear
             logger.debug(
                 f"Using CODEBASE_DIR environment variable override: {override_dir}"
             )
-            override_config_path = override_dir / ".code-indexer" / "config.json"
-            return cls(override_config_path)
+            override_config_path = index_root(override_dir) / "config.json"
+            return cls(override_config_path, project_root=override_dir)
 
         # CRITICAL: Use find_config_path which stops at first match
         config_path = cls.find_config_path(start_dir)
+        project_root: Optional[Path] = None
+        if config_path is not None:
+            # Which ancestor matched: the one whose index root holds this config.
+            project_root = cls._project_root_of(config_path, start_dir)
         if config_path is None:
             # If no config found, use default path from the start directory
             if start_dir:
@@ -1383,10 +1406,25 @@ code-indexer index --clear
                     import tempfile
 
                     start = Path(tempfile.gettempdir())
-            config_path = start / ".code-indexer" / "config.json"
+            config_path = index_root(start) / "config.json"
+            project_root = start
 
         # DEFENSIVE: Ensure we always return a ConfigManager with the first found config
-        return cls(config_path)
+        return cls(config_path, project_root=project_root)
+
+    @staticmethod
+    def _project_root_of(
+        config_path: Path, start_dir: Optional[Path]
+    ) -> Optional[Path]:
+        """The ancestor of ``start_dir`` whose index root holds ``config_path``."""
+        try:
+            current = start_dir if start_dir else Path.cwd()
+        except (FileNotFoundError, OSError):
+            return None
+        for path in [current] + list(current.parents):
+            if index_root(path) / "config.json" == config_path:
+                return path
+        return None
 
     @classmethod
     def load_verified_config(cls, target_dir: "Path") -> "Config":
@@ -1605,16 +1643,14 @@ code-indexer index --clear
         if daemon_config.get("socket_base"):
             socket_base = Path(daemon_config["socket_base"])
             ensure_socket_directory(socket_base, socket_mode)
-            repo_hash = generate_repo_hash(self.config_path.parent.parent)
+            repo_hash = generate_repo_hash(self.project_root)
             socket_path = socket_base / f"{repo_hash}.sock"
         else:
             # Use standard location
-            socket_path = generate_socket_path(
-                self.config_path.parent.parent, socket_mode
-            )
+            socket_path = generate_socket_path(self.project_root, socket_mode)
 
         # Create mapping file for debugging
-        create_mapping_file(self.config_path.parent.parent, socket_path)
+        create_mapping_file(self.project_root, socket_path)
 
         return socket_path
 

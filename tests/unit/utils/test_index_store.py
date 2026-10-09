@@ -372,6 +372,62 @@ def test_every_scip_cli_command_reads_the_stores_scip_dir(
     assert seen == [root / "scip"], f"{args[0]}: {seen}"
 
 
+# ── per-repo config and mode detection ─────────────────────────────────────
+
+
+def test_config_discovery_finds_the_config_in_the_store(elsewhere: Any) -> None:
+    from code_indexer.config import ConfigManager
+
+    repo, root = elsewhere
+    root.mkdir(parents=True)
+    (root / "config.json").write_text("{}")
+    (repo / "sub").mkdir()
+
+    manager = ConfigManager.create_with_backtrack(repo / "sub")
+
+    assert manager.config_path == root / "config.json"
+    assert manager.project_root == repo, "discovery did not record the repo"
+    assert ConfigManager.find_config_path(repo / "sub") == root / "config.json"
+
+
+def test_a_relative_codebase_dir_resolves_against_the_repo_not_the_store(
+    elsewhere: Any,
+) -> None:
+    """The reverse mapping config -> repo: with the index elsewhere, the old
+    config_path.parent.parent would land in the store, not the repository."""
+    from code_indexer.config import ConfigManager
+
+    repo, root = elsewhere
+    root.mkdir(parents=True)
+    (root / "config.json").write_text(json.dumps({"codebase_dir": "."}))
+
+    config = ConfigManager.create_with_backtrack(repo).load()
+
+    assert config.codebase_dir == repo.resolve()
+
+
+def test_mode_detection_finds_the_project_through_the_store(elsewhere: Any) -> None:
+    from code_indexer.mode_detection.command_mode_detector import (
+        CommandModeDetector,
+        find_project_root,
+    )
+
+    repo, root = elsewhere
+    root.mkdir(parents=True)
+    (repo / "deep").mkdir()
+
+    assert find_project_root(repo / "deep") == repo
+    assert CommandModeDetector(repo).config_dir == root
+
+
+def test_a_directly_built_manager_keeps_todays_layout(tmp_path: Path) -> None:
+    """No recorded root: the local backend's <repo>/.code-indexer/config.json."""
+    from code_indexer.config import ConfigManager
+
+    manager = ConfigManager(tmp_path / ".code-indexer" / "config.json")
+    assert manager.project_root == tmp_path
+
+
 if __name__ == "__main__":
     if "--write" in sys.argv:
         _BASELINE.write_text(json.dumps(scan(), indent=1, sort_keys=True) + "\n")
