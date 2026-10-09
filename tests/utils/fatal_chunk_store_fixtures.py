@@ -23,6 +23,9 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from code_indexer.server.services.embedding_stats_attribution import (
+    StatsAttribution,
+)
 from code_indexer.server.utils.index_command_layout import append_server_layout_args
 
 COLLECTION_NAME = "voyage-code-3"
@@ -201,7 +204,15 @@ def make_journal_path_a_directory(chunks_db: Path) -> Path:
 def run_server_index_child(repo_dir: Path) -> subprocess.CompletedProcess:
     """Run the exact server-context ``cidx index`` command line
     (``refresh_scheduler._index_source`` builds the same arguments)."""
-    args = append_server_layout_args(["cidx", "index", "--fts", "--progress-json"])
+    args = append_server_layout_args(
+        ["cidx", "index", "--fts", "--progress-json"],
+        attribution=StatsAttribution(
+            golden_repo_alias=f"{repo_dir.name}-global",
+            job_id="nojob:test",
+            node_id="node-a",
+            purpose="refresh",
+        ),
+    )
     return subprocess.run(
         cidx_child_command(args[1:]),
         cwd=repo_dir,

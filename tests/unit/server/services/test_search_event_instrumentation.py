@@ -140,7 +140,8 @@ def wire_config_service(monkeypatch):
     cfg.get_config.return_value.memory_retrieval_config.memory_retrieval_enabled = False
     cfg.get_config.return_value.rerank_config = None
     cfg.get_config.return_value.node_id = "test-node"
-    monkeypatch.setattr(sh.code_search, "get_config_service", lambda: cfg)
+    # code_search resolves the node id through the shared
+    # server/utils/runtime_node_id.py resolver (Story #2118).
     monkeypatch.setattr(sh.repo_search, "get_config_service", lambda: cfg)
     return cfg
 

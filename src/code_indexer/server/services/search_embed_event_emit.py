@@ -18,7 +18,6 @@ parentless background contexts still get a durable, non-null id.
 """
 
 import logging
-import socket
 import time
 import uuid
 from typing import Any, Optional
@@ -30,6 +29,7 @@ from code_indexer.server.services.governed_call import EmbeddingCacheMetadata
 from code_indexer.server.services.search_embed_event_writer import (
     SearchEmbedEventRecord,
 )
+from code_indexer.server.utils.runtime_node_id import resolve_runtime_node_id
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id,
 )
@@ -61,34 +61,6 @@ def clear_search_embed_event_writer() -> None:
     """Clear the process-level writer (lifespan shutdown / test isolation)."""
     global _search_embed_event_writer
     _search_embed_event_writer = None
-
-
-# ---------------------------------------------------------------------------
-# node_id resolution -- mirrors the stepwise lookup already duplicated at
-# mcp/handlers/search.py's SearchEventRecord construction site (Story #1159).
-# ---------------------------------------------------------------------------
-
-
-def _resolve_node_id() -> str:
-    """Stepwise node_id lookup -- never raises (getattr with defaults)."""
-    try:
-        from code_indexer.server.services.config_service import get_config_service
-
-        cfg_svc = get_config_service()
-        cfg_get = getattr(cfg_svc, "get_config", None)
-        cfg_obj = cfg_get() if callable(cfg_get) else None
-        node_id = str(getattr(cfg_obj, "node_id", "") or "")
-    except Exception as exc:  # noqa: BLE001 -- node_id must never break emission
-        logger.debug("emit_embed_event: config node_id lookup failed: %s", exc)
-        node_id = ""
-
-    if not node_id:
-        try:
-            node_id = socket.gethostname()
-        except OSError as exc:
-            logger.debug("emit_embed_event: gethostname() failed: %s", exc)
-            node_id = "unknown"
-    return node_id
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +106,7 @@ def emit_embed_event(
     record = SearchEmbedEventRecord(
         timestamp=time.time(),
         correlation_id=resolved_correlation_id,
-        node_id=_resolve_node_id(),
+        node_id=resolve_runtime_node_id(),
         provider=meta.provider or "",
         model=meta.model,
         config_digest=meta.config_digest,

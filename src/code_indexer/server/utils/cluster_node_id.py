@@ -80,3 +80,15 @@ def resolve_cluster_node_id(raw_config: Optional[Dict[str, Any]]) -> str:
     if isinstance(configured_node_id, str) and configured_node_id:
         return configured_node_id
     return f"{socket.gethostname()}-cidx"
+
+
+def resolve_server_config_node_id(server_config: Any) -> str:
+    """The same identity as ``resolve_cluster_node_id``, from a loaded
+    ``ServerConfig`` (``cluster`` is a bootstrap key read from config.json).
+
+    Used wherever a row must join to job ownership (``executing_node``):
+    telemetry and embedding_call_stats attribution (Story #2118)."""
+    cluster = getattr(server_config, "cluster", None)
+    return resolve_cluster_node_id(
+        {"cluster": {"node_id": cluster.node_id}} if cluster is not None else None
+    )

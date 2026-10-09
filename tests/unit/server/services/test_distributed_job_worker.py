@@ -59,7 +59,9 @@ class FakeRefreshScheduler:
     def __init__(self):
         self.refreshed_repos = []
 
-    def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
+    def execute_refresh_for_claimed_job(
+        self, alias, progress_callback=None, job_id=None
+    ):
         self.refreshed_repos.append(alias)
         return {"success": True, "alias": alias}
 
@@ -142,7 +144,9 @@ class TestProcessOneJob:
         )
 
         class FailingScheduler:
-            def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
+            def execute_refresh_for_claimed_job(
+                self, alias, progress_callback=None, job_id=None
+            ):
                 raise RuntimeError("git pull failed")
 
         worker = DistributedJobWorkerService(
@@ -308,7 +312,9 @@ class TestRefreshResultInterpretation:
         )
 
         class QuarantinedScheduler:
-            def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
+            def execute_refresh_for_claimed_job(
+                self, alias, progress_callback=None, job_id=None
+            ):
                 return {"success": False, "message": "integrity gate quarantined"}
 
         worker = DistributedJobWorkerService(
@@ -336,7 +342,9 @@ class TestRefreshResultInterpretation:
         )
 
         class ProgressReportingScheduler:
-            def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
+            def execute_refresh_for_claimed_job(
+                self, alias, progress_callback=None, job_id=None
+            ):
                 assert progress_callback is not None
                 progress_callback(42, phase="scip", detail="halfway")
                 return {"success": True}
@@ -367,7 +375,9 @@ class TestRefreshResultInterpretation:
             def __init__(self):
                 self.seen_callback = "unset"
 
-            def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
+            def execute_refresh_for_claimed_job(
+                self, alias, progress_callback=None, job_id=None
+            ):
                 self.seen_callback = progress_callback
                 return {"success": True}
 

@@ -39,7 +39,17 @@ logger = logging.getLogger(__name__)
 VALID_PROVIDERS = frozenset({"voyageai", "cohere"})
 VALID_CALL_TYPES = frozenset({"embed", "embed_multimodal", "rerank"})
 VALID_PURPOSES = frozenset(
-    {"index", "refresh", "query", "temporal", "key_test", "cache_shadow_audit"}
+    {
+        "index",
+        "refresh",
+        "query",
+        "temporal",
+        # Story #2118: contextual temporal calls made by a golden-repo REFRESH
+        # child, kept apart from registration-time "temporal" spend.
+        "temporal_refresh",
+        "key_test",
+        "cache_shadow_audit",
+    }
 )
 
 
@@ -58,7 +68,7 @@ class EmbeddingCallRecord:
     item_count: int
     token_count: int
     batch_size: int
-    purpose: str  # "index" | "refresh" | "query" | "temporal" | "key_test" | "cache_shadow_audit"
+    purpose: str  # see VALID_PURPOSES
     success: bool
     latency_ms: int
     occurred_at: float

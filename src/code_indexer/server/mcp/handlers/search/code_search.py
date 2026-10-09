@@ -14,12 +14,11 @@ Refactoring is tracked separately.
 """
 
 import logging
-import socket
 import time
 from typing import Any, Dict, Optional
 
 from code_indexer.server.auth.user_manager import User
-from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.utils.runtime_node_id import resolve_runtime_node_id
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
@@ -219,20 +218,7 @@ def search_code(
                     if isinstance(_results_payload, list):
                         _result_count = len(_results_payload)
 
-            # Stepwise node_id lookup — never raises (getattr with defaults).
-            _cfg_svc = get_config_service()
-            _cfg_get = getattr(_cfg_svc, "get_config", None)
-            _cfg_obj = _cfg_get() if callable(_cfg_get) else None
-            _node_id = str(getattr(_cfg_obj, "node_id", "") or "")
-            if not _node_id:
-                try:
-                    _node_id = socket.gethostname()
-                except OSError as _hn_exc:
-                    logger.debug(
-                        "search_code: socket.gethostname() failed, using 'unknown': %s",
-                        _hn_exc,
-                    )
-                    _node_id = "unknown"
+            _node_id = resolve_runtime_node_id()
 
             _record = SearchEventRecord(
                 timestamp=time.time(),

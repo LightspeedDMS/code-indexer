@@ -220,7 +220,7 @@ class TestPodPullRoundTrip:
 
         seen = {}
 
-        def add_executor(metadata, progress_callback):
+        def add_executor(metadata, progress_callback, job_id):
             seen.update(metadata)
             progress_callback(40, phase="index", detail="indexing")
             return {"success": True, "alias": metadata["alias"]}
@@ -273,7 +273,7 @@ class TestPodPullRoundTrip:
         claimer = DistributedJobClaimer(pool=_make_pool(table), node_id="node-2")
         ran = []
 
-        def _dispatch(md, pc):
+        def _dispatch(md, pc, job_id):
             ran.append(md)
             return {"ok": True}
 
@@ -428,7 +428,7 @@ class TestPodPullRoundTripRealSubmitBug1430:
 
         seen = {}
 
-        def add_executor(metadata, progress_callback):
+        def add_executor(metadata, progress_callback, job_id):
             seen.update(metadata)
             progress_callback(40, phase="index", detail="indexing")
             return {"success": True, "alias": metadata["alias"]}
@@ -501,7 +501,7 @@ class TestSetupMethodClearsMemoryPressureBug1448:
         table = _ClaimerJobsTable([row], now)
         claimer = DistributedJobClaimer(pool=_make_pool(table), node_id="node-1")
 
-        def add_executor(metadata, progress_callback):
+        def add_executor(metadata, progress_callback, job_id):
             return {"success": True, "alias": metadata["alias"]}
 
         loop = IndexJobClaimLoop(
@@ -544,7 +544,7 @@ class TestSetupMethodClearsMemoryPressureBug1448:
             table = _ClaimerJobsTable([row], datetime.now(timezone.utc))
             claimer = DistributedJobClaimer(pool=_make_pool(table), node_id="node-2")
 
-            def add_executor(metadata, progress_callback):
+            def add_executor(metadata, progress_callback, job_id):
                 return {"success": True, "alias": metadata["alias"]}
 
             loop = IndexJobClaimLoop(

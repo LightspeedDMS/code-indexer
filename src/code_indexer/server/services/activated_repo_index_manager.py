@@ -15,7 +15,12 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable, Tuple, cast
+from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable, Tuple, cast
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.embedding_stats_attribution import (
+        StatsAttribution,
+    )
 
 from code_indexer.config import Config
 
@@ -726,6 +731,23 @@ class ActivatedRepoIndexManager:
             ),
         }
 
+    @staticmethod
+    def _stats_attribution(repo_path: str) -> "StatsAttribution":
+        """Story #2118: attribution of an activated repo's `cidx index`
+        children. The repo directory is ``activated-repos/<user>/<alias>``;
+        these paths run without a job handle, so nojob:activated_repo_index
+        is recorded."""
+        from code_indexer.server.services.embedding_stats_attribution import (
+            build_server_stats_attribution,
+        )
+
+        return build_server_stats_attribution(
+            alias=Path(repo_path).name,
+            job_id=None,
+            site="activated_repo_index",
+            purpose="index",
+        )
+
     def _execute_semantic_indexing(
         self,
         repo_path: str,
@@ -757,7 +779,9 @@ class ActivatedRepoIndexManager:
             args = ["cidx", "index"]
             if clear:
                 args.append("--clear")
-            args = append_server_layout_args(args)
+            args = append_server_layout_args(
+                args, attribution=self._stats_attribution(repo_path)
+            )
             clear_start_time = time.time()
             result = self._run_subprocess_with_telemetry(
                 args,
@@ -896,7 +920,10 @@ class ActivatedRepoIndexManager:
 
             # Story #1488: server states the new-collection layout explicitly
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
-            args = append_server_layout_args(["cidx", "index", "--fts"])
+            args = append_server_layout_args(
+                ["cidx", "index", "--fts"],
+                attribution=self._stats_attribution(repo_path),
+            )
             if clear:
                 args.append("--clear")
 
@@ -939,7 +966,10 @@ class ActivatedRepoIndexManager:
 
             # Story #1488: server states the new-collection layout explicitly
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
-            args = append_server_layout_args(["cidx", "index", "--index-commits"])
+            args = append_server_layout_args(
+                ["cidx", "index", "--index-commits"],
+                attribution=self._stats_attribution(repo_path),
+            )
             if clear:
                 args.append("--clear")
 

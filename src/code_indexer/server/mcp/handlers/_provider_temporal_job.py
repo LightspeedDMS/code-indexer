@@ -13,9 +13,14 @@ be circular. By call time both modules are already fully loaded.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 from ._utils import golden_repo_write_lock_guard
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.embedding_stats_attribution import (
+        StatsAttribution,
+    )
 
 #: Mirrors repos.py's own _GLOBAL_SUFFIX (defined locally here -- _utils.py
 #: has no such name -- to avoid a needless cross-module dependency for a
@@ -54,7 +59,12 @@ def _resolve_provider_temporal_target(
 
 
 def _build_provider_temporal_env_and_cmd(
-    provider_name: str, clear: bool, repo_alias: str, kwargs: Dict[str, Any]
+    provider_name: str,
+    clear: bool,
+    repo_alias: str,
+    kwargs: Dict[str, Any],
+    *,
+    attribution: "StatsAttribution",
 ) -> Tuple[list, Dict[str, str]]:
     """Build the `cidx index --index-commits` command + subprocess env."""
     from .repos import (
@@ -85,6 +95,7 @@ def _build_provider_temporal_env_and_cmd(
         all_branches_gate_enabled=gate_on,
         alias=repo_alias,
         global_floor_date=floor_date,
+        attribution=attribution,
     )
     return cmd, env
 
@@ -119,6 +130,7 @@ def _run_and_finish_provider_temporal_index(
     repo_path: str,
     is_versioned: bool,
     kwargs: Dict[str, Any],
+    job_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the subprocess (under the caller's write lock) and build result."""
     from .repos import (
@@ -127,8 +139,23 @@ def _run_and_finish_provider_temporal_index(
         logger,
     )
 
+    # Story #2118: the base clone is golden_repos_dir/<alias> (submit_job
+    # consumes repo_alias for tracking, so it may be empty here).
+    from code_indexer.server.services.embedding_stats_attribution import (
+        build_server_stats_attribution,
+    )
+
     cmd, env = _build_provider_temporal_env_and_cmd(
-        provider_name, clear, repo_alias, kwargs
+        provider_name,
+        clear,
+        repo_alias,
+        kwargs,
+        attribution=build_server_stats_attribution(
+            alias=f"{Path(actual_path).name}{_GLOBAL_SUFFIX}",
+            job_id=job_id,
+            site="provider_temporal_index",
+            purpose="index",
+        ),
     )
     success, stdout_out, stderr_out = _run_provider_subprocess(
         cmd, actual_path, env, "temporal", ["temporal"], progress_callback
@@ -161,9 +188,13 @@ def _provider_temporal_index_job(
     provider_name: str,
     clear: bool = False,
     progress_callback=None,
+    job_id: Optional[str] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """Background job for per-provider temporal index (Story #641).
+
+    ``job_id`` is injected by BackgroundJobManager (it declares the name) and
+    recorded on the child's embedding_call_stats rows (Story #2118).
 
     Bug #1580 follow-up: holds the golden repo's write lock for its whole
     duration -- mover.py's TemporalLegacyMigrationScheduler relocates
@@ -199,4 +230,5 @@ def _provider_temporal_index_job(
             repo_path=repo_path,
             is_versioned=is_versioned,
             kwargs=kwargs,
+            job_id=job_id,
         )

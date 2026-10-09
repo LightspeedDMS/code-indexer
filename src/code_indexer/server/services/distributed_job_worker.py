@@ -130,6 +130,7 @@ class DistributedJobWorkerService:
             result = self._refresh_scheduler.execute_refresh_for_claimed_job(
                 repo_alias,
                 progress_callback=self._make_progress_callback(job_id),
+                job_id=job_id,
             )
             # Mirror BackgroundJobManager._execute_job's own interpretation
             # of the refresh result dict (Story #1586 Finding 2): a real

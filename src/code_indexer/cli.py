@@ -13,6 +13,7 @@ import time
 import threading
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Optional,
     Union,
     Callable,
@@ -24,6 +25,9 @@ from typing import (
 )
 
 import click
+
+if TYPE_CHECKING:
+    from .server.services.embedding_stats_attribution import StatsAttribution
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
@@ -2986,6 +2990,23 @@ def _install_embedding_stats_writer_for_index() -> None:
         EmbeddingStatsWriter.set_active(NoOpWriter())
 
 
+def _parse_stats_attribution_option(
+    ctx: click.Context, param: click.Parameter, value: Optional[str]
+) -> Optional["StatsAttribution"]:
+    """Click callback for `cidx index --stats-attribution` (Story #2118).
+
+    Parses at argument-parsing time, so a malformed value fails the run
+    (usage error, exit 2) before any provider call. No value: None."""
+    if value is None:
+        return None
+    from .server.services.embedding_stats_attribution import StatsAttribution
+
+    try:
+        return StatsAttribution.from_json(value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
+
+
 def reject_sharded_json_for_temporal(
     *, index_commits: bool, new_collection_layout: Optional[str]
 ) -> None:
@@ -3232,6 +3253,16 @@ def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
     "indexing delegates to a daemon. Every other provider setting (model, "
     "timeout, retries, ...) is left untouched.",
 )
+@click.option(
+    "--stats-attribution",
+    default=None,
+    hidden=True,
+    callback=_parse_stats_attribution_option,
+    help="Internal: JSON {golden_repo_alias, job_id, node_id, purpose} that "
+    "attributes every embedding call of this run in embedding_call_stats. "
+    "Stamped by the server on every `cidx index` it spawns; a malformed "
+    "value fails the run before any provider call.",
+)
 @click.pass_context
 @require_mode("local")
 def index(
@@ -3256,6 +3287,7 @@ def index(
     migrate_chunks_to_sqlite: bool = False,
     ignore_resume_state: bool = False,
     server_managed_provider_settings: bool = False,
+    stats_attribution=None,
 ):
     """Index the codebase for semantic search.
 
@@ -3372,6 +3404,15 @@ def index(
     # this covers plain semantic indexing too -- see the helper's
     # docstring).
     _install_embedding_stats_writer_for_index()
+    # Story #2118: attribute every embedding call of this run (already
+    # validated by the option callback). Process-wide, because the calls run
+    # on VectorCalculationManager pool threads.
+    if stats_attribution is not None:
+        from .server.services.embedding_call_instrumentation import (
+            set_process_default_attribution,
+        )
+
+        set_process_default_attribution(stats_attribution)
 
     # H2: When --progress-json is active, redirect the module-level console to
     # stderr so Rich human-readable output does not corrupt the JSON stream on stdout.

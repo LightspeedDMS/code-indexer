@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import threading
 import time
 from contextlib import contextmanager
 from typing import Awaitable, Callable, Iterator, Optional, TypeVar
 
 from code_indexer.server.services.embedding_call_stats import EmbeddingCallRecord
+from code_indexer.server.services.embedding_stats_attribution import StatsAttribution
 from code_indexer.server.services.embedding_stats_writer import EmbeddingStatsWriter
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,43 @@ T = TypeVar("T")
 _stats_purpose_override: "contextvars.ContextVar[Optional[str]]" = (
     contextvars.ContextVar("_stats_purpose_override", default=None)
 )
+
+
+_process_default_attribution: Optional[StatsAttribution] = None
+_process_default_attribution_lock = threading.Lock()
+
+
+def set_process_default_attribution(attribution: StatsAttribution) -> None:
+    """Install the PROCESS-WIDE default attribution (Story #2118).
+
+    Called once by a `cidx index` child from its ``--stats-attribution``
+    argument. Process-wide rather than a contextvar because the child's
+    embedding calls run on VectorCalculationManager pool threads."""
+    global _process_default_attribution
+    with _process_default_attribution_lock:
+        _process_default_attribution = attribution
+
+
+def clear_process_default_attribution() -> None:
+    """Remove the process-wide default attribution."""
+    global _process_default_attribution
+    with _process_default_attribution_lock:
+        _process_default_attribution = None
+
+
+#: The provider call sites' label for indexing work; it takes the
+#: attribution purpose.
+_GENERIC_INDEX_PURPOSE = "index"
+#: The contextual temporal embedder's label; in a refresh child it becomes
+#: _TEMPORAL_REFRESH_PURPOSE.
+_TEMPORAL_PURPOSE = "temporal"
+_REFRESH_PURPOSE = "refresh"
+_TEMPORAL_REFRESH_PURPOSE = "temporal_refresh"
+
+
+def _current_attribution() -> Optional[StatsAttribution]:
+    with _process_default_attribution_lock:
+        return _process_default_attribution
 
 
 @contextmanager
@@ -85,6 +124,27 @@ def _record_call(
     caught and logged -- callers rely on this NEVER raising.
     """
     try:
+        attribution = _current_attribution()
+        if attribution is not None:
+            # Explicit correlation args always win; the attribution fills
+            # only what the call site left unset. The generic indexing label
+            # "index" takes the attribution purpose ("index" or "refresh");
+            # in a REFRESH child the contextual temporal label "temporal"
+            # becomes "temporal_refresh", so refresh-time temporal spend is
+            # countable apart from registration-time temporal spend. Every
+            # other label ("query", "key_test", ...) is kept.
+            if golden_repo_alias is None:
+                golden_repo_alias = attribution.golden_repo_alias
+            if job_id is None:
+                job_id = attribution.job_id
+            if node_id is None:
+                node_id = attribution.node_id
+            if purpose == _GENERIC_INDEX_PURPOSE:
+                purpose = attribution.purpose
+            elif (
+                purpose == _TEMPORAL_PURPOSE and attribution.purpose == _REFRESH_PURPOSE
+            ):
+                purpose = _TEMPORAL_REFRESH_PURPOSE
         effective_purpose = _stats_purpose_override.get() or purpose
         record = EmbeddingCallRecord(
             provider=provider,

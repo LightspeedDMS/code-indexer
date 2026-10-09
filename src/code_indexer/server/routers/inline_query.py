@@ -417,9 +417,9 @@ def register_query_routes(
         if not _admission.allowed:
             raise_memory_pressure_http_error(_admission)
 
-        import socket
         import time
         from pathlib import Path as PathLib
+        from code_indexer.server.utils.runtime_node_id import resolve_runtime_node_id
         from code_indexer.server.services.search_event_context import (
             SearchEventContext,
             _search_event_ctx,
@@ -1168,19 +1168,7 @@ def register_query_routes(
             if _writer is not None and _search_succeeded:
                 try:
                     _total_ms = int((time.time() - start_time) * 1000)
-                    _cfg_svc = get_config_service()
-                    _cfg_get = getattr(_cfg_svc, "get_config", None)
-                    _cfg_obj = _cfg_get() if callable(_cfg_get) else None
-                    _node_id = str(getattr(_cfg_obj, "node_id", "") or "")
-                    if not _node_id:
-                        try:
-                            _node_id = socket.gethostname()
-                        except OSError as _hn_exc:
-                            logger.debug(
-                                "inline_query: socket.gethostname() failed, using 'unknown': %s",
-                                _hn_exc,
-                            )
-                            _node_id = "unknown"
+                    _node_id = resolve_runtime_node_id()
                     _record = SearchEventRecord(
                         timestamp=time.time(),
                         username=current_user.username,

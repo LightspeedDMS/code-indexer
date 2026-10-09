@@ -1759,6 +1759,7 @@ class RefreshScheduler:
         self,
         alias_name: str,
         progress_callback: Optional[Callable[..., None]] = None,
+        job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Perform the refresh WORK for a job that has ALREADY been claimed and
@@ -1790,6 +1791,8 @@ class RefreshScheduler:
                 detail=None) forwarded into _execute_refresh() so progress is
                 visible the same way a normally-submitted refresh job's
                 progress is.
+            job_id: The claimed background job's id, recorded on the
+                embedding_call_stats rows of this refresh (Story #2118).
 
         Returns:
             The same result dict _execute_refresh() returns
@@ -1804,6 +1807,7 @@ class RefreshScheduler:
             force_reset=False,
             progress_callback=progress_callback,
             tracked_by_caller=True,
+            job_id=job_id,
         )
 
     def get_refresh_interval(self) -> int:
@@ -2134,13 +2138,16 @@ class RefreshScheduler:
         # Bug #2012: declaring cancel_check makes BackgroundJobManager inject
         # its DB-backed check (sees a cancel issued on any worker or node),
         # which stops the indexing subprocesses and skips the publish.
-        def _refresh_worker(progress_callback=None, cancel_check=None):
+        # Story #2118: declaring job_id makes BackgroundJobManager inject this
+        # job's id, recorded on the embedding_call_stats rows of its children.
+        def _refresh_worker(progress_callback=None, cancel_check=None, job_id=None):
             return self._execute_refresh(
                 alias_name,
                 force_reset=force_reset,
                 progress_callback=progress_callback,
                 tracked_by_caller=True,
                 cancel_check=cancel_check,
+                job_id=job_id,
             )
 
         job_id: str = self.background_job_manager.submit_job(
@@ -2206,6 +2213,7 @@ class RefreshScheduler:
         progress_callback=None,
         tracked_by_caller: bool = False,
         cancel_check: Optional[Callable[[], bool]] = None,
+        job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Thin wrapper around _execute_refresh_impl(): times the call and
         records cidx.repos.refresh.duration via _record_refresh_duration_metric()
@@ -2235,6 +2243,7 @@ class RefreshScheduler:
                 progress_callback=progress_callback,
                 tracked_by_caller=tracked_by_caller,
                 cancel_check=cancel_check,
+                job_id=job_id,
             )
             _status = "success" if result.get("success") else "error"
             settle(result)
@@ -2257,6 +2266,7 @@ class RefreshScheduler:
         progress_callback=None,
         tracked_by_caller: bool = False,
         cancel_check: Optional[Callable[[], bool]] = None,
+        job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute refresh for a repository (called by BackgroundJobManager).
@@ -3069,6 +3079,7 @@ class RefreshScheduler:
                                 ),
                                 force_reconcile=force_reconcile,
                                 cancel_check=cancel_check,
+                                job_id=job_id,
                             )
                         except FatalChunkStoreIndexError as fatal_exc:
                             # Bug #2022: self-heal under the lock; stay failed.
@@ -3560,6 +3571,7 @@ class RefreshScheduler:
         force_reconcile: bool = False,
         orphan_event_callback: Optional[Any] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
+        job_id: Optional[str] = None,
     ) -> None:
         """
         Index the golden repo source in place (Story #229: index-source-first).
@@ -3618,13 +3630,26 @@ class RefreshScheduler:
         else:
             index_command = ["cidx", "index", "--fts", "--progress-json"]
 
+        from code_indexer.server.services.embedding_stats_attribution import (
+            build_server_stats_attribution,
+        )
         from code_indexer.server.utils.index_command_layout import (
             append_server_layout_args,
         )
 
+        # Story #2118: every child's embedding rows carry this alias, the
+        # refresh job (nojob:refresh_scheduler outside a job) and node.
+        stats_attribution = build_server_stats_attribution(
+            alias=alias_name,
+            job_id=job_id,
+            site="refresh_scheduler",
+            purpose="refresh",
+        )
         # Story #1488: server states the new-collection layout explicitly
         # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
-        index_command = append_server_layout_args(index_command)
+        index_command = append_server_layout_args(
+            index_command, attribution=stats_attribution
+        )
 
         # Step 2: Temporal indexing on source (if enabled and not local://)
         repo_info = self.registry.get_global_repo(alias_name)
@@ -3682,7 +3707,8 @@ class RefreshScheduler:
             # (CHUNKS_DB); append_server_layout_args imported above in this
             # method for the semantic command.
             temporal_command = append_server_layout_args(
-                ["cidx", "index", "--index-commits", "--progress-json"]
+                ["cidx", "index", "--index-commits", "--progress-json"],
+                attribution=stats_attribution,
             )
             logger.info(f"Temporal indexing enabled for {alias_name}")
 

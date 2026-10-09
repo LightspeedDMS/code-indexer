@@ -5,7 +5,29 @@ import subprocess
 
 import pytest
 
-from run_repro import REPO_ROOT, archive_tree, node_for_run, parse_node_sequence
+from run_repro import (
+    REPO_ROOT,
+    archive_tree,
+    index_command,
+    node_for_run,
+    parse_node_sequence,
+)
+
+
+@pytest.mark.parametrize("reconcile", [False, True])
+def test_index_command_stamps_a_refresh_attribution(reconcile):
+    """Story #2118: the server's `cidx index` command requires a stats
+    attribution; the harness builds it exactly as the refresh does."""
+    from code_indexer.server.services.embedding_stats_attribution import (
+        StatsAttribution,
+    )
+
+    argv = index_command(reconcile)
+
+    prefix = "--stats-attribution="
+    [token] = [t for t in argv if t.startswith(prefix)]
+    assert StatsAttribution.from_json(token[len(prefix) :]).purpose == "refresh"
+    assert ("--reconcile" in argv) is reconcile
 
 
 def _committed_version() -> str:

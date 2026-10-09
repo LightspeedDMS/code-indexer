@@ -2093,9 +2093,13 @@ def _provider_index_job(
     provider_name: str,
     clear: bool = False,
     progress_callback=None,
+    job_id: Optional[str] = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Background job worker for provider index add/recreate."""
+    """Background job worker for provider index add/recreate.
+
+    ``job_id`` is injected by BackgroundJobManager (it declares the name) and
+    recorded on the child's embedding_call_stats rows (Story #2118)."""
     import os
 
     if not repo_path or not provider_name:
@@ -2126,7 +2130,21 @@ def _provider_index_job(
 
     # Story #1488: server states the new-collection layout explicitly
     # (CHUNKS_DB) rather than inheriting the CLI/daemon SHARDED_JSON default.
-    cmd = append_server_layout_args(["cidx", "index", "--progress-json"])
+    from code_indexer.server.services.embedding_stats_attribution import (
+        build_server_stats_attribution,
+    )
+
+    # Story #2118: the base clone is golden_repos_dir/<alias> (submit_job
+    # consumes repo_alias for tracking, so it may be empty here).
+    cmd = append_server_layout_args(
+        ["cidx", "index", "--progress-json"],
+        attribution=build_server_stats_attribution(
+            alias=f"{Path(actual_path).name}-global",
+            job_id=job_id,
+            site="provider_index",
+            purpose="index",
+        ),
+    )
     if clear:
         cmd.append("--clear")
 

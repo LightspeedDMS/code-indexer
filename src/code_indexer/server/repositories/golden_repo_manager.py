@@ -764,7 +764,9 @@ class GoldenRepoManager:
         # lives in execute_add_golden_repo_work() so any pod's IndexJobClaimLoop
         # can run it from the job row's metadata. This thin wrapper preserves the
         # exact solo/local-pool path.
-        def background_worker(progress_callback=None) -> Dict[str, Any]:
+        # Story #2118: declaring job_id makes BackgroundJobManager inject this
+        # job's id, recorded on the embedding_call_stats rows of its children.
+        def background_worker(progress_callback=None, job_id=None) -> Dict[str, Any]:
             return self.execute_add_golden_repo_work(
                 repo_url=repo_url,
                 alias=alias,
@@ -773,6 +775,7 @@ class GoldenRepoManager:
                 temporal_options=temporal_options,
                 submitter_username=submitter_username,
                 progress_callback=progress_callback,
+                job_id=job_id,
             )
 
         # Submit to BackgroundJobManager. Pod-pull: pass reconstruction params
@@ -805,6 +808,7 @@ class GoldenRepoManager:
         temporal_options: Optional[Dict] = None,
         submitter_username: str,
         progress_callback: Optional[Callable[..., Any]] = None,
+        job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """reusable clone + index + register + global-activate body for
         add_golden_repo, extracted verbatim from the former background_worker
@@ -895,6 +899,7 @@ class GoldenRepoManager:
                     temporal_options=temporal_options,
                     progress_callback=progress_callback,
                     orphan_event_callback=_make_hnsw_orphan_event_logger(alias),
+                    job_id=job_id,
                 )
 
                 # Create golden repository record
@@ -2577,6 +2582,7 @@ class GoldenRepoManager:
         temporal_options: Optional[Dict] = None,
         progress_callback=None,
         orphan_event_callback: Optional[Any] = None,
+        job_id: Optional[str] = None,
     ) -> None:
         """
         Execute the required workflow after successful repository cloning.
@@ -2603,6 +2609,20 @@ class GoldenRepoManager:
         """
         logging.info(
             f"Executing post-clone workflow for {clone_path} (force_init={force_init})"
+        )
+
+        # Story #2118: the clone directory is golden_repos_dir/<alias>; every
+        # child of this registration is charged to that golden repo's global
+        # alias, the add job (nojob:golden_repo_add outside one), purpose index.
+        from code_indexer.server.services.embedding_stats_attribution import (
+            build_server_stats_attribution,
+        )
+
+        stats_attribution = build_server_stats_attribution(
+            alias=f"{Path(clone_path).name}-global",
+            job_id=job_id,
+            site="golden_repo_add",
+            purpose="index",
         )
 
         # Build init command with optional --force flag
@@ -2636,7 +2656,8 @@ class GoldenRepoManager:
             # Story #1488: server states the new-collection layout explicitly
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
             temporal_command = append_server_layout_args(
-                ["cidx", "index", "--index-commits", "--progress-json"]
+                ["cidx", "index", "--index-commits", "--progress-json"],
+                attribution=stats_attribution,
             )
 
             # Story #1404: global temporal indexing floor date, composed
@@ -2914,7 +2935,8 @@ class GoldenRepoManager:
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
             _run_popen_with_telemetry(
                 append_server_layout_args(
-                    ["cidx", "index", "--fts", "--progress-json"]
+                    ["cidx", "index", "--fts", "--progress-json"],
+                    attribution=stats_attribution,
                 ),
                 phase_name="semantic",
                 error_label="semantic+FTS indexing",
@@ -3691,10 +3713,38 @@ class GoldenRepoManager:
             # silently inherited the unsafe enabled default in postgres/
             # cluster mode. Merged via the shared resolver used by every
             # other server-side `cidx index` spawn site.
-            _cb_env = build_cidx_subprocess_env()
+            from code_indexer.server.services.config_service import (
+                get_config_service as _get_config_service_for_stats,
+            )
+            from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+                build_embedding_stats_child_env,
+            )
+
+            # Story #2118: the child needs CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR
+            # to write its attributed embedding_call_stats rows (as every
+            # other server `cidx index` spawn does).
+            _cb_env = build_cidx_subprocess_env(
+                build_embedding_stats_child_env(
+                    _get_config_service_for_stats().get_config()
+                )
+            )
             _cb_env.update(resolve_hnsw_sync_epoch_env_var())
+            from code_indexer.server.services.embedding_stats_attribution import (
+                build_server_stats_attribution,
+            )
+
+            # Story #2118: the base clone is golden_repos_dir/<alias>; a branch
+            # change re-index runs outside any job handle here.
             result = subprocess.run(
-                append_server_layout_args(["cidx", "index", "--fts"]),
+                append_server_layout_args(
+                    ["cidx", "index", "--fts"],
+                    attribution=build_server_stats_attribution(
+                        alias=f"{Path(base_clone_path).name}-global",
+                        job_id=None,
+                        site="golden_repo_change_branch",
+                        purpose="index",
+                    ),
+                ),
                 cwd=base_clone_path,
                 capture_output=True,
                 text=True,
@@ -4433,8 +4483,20 @@ class GoldenRepoManager:
                     f"Invalid index_type: {index_type}. Must be one of: {', '.join(valid_index_types)}"
                 )
 
-        def background_worker(progress_callback=None) -> Dict[str, Any]:
+        def background_worker(progress_callback=None, job_id=None) -> Dict[str, Any]:
             """Execute add index operations in a single background thread with write lock + CoW."""
+            from code_indexer.server.services.embedding_stats_attribution import (
+                build_server_stats_attribution,
+            )
+
+            # Story #2118: declaring job_id makes BackgroundJobManager inject
+            # this job's id; every child is charged to it, purpose index.
+            stats_attribution = build_server_stats_attribution(
+                alias=f"{alias}-global",
+                job_id=job_id,
+                site="golden_repo_add_index",
+                purpose="index",
+            )
             # Acquire write lock (Bug #473 Fix 1)
             scheduler = getattr(self, "_refresh_scheduler", None)
             lock_acquired = False
@@ -4596,7 +4658,8 @@ class GoldenRepoManager:
                         )
 
                         command = append_server_layout_args(
-                            ["cidx", "index", "--clear", "--progress-json"]
+                            ["cidx", "index", "--clear", "--progress-json"],
+                            attribution=stats_attribution,
                         )
                         _run_with_popen_progress(
                             command,
@@ -4620,7 +4683,8 @@ class GoldenRepoManager:
                         )
 
                         command = append_server_layout_args(
-                            ["cidx", "index", "--rebuild-fts-index"]
+                            ["cidx", "index", "--rebuild-fts-index"],
+                            attribution=stats_attribution,
                         )
                         from code_indexer.storage.shared.hnsw_sync_state import (
                             resolve_hnsw_sync_epoch_env_var as _resolve_fts_hnsw_epoch,
@@ -4629,7 +4693,18 @@ class GoldenRepoManager:
                         # Bug #1575 Part C independent re-review: this
                         # spawn previously never set
                         # CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV at all.
-                        _fts_env = build_cidx_subprocess_env()
+                        # Story #2118: same stats bootstrap env as every
+                        # other attributed `cidx index` child.
+                        from code_indexer.server.services.config_service import (
+                            get_config_service as _get_cfg_for_fts_stats,
+                        )
+                        from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+                            build_embedding_stats_child_env as _fts_stats_env,
+                        )
+
+                        _fts_env = build_cidx_subprocess_env(
+                            _fts_stats_env(_get_cfg_for_fts_stats().get_config())
+                        )
                         _fts_env.update(_resolve_fts_hnsw_epoch())
                         result = subprocess.run(
                             command,
@@ -4693,7 +4768,8 @@ class GoldenRepoManager:
                                 "--index-commits",
                                 *_clear_flags,
                                 "--progress-json",
-                            ]
+                            ],
+                            attribution=stats_attribution,
                         )
 
                         max_commits = temporal_options.get("max_commits")

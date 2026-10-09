@@ -503,6 +503,7 @@ class TestSubmitRefreshJobForceReset:
             progress_callback=None,
             tracked_by_caller=True,
             cancel_check=None,
+            job_id=None,
         )
 
     def test_submit_job_passes_force_reset_false_in_lambda(
@@ -552,6 +553,7 @@ class TestSubmitRefreshJobForceReset:
             progress_callback=None,
             tracked_by_caller=True,
             cancel_check=None,
+            job_id=None,
         )
 
     def test_submit_job_default_force_reset_is_false(
@@ -595,4 +597,5 @@ class TestSubmitRefreshJobForceReset:
             progress_callback=None,
             tracked_by_caller=True,
             cancel_check=None,
+            job_id=None,
         )

@@ -91,12 +91,23 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
 
 def index_command(reconcile: bool) -> List[str]:
     """The server's ``cidx index`` refresh command (``append_server_layout_args``)."""
+    from code_indexer.server.services.embedding_stats_attribution import (
+        StatsAttribution,
+    )
     from code_indexer.server.utils.index_command_layout import append_server_layout_args
 
     base = ["cidx", "index", "--fts", "--progress-json"]
     if reconcile:
         base.insert(3, "--reconcile")
-    return list(append_server_layout_args(base))
+    # Story #2118: the server stamps every refresh child with an attribution
+    # (the harness has no server node or job; fixed values identify it).
+    attribution = StatsAttribution(
+        golden_repo_alias="reembed-repro-global",
+        job_id="nojob:reembed_repro",
+        node_id="reembed-repro",
+        purpose="refresh",
+    )
+    return list(append_server_layout_args(base, attribution=attribution))
 
 
 def kind_for(argv: List[str]) -> str:

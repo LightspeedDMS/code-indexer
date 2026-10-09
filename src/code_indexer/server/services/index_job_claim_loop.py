@@ -30,8 +30,12 @@ logger = logging.getLogger(__name__)
 # progress_callback(progress: int, phase: Optional[str], detail: Optional[str])
 # routes to the shared background_jobs row so a work-stolen job (PR #1424 H2)
 # reports incremental progress cross-node instead of a 0 -> 100 jump.
+#: op_type -> executor(metadata, progress_callback, job_id). job_id is the
+#: CLAIMED row's id: the executor records it on its children's
+#: embedding_call_stats rows (Story #2118), never nojob:*.
 DispatchTable = Dict[
-    str, Callable[[Dict[str, Any], Callable[..., Any]], Optional[Dict[str, Any]]]
+    str,
+    Callable[[Dict[str, Any], Callable[..., Any], str], Optional[Dict[str, Any]]],
 ]
 
 
@@ -177,7 +181,7 @@ class IndexJobClaimLoop:
                 job_id,
                 op_type,
             )
-            result = executor(metadata, self._make_progress_callback(job_id))
+            result = executor(metadata, self._make_progress_callback(job_id), job_id)
             self._claimer.complete_job(job_id, result)
             logger.info("IndexJobClaimLoop: completed %s", job_id)
         except Exception as exc:  # noqa: BLE001 — surface as job failure
