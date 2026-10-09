@@ -517,6 +517,14 @@ def initialize_services() -> Dict[str, Any]:
 
     _git_backend = build_configured_git_backend(server_config)
 
+    # Content seam, same shape: the golden-repo manager has to know whether the
+    # repositories are on this pod (local) or with workspace-mcp (delegated).
+    from code_indexer.server.startup.content_backend_wiring import (
+        build_configured_content_backend,
+    )
+
+    _content_backend = build_configured_content_backend(server_config)
+
     golden_repo_manager = GoldenRepoManager(
         data_dir=data_dir,
         resource_config=server_config.resource_config,
@@ -525,6 +533,7 @@ def initialize_services() -> Dict[str, Any]:
             _backend_registry.golden_repo_metadata if _backend_registry else None
         ),
         git_backend=_git_backend,
+        content_backend=_content_backend,
     )
     if _backend_registry is not None:
         golden_repo_manager._global_repos_backend = _backend_registry.global_repos

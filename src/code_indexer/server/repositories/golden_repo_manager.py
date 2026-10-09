@@ -49,6 +49,10 @@ from code_indexer.server.logging_utils import (
     strip_url_credentials,
 )
 from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
+from code_indexer.server.storage.shared.content_backend import (
+    ContentBackend,
+    LocalContentBackend,
+)
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from code_indexer.utils.git_runner import run_git_command
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
@@ -393,6 +397,12 @@ class GoldenRepoManager:
         None  # RefreshScheduler (existing, re-declared for clarity)
     )
     _snapshot_manager: Optional[Any] = None  # VersionedSnapshotManager (Story #1034)
+    # Content seam. A class-level default as well as the __init__ parameter: an
+    # instance built without __init__ (object.__new__, as many tests do) must
+    # still mean "the repository is on this pod" -- today's behaviour -- rather
+    # than an AttributeError. LocalContentBackend is stateless, so sharing it
+    # is safe.
+    _content_backend: ContentBackend = LocalContentBackend()
 
     def __init__(
         self,
@@ -401,6 +411,7 @@ class GoldenRepoManager:
         db_path: Optional[str] = None,
         storage_backend: Optional[Any] = None,
         git_backend: Optional[GitBackend] = None,
+        content_backend: Optional[ContentBackend] = None,
     ):
         """
         Initialize golden repository manager.
@@ -412,6 +423,11 @@ class GoldenRepoManager:
             git_backend: EVO-64678 git seam. Defaults to LocalGitBackend (git run
                 in-process), i.e. exactly today's behavior; the server injects the
                 configured backend via build_git_backend() at startup.
+            content_backend: the content seam. Defaults to LocalContentBackend
+                (the repository is on this pod's disk). A delegated backend means
+                the clone lives with the service that owns the files, and only
+                the repository's index state lives here -- see
+                _clone_for_delegated_content.
 
         Raises:
             ValueError: If data_dir is None or empty
@@ -422,6 +438,9 @@ class GoldenRepoManager:
         # EVO-64678: all git runs through this seam. Default local => no behavior change.
         self._git_backend: GitBackend = (
             git_backend if git_backend is not None else LocalGitBackend()
+        )
+        self._content_backend: ContentBackend = (
+            content_backend if content_backend is not None else LocalContentBackend()
         )
 
         self.data_dir = data_dir
@@ -2421,12 +2440,86 @@ class GoldenRepoManager:
         """
         clone_path = os.path.join(self.golden_repos_dir, alias)
 
+        if not self._content_backend.is_local:
+            return self._clone_for_delegated_content(repo_url, clone_path, branch)
+
         # For local repositories, use regular copying (NO CoW for golden repo registration)
         if self._is_local_path(repo_url):
             return self._clone_local_repository_with_regular_copy(repo_url, clone_path)
 
         # For remote repositories, use regular git clone
         return self._clone_remote_repository(repo_url, clone_path, branch)
+
+    def _clone_for_delegated_content(
+        self, repo_url: str, clone_path: str, branch: Optional[str]
+    ) -> str:
+        """Register a repository whose files this pod does not hold.
+
+        Under a delegated content backend the repository lives with the service
+        that owns the files: git-mcp clones it there (the git seam), and every
+        read goes through workspace-mcp. This pod keeps only the repository's
+        index state, which today still sits at ``<clone_path>/.code-indexer``
+        (the local IndexStore), so ``clone_path`` is created here as an
+        index-state directory -- it never holds the repository.
+
+        Refused rather than degraded:
+
+        * a local git backend -- the clone would land on THIS pod's disk, where
+          the content backend never looks, and the index would come out empty;
+        * a local source that is not already at ``clone_path`` -- copying it
+          means reading this pod's disk, which a delegated pod may not have.
+
+        The clone must be visible THROUGH the content backend before indexing
+        starts: git-mcp and workspace-mcp can be different NFS clients, so a
+        clone git-mcp reports done can still be briefly missing for the reader.
+        """
+        if self._is_local_path(repo_url):
+            source = (
+                repo_url[len("file://") :]
+                if repo_url.startswith("file://")
+                else repo_url
+            )
+            if os.path.normpath(source) != os.path.normpath(clone_path):
+                raise GitOperationError(
+                    "content_backend='delegated': a local source can only be "
+                    "registered in place (already provisioned at "
+                    f"{clone_path!r}); copying {repo_url!r} would read this "
+                    "pod's disk"
+                )
+        else:
+            if isinstance(self._git_backend, LocalGitBackend):
+                raise GitOperationError(
+                    "content_backend='delegated' needs git_backend='delegated': "
+                    "a local clone would land on this pod, where the content "
+                    "backend never reads, and the index would come out empty"
+                )
+            self._clone_remote_repository(repo_url, clone_path, branch)
+        self._await_clone_visible_through_content_backend(clone_path)
+        os.makedirs(clone_path, exist_ok=True)
+        return clone_path
+
+    def _await_clone_visible_through_content_backend(
+        self, clone_path: str, *, attempts: int = 100, delay_seconds: float = 0.1
+    ) -> None:
+        """Block until the content backend can list *clone_path*.
+
+        The delegated twin of _await_clone_path_locally_visible: one page of
+        one entry is enough to prove the reader sees the repository. Bounded --
+        raises rather than hangs, and the last error says why.
+        """
+        last_exc: Optional[Exception] = None
+        for _ in range(max(1, attempts)):
+            try:
+                self._content_backend.manifest(clone_path, page_size=1)
+                return
+            except Exception as exc:  # the backend's transport, whatever it is
+                last_exc = exc
+                time.sleep(delay_seconds)
+        raise GitOperationError(
+            f"Cloned repository never became visible through the content "
+            f"backend at {clone_path!r} after {attempts} attempts "
+            f"(~{delay_seconds * attempts:.1f}s): {last_exc}"
+        )
 
     def _is_local_path(self, repo_url: str) -> bool:
         """
