@@ -112,3 +112,55 @@ class TestContentBackendStamp:
             return_value=service,
         ):
             assert append_server_layout_args(["cidx", "index"]) == self._BASE
+
+
+class TestGitBackendStamp:
+    """The git selection travels to the child the same way.
+
+    On a pod that does not hold the repository the child must ask git-mcp for
+    HEAD's commit and branch; without the flag it records "unknown", and
+    refresh then re-indexes every cycle.
+    """
+
+    _BASE = [
+        "cidx",
+        "index",
+        "--new-collection-layout=chunks_db",
+        "--ignore-resume-state",
+        "--server-managed-provider-settings",
+    ]
+
+    def test_local_stamps_nothing(self) -> None:
+        assert (
+            append_server_layout_args(
+                ["cidx", "index"], content_backend="local", git_backend="local"
+            )
+            == self._BASE
+        )
+
+    def test_delegated_git_stamps_its_flag(self) -> None:
+        assert append_server_layout_args(
+            ["cidx", "index"], content_backend="local", git_backend="delegated"
+        ) == [*self._BASE, "--git-backend=delegated"]
+
+    def test_both_delegated_stamp_content_then_git(self) -> None:
+        assert append_server_layout_args(
+            ["cidx", "index"], content_backend="delegated", git_backend="delegated"
+        ) == [*self._BASE, "--content-backend=delegated", "--git-backend=delegated"]
+
+    def test_unset_reads_the_server_config(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        service = SimpleNamespace(
+            get_config=lambda: SimpleNamespace(
+                content_backend="delegated", git_backend="delegated"
+            )
+        )
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service",
+            return_value=service,
+        ):
+            result = append_server_layout_args(["cidx", "index"])
+
+        assert result[-2:] == ["--content-backend=delegated", "--git-backend=delegated"]

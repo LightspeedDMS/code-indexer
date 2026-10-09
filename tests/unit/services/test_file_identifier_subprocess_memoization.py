@@ -117,9 +117,19 @@ class TestFileIdentifierSubprocessMemoization:
 
         call_log: List[list] = []
 
-        with patch(
-            "code_indexer.services.file_identifier.run_git_command",
-            side_effect=_make_fake_runner(call_log),
+        fake_runner = _make_fake_runner(call_log)
+        # Branch and commit are read by services.git_head (shared with
+        # GitDetectionService); file_identifier's own runner stays patched as
+        # the trap for a reintroduced per-file hash-object subprocess.
+        with (
+            patch(
+                "code_indexer.services.file_identifier.run_git_command",
+                side_effect=fake_runner,
+            ),
+            patch(
+                "code_indexer.services.git_head.run_git_command",
+                side_effect=fake_runner,
+            ),
         ):
             identifier.get_file_metadata(file_a)
             identifier.get_file_metadata(file_b)
@@ -164,10 +174,20 @@ class TestFileIdentifierSubprocessMemoization:
         expected_branch = "feature-branch"
         expected_commit = "cafebabecafebabecafebabecafebabe12345678"
 
-        with patch(
-            "code_indexer.services.file_identifier.run_git_command",
-            side_effect=_make_fake_runner(
-                call_log, branch=expected_branch, commit=expected_commit
+        fake_runner = _make_fake_runner(
+            call_log, branch=expected_branch, commit=expected_commit
+        )
+        # Branch and commit are read by services.git_head (shared with
+        # GitDetectionService); file_identifier's own runner stays patched as
+        # the trap for a reintroduced per-file hash-object subprocess.
+        with (
+            patch(
+                "code_indexer.services.file_identifier.run_git_command",
+                side_effect=fake_runner,
+            ),
+            patch(
+                "code_indexer.services.git_head.run_git_command",
+                side_effect=fake_runner,
             ),
         ):
             meta_a = identifier.get_file_metadata(file_a)

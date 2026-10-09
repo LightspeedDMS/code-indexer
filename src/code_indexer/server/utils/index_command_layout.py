@@ -52,6 +52,9 @@ from typing import List, Optional
 from code_indexer.server.startup.content_backend_wiring import (
     configured_content_backend_name,
 )
+from code_indexer.server.startup.git_backend_wiring import (
+    configured_git_backend_name,
+)
 
 #: The explicit server-context layout arg. Single `--opt=value` token so it
 #: is a single, greppable list element that Click parses identically to the
@@ -70,9 +73,17 @@ SERVER_MANAGED_PROVIDER_SETTINGS_ARG = "--server-managed-provider-settings"
 #: ever stamped for ``delegated``; ``local`` is the child's own default.
 SERVER_DELEGATED_CONTENT_BACKEND_ARG = "--content-backend=delegated"
 
+#: The same for git: a child on a pod that does not hold the repository must
+#: ask git-mcp for HEAD's commit and branch, or it records "unknown" -- and
+#: refresh then sees a stale index every cycle and re-indexes from scratch.
+SERVER_DELEGATED_GIT_BACKEND_ARG = "--git-backend=delegated"
+
 
 def append_server_layout_args(
-    cmd: List[str], *, content_backend: Optional[str] = None
+    cmd: List[str],
+    *,
+    content_backend: Optional[str] = None,
+    git_backend: Optional[str] = None,
 ) -> List[str]:
     """Return a NEW command list with the explicit CHUNKS_DB new-collection
     layout arg, the resume-state-distrust arg, the
@@ -85,15 +96,19 @@ def append_server_layout_args(
         content_backend: The server's content-backend selection. ``None``
             (every production caller) reads it from the server config, so a
             spawn site cannot forget to pass it.
+        git_backend: The server's git-backend selection, read the same way.
 
     Returns:
         A new list equal to ``cmd`` with ``--new-collection-layout=chunks_db``,
         ``--ignore-resume-state``, ``--server-managed-provider-settings`` and,
-        for ``delegated`` only, ``--content-backend=delegated`` appended, in
-        that order. The input list is not mutated.
+        for ``delegated`` only, ``--content-backend=delegated`` and
+        ``--git-backend=delegated`` appended, in that order. The input list is
+        not mutated.
     """
     if content_backend is None:
         content_backend = configured_content_backend_name()
+    if git_backend is None:
+        git_backend = configured_git_backend_name()
     stamped = [
         *cmd,
         SERVER_NEW_COLLECTION_LAYOUT_ARG,
@@ -102,4 +117,6 @@ def append_server_layout_args(
     ]
     if content_backend == "delegated":
         stamped.append(SERVER_DELEGATED_CONTENT_BACKEND_ARG)
+    if git_backend == "delegated":
+        stamped.append(SERVER_DELEGATED_GIT_BACKEND_ARG)
     return stamped

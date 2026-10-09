@@ -187,6 +187,7 @@ smoke:
       tests/unit/indexing/test_manifest_pass_lifetime.py
       tests/unit/indexing/test_delegated_pod_has_no_local_repo.py
       tests/unit/server/repositories/test_golden_repo_delegated_content.py
+      tests/unit/services/test_index_git_seam.py
       tests/unit/global_repos/test_refresh_git_seam_mountless.py
       tests/unit/global_repos/test_reclone_mountless.py
       tests/unit/server/startup/test_ripgrep_backend_wiring.py

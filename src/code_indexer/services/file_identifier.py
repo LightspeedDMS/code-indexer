@@ -18,6 +18,7 @@ from ..config import Config
 from ..utils.git_runner import run_git_command, is_git_repository
 from ..indexing.repo_manifest import RepoManifest
 from ..utils.blob_hash import git_blob_hash, git_blob_hash_bytes
+from .git_head import read_head_branch, read_head_commit
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class FileIdentifier:
         project_dir: Path,
         config: Optional[Config] = None,
         manifest: Optional["RepoManifest"] = None,
+        git_backend: Optional[Any] = None,
     ):
         """
         Initialize FileIdentifier with project directory and optional configuration.
@@ -48,6 +50,9 @@ class FileIdentifier:
                 from it and the file is NOT opened to hash it -- on the
                 golden-repos NFS mount that is one round trip per file removed.
                 None keeps the read, so every existing caller is unchanged.
+            git_backend: the git seam (git-mcp) for a repository this machine
+                does not hold. HEAD's branch and commit are asked of it, and the
+                repository counts as git-addressable. None keeps local git.
         """
         self._manifest = manifest
 
@@ -61,6 +66,11 @@ class FileIdentifier:
         # the hashes it is holding -- found by running the seam on EKS, where
         # every hash came back None while the backend was answering perfectly.
         if manifest is not None:
+            self.git_available = True
+        # Likewise a git backend: git-mcp answers for the repository whether or
+        # not this machine can see a .git directory.
+        self._git_backend = git_backend
+        if git_backend is not None:
             self.git_available = True
         self._project_id: Optional[str] = None
         # Issue #676: Memoized per-run invariants — branch and commit hash do not
@@ -84,7 +94,11 @@ class FileIdentifier:
         self._manifest = manifest
         # Same reason as in __init__: attaching a manifest makes the repository
         # git-addressable, and detaching one restores the local probe's answer.
-        self.git_available = True if manifest is not None else self._detect_git()
+        self.git_available = (
+            True
+            if manifest is not None or self._git_backend is not None
+            else self._detect_git()
+        )
 
     def _detect_git(self) -> bool:
         """
@@ -270,17 +284,13 @@ class FileIdentifier:
     def _get_cached_branch(self) -> Optional[str]:
         """Return the current branch name, fetched exactly once per FileIdentifier instance.
 
-        Branch and commit still come from LOCAL git, and under a delegated
-        backend there may be no local checkout -- spawning git with a cwd that
-        does not exist raises FileNotFoundError from the spawn itself, not
-        CalledProcessError, so it used to escape. Those paths now degrade to
-        "unknown" the same way a failing git command does. The blob hash, which
-        is what seeds a chunk's identity, comes from the manifest and is
-        unaffected.
+        Asked of the git backend when one was given (a pod that does not hold
+        the repository asks git-mcp), else of local git -- see
+        ``services.git_head``. A failure degrades to "unknown".
 
         Issue #676: the branch is invariant for the duration of an indexing run.
         After the first call the result is memoized; subsequent calls return the
-        cached value without spawning a subprocess.
+        cached value without asking again.
 
         Returns:
             Branch name string (e.g. "development"), a "detached-<sha>" synthetic
@@ -288,36 +298,7 @@ class FileIdentifier:
             when git is not available.
         """
         if self._cached_branch is None and self.git_available:
-            try:
-                result = run_git_command(
-                    ["git", "branch", "--show-current"],
-                    cwd=self.project_dir,
-                )
-                branch_name = result.stdout.strip()
-                if branch_name:
-                    self._cached_branch = branch_name
-                else:
-                    # Empty output means detached HEAD — derive synthetic name from short hash
-                    try:
-                        result = run_git_command(
-                            ["git", "rev-parse", "--short", "HEAD"],
-                            cwd=self.project_dir,
-                        )
-                        self._cached_branch = f"detached-{result.stdout.strip()}"
-                    except (subprocess.CalledProcessError, OSError) as exc:
-                        logger.debug(
-                            "Could not resolve detached HEAD short hash in %s: %s",
-                            self.project_dir,
-                            exc,
-                        )
-                        self._cached_branch = "unknown"
-            except (subprocess.CalledProcessError, OSError) as exc:
-                logger.debug(
-                    "git branch --show-current failed in %s: %s; falling back to 'unknown'",
-                    self.project_dir,
-                    exc,
-                )
-                self._cached_branch = "unknown"
+            self._cached_branch = read_head_branch(self.project_dir, self._git_backend)
         return self._cached_branch
 
     def _get_cached_commit_hash(self) -> Optional[str]:
@@ -325,27 +306,16 @@ class FileIdentifier:
 
         Issue #676: the commit hash is invariant for the duration of an indexing run.
         After the first call the result is memoized (including failure: stored as
-        "unknown") so subsequent calls never spawn a subprocess.
+        "unknown") so subsequent calls never ask again.
 
         Returns:
             Full 40-character commit hash string, "unknown" when the git command
             fails, or None when git is not available.
         """
         if self._cached_commit_hash is None and self.git_available:
-            try:
-                result = run_git_command(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=self.project_dir,
-                )
-                self._cached_commit_hash = result.stdout.strip()
-            except (subprocess.CalledProcessError, OSError) as exc:
-                # Memoize failure as "unknown" so subsequent calls skip the subprocess
-                logger.debug(
-                    "git rev-parse HEAD failed in %s: %s; memoizing as 'unknown'",
-                    self.project_dir,
-                    exc,
-                )
-                self._cached_commit_hash = "unknown"
+            self._cached_commit_hash = read_head_commit(
+                self.project_dir, self._git_backend
+            )
         return self._cached_commit_hash
 
     def _get_git_metadata(

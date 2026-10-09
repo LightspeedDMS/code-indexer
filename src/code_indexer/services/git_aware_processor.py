@@ -32,6 +32,7 @@ class GitAwareDocumentProcessor(DocumentProcessor):
         embedding_provider: EmbeddingProvider,
         vector_store_client: Any,  # FilesystemVectorStore (vector store backend)
         content_backend: Optional[Any] = None,  # ContentBackend
+        git_backend: Optional[Any] = None,  # GitBackend, for HEAD's commit/branch
     ):
         super().__init__(config, embedding_provider, vector_store_client)
 
@@ -54,8 +55,16 @@ class GitAwareDocumentProcessor(DocumentProcessor):
         # unconditional: it always rebuilds.
         self.manifest_pass_open = False
 
-        self.file_identifier = FileIdentifier(config.codebase_dir, config)
-        self.git_detection = GitDetectionService(config.codebase_dir, config)
+        # The git seam: on a pod that does not hold the repository, HEAD's commit
+        # and branch come from git-mcp -- otherwise every chunk and the index
+        # metadata record "unknown", and refresh re-indexes every cycle.
+        self.git_backend = git_backend
+        self.file_identifier = FileIdentifier(
+            config.codebase_dir, config, git_backend=git_backend
+        )
+        self.git_detection = GitDetectionService(
+            config.codebase_dir, config, git_backend=git_backend
+        )
 
     def begin_manifest_pass(self) -> None:
         """Build the manifest describing the repository as it is RIGHT NOW.

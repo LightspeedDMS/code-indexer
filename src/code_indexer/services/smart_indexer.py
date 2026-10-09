@@ -116,9 +116,14 @@ class SmartIndexer(HighThroughputProcessor):
         vector_store_client: Any,  # FilesystemVectorStore (vector store backend)
         metadata_path: Path,
         content_backend: Optional[Any] = None,  # ContentBackend
+        git_backend: Optional[Any] = None,  # GitBackend
     ):
         super().__init__(
-            config, embedding_provider, vector_store_client, content_backend
+            config,
+            embedding_provider,
+            vector_store_client,
+            content_backend,
+            git_backend=git_backend,
         )
         self.progressive_metadata = ProgressiveMetadata(metadata_path)
 

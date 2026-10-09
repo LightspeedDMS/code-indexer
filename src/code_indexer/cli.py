@@ -3256,6 +3256,17 @@ def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
     "code_indexer.content_backend entry point), and fails rather than falling "
     "back to the disk. Stamped by the server on the commands it spawns.",
 )
+@click.option(
+    "--git-backend",
+    type=click.Choice(["local", "delegated"]),
+    default="local",
+    hidden=True,
+    help="Internal: who answers git questions about the repository (HEAD's "
+    "commit and branch, recorded in the index). 'local' (default) runs git "
+    "here. 'delegated' asks the git-backend plugin the server is configured "
+    "with (git-mcp), for a repository this machine does not hold. Stamped by "
+    "the server on the commands it spawns.",
+)
 @click.pass_context
 @require_mode("local")
 def index(
@@ -3281,6 +3292,7 @@ def index(
     ignore_resume_state: bool = False,
     server_managed_provider_settings: bool = False,
     content_backend: str = "local",
+    git_backend: str = "local",
 ):
     """Index the codebase for semantic search.
 
@@ -4563,12 +4575,18 @@ def index(
             if content_backend == "local"
             else _build_index_content_backend(content_backend)
         )
+        # Same rule for git: None keeps local git; delegated fails here, before
+        # any work, if the plugin is missing.
+        repo_git_backend = (
+            None if git_backend == "local" else _build_index_git_backend(git_backend)
+        )
         smart_indexer = SmartIndexer(
             config,
             embedding_provider,
             vector_store_client,
             metadata_path,
             content_backend=repo_content_backend,
+            git_backend=repo_git_backend,
         )
 
         # Get git status and display
@@ -5002,6 +5020,7 @@ def index(
                 _extra_client,
                 _extra_metadata,
                 content_backend=repo_content_backend,
+                git_backend=repo_git_backend,
             )
             _extra_stats = _extra_indexer.smart_index(
                 force_full=clear,
@@ -5062,6 +5081,13 @@ def index(
         # EVERY exit path (normal return, sys.exit -> SystemExit, or any
         # exception) so it is never leaked past the mutation lifecycle.
         _index_mutation_lock_ctx.__exit__(None, None, None)
+
+
+def _build_index_git_backend(backend_type: str) -> Any:
+    """Build the git backend ``cidx index --git-backend`` selected."""
+    from .server.startup.git_backend_wiring import build_named_git_backend
+
+    return build_named_git_backend(backend_type)
 
 
 def _build_index_content_backend(backend_type: str) -> Any:
