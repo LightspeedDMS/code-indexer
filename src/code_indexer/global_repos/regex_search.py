@@ -46,6 +46,7 @@ from code_indexer.server.services.subprocess_executor import (
     SubprocessExecutor,
     ExecutionStatus,
 )
+from code_indexer.utils.index_store import INDEX_DIRNAME
 
 logger = logging.getLogger(__name__)
 
@@ -460,10 +461,9 @@ def _maybe_trigger_lazy_index_build(repo_path: Path) -> None:
 
     def _run() -> None:
         try:
-            from .trigram_index_manager import TrigramIndexManager
+            from .trigram_index_manager import TrigramIndexManager, trigram_index_dir
 
-            index_dir = repo_path / ".code-indexer" / "trigram_index"
-            n = TrigramIndexManager(index_dir).build(repo_path)
+            n = TrigramIndexManager(trigram_index_dir(repo_path)).build(repo_path)
             logger.info("lazy trigram index build complete for %s (%d files)", key, n)
         except Exception as exc:  # never let the background build crash the server
             logger.warning("lazy trigram index build failed for %s: %s", key, exc)
@@ -1380,11 +1380,10 @@ class RegexSearchService:
             from .trigram_index_manager import (
                 TrigramIndexManager,
                 _run_with_thread_watchdog,
+                trigram_index_dir,
             )
 
-            index = TrigramIndexManager(
-                self.repo_path / ".code-indexer" / "trigram_index"
-            )
+            index = TrigramIndexManager(trigram_index_dir(self.repo_path))
             if not index.exists(timeout_seconds=_remaining_budget()):
                 # No compatible index (missing or stale/old-format). Self-heal in
                 # the background so later searches are pre-filtered; this one
@@ -1544,7 +1543,7 @@ class RegexSearchService:
                     cmd.extend(["-g", f"!{normalized}"])
 
         # Always exclude CIDX internal directories (Bug #158)
-        cmd.extend(["-g", "!.code-indexer/**"])
+        cmd.extend(["-g", f"!{INDEX_DIRNAME}/**"])
         cmd.extend(["-g", "!.git/**"])
 
         if candidate_files is not None:
@@ -1857,7 +1856,7 @@ class RegexSearchService:
             # the caller's excludes with the same two hardcoded patterns so
             # every engine agrees.
             combined_exclude_patterns = list(exclude_patterns or [])
-            combined_exclude_patterns.extend([".code-indexer/**", ".git/**"])
+            combined_exclude_patterns.extend([f"{INDEX_DIRNAME}/**", ".git/**"])
 
             # Write glob config to temp file
             config = {
@@ -2290,7 +2289,7 @@ class RegexSearchService:
         for root, _dirs, files in os.walk(search_path):
             # Skip internal directories
             rel_root = os.path.relpath(root, search_path)
-            if rel_root.startswith(".code-indexer") or rel_root.startswith(".git"):
+            if rel_root.startswith(INDEX_DIRNAME) or rel_root.startswith(".git"):
                 continue
 
             for fname in files:
@@ -2604,7 +2603,7 @@ class RegexSearchService:
         # No glob filters: preserve grep's direct recursive fast path.
         cmd = self._build_grep_command(pattern, case_sensitive, context_lines, True)
         # Always exclude CIDX internal directories (Bug #158)
-        cmd.extend(["--exclude-dir", ".code-indexer"])
+        cmd.extend(["--exclude-dir", INDEX_DIRNAME])
         cmd.extend(["--exclude-dir", ".git"])
         cmd.append(str(search_path))
 

@@ -31,6 +31,7 @@ from enum import Enum
 from pathlib import Path
 
 from code_indexer.server.utils.index_command_layout import append_server_layout_args
+from code_indexer.utils.index_store import index_root
 from code_indexer.server.services.index_freshness import (
     build_commit_is_current,
     record_build_commit,
@@ -92,7 +93,7 @@ def fts_index_present(repo_path: Path) -> bool:
     ``smart_indexer``'s own existing-index check -- an empty ``tantivy_index/``
     directory (e.g. a stale mktemp) does NOT count as built.
     """
-    return (repo_path / ".code-indexer" / FTS_INDEX_DIRNAME / _FTS_MARKER).exists()
+    return (index_root(repo_path) / FTS_INDEX_DIRNAME / _FTS_MARKER).exists()
 
 
 def fts_backfill_skip_present(repo_path: Path) -> bool:
@@ -102,7 +103,7 @@ def fts_backfill_skip_present(repo_path: Path) -> bool:
     the backfill discovery so a permanently file-less repo is not re-attempted every
     tick. A successful rebuild clears it, so the mark never wrongly sticks.
     """
-    return (repo_path / ".code-indexer" / _SKIP_MARKER).exists()
+    return (index_root(repo_path) / _SKIP_MARKER).exists()
 
 
 def _combined_output(result: "subprocess.CompletedProcess[str]") -> str:
@@ -212,7 +213,7 @@ def ensure_fts_index(
             maintenance backfill sweep passes a bounded value so one stuck repo
             can't wedge a tick. A ``TimeoutExpired`` becomes a ``FAILED`` outcome.
     """
-    ci = repo_path / ".code-indexer"
+    ci = index_root(repo_path)
 
     # Present is not enough to skip: an index built at a commit the clone has moved
     # past answers queries with content that no longer exists. Short-circuiting on
