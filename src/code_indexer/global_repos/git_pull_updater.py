@@ -13,11 +13,14 @@ from typing import Optional, Union
 
 from .git_error_classifier import GitFetchError
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
-from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
+from code_indexer.server.storage.shared.git_backend import (
+    GitBackend,
+    LocalGitBackend,
+    head_branch,
+)
 from code_indexer.utils.subprocess_diagnostics import (
     DEFAULT_DIAGNOSTIC_MAX_CHARS,
     format_called_process_error_diagnostic as _format_called_process_diagnostic,
-    format_completed_process_diagnostic as _format_subprocess_failure_diagnostic,
 )
 from .update_strategy import UpdateStrategy
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
@@ -254,58 +257,38 @@ class GitPullUpdater(UpdateStrategy):
                 )
 
             # Detect detached HEAD (e.g. repo pinned to a tag or specific commit).
-            # git symbolic-ref -q HEAD returns rc=0 on a branch, rc!=0 when detached.
-            # A detached/pinned ref is immutable for refresh purposes — skip the
+            # A detached/pinned ref is immutable for refresh purposes -- skip the
             # upstream comparison entirely and return False gracefully.
-            # EVO-64678: deliberately NOT routed through the git seam. The seam's
-            # symbolic_ref(short=False) runs `git symbolic-ref HEAD` — WITHOUT the
-            # `-q` that suppresses git's "ref HEAD is not a symbolic ref" stderr on
-            # a detached HEAD, which is exactly the case this check exists to
-            # detect. Swapping it would change the emitted command and its stderr.
-            symbolic_ref_result = subprocess.run(
-                ["git", "symbolic-ref", "-q", "HEAD"],
-                cwd=str(self.repo_path),
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if symbolic_ref_result.returncode != 0:
+            # Through the git seam: run on this pod, these two commands fail on
+            # a pod that does not hold the repository, and the failure used to
+            # read as "detached" -- refresh then never pulled. head_branch()
+            # reports ONLY a real detached HEAD as None and raises otherwise.
+            if head_branch(self._git_backend, str(self.repo_path), timeout=10) is None:
                 logger.info(
                     f"Skipping remote-change check for {self.repo_path}: "
                     "HEAD is detached (pinned tag or commit). Nothing to pull."
                 )
                 return False
 
-            # Check for commits on remote not in local using HEAD..@{upstream}
-            # EVO-64678: left raw — the git seam has no `git log` method, and no
-            # existing method reproduces `log HEAD..@{upstream} --oneline`
-            # (rev_list_count() counts commits but emits a different command and
-            # cannot report the per-commit lines logged below).
-            log_result = subprocess.run(
-                ["git", "log", "HEAD..@{upstream}", "--oneline"],
-                cwd=str(self.repo_path),
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            if log_result.returncode != 0:
+            # Commits on the remote not in local: HEAD..@{upstream}.
+            try:
+                behind = self._git_backend.rev_list_count(
+                    str(self.repo_path), "HEAD..@{upstream}", timeout=30
+                )
+            except subprocess.CalledProcessError as e:
                 # Bug #1832: name exit code + both streams, not stderr alone.
                 raise RuntimeError(
-                    f"Git log command failed for {self.repo_path}: "
-                    f"{_format_subprocess_failure_diagnostic(log_result)}"
-                )
+                    f"Git upstream comparison (rev-list HEAD..@{{upstream}}) failed for {self.repo_path}: "
+                    f"{_format_called_process_diagnostic(e)}"
+                ) from e
 
-            # If there's any output, there are remote commits to pull
-            has_remote_changes = bool(log_result.stdout.strip())
-
-            if has_remote_changes:
+            if behind:
                 logger.info(
                     f"Remote changes detected for {self.repo_path}: "
-                    f"{redact_url_credentials(len(log_result.stdout.strip().splitlines()))} commit(s) to pull"
+                    f"{behind} commit(s) to pull"
                 )
 
-            return has_remote_changes
+            return behind > 0
 
         except GitFetchError:
             raise

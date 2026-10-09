@@ -64,7 +64,11 @@ from code_indexer.server.services.metadata_reader import (
     read_status,
 )
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
-from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
+from code_indexer.server.storage.shared.git_backend import (
+    GitBackend,
+    LocalGitBackend,
+    head_branch,
+)
 from code_indexer.server.storage.shared.nfs_visibility import (
     _configured_visibility_timeout,
     wait_for_nfs_visibility,
@@ -2762,25 +2766,18 @@ class RefreshScheduler:
                             # pulling.  If the clone was switched to a wrong branch by any previous
                             # operation, reset it now so we don't perpetuate the contamination.
                             try:
-                                # EVO-64678: deliberately NOT routed through the
-                                # git seam. `branch --show-current` prints an
-                                # EMPTY line with rc=0 on a detached HEAD, and
-                                # the comparison below relies on that (empty
-                                # current_branch => no checkout). The seam's
-                                # current_branch()/symbolic_ref() run
-                                # `symbolic-ref --short HEAD`, which instead
-                                # FAILS on a detached HEAD -- that would abort
-                                # the whole verification block via the outer
-                                # handler. Different command, different
-                                # semantics: left raw.
-                                branch_result = subprocess.run(
-                                    ["git", "branch", "--show-current"],
-                                    cwd=master_path,
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=10,
+                                # Through the git seam; a detached HEAD is "" (no
+                                # checkout below), exactly as `branch
+                                # --show-current` printed it. Run on this pod,
+                                # the raw command found no repository on a
+                                # mount-less pod and the check silently did
+                                # nothing.
+                                current_branch = (
+                                    head_branch(
+                                        self._git_backend, master_path, timeout=10
+                                    )
+                                    or ""
                                 )
-                                current_branch = branch_result.stdout.strip()
                                 default_branch = repo_info.get("default_branch")
                                 try:
                                     db_path = str(
@@ -2803,26 +2800,18 @@ class RefreshScheduler:
 
                                 if not default_branch:
                                     try:
-                                        # EVO-64678: left raw. The seam's
-                                        # symbolic_ref() hardcodes the HEAD ref;
-                                        # it cannot express
-                                        # `refs/remotes/origin/HEAD`.
-                                        symref_result = subprocess.run(
-                                            [
-                                                "git",
-                                                "symbolic-ref",
-                                                "--short",
-                                                "refs/remotes/origin/HEAD",
-                                            ],
-                                            cwd=master_path,
-                                            capture_output=True,
-                                            text=True,
+                                        # Through the git seam: `rev-parse
+                                        # --abbrev-ref origin/HEAD` names the
+                                        # same ref as `symbolic-ref --short
+                                        # refs/remotes/origin/HEAD`.
+                                        ref = self._git_backend.rev_parse(
+                                            master_path,
+                                            "--abbrev-ref",
+                                            "origin/HEAD",
                                             timeout=10,
                                         )
-                                        if symref_result.returncode == 0:
-                                            ref = symref_result.stdout.strip()
-                                            if ref.startswith("origin/"):
-                                                default_branch = ref[len("origin/") :]
+                                        if ref.startswith("origin/"):
+                                            default_branch = ref[len("origin/") :]
                                     except Exception as e:
                                         logger.debug(
                                             "git symbolic-ref fallback failed for %s: %s",
@@ -4708,12 +4697,10 @@ class RefreshScheduler:
             return False
 
         try:
-            head_result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=source_path,
-                capture_output=True,
-                text=True,
-                timeout=10,
+            # Through the git seam: on a mount-less pod the raw command found
+            # no repository, so this signal never fired there.
+            actual_commit = self._git_backend.rev_parse(
+                str(source_path), "HEAD", timeout=10
             )
         except Exception as e:
             logger.debug(
@@ -4724,10 +4711,6 @@ class RefreshScheduler:
             )
             return False
 
-        if head_result.returncode != 0:
-            return False
-
-        actual_commit = head_result.stdout.strip()
         if not actual_commit:
             return False
 

@@ -118,11 +118,6 @@ _DUAL_FORM_VERBS = {
 # mutating forms -- the assertion below re-checks each call against the
 # classifier, so `git remote show` being listed cannot smuggle in `git remote add`.
 ALLOWED_READS = {
-    ("global_repos/git_pull_updater.py", "symbolic-ref"),
-    ("global_repos/git_pull_updater.py", "log"),
-    ("global_repos/refresh_scheduler.py", "branch"),
-    ("global_repos/refresh_scheduler.py", "symbolic-ref"),
-    ("global_repos/refresh_scheduler.py", "rev-parse"),
     ("server/services/git_operations_service.py", "config"),
     ("server/services/golden_repo_reconciler.py", "rev-parse"),
     ("server/services/cidx_meta_backup/branch_detect.py", "remote"),

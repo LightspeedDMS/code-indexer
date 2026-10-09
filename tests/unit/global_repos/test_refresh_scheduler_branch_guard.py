@@ -149,7 +149,7 @@ class TestBranchGuardWrongBranch:
         checkout_calls = []
 
         def fake_subprocess_run(cmd, **kwargs):
-            if cmd == ["git", "branch", "--show-current"]:
+            if cmd == ["git", "symbolic-ref", "--short", "HEAD"]:
                 # Report we are on 'develop' instead of 'main'
                 return _proc(returncode=0, stdout="develop")
             if cmd == ["git", "checkout", "main"]:
@@ -226,7 +226,7 @@ class TestBranchGuardCorrectBranch:
         checkout_calls = []
 
         def fake_subprocess_run(cmd, **kwargs):
-            if cmd == ["git", "branch", "--show-current"]:
+            if cmd == ["git", "symbolic-ref", "--short", "HEAD"]:
                 # Already on main — no checkout needed
                 return _proc(returncode=0, stdout="main")
             if cmd[:2] == ["git", "checkout"]:
@@ -304,7 +304,7 @@ class TestBranchGuardCheckoutFailure:
         }
 
         def fake_subprocess_run(cmd, **kwargs):
-            if cmd == ["git", "branch", "--show-current"]:
+            if cmd == ["git", "symbolic-ref", "--short", "HEAD"]:
                 return _proc(returncode=0, stdout="develop")
             if cmd == ["git", "checkout", "main"]:
                 # Simulate checkout failure
@@ -405,9 +405,9 @@ class TestBranchGuardDefaultBranch:
         checkout_calls = []
 
         def fake_subprocess_run(cmd, **kwargs):
-            if cmd == ["git", "branch", "--show-current"]:
+            if cmd == ["git", "symbolic-ref", "--short", "HEAD"]:
                 return _proc(returncode=0, stdout="feature/something")
-            if cmd == ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]:
+            if cmd == ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]:
                 # All fallbacks exhausted — symbolic-ref returns empty
                 return _proc(returncode=0, stdout="")
             if cmd[:2] == ["git", "checkout"]:
