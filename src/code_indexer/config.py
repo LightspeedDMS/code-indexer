@@ -1263,28 +1263,36 @@ code-indexer index --clear
         Returns:
             Path to config.json if found, None otherwise
         """
-        # Safely get current working directory with fallback
+        found = ConfigManager._discover(start_dir)
+        return found[0] if found else None
+
+    @staticmethod
+    def _search_start(start_dir: Optional[Path] = None) -> Path:
+        """Where discovery starts: ``start_dir``, else the cwd, else the temp dir."""
         if start_dir:
-            current = start_dir
-        else:
-            try:
-                current = Path.cwd()
-            except (FileNotFoundError, OSError):
-                # Working directory deleted - use temp directory as fallback
-                import tempfile
+            return Path(start_dir)
+        try:
+            return Path.cwd()
+        except (FileNotFoundError, OSError):
+            # Working directory deleted - use temp directory as fallback
+            import tempfile
 
-                current = Path(tempfile.gettempdir())
+            return Path(tempfile.gettempdir())
 
-        # Walk up the directory tree looking for .code-indexer/config.json
+    @staticmethod
+    def _discover(start_dir: Optional[Path] = None) -> Optional[Tuple[Path, Path]]:
+        """``(config_path, project_root)`` of the nearest project, from ONE walk.
+
+        The root is the ancestor whose index root held the config -- taken from
+        the same iteration that matched, never re-derived from the config path,
+        which with a relocated store would name the store, not the repository.
+        """
+        current = ConfigManager._search_start(start_dir)
         # CRITICAL: Must stop at first match to support nested projects
-        search_paths = [current] + list(current.parents)
-        for path in search_paths:
+        for path in [current] + list(current.parents):
             config_path = index_root(path) / "config.json"
             if config_path.exists():
-                # DEFENSIVE: Ensure we return immediately at first match
-                # This prevents any issues with continued searching
-                return config_path
-
+                return config_path, path
         return None
 
     @classmethod
@@ -1312,13 +1320,7 @@ code-indexer index --clear
         if start_path:
             current = Path(start_path).resolve()
         else:
-            try:
-                current = Path.cwd()
-            except (FileNotFoundError, OSError):
-                # Working directory deleted - use temp directory as fallback
-                import tempfile
-
-                current = Path(tempfile.gettempdir())
+            current = cls._search_start()
 
         # Walk up the directory tree looking for .code-indexer/config.json
         while current != current.parent:
@@ -1388,43 +1390,14 @@ code-indexer index --clear
             override_config_path = index_root(override_dir) / "config.json"
             return cls(override_config_path, project_root=override_dir)
 
-        # CRITICAL: Use find_config_path which stops at first match
-        config_path = cls.find_config_path(start_dir)
-        project_root: Optional[Path] = None
-        if config_path is not None:
-            # Which ancestor matched: the one whose index root holds this config.
-            project_root = cls._project_root_of(config_path, start_dir)
-        if config_path is None:
+        # CRITICAL: the first match, as find_config_path; the root comes with it
+        found = cls._discover(start_dir)
+        if found is None:
             # If no config found, use default path from the start directory
-            if start_dir:
-                start = start_dir
-            else:
-                try:
-                    start = Path.cwd()
-                except (FileNotFoundError, OSError):
-                    # Working directory deleted - use temp directory as fallback
-                    import tempfile
-
-                    start = Path(tempfile.gettempdir())
-            config_path = index_root(start) / "config.json"
-            project_root = start
-
-        # DEFENSIVE: Ensure we always return a ConfigManager with the first found config
+            start = cls._search_start(start_dir)
+            found = (index_root(start) / "config.json", start)
+        config_path, project_root = found
         return cls(config_path, project_root=project_root)
-
-    @staticmethod
-    def _project_root_of(
-        config_path: Path, start_dir: Optional[Path]
-    ) -> Optional[Path]:
-        """The ancestor of ``start_dir`` whose index root holds ``config_path``."""
-        try:
-            current = start_dir if start_dir else Path.cwd()
-        except (FileNotFoundError, OSError):
-            return None
-        for path in [current] + list(current.parents):
-            if index_root(path) / "config.json" == config_path:
-                return path
-        return None
 
     @classmethod
     def load_verified_config(cls, target_dir: "Path") -> "Config":
