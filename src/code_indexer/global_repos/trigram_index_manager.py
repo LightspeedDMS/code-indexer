@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Set, Tuple
 
+from ..utils.index_store import index_root
 from .regex_trigram import trigrams
 
 logger = logging.getLogger(__name__)
@@ -200,7 +201,7 @@ _STALE_BUILD_FILE_AGE_SECONDS = 6 * 60 * 60
 
 def trigram_index_dir(repo_path: Path) -> Path:
     """Return the trigram index directory of the repository at ``repo_path``."""
-    return Path(repo_path) / ".code-indexer" / "trigram_index"
+    return index_root(repo_path) / "trigram_index"
 
 
 def remove_leftover_build_files(

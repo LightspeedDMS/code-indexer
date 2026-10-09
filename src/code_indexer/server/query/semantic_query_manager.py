@@ -8,6 +8,7 @@ background job integration, and proper resource management.
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.storage.filesystem_vector_store import LocalIndexNotFoundError
+from code_indexer.utils.index_store import index_root
 
 import contextvars
 import json
@@ -264,7 +265,7 @@ def reconstruct_temporal_backend(
     index_path = (
         Path(temporal_index_dir)
         if temporal_index_dir is not None
-        else repo_path / ".code-indexer" / "index"
+        else index_root(repo_path) / "index"
     )
     return config, index_path, vector_store
 
@@ -332,7 +333,7 @@ def load_golden_temporal_config(
     # golden_path (e.g. an under-wired collaborator in a test, or a
     # dangling registry entry) silently overwrite a correct clone config
     # with default (wrong) embedder settings instead of failing open.
-    golden_config_file = Path(golden_path) / ".code-indexer" / "config.json"
+    golden_config_file = index_root(golden_path) / "config.json"
     if not golden_config_file.exists():
         logger.warning(
             "Golden repo path has no config.json for temporal embedder "
@@ -521,7 +522,7 @@ class SemanticQueryManager:
         Raises:
             json.JSONDecodeError: If config file contains invalid JSON
         """
-        config_file = repo_path / ".code-indexer" / "config.json"
+        config_file = index_root(repo_path) / "config.json"
         if not config_file.exists():
             self.logger.debug(
                 f"Config file not found at {config_file}, defaulting to single repository mode",
@@ -3250,7 +3251,7 @@ class SemanticQueryManager:
             SemanticQueryError: If FTS index not available or search fails
         """
         # Check if FTS index exists
-        fts_index_dir = repo_path / ".code-indexer" / "tantivy_index"
+        fts_index_dir = index_root(repo_path) / "tantivy_index"
         if not fts_index_dir.exists():
             raise SemanticQueryError(
                 f"FTS index not available for repository '{repository_alias}'. "

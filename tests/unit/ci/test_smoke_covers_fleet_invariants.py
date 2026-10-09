@@ -53,6 +53,7 @@ _CONTENT_SEAM_SEAMS = (
     "LocalContentBackend",
     "content_backend_wiring",
     "content_seam_inventory",
+    "LocalIndexStore",
 )
 
 # Jobs whose pytest invocation counts as "CI runs this".
