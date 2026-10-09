@@ -58,6 +58,9 @@ from code_indexer.server.services.cidx_meta_backup import (
     detect_default_branch,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.startup.content_backend_wiring import (
+    configured_content_backend_name,
+)
 from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
 from code_indexer.server.services.metadata_reader import (
     read_current_commit,
@@ -1259,6 +1262,21 @@ class RefreshScheduler:
         master = Path(master_path)
         temp_clone = master.parent / f".reclone-{master.name}-tmp"
 
+        # On a pod that does not hold the repository, master_path holds only
+        # the index state, and the clone below would land with git-mcp, not
+        # here: the swap would delete the index and then fail to rename a
+        # directory this pod cannot see, orphaning the clone on the shared
+        # volume. Refused, loudly, before anything is cloned or deleted.
+        if configured_content_backend_name() == "delegated":
+            logger.critical(
+                f"Auto re-clone SKIPPED for {alias_name}: content_backend="
+                "'delegated' -- the repository lives with git-mcp/workspace-mcp, "
+                "and swapping a fresh clone in is not supported from this pod "
+                "yet. Repair the clone on the shared volume; the index here is "
+                "left untouched."
+            )
+            return False
+
         # Clean up any leftover temp dir from a previous failed attempt.
         if temp_clone.exists():
             shutil.rmtree(str(temp_clone))
@@ -1292,7 +1310,17 @@ class RefreshScheduler:
                 shutil.rmtree(str(temp_clone))
             return False
 
-        # Clone succeeded — swap temp into place.
+        # Clone succeeded -- swap temp into place, but only if the clone is HERE.
+        # A backend that cloned somewhere this pod cannot see would otherwise
+        # have us delete the master (and its index) for nothing.
+        if not temp_clone.is_dir():
+            logger.critical(
+                f"Auto re-clone swap SKIPPED for {alias_name}: the clone at "
+                f"{temp_clone} is not visible on this pod; {master} is left "
+                "untouched."
+            )
+            return False
+
         try:
             if master.exists():
                 shutil.rmtree(str(master))
