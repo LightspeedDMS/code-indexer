@@ -519,6 +519,33 @@ class HealthCheckService:
             return False, False, []
         return bool(reasons), False, reasons
 
+    def _collect_index_spend_alarm_failures(self) -> Tuple[bool, bool, List[str]]:
+        """Story #2118 refresh embedding volume alarm: DEGRADED only.
+
+        Alarming aliases with their 24 h sums, or "blind" (aggregate read
+        failed, stats recording disabled, unattributed index-time rows, or
+        the alarm was never built on this node: lifespan stored None). The
+        aggregate is cached 60 s by the alarm; every caller of this method
+        is a sync route, so the DB read runs off the event loop. A process
+        that never reached the lifespan block reports nothing. A collection
+        error reports blind -- never a silent "healthy".
+        """
+        blind = "Refresh embedding volume alarm blind: "
+        try:
+            from ..app import app as app_module
+
+            state = app_module.state
+            if not hasattr(state, "index_spend_alarm"):
+                return False, False, []
+            alarm = state.index_spend_alarm
+            if alarm is None:
+                reasons = [blind + "the alarm was not started on this node"]
+            else:
+                reasons = alarm.cached_report().health_reasons()
+        except Exception as exc:
+            reasons = [blind + f"health collection failed: {type(exc).__name__}"]
+        return bool(reasons), False, reasons
+
     def _read_fleet_migration_unrecoverable_aliases(self) -> List[str]:
         """
         Read every golden_alias currently recorded with the PERMANENT
@@ -1459,6 +1486,11 @@ class HealthCheckService:
         siem_warn, _siem_err, siem_reasons = self._collect_siem_delivery_failures()
         has_warning = has_warning or siem_warn
         failure_reasons.extend(siem_reasons)
+
+        # Story #2118: refresh embedding volume alarm -- DEGRADED only.
+        isa_warn, _isa_err, isa_reasons = self._collect_index_spend_alarm_failures()
+        has_warning = has_warning or isa_warn
+        failure_reasons.extend(isa_reasons)
 
         # Bug #1539's cidx-meta conflict-resolution quarantine escalation
         # (Bug #1555 Defect B) is RETIRED: Bug #1555's root-cause fix made

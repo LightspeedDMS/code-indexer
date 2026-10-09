@@ -223,3 +223,31 @@ class _RefreshFailureBackoffPostgresMixin:
                 row = cur.fetchone()
             conn.commit()
         return None if row is None else int(row[0])
+
+    def mark_volume_alarm_deferral(self, golden_alias: str, due_at: float) -> None:
+        """Story #2118: remember a system refresh deferred by the refresh
+        volume alarm, due at *due_at*, WITHOUT a strike: a new row has no
+        failures (so no failure backoff); an existing row keeps its strikes
+        and failure detail. One statement; the trigger gets a fresh
+        generation from the store-wide sequence, exactly as a backoff
+        deferral does."""
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        now = time.time()
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO refresh_failure_backoff_state "
+                    "(golden_alias, consecutive_failure_count, last_detail, "
+                    "last_failed_at, updated_at, pending_trigger, pending_due_at, "
+                    "pending_marked_at, trigger_generation) "
+                    "VALUES (%s, 0, 'refresh volume alarm', %s, %s, TRUE, %s, %s, "
+                    "nextval('refresh_trigger_generation_seq')) "
+                    "ON CONFLICT (golden_alias) DO UPDATE SET pending_trigger = TRUE, "
+                    "pending_due_at = EXCLUDED.pending_due_at, "
+                    "pending_marked_at = EXCLUDED.pending_marked_at, "
+                    "trigger_generation = EXCLUDED.trigger_generation, "
+                    "updated_at = EXCLUDED.updated_at",
+                    (golden_alias, now, datetime.now(timezone.utc), due_at, now),
+                )
+            conn.commit()

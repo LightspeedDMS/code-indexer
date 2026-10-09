@@ -322,3 +322,38 @@ class _RefreshFailureBackoffSqliteMixin:
 
         escalated: Optional[int] = self._conn_manager.execute_atomic(operation)
         return escalated
+
+    def mark_volume_alarm_deferral(self, golden_alias: str, due_at: float) -> None:
+        """Story #2118: remember a system refresh deferred by the refresh
+        volume alarm, due at *due_at*, WITHOUT a strike: a new row has no
+        failures (so no failure backoff); an existing row keeps its strikes
+        and failure detail. The trigger gets a fresh generation from the
+        store-wide counter in the same transaction, exactly as a backoff
+        deferral does, so a publish resolves it only if its cycle covered
+        it."""
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        now = time.time()
+        updated_at = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE refresh_trigger_generation_counter SET value = value + 1 "
+                "WHERE id = 1"
+            )
+            conn.execute(
+                "INSERT INTO refresh_failure_backoff_state "
+                "(golden_alias, consecutive_failure_count, last_detail, "
+                "last_failed_at, updated_at, pending_trigger, pending_due_at, "
+                "pending_marked_at, trigger_generation) "
+                "VALUES (?, 0, 'refresh volume alarm', ?, ?, 1, ?, ?, "
+                "(SELECT value FROM refresh_trigger_generation_counter WHERE id = 1)) "
+                "ON CONFLICT(golden_alias) DO UPDATE SET pending_trigger = 1, "
+                "pending_due_at = excluded.pending_due_at, "
+                "pending_marked_at = excluded.pending_marked_at, "
+                "trigger_generation = excluded.trigger_generation, "
+                "updated_at = excluded.updated_at",
+                (golden_alias, now, updated_at, due_at, now),
+            )
+
+        self._conn_manager.execute_atomic(operation)

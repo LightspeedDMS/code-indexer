@@ -24,6 +24,10 @@ from ._forced_reconcile_state_mixin import (
     delete_forced_reconcile_state_for_repo,
 )
 from ._golden_repo_metadata_extra_mixin import _GoldenRepoMetadataExtraMixin
+from ._published_points_mixin import (
+    PUBLISHED_POINTS_COLUMN,
+    _PublishedPointsSqliteMixin,
+)
 from ._refresh_failure_backoff_mixin import (
     _RefreshFailureBackoffSqliteMixin,
     create_refresh_failure_backoff_table,
@@ -37,6 +41,7 @@ class GoldenRepoMetadataSqliteBackend(
     _GoldenRepoMetadataExtraMixin,
     _RefreshFailureBackoffSqliteMixin,
     _ForcedReconcileStateSqliteMixin,
+    _PublishedPointsSqliteMixin,
 ):
     """
     SQLite backend for golden repository metadata (Story #711).
@@ -676,6 +681,7 @@ def _migrate_golden_repos_metadata_columns(conn: sqlite3.Connection) -> None:
         ("category_id", "INTEGER"),
         ("category_auto_assigned", "INTEGER DEFAULT 0"),
         ("wiki_enabled", "INTEGER DEFAULT 0"),
+        PUBLISHED_POINTS_COLUMN,  # Story #2118: volume-alarm reference size
     ]
     for col_name, col_def in migrations:
         if col_name not in existing_cols:

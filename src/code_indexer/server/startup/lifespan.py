@@ -1532,6 +1532,27 @@ def make_lifespan(
                 )
                 app.state.snapshot_manager = None
 
+            # Story #2118: refresh embedding volume alarm over the shared
+            # stats/metadata backends. None (cannot be built) is published
+            # too: health then reports the alarm blind, and the scheduler
+            # gate is inert.
+            index_spend_alarm = None
+            try:
+                from code_indexer.server.services.index_spend_alarm import (
+                    build_index_spend_alarm,
+                )
+
+                index_spend_alarm = build_index_spend_alarm(backend_registry)
+            except Exception as alarm_exc:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-2118",
+                        f"Refresh volume alarm unavailable (health reports it "
+                        f"blind; system refreshes are not gated): {alarm_exc}",
+                    )
+                )
+            app.state.index_spend_alarm = index_spend_alarm
+
             global_lifecycle_manager = GlobalReposLifecycleManager(
                 str(golden_repos_dir),
                 background_job_manager=background_job_manager,
@@ -1547,6 +1568,7 @@ def make_lifespan(
                     if backend_registry is not None
                     else None
                 ),
+                index_spend_alarm=index_spend_alarm,
             )
             global_lifecycle_manager.start()
 

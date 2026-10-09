@@ -356,7 +356,8 @@ def request_cidx_meta_refresh(refresh_scheduler: Any) -> None:
     except RefreshDeferredError as exc:
         logger.info(
             f"cidx-meta refresh deferred until {exc.backoff_until:.0f}: "
-            f"persisted failure backoff; the refresh scheduler fires it then"
+            f"{exc.reason or 'persisted failure backoff'}; "
+            f"the refresh scheduler fires it then"
         )
     except DuplicateJobError as exc:
         if _debouncer is None:

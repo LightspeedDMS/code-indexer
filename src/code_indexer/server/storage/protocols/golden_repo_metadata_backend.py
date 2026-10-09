@@ -167,6 +167,19 @@ class GoldenRepoMetadataBackend(Protocol):
         self, golden_alias: str, covered_generation: int
     ) -> Optional[int]: ...
 
+    # Story #2118: a system refresh deferred by the refresh volume alarm is a
+    # pending trigger WITHOUT a strike; published_points (bare alias) is the
+    # alarm's reference size, NULL until a verified publish records it.
+    def mark_volume_alarm_deferral(self, golden_alias: str, due_at: float) -> None: ...
+
+    def set_published_points(self, alias: str, points: int) -> bool: ...
+
+    def get_published_points(self, alias: str) -> Optional[int]: ...
+
+    def get_published_points_many(
+        self, aliases: List[str]
+    ) -> Dict[str, Optional[int]]: ...
+
     # Bug #1769: local-repo `cidx init` repair per-repo failure
     # quarantine state (see global_repos/refresh_scheduler.py's
     # _repair_uninitialized_local_repo()).

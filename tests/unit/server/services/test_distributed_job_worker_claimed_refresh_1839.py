@@ -187,6 +187,7 @@ class _RealisticRefreshSchedulerDouble:
         alias_name: str,
         progress_callback: Optional[ProgressCallback] = None,
         job_id: Optional[str] = None,
+        submitter_username: str = "system",
     ) -> Dict[str, Any]:
         self.claimed_execute_calls.append((alias_name, progress_callback))
         self.claimed_execute_job_ids.append(job_id)

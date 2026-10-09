@@ -30,6 +30,7 @@ from ._forced_reconcile_state_mixin import (
     _ForcedReconcileStatePostgresMixin,
     delete_forced_reconcile_state_for_repo,
 )
+from ._published_points_mixin import _PublishedPointsPostgresMixin
 from ._refresh_failure_backoff_mixin import (
     _RefreshFailureBackoffPostgresMixin,
     delete_refresh_failure_backoff_for_repo,
@@ -44,7 +45,9 @@ _RECONCILE_AUTO_HEAL_EVENT_ROW_ID = 1
 
 
 class GoldenRepoMetadataPostgresBackend(
-    _RefreshFailureBackoffPostgresMixin, _ForcedReconcileStatePostgresMixin
+    _RefreshFailureBackoffPostgresMixin,
+    _ForcedReconcileStatePostgresMixin,
+    _PublishedPointsPostgresMixin,
 ):
     """
     PostgreSQL backend for golden repository metadata.

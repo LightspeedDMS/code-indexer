@@ -475,6 +475,7 @@ class RefreshScheduler:
         golden_repo_metadata_backend: Optional[Any] = None,
         alias_lock_db_backed_enabled_getter: Optional[Callable[[], bool]] = None,
         alias_lock_store_resolver: Optional[Callable[[], Any]] = None,
+        index_spend_alarm: Optional[Any] = None,
     ):
         """
         Initialize the refresh scheduler.
@@ -514,6 +515,11 @@ class RefreshScheduler:
                 dispatching PostgreSQL/SQLite via is_postgres_storage_mode()).
                 Only ever consulted when alias_lock_db_backed_enabled_getter()
                 returns True.
+            index_spend_alarm: Story #2118 -- optional IndexSpendAlarm
+                (server/services/index_spend_alarm.py) whose gate defers
+                SYSTEM refreshes of an alias with a runaway refresh embedding
+                volume. None (CLI mode, and every caller predating it) leaves
+                submissions unchanged.
         """
         self.golden_repos_dir = Path(golden_repos_dir)
         self.config_source = config_source
@@ -525,6 +531,7 @@ class RefreshScheduler:
         self._snapshot_manager = snapshot_manager
         self._alias_lock_db_backed_enabled_getter = alias_lock_db_backed_enabled_getter
         self._alias_lock_store_resolver = alias_lock_store_resolver
+        self._index_spend_alarm = index_spend_alarm
 
         # Initialize managers
         self.alias_manager = AliasManager(str(self.golden_repos_dir / "aliases"))
@@ -1760,8 +1767,15 @@ class RefreshScheduler:
         alias_name: str,
         progress_callback: Optional[Callable[..., None]] = None,
         job_id: Optional[str] = None,
+        submitter_username: str = "system",
     ) -> Dict[str, Any]:
         """
+        Story #2118: ``submitter_username`` is the claimed job's submitter.
+        A SYSTEM job of an alias whose refresh embedding volume alarms is not
+        run: the strike-free deferral is persisted and the returned result
+        (success, ``skipped="volume_alarm_deferred"``) ends the claimed job
+        as completed. An unknown submitter counts as system (gated).
+
         Perform the refresh WORK for a job that has ALREADY been claimed and
         is occupying the idx_active_job_per_repo dedup slot (Bug #1839).
 
@@ -1802,6 +1816,11 @@ class RefreshScheduler:
             ValueError: If alias is not found in the global registry.
         """
         global_alias = self._resolve_global_alias(alias_name)
+        deferred = self._volume_alarm_deferral_result(
+            global_alias, submitter_username, False
+        )
+        if deferred is not None:
+            return deferred
         return self._execute_refresh(
             global_alias,
             force_reset=False,
@@ -2120,6 +2139,11 @@ class RefreshScheduler:
             force_reset or self._is_externally_managed()
         ):
             failure_recovery.defer_if_backed_off(self.golden_repo_metadata, alias_name)
+            # Story #2118: a runaway refresh embedding volume defers system
+            # triggers (persisted, re-checked when the trigger fires).
+            alarm = getattr(self, "_index_spend_alarm", None)
+            if alarm is not None:
+                alarm.defer_if_alarming(alias_name)
 
         if not self.background_job_manager:
             # Fallback to direct execution if no job manager (CLI mode)
@@ -2141,6 +2165,13 @@ class RefreshScheduler:
         # Story #2118: declaring job_id makes BackgroundJobManager inject this
         # job's id, recorded on the embedding_call_stats rows of its children.
         def _refresh_worker(progress_callback=None, cancel_check=None, job_id=None):
+            # Story #2118: a job queued while the alias was quiet re-checks
+            # the volume alarm when it actually starts.
+            deferred = self._volume_alarm_deferral_result(
+                alias_name, submitter_username, force_reset
+            )
+            if deferred is not None:
+                return deferred
             return self._execute_refresh(
                 alias_name,
                 force_reset=force_reset,
@@ -2159,6 +2190,37 @@ class RefreshScheduler:
         )
         logger.info(f"Submitted refresh job {job_id} for {alias_name}")
         return job_id
+
+    def _volume_alarm_deferral_result(
+        self, alias_name: str, submitter_username: str, force_reset: bool
+    ) -> Optional[Dict[str, Any]]:
+        """Story #2118 run-time volume gate for refresh WORK that did not
+        just pass the submit-time gate: a claimed job (cluster reclaim) or
+        a job queued before its alias began alarming. Same exceptions as the
+        submit gate (admin, force_reset, externally managed: no loop would
+        fire the trigger). When the alias alarms, the alarm has persisted
+        the strike-free deferral (the trigger fires later through the normal
+        path) and this returns the job's terminal, non-failure result: the
+        caller must not index. None: run the refresh."""
+        alarm = getattr(self, "_index_spend_alarm", None)
+        if (
+            alarm is None
+            or submitter_username != "system"
+            or force_reset
+            or self._is_externally_managed()
+        ):
+            return None
+        try:
+            alarm.defer_if_alarming(alias_name)
+        except failure_recovery.RefreshDeferredError as exc:
+            return {
+                "success": True,
+                "alias": alias_name,
+                "skipped": "volume_alarm_deferred",
+                "message": f"Refresh deferred: {exc.reason}",
+                "deferred_until": exc.backoff_until,
+            }
+        return None
 
     def _scheduled_local_repo_repair_is_quarantined(self, alias_name: str) -> bool:
         """Return whether scheduled submission must be suppressed for *alias_name*.
@@ -3271,6 +3333,15 @@ class RefreshScheduler:
                     self.registry.update_refresh_timestamp(alias_name)
                     failure_recovery.resolve_after_publish(  # Bug #2022: published
                         self.golden_repo_metadata, alias_name, covered_generation
+                    )
+                    # Story #2118: the volume alarm's reference size, counted
+                    # read-only from the snapshot just verified and published.
+                    from code_indexer.server.services.index_spend_alarm import (
+                        record_published_points,
+                    )
+
+                    record_published_points(
+                        self.golden_repo_metadata, alias_name, new_index_path
                     )
 
                     # AC6: Reconcile registry with filesystem at END of refresh

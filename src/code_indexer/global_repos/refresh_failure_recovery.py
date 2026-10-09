@@ -87,12 +87,19 @@ class RefreshDeferredError(DuplicateJobError):
     A DuplicateJobError on purpose: every system caller already treats that
     as "a refresh will happen later -- retry/debounce", never as dropped."""
 
-    def __init__(self, alias_name: str, backoff_until: float) -> None:
+    def __init__(
+        self,
+        alias_name: str,
+        backoff_until: float,
+        reason: Optional[str] = None,
+    ) -> None:
+        # reason None: the persisted failure backoff (the original message).
         Exception.__init__(
             self,
             f"refresh of {alias_name} deferred until {backoff_until:.0f}: "
-            f"persisted failure backoff active",
+            f"{reason or 'persisted failure backoff active'}",
         )
+        self.reason = reason
         self.operation_type = "global_repo_refresh"
         self.repo_alias = alias_name
         self.existing_job_id = ""

@@ -388,9 +388,12 @@ class LangfuseTraceSyncService:
                         )
                     self._refresh_scheduler.trigger_refresh_for_repo(trigger_alias)
                 except RefreshDeferredError as exc:
+                    cause = (
+                        f"({exc.reason})" if exc.reason else "by its failure backoff"
+                    )
                     logger.info(
                         f"Refresh for '{trigger_alias}' deferred until "
-                        f"{exc.backoff_until:.0f} by its failure backoff and "
+                        f"{exc.backoff_until:.0f} {cause} and "
                         f"persisted; the refresh scheduler fires it then"
                     )
                 except DuplicateJobError:
