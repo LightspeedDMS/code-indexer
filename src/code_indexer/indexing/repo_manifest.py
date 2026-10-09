@@ -43,7 +43,7 @@ import inspect
 import logging
 import os
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Iterator, Optional, Sequence, Union
+from typing import Any, Dict, Iterator, Optional, Sequence, Tuple, Union
 
 from ..server.storage.shared.content_backend import (
     ContentBackend,
@@ -74,9 +74,14 @@ class RepoManifest:
         entries: Dict[str, ContentEntry],
         *,
         backend_is_local: bool = True,
+        pruned: Sequence[str] = (),
     ) -> None:
         self._root = root
         self._entries = entries
+        #: The directory names the backend was ACTUALLY asked to skip -- empty
+        #: when none were given or the backend cannot prune. What a caller
+        #: must reason about, not what it asked for.
+        self.pruned: Tuple[str, ...] = tuple(pruned)
         # Whether the backend that produced these entries reads THIS container's
         # disk. It decides what an entry with no hash means: with a local
         # backend the file is still right there to be read, and with a delegated
@@ -129,6 +134,7 @@ class RepoManifest:
             root,
             entries,
             backend_is_local=bool(getattr(chosen, "is_local", True)),
+            pruned=prune,
         )
 
     def _relative(self, file_path: Union[str, Path]) -> Optional[str]:

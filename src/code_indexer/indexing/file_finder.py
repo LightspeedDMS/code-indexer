@@ -1,8 +1,9 @@
 """File discovery and filtering for indexing."""
 
+import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Sequence
 import pathspec
 
 from ..config import Config
@@ -14,6 +15,8 @@ if TYPE_CHECKING:
     from .repo_manifest import RepoManifest
 
 #: Directories whose own .gitignore is never read (local walk and manifest alike).
+logger = logging.getLogger(__name__)
+
 _GITIGNORE_SKIP_DIRS = frozenset({".git", "__pycache__", ".mypy_cache", "node_modules"})
 
 
@@ -183,6 +186,7 @@ class FileFinder:
         the disk again.
         """
         self._manifest = manifest
+        self._fetched_negations: List[str] = []
         if manifest is None:
             self.exclude_spec = self._local_exclude_spec
             return
@@ -225,8 +229,42 @@ class FileFinder:
                     record.path.rsplit("/", 1)[0] if "/" in record.path else None
                 )
                 text = record.data.decode("utf-8", errors="ignore")
+                self._fetched_negations.extend(_negations(text))
                 patterns.extend(_gitignore_lines(text, relative_dir))
         return patterns
+
+    def negation_could_rescue(self, pruned: Sequence[str], backend: Any) -> bool:
+        """Whether a .gitignore negation could re-include a path under ``pruned``.
+
+        A negation (``!dist/``, ``!keep.py``) is the only way a .gitignore
+        rescues a path. The root and first-level files are the ones the
+        attached manifest just fetched; a pruned top-level directory's own
+        .gitignore -- which a pruned manifest no longer lists -- is fetched
+        directly. Call after ``set_manifest``.
+        """
+        return bool(pruned) and (
+            any(_could_rescue(n, pruned) for n in self._fetched_negations)
+            or self._pruned_gitignores_negate(pruned, backend)
+        )
+
+    def _pruned_gitignores_negate(self, prune: Sequence[str], backend: Any) -> bool:
+        """Whether a pruned top-level directory's own .gitignore has a negation.
+
+        The local walk reads first-level .gitignore files (except the skip set),
+        so ``<pruned>/.gitignore`` is one the unpruned run would have read.
+        """
+        wanted = [
+            f"{name}/.gitignore" for name in prune if name not in _GITIGNORE_SKIP_DIRS
+        ]
+        if not wanted:
+            return False
+        for record in backend.fetch(self.config.codebase_dir, wanted):
+            # Inside a pruned directory, ANY negation rescues something there.
+            if record.error is None and _negations(
+                record.data.decode("utf-8", errors="ignore")
+            ):
+                return True
+        return False
 
     def _add_gitignore_patterns(self, directory: Path, patterns: list) -> None:
         """Add patterns from .gitignore files recursively."""
@@ -616,6 +654,57 @@ class FileFinder:
             "total_size": total_size,
             "extensions": extensions,
         }
+
+
+def attach_delegated_manifest(
+    finder: "FileFinder", backend: Any, root: Optional[Path] = None
+) -> "RepoManifest":
+    """Build a pass's manifest through ``backend`` and attach it to ``finder``.
+
+    Pruned of the finder's ``manifest_prune_dirs()`` -- unless a .gitignore
+    negation could re-include something under a pruned directory, in which
+    case it is rebuilt unpruned, so the discovered file set is always the
+    unpruned one. Negations are rare, so the common case keeps the saving.
+    The decision follows what was ACTUALLY pruned: a backend that cannot prune
+    is built once.
+    """
+    from .repo_manifest import RepoManifest
+
+    root = Path(root if root is not None else finder.config.codebase_dir)
+    manifest = RepoManifest.build(
+        root, backend=backend, prune_dirs=finder.manifest_prune_dirs()
+    )
+    finder.set_manifest(manifest, backend)
+    if manifest.pruned and finder.negation_could_rescue(manifest.pruned, backend):
+        logger.info(
+            "a .gitignore negation could re-include a pruned directory; "
+            "rebuilding the manifest unpruned"
+        )
+        manifest = RepoManifest.build(root, backend=backend)
+        finder.set_manifest(manifest, backend)
+    return manifest
+
+
+def _negations(text: str) -> List[str]:
+    """A .gitignore's negation patterns (the text after ``!``), as written."""
+    return [
+        line.strip()[1:]
+        for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if line.strip().startswith("!")
+    ]
+
+
+def _could_rescue(negation: str, pruned: Sequence[str]) -> bool:
+    """Whether one negation, read relative to its own .gitignore, could
+    re-include a path under a directory named in ``pruned``.
+
+    A single component matches at any depth (``!keep.py``); a component that
+    is a pruned name, or a glob, can reach into one. ``!gen/keep.py`` cannot.
+    """
+    parts = [p for p in negation.strip("/").split("/") if p]
+    if len(parts) <= 1:
+        return True
+    return any(p in pruned or any(c in p for c in "*?[") for p in parts)
 
 
 def _gitignore_lines(text: str, relative_dir: Optional[str]) -> List[str]:

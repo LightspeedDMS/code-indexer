@@ -86,7 +86,6 @@ class GitAwareDocumentProcessor(DocumentProcessor):
             self.content_backend, "is_local", True
         ):
             return
-        from ..indexing.repo_manifest import RepoManifest
 
         # Every step below is a remote call or depends on one, and the callers
         # only reach their ``finally: end_manifest_pass()`` once this returns. A
@@ -94,14 +93,16 @@ class GitAwareDocumentProcessor(DocumentProcessor):
         # pass would then join it, find no manifest and read the local disk --
         # nor leave a half-installed manifest serving stale hashes.
         try:
-            self.repo_manifest = RepoManifest.build(
-                self.config.codebase_dir,
-                backend=self.content_backend,
-                prune_dirs=self.file_finder.manifest_prune_dirs(),
+            from ..indexing.file_finder import attach_delegated_manifest
+
+            self.repo_manifest = attach_delegated_manifest(
+                self.file_finder, self.content_backend, self.config.codebase_dir
             )
             self.file_identifier.set_manifest(self.repo_manifest)
-            self.file_finder.set_manifest(self.repo_manifest, self.content_backend)
         except BaseException:
+            # attach_delegated_manifest may have installed a manifest on the
+            # finder before failing; nothing may be left reading it.
+            self.file_finder.set_manifest(None)
             self.end_manifest_pass()
             raise
 

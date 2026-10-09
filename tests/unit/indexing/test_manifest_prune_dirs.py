@@ -23,7 +23,7 @@ from typing import Any, Dict, List
 import pytest
 
 from code_indexer.config import Config
-from code_indexer.indexing.file_finder import FileFinder
+from code_indexer.indexing.file_finder import FileFinder, attach_delegated_manifest
 from code_indexer.indexing.repo_manifest import RepoManifest
 from code_indexer.server.storage.shared.content_backend import LocalContentBackend
 
@@ -176,40 +176,66 @@ def test_the_indexing_pass_sends_discoverys_list(repo: Path) -> None:
         processor.end_manifest_pass()
 
 
-def test_the_fts_rebuild_sends_the_list(
+def test_the_fts_rebuild_builds_its_manifest_the_same_way(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from code_indexer import cli
 
     backend = _Recording()
     monkeypatch.setattr(cli, "_build_index_content_backend", lambda name: backend)
+    finder = FileFinder(_config(repo))
 
-    cli._delegated_fts_source("delegated", repo, prune_dirs=["node_modules"])
+    _, manifest = cli._delegated_fts_source("delegated", finder)
 
-    assert backend.calls and backend.calls[0]["prune_dirs"] == ["node_modules"]
+    assert "node_modules" in backend.calls[0]["prune_dirs"]
+    assert finder._manifest is manifest, "discovery does not read the manifest"
 
 
-def test_the_fts_command_passes_discoverys_list() -> None:
-    """Source-level: the index command's FTS rebuild hands its finder's list on."""
-    import ast
-    import inspect
+# ── a .gitignore negation can re-include a pruned directory ─────────────────
 
-    from code_indexer import cli
 
-    tree = ast.parse(inspect.getsource(cli))
-    calls = [
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Call)
-        and getattr(n.func, "id", None) == "_delegated_fts_source"
-    ]
-    assert calls
-    for call in calls:
-        prune = {kw.arg: kw.value for kw in call.keywords}.get("prune_dirs")
-        assert (
-            prune is not None
-            and getattr(prune.func, "attr", None) == "manifest_prune_dirs"
-        )
+def _discover(repo: Path, backend: Any) -> Any:
+    finder = FileFinder(_config(repo))
+    manifest = attach_delegated_manifest(finder, backend)
+    return sorted(p.relative_to(repo).as_posix() for p in finder.find_files()), manifest
+
+
+def _unpruned(repo: Path) -> List[str]:
+    finder = FileFinder(_config(repo))
+    backend = _Recording()
+    finder.set_manifest(RepoManifest.build(repo, backend=backend), backend)
+    return sorted(p.relative_to(repo).as_posix() for p in finder.find_files())
+
+
+@pytest.mark.parametrize(
+    "ignore_file, text",
+    [(".gitignore", "!dist/\n"), ("dist/.gitignore", "!bundle.py\n")],
+)
+def test_a_negation_falls_back_to_the_unpruned_manifest(
+    repo: Path, ignore_file: str, text: str
+) -> None:
+    """Root ``!dist/``, or a negation inside the pruned directory's own
+    .gitignore (which a pruned manifest does not even list): either could
+    re-include something, so the file set must be exactly the unpruned one."""
+    (repo / ignore_file).write_text(text)
+    backend = _Recording()
+
+    found, manifest = _discover(repo, backend)
+
+    assert found == _unpruned(repo)
+    assert "dist/bundle.py" in manifest.paths(), "still pruned"
+    assert "prune_dirs" not in backend.calls[-1], "the last build was pruned"
+
+
+def test_without_a_negation_the_prune_holds(repo: Path) -> None:
+    (repo / ".gitignore").write_text("*.log\nsecret.py\n")
+    backend = _Recording()
+
+    found, manifest = _discover(repo, backend)
+
+    assert found == _unpruned(repo)
+    assert "dist/bundle.py" not in manifest.paths()
+    assert all("prune_dirs" in c for c in backend.calls)
 
 
 # ── the local backend honours it identically ────────────────────────────────
@@ -248,3 +274,34 @@ def test_a_name_discovery_would_keep_somewhere_is_never_sent(repo: Path) -> None
         _config(repo, exclude_dirs=["vendor", "out"])
     ).manifest_prune_dirs()
     assert names == ["out"]
+
+
+@pytest.mark.parametrize(
+    "negation, rescues",
+    [
+        ("gen/keep.py", False),  # anchored to a directory that is not pruned
+        ("src/util/keep.py", False),
+        ("keep.py", True),  # one component: matches at any depth
+        ("dist/", True),
+        ("**/keep.py", True),  # a glob component can reach anywhere
+        ("pkg/*/x.py", True),
+        ("pkg/node_modules/x.py", True),  # names a pruned directory
+    ],
+)
+def test_which_negations_could_rescue_a_pruned_path(
+    negation: str, rescues: bool
+) -> None:
+    from code_indexer.indexing.file_finder import _could_rescue
+
+    assert _could_rescue(negation, ["node_modules", "dist"]) is rescues
+
+
+def test_an_anchored_negation_elsewhere_keeps_the_prune(repo: Path) -> None:
+    (repo / ".gitignore").write_text("gen/\n!gen/keep.py\n")
+    backend = _Recording()
+
+    found, manifest = _discover(repo, backend)
+
+    assert found == _unpruned(repo)
+    assert all("prune_dirs" in c for c in backend.calls), "rebuilt unpruned"
+    assert "dist/bundle.py" not in manifest.paths()
