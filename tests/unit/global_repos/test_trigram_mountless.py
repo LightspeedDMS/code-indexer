@@ -41,7 +41,10 @@ def index_state_only(tmp_path: Path) -> Path:
     repo = tmp_path / "golden-repos" / "agent-router"
     (repo / ".code-indexer").mkdir(parents=True)
     (repo / "router.py").write_text("def route_request():\n    pass\n")
-    assert tim.TrigramIndexManager(tim.trigram_index_dir(repo)).build(repo) == 1
+    # file_list given explicitly: the build must not depend on ripgrep being
+    # installed where the tests run (the CI smoke image has none).
+    index = tim.TrigramIndexManager(tim.trigram_index_dir(repo))
+    assert index.build(repo, file_list=["router.py"]) == 1
     (repo / "router.py").unlink()  # the files are with workspace-mcp now
     return repo
 
