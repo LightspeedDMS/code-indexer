@@ -299,7 +299,8 @@ def test_self_healing_retries_write_scip_into_the_store(elsewhere: Any) -> None:
 def test_the_backfill_freshness_check_reads_the_store(
     elsewhere: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from code_indexer.server.services import scip_backfill_policy, scip_lifecycle
+    from code_indexer.server.services import scip_lifecycle
+    from code_indexer.server.services.scip_backfill_policy import ScipBackfillPolicy
 
     repo, root = elsewhere
     seen: List[Path] = []
@@ -309,12 +310,7 @@ def test_the_backfill_freshness_check_reads_the_store(
         return True
 
     monkeypatch.setattr(scip_lifecycle, "scip_db_is_fresh", fresh)
-    policy_cls = next(
-        getattr(scip_backfill_policy, n)
-        for n in dir(scip_backfill_policy)
-        if hasattr(getattr(scip_backfill_policy, n), "is_fresh")
-    )
-    policy = policy_cls.__new__(policy_cls)
+    policy = ScipBackfillPolicy.__new__(ScipBackfillPolicy)
     assert policy.is_fresh(repo) is True
     assert seen == [root / "scip"]
 
