@@ -43,6 +43,8 @@ the two call sites can never diverge again.
 from __future__ import annotations
 
 import socket
+
+import pytest
 from typing import Any, Dict, List, Optional
 
 from code_indexer.server.utils.cluster_node_id import resolve_cluster_node_id
@@ -86,3 +88,65 @@ class TestResolveClusterNodeId:
         ]
         for raw_config in configs:
             assert resolve_cluster_node_id(raw_config) != "local"
+
+
+# ── configured_node_id: the explicit value or "" -- never a crash ────────────
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        [],
+        "not a dict",
+        {},
+        {"cluster": None},  # what a standalone server writes
+        {"cluster": []},
+        {"cluster": {}},
+        {"cluster": {"node_id": None}},
+        {"cluster": {"node_id": 7}},
+        {"cluster": {"node_id": ""}},
+    ],
+)
+def test_configured_node_id_is_empty_for_every_unconfigured_shape(raw) -> None:
+    from code_indexer.server.utils.cluster_node_id import configured_node_id
+
+    assert configured_node_id(raw) == ""
+
+
+def test_configured_node_id_returns_the_explicit_value() -> None:
+    from code_indexer.server.utils.cluster_node_id import configured_node_id
+
+    assert configured_node_id({"cluster": {"node_id": "cidx-3"}}) == "cidx-3"
+
+
+def test_the_dep_map_sentinel_node_id_survives_a_null_cluster(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """``"cluster": null`` used to raise inside _get_node_id -- swallowed, so the
+    value was right only by accident. It must now be READ, not swallowed, and
+    the fallback must stay the bare hostname the startup sentinel sweep
+    expects, so locks written before and after this fix still match."""
+    import json
+    import logging
+    import socket
+
+    from code_indexer.server.services.dependency_map_service import (
+        DependencyMapService,
+    )
+
+    (tmp_path / ".cidx-server").mkdir()
+    (tmp_path / ".cidx-server" / "config.json").write_text(
+        json.dumps({"cluster": None})
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    service = DependencyMapService.__new__(DependencyMapService)
+
+    with caplog.at_level(logging.DEBUG):
+        assert service._get_node_id() == socket.gethostname()
+    assert not [r for r in caplog.records if "could not read" in r.getMessage()]
+
+    (tmp_path / ".cidx-server" / "config.json").write_text(
+        json.dumps({"cluster": {"node_id": "cidx-2"}})
+    )
+    assert service._get_node_id() == "cidx-2"

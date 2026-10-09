@@ -45,6 +45,20 @@ import socket
 from typing import Any, Dict, Optional
 
 
+def configured_node_id(raw_config: Optional[Any]) -> str:
+    """The explicitly configured ``cluster.node_id`` string, or ``""``.
+
+    Tolerates every malformed shape a ``config.json`` takes in practice -- a
+    non-dict document, ``"cluster": null`` (which the server itself writes for
+    a standalone install), a non-dict ``cluster`` and a non-string
+    ``node_id`` -- by treating them all as "not configured". Callers choose
+    their own fallback.
+    """
+    cluster_cfg = raw_config.get("cluster") if isinstance(raw_config, dict) else None
+    node_id = cluster_cfg.get("node_id") if isinstance(cluster_cfg, dict) else None
+    return node_id if isinstance(node_id, str) else ""
+
+
 def resolve_cluster_node_id(raw_config: Optional[Dict[str, Any]]) -> str:
     """Resolve this process's cluster node identity from a parsed
     ``config.json`` dict.
@@ -73,10 +87,4 @@ def resolve_cluster_node_id(raw_config: Optional[Dict[str, Any]]) -> str:
         ``get_active_nodes()``, and using it as the fallback here is
         precisely the defect this function exists to eliminate.
     """
-    cluster_cfg = raw_config.get("cluster") if isinstance(raw_config, dict) else None
-    configured_node_id = (
-        cluster_cfg.get("node_id") if isinstance(cluster_cfg, dict) else None
-    )
-    if isinstance(configured_node_id, str) and configured_node_id:
-        return configured_node_id
-    return f"{socket.gethostname()}-cidx"
+    return configured_node_id(raw_config) or f"{socket.gethostname()}-cidx"
