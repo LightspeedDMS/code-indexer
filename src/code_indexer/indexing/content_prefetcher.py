@@ -40,6 +40,7 @@ from ..server.storage.shared.content_backend import ContentBackend, FetchedFile
 from .fetch_planner import (
     DEFAULT_FETCH_BUDGET_BYTES,
     DEFAULT_FETCH_BUDGET_FILES,
+    DEFAULT_FETCH_BUDGET_REQUEST_BYTES,
     plan_fetch_batches,
 )
 
@@ -92,13 +93,18 @@ class ContentPrefetcher:
         *,
         budget_bytes: int = DEFAULT_FETCH_BUDGET_BYTES,
         budget_files: int = DEFAULT_FETCH_BUDGET_FILES,
+        budget_request_bytes: int = DEFAULT_FETCH_BUDGET_REQUEST_BYTES,
     ) -> None:
         self._backend = backend
         self._root = Path(repo_root)
         self._expected_blob_sha = expected_blob_sha
         self._batch_of: Dict[str, _Batch] = {}
         for paths in plan_fetch_batches(
-            rel_paths, size_of, budget_bytes=budget_bytes, budget_files=budget_files
+            rel_paths,
+            size_of,
+            budget_bytes=budget_bytes,
+            budget_files=budget_files,
+            budget_request_bytes=budget_request_bytes,
         ):
             batch = _Batch(paths)
             for path in paths:

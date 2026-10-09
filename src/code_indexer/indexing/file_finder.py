@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
 import pathspec
 
 from ..config import Config
+from .fetch_planner import plan_fetch_batches
 from ..services.override_filter_service import OverrideFilterService
 from ..utils.path_confinement import is_resolved_within_root
 
@@ -155,7 +156,11 @@ class FileFinder:
     def _fetched_gitignore_patterns(
         self, manifest: "RepoManifest", backend: Optional[Any]
     ) -> List[str]:
-        """The local walk's .gitignore rules, from bytes fetched in ONE call.
+        """The local walk's .gitignore rules, fetched in as few calls as possible.
+
+        One call in practice; the paths go through the same planner as every
+        other fetch, so a repository with thousands of top-level directories
+        is split into requests the server accepts instead of one it refuses.
 
         Root first, then first-level directories in sorted order (the local walk
         uses iterdir order; the nested patterns are prefixed with their own
@@ -175,12 +180,15 @@ class FileFinder:
         if not wanted or backend is None:
             return []
         patterns: List[str] = []
-        for record in backend.fetch(self.config.codebase_dir, wanted):
-            if record.error is not None:
-                continue
-            relative_dir = record.path.rsplit("/", 1)[0] if "/" in record.path else None
-            text = record.data.decode("utf-8", errors="ignore")
-            patterns.extend(_gitignore_lines(text, relative_dir))
+        for batch in plan_fetch_batches(wanted, manifest.size):
+            for record in backend.fetch(self.config.codebase_dir, batch):
+                if record.error is not None:
+                    continue
+                relative_dir = (
+                    record.path.rsplit("/", 1)[0] if "/" in record.path else None
+                )
+                text = record.data.decode("utf-8", errors="ignore")
+                patterns.extend(_gitignore_lines(text, relative_dir))
         return patterns
 
     def _add_gitignore_patterns(self, directory: Path, patterns: list) -> None:
