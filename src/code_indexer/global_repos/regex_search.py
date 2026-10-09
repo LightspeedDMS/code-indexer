@@ -448,6 +448,10 @@ def _maybe_trigger_lazy_index_build(repo_path: Path) -> None:
     already running/recent. Best-effort; never raises into the caller."""
     if not _lazy_build_enabled():
         return
+    from .trigram_index_manager import trigram_prefilter_available
+
+    if not trigram_prefilter_available():
+        return  # would publish an empty index; see trigram_prefilter_available
     key = str(repo_path)
     now = time.monotonic()
     with _lazy_build_lock:
@@ -1375,6 +1379,12 @@ class RegexSearchService:
                 return None
             return max(0.0, deadline - time.monotonic())
 
+        from .trigram_index_manager import trigram_prefilter_available
+
+        if not trigram_prefilter_available():
+            # Not consulted at all: an index found here was built from an
+            # empty listing and would turn every search into zero matches.
+            return None
         try:
             from .regex_trigram import extract_required_trigrams
             from .trigram_index_manager import (

@@ -10,7 +10,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | unclassified | 0 |
 | repo-read | 402 |
 | repo-write | 93 |
-| cidx-state-in-repo | 1320 |
+| cidx-state-in-repo | 1322 |
 | migrated | 69 |
 | local-only | 146 |
 | cidx-state | 521 |
@@ -40,7 +40,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `global_repos/meta_description_hook.py` | 0 | 1 | 0 | 9 |
 | `global_repos/meta_directory_updater.py` | 0 | 0 | 0 | 6 |
 | `global_repos/refresh_integrity_gate.py` | 0 | 0 | 0 | 7 |
-| `global_repos/refresh_scheduler.py` | 0 | 7 | 3 | 19 |
+| `global_repos/refresh_scheduler.py` | 0 | 7 | 3 | 21 |
 | `global_repos/regex_search.py` | 0 | 3 | 0 | 1 |
 | `global_repos/repo_analyzer.py` | 0 | 7 | 0 | 0 |
 | `global_repos/shared_operations.py` | 0 | 0 | 1 | 0 |
