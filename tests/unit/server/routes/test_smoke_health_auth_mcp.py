@@ -58,6 +58,7 @@ def test_post_auth_routes(client, path, body):
 @pytest.mark.parametrize(
     "path",
     [
+        "/",
         "/login",
         "/login/sso",
         "/admin/login",
@@ -72,6 +73,14 @@ def test_get_login_web_routes(client, path):
 
 def test_post_web_login(client):
     _smoke(client, "POST", "/login", data={"username": "x", "password": "y"})
+
+
+def test_get_root_redirects_to_login(client):
+    """Bare "/" has no page of its own -- it must forward to the unified
+    login form rather than dead-ending in a 404 (no router registers "/")."""
+    response = client.get("/", follow_redirects=False)
+    assert response.status_code in (302, 303, 307, 308)
+    assert response.headers["location"] == "/login"
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from code_indexer.server.middleware.error_handler import GlobalErrorHandler
 
@@ -281,6 +282,13 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
         job_tracker=job_tracker,
         secret_key=secret_key,
     )
+
+    # Bare "/" has no registered page (login_router mounts only at "/login",
+    # the dashboard lives under "/admin/") -- send visitors straight to the
+    # unified login form instead of a dead-end 404.
+    @app.get("/", include_in_schema=False)
+    async def _root_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/login")
 
     # Initialize self-monitoring app.state attributes to None (Bug #87 fix)
     # These will be updated during lifespan startup if self-monitoring is enabled
