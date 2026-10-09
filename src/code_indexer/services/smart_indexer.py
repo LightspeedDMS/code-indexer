@@ -146,6 +146,51 @@ class SmartIndexer(HighThroughputProcessor):
         # Initialize git hook manager for branch change detection
         self.git_hook_manager = GitHookManager(config.codebase_dir, metadata_path)
 
+    def _git_deltas_via_seam(
+        self, last_commit: str, current_commit: str
+    ) -> Optional[GitDelta]:
+        """The changes between two commits, asked of the git backend.
+
+        For a repository this pod does not hold. The seam has ``diff
+        --name-only``, not ``--name-status``, and with rename detection a
+        forward diff names only a rename's NEW path -- the old path's chunks
+        would never be removed. So both directions are asked: the reverse diff
+        names the old path. Every touched path is then classified by whether
+        it is still tracked at HEAD: tracked -> re-index, gone -> delete. A
+        rename is exactly delete-old + add-new, as the local path treats it.
+
+        Returns None when the backend cannot answer; the caller must not read
+        that as "nothing changed" (an empty delta would leave the index stale
+        without a word) and does a full index instead.
+        """
+        repo = str(self.config.codebase_dir)
+        try:
+            touched = set(
+                self.git_backend.diff_name_only(
+                    repo, f"{last_commit}..{current_commit}"
+                )
+            )
+            touched |= set(
+                self.git_backend.diff_name_only(
+                    repo, f"{current_commit}..{last_commit}"
+                )
+            )
+            tracked = set(self.git_backend.ls_files(repo)) if touched else set()
+        except Exception as e:  # the backend's transport, whatever it is
+            logger.error(
+                f"Git delta through the git backend failed "
+                f"({type(e).__name__}: {e}); falling back to a full index"
+            )
+            return None
+        modified = sorted(
+            p for p in touched if p in tracked and self._should_index_file(p)
+        )
+        deleted = sorted(
+            p for p in touched if p not in tracked and self._should_index_file(p)
+        )
+        logger.info(f"Git delta (git backend): ~{len(modified)} -{len(deleted)}")
+        return GitDelta(added=[], modified=modified, deleted=deleted, renamed=[])
+
     def _get_git_deltas_since_commit(
         self, last_commit: str, current_commit: str
     ) -> GitDelta:
@@ -1661,9 +1706,24 @@ class SmartIndexer(HighThroughputProcessor):
                     )
 
                 # Get git deltas - this is the KEY improvement for deletion detection
-                git_delta = self._get_git_deltas_since_commit(
-                    last_indexed_commit, current_commit
-                )
+                if self.git_backend is not None:
+                    seam_delta = self._git_deltas_via_seam(
+                        last_indexed_commit, current_commit
+                    )
+                    if seam_delta is None:
+                        return self._do_full_index(
+                            batch_size,
+                            progress_callback,
+                            git_status,
+                            provider_name,
+                            model_name,
+                            quiet,
+                        )
+                    git_delta = seam_delta
+                else:
+                    git_delta = self._get_git_deltas_since_commit(
+                        last_indexed_commit, current_commit
+                    )
 
                 # Handle deletions FIRST (critical for git pull scenarios)
                 if git_delta.deleted:

@@ -216,3 +216,94 @@ def test_every_indexer_the_index_command_builds_gets_the_git_backend() -> None:
         passed = {kw.arg: kw.value for kw in call.keywords}
         assert "git_backend" in passed, f"SmartIndexer at line {call.lineno}"
         assert getattr(passed["git_backend"], "id", None) == "repo_git_backend"
+
+
+# ── incremental: what changed between two commits ──────────────────────────
+
+OLD, NEW = "a" * 40, "b" * 40
+
+
+class _DiffingGitMcp(_GitMcp):
+    """``diff --name-only`` per direction, and the paths tracked at HEAD."""
+
+    def __init__(self, forward: List[str], reverse: List[str], tracked: List[str]):
+        super().__init__()
+        self.forward, self.reverse, self.tracked = forward, reverse, tracked
+
+    def diff_name_only(self, repo_path: str, spec: str, **kw: Any) -> List[str]:
+        self._check()
+        return self.forward if spec == f"{OLD}..{NEW}" else self.reverse
+
+    def ls_files(self, repo_path: str, **kw: Any) -> List[str]:
+        self._check()
+        return self.tracked
+
+
+def _indexer(repo: Path, git: Any) -> Any:
+    from code_indexer.indexing.file_finder import FileFinder
+    from code_indexer.services.smart_indexer import SmartIndexer
+
+    config = Config(codebase_dir=repo, file_extensions=["py"])
+    indexer = SmartIndexer.__new__(SmartIndexer)
+    indexer.config = config
+    indexer.git_backend = git
+    indexer.file_finder = FileFinder(config)
+    return indexer
+
+
+def test_the_delta_deletes_a_renamed_files_old_path(empty_repo: Path) -> None:
+    """With rename detection the forward diff names only the new path; the
+    reverse diff names the old one, so its chunks are removed."""
+    git = _DiffingGitMcp(
+        forward=["src/edited.py", "src/new_name.py", "src/removed.py", "README.md"],
+        reverse=[
+            "src/edited.py",
+            "src/old_name.py",
+            "src/removed.py",
+            "README.md",
+            "docs/old.md",
+        ],
+        tracked=["src/edited.py", "src/new_name.py", "README.md", "src/untouched.py"],
+    )
+
+    delta = _indexer(empty_repo, git)._git_deltas_via_seam(OLD, NEW)
+
+    assert delta is not None
+    assert delta.modified == ["src/edited.py", "src/new_name.py"]
+    assert delta.deleted == ["src/old_name.py", "src/removed.py"]
+    assert "README.md" not in delta.modified, "the extension filter was skipped"
+    assert "docs/old.md" not in delta.deleted, (
+        "deletions skip the filter (local parity)"
+    )
+
+
+def test_a_failing_backend_is_not_read_as_nothing_changed(empty_repo: Path) -> None:
+    git = _DiffingGitMcp([], [], [])
+    git.down = True
+    assert _indexer(empty_repo, git)._git_deltas_via_seam(OLD, NEW) is None
+
+
+def test_an_incremental_run_without_a_delta_does_a_full_index(empty_repo: Path) -> None:
+    """An empty delta would leave the index stale without a word."""
+    git = _DiffingGitMcp([], [], [])
+    git.down = True
+    indexer = _indexer(empty_repo, git)
+    metadata = MagicMock()
+    metadata.can_resume_interrupted_operation.return_value = False
+    metadata.get_resume_timestamp.return_value = 1_700_000_000.0
+    metadata.get_last_indexed_commit.return_value = OLD
+    indexer.progressive_metadata = metadata
+    full: List[Any] = []
+    indexer._do_full_index = lambda *a, **k: full.append(a) or "FULL"
+
+    result = indexer._do_incremental_index(
+        10,
+        None,
+        {"git_available": True, "current_commit": NEW, "current_branch": "main"},
+        "voyage-ai",
+        "voyage-code-3",
+        60,
+        quiet=True,
+    )
+
+    assert result == "FULL" and len(full) == 1
