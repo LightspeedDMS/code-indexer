@@ -134,3 +134,15 @@ def build_named_content_backend(backend_type: str) -> ContentBackend:
         resolve_delegated_content_backend() if backend_type == "delegated" else None
     )
     return build_content_backend_for(backend_type, delegated_backend=delegated)
+
+
+def configured_content_backend_name() -> str:
+    """The running server's ``content_backend`` selection, ``local`` when unset.
+
+    For code that must behave differently when repository files are NOT on this
+    pod (a delegated backend) but has no config object in hand.
+    """
+    from code_indexer.server.services.config_service import get_config_service
+
+    config = get_config_service().get_config()
+    return getattr(config, "content_backend", "local") or "local"
