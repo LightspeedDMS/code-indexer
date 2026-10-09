@@ -13,10 +13,16 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List
 
+from unittest.mock import patch
+
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.mcp.handlers import _utils
 from code_indexer.server.mcp.handlers.search.code_search import search_code
+from code_indexer.server.services.repo_access_guard import (
+    AccessFilteringServiceUnavailableError,
+)
 
 _LOGGER = "code_indexer.server.mcp.handlers.search"
 
@@ -55,14 +61,53 @@ def test_client_error_logs_warning_without_traceback(
     assert all(not r.exc_info for r in records), records
 
 
+class _RaisingQueryManager:
+    """Search manager double whose search fails with a given exception."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    def query_user_repositories(self, *args: Any, **kwargs: Any) -> Any:
+        raise self._error
+
+
+def _search_failing_with(error: BaseException) -> Dict[str, Any]:
+    with (
+        patch.object(
+            _utils.app_module,
+            "semantic_query_manager",
+            _RaisingQueryManager(error),
+            create=True,
+        ),
+        patch.object(_utils.app_module, "activated_repo_manager", None, create=True),
+    ):
+        return _search({"repository_alias": "example-repo"})
+
+
 def test_internal_failure_logs_error_with_traceback(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG, logger=_LOGGER)
 
-    # A global alias with no server state wired fails inside the server.
-    body = _search({"repository_alias": "example-repo-global"})
+    body = _search_failing_with(RuntimeError("storage exploded"))
 
     assert body["success"] is False
+    assert body["error"] == "Search failed"
     records = _search_failures(caplog)
-    assert any(r.levelno == logging.ERROR and r.exc_info for r in records), records
+    assert records, caplog.text
+    assert all(r.levelno == logging.ERROR and r.exc_info for r in records), records
+
+
+def test_unavailable_access_filtering_service_logs_error_with_fixed_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=_LOGGER)
+    fixed_text = "Access control is unavailable; refusing the request."
+
+    body = _search_failing_with(AccessFilteringServiceUnavailableError(fixed_text))
+
+    assert body["success"] is False
+    assert body["error"] == fixed_text
+    records = _search_failures(caplog)
+    assert records, caplog.text
+    assert all(r.levelno == logging.ERROR and r.exc_info for r in records), records

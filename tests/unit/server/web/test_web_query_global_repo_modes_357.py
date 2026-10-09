@@ -564,7 +564,8 @@ class TestQueryFailureLogging:
     ):
         # A process whose access filtering service is not wired must fail
         # closed. Its error carries a fixed text that classify_search_error
-        # allows to the client, so it is shown and logged at WARNING.
+        # allows to the client, so it is shown; an unwired server-side
+        # service is an internal failure, so it is logged at ERROR.
         app_module = importlib.import_module("code_indexer.server.app")
         monkeypatch.setattr(
             vars(app_module)["app"].state, "access_filtering_service", None
@@ -576,12 +577,11 @@ class TestQueryFailureLogging:
         assert "Repository access control is unavailable" in (_error(html) or "")
         assert env.searched_paths == []
         records = _routes_records(caplog)
-        assert [r for r in records if r.levelno >= logging.ERROR] == []
         code = "STORE-GENERAL-041" if handler == PARTIAL else "STORE-GENERAL-035"
         refusals = [r for r in records if f"[{code}]" in r.getMessage()]
         assert len(refusals) == 1
-        assert refusals[0].levelno == logging.WARNING
-        assert refusals[0].exc_info is None
+        assert refusals[0].levelno == logging.ERROR
+        assert refusals[0].exc_info
 
     def test_unexpected_query_layer_error_text_never_reaches_the_page(
         self, web_app, env, handler, caplog

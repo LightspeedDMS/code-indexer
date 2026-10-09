@@ -6293,7 +6293,7 @@ def _classify_web_query_failure(
 
     outcome = classify_search_error(error)
     error_class = type(error).__name__
-    if outcome.client_error or detail_logged_upstream:
+    if not outcome.log_as_internal or detail_logged_upstream:
         detail = (
             outcome.message
             if outcome.client_error

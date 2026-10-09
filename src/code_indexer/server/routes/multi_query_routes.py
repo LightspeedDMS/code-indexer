@@ -303,6 +303,14 @@ def multi_repository_query(
 
         outcome = classify_search_error(e)
         if outcome.client_error:
+            if outcome.log_as_internal:
+                logger.error(
+                    format_error_log(
+                        "WEB-GENERAL-030", "Multi-repo search refused", error=str(e)
+                    ),
+                    extra=get_log_extra("WEB-GENERAL-030"),
+                    exc_info=True,
+                )
             raise HTTPException(status_code=422, detail=outcome.message)
         logger.error(
             format_error_log(

@@ -92,6 +92,24 @@ def test_client_errors_keep_their_text(error: Exception, text: str) -> None:
     assert text in outcome.message
 
 
+def test_unavailable_access_filtering_service_is_logged_as_internal() -> None:
+    from code_indexer.server.services.repo_access_guard import (
+        AccessFilteringServiceUnavailableError,
+    )
+
+    outcome = classify_search_error(
+        AccessFilteringServiceUnavailableError("access control unavailable")
+    )
+
+    assert outcome.message == "access control unavailable"
+    assert outcome.log_as_internal is True
+
+
+def test_request_errors_are_not_logged_as_internal() -> None:
+    assert classify_search_error(SearchRequestError("bad")).log_as_internal is False
+    assert classify_search_error(RuntimeError("x")).log_as_internal is True
+
+
 def test_repository_not_found_names_only_the_alias() -> None:
     error = SearchRepositoryNotFoundError("example-repo-global")
     assert str(error) == "Repository 'example-repo-global' not found"

@@ -36,10 +36,18 @@ _MAX_CHAIN = 8
 
 @dataclass(frozen=True)
 class SearchErrorOutcome:
-    """The client-facing message for a failed search, and its class."""
+    """The client-facing message for a failed search, and its class.
+
+    ``log_as_internal`` is how every front door picks its log level: True
+    logs at ERROR with ``exc_info``, False at WARNING without a traceback.
+    It is True for every non-client failure, and also for
+    ``AccessFilteringServiceUnavailableError``, which keeps its fixed text in
+    the response but means a server-side service is not wired.
+    """
 
     message: str
     client_error: bool
+    log_as_internal: bool
     timed_out: bool = False
 
 
@@ -66,15 +74,26 @@ def _client_text(error: BaseException) -> Optional[str]:
 
 def classify_search_error(error: BaseException) -> SearchErrorOutcome:
     """Classify a failed search for its client-facing response."""
+    from code_indexer.server.services.repo_access_guard import (
+        AccessFilteringServiceUnavailableError,
+    )
+
     text = _client_text(error)
     if text is not None:
-        return SearchErrorOutcome(message=text, client_error=True)
+        return SearchErrorOutcome(
+            message=text,
+            client_error=True,
+            log_as_internal=isinstance(error, AccessFilteringServiceUnavailableError),
+        )
     if any(isinstance(link, TimeoutError) for link in _chain(error)):
         return SearchErrorOutcome(
             message=public_error_message(SEARCH_TIMED_OUT),
             client_error=False,
+            log_as_internal=True,
             timed_out=True,
         )
     return SearchErrorOutcome(
-        message=public_error_message(SEARCH_FAILED), client_error=False
+        message=public_error_message(SEARCH_FAILED),
+        client_error=False,
+        log_as_internal=True,
     )

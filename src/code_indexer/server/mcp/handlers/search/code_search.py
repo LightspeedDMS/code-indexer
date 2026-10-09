@@ -263,9 +263,9 @@ def search_code(
         # A request the caller can fix is not a server fault: WARNING, no
         # traceback (as REST /api/query). Everything else keeps ERROR.
         logger.log(
-            logging.WARNING if outcome.client_error else logging.ERROR,
+            logging.ERROR if outcome.log_as_internal else logging.WARNING,
             f"Error in search_code: {e}",
-            exc_info=not outcome.client_error,
+            exc_info=outcome.log_as_internal,
             extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response(

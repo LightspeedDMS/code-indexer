@@ -1085,6 +1085,14 @@ def register_query_routes(
         except AccessFilteringServiceUnavailableError as e:
             # Query searches only repositories the caller can access; with
             # access control unavailable that cannot be verified -- refuse.
+            # An unwired server-side service is an internal failure.
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-037",
+                    f"Access control unavailable in unified search: {e}",
+                ),
+                exc_info=True,
+            )
             raise access_control_unavailable_error(e)
 
         except MultiIndexQueryTimeoutError as e:
