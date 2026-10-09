@@ -27,7 +27,7 @@ import ast
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any, Dict, List, Union
 
 import pytest
 
@@ -245,6 +245,135 @@ def test_scip_query_finds_an_alias_db_through_the_store(
     found = service.find_scip_files(repository_alias=repo.name)
     assert found == [snapshot_root / "scip" / "index.scip.db"]
     assert not (snapshot / ".code-indexer").exists()
+
+
+def test_the_delegated_scip_funnel_clears_the_marker_in_the_store(
+    elsewhere: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from code_indexer.server.services import scip_lifecycle
+
+    repo, root = elsewhere
+    seen: List[Path] = []
+    monkeypatch.setattr(
+        scip_lifecycle, "remove_scip_build_commit", lambda d: seen.append(Path(d))
+    )
+    try:
+        scip_lifecycle.funnel_scip_generation(
+            alias="repo",
+            repo_root=repo,
+            config=SimpleNamespace(scip_backend="delegated"),
+            clear=True,
+        )
+    except Exception:
+        pass  # only the directory it was handed matters here
+    assert seen == [root / "scip"]
+
+
+def test_self_healing_retries_write_scip_into_the_store(elsewhere: Any) -> None:
+    import threading
+    from types import SimpleNamespace
+
+    from code_indexer.server.services.scip_self_healing import (
+        SCIPSelfHealingService,
+    )
+
+    repo, root = elsewhere
+    (repo / "proj").mkdir()
+    job = SimpleNamespace(
+        language_resolution_status={
+            "proj/": {"language": "no-such-language", "build_system": "x"}
+        }
+    )
+    service = SCIPSelfHealingService.__new__(SCIPSelfHealingService)
+    service.repo_root = repo
+    service.job_manager = SimpleNamespace(_lock=threading.Lock(), jobs={"j": job})
+
+    service._retry_scip_for_project("j", "proj/")
+
+    assert (root / "scip").is_dir(), "the retry did not create the store's SCIP dir"
+    assert not (repo / ".code-indexer").exists(), "the retry wrote into the repo"
+
+
+def test_the_backfill_freshness_check_reads_the_store(
+    elsewhere: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from code_indexer.server.services import scip_backfill_policy, scip_lifecycle
+
+    repo, root = elsewhere
+    seen: List[Path] = []
+
+    def fresh(repo_root: Path, scip_dir: Path) -> bool:
+        seen.append(Path(scip_dir))
+        return True
+
+    monkeypatch.setattr(scip_lifecycle, "scip_db_is_fresh", fresh)
+    policy_cls = next(
+        getattr(scip_backfill_policy, n)
+        for n in dir(scip_backfill_policy)
+        if hasattr(getattr(scip_backfill_policy, n), "is_fresh")
+    )
+    policy = policy_cls.__new__(policy_cls)
+    assert policy.is_fresh(repo) is True
+    assert seen == [root / "scip"]
+
+
+def test_scip_remote_config_is_read_from_the_store(
+    elsewhere: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from code_indexer import cli_scip
+    from code_indexer.mode_detection import command_mode_detector
+
+    repo, root = elsewhere
+    root.mkdir(parents=True)
+    (root / "config.json").write_text(json.dumps({"server_url": "https://x"}))
+    monkeypatch.setattr(command_mode_detector, "find_project_root", lambda cwd: repo)
+
+    assert cli_scip._get_remote_config() == {"server_url": "https://x"}
+
+
+_SCIP_QUERY_COMMANDS = [
+    ["status"],
+    ["definition", "Foo"],
+    ["references", "Foo"],
+    ["dependencies", "Foo"],
+    ["dependents", "Foo"],
+    ["impact", "Foo"],
+    ["callchain", "Foo", "Bar"],
+    ["context", "Foo"],
+]
+
+
+@pytest.mark.parametrize("args", _SCIP_QUERY_COMMANDS, ids=lambda a: a[0])
+def test_every_scip_cli_command_reads_the_stores_scip_dir(
+    elsewhere: Any, monkeypatch: pytest.MonkeyPatch, args: List[str]
+) -> None:
+    """Each command loads SCIP status from scip_index_dir(cwd); a site that
+    still joined the literal would hand the tracker the repo's own path."""
+    from click.testing import CliRunner
+
+    from code_indexer import cli_scip, disabled_commands
+    from code_indexer.scip import status as scip_status
+
+    repo, root = elsewhere
+    seen: List[Path] = []
+
+    class _Recording:
+        def __init__(self, scip_dir: Path) -> None:
+            seen.append(Path(scip_dir))
+
+        def load(self) -> Any:
+            raise SystemExit(7)
+
+    monkeypatch.setattr(scip_status, "StatusTracker", _Recording)
+    # Mode detection is its own (not yet migrated) .code-indexer site; stub it
+    # rather than plant a marker inside the repo.
+    monkeypatch.setattr(disabled_commands, "detect_current_mode", lambda: "local")
+    monkeypatch.chdir(repo)
+    CliRunner().invoke(cli_scip.scip_group, args)
+
+    assert seen == [root / "scip"], f"{args[0]}: {seen}"
 
 
 if __name__ == "__main__":
