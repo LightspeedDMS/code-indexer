@@ -44,6 +44,36 @@ from typing import Iterable, List, Optional
 
 from code_indexer.utils.git_runner import run_git_command
 
+# cidx's own untracked working paths inside a repository clone: the index
+# directory and the project-level override file. Unanchored patterns, so
+# they are kept at any depth.
+CIDX_OWNED_WORKING_PATHS = (".code-indexer", ".code-indexer-override.yaml")
+
+# The ONE argv every server-side "remove untracked files" runs (REST and
+# MCP git_clean, and the pre-refresh clearing of a dirty repository). Each
+# `-e` adds an ignore rule, and without `-x` git clean keeps ignored paths,
+# so the repository's index survives the clean.
+GIT_CLEAN_UNTRACKED_ARGV = ["git", "clean", "-fd"] + [
+    arg for path in CIDX_OWNED_WORKING_PATHS for arg in ("-e", path)
+]
+
+# Uncommitted changes other than cidx's own working paths: the paths the
+# clean above keeps must not make the repository look dirty afterwards.
+# Untracked files are listed individually so the exclusions also apply
+# inside an otherwise-collapsed untracked directory.
+GIT_STATUS_UNCOMMITTED_ARGV = [
+    "git",
+    "status",
+    "--porcelain",
+    "--untracked-files=all",
+    "--",
+    ".",
+] + [
+    f":(exclude,glob){pattern}"
+    for path in CIDX_OWNED_WORKING_PATHS
+    for pattern in (f"**/{path}", f"**/{path}/**")
+]
+
 
 class GitArgumentValidationError(ValueError):
     """Raised when a caller-supplied git argv component fails safety validation.

@@ -23,6 +23,10 @@ from pathlib import Path
 from typing import Optional, Any, List, Union, cast
 
 from code_indexer.utils.git_runner import run_git_command
+from code_indexer.server.services.git_argv_safety import (
+    GIT_CLEAN_UNTRACKED_ARGV,
+    GIT_STATUS_UNCOMMITTED_ARGV,
+)
 from code_indexer.utils.credential_redaction import mask_url_credentials
 from code_indexer.utils.git_remote_url import parse_git_remote_url
 from code_indexer.server.logging_utils import format_error_log
@@ -107,7 +111,7 @@ class GitStateManager:
         # Check current status
         try:
             status_result = run_git_command(
-                ["git", "status", "--porcelain"], cwd=repo_path, check=True
+                list(GIT_STATUS_UNCOMMITTED_ARGV), cwd=repo_path, check=True
             )
         except subprocess.CalledProcessError as e:
             raise GitStateError(f"git status failed: {e}")
@@ -152,7 +156,7 @@ class GitStateManager:
 
         # Execute git clean -fd
         try:
-            run_git_command(["git", "clean", "-fd"], cwd=repo_path, check=True)
+            run_git_command(list(GIT_CLEAN_UNTRACKED_ARGV), cwd=repo_path, check=True)
             logger.debug(
                 f"git clean -fd succeeded for {repo_path}",
                 extra={"correlation_id": get_correlation_id()},
@@ -172,7 +176,7 @@ class GitStateManager:
         # Verify clean state
         try:
             final_status = run_git_command(
-                ["git", "status", "--porcelain"], cwd=repo_path, check=True
+                list(GIT_STATUS_UNCOMMITTED_ARGV), cwd=repo_path, check=True
             )
         except subprocess.CalledProcessError as e:
             raise GitStateError(f"git status verification failed: {e}")

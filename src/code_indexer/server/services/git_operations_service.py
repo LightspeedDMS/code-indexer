@@ -34,6 +34,7 @@ from code_indexer.server.utils.config_manager import ServerConfigManager
 from code_indexer.utils.git_runner import run_git_command
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.git_argv_safety import (
+    GIT_CLEAN_UNTRACKED_ARGV,
     validate_branch_name,
     validate_pathspecs,
     validate_remote_name,
@@ -2118,7 +2119,7 @@ class GitOperationsService:
 
         try:
             result = run_git_command(
-                ["git", "clean", "-fd"],
+                list(GIT_CLEAN_UNTRACKED_ARGV),
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
                 check=True,
