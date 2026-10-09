@@ -4438,7 +4438,9 @@ def make_lifespan(
                         with open(_cfg_path) as _f:
                             _cfg_data = _json.load(_f)
                             _pg_dsn = _cfg_data.get("postgres_dsn", "")
-                            _cluster_cfg = _cfg_data.get("cluster", {})
+                            # "cluster": null is written by a standalone
+                            # server; `or {}` keeps it from raising here.
+                            _cluster_cfg = _cfg_data.get("cluster") or {}
                             _sharding_enabled = bool(
                                 _cluster_cfg.get("sharding_enabled", False)
                             )
@@ -5455,7 +5457,11 @@ def make_lifespan(
                 if _nm_cfg_path.exists():
                     with open(_nm_cfg_path) as _nm_f:
                         _nm_cfg = _nm_json.load(_nm_f)
-                        _nm_node_id = _nm_cfg.get("cluster", {}).get("node_id") or None
+                        from code_indexer.server.utils.cluster_node_id import (
+                            configured_node_id,
+                        )
+
+                        _nm_node_id = configured_node_id(_nm_cfg) or None
             except Exception as e:
                 logger.debug(f"Could not read node_id from config.json: {e}")
 
