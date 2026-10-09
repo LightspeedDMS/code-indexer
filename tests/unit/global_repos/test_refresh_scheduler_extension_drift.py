@@ -137,7 +137,9 @@ def _run_execute_refresh_capture_popen(
                 ):
                     with patch(
                         "code_indexer.global_repos.refresh_scheduler.subprocess.run",
-                        return_value=MagicMock(returncode=0),
+                        # A real git result: the seam parses stdout (e.g. the
+                        # rev-list count -- "1" means one commit to pull).
+                        return_value=MagicMock(returncode=0, stdout="1\n", stderr=""),
                     ):
                         sched._execute_refresh("my-repo-global")
     return captured

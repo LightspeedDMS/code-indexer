@@ -516,6 +516,31 @@ class LocalGitBackend:
 # Factory
 # ---------------------------------------------------------------------------
 
+#: What git prints when HEAD is not a branch: ``fatal: ref HEAD is not a
+#: symbolic ref``. git-mcp surfaces git's stderr verbatim, so the same text
+#: identifies a detached HEAD through either backend.
+DETACHED_HEAD_MARKER = "is not a symbolic ref"
+
+
+def head_branch(
+    backend: "GitBackend", repo_path: str, timeout: Timeout = None
+) -> Optional[str]:
+    """The checked-out branch, or ``None`` when HEAD is detached.
+
+    A detached HEAD is a normal state (a repository pinned to a tag or commit)
+    and is reported as ``None``. ANY other failure -- a transport error to
+    git-mcp, a path that is not a repository -- raises: reading it as
+    "detached" would make refresh silently skip the pull, which is exactly how
+    a pod without the repository on its disk used to fail.
+    """
+    try:
+        return backend.symbolic_ref(repo_path, short=True, timeout=timeout) or None
+    except subprocess.CalledProcessError as exc:
+        if DETACHED_HEAD_MARKER in str(exc.stderr or ""):
+            return None
+        raise
+
+
 VALID_GIT_BACKENDS = ("local", "delegated")
 
 

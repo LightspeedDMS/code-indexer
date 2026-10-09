@@ -79,9 +79,9 @@ def _make_subprocess_handler(
     symbolic_ref_calls: List,
 ):
     def handler(cmd, **kwargs):
-        if cmd == ["git", "branch", "--show-current"]:
+        if cmd == ["git", "symbolic-ref", "--short", "HEAD"]:
             return _proc(stdout=current_branch)
-        if cmd == ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]:
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]:
             symbolic_ref_calls.append(cmd)
             return _proc(returncode=symbolic_ref_returncode, stdout=symbolic_ref_stdout)
         if cmd[:2] == ["git", "checkout"]:

@@ -27,8 +27,10 @@ import pytest
 from code_indexer.global_repos.git_error_classifier import GitFetchError
 from code_indexer.global_repos.git_pull_updater import (
     GitPullUpdater,
-    _format_subprocess_failure_diagnostic,
     _format_timeout_diagnostic,
+)
+from code_indexer.utils.subprocess_diagnostics import (
+    format_completed_process_diagnostic as _format_subprocess_failure_diagnostic,
 )
 
 
@@ -254,7 +256,7 @@ class TestNonFetchTimeoutsNotMisclassified:
                 return _proc(returncode=0, args=cmd)
             if cmd[:2] == ["git", "symbolic-ref"]:
                 return _proc(returncode=0, stdout="refs/heads/main\n", args=cmd)
-            if cmd[:2] == ["git", "log"]:
+            if cmd[:2] == ["git", "rev-list"]:  # HEAD..@{upstream}, via the seam
                 raise subprocess.TimeoutExpired(cmd=cmd, timeout=30)
             raise AssertionError(f"unexpected subprocess call: {cmd}")
 
@@ -263,7 +265,7 @@ class TestNonFetchTimeoutsNotMisclassified:
                 updater.has_changes()
 
         assert not isinstance(exc_info.value, GitFetchError)
-        assert "log" in str(exc_info.value)
+        assert "HEAD..@{upstream}" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +287,7 @@ class TestStderrOnlyDiagnosticsFixedInHasChanges:
                 return _proc(returncode=0, args=cmd)
             if cmd[:2] == ["git", "symbolic-ref"]:
                 return _proc(returncode=0, stdout="refs/heads/main\n", args=cmd)
-            if cmd[:2] == ["git", "log"]:
+            if cmd[:2] == ["git", "rev-list"]:  # HEAD..@{upstream}, via the seam
                 return _proc(
                     returncode=128,
                     stdout="fatal: ambiguous argument 'HEAD..@{upstream}': real diagnostic",
