@@ -84,6 +84,43 @@ def test_refresh_removes_the_empty_index_and_builds_none(
     assert not tim.trigram_index_dir(index_state_only).exists()
 
 
+def test_an_unreadable_setting_skips_the_build_but_never_deletes(
+    index_state_only: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not knowing is no reason to delete a valid -- and, in a cluster,
+    shared -- index; only a confirmed delegated backend removes it."""
+    from code_indexer.global_repos.refresh_scheduler import _build_source_trigram_index
+
+    def unreadable() -> str:
+        raise RuntimeError("config service not initialised")
+
+    monkeypatch.setattr(wiring, "configured_content_backend_name", unreadable)
+    built: List[Path] = []
+    monkeypatch.setattr(
+        tim.TrigramIndexManager,
+        "build",
+        lambda self, p, file_list=None: built.append(p) or 0,
+    )
+
+    _build_source_trigram_index("agent-router-global", str(index_state_only))
+
+    assert built == []
+    assert tim.TrigramIndexManager(tim.trigram_index_dir(index_state_only)).exists()
+
+
+def test_an_unreadable_setting_is_logged_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def unreadable() -> str:
+        raise RuntimeError("config service not initialised")
+
+    monkeypatch.setattr(wiring, "configured_content_backend_name", unreadable)
+    monkeypatch.setattr(wiring, "_unknown_backend_logged", False)
+    for _ in range(5):
+        assert tim.trigram_prefilter_available() is False
+    assert sum("unreadable" in r.getMessage() for r in caplog.records) == 1
+
+
 def test_the_lazy_self_heal_builds_nothing(
     delegated: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

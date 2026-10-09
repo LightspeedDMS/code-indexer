@@ -60,6 +60,7 @@ from code_indexer.server.services.cidx_meta_backup import (
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.startup.content_backend_wiring import (
     configured_content_backend_name,
+    content_backend_name_or_none,
 )
 from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
 from code_indexer.server.services.metadata_reader import (
@@ -407,9 +408,12 @@ def _build_source_trigram_index(alias_name: str, source_path: str) -> None:
         tri_dir = trigram_index_dir(tri_source_path)
         if not trigram_prefilter_available():
             # Delegated content: the files are not on this disk, so a build
-            # would publish an empty index. Remove one an earlier build left,
-            # and let regex search full-scan.
-            if tri_dir.exists():
+            # would publish an empty index, and one an earlier build left
+            # would steer searches at paths this pod cannot read -- removed,
+            # but ONLY on a confirmed delegated backend. An unreadable setting
+            # skips the build and leaves the (possibly shared) index alone:
+            # not knowing is no reason to delete anything.
+            if content_backend_name_or_none() == "delegated" and tri_dir.exists():
                 shutil.rmtree(tri_dir)
             logger.info(
                 f"Trigram index skipped for {alias_name}: repository is not on "

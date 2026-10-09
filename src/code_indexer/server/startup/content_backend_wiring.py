@@ -136,6 +136,27 @@ def build_named_content_backend(backend_type: str) -> ContentBackend:
     return build_content_backend_for(backend_type, delegated_backend=delegated)
 
 
+_unknown_backend_logged = False
+
+
+def content_backend_name_or_none() -> Optional[str]:
+    """The configured content backend, or None when the setting cannot be read.
+
+    For callers that must tell "confirmed delegated" from "unknown": skipping
+    local-disk work is safe on either, but DESTROYING local state is only
+    justified by a confirmed answer. The failure is logged once per process,
+    not per call -- callers sit on hot paths (every regex search).
+    """
+    global _unknown_backend_logged
+    try:
+        return configured_content_backend_name()
+    except Exception as exc:  # the server config, whatever its state
+        if not _unknown_backend_logged:
+            _unknown_backend_logged = True
+            logger.warning("content_backend setting unreadable (%s)", exc)
+        return None
+
+
 def configured_content_backend_name() -> str:
     """The running server's ``content_backend`` selection, ``local`` when unset.
 

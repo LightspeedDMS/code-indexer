@@ -212,15 +212,11 @@ def trigram_prefilter_available() -> bool:
     when the setting cannot be read -- a missing pre-filter costs time, a
     wrong one costs results.
     """
-    try:
-        from code_indexer.server.startup.content_backend_wiring import (
-            configured_content_backend_name,
-        )
+    from code_indexer.server.startup.content_backend_wiring import (
+        content_backend_name_or_none,
+    )
 
-        return configured_content_backend_name() != "delegated"
-    except Exception as exc:  # the server config, whatever its state
-        logger.warning("trigram pre-filter disabled: content backend unknown (%s)", exc)
-        return False
+    return content_backend_name_or_none() == "local"
 
 
 def trigram_index_dir(repo_path: Path) -> Path:
