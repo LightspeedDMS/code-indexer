@@ -58,6 +58,10 @@ UNKNOWN_ALIAS = "never-activated-repo"
 README = "README.md"
 README_TEXT = "example"
 
+# The module-scoped real app via isolated_app (~7 s alone) is paid by
+# whichever test runs first, slower under parallel gate load.
+pytestmark = pytest.mark.timeout(45)
+
 
 @pytest.fixture(scope="module")
 def client(tmp_path_factory: pytest.TempPathFactory) -> Iterator[TestClient]:

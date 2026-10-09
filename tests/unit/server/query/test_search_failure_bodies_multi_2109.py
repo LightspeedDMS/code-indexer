@@ -40,6 +40,10 @@ SENTINEL = "/srv/sentinel-internal-path/index"
 STORE_FAILURE = OSError(f"index storage is unavailable at {SENTINEL}")
 LOGGER_NAME = "code_indexer.server"
 
+# The bound #2047 module fixtures index two corpus repositories and start a
+# real app (~7 s alone); whichever test runs first pays it, slower under load.
+pytestmark = pytest.mark.timeout(45)
+
 
 def _logged(caplog: pytest.LogCaptureFixture) -> str:
     parts = []

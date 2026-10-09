@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from code_indexer.server.services.resizable_limiter import ResizableLimiter
 
 
@@ -218,6 +220,8 @@ def test_config_update_calls_set_limit():
 # ---------------------------------------------------------------------------
 
 
+# Waits out the real 10 s acquire timeout (the behaviour under test).
+@pytest.mark.timeout(45)
 def test_job_fn_returns_error_on_acquire_timeout():
     """When the limiter is full, the single-repo job_fn captured from handle_xray_search
     returns a dict with error='xray_cell_queue_timeout'."""

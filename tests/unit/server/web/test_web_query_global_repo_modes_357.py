@@ -60,6 +60,10 @@ OWN_ACTIVATION = "my-web-repo"
 # decoded text, so FTS returns it as the Tantivy snippet.
 LATIN1_TEXT = "def legacy_greeting():\n    return 'café crème'\n"
 
+# The module-scoped real create_app() and FTS index templates (~10 s alone)
+# are paid by whichever test runs first, slower under parallel gate load.
+pytestmark = pytest.mark.timeout(45)
+
 _BADGE = re.compile(r'class="search-mode-badge search-mode-([a-z]+)"')
 
 

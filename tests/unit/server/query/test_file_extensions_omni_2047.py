@@ -40,6 +40,10 @@ ADMIN = User(
 VALUES = ["py", ".MD"]
 NEVER_A_SUFFIX = "never be a file extension"
 
+# The module-scoped omni_env indexes two corpus repositories and starts a real
+# app (~7.5 s alone); whichever test runs first pays it, slower under load.
+pytestmark = pytest.mark.timeout(45)
+
 
 @pytest.fixture(scope="module")
 def omni_env(

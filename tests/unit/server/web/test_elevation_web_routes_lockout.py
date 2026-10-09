@@ -190,6 +190,9 @@ class TestSharedCounterAcrossFrontDoors:
             # The first backoff window is 5 s; the header is whole seconds.
             assert 1 <= int(response.headers["Retry-After"]) <= 5
 
+    # Three doors each wait the real 2 s reservation busy timeout (~6 s
+    # idle): the wait is the behaviour under test, slower under gate load.
+    @pytest.mark.timeout(45)
     def test_busy_store_answers_503_try_again_shortly(self, door, tmp_path):
         import sqlite3
 

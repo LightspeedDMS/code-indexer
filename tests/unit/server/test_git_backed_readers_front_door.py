@@ -41,6 +41,10 @@ from tests.unit.server.repo_url_userinfo_env import (  # noqa: F401 - fixtures
 EXTRA_LINKS = ("abs.py", "chain.py", "sub/x.py")
 GIT_BACKED = (*GIT_FILE_LINKS, *EXTRA_LINKS)
 
+# The module-scoped real create_app(), golden clone and SCIP database (~8 s
+# alone) are paid by whichever test runs first, slower under gate load.
+pytestmark = pytest.mark.timeout(45)
+
 
 @pytest.fixture(scope="module")
 def clone(app: Any) -> Path:
