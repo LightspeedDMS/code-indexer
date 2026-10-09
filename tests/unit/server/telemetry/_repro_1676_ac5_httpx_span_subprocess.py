@@ -122,7 +122,9 @@ def _run() -> dict:
             enabled=True,
             export_traces=True,
             export_metrics=True,
-            collector_endpoint="http://127.0.0.1:1",
+            # The parent test's listening OTLP/HTTP sink.
+            collector_endpoint=os.environ["REPRO_1676_AC5_COLLECTOR_ENDPOINT"],
+            collector_protocol="http",
         )
     )
 

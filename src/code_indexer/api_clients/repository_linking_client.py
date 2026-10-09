@@ -10,6 +10,7 @@ from typing import List, Dict, Any, cast
 from pydantic import BaseModel, Field
 
 from .base_client import CIDXRemoteAPIClient, APIClientError, AuthenticationError
+from ..utils.credential_redaction import mask_url_credentials
 from ..server.models.repository_discovery import (
     RepositoryMatch,  # noqa: F401 - Re-exported for tests
     RepositoryDiscoveryResponse as ServerRepositoryDiscoveryResponse,
@@ -100,13 +101,20 @@ class RepositoryLinkingClient(CIDXRemoteAPIClient):
             r"^~/.+$",
         )
         if not any(re.match(p, repo_url) for p in _url_patterns):
-            raise ValueError(f"Invalid git URL format: {repo_url}")
+            raise ValueError(
+                f"Invalid git URL format: {mask_url_credentials(repo_url)}"
+            )
+
+        from ..server.git.git_subprocess_env import remote_url_without_credentials
 
         # Server handler (inline_repos.py discover_repositories) declares
         # `source: str` as the query parameter name, not repo_url. quote() with
         # safe='' encodes filesystem-path slashes and other reserved chars.
+        # URL credentials are never sent: the query names the remote in its
+        # credential-free form.
+        source = remote_url_without_credentials(repo_url)
         discovery_endpoint = (
-            f"/api/repos/discover?source={urllib.parse.quote(repo_url, safe='')}"
+            f"/api/repos/discover?source={urllib.parse.quote(source, safe='')}"
         )
 
         try:

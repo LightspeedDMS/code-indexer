@@ -45,17 +45,50 @@ class UsersSqliteBackend:
         now = created_at if created_at else datetime.now(timezone.utc).isoformat()
 
         def operation(conn):
-            conn.execute(
-                """INSERT INTO users
-                   (username, password_hash, role, email, created_at,
-                    password_changed_at, account_created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (username, password_hash, role, email, now, now, now),
-            )
+            self._insert_user(conn, username, password_hash, role, email, now)
             return None
 
         self._conn_manager.execute_atomic(operation)
         logger.info(f"Created user: {username}")
+
+    @staticmethod
+    def _insert_user(
+        conn, username: str, password_hash: str, role: str, email, now: str
+    ) -> None:
+        conn.execute(
+            """INSERT INTO users
+               (username, password_hash, role, email, created_at,
+                password_changed_at, account_created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (username, password_hash, role, email, now, now, now),
+        )
+
+    def has_any_user(self) -> bool:
+        """True when the store holds at least one user."""
+        conn = self._conn_manager.get_connection()
+        return conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None
+
+    def create_user_if_store_empty(
+        self, username: str, password_hash: str, role: str
+    ) -> bool:
+        """Create the user only while the store holds no users at all.
+
+        The check and the insert run in one exclusive transaction, so of any
+        number of concurrent callers on an empty store exactly one creates
+        its user.  Returns True when the user was created.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn) -> bool:
+            if conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None:
+                return False
+            self._insert_user(conn, username, password_hash, role, None, now)
+            return True
+
+        created: bool = self._conn_manager.execute_atomic(operation)
+        if created:
+            logger.info(f"Created user: {username}")
+        return created
 
     def get_user(self, username: str) -> Optional[Dict[str, Any]]:
         """Get user with all related data (api_keys, mcp_credentials)."""

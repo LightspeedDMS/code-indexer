@@ -26,6 +26,7 @@ from dataclasses import dataclass, asdict, fields
 # at module scope (not under TYPE_CHECKING) because we need the runtime
 # class object, not just the type annotation.
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+from code_indexer.utils.credential_redaction import with_masked_repo_url
 
 # Bug #1256: driver-agnostic classifier shared with the INSERT-path
 # unique-violation detection in job_tracker._atomic_insert_impl (Bug
@@ -992,6 +993,10 @@ class BackgroundJobManager:
                     # (sqlite_backends.py:2510), but field testers misread it as
                     # "submitter is not admin". Remove from public projection.
                     db_job.pop("is_admin", None)
+                    # A registration URL kept in the job's metadata (needed to
+                    # run the job) is returned with its userinfo redacted.
+                    if isinstance(db_job.get("metadata"), dict):
+                        db_job["metadata"] = with_masked_repo_url(db_job["metadata"])
                     return db_job  # type: ignore[no-any-return]
             except Exception as e:
                 logging.error(f"Failed to get job {job_id} from SQLite: {e}")

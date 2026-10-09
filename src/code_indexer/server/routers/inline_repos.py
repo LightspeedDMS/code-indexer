@@ -41,6 +41,10 @@ from ..services.repository_discovery_service import (
 from . import repo_access_http
 from ..validators.composite_repo_validator import CompositeRepoValidator  # noqa: E402
 from ..logging_utils import mask_url_credentials  # noqa: E402
+from code_indexer.utils.path_confinement import (  # noqa: E402
+    has_git_segment,
+    is_readable_within_root,
+)
 from ..repositories.golden_repo_manager import GitOperationError  # noqa: E402
 
 from fastapi import (
@@ -795,7 +799,8 @@ def register_repo_routes(
             )
 
             logging.info(
-                f"Repository discovery for {source} by {current_user.username}: "
+                f"Repository discovery for {mask_url_credentials(source)} "
+                f"by {current_user.username}: "
                 f"{discovery_response.total_matches} matches found"
             )
 
@@ -1981,7 +1986,11 @@ def register_repo_routes(
                 detail="Invalid path: must be a relative path within the repository",
             )
 
-        if not scan_root.exists():
+        # A path inside the repository's .git is answered as a missing path.
+        if (
+            has_git_segment(scan_root.relative_to(repo_resolved).parts)
+            or not scan_root.exists()
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Path '{path}' does not exist in repository '{user_alias}'",
@@ -1993,11 +2002,22 @@ def register_repo_routes(
                 detail=f"Path '{path}' is not a directory",
             )
 
+        def _listable(candidate: Path) -> bool:
+            # A symlink is listed only when it resolves inside the repository
+            # and outside its .git -- the same rule every file read applies.
+            return not candidate.is_symlink() or is_readable_within_root(
+                candidate, repo_resolved
+            )
+
         try:
             if not recursive:
                 entries = []
                 with os.scandir(scan_root) as it:
                     for entry in it:
+                        if has_git_segment((entry.name,)) or not _listable(
+                            Path(entry.path)
+                        ):
+                            continue
                         rel = Path(entry.path).relative_to(repo_resolved)
                         entries.append(
                             {
@@ -2018,6 +2038,18 @@ def register_repo_routes(
             # cycles and escaping the repo via symlinks.
             for dirpath, dirnames, filenames in os.walk(scan_root, followlinks=False):
                 current = Path(dirpath)
+                # The repository's .git is neither listed nor descended into,
+                # nor is any symlink resolving into it.
+                dirnames[:] = [
+                    d
+                    for d in dirnames
+                    if not has_git_segment((d,)) and _listable(current / d)
+                ]
+                filenames = [
+                    f
+                    for f in filenames
+                    if not has_git_segment((f,)) and _listable(current / f)
+                ]
                 # depth of this directory relative to scan_root (root == 0); its
                 # children sit at depth+1. Skip emitting a directory's children
                 # once they would exceed max_depth, and prune descent so os.walk

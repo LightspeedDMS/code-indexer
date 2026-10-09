@@ -22,12 +22,14 @@ class AutoSpanLogger:
     to capture timing, inputs, outputs, and errors. When no trace is active, executes
     tools without any logging overhead.
 
+    Invariant: every span input, output and error output goes through
+    LangfuseClient (create_span / update_span / end_span), the single export
+    boundary that redacts secrets; this class never touches SDK span objects
+    directly. The caller always receives the unredacted result.
+
     Story #136 follow-up: Supports automatic trace creation on first tool call when
     auto_trace_enabled=True and no trace exists for the session.
     """
-
-    # Sensitive field names to remove from inputs (case-insensitive)
-    SENSITIVE_FIELDS = {"password", "token", "secret", "api_key"}
 
     def __init__(
         self,
@@ -47,29 +49,18 @@ class AutoSpanLogger:
         self.langfuse = langfuse_client
         self.config = config or LangfuseConfig()  # Default to disabled config
 
-    def _sanitize_input(self, arguments: dict) -> dict:
+    def _sanitize_input(self, arguments: dict) -> Any:
         """
-        Remove sensitive fields from input arguments.
-
-        Filters out fields like password, token, secret, api_key (case-insensitive)
-        to prevent sensitive data from being logged to Langfuse.
+        Span input for the tool arguments. Secrets are redacted by
+        LangfuseClient at the export boundary, so the arguments pass through.
 
         Args:
             arguments: Original tool arguments
 
         Returns:
-            Sanitized copy of arguments with sensitive fields removed
+            The arguments, unmodified
         """
-        if not isinstance(arguments, dict):
-            return arguments
-
-        # Create copy and remove sensitive fields (case-insensitive)
-        sanitized = {}
-        for key, value in arguments.items():
-            if key.lower() not in self.SENSITIVE_FIELDS:
-                sanitized[key] = value
-
-        return sanitized
+        return arguments
 
     def _summarize_output(self, output: Any) -> Any:
         """
@@ -118,7 +109,7 @@ class AutoSpanLogger:
         Args:
             session_id: MCP session ID
             tool_name: Name of the tool being called
-            arguments: Tool arguments (will be sanitized for span input)
+            arguments: Tool arguments (redacted at the export boundary)
             handler: Async callable that executes the tool
             username: Optional username for auto-trace user_id (Story #136 follow-up)
 
@@ -163,12 +154,10 @@ class AutoSpanLogger:
         # Try to create span, but continue without it if creation fails
         span = None
         try:
-            # Sanitize inputs before passing to span
-            sanitized_input = self._sanitize_input(arguments)
             span = self.langfuse.create_span(
                 trace_id=trace_ctx.trace_id,
                 name=tool_name,
-                input_data=sanitized_input,
+                input_data=self._sanitize_input(arguments),
             )
         except Exception as span_creation_error:
             logger.warning(
@@ -182,28 +171,28 @@ class AutoSpanLogger:
         try:
             result = await handler()
 
-            # End span with summarized output
-            # Langfuse SDK 3.x: use update() to set output, then end() with no args
+            # End span with summarized output, through the export boundary
             if span:
                 try:
-                    summarized_result = self._summarize_output(result)
-                    span.update(output=summarized_result)
-                    span.end()
+                    self.langfuse.update_span(
+                        span, output=self._summarize_output(result)
+                    )
+                    self.langfuse.end_span(span)
                 except Exception as span_error:
                     logger.warning(f"Failed to end span: {span_error}", exc_info=True)
 
             return result
 
         except Exception as e:
-            # Capture error in span
-            # Langfuse SDK 3.x: use update() to set output/level, then end() with no args
+            # Capture error in span, through the export boundary
             if span:
                 try:
-                    span.update(
+                    self.langfuse.update_span(
+                        span,
                         output={"error": str(e), "error_type": type(e).__name__},
                         level="ERROR",
                     )
-                    span.end()
+                    self.langfuse.end_span(span)
                 except Exception as span_error:
                     logger.warning(
                         f"Failed to end span with error: {span_error}", exc_info=True

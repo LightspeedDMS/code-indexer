@@ -23,22 +23,8 @@ from code_indexer.utils.credential_redaction import (  # noqa: F401 - re-export
     mask_url_credentials,
     redact_command,
     redact_command_output,
+    redact_secret_fields,
 )
-
-
-# Sensitive field names that should be redacted in logs
-SENSITIVE_FIELDS = {
-    "password",
-    "token",
-    "api_key",
-    "secret",
-    "access_token",
-    "refresh_token",
-    "authorization",
-    "auth_token",
-    "private_key",
-    "client_secret",
-}
 
 
 def format_error_log(error_code: str, message: str, **context) -> str:
@@ -115,6 +101,23 @@ def get_log_extra(error_code: str) -> Dict[str, Any]:
         extra["correlation_id"] = correlation_id
 
     return extra
+
+
+def public_error_message(message: str) -> str:
+    """
+    Return a fixed client-facing failure message, suffixed with the active
+    request's correlation id when there is one.
+
+    Front doors answer internal failures with this instead of exception
+    text; the full detail belongs in the server log only, where the
+    correlation id links the two.
+    """
+    from code_indexer.server.middleware.correlation import get_correlation_id
+
+    correlation_id = get_correlation_id()
+    if correlation_id:
+        return f"{message} (correlation id: {correlation_id})"
+    return message
 
 
 def inject_correlation_id(record: logging.LogRecord) -> None:
@@ -258,8 +261,12 @@ def sanitize_for_logging(data: Any) -> Any:
     """
     Sanitize data for logging by redacting sensitive information.
 
+    Delegates to the shared redact_secret_fields(): the value of every
+    secret-named key, at any depth, becomes "***REDACTED***"; None and plain
+    strings without embedded credentials pass through unchanged.
+
     Args:
-        data: Data to sanitize (dict, string, or other type)
+        data: Data to sanitize (dict, list, string, or other type)
 
     Returns:
         Sanitized copy of data with sensitive fields redacted
@@ -271,19 +278,114 @@ def sanitize_for_logging(data: Any) -> Any:
         >>> sanitize_for_logging("plain string")
         'plain string'
     """
-    if data is None:
-        return None
+    return redact_secret_fields(data)
 
-    if not isinstance(data, dict):
-        # Non-dict types are returned as-is
-        return data
 
-    # Create sanitized copy of dictionary
-    sanitized = {}
-    for key, value in data.items():
-        if key.lower() in SENSITIVE_FIELDS:
-            sanitized[key] = "***REDACTED***"
-        else:
-            sanitized[key] = value
+# Attributes every LogRecord carries; anything else came from ``extra=``
+# (or an injector above).
+_STANDARD_RECORD_ATTRS = frozenset(
+    logging.LogRecord("", 0, "", 0, "", (), None).__dict__
+) | {"message", "asctime"}
+_TRACEBACK_FORMATTER = logging.Formatter()
 
-    return sanitized
+
+def _redact_message(record: logging.LogRecord) -> None:
+    """Mask credentials in the record's formatted message, in place.
+
+    A message with nothing to mask keeps its ``msg``/``args``. Otherwise a
+    tuple of args is kept -- template and each text argument masked
+    separately -- only when the recomposed message formats and holds
+    nothing left to mask (formatters such as the HTTP access formatter
+    read ``args``); else the message is flattened (``args`` cleared) and
+    the colour template dropped so it cannot be printed unformatted."""
+    message = record.getMessage()
+    redacted = redact_secret_fields(message)
+    if redacted == message:
+        return
+    if isinstance(record.args, tuple) and isinstance(record.msg, str):
+        template = redact_secret_fields(record.msg)
+        args = tuple(
+            redact_secret_fields(arg) if isinstance(arg, str) else arg
+            for arg in record.args
+        )
+        try:
+            recomposed = template % args
+        except (TypeError, ValueError, KeyError):
+            recomposed = None
+        if recomposed is not None and redact_secret_fields(recomposed) == recomposed:
+            record.msg, record.args = template, args
+            return
+    record.msg = redacted
+    record.args = None
+    record.__dict__.pop("color_message", None)
+
+
+REDACTION_FAILED_MESSAGE = "[log message withheld: redaction failed]"
+
+
+def _withhold_record(record: logging.LogRecord) -> None:
+    """Replace everything that could carry raw text with a fixed marker.
+
+    Every extra attribute keeps its name (a formatter such as
+    ``%(payload)s`` still resolves) but its value becomes the marker. The
+    private OTEL context object is kept: it holds no text and the log
+    bridge needs it as a context."""
+    record.msg = REDACTION_FAILED_MESSAGE
+    record.args = ()
+    record.exc_info = None
+    record.exc_text = None
+    record.stack_info = None
+    record.__dict__.pop("color_message", None)
+    for key in list(record.__dict__):
+        if key not in _STANDARD_RECORD_ATTRS and key != OTEL_CONTEXT_RECORD_ATTR:
+            record.__dict__[key] = REDACTION_FAILED_MESSAGE
+
+
+def redact_log_record(record: logging.LogRecord) -> logging.LogRecord:
+    """Mask credential values in ``record`` IN PLACE and return it: the
+    message (``_redact_message``), the traceback (``exc_info`` formatted
+    into ``exc_text``, ``exc_info`` cleared), ``stack_info`` and every
+    extra attribute. Idempotent. The private OTEL context object is left
+    as is (it holds no text).
+
+    Never raises: the filter runs on handlers outside the queue, so a
+    failure here (a malformed ``msg % args``, an argument whose ``__str__``
+    raises, ...) would reach application code. On any failure the record
+    fails closed -- its message becomes ``REDACTION_FAILED_MESSAGE`` and
+    its args, traceback, stack and colour template are dropped -- so the
+    line is still emitted without its unredacted content."""
+    try:
+        _redact_record_fields(record)
+    except Exception:
+        _withhold_record(record)
+    return record
+
+
+def _redact_record_fields(record: logging.LogRecord) -> None:
+    _redact_message(record)
+    if record.exc_info:
+        record.exc_text = _TRACEBACK_FORMATTER.formatException(record.exc_info)
+    record.exc_info = None
+    if record.exc_text:
+        record.exc_text = redact_secret_fields(record.exc_text)
+    if record.stack_info:
+        record.stack_info = redact_secret_fields(record.stack_info)
+    extras = {
+        key: value
+        for key, value in record.__dict__.items()
+        if key not in _STANDARD_RECORD_ATTRS and key != OTEL_CONTEXT_RECORD_ATTR
+    }
+    record.__dict__.update(redact_secret_fields(extras))
+
+
+class RedactingLogFilter(logging.Filter):
+    """Redacts each record (``redact_log_record``) before its handler
+    formats or exports it. Attached to every server log handler where it is
+    installed (``async_logging``)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        redact_log_record(record)
+        return True
+
+
+REDACTING_LOG_FILTER = RedactingLogFilter()

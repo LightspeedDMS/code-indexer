@@ -23,6 +23,8 @@ class MultiSearchRequest(BaseModel):
         exclude_language: Exclude files of specified language (optional)
         exclude_path: Exclude files matching path pattern (optional)
         accuracy: Search accuracy profile - fast, balanced, high (optional)
+        file_extensions: Keep only files with these extensions (optional,
+            semantic/FTS; the #2047 rule of services/extension_filter.py)
     """
 
     repositories: List[str] = Field(
@@ -49,6 +51,16 @@ class MultiSearchRequest(BaseModel):
     accuracy: Optional[str] = Field(
         None, description="Search accuracy profile ('fast', 'balanced', 'high')"
     )
+    # #2047: the same rule as single-repository search (semantic and FTS).
+    file_extensions: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Keep only files with one of these extensions (e.g., ['py', '.js']). "
+            "Case-insensitive, leading dot optional, several values OR-ed; "
+            "extensionless files never match; intersected with 'language'."
+        ),
+    )
+    # The #2047 request deadline is server-only: InternalMultiSearchRequest.
     # Story #1108: per-request cache bypass flag — threads through to SemanticSearchRequest
     no_embedding_cache_shortcut: bool = Field(
         False,
@@ -62,30 +74,7 @@ class MultiSearchRequest(BaseModel):
         None,
         description="Explicit temporal embedder override (e.g. 'embed-v4.0'). Only used when search_type='temporal'.",
     )
-    # Story #1148 PART 1: pre-computed embedding vector for omni fan-out reuse.
-    # When set, each per-repo semantic search uses this vector via
-    # _PrecomputedEmbeddingProvider instead of calling coalesced_query_embedding
-    # again. This ensures exactly ONE cache key-resolution per omni query,
-    # deterministically, regardless of how many repos share the same provider config.
-    # Excluded from JSON serialisation (not a user-facing API field).
-    precomputed_query_vector: Optional[List[float]] = Field(
-        None,
-        description="Pre-computed query embedding vector (Story #1148 omni reuse; internal only)",
-        exclude=True,
-    )
-    # Defect #1148 fix: provider-config digest of the provider that produced
-    # precomputed_query_vector.  _search_semantic_sync compares this against
-    # each repo's own embedding-service digest and only reuses the vector when
-    # they match.  Repos on a different provider config get None (embed via their
-    # own chokepoint with the correct config).  Excluded from JSON serialisation.
-    precomputed_query_vector_digest: Optional[str] = Field(
-        None,
-        description=(
-            "Config digest of provider that produced precomputed_query_vector "
-            "(Story #1148 mixed-config isolation; internal only)"
-        ),
-        exclude=True,
-    )
+    # Query vectors are computed by the server: InternalMultiSearchRequest.
 
     @field_validator("repositories")
     @classmethod
@@ -94,6 +83,36 @@ class MultiSearchRequest(BaseModel):
         if not v:
             raise ValueError("Must specify at least one repository")
         return v
+
+    @field_validator("file_extensions")
+    @classmethod
+    def validate_file_extensions(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        """#2047: the one shared file_extensions validation."""
+        from code_indexer.services.extension_filter import (
+            validate_file_extensions_field,
+        )
+
+        return validate_file_extensions_field(v)
+
+
+class InternalMultiSearchRequest(MultiSearchRequest):
+    """Server-only multi-repository request, built by MultiSearchService.search
+    from the client's MultiSearchRequest; never a request body, so a client
+    cannot set the fields below (an unknown body field is ignored).
+
+    extension_deadline: the #2047 time budget (a time.monotonic() reading)
+    the server computes once per request and shares with every repository.
+
+    precomputed_query_vector / precomputed_query_vector_digest: the query
+    embedding the server's omni step computes ONCE before the fan-out
+    (Story #1148), with the digest of the provider config that produced it;
+    each repository reuses the vector only when its own provider digest
+    matches. Excluded from serialisation.
+    """
+
+    extension_deadline: Optional[float] = None
+    precomputed_query_vector: Optional[List[float]] = Field(None, exclude=True)
+    precomputed_query_vector_digest: Optional[str] = Field(None, exclude=True)
 
 
 class MultiSearchMetadata(BaseModel):

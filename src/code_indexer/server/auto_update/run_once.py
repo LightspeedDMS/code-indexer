@@ -6,6 +6,7 @@ import sys
 import os
 import logging
 from pathlib import Path
+from typing import Optional, Tuple
 
 from code_indexer.server.auto_update.service import AutoUpdateService
 from code_indexer.server.auto_update.change_detector import ChangeDetector
@@ -13,7 +14,10 @@ from code_indexer.server.auto_update.deployment_lock import (
     DeploymentLock,
     get_default_lock_path,
 )
-from code_indexer.server.auto_update.deployment_executor import DeploymentExecutor
+from code_indexer.server.auto_update.deployment_executor import (
+    PENDING_REDEPLOY_MARKER,
+    DeploymentExecutor,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -65,6 +69,49 @@ def _resolve_server_url(deployment_executor: DeploymentExecutor) -> str:
     return f"http://{host}:{int(port)}"
 
 
+def _redeploy_marker_identity() -> Optional[Tuple[int, int]]:
+    """(inode, mtime_ns) of the pending-redeploy marker, or None if absent."""
+    try:
+        st = PENDING_REDEPLOY_MARKER.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_ino, st.st_mtime_ns)
+
+
+def _consume_redeploy_marker(identity_before: Optional[Tuple[int, int]]) -> None:
+    """Remove the marker the completed retry served (Bug #2064); never raises.
+
+    Called only after the retry deploy AND the cidx-server restart
+    succeeded.  Without this, the next poll_once() finds the marker and
+    forces a second deploy and restart.  A marker that is absent, or was
+    re-created during the retry deploy (a fresh redeploy request, e.g. from
+    the auto-updater unit's Python being rewritten), is left in place.
+
+    Check-then-unlink is safe: the only other writer runs inside this
+    process's own deploy, and cidx-auto-update is a Type=oneshot unit
+    started by a timer, which systemd never runs twice at the same time.
+    A marker that cannot be checked or removed is kept (WARNING): the cost
+    is one extra redeploy, never a skipped one.
+    """
+    if identity_before is None:
+        return
+    try:
+        if _redeploy_marker_identity() != identity_before:
+            logger.info(
+                "Pending-redeploy marker was re-created during the retry "
+                "deploy; keeping it for the next run",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+        PENDING_REDEPLOY_MARKER.unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning(
+            f"Could not consume pending-redeploy marker after retry deploy "
+            f"({type(e).__name__}); the next run will redeploy and restart again",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+
 def main():
     """Execute one auto-update polling iteration.
 
@@ -113,18 +160,33 @@ def main():
             )
 
             # Execute full deployment
+            marker_before = _redeploy_marker_identity()
             success = deployment_executor.execute()
 
             if success:
-                deployment_executor._write_status_file(
-                    "success", "Deployment completed"
-                )
-                # Restart CIDX server after successful deployment
-                deployment_executor.restart_server()
-                logger.info(
-                    "Retry deployment completed successfully",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                # Restart CIDX server after successful deployment.  Bug #2064:
+                # only a COMPLETED restart consumes the pending-redeploy
+                # marker; a failed or interrupted restart keeps it (and a
+                # failed status), so the next run re-drives the restart.
+                success = deployment_executor.restart_server()
+                if success:
+                    deployment_executor._write_status_file(
+                        "success", "Deployment completed"
+                    )
+                    _consume_redeploy_marker(marker_before)
+                    logger.info(
+                        "Retry deployment completed successfully",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    deployment_executor._write_status_file(
+                        "failed",
+                        "Deployment succeeded but server restart failed during retry",
+                    )
+                    logger.error(
+                        "Retry deployment: server restart failed; will retry",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
             else:
                 deployment_executor._write_status_file(
                     "failed", "Deployment failed during retry"

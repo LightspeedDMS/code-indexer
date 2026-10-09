@@ -285,7 +285,7 @@ def _get_wiki_enabled_repos() -> set:
     """Build set of wiki-enabled golden repo aliases (Story #292 AC2).
 
     Called once per MCP request to avoid per-result DB queries.
-    Returns set of alias strings without -global suffix (e.g. {"sf-kb-wiki", "docs-repo"}).
+    Returns set of alias strings without -global suffix (e.g. {"example-wiki", "docs-repo"}).
     Degrades gracefully: returns empty set on any error.
     """
     try:
@@ -313,7 +313,7 @@ def _enrich_with_wiki_url(
 
     Field is completely omitted (not null, not empty) when conditions are not met (AC4).
     Wiki URL format: /wiki/{alias_without_global}/{path_without_md_extension}
-    Example: /wiki/sf-kb-wiki/Customer/getting-started
+    Example: /wiki/example-wiki/Customer/getting-started
     """
     if not file_path or not str(file_path).endswith(".md"):
         return

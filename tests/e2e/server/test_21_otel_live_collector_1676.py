@@ -67,7 +67,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.e2e.helpers import require_voyage_key
-from tests.e2e.server.conftest import AdminTokenProvider, wait_for_terminal_job
+from tests.e2e.server.conftest import (
+    AdminTokenProvider,
+    stop_in_process_stall_watchdog,
+    wait_for_terminal_job,
+)
 from tests.e2e.server.mcp_helpers import call_mcp_tool
 
 logger = logging.getLogger(__name__)
@@ -424,6 +428,7 @@ def telemetry_app_client(
         fresh_app = create_app()
         _app_module.app = fresh_app
         with TestClient(fresh_app, raise_server_exceptions=False) as client:
+            stop_in_process_stall_watchdog(fresh_app)
             login_resp = client.post(
                 "/auth/login",
                 json={"username": _ADMIN_USERNAME, "password": _ADMIN_PASSWORD},

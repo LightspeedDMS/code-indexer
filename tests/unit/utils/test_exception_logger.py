@@ -9,6 +9,7 @@ Tests exception logging functionality including:
 
 import json
 import os
+import sys
 import threading
 import time
 from datetime import datetime
@@ -41,7 +42,8 @@ class TestExceptionLoggerInitialization:
 
         # Verify log file created in project's .code-indexer directory
         assert logger.log_file_path.parent == project_root / ".code-indexer"  # type: ignore[union-attr]
-        assert logger.log_file_path.exists()  # type: ignore[union-attr]
+        # Bug #2060: created on first write, not by initialize().
+        assert not logger.log_file_path.exists()  # type: ignore[union-attr]
 
         # Verify filename format: error_<timestamp>_<pid>.log
         filename = logger.log_file_path.name  # type: ignore[union-attr]
@@ -63,7 +65,8 @@ class TestExceptionLoggerInitialization:
 
         # Daemon mode uses same location as CLI
         assert logger.log_file_path.parent == project_root / ".code-indexer"  # type: ignore[union-attr]
-        assert logger.log_file_path.exists()  # type: ignore[union-attr]
+        # Bug #2060: created on first write, not by initialize().
+        assert not logger.log_file_path.exists()  # type: ignore[union-attr]
 
     def test_server_mode_creates_log_file_in_home_directory(
         self, tmp_path, monkeypatch
@@ -84,7 +87,8 @@ class TestExceptionLoggerInitialization:
             # Server mode uses ~/.cidx-server/logs/
             expected_log_dir = tmp_path / ".cidx-server" / "logs"
             assert logger.log_file_path.parent == expected_log_dir  # type: ignore[union-attr]
-            assert logger.log_file_path.exists()  # type: ignore[union-attr]
+            # Bug #2060: created on first write, not by initialize().
+            assert not logger.log_file_path.exists()  # type: ignore[union-attr]
 
     def test_server_mode_honors_cidx_server_data_dir_env_var(
         self, tmp_path, monkeypatch
@@ -119,10 +123,11 @@ class TestExceptionLoggerInitialization:
 
         assert logger.log_file_path.parent == expected_log_dir
         assert logger.log_file_path.parent != real_home_log_dir
-        assert logger.log_file_path.exists()
+        # Bug #2060: created on first write, not by initialize().
+        assert not logger.log_file_path.exists()
 
-    def test_log_directory_created_if_not_exists(self, tmp_path):
-        """Test that log directory is created if it doesn't exist."""
+    def test_log_directory_created_on_first_write(self, tmp_path):
+        """The log directory is created by the first logged exception."""
         from code_indexer.utils.exception_logger import ExceptionLogger
 
         project_root = tmp_path / "test_project"
@@ -133,8 +138,14 @@ class TestExceptionLoggerInitialization:
         assert not code_indexer_dir.exists()
 
         logger = ExceptionLogger.initialize(project_root, mode="cli")
+        # Bug #2060: initialize() alone creates nothing.
+        assert not code_indexer_dir.exists()
 
-        # Directory should now exist
+        try:
+            raise OSError("boom")
+        except OSError as e:
+            logger.log_exception(e)
+
         assert code_indexer_dir.exists()
         assert logger.log_file_path.exists()  # type: ignore[union-attr]
 
@@ -169,6 +180,258 @@ class TestExceptionLoggerInitialization:
         assert len(time_part) == 6
         current_year = str(datetime.now().year)
         assert date_part.startswith(current_year)  # Current year
+
+
+class TestLazyLogFileCreation2060:
+    """Bug #2060: the error log is created on the first write, never eagerly.
+
+    The server spawns ``cidx`` constantly (refresh, registration, omni-regex
+    queries whose cwd is inside a ``.versioned/`` snapshot). An eager file
+    left an empty ``error_*.log`` per call and wrote inside immutable
+    snapshots on the query path.
+    """
+
+    def test_initialize_without_exception_creates_no_file_or_directory(self, tmp_path):
+        from code_indexer.utils.exception_logger import ExceptionLogger
+
+        project_root = tmp_path / "test_project"
+        project_root.mkdir()
+
+        logger = ExceptionLogger.initialize(project_root, mode="cli")
+
+        assert logger.log_file_path is not None
+        assert logger.log_file_path.parent == project_root / ".code-indexer"
+        assert not logger.log_file_path.exists()
+        assert not (project_root / ".code-indexer").exists()
+        assert list(project_root.rglob("*")) == []
+
+    def test_server_mode_initialize_creates_no_file(self, tmp_path, monkeypatch):
+        from code_indexer.utils.exception_logger import ExceptionLogger
+
+        data_dir = tmp_path / "server-data"
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(data_dir))
+
+        logger = ExceptionLogger.initialize(tmp_path, mode="server")
+
+        assert logger.log_file_path is not None
+        assert logger.log_file_path.parent == data_dir / "logs"
+        assert not logger.log_file_path.exists()
+
+    def test_first_exception_creates_file_with_unchanged_location_and_format(
+        self, tmp_path
+    ):
+        from code_indexer.utils.exception_logger import ExceptionLogger
+
+        project_root = tmp_path / "test_project"
+        project_root.mkdir()
+        logger = ExceptionLogger.initialize(project_root, mode="cli")
+        assert logger.log_file_path is not None
+
+        try:
+            raise ValueError("first real error")
+        except ValueError as e:
+            logger.log_exception(e, thread_name="T1", context={"k": "v"})
+
+        log_files = list((project_root / ".code-indexer").glob("error_*.log"))
+        assert log_files == [logger.log_file_path]
+        assert logger.log_file_path.name.endswith(f"_{os.getpid()}.log")
+
+        content = logger.log_file_path.read_text()
+        assert content.endswith("\n---\n")
+        entry = json.loads(content[: -len("\n---\n")])
+        assert entry["exception_type"] == "ValueError"
+        assert entry["exception_message"] == "first real error"
+        assert entry["thread"] == "T1"
+        assert entry["context"] == {"k": "v"}
+        assert content == json.dumps(entry, indent=2) + "\n---\n"
+
+
+class TestVersionedSnapshotRedirect2060:
+    """Bug #2060: never write inside a ``.versioned`` snapshot.
+
+    The server runs ``cidx`` with its cwd inside immutable snapshots (e.g.
+    the multi-repo regex query path). A real error there must be logged
+    outside the snapshot: in the server-mode log directory.
+    """
+
+    @pytest.fixture
+    def server_logs(self, tmp_path, monkeypatch):
+        data_dir = tmp_path / "server-data"
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(data_dir))
+        return data_dir / "logs"
+
+    @pytest.fixture
+    def snapshot(self, tmp_path):
+        root = (
+            tmp_path / "golden-repos" / ".versioned" / "example-repo" / "v_1700000000"
+        )
+        (root / "src").mkdir(parents=True)
+        return root
+
+    @staticmethod
+    def _log_one(project_root):
+        from code_indexer.utils.exception_logger import ExceptionLogger
+
+        logger = ExceptionLogger.initialize(project_root, mode="cli")
+        try:
+            raise RuntimeError("error inside snapshot")
+        except RuntimeError as e:
+            logger.log_exception(e)
+        return logger
+
+    @staticmethod
+    def _snapshot_files(snapshot):
+        return sorted(p.relative_to(snapshot) for p in snapshot.rglob("*"))
+
+    def test_snapshot_root_logs_outside_the_snapshot(self, snapshot, server_logs):
+        before = self._snapshot_files(snapshot)
+
+        logger = self._log_one(snapshot)
+
+        assert self._snapshot_files(snapshot) == before
+        assert logger.log_file_path is not None
+        assert logger.log_file_path.parent == server_logs
+        assert "error inside snapshot" in logger.log_file_path.read_text()
+
+    def test_snapshot_subdirectory_logs_outside_the_snapshot(
+        self, snapshot, server_logs
+    ):
+        before = self._snapshot_files(snapshot)
+
+        logger = self._log_one(snapshot / "src")
+
+        assert self._snapshot_files(snapshot) == before
+        assert logger.log_file_path is not None
+        assert logger.log_file_path.parent == server_logs
+        assert logger.log_file_path.exists()
+
+    def test_unwritable_fallback_never_raises_and_reports_to_stderr(
+        self, snapshot, tmp_path, monkeypatch, capsys
+    ):
+        from code_indexer.utils.exception_logger import ExceptionLogger
+
+        # A regular FILE as the data dir: "<file>/logs" can never be created,
+        # whatever the process's privileges.
+        not_a_dir = tmp_path / "data-dir-is-a-file"
+        not_a_dir.write_text("")
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(not_a_dir))
+        before = self._snapshot_files(snapshot)
+        logger = ExceptionLogger.initialize(snapshot, mode="cli")
+
+        try:
+            raise KeyError("original failure")
+        except KeyError as e:
+            logger.log_exception(e)  # must not raise
+
+        err = capsys.readouterr().err
+        assert "KeyError" in err
+        assert "NotADirectoryError" in err or "FileExistsError" in err
+        assert str(tmp_path) not in err and "data-dir-is-a-file" not in err
+        assert self._snapshot_files(snapshot) == before
+
+    def test_rule_covers_every_canonical_snapshot(self, snapshot, server_logs):
+        """The logger's rule (any `.versioned` path component) must cover
+        every path the canonical predicate calls a snapshot."""
+        from code_indexer.server.storage.shared.snapshot_paths import (
+            is_versioned_snapshot,
+        )
+        from code_indexer.utils.exception_logger import ExceptionLogger
+
+        assert is_versioned_snapshot(str(snapshot))
+        logger = ExceptionLogger.initialize(snapshot, mode="cli")
+        assert logger.log_file_path is not None
+        assert logger.log_file_path.parent == server_logs
+
+
+class TestConcurrentWrites2060:
+    """Bug #2060: one logger, many threads: entries must never interleave."""
+
+    THREADS = 16
+    ENTRIES_PER_THREAD = 5
+    # Larger than the default file buffer (8 KiB), so an unserialized entry
+    # reaches the file in several write() calls that other threads can split.
+    PAD_CHARS = 40_000
+
+    def test_concurrent_first_writes_never_interleave(self, tmp_path):
+        from code_indexer.utils.exception_logger import ExceptionLogger
+
+        logger = ExceptionLogger.initialize(tmp_path, mode="cli")
+        assert logger.log_file_path is not None
+        barrier = threading.Barrier(self.THREADS)
+
+        def worker(t: int) -> None:
+            barrier.wait()  # all threads race the FIRST write together
+            for n in range(self.ENTRIES_PER_THREAD):
+                try:
+                    raise ValueError(f"t{t}-n{n}")
+                except ValueError as e:
+                    logger.log_exception(e, context={"pad": "x" * self.PAD_CHARS})
+
+        threads = [
+            threading.Thread(target=worker, args=(t,)) for t in range(self.THREADS)
+        ]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+
+        content = logger.log_file_path.read_text()
+        entries = [e for e in content.split("\n---\n") if e.strip()]
+        assert len(entries) == self.THREADS * self.ENTRIES_PER_THREAD
+        messages = sorted(json.loads(e)["exception_message"] for e in entries)
+        assert messages == sorted(
+            f"t{t}-n{n}"
+            for t in range(self.THREADS)
+            for n in range(self.ENTRIES_PER_THREAD)
+        )
+
+
+class _UnprintableError(Exception):
+    """An exception whose message cannot be rendered."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("__str__ failed")
+
+
+class _RaisingStream:
+    """A stderr replacement whose every write fails."""
+
+    def write(self, _text: str) -> int:
+        raise RuntimeError("stream broken")
+
+    def flush(self) -> None:
+        raise RuntimeError("stream broken")
+
+
+class TestLogExceptionNeverRaises2060:
+    """Bug #2060: log_exception must never raise -- raising would replace
+    the exception being logged."""
+
+    def test_exception_whose_str_raises_does_not_escape(self, tmp_path, capsys):
+        from code_indexer.utils.exception_logger import ExceptionLogger
+
+        logger = ExceptionLogger.initialize(tmp_path, mode="cli")
+        try:
+            raise _UnprintableError()
+        except _UnprintableError as e:
+            logger.log_exception(e)  # must return normally
+
+        assert "_UnprintableError" in capsys.readouterr().err
+
+    def test_broken_stderr_during_diagnostic_does_not_escape(
+        self, tmp_path, monkeypatch
+    ):
+        from code_indexer.utils.exception_logger import ExceptionLogger
+
+        # The log write fails: the log directory path is a regular file.
+        (tmp_path / ".code-indexer").write_text("")
+        logger = ExceptionLogger.initialize(tmp_path, mode="cli")
+        monkeypatch.setattr(sys, "stderr", _RaisingStream())
+
+        try:
+            raise ValueError("original")
+        except ValueError as e:
+            logger.log_exception(e)  # must return normally
 
 
 class TestExceptionLogging:

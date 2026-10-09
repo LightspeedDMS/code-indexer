@@ -7,6 +7,7 @@ by git URL with proper authentication and access control.
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.utils.credential_redaction import mask_url_credentials
 
 import logging
 from typing import List, Optional
@@ -92,7 +93,8 @@ class RepositoryDiscoveryService:
         """
         try:
             logger.debug(
-                f"Discovering repositories for URL: {repo_url}, User: {user.username}",
+                "Discovering repositories for URL: "
+                f"{mask_url_credentials(repo_url)}, User: {user.username}",
                 extra={"correlation_id": get_correlation_id()},
             )
 
@@ -140,8 +142,13 @@ class RepositoryDiscoveryService:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+            from code_indexer.server.git.git_subprocess_env import (
+                remote_url_without_credentials,
+            )
+
+            # The response never echoes the URL's credentials.
             return RepositoryDiscoveryResponse(
-                query_url=repo_url,
+                query_url=remote_url_without_credentials(repo_url),
                 normalized_url=normalized_url.canonical_form,
                 golden_repositories=golden_repositories,
                 activated_repositories=activated_repositories,
@@ -174,7 +181,8 @@ class RepositoryDiscoveryService:
         return RepositoryMatch(
             alias=match_result.alias,
             repository_type=match_result.repository_type.value,
-            git_url=match_result.git_url,
+            # Returned with its userinfo redacted.
+            git_url=mask_url_credentials(match_result.git_url),
             available_branches=match_result.available_branches,
             default_branch=match_result.default_branch,
             last_indexed=match_result.last_indexed,

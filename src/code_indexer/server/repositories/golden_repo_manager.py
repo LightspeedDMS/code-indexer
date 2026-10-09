@@ -44,7 +44,11 @@ if TYPE_CHECKING:
 
 from pydantic import BaseModel
 from code_indexer.server.logging_utils import format_error_log, mask_url_credentials
-from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.git.git_subprocess_env import (
+    build_non_interactive_git_env,
+    ensure_remote_url_without_credentials,
+    remote_url_without_credentials,
+)
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 # Story #876 D4 — cluster-atomic lifecycle registration hook.
@@ -752,7 +756,8 @@ class GoldenRepoManager:
         if not skip_pre_flight_git_validation and not repo_url.startswith("local://"):
             if not self._validate_git_repository(repo_url):
                 raise GitOperationError(
-                    f"Invalid or inaccessible git repository: {repo_url}"
+                    "Invalid or inaccessible git repository: "
+                    f"{mask_url_credentials(repo_url)}"
                 )
 
         # Pod-pull: the real clone+index+register+activate work now
@@ -1873,18 +1878,21 @@ class GoldenRepoManager:
             True if repository is valid and accessible, False otherwise
         """
         try:
-            # Use git ls-remote to check if repository is accessible
+            # Use git ls-remote to check if repository is accessible.
+            # Repository credentials are supplied at run time, never on argv.
             result = subprocess.run(
-                ["git", "ls-remote", repo_url],
+                ["git", "ls-remote", remote_url_without_credentials(repo_url)],
                 capture_output=True,
                 text=True,
                 timeout=self.resource_config.git_clone_timeout,
-                env=build_non_interactive_git_env(),
+                env=build_non_interactive_git_env(repo_url),
             )
             return result.returncode == 0
         except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
             logger.debug(
-                "Repository accessibility check failed for %s: %s", repo_url, e
+                "Repository accessibility check failed for %s: %s",
+                mask_url_credentials(repo_url),
+                mask_url_credentials(str(e)),
             )
             return False
 
@@ -1993,11 +2001,13 @@ class GoldenRepoManager:
                     # AC4 Story #163: Auto-create folder for local:// URLs
                     os.makedirs(clone_path, exist_ok=True)
                     logging.info(
-                        f"Created local repository directory for {repo_url}: {clone_path}"
+                        "Created local repository directory for "
+                        f"{mask_url_credentials(repo_url)}: {clone_path}"
                     )
                 else:
                     logging.info(
-                        f"Using existing local directory for {repo_url}: {clone_path}"
+                        "Using existing local directory for "
+                        f"{mask_url_credentials(repo_url)}: {clone_path}"
                     )
                 return clone_path
 
@@ -2254,14 +2264,16 @@ class GoldenRepoManager:
             cmd = ["git", "-c", "core.fsync=none", "clone"]
             if branch:
                 cmd.extend(["--branch", branch])
-            cmd.extend([repo_url, clone_path])
+            # The clone's stored origin is the credential-free URL; repository
+            # credentials are supplied to git at run time, never on argv.
+            cmd.extend([remote_url_without_credentials(repo_url), clone_path])
 
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.resource_config.git_pull_timeout,
-                env=build_non_interactive_git_env(),
+                env=build_non_interactive_git_env(repo_url),
             )
 
             if result.returncode != 0:
@@ -3589,9 +3601,17 @@ class GoldenRepoManager:
     _CB_FIX_TIMEOUT: int = 60  # 1 min for cidx fix-config
 
     def _cb_git_fetch_and_validate(
-        self, base_clone_path: str, target_branch: str, git_timeout: int
+        self,
+        base_clone_path: str,
+        target_branch: str,
+        git_timeout: int,
+        *,
+        credentials_url: Optional[str],
     ) -> None:
-        """Fetch remote and validate that target_branch exists (AC3)."""
+        """Fetch remote and validate that target_branch exists (AC3).
+
+        ``credentials_url`` is the registered repository URL; its credentials
+        are supplied to git at run time."""
         subprocess.run(
             ["git", "-c", "core.fsync=none", "fetch", "origin"],
             cwd=base_clone_path,
@@ -3599,7 +3619,7 @@ class GoldenRepoManager:
             text=True,
             timeout=git_timeout,
             check=True,
-            env=build_non_interactive_git_env(),
+            env=build_non_interactive_git_env(credentials_url),
         )
         result = subprocess.run(
             ["git", "branch", "-r"],
@@ -3619,9 +3639,17 @@ class GoldenRepoManager:
             )
 
     def _cb_checkout_and_pull(
-        self, base_clone_path: str, target_branch: str, git_timeout: int
+        self,
+        base_clone_path: str,
+        target_branch: str,
+        git_timeout: int,
+        *,
+        credentials_url: Optional[str],
     ) -> None:
-        """Checkout target branch and pull latest commits."""
+        """Checkout target branch and pull latest commits.
+
+        ``credentials_url`` is the registered repository URL; its credentials
+        are supplied to the pull at run time."""
         subprocess.run(
             ["git", "checkout", target_branch],
             cwd=base_clone_path,
@@ -3638,7 +3666,7 @@ class GoldenRepoManager:
             text=True,
             timeout=git_timeout,
             check=True,
-            env=build_non_interactive_git_env(),
+            env=build_non_interactive_git_env(credentials_url),
         )
 
     def _cb_cidx_index(self, base_clone_path: str) -> None:
@@ -4092,8 +4120,17 @@ class GoldenRepoManager:
 
             base = golden_repo.clone_path
             previous_branch = golden_repo.default_branch
-            self._cb_git_fetch_and_validate(base, target_branch, git_t)
-            self._cb_checkout_and_pull(base, target_branch, git_t)
+            # The base clone (never a versioned snapshot) converges to a
+            # credential-free origin; credentials are supplied at run time.
+            # A failed sanitization raises GitCommandError here, before any
+            # credentialed git call.
+            ensure_remote_url_without_credentials(base)
+            self._cb_git_fetch_and_validate(
+                base, target_branch, git_t, credentials_url=golden_repo.repo_url
+            )
+            self._cb_checkout_and_pull(
+                base, target_branch, git_t, credentials_url=golden_repo.repo_url
+            )
             try:
                 # Story #482 PATH D: coarse progress markers around each major step.
                 # _cb_cidx_index/_cb_cow_snapshot are shared callbacks used elsewhere;

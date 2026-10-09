@@ -28,7 +28,7 @@ import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, cast
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -72,6 +72,10 @@ from ..utils.bounded_submission_gate import (
 from ..utils.host_validation import normalize_server_host
 from code_indexer import __version__ as cidx_version
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.utils.credential_redaction import (
+    mask_url_credentials,
+    with_masked_repo_url,
+)
 from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -3176,7 +3180,9 @@ def _batch_create_repos(
                     "WEB-GENERAL-067",
                     "Batch golden repo create failed",
                     repo_alias=repo_data.get("alias", "unknown"),
-                    repo_url=repo_data.get("clone_url", "unknown"),
+                    repo_url=mask_url_credentials(
+                        repo_data.get("clone_url", "unknown")
+                    ),
                     submitter=submitter_username,
                 ),
                 extra=get_log_extra("WEB-GENERAL-067"),
@@ -3409,7 +3415,8 @@ def _get_golden_repos_list(backend_registry=None):
     """Get list of all golden repositories with global alias, version, and index info."""
     try:
         manager = _get_golden_repo_manager()
-        repos = manager.list_golden_repos()
+        # Repository URLs are rendered with their userinfo redacted.
+        repos = [with_masked_repo_url(r) for r in manager.list_golden_repos()]
         server_data_dir = os.environ.get(
             "CIDX_SERVER_DATA_DIR", os.path.expanduser("~/.cidx-server")
         )
@@ -3573,7 +3580,9 @@ def add_golden_repo(
         if "already exists" in error_msg.lower():
             error_msg = f"Repository alias '{alias}' already exists"
         elif "invalid" in error_msg.lower() or "inaccessible" in error_msg.lower():
-            error_msg = f"Invalid or inaccessible repository: {repo_url}"
+            error_msg = (
+                f"Invalid or inaccessible repository: {mask_url_credentials(repo_url)}"
+            )
         return _create_golden_repos_page_response(
             request, session, error_message=error_msg
         )
@@ -4343,6 +4352,8 @@ def _get_single_repo_enriched(alias: str, backend_registry=None) -> Optional[dic
     repo = next((r for r in repos if r.get("alias") == alias), None)
     if repo is None:
         return None
+    # The repository URL is rendered with its userinfo redacted.
+    repo = with_masked_repo_url(repo)
     server_data_dir = os.environ.get(
         "CIDX_SERVER_DATA_DIR", os.path.expanduser("~/.cidx-server")
     )
@@ -5701,8 +5712,6 @@ def query_submit(
 
     backend_registry = getattr(request.app.state, "backend_registry", None)
 
-    from code_indexer.server.query.semantic_query_manager import SemanticQueryError
-
     try:
         # Handle SCIP query mode
         if search_mode == "scip":
@@ -5977,21 +5986,20 @@ def query_submit(
                         fuzzy=fuzzy,
                         regex=regex,
                     )
-                except (SemanticQueryError, ValueError) as e:
+                except WebQueryNotCompleted as e:
                     # The query was not completed (access refused, invalid
                     # parameters, provider outage, timeout, missing index):
-                    # shown to the user; _execute_text_query logged it.
-                    error_message = f"Query failed: {str(e)}"
+                    # _execute_text_query logged it and classified the text
+                    # the user is shown (classify_search_error).
+                    error_message = f"Query failed: {e}"
                 else:
                     results.extend(text_rows)
 
     except Exception as e:
-        logger.error(
-            format_error_log("STORE-GENERAL-035", f"Query execution failed: {e}"),
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
+        message = _classify_web_query_failure(
+            e, error_code="STORE-GENERAL-035", detail_logged_upstream=False
         )
-        error_message = f"Query failed: {str(e)}"
+        error_message = f"Query failed: {message}"
 
     return _create_query_page_response(
         request,
@@ -6262,6 +6270,52 @@ def _execute_scip_query(
     return results, None
 
 
+class WebQueryNotCompleted(Exception):
+    """A Web text query the query layer did not complete. ``str()`` is what
+    the user is shown: the ``classify_search_error`` message (a client
+    error's own text, else the fixed public failure message)."""
+
+
+def _classify_web_query_failure(
+    error: BaseException, *, error_code: str, detail_logged_upstream: bool
+) -> str:
+    """Log a failed Web query once and return the text the user is shown.
+
+    One rule for every search front door (``classify_search_error``): only a
+    client error's text (it describes the caller's own request) is logged,
+    at WARNING, and shown. Any other failure can carry a provider's or the
+    server's internal text, so the user sees only the fixed public message;
+    its detail is logged at ERROR with the traceback, or, when the query
+    layer already logged it (``detail_logged_upstream``), only its class is
+    logged at WARNING.
+    """
+    from code_indexer.server.query.search_error_policy import classify_search_error
+
+    outcome = classify_search_error(error)
+    error_class = type(error).__name__
+    if not outcome.log_as_internal or detail_logged_upstream:
+        detail = (
+            outcome.message
+            if outcome.client_error
+            else "not a client error, detail not logged"
+        )
+        logger.warning(
+            format_error_log(
+                error_code, f"Query not completed: {error_class}: {detail}"
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+    else:
+        logger.error(
+            format_error_log(
+                error_code, f"Query execution failed: {error_class}: {error}"
+            ),
+            exc_info=error,
+            extra={"correlation_id": get_correlation_id()},
+        )
+    return outcome.message
+
+
 def _execute_text_query(
     query_manager: Any,
     target_repo: Dict[str, Any],
@@ -6293,7 +6347,9 @@ def _execute_text_query(
     applies (a repository the user cannot access is refused like an unknown
     one); an activated repository is queried as its owner. Failures raise;
     a query the query layer did not complete (SemanticQueryError, ValueError)
-    is logged here once, at WARNING, before it is re-raised.
+    is classified with ``classify_search_error``, logged here once at
+    WARNING, and raised as ``WebQueryNotCompleted`` carrying the message the
+    user is shown.
     """
     from code_indexer.server.query.semantic_query_manager import SemanticQueryError
 
@@ -6320,23 +6376,11 @@ def _execute_text_query(
             regex=regex,
         )
     except (SemanticQueryError, ValueError) as e:
-        # Only a repository-not-found refusal (also how a repository the user
-        # cannot access is refused) is logged with its message: it names just
-        # the repository and the user. Other messages can carry a provider's
-        # error text, so only the class is logged; the user sees the reason.
-        message = str(e)
-        not_found = (
-            message.startswith("Repository '") and "' not found for user '" in message
-        ) or message.startswith("No activated repositories found for user '")
-        detail = message if not_found else "reason shown to the user, not logged"
-        logger.warning(
-            format_error_log(
-                "STORE-GENERAL-053",
-                f"Query not completed: {type(e).__name__}: {detail}",
-            ),
-            extra={"correlation_id": get_correlation_id()},
+        # The query layer logged the detail of a failure it raised itself.
+        message = _classify_web_query_failure(
+            e, error_code="STORE-GENERAL-053", detail_logged_upstream=True
         )
-        raise
+        raise WebQueryNotCompleted(message) from e
 
     rows = [
         {
@@ -6443,8 +6487,6 @@ def query_results_partial_post(
     warning_message: Optional[str] = None
     backend_registry = getattr(request.app.state, "backend_registry", None)
 
-    from code_indexer.server.query.semantic_query_manager import SemanticQueryError
-
     try:
         query_manager = _get_semantic_query_manager()
         if not query_manager:
@@ -6501,21 +6543,20 @@ def query_results_partial_post(
                         fuzzy=fuzzy,
                         regex=regex,
                     )
-                except (SemanticQueryError, ValueError) as e:
+                except WebQueryNotCompleted as e:
                     # The query was not completed (access refused, invalid
                     # parameters, provider outage, timeout, missing index):
-                    # shown to the user; _execute_text_query logged it.
-                    error_message = f"Query failed: {str(e)}"
+                    # _execute_text_query logged it and classified the text
+                    # the user is shown (classify_search_error).
+                    error_message = f"Query failed: {e}"
                 else:
                     results.extend(text_rows)
 
     except Exception as e:
-        logger.error(
-            format_error_log("STORE-GENERAL-041", f"Query execution failed: {e}"),
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
+        message = _classify_web_query_failure(
+            e, error_code="STORE-GENERAL-041", detail_logged_upstream=False
         )
-        error_message = f"Query failed: {str(e)}"
+        error_message = f"Query failed: {message}"
 
     csrf_token_new = generate_csrf_token()
     response = templates.TemplateResponse(
@@ -9118,7 +9159,8 @@ async def fetch_discovery_branches(request: Request):
                 logger.warning(
                     format_error_log(
                         "STORE-GENERAL-045",
-                        f"Branch discovery shed load for {clone_url}: {overloaded}",
+                        "Branch discovery shed load for "
+                        f"{mask_url_credentials(clone_url)}: {overloaded}",
                     )
                 )
                 return {
@@ -9301,7 +9343,11 @@ def reset_config(
         return _create_config_page_response(
             request,
             session,
-            success_message="Configuration reset to defaults successfully",
+            success_message=(
+                "Runtime settings reset to defaults. Bootstrap settings, the "
+                "bind address, port, worker count, log level, stored keys, "
+                "security settings and deployment identity were kept."
+            ),
         )
     except Exception as e:
         logger.error(
@@ -9420,15 +9466,6 @@ async def update_langfuse_pull_config(
         )
 
 
-def _extract_git_hostname(remote_url: str) -> Optional[str]:
-    """Extract hostname from git@host:path or ssh:// URLs."""
-    if remote_url.startswith("git@") and ":" in remote_url:
-        return remote_url.split("@", 1)[1].split(":", 1)[0]
-    if remote_url.startswith("ssh://"):
-        return urlparse(remote_url).hostname
-    return None
-
-
 @web_router.post(
     "/config/cidx_meta_backup",
     response_class=HTMLResponse,
@@ -9441,6 +9478,7 @@ async def update_cidx_meta_backup_config(
     """Update cidx-meta backup config with SSH validation and bootstrap."""
     from ..services.cidx_meta_backup.bootstrap import CidxMetaBackupBootstrap
     from ..services.config_service import get_config_service
+    from code_indexer.utils.git_remote_url import git_remote_host
 
     session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
@@ -9463,7 +9501,7 @@ async def update_cidx_meta_backup_config(
         or remote_url.startswith("https://")
         or remote_url.startswith("http://")
     ):
-        hostname = _extract_git_hostname(remote_url)
+        hostname = git_remote_host(remote_url)
         key_list = _get_ssh_key_manager().list_keys()
         if hostname and not any(hostname in key.hosts for key in key_list.managed):
             return _create_config_page_response(

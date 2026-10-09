@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 ALL_TIME_RANGE = ("1970-01-01", "2100-12-31")
 
 
+class TemporalParameterError(ValueError):
+    """A temporal query parameter supplied by the caller is invalid (time
+    range, date format, an unresolvable at_commit). Its message describes
+    only the caller's own input; any other ValueError is an internal failure.
+    """
+
+
 def parse_date_range(date_range: str) -> Tuple[str, str]:
     """Parse and validate a date range string.
 
@@ -34,16 +41,16 @@ def parse_date_range(date_range: str) -> Tuple[str, str]:
         Tuple of (start_date, end_date) as validated strings
 
     Raises:
-        ValueError: If date range format or dates are invalid
+        TemporalParameterError: If date range format or dates are invalid
     """
     if ".." not in date_range:
-        raise ValueError(
+        raise TemporalParameterError(
             "Time range must use '..' separator (format: YYYY-MM-DD..YYYY-MM-DD)"
         )
 
     parts = date_range.split("..")
     if len(parts) != 2:
-        raise ValueError(
+        raise TemporalParameterError(
             "Time range must use '..' separator (format: YYYY-MM-DD..YYYY-MM-DD)"
         )
 
@@ -53,17 +60,19 @@ def parse_date_range(date_range: str) -> Tuple[str, str]:
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
         end_dt = datetime.strptime(end_date, "%Y-%m-%d")
     except ValueError:
-        raise ValueError("Invalid date format. Use YYYY-MM-DD (e.g., 2023-01-01)")
+        raise TemporalParameterError(
+            "Invalid date format. Use YYYY-MM-DD (e.g., 2023-01-01)"
+        )
 
     if start_date != start_dt.strftime("%Y-%m-%d") or end_date != end_dt.strftime(
         "%Y-%m-%d"
     ):
-        raise ValueError(
+        raise TemporalParameterError(
             "Invalid date format. Use YYYY-MM-DD with zero-padded month/day (e.g., 2023-01-01)"
         )
 
     if end_dt < start_dt:
-        raise ValueError("End date must be after start date")
+        raise TemporalParameterError("End date must be after start date")
 
     return start_date, end_date
 
@@ -107,7 +116,7 @@ def resolve_commit_timestamp(project_root: Path, ref: str) -> int:
 
     resolved_hash = rev_parse.stdout.strip()
     if rev_parse.returncode != 0 or not resolved_hash:
-        raise ValueError(
+        raise TemporalParameterError(
             f"at_commit '{ref}' does not resolve to a commit in this repository"
         )
 

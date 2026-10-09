@@ -18,6 +18,16 @@ from .connection_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
 
+_PG_NOW = "NOW()"
+
+
+def _live_predicate(now_sql: str) -> str:
+    """SQL true while an entry is younger than its TTL -- the one expiry rule
+    (consume() keeps what it accepts, cleanup_expired() deletes its
+    negation), using exact interval arithmetic. `now_sql` is the SQL for the
+    current time (_PG_NOW, the database clock, in production)."""
+    return f"({now_sql} - created_at::timestamptz) < make_interval(secs => ttl_seconds)"
+
 
 class PayloadCachePostgresBackend:
     """
@@ -235,6 +245,53 @@ class PayloadCachePostgresBackend:
             "node_id": row[4],
         }
 
+    def store_expiring(self, cache_handle: str, content: str, ttl_seconds: int) -> None:
+        """Insert or replace one entry living exactly `ttl_seconds`, stamped
+        by the database clock (see PayloadCacheBackend.store_expiring).
+        Errors propagate."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO payload_cache
+                    (cache_handle, content, preview, created_at, ttl_seconds, node_id)
+                VALUES (
+                    %s, %s, '',
+                    to_char(now() AT TIME ZONE 'UTC',
+                            'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'),
+                    %s, NULL
+                )
+                ON CONFLICT (cache_handle) DO UPDATE SET
+                    content = EXCLUDED.content,
+                    preview = EXCLUDED.preview,
+                    created_at = EXCLUDED.created_at,
+                    ttl_seconds = EXCLUDED.ttl_seconds,
+                    node_id = EXCLUDED.node_id
+                """,
+                (cache_handle, content, ttl_seconds),
+            )
+            conn.commit()
+
+    def consume(self, cache_handle: str) -> bool:
+        """Atomically delete a live entry; True only for the one caller
+        whose DELETE removed it (see PayloadCacheBackend.consume).
+
+        A concurrent DELETE of the same row waits on the row lock and then
+        matches nothing, so exactly one caller sees rowcount 1. Age is
+        measured on the database clock, the clock store_expiring() stamps
+        entries with. Errors propagate.
+        """
+        with self._pool.connection() as conn:
+            result = conn.execute(
+                f"""
+                DELETE FROM payload_cache
+                WHERE cache_handle = %s AND {_live_predicate(_PG_NOW)}
+                """,
+                (cache_handle,),
+            )
+            deleted = int(result.rowcount) if result.rowcount else 0
+            conn.commit()
+        return deleted == 1
+
     def cleanup_expired(self) -> int:
         """Delete all entries that have exceeded their TTL.
 
@@ -244,12 +301,7 @@ class PayloadCachePostgresBackend:
         try:
             with self._pool.connection() as conn:
                 result = conn.execute(
-                    """
-                    DELETE FROM payload_cache
-                    WHERE (
-                        EXTRACT(EPOCH FROM (NOW() - created_at::timestamptz))
-                    ) > ttl_seconds
-                    """
+                    f"DELETE FROM payload_cache WHERE NOT ({_live_predicate(_PG_NOW)})"
                 )
                 deleted = int(result.rowcount) if result.rowcount else 0
                 conn.commit()

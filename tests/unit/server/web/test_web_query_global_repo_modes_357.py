@@ -60,6 +60,10 @@ OWN_ACTIVATION = "my-web-repo"
 # decoded text, so FTS returns it as the Tantivy snippet.
 LATIN1_TEXT = "def legacy_greeting():\n    return 'café crème'\n"
 
+# The module-scoped real create_app() and FTS index templates (~10 s alone)
+# are paid by whichever test runs first, slower under parallel gate load.
+pytestmark = pytest.mark.timeout(45)
+
 _BADGE = re.compile(r'class="search-mode-badge search-mode-([a-z]+)"')
 
 
@@ -87,7 +91,8 @@ def _add_doc(
             "identifiers": ids,
             "line_start": 1,
             "line_end": body.count("\n") + 1,
-            "language": "python",
+            # The file suffix, as the indexer stores it (chunk_fts_documents).
+            "language": "py",
         }
     )
 
@@ -514,9 +519,9 @@ class TestQueryFailureLogging:
 
         assert _error(html) is not None
         message = self._assert_refusal_logged_as_warning(caplog)
-        # A repository the user cannot access is refused as not found; that
-        # message names only the repository and the user, so it is logged.
-        assert "SemanticQueryError" in message
+        # A repository the user cannot access is refused as not found: a
+        # client error (classify_search_error), so its message is logged.
+        assert "SearchRequestError" in message
         assert UNGRANTED_GLOBAL in message
 
     def test_invalid_time_range_logs_warning_not_error(
@@ -532,9 +537,10 @@ class TestQueryFailureLogging:
                 time_range="not-a-range",
             )
 
-        assert _error(html) is not None
+        # A client error: the user sees its reason.
+        assert "YYYY-MM-DD..YYYY-MM-DD" in (_error(html) or "")
         message = self._assert_refusal_logged_as_warning(caplog)
-        assert "ValueError" in message
+        assert "SearchParameterError" in message
 
     def test_provider_error_text_is_not_logged_by_the_web_page(
         self, web_app, env, handler, caplog
@@ -548,16 +554,22 @@ class TestQueryFailureLogging:
             with caplog.at_level(logging.WARNING):
                 html = _query(web_app, handler, GRANTED_GLOBAL, "find", "semantic")
 
-        assert _error(html) is not None
+        # Not a client error: the page shows only the fixed public message.
+        error = _error(html)
+        assert error is not None
+        assert "Search failed" in error
+        assert token not in html
         message = self._assert_refusal_logged_as_warning(caplog)
-        assert "SemanticQueryError" in message
+        assert "SearchFailedError" in message
         assert token not in message
 
-    def test_unexpected_failure_logs_error_with_traceback(
+    def test_unwired_access_filtering_fails_closed_with_its_fixed_text(
         self, web_app, env, handler, caplog, monkeypatch
     ):
         # A process whose access filtering service is not wired must fail
-        # closed: a wiring fault, not a refusal of this user.
+        # closed. Its error carries a fixed text that classify_search_error
+        # allows to the client, so it is shown; an unwired server-side
+        # service is an internal failure, so it is logged at ERROR.
         app_module = importlib.import_module("code_indexer.server.app")
         monkeypatch.setattr(
             vars(app_module)["app"].state, "access_filtering_service", None
@@ -566,11 +578,42 @@ class TestQueryFailureLogging:
         with caplog.at_level(logging.WARNING):
             html = _query(web_app, handler, GRANTED_GLOBAL, "find", "semantic")
 
-        assert _error(html) is not None
+        assert "Repository access control is unavailable" in (_error(html) or "")
+        assert env.searched_paths == []
+        records = _routes_records(caplog)
+        code = "STORE-GENERAL-041" if handler == PARTIAL else "STORE-GENERAL-035"
+        refusals = [r for r in records if f"[{code}]" in r.getMessage()]
+        assert len(refusals) == 1
+        assert refusals[0].levelno == logging.ERROR
+        assert refusals[0].exc_info
+
+    def test_unexpected_query_layer_error_text_never_reaches_the_page(
+        self, web_app, env, handler, caplog
+    ):
+        # Not a SemanticQueryError/ValueError: the outer page handler gets it.
+        sentinel_path = "/srv/example-internal/sentinel-index-dir"
+        token = "example-fake-token-0123456789"
+        manager = vars(importlib.import_module("code_indexer.server.app"))[
+            "semantic_query_manager"
+        ]
+
+        def _fault(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(f"cannot open {sentinel_path} (token={token})")
+
+        with patch.object(manager, "query_user_repositories", _fault):
+            with caplog.at_level(logging.WARNING):
+                html = _query(web_app, handler, GRANTED_GLOBAL, "find", "semantic")
+
+        # The fixed public message (it may carry a correlation id suffix).
+        assert (_error(html) or "").startswith("Query failed: Search failed")
+        assert sentinel_path not in html
+        assert token not in html
+        # The detail stays server-side, logged once at ERROR with a traceback.
         errors = [r for r in _routes_records(caplog) if r.levelno >= logging.ERROR]
         assert len(errors) == 1
         code = "STORE-GENERAL-041" if handler == PARTIAL else "STORE-GENERAL-035"
         assert f"[{code}]" in errors[0].getMessage()
+        assert sentinel_path in errors[0].getMessage()
         assert errors[0].exc_info is not None
 
     def test_unexpected_value_error_in_scip_mode_logs_error_with_traceback(

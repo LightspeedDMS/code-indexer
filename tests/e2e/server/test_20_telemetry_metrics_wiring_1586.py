@@ -34,6 +34,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from code_indexer.server.app import create_app
+from code_indexer.server.services import config_service as config_service_module
 from tests.e2e.server.conftest import (
     AdminTokenProvider,
     isolated_server_data_dir,
@@ -89,6 +90,28 @@ class TestLifespanRealStartupWiring:
     REAL startup config, not a test substituting a private singleton --
     constructs and assigns ApplicationMetrics/JobMetrics.
     """
+
+    def test_isolated_data_dir_rebinds_a_config_service_already_bound_elsewhere(
+        self, tmp_path, test_client: TestClient
+    ) -> None:
+        """The shared session app keeps serving while a test runs, and any
+        of its requests or threads calling get_config_service() after the
+        per-test singleton reset binds the singleton to the SESSION dir.  A
+        throwaway create_app() inside isolated_server_data_dir must still
+        read the isolated dir's config, so the helper itself must bind the
+        singleton -- and hand the session's back on exit."""
+        session_service = config_service_module.get_config_service()
+        isolated_dir = tmp_path / "isolated-data-dir"
+        with isolated_server_data_dir(
+            isolated_dir, config={"telemetry_config": {"enabled": True}}
+        ):
+            bound = config_service_module.get_config_service()
+            assert bound is not session_service
+            assert bound.config_manager.server_dir == isolated_dir
+            telemetry_config = bound.get_config().telemetry_config
+            assert telemetry_config is not None
+            assert telemetry_config.enabled is True
+        assert config_service_module.get_config_service() is session_service
 
     def test_lifespan_constructs_real_application_and_job_metrics_from_startup_config(
         self, tmp_path

@@ -23,6 +23,13 @@ from pathlib import Path
 from typing import Optional, Any, List, Union, cast
 
 from code_indexer.utils.git_runner import run_git_command
+from code_indexer.server.services.git_argv_safety import (
+    GIT_CLEAN_UNTRACKED_ARGV,
+    GIT_STATUS_UNCOMMITTED_ARGV,
+    uncommitted_status_lines,
+)
+from code_indexer.utils.credential_redaction import mask_url_credentials
+from code_indexer.utils.git_remote_url import parse_git_remote_url
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
@@ -105,14 +112,14 @@ class GitStateManager:
         # Check current status
         try:
             status_result = run_git_command(
-                ["git", "status", "--porcelain"], cwd=repo_path, check=True
+                list(GIT_STATUS_UNCOMMITTED_ARGV), cwd=repo_path, check=True
             )
         except subprocess.CalledProcessError as e:
             raise GitStateError(f"git status failed: {e}")
 
         # Parse status output to count files
-        status_output = status_result.stdout.strip()
-        if not status_output:
+        changes = uncommitted_status_lines(status_result.stdout)
+        if not changes:
             # Already clean, no action needed
             logger.info(
                 f"Repository {repo_path} is already clean, skipping clearing",
@@ -121,9 +128,7 @@ class GitStateManager:
             return CleanupResult(was_dirty=False, files_cleared=0)
 
         # Count files to be cleared
-        files_to_clear = len(
-            [line for line in status_output.split("\n") if line.strip()]
-        )
+        files_to_clear = len(changes)
         logger.info(
             f"Repository {repo_path} has {files_to_clear} uncommitted changes, clearing",
             extra={"correlation_id": get_correlation_id()},
@@ -150,7 +155,7 @@ class GitStateManager:
 
         # Execute git clean -fd
         try:
-            run_git_command(["git", "clean", "-fd"], cwd=repo_path, check=True)
+            run_git_command(list(GIT_CLEAN_UNTRACKED_ARGV), cwd=repo_path, check=True)
             logger.debug(
                 f"git clean -fd succeeded for {repo_path}",
                 extra={"correlation_id": get_correlation_id()},
@@ -170,12 +175,12 @@ class GitStateManager:
         # Verify clean state
         try:
             final_status = run_git_command(
-                ["git", "status", "--porcelain"], cwd=repo_path, check=True
+                list(GIT_STATUS_UNCOMMITTED_ARGV), cwd=repo_path, check=True
             )
         except subprocess.CalledProcessError as e:
             raise GitStateError(f"git status verification failed: {e}")
 
-        if final_status.stdout.strip():
+        if uncommitted_status_lines(final_status.stdout):
             # Still dirty after reset/clean - should never happen
             error_msg = f"Repository not clean after reset/clean: {final_status.stdout}"
             logger.error(
@@ -449,7 +454,9 @@ class GitStateManager:
 
     def _push_branch_to_remote(self, repo_path: Path, branch_name: str) -> None:
         """
-        Push branch to remote repository.
+        Push branch to remote repository, tracking it, through the server's
+        single push implementation with the server's own git
+        authentication as the credential source.
 
         Args:
             repo_path: Path to repository
@@ -458,14 +465,26 @@ class GitStateManager:
         Raises:
             GitStateError: If push fails
         """
+        # Imported here: the server.git package imports this module.
+        from code_indexer.server.git.git_push import push
+        from code_indexer.server.services.git_argv_safety import (
+            GitArgumentValidationError,
+        )
+
         try:
-            run_git_command(
-                ["git", "push", "-u", "origin", branch_name], cwd=repo_path, check=True
+            push(
+                repo_path,
+                "origin",
+                branch_name,
+                set_upstream=True,
+                credentials_url=None,
             )
             logger.info(
                 f"Pushed branch {branch_name} to remote",
                 extra={"correlation_id": get_correlation_id()},
             )
+        except GitArgumentValidationError as e:
+            raise GitStateError(f"git push refused: {e}")
         except subprocess.CalledProcessError as e:
             error_detail = e.stderr if hasattr(e, "stderr") else str(e)
             raise GitStateError(f"git push failed: {error_detail}")
@@ -693,12 +712,12 @@ class GitHubPRClient:
             # Parse GitHub URL (supports both HTTPS and SSH)
             # HTTPS: https://github.com/owner/repo.git
             # SSH: git@github.com:owner/repo.git
-            if "github.com" not in remote_url:
-                raise ValueError(f"Not a GitHub repository: {remote_url}")
-
-            parts = remote_url.replace(".git", "").split("/")
-            repo = parts[-1]
-            owner = parts[-2].split(":")[-1]  # Handle SSH format
+            parsed = parse_git_remote_url(remote_url)
+            if "github.com" not in remote_url or parsed is None:
+                raise ValueError(
+                    f"Not a GitHub repository: {mask_url_credentials(remote_url)}"
+                )
+            owner, repo = parsed.owner_repo()
 
         except subprocess.CalledProcessError as e:
             raise Exception(f"Failed to get remote URL: {e}")
@@ -794,12 +813,12 @@ class GitLabPRClient:
             # Parse GitLab URL
             # HTTPS: https://gitlab.com/owner/repo.git
             # SSH: git@gitlab.com:owner/repo.git
-            if "gitlab.com" not in remote_url:
-                raise ValueError(f"Not a GitLab repository: {remote_url}")
-
-            parts = remote_url.replace(".git", "").split("/")
-            repo = parts[-1]
-            owner = parts[-2].split(":")[-1]
+            parsed = parse_git_remote_url(remote_url)
+            if "gitlab.com" not in remote_url or parsed is None:
+                raise ValueError(
+                    f"Not a GitLab repository: {mask_url_credentials(remote_url)}"
+                )
+            owner, repo = parsed.owner_repo()
 
             # GitLab uses URL-encoded project path (owner/repo)
             project_path = f"{owner}/{repo}"

@@ -62,4 +62,4 @@ outputSchema:
       type: integer
 ---
 
-TL;DR: Search CI/CD run logs for a pattern. Auto-detects GitHub Actions or GitLab CI from the repository remote URL. QUICK START: ci_search_logs(repository_alias='myrepo-global', run_id=12345, pattern='ERROR'). FORGE OVERRIDE: pass forge='github' or forge='gitlab' to skip auto-detection. run_id maps to GitHub Actions run_id or GitLab pipeline_id. pattern renamed from 'query' (GitLab). MIGRATION: replaces github_actions_search_logs(owner, repo, run_id, query) and gitlab_ci_search_logs(project_id, pipeline_id, pattern).
+TL;DR: Search CI/CD run logs for a pattern. Auto-detects GitHub Actions or GitLab CI from the repository remote URL. QUICK START: ci_search_logs(repository_alias='myrepo-global', run_id=12345, pattern='ERROR'). FORGE OVERRIDE: pass forge='github' or forge='gitlab' to skip auto-detection. run_id maps to GitHub Actions run_id or GitLab pipeline_id.

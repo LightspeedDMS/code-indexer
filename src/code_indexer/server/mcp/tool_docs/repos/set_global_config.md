@@ -32,10 +32,20 @@ outputSchema:
   - success
 ---
 
-TL;DR: Configure auto-refresh interval for ALL global repositories system-wide. ADMIN ONLY (requires manage_golden_repos permission). Requires MCP elevation (TOTP step-up) -- unlike get_global_config, which has no elevation gate. QUICK START: set_global_config(300) sets 5-minute refresh interval. REQUIRED PARAMETER: refresh_interval in seconds (minimum 60, no maximum). EFFECT: All global repositories will automatically pull latest changes and re-index at this interval. TYPICAL VALUES: 300 (5 min, frequent updates), 900 (15 min, balanced), 3600 (1 hour, less load), 86400 (1 day, minimal). TRADEOFFS: Lower intervals = fresher code but higher system load and network usage. Higher intervals = less load but stale code between refreshes. USE CASES: (1) Adjust refresh frequency based on team velocity, (2) Reduce system load during peak hours, (3) Increase update frequency for critical repos. VERIFICATION: Use get_global_config to confirm new setting. SCOPE: Applies to ALL global repos - cannot set per-repo intervals. TROUBLESHOOTING: Permission denied? Requires admin role. Value too low? Must be >= 60 seconds.
+TL;DR: Configure the auto-refresh interval for ALL global repositories system-wide. ADMIN ONLY: requires the admin role and, when elevation enforcement is on, an active elevation window (TOTP step-up via `elevate_session`). get_global_config has no elevation gate.
 
-ERRORS:
-- elevation_required: TOTP step-up needed
-- totp_setup_required: TOTP not yet configured for this account (setup_url provided)
+INPUT: `{"refresh_interval": 300}` sets a 5-minute interval. `refresh_interval` is in seconds, minimum 60, no maximum. The value is saved in the server's runtime configuration (the same setting as the golden-repos refresh interval in the Web UI config screen) and an audit entry is recorded.
+
+EFFECT: Global repositories are refreshed (pull latest changes and re-index) at this interval. The setting applies to all global repositories; there are no per-repository intervals.
+
+TYPICAL VALUES: 300 (5 min), 900 (15 min), 3600 (1 hour), 86400 (1 day). Lower intervals keep code fresher at the cost of more load and network traffic.
+
+RETURNS: `{"success": true, "status": "updated", "refresh_interval": 300}`. Confirm with get_global_config.
+
+ERRORS (returned as `{"success": false, "error": "..."}` except the elevation codes):
+- `Permission denied: admin role required`
+- `elevation_required` / `totp_setup_required` (only when elevation enforcement is on; `totp_setup_required` includes `setup_url`)
+- `Missing required parameter: refresh_interval`
+- `Refresh interval must be at least 60 seconds. Got: <N> seconds.`
 
 RELATED TOOLS: get_global_config (check current interval), refresh_golden_repo (force immediate refresh without changing interval), repository_status (check when specific repo last refreshed).

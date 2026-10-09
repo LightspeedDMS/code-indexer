@@ -27,6 +27,7 @@ from ..remote.credential_manager import (
     CredentialDecryptionError,
 )
 from ..api_clients.base_client import NetworkError, AuthenticationError
+from ..utils.credential_redaction import mask_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +53,12 @@ def execute_remote_query(
     min_score: Optional[float] = None,
     include_source: bool = True,
     accuracy: str = "balanced",
+    file_extensions: Optional[List[str]] = None,
 ) -> List:
     """Execute semantic search query on remote repository with transparent routing.
+
+    ``file_extensions`` (#2047) is sent as the REST ``file_extensions`` field;
+    the server applies the shared rule.
 
     This function provides identical API to local query execution, automatically
     handling repository linking during first query and routing subsequent queries
@@ -146,6 +151,7 @@ def execute_remote_query(
             min_score=min_score,
             include_source=include_source,
             read_timeout_seconds=read_timeout_seconds,
+            file_extensions=file_extensions,
         )
 
         # Apply staleness detection to enhance results with local file timestamp comparison
@@ -225,7 +231,9 @@ def _establish_repository_link(project_root: Path) -> Optional[RepositoryLink]:
                 "Unable to determine git repository URL. Please ensure repository has a remote origin."
             )
 
-        logger.info(f"Attempting repository linking for: {repo_url}")
+        logger.info(
+            "Attempting repository linking for: %s", mask_url_credentials(repo_url)
+        )
 
         # Load remote configuration for server details
         remote_config = _load_remote_configuration(project_root)
@@ -253,7 +261,7 @@ def _establish_repository_link(project_root: Path) -> Optional[RepositoryLink]:
                 return repository_link
             else:
                 logger.warning(
-                    f"No matching repository found for {repo_url}. "
+                    f"No matching repository found for {mask_url_credentials(repo_url)}. "
                     "Please check that the repository exists on the remote server and has the correct branch."
                 )
                 return None
@@ -275,6 +283,7 @@ def _execute_authenticated_query(
     min_score: Optional[float] = None,
     include_source: bool = True,
     read_timeout_seconds: Optional[float] = None,
+    file_extensions: Optional[List[str]] = None,
 ) -> List[QueryResultItem]:
     """Execute authenticated query against remote repository.
 
@@ -292,6 +301,7 @@ def _execute_authenticated_query(
             client's httpx read timeout, sourced from the project's
             .code-indexer/.remote-config "api_read_timeout_seconds" field.
             None preserves the pre-#1398 hardcoded 30.0s default.
+        file_extensions: #2047 values, sent as the REST field
 
     Returns:
         List of query result items
@@ -319,6 +329,7 @@ def _execute_authenticated_query(
                 min_score=min_score,
                 language=language_filter,
                 path_filter=path_filter,
+                file_extensions=file_extensions,
             )
 
             return cast(List[QueryResultItem], results)

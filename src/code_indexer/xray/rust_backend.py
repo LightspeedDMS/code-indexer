@@ -31,7 +31,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Protocol, Tuple
 
-from code_indexer.utils.path_confinement import is_resolved_within_root
+from code_indexer.utils.path_confinement import is_readable_within_root
 
 logger = logging.getLogger(__name__)
 
@@ -1943,7 +1943,7 @@ def _build_matches(
     rel_path = spec.get("file_path", "")
     source_lines: List[str] = []
     if abs_path and (
-        resolved_root is None or is_resolved_within_root(Path(abs_path), resolved_root)
+        resolved_root is None or is_readable_within_root(Path(abs_path), resolved_root)
     ):
         try:
             source = Path(abs_path).read_bytes().decode("utf-8", errors="replace")

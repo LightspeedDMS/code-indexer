@@ -13,7 +13,11 @@ try:
 except ImportError:
     import sqlite3
 
-from code_indexer.utils.path_confinement import resolve_if_within_root
+from code_indexer.utils.path_confinement import (
+    has_git_segment,
+    is_readable_within_root,
+    resolve_if_within_root,
+)
 
 from .primitives import QueryResult, resolve_scip_trust_root
 
@@ -300,13 +304,15 @@ class DatabaseBackend(SCIPBackend):
 
     def _read_lines_within_root(self, candidate: Path) -> Optional[List[str]]:
         """Return ``candidate``'s lines when the file actually opened lies
-        inside ``self._resolved_root``; ``None`` when it does not.
+        inside ``self._resolved_root`` and not inside the repository's .git;
+        ``None`` when it does not.
 
-        The path is checked first (so a file outside the root is never even
-        opened), then opened, then the OPENED file's real path is verified
-        through ``/proc/self/fd`` and read from that descriptor only -- a
-        symlink swapped between check and open cannot redirect the read.
-        Where ``/proc`` fd links are unavailable the read fails closed with
+        The path is checked first (so a file outside the root, or resolving
+        into .git, is never even opened), then opened, then the OPENED
+        file's real path is verified through ``/proc/self/fd`` against the
+        same rule and read from that descriptor only -- a symlink swapped
+        between check and open cannot redirect the read. Where ``/proc`` fd
+        links are unavailable the read fails closed with
         ``_OpenedFileUnverifiable``.
 
         Raises:
@@ -318,7 +324,7 @@ class DatabaseBackend(SCIPBackend):
         root = self._resolved_root
         assert root is not None  # callers check before reading
         try:
-            if resolve_if_within_root(candidate, root) is None:
+            if not is_readable_within_root(candidate, root):
                 return None
         except ValueError:  # e.g. an embedded NUL byte in a stored path
             return None
@@ -331,8 +337,10 @@ class DatabaseBackend(SCIPBackend):
             except OSError as exc:
                 raise _OpenedFileUnverifiable(str(exc)) from exc
             try:
-                opened.relative_to(root)
+                opened_relative = opened.relative_to(root)
             except ValueError:
+                return None
+            if has_git_segment(opened_relative.parts):
                 return None
             with os.fdopen(fd, "rb", closefd=False) as handle:
                 data = handle.read()

@@ -1903,7 +1903,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     ];
 
     fn cookbook_source() -> &'static str {
-        include_str!("../../../docs/xray-cookbook.md")
+        include_str!("../../../docs/guides/xray-cookbook.md")
     }
 
     /// Extracts the byte content of the `rust` fence that immediately
@@ -1978,7 +1978,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             assert_eq!(
                 doc_copy,
                 template_source(name),
-                "docs/xray-cookbook.md's copy of '{}' has drifted from docs/xray-templates/{}.rs",
+                "docs/guides/xray-cookbook.md's copy of '{}' has drifted from docs/xray-templates/{}.rs",
                 name,
                 name
             );
@@ -1992,7 +1992,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             assert_eq!(
                 doc_copy,
                 template_source(name),
-                "docs/xray-cookbook.md's copy of '{}' has drifted from docs/xray-templates/{}.rs",
+                "docs/guides/xray-cookbook.md's copy of '{}' has drifted from docs/xray-templates/{}.rs",
                 name,
                 name
             );

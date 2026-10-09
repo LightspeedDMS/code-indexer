@@ -36,8 +36,28 @@ Usage:
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Dict
+
+from code_indexer.server.logging_utils import redact_log_record
+
+
+def _redacted_copy(record: logging.LogRecord) -> logging.LogRecord:
+    """A copy of ``record`` safe to export, redacted by the shared
+    ``redact_log_record``, with the redacted traceback and stack folded into
+    the body. The copy carries no ``args``/``exc_info``/``exc_text``/
+    ``stack_info``, so the bridge never forwards a traceback outside the
+    body. ``record`` itself is not modified."""
+    safe = redact_log_record(copy.copy(record))
+    parts = [safe.getMessage(), safe.exc_text, safe.stack_info]
+    safe.msg = "\n".join(part for part in parts if part)
+    safe.args = None
+    safe.exc_info = None
+    safe.exc_text = None
+    safe.stack_info = None
+    return safe
+
 
 # Zero values for when no trace context is available
 ZERO_TRACE_ID = "0" * 32
@@ -189,7 +209,7 @@ class ContextAwareLogBridgeHandler(logging.Handler):
         try:
             if captured_context is not None:
                 token = otel_context.attach(captured_context)
-            self._wrapped_handler.emit(record)
+            self._wrapped_handler.emit(_redacted_copy(record))
         except Exception:
             self.handleError(record)
         finally:

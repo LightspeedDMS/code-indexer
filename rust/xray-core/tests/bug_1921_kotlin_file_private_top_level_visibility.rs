@@ -46,7 +46,7 @@
 //! exist is on the SAFE side, not to claim it is valid source). Neither
 //! is the bug #1921 hypothesized, and both already behave per the epic's
 //! own "over-binding is safe, under-binding is not" doctrine
-//! (`docs/xray-architecture.md`'s candidate-admission section).
+//! (`docs/architecture/xray/architecture.md`'s candidate-admission section).
 //!
 //! The SAME_FILE fixture above, by contrast, IS real, compilable Kotlin.
 

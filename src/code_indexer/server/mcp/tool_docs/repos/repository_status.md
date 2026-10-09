@@ -9,7 +9,7 @@ inputSchema:
   properties:
     alias:
       type: string
-      description: "Repository alias. Append '-global' suffix for global repos (e.g., 'backend-global'); omit suffix for activated user repos (e.g., 'my-repo')."
+      description: "Repository alias. A '-global' alias (e.g., 'example-repo-global') returns global repository status; any other alias is looked up as a golden repository alias (see the tool description)."
     detail:
       type: string
       enum:
@@ -50,11 +50,11 @@ outputSchema:
   - success
 ---
 
-Unified replacement for get_repository_status, global_repo_status, and get_repository_statistics (Story #990 hard-cut).
+Get the status of one repository, with optional statistics.
 
-AUTO-DETECTION: The 'kind' discriminator is set automatically:
+AUTO-DETECTION: The 'kind' discriminator is set from the alias:
 - alias ending in '-global' -> kind='global' (shared read-only global repository)
-- alias without '-global' suffix -> kind='activated' (your user-activated repository)
+- any other alias -> kind='activated'
 
 ENVELOPE SHAPE:
 ```json
@@ -67,14 +67,14 @@ ENVELOPE SHAPE:
 }
 ```
 
-FIELD PRESERVATION:
-- For kind='activated': status contains the same fields formerly returned by get_repository_status (user_alias, golden_repo_alias, repo_url, activation_status, file_count, index_size, last_updated, enable_temporal, branches_list, etc.)
-- For kind='global': status contains alias, repo_name, url, last_refresh, enable_temporal, next_refresh (null when not scheduled), enable_scip — nested under 'status'. next_refresh and enable_scip are global-repo-only (not present for kind='activated').
-- When detail='stats': statistics contains the same fields formerly returned by get_repository_statistics (repository_id, files, storage, activity, health)
+STATUS FIELDS:
+- kind='global': status contains alias, repo_name, url, last_refresh, enable_temporal, next_refresh (null when not scheduled) and enable_scip. An unknown alias returns `Global repo '<alias>' not found`.
+- kind='activated': the alias is looked up as a golden repository alias, and status describes that golden repository: alias, repo_url, default_branch, clone_path, created_at, activation_status ('activated' when you have an activation of it, else 'available'), branches_list, file_count, index_size, last_updated, enable_temporal and temporal_status. An alias that exists only as your workspace alias (for example 'my-work') is not a golden repository alias and returns `Repository '<alias>' not found`; use list_repositories for your workspaces.
 
-MIGRATION TABLE:
-- get_repository_status(user_alias=X) -> repository_status(alias=X, detail='basic')
-- global_repo_status(alias=X) -> repository_status(alias=X, detail='basic')
-- get_repository_statistics(repository_alias=X) -> repository_status(alias=X, detail='stats')
+STATISTICS (detail='stats'):
+- kind='global': statistics contains repository_alias, is_global, path and index_path ({} when the alias cannot be resolved).
+- kind='activated': statistics contains the repository statistics report (repository_id, files, storage, activity, health).
 
-NOTE: get_all_repositories_status is NOT affected by this consolidation — use it for a bulk overview of all repos.
+ERRORS: `Missing required parameter: alias`; `Invalid detail value '<value>': must be 'basic' or 'stats'`; the not-found messages above.
+
+For a bulk overview of all repos, use get_all_repositories_status.

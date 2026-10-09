@@ -31,7 +31,11 @@ from code_indexer.config import ConfigManager
 from .alias_manager import AliasManager
 from .git_error_classifier import GitFetchError
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
-from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.git.git_subprocess_env import (
+    build_non_interactive_git_env,
+    ensure_remote_url_without_credentials,
+    remote_url_without_credentials,
+)
 from .git_pull_updater import GitPullUpdater
 from .meta_directory_updater import MetaDirectoryUpdater
 from .update_strategy import UpdateStrategy
@@ -399,6 +403,40 @@ def _is_git_repo_url(repo_url: str) -> bool:
     if not repo_url:
         return False
     return any(repo_url.startswith(prefix) for prefix in _GIT_URL_PREFIXES)
+
+
+def _git_pull_updater_for(
+    master_path: str,
+    repo_url: str,
+    cancel_check: Optional[Callable[[], bool]],
+) -> GitPullUpdater:
+    """The updater for one golden refresh of the base clone at
+    ``master_path``.
+
+    Repository credentials are supplied to git at run time and never stored
+    in a clone's configuration: the registered ``repo_url`` (which may carry
+    userinfo) is handed to every fetch/pull as a run-time credential, and the
+    base clone's stored origin URL is first rewritten to its credential-free
+    form (idempotent). Only the base clone is rewritten -- never a versioned
+    snapshot. A failed rewrite fails the refresh before any network command
+    (RuntimeError): a clone that may still store a credential is never
+    fetched or pulled. Raises OrphanedRepoError (before any rewrite) when
+    the clone is missing. Runs in the refresh job's thread."""
+    updater = GitPullUpdater(
+        master_path, cancel_check=cancel_check, credentials_url=repo_url
+    )
+    from code_indexer.server.services.git_operations_service import (
+        GitCommandError,
+    )
+
+    try:
+        ensure_remote_url_without_credentials(master_path)
+    except GitCommandError as exc:
+        raise RuntimeError(
+            f"Stored remote URLs of {master_path} could not all be made "
+            f"credential-free ({exc}); the refresh is not run"
+        ) from exc
+    return updater
 
 
 # Bug #1810 / Bug #1832: the diagnostic formatter used to be defined
@@ -1246,13 +1284,20 @@ class RefreshScheduler:
             shutil.rmtree(str(temp_clone))
 
         try:
+            # Credential-free URL on argv and in the clone's stored origin;
+            # repository credentials are supplied at run time.
             clone_result = run_with_cancel(
-                ["git", "clone", repo_url, str(temp_clone)],
+                [
+                    "git",
+                    "clone",
+                    remote_url_without_credentials(repo_url),
+                    str(temp_clone),
+                ],
                 cancel_check,
                 capture_output=True,
                 text=True,
                 timeout=self.CLONE_TIMEOUT_SECONDS,
-                env=build_non_interactive_git_env(),
+                env=build_non_interactive_git_env(repo_url),
             )
         except SubprocessCancelledError:
             # Bug #2012: the job was cancelled mid-clone -- drop the partial
@@ -2362,6 +2407,23 @@ class RefreshScheduler:
                     regate, covered_generation = failure_recovery.begin_refresh_cycle(
                         self.golden_repo_metadata, alias_name
                     )
+                    # Bug #2056: an FTS index built before the cached-chunk
+                    # fix may be partly emptied, undetectably; it carries no
+                    # current content marker. Its next `cidx index --fts`
+                    # rebuilds it once from disk (no embedding), so a cycle
+                    # with no upstream change must index instead of skipping
+                    # (used by every "No changes detected" check below).
+                    # Checked on the mutable base clone, never .versioned/.
+                    from code_indexer.services.fts_lifecycle import (
+                        fts_content_rebuild_due,
+                    )
+
+                    fts_rebuild_due = fts_content_rebuild_due(Path(master_path))
+                    if fts_rebuild_due:
+                        logger.info(
+                            f"FTS index of {alias_name} has no current content "
+                            f"marker; this refresh rebuilds it once from disk"
+                        )
 
                     if is_local_repo:
                         # C3: For local repos, source_path is the LIVE directory (where writers put files),
@@ -2567,7 +2629,9 @@ class RefreshScheduler:
                                     master_path, _branch, cancel_check=cancel_check
                                 ).sync()
 
-                                if _sync_result.skipped and not (force_reset or regate):
+                                if _sync_result.skipped and not (
+                                    force_reset or regate or fts_rebuild_due
+                                ):
                                     logger.info(
                                         "No cidx-meta backup changes detected for %s, "
                                         "skipping refresh",
@@ -2596,7 +2660,7 @@ class RefreshScheduler:
                                 force_reconcile = self._check_extension_drift(
                                     source_path, alias_name
                                 )
-                                if not (force_reconcile or regate):
+                                if not (force_reconcile or regate or fts_rebuild_due):
                                     logger.info(
                                         f"No changes detected for local repo {alias_name}, skipping refresh"
                                     )
@@ -2696,7 +2760,9 @@ class RefreshScheduler:
                             sync_result = CidxMetaBackupSync(
                                 master_path, branch, cancel_check=cancel_check
                             ).sync()
-                            if sync_result.skipped and not (force_reset or regate):
+                            if sync_result.skipped and not (
+                                force_reset or regate or fts_rebuild_due
+                            ):
                                 logger.info(
                                     "No cidx-meta backup changes detected for %s, skipping refresh",
                                     alias_name,
@@ -2736,8 +2802,11 @@ class RefreshScheduler:
                                 # message-substring matching.
                                 try:
                                     # Bug #2012: its git calls are cancellable.
-                                    updater = GitPullUpdater(
-                                        master_path, cancel_check=cancel_check
+                                    # The base clone's origin converges to
+                                    # the credential-free URL; credentials
+                                    # are supplied at run time.
+                                    updater = _git_pull_updater_for(
+                                        master_path, repo_url, cancel_check
                                     )
                                 except OrphanedRepoError as orphan_exc:
                                     logger.warning(
@@ -2898,7 +2967,9 @@ class RefreshScheduler:
                                                 else None
                                             )
                                             force_reconcile = forced_signal is not None
-                                        if not (force_reconcile or regate):
+                                        if not (
+                                            force_reconcile or regate or fts_rebuild_due
+                                        ):
                                             logger.info(
                                                 f"No changes detected for {alias_name}, skipping refresh"
                                             )

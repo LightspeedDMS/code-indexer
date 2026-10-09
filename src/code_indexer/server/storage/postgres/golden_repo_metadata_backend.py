@@ -23,6 +23,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from code_indexer.utils.credential_redaction import mask_url_credentials
 from .pg_utils import sanitize_row
 from .connection_pool import ConnectionPool
 from ._forced_reconcile_state_mixin import (
@@ -342,7 +343,11 @@ class GoldenRepoMetadataPostgresBackend(
             conn.commit()
 
         if updated:
-            logger.info("Updated repo_url=%s for golden repo: %s", repo_url, alias)
+            logger.info(
+                "Updated repo_url=%s for golden repo: %s",
+                mask_url_credentials(repo_url),
+                alias,
+            )
         return updated
 
     def update_category(

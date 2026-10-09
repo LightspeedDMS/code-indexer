@@ -103,11 +103,12 @@ def test_removed_account_is_not_imported_again(server_dir: Path) -> None:
     assert users.get_user("alice") is None
 
 
-def test_entries_not_imported_are_reported_for_recreation(
+def test_incomplete_import_is_reported_and_kept_pending(
     server_dir: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The import runs once: every entry it could not import is reported at
-    ERROR by name, with the reason, for an administrator to re-create."""
+    """An import with entries it could not import stays pending: one ERROR
+    states how many (never which accounts), the failure reason is logged per
+    entry, and users.json keeps only the entries still to import."""
     users = _users(server_dir)
     _write_legacy(
         server_dir,
@@ -117,14 +118,14 @@ def test_entries_not_imported_are_reported_for_recreation(
     with caplog.at_level(logging.ERROR, logger=MIGRATION_LOGGER):
         _start_up(server_dir)
 
-    reports = [
-        r.getMessage()
-        for r in caplog.records
-        if r.levelno == logging.ERROR and "re-create" in r.getMessage()
-    ]
-    assert len(reports) == 1
-    assert "broken" in reports[0] and "alice" not in reports[0]
-    assert "attribute" in reports[0]  # the reason the entry failed
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    summaries = [m for m in errors if "users.json import incomplete" in m]
+    assert len(summaries) == 1
+    assert "1 entries" in summaries[0]
+    assert "broken" not in summaries[0] and "alice" not in summaries[0]
+    assert any("attribute" in m for m in errors)  # the reason the entry failed
+    remaining = json.loads((server_dir / "users.json").read_text())
+    assert list(remaining) == ["broken"]
 
 
 def test_failed_rename_still_prevents_reimport(

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ..config import IndexingConfig, Config
 from .image_extractor import ImageExtractorFactory
-from ..utils.path_confinement import is_resolved_within_root
+from ..utils.path_confinement import is_indexable_location
 from ..utils.source_text_decoding import read_source_text
 
 
@@ -303,14 +303,13 @@ class FixedSizeChunker:
         # production caller passes repo_root; when it is omitted (test-only
         # direct usage of this method) there is no root to check against,
         # so the file is read unconditionally. Local CLI context reads
-        # symlinked files wherever they point.
-        if (
-            repo_root is not None
-            and self._config is not None
-            and self._config.confined_to_codebase_root
-        ):
+        # symlinked files wherever they point, except into the repository's
+        # own .git, which no context reads.
+        if repo_root is not None and self._config is not None:
             resolved_root = self._resolved_root_for(repo_root)
-            if not is_resolved_within_root(file_path, resolved_root):
+            if not is_indexable_location(
+                file_path, resolved_root, self._config.confined_to_codebase_root
+            ):
                 raise ValueError("file does not resolve inside the codebase root")
 
         # Decode through the helper query-time retrieval also uses, so the

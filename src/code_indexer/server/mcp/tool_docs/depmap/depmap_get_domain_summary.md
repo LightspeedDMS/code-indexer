@@ -39,11 +39,9 @@ Name and description come from the domain markdown file's YAML frontmatter.
 If the frontmatter is absent or does not contain those keys, the values from
 _domains.json are used as fallbacks.
 
-BREAKING CHANGE (Story #888): Empty-string domain_name now returns success=false,
-resolution=invalid_input. An unknown domain name now returns success=false,
-resolution=domain_not_indexed. Previous behavior returned success=true with
-summary=null for both cases. Callers that relied on null-summary-success must
-add input validation and distinguish the two failure modes using resolution.
+FAILURE MODES: An empty-string domain_name returns success=false,
+resolution=invalid_input. An unknown domain name returns success=false,
+resolution=domain_not_indexed. Distinguish the two using resolution.
 
 Use this tool to understand a domain at a glance: its purpose, which repos form it,
 and which other domains it depends on.

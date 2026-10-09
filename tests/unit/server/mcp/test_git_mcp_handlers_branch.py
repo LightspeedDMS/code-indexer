@@ -247,11 +247,10 @@ class TestGitBranchDeleteHandler:
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git branch delete requires confirmation token."""
-        mock_git_service.git_branch_delete.side_effect = ValueError(
-            "Confirmation token required for branch deletion"
-        )
-        # Mock generate_confirmation_token to return a string
-        mock_git_service.generate_confirmation_token.return_value = "DEL789"
+        mock_git_service.git_branch_delete.return_value = {
+            "requires_confirmation": True,
+            "token": "DEL789",
+        }
 
         params = {
             "repository_alias": "test-repo",
@@ -286,7 +285,11 @@ class TestGitBranchDeleteHandler:
         assert data["success"] is True
         assert data["deleted_branch"] == "old-feature"
         mock_git_service.git_branch_delete.assert_called_once_with(
-            Path("/tmp/test-repo"), "old-feature", confirmation_token="DEL123"
+            Path("/tmp/test-repo"),
+            "old-feature",
+            confirmation_token="DEL123",
+            username="testadmin",
+            repo_alias="test-repo",
         )
 
     def test_git_branch_delete_current_branch(

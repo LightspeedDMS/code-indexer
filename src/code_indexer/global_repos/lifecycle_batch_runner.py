@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import yaml
 
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
+from code_indexer.utils.credential_redaction import mask_url_credentials
 from code_indexer.global_repos.unified_response_parser import (
     CURRENT_LIFECYCLE_SCHEMA_VERSION,
 )
@@ -205,13 +206,21 @@ def _do_write(
         yaml.YAMLError: if lifecycle_frontmatter cannot be serialised to YAML.
         OSError: on I/O failures during write or rename.
     """
+    # Descriptions are indexed and globally queryable: repository URLs are
+    # written with their userinfo redacted, in the frontmatter ``url`` and
+    # anywhere in the body (so a refresh rewrites an older description too).
+    frontmatter = dict(lifecycle_frontmatter)
+    if "url" in frontmatter:
+        frontmatter["url"] = mask_url_credentials(frontmatter["url"])
+    body = mask_url_credentials(description_body)
+
     # Fail-closed: re-raise yaml serialisation errors rather than silently
     # writing a corrupt file (Messi Rule #13 — Anti-Silent-Failure).
     frontmatter_yaml = yaml.dump(
-        lifecycle_frontmatter, default_flow_style=False, allow_unicode=True
+        frontmatter, default_flow_style=False, allow_unicode=True
     )
 
-    content = f"---\n{frontmatter_yaml}---\n\n{description_body}\n"
+    content = f"---\n{frontmatter_yaml}---\n\n{body}\n"
 
     cidx_meta_path.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=str(cidx_meta_path))
@@ -746,7 +755,8 @@ class LifecycleBatchRunner:
                     "'---' but YAML could not be parsed. Manual inspection required."
                 )
             if pre_body and pre_body.strip():
-                existing_description = pre_body
+                # The model receives repository URLs with userinfo redacted.
+                existing_description = mask_url_credentials(pre_body)
             la = pre_fm.get("last_analyzed") if pre_fm else None
             existing_last_analyzed = str(la) if la is not None else None
 

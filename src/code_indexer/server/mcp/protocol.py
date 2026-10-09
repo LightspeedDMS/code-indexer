@@ -943,6 +943,9 @@ def _authorize_tool_call(
     synchronously: :func:`_dispatch_tool_call` runs it on a worker thread."""
     from .tools import TOOL_REGISTRY
 
+    # Invariant for per-group tool grants (Bug #2076): a grant may only
+    # restrict the caller's role permissions, never extend them. Grants are
+    # not enforced in this version.
     group_decision = tool_access_memo.is_allowed(tool_name, effective_user)
     if group_decision is False:
         raise ValueError(f"Permission denied: tool access denied for {tool_name}")

@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from code_indexer.cli_watch_helpers import detect_existing_indexes
+from code_indexer.config import Config
 from code_indexer.services.temporal.temporal_server_paths import (
     server_temporal_index_root,
 )
@@ -60,7 +61,7 @@ def _build_sister_only_golden_clone(tmp_path: Path) -> Path:
 def test_detect_existing_indexes_sees_sister_relocated_temporal_data(tmp_path):
     project_root = _build_sister_only_golden_clone(tmp_path)
 
-    result = detect_existing_indexes(project_root)
+    result = detect_existing_indexes(project_root, Config(codebase_dir=project_root))
 
     assert result["temporal"] is True, (
         "detect_existing_indexes must recognize temporal data relocated to "

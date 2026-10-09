@@ -255,11 +255,22 @@ def search_code(
 
         return _result
     except Exception as e:
-        logger.exception(
+        from code_indexer.server.query.search_error_policy import (
+            classify_search_error,
+        )
+
+        outcome = classify_search_error(e)
+        # A request the caller can fix is not a server fault: WARNING, no
+        # traceback (as REST /api/query). Everything else keeps ERROR.
+        logger.log(
+            logging.ERROR if outcome.log_as_internal else logging.WARNING,
             f"Error in search_code: {e}",
+            exc_info=outcome.log_as_internal,
             extra={"correlation_id": get_correlation_id()},
         )
-        return _mcp_response({"success": False, "error": str(e), "results": []})
+        return _mcp_response(
+            {"success": False, "error": outcome.message, "results": []}
+        )
     finally:
         # Issue #1159: always reset ContextVar so it never leaks into the next request.
         _search_event_ctx.reset(_ctx_token)

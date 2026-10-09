@@ -44,7 +44,7 @@ PARAMETERS: alias (required) - golden repo alias without -global suffix. branch 
 
 BEHAVIOR: (1) Validates repository exists and branch name is syntactically valid, (2) Returns immediately with job_id if a new job was submitted. The background job then: acquires write lock, fetches latest from remote origin, validates target branch exists on remote, checks out and pulls the target branch, re-indexes the repository, creates a new CoW snapshot, atomically swaps alias JSON to point to new snapshot, and updates metadata.
 
-ASYNC: This operation returns immediately with a job_id. Use get_job_details to poll for completion. Returns job_id=null (HTTP 200) if already on the target branch — no job is created.
+ASYNC: This operation returns immediately with a job_id. Use get_job_details to poll for completion. If the repository is already on the target branch, no job is created and the response is `{"success": true, "message": "Already on branch '<branch>'. No action taken."}` with no job_id.
 
 DUPLICATE JOB: If a change_branch job is already running for this repository, returns an error with existing_job_id. Wait for the existing job to complete before retrying.
 

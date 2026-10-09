@@ -1,14 +1,17 @@
 ---
 name: feedback-parallel-dispatch-cap-4-on-20x
-description: "User's Claude subscription is 20x tier -- parallel subagent dispatch cap raised from 2 to 4 concurrent agents"
+description: "Dispatch cap is now ONE working agent + at most ONE review agent (5x subscription, 2026-10-07); Codex carries the hardest reviews. Supersedes the earlier 4-agent cap on 20x."
 metadata:
   type: feedback
-  originSessionId: ca34043c-b05f-4314-8219-619a25ec9f26
-  modified: 2026-08-27T13:30:52.646Z
 ---
 
-The user is on a 20x Claude subscription and explicitly raised the standing parallel-subagent dispatch cap from 2 to 4 concurrent agents: "you can go to four agents at a time now. we are on a 20x subscription."
+On the 5x subscription the coordinator runs at most ONE working agent (engineer, assembler, investigator) and at most ONE review agent at a time. The hardest reviews go to Codex (codex-code-reviewer relays), and Claude reviewers are used sparingly.
 
-**Why**: Higher subscription tier supports more concurrent usage; the 2-agent cap used throughout the prior `/implement-backlog` sessions was a conservative default, not a hard platform limit.
+**Why:** 2026-10-07 the 20x account hit its weekly limit mid-session with 4-5 agents running, killing every agent mid-edit. The owner switched to a 5x account: "can't go with 4 agents at a time ... one agent doing work, and max one agent doing reviews, and rely on codex for the most complicated reviews. this is a 5x account". (Earlier, on 20x, the cap was 4.)
 
-**How to apply**: In this project (code-indexer), default the parallel-subagent dispatch cap to 4 (not 2) for `/implement-backlog` and similar multi-item sweeps, verified via `ListAgents` before each new dispatch same as before. All the same safety rules still apply at the higher cap: each dispatch prompt must still forbid touching sibling agents' files, forbid `git worktree` (dual-import trap), forbid broad `git add -A`, and must instruct agents to block synchronously rather than expect a background-notification mechanism (see [[feedback_no_subagent_to_subagent_delegation]] and the phantom-background-wait pattern noted in [[project_backlog_session_paused_2026_08_27]]). If a future session finds 4 concurrent agents causing resource contention (CPU/memory pressure, flaky shared-tree test runs), that's worth flagging back to the user rather than silently reverting to 2.
+**How to apply:**
+- Keep a single ordered work queue; dispatch the next work item only when the current worker reports.
+- Reviews: Codex first for complex or security work; a Claude (Opus) reviewer only where dual review is mandatory and Codex has already passed it, or when Codex is unavailable.
+- Do cheap mechanical steps (staging via hash-object/update-index, exporting, running targeted tests, committing) in the main context instead of spending an agent.
+- Keep briefs tight and budgeted ([[feedback-bound-every-agent-run]]); a cut-off agent leaves partial edits, so check imports and the tree before re-dispatching.
+- If the owner moves back to a larger tier, ask before raising the cap.

@@ -397,6 +397,30 @@ class PayloadCache:
 
         self._conn_manager.execute_atomic(_do_insert)
 
+    def _expiring_backend(self) -> "PayloadCacheBackend":
+        """Expiring entries need a storage backend: only a backend records
+        each entry's own TTL and measures it on the store's clock."""
+        if self._backend is None:
+            raise RuntimeError(
+                "Expiring entries require a PayloadCache with a storage "
+                "backend (server mode)"
+            )
+        return self._backend
+
+    def store_expiring_key(self, key: str, content: str, ttl_seconds: int) -> None:
+        """Store content under `key` for exactly `ttl_seconds`, whatever the
+        configured cache TTL, stamped by the store's own clock. Failures
+        propagate."""
+        self._expiring_backend().store_expiring(key, content, ttl_seconds)
+
+    def consume_key(self, key: str) -> bool:
+        """Atomically remove a live entry; True only for the single caller
+        whose delete removed it. Any other caller -- concurrent, later, or
+        on another worker or node sharing the store -- gets False, as does
+        a missing or expired key. Failures propagate.
+        """
+        return bool(self._expiring_backend().consume(key))
+
     def has_key(self, key: str) -> bool:
         """Check if a key exists in the cache without retrieving content.
 

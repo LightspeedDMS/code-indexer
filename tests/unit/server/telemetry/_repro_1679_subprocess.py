@@ -53,7 +53,7 @@ _SHUTDOWN_TIMEOUT_SECONDS = 45.0
 
 def _run() -> dict:
     import httpx
-    from asgi_lifespan import LifespanManager
+    from _app_lifespan import app_lifespan
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
         InMemorySpanExporter,
@@ -64,7 +64,7 @@ def _run() -> dict:
     app = create_app()
 
     async def _drive() -> dict:
-        async with LifespanManager(app, shutdown_timeout=_SHUTDOWN_TIMEOUT_SECONDS):
+        async with app_lifespan(app, shutdown_timeout=_SHUTDOWN_TIMEOUT_SECONDS):
             telemetry_manager = getattr(app.state, "telemetry_manager", None)
             tracer_provider = (
                 telemetry_manager.tracer_provider

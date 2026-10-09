@@ -235,37 +235,44 @@ class UserManager:
         with open(self.users_file_path, "w") as f:
             json.dump(users_data, f, indent=2)
 
-    def seed_initial_admin(self):
-        """Create initial admin user (admin/admin) if no users exist."""
+    def seed_initial_admin(self) -> bool:
+        """Seed the initial administrator only when the user store is empty.
+
+        A store holding any user is left exactly as it is: no account is
+        created, and no existing account's password or role changes.
+
+        Returns:
+            True when the initial administrator was created.
+        """
         if self._use_sqlite and self._sqlite_backend is not None:
-            # SQLite backend (Story #702)
-            existing = self._sqlite_backend.get_user("admin")
-            if existing is None:
-                # Create initial admin user
-                self.prepare_name_for_new_account("admin")
-                admin_password_hash = self.password_manager.hash_password("admin")
-                self._sqlite_backend.create_user(
-                    username="admin",
-                    password_hash=admin_password_hash,
-                    role="admin",
-                )
-        else:
-            # JSON file storage (backward compatible)
-            users_data = self._load_users()
+            # SQLite (Story #702) or PostgreSQL backend.
+            if self._sqlite_backend.has_any_user():
+                return False
+            # Leftover rows under the name are removed only while no account
+            # has it, so a seeder that loses the race to another seeder never
+            # removes rows of the account the winner just created.
+            if self._account_activations is not None:
+                self._account_activations.ensure_name_free("admin")
+            if self._account_data_purger is not None:
+                self._account_data_purger.purge_deleted("admin")
+            created: bool = self._sqlite_backend.create_user_if_store_empty(
+                username="admin",
+                password_hash=self.password_manager.hash_password("admin"),
+                role="admin",
+            )
+            return created
 
-            if "admin" not in users_data:
-                # Create initial admin user
-                admin_password_hash = self.password_manager.hash_password("admin")
-
-                users_data["admin"] = {
-                    "role": "admin",
-                    "password_hash": admin_password_hash,
-                    "created_at": DateTimeParser.format_for_storage(
-                        datetime.now(timezone.utc)
-                    ),
-                }
-
-                self._save_users(users_data)
+        # JSON file storage (backward compatible)
+        users_data = self._load_users()
+        if users_data:
+            return False
+        users_data["admin"] = {
+            "role": "admin",
+            "password_hash": self.password_manager.hash_password("admin"),
+            "created_at": DateTimeParser.format_for_storage(datetime.now(timezone.utc)),
+        }
+        self._save_users(users_data)
+        return True
 
     def prepare_name_for_new_account(self, username: str) -> None:
         """Make *username* clean before it is created.

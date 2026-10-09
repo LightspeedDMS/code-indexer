@@ -25,9 +25,11 @@ from ..models.query import (
     FTSResultItem,
 )
 from ..models.api_models import QueryResultItem
-from ..query.semantic_query_manager import SemanticQueryError
+from ..query.search_error_policy import classify_search_error
+from ..query.semantic_query_manager import SearchFailedError, SearchRequestError
+from ...services.multi_index_query_service import MultiIndexQueryTimeoutError
 from ..auth import dependencies
-from ..logging_utils import format_error_log
+from ..logging_utils import format_error_log, public_error_message
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
@@ -245,6 +247,9 @@ def _execute_temporal_via_live_dispatch_rest(
         worker_input = build_temporal_worker_input_from_rest_request(
             request, current_user.username, fusion_fetch_limit
         )
+    except ValueError as exc:
+        # The builder only normalizes the caller's own parameters.
+        raise SearchRequestError(str(exc)) from exc
     except TemporalAliasRejectedError as exc:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -539,6 +544,14 @@ def register_query_routes(
 
             # Story 5: Handle FTS and Hybrid modes
             if request.search_mode in ["fts", "hybrid"]:
+                from ..query.filtered_search import extension_overfetch_deadline
+
+                # #2047: ONE extension over-fetch time budget for this
+                # request, shared by the FTS half and the semantic half.
+                extension_deadline = extension_overfetch_deadline(
+                    request.file_extensions
+                )
+
                 # Get user's activated repositories
                 activated_repos = activated_repo_manager.list_activated_repositories(
                     current_user.username
@@ -734,26 +747,26 @@ def register_query_routes(
                             if request.fuzzy and edit_dist == 0:
                                 edit_dist = 1
 
-                            # Execute FTS query
+                            from ..query.filtered_search import fts_filter_kwargs
+
+                            # Execute FTS query; the filters come from the one
+                            # shared builder (Story #503 Phase 1 excludes,
+                            # #2047 file_extensions under the request deadline).
                             fts_raw_results = tantivy_manager.search(
                                 query_text=request.query_text,
                                 case_sensitive=request.case_sensitive,
                                 edit_distance=edit_dist,
                                 snippet_lines=request.snippet_lines,
                                 limit=request.limit,
-                                language_filter=request.language,
-                                path_filter=request.path_filter,
-                                exclude_languages=(
-                                    [request.exclude_language]
-                                    if request.exclude_language
-                                    else None
-                                ),  # Story #503 Phase 1
-                                exclude_paths=(
-                                    [request.exclude_path]
-                                    if request.exclude_path
-                                    else None
-                                ),  # Story #503 Phase 1
                                 use_regex=request.regex,  # Story #503 Phase 1
+                                **fts_filter_kwargs(
+                                    language=request.language,
+                                    path_filter=request.path_filter,
+                                    exclude_language=request.exclude_language,
+                                    exclude_path=request.exclude_path,
+                                    file_extensions=request.file_extensions,
+                                    deadline=extension_deadline,
+                                ),
                             )
 
                             # Convert to API response format
@@ -785,12 +798,20 @@ def register_query_routes(
                                 format_error_log(
                                     "APP-GENERAL-033",
                                     f"FTS search failed: {e}",
-                                )
+                                ),
+                                exc_info=True,
                             )
                             if request.search_mode == "fts":
+                                _fts_outcome = classify_search_error(e)
                                 raise HTTPException(
-                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                                    detail=f"FTS search failed: {str(e)}",
+                                    status_code=(
+                                        status.HTTP_400_BAD_REQUEST
+                                        if _fts_outcome.client_error
+                                        else status.HTTP_504_GATEWAY_TIMEOUT
+                                        if _fts_outcome.timed_out
+                                        else status.HTTP_500_INTERNAL_SERVER_ERROR
+                                    ),
+                                    detail=_fts_outcome.message,
                                 )
                             # For hybrid mode, continue with semantic only
                             search_mode_actual = "semantic"
@@ -834,6 +855,8 @@ def register_query_routes(
                                 limit=request.limit,
                                 min_score=request.min_score,
                                 file_extensions=request.file_extensions,
+                                # #2047: intersect with language, as FTS does.
+                                language=request.language,
                                 # Phase 1 parameters (Story #503)
                                 exclude_language=request.exclude_language,
                                 exclude_path=request.exclude_path,
@@ -850,6 +873,8 @@ def register_query_routes(
                                 no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
                                 # Story #1291 AC7/AC8: explicit embedder override
                                 temporal_embedder=request.temporal_embedder,
+                                # #2047: the budget shared with the FTS half
+                                extension_deadline=extension_deadline,
                             )
                         semantic_results_list = [
                             QueryResultItem(**result)
@@ -857,27 +882,17 @@ def register_query_routes(
                         ]
                         _hybrid_search_status = "success"
                         _hybrid_search_results_count = len(semantic_results_list)
-                    except ValueError as e:
-                        # Surface validation errors as HTTP 400
-                        logger.warning(
-                            format_error_log(
-                                "APP-GENERAL-034",
-                                f"Validation error in query: {e}",
-                            )
-                        )
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail={
-                                "error": "Invalid query parameters",
-                                "message": str(e),
-                            },
-                        )
                     except Exception as e:
+                        # One client-error rule: a client error is answered by
+                        # the handlers below with its own text.
+                        if classify_search_error(e).client_error:
+                            raise
                         logger.error(
                             format_error_log(
                                 "APP-GENERAL-035",
                                 f"Semantic search failed: {e}",
-                            )
+                            ),
+                            exc_info=True,
                         )
                         if search_mode_actual == "semantic":
                             raise
@@ -986,6 +1001,8 @@ def register_query_routes(
                         limit=_fetch_limit,
                         min_score=request.min_score,
                         file_extensions=request.file_extensions,
+                        # #2047: intersect with language, as FTS does.
+                        language=request.language,
                         # Phase 1 parameters (Story #503)
                         exclude_language=request.exclude_language,
                         exclude_path=request.exclude_path,
@@ -1065,39 +1082,60 @@ def register_query_routes(
             # Re-raise HTTP exceptions as-is
             raise
 
-        except ValueError as e:
-            # Surface validation errors from backend as HTTP 400
-            logger.warning(
-                format_error_log(
-                    "APP-GENERAL-036",
-                    f"Validation error in query: {e}",
-                )
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"error": "Invalid query parameters", "message": str(e)},
-            )
-
         except AccessFilteringServiceUnavailableError as e:
             # Query searches only repositories the caller can access; with
             # access control unavailable that cannot be verified -- refuse.
+            # An unwired server-side service is an internal failure.
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-037",
+                    f"Access control unavailable in unified search: {e}",
+                ),
+                exc_info=True,
+            )
             raise access_control_unavailable_error(e)
 
-        except SemanticQueryError as e:
-            error_message = str(e)
-
-            # Determine appropriate HTTP status code based on error type
-            if "not found" in error_message.lower():
-                status_code = status.HTTP_404_NOT_FOUND
-            elif "timed out" in error_message.lower():
-                status_code = status.HTTP_408_REQUEST_TIMEOUT
-            elif "no activated repositories" in error_message.lower():
-                status_code = status.HTTP_400_BAD_REQUEST
-            else:
-                status_code = status.HTTP_400_BAD_REQUEST
-
+        except MultiIndexQueryTimeoutError as e:
+            # #2109: the search ran out of time -- never a short answer. The
+            # body is a fixed message; the detail goes to the server log.
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-037",
+                    f"Search timed out in unified search: {e}",
+                ),
+                exc_info=True,
+            )
             raise HTTPException(
-                status_code=status_code,
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail=public_error_message("Search timed out"),
+            )
+
+        except SearchFailedError as e:
+            # #2109: the search itself failed (storage, provider or
+            # configuration) -- a server-side failure, not a bad request.
+            # The body is a fixed message; the detail goes to the server log.
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-037",
+                    f"Search failed in unified search: {e}",
+                ),
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=public_error_message("Search failed"),
+            )
+
+        except SearchRequestError as e:
+            # The request itself was rejected; its message names only the
+            # caller's own input. Every other failure falls through below.
+            error_message = str(e)
+            raise HTTPException(
+                status_code=(
+                    status.HTTP_404_NOT_FOUND
+                    if "not found" in error_message.lower()
+                    else status.HTTP_400_BAD_REQUEST
+                ),
                 detail=error_message,
             )
 
@@ -1109,9 +1147,16 @@ def register_query_routes(
                 ),
                 exc_info=True,
             )
+            _outcome = classify_search_error(e)
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Internal search error: {str(e)}",
+                status_code=(
+                    status.HTTP_400_BAD_REQUEST
+                    if _outcome.client_error
+                    else status.HTTP_504_GATEWAY_TIMEOUT
+                    if _outcome.timed_out
+                    else status.HTTP_500_INTERNAL_SERVER_ERROR
+                ),
+                detail=_outcome.message,
             )
         finally:
             # Issue #1159: reset ctx and enqueue search event record.

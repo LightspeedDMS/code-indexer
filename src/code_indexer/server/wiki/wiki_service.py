@@ -6,6 +6,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from code_indexer.utils.path_confinement import is_readable_within_root
+
 if TYPE_CHECKING:
     from .wiki_cache import WikiCache
 
@@ -390,6 +392,8 @@ class WikiService:
             rel = md_file.relative_to(repo_dir)
             if any(part.startswith(".") for part in rel.parts):
                 continue
+            if not is_readable_within_root(md_file, repo_dir.resolve()):
+                continue
             try:
                 raw = md_file.read_text(encoding="utf-8")
                 metadata, _ = self._strip_front_matter(raw)
@@ -536,6 +540,8 @@ class WikiService:
         for md_file in sorted(repo_path.rglob("*.md")):
             rel = md_file.relative_to(repo_path)
             if any(part.startswith(".") for part in rel.parts):
+                continue
+            if not is_readable_within_root(md_file, repo_path.resolve()):
                 continue
             try:
                 raw = md_file.read_text(encoding="utf-8")

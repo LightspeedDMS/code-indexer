@@ -7,6 +7,16 @@ Provides a wrapper around the Langfuse Python SDK with:
 - Thread-safe singleton pattern for SDK instance (double-check locking)
 - Comprehensive error handling
 - Trace, span, and scoring operations
+
+Invariants: this module is the only code that hands data to the Langfuse
+SDK, and no secret value leaves the process through it.
+  - The SDK runs on a tracer provider of its own, so it exports only its own
+    spans -- never the server's request or httpx spans.
+  - Input, output and metadata are redacted by the SDK's own mask hook
+    (_redact_sdk_data), which the SDK applies on every path that sets them.
+  - The fields the SDK never masks (names, tags, session and user ids, score
+    comments) go through _export_safe() here. Each field has exactly one
+    redaction point, and both use the shared redact_secret_fields().
 """
 
 import logging
@@ -14,8 +24,21 @@ import threading
 from typing import Optional, Dict, Any
 
 from code_indexer.server.utils.config_manager import LangfuseConfig
+from code_indexer.utils.credential_redaction import redact_secret_fields
 
 logger = logging.getLogger(__name__)
+
+
+def _redact_sdk_data(*, data: Any, **kwargs: Dict[str, Any]) -> Any:
+    """The SDK's mask hook: applied by the SDK to every input, output and
+    metadata value before it is recorded."""
+    return redact_secret_fields(data)
+
+
+def _export_safe(**fields: Any) -> Dict[str, Any]:
+    """Redact the fields the SDK's mask hook never sees (names, tags,
+    session and user ids, score comments)."""
+    return {name: redact_secret_fields(value) for name, value in fields.items()}
 
 
 class LangfuseClient:
@@ -50,6 +73,9 @@ class LangfuseClient:
         self._config = config
         self._langfuse: Optional[Any] = None  # Lazy initialization
         self._lock = threading.Lock()  # Thread-safe initialization
+        # The SDK's own tracer provider (never the global one). Typed Any
+        # because the OTEL SDK, like Langfuse, is imported lazily.
+        self._tracer_provider: Optional[Any] = None
 
     def is_enabled(self) -> bool:
         """Check if Langfuse tracing is enabled."""
@@ -99,11 +125,17 @@ class LangfuseClient:
             try:
                 # Lazy import - only import Langfuse when actually needed
                 from langfuse import Langfuse
+                from opentelemetry.sdk.trace import TracerProvider
 
+                # Langfuse exports through its own tracer provider and never
+                # receives the server's OTEL spans.
+                self._tracer_provider = TracerProvider()
                 self._langfuse = Langfuse(
                     public_key=self._config.public_key,
                     secret_key=self._config.secret_key,
                     host=self._config.host,
+                    tracer_provider=self._tracer_provider,
+                    mask=_redact_sdk_data,
                 )
                 logger.info("Langfuse SDK initialized successfully")
                 return True
@@ -150,7 +182,7 @@ class LangfuseClient:
             # Create root span with context (creates trace implicitly)
             # Use end_on_exit=False so we control lifecycle manually via end_trace()
             span_cm = self._langfuse.start_as_current_span(
-                name=name,
+                **_export_safe(name=name),
                 metadata=metadata,
                 input=input,
                 end_on_exit=False,
@@ -167,7 +199,7 @@ class LangfuseClient:
             if tags is not None:
                 update_kwargs["tags"] = tags
 
-            self._langfuse.update_current_trace(**update_kwargs)
+            self._langfuse.update_current_trace(**_export_safe(**update_kwargs))
 
             # Exit context but keep span active - it will be ended in end_trace()
             span_cm.__exit__(None, None, None)
@@ -230,7 +262,7 @@ class LangfuseClient:
                 if metadata is not None:
                     update_kwargs["metadata"] = metadata
                 if tags is not None:
-                    update_kwargs["tags"] = tags
+                    update_kwargs["tags"] = _export_safe(tags=tags)["tags"]
 
                 self._langfuse.update_current_trace(**update_kwargs)
             finally:
@@ -317,7 +349,7 @@ class LangfuseClient:
             # Create span attached to the trace
             span = self._langfuse.start_span(
                 trace_context=trace_context,
-                name=name,
+                **_export_safe(name=name),
                 metadata=metadata,
                 input=input_data,
                 output=output_data,
@@ -328,6 +360,54 @@ class LangfuseClient:
         except Exception as e:
             logger.error(f"Failed to create span '{name}': {e}")
             return None
+
+    def update_span(
+        self,
+        span: Any,
+        output: Optional[Any] = None,
+        level: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Set a span's output, metadata and level (payloads masked by the
+        SDK's mask hook).
+
+        Args:
+            span: Span returned by create_span()
+            output: Optional output data (tool results)
+            level: Optional span level (e.g. "ERROR")
+            metadata: Optional metadata dict
+
+        Returns:
+            True if the span was updated, False otherwise
+        """
+        if not self._config.enabled or span is None:
+            return False
+        try:
+            update_kwargs: Dict[str, Any] = {"output": output, "metadata": metadata}
+            if level is not None:
+                update_kwargs["level"] = level
+            span.update(**update_kwargs)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update span: {e}")
+            return False
+
+    def end_span(self, span: Any) -> bool:
+        """
+        End a span created by create_span().
+
+        Returns:
+            True if the span was ended, False otherwise
+        """
+        if not self._config.enabled or span is None:
+            return False
+        try:
+            span.end()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to end span: {e}")
+            return False
 
     def score(
         self, trace_id: str, name: str, value: float, comment: Optional[str] = None
@@ -345,7 +425,15 @@ class LangfuseClient:
 
         Returns:
             Langfuse score object if successful, None otherwise
+
+        Raises:
+            TypeError: value is not an int or float (a bool is not a score)
         """
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(
+                "score value must be a number (int or float), "
+                f"got {type(value).__name__}"
+            )
         if not self._ensure_initialized():
             return None
 
@@ -353,7 +441,9 @@ class LangfuseClient:
             assert self._langfuse is not None
             # create_score() is the correct method name in Langfuse 3.7.0
             score = self._langfuse.create_score(
-                trace_id=trace_id, name=name, value=value, comment=comment
+                trace_id=trace_id,
+                value=value,
+                **_export_safe(name=name, comment=comment),
             )
             logger.debug(f"Added score to trace {trace_id}: {name}={value}")
             return score
@@ -376,6 +466,10 @@ class LangfuseClient:
             return
 
         try:
+            # The SDK's flush() flushes only the global provider, never the
+            # dedicated one its spans are on.
+            if self._tracer_provider is not None:
+                self._tracer_provider.force_flush()
             self._langfuse.flush()
             logger.debug("Flushed Langfuse traces")
 

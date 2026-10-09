@@ -19,8 +19,12 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any, cast
-from urllib.parse import urlparse
-import re
+
+from code_indexer.server.services.git_url_normalizer import (
+    GitUrlNormalizationError,
+    GitUrlNormalizer,
+)
+from code_indexer.utils.git_remote_url import parse_git_remote_url
 
 from code_indexer.utils.file_locking import (
     nfs_safe_flock,
@@ -1232,26 +1236,18 @@ class SyncJobManager:
         if not repo_url:
             return repo_url
 
-        # Convert SSH to HTTPS format for normalization
-        if repo_url.startswith("git@"):
-            # Convert git@github.com:user/repo.git to https://github.com/user/repo.git
-            ssh_match = re.match(r"git@([^:]+):(.+)", repo_url)
-            if ssh_match:
-                host, path = ssh_match.groups()
-                repo_url = f"https://{host}/{path}"
-
-        # Parse URL and normalize
-        parsed = urlparse(repo_url.lower())
-
-        # Remove .git suffix if present
-        path = parsed.path
-        if path.endswith(".git"):
-            path = path[:-4]
-
-        # Normalize path separators
-        path = path.strip("/").replace("//", "/")
-
-        return f"{parsed.scheme}://{parsed.netloc}/{path}"
+        # Every form of one repository on one server endpoint maps to one
+        # key (GitRemoteUrl.endpoint_identity), and the key never holds the
+        # URL's credentials. A local path is keyed by its canonical form; any
+        # other value by its own text.
+        remote = parse_git_remote_url(repo_url)
+        if remote is not None:
+            return remote.endpoint_identity.lower()
+        try:
+            identity = GitUrlNormalizer().get_canonical_form(repo_url)
+        except GitUrlNormalizationError:
+            identity = repo_url.strip()
+        return identity.lower()
 
     def _get_resource_metrics(self) -> Dict[str, Any]:
         """

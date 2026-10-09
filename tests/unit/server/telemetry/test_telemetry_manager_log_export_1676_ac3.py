@@ -35,6 +35,19 @@ from code_indexer.server.services.async_logging import (
 )
 from code_indexer.server.telemetry.log_handler import ContextAwareLogBridgeHandler
 from code_indexer.server.utils.config_manager import TelemetryConfig
+from tests.unit.server.telemetry.otlp_sink import OtlpHttpSink
+
+
+def _export_logs_config(sink: OtlpHttpSink) -> TelemetryConfig:
+    """Log export ON, to the listening sink (traces and metrics off)."""
+    return TelemetryConfig(
+        enabled=True,
+        export_traces=False,
+        export_metrics=False,
+        export_logs=True,
+        collector_endpoint=sink.endpoint,
+        collector_protocol="http",
+    )
 
 
 @pytest.fixture
@@ -51,36 +64,30 @@ def _wrapper_handlers(listener):
 
 
 class TestExportLogsEnabledRegistersExactlyOneWrapper:
-    def test_registers_exactly_one_wrapper_handler(self, listener) -> None:
+    def test_registers_exactly_one_wrapper_handler(
+        self, listener, otlp_sink: OtlpHttpSink
+    ) -> None:
         from code_indexer.server.telemetry import (
             get_telemetry_manager,
             reset_telemetry_manager,
         )
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=False,
-            export_metrics=False,
-            export_logs=True,
-        )
+        config = _export_logs_config(otlp_sink)
         get_telemetry_manager(config)
         try:
             assert len(_wrapper_handlers(listener)) == 1
         finally:
             reset_telemetry_manager()
 
-    def test_no_duplicate_wrapper_across_reset_and_reconstruct(self, listener) -> None:
+    def test_no_duplicate_wrapper_across_reset_and_reconstruct(
+        self, listener, otlp_sink: OtlpHttpSink
+    ) -> None:
         from code_indexer.server.telemetry import (
             get_telemetry_manager,
             reset_telemetry_manager,
         )
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=False,
-            export_metrics=False,
-            export_logs=True,
-        )
+        config = _export_logs_config(otlp_sink)
         get_telemetry_manager(config)
         reset_telemetry_manager()
 
@@ -173,18 +180,15 @@ class TestTelemetryManagerIndependentShutdown:
 
 
 class TestResetTelemetryManagerUnregistersWrapper:
-    def test_reset_unregisters_wrapper_from_listener(self, listener) -> None:
+    def test_reset_unregisters_wrapper_from_listener(
+        self, listener, otlp_sink: OtlpHttpSink
+    ) -> None:
         from code_indexer.server.telemetry import (
             get_telemetry_manager,
             reset_telemetry_manager,
         )
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=False,
-            export_metrics=False,
-            export_logs=True,
-        )
+        config = _export_logs_config(otlp_sink)
         manager = get_telemetry_manager(config)
         wrapper = manager.log_bridge_handler
         assert wrapper is not None
@@ -219,19 +223,16 @@ class TestLogBridgeHandlerRegistrationFailureLogsWarning:
     reports non-None -- a Messi Rule #13 anti-silent-failure violation.
     """
 
-    def test_warning_logged_when_no_active_listener(self, caplog) -> None:
+    def test_warning_logged_when_no_active_listener(
+        self, caplog, otlp_sink: OtlpHttpSink
+    ) -> None:
         from code_indexer.server.telemetry.manager import TelemetryManager
 
         # No active listener at all -- register_additional_listener_handler()
         # is guaranteed to return False.
         shutdown_queue_logging()
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=False,
-            export_metrics=False,
-            export_logs=True,
-        )
+        config = _export_logs_config(otlp_sink)
         with caplog.at_level(
             logging.WARNING, logger="code_indexer.server.telemetry.manager"
         ):

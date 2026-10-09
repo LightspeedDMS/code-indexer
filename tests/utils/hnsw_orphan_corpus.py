@@ -2,7 +2,7 @@
 Synthetic HNSW orphan-corpus generator (Story #1358 / Epic #1333, AC4).
 
 Reproduces the two orphan-producing regimes measured in spike #1330
-(docs/research/hnsw-temporal-orphans-1330.md) against the REAL project
+(docs/archive/hnsw-temporal-orphans-1330.md) against the REAL project
 hnswlib fork, at production build parameters (M=16, ef_construction=200,
 cosine, batched add_items -- no mocks, no PyPI hnswlib).
 

@@ -22,7 +22,11 @@ from fastapi.testclient import TestClient
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.routers.inline_query import register_query_routes
-from code_indexer.server.query.semantic_query_manager import SemanticQueryError
+from code_indexer.server.query.semantic_query_manager import (
+    SearchRepositoryNotFoundError,
+    SearchRequestError,
+    SemanticQueryError,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -142,15 +146,15 @@ def app_with_routes(
 class TestNoEnqueueOnFailure:
     """Bug #1173: search event must NOT be enqueued when the handler raises."""
 
-    def test_no_enqueue_on_semantic_query_error_not_found(
+    def test_no_enqueue_on_repository_not_found(
         self,
         app_with_routes,
         mock_semantic_query_manager,
         writer,
     ):
-        """SemanticQueryError 'not found' -> 404 -> no log row (Spec H11)."""
+        """SearchRepositoryNotFoundError -> 404 -> no log row (Spec H11)."""
         mock_semantic_query_manager.query_user_repositories.side_effect = (
-            SemanticQueryError("Repository not found")
+            SearchRepositoryNotFoundError("missing-repo")
         )
 
         client = TestClient(app_with_routes, raise_server_exceptions=False)
@@ -165,15 +169,15 @@ class TestNoEnqueueOnFailure:
             "enqueue must not fire in the finally: block"
         )
 
-    def test_no_enqueue_on_semantic_query_error_bad_request(
+    def test_no_enqueue_on_search_request_error(
         self,
         app_with_routes,
         mock_semantic_query_manager,
         writer,
     ):
-        """SemanticQueryError 'no activated repositories' -> 400 -> no log row."""
+        """SearchRequestError -> 400 -> no log row."""
         mock_semantic_query_manager.query_user_repositories.side_effect = (
-            SemanticQueryError("no activated repositories for user")
+            SearchRequestError("no activated repositories for user")
         )
 
         client = TestClient(app_with_routes, raise_server_exceptions=False)
@@ -187,13 +191,60 @@ class TestNoEnqueueOnFailure:
             "Bug #1173: event was enqueued for a failed (400) search"
         )
 
+    def test_no_enqueue_on_semantic_query_error_not_found(
+        self,
+        app_with_routes,
+        mock_semantic_query_manager,
+        writer,
+    ):
+        """A plain SemanticQueryError is internal -> 500 fixed text -> no log row."""
+        mock_semantic_query_manager.query_user_repositories.side_effect = (
+            SemanticQueryError("Repository not found")
+        )
+
+        client = TestClient(app_with_routes, raise_server_exceptions=False)
+        response = client.post(
+            "/api/query",
+            json={"query_text": "find me", "repository_alias": "missing-repo"},
+        )
+
+        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+        assert response.json()["detail"].startswith("Search failed")
+        assert len(writer.enqueued) == 0, (
+            "Bug #1173: event was enqueued for a failed (500) search — "
+            "enqueue must not fire in the finally: block"
+        )
+
+    def test_no_enqueue_on_semantic_query_error_bad_request(
+        self,
+        app_with_routes,
+        mock_semantic_query_manager,
+        writer,
+    ):
+        """A plain SemanticQueryError is internal -> 500 fixed text -> no log row."""
+        mock_semantic_query_manager.query_user_repositories.side_effect = (
+            SemanticQueryError("no activated repositories for user")
+        )
+
+        client = TestClient(app_with_routes, raise_server_exceptions=False)
+        response = client.post(
+            "/api/query",
+            json={"query_text": "find me", "repository_alias": "any"},
+        )
+
+        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+        assert response.json()["detail"].startswith("Search failed")
+        assert len(writer.enqueued) == 0, (
+            "Bug #1173: event was enqueued for a failed (500) search"
+        )
+
     def test_no_enqueue_on_value_error(
         self,
         app_with_routes,
         mock_semantic_query_manager,
         writer,
     ):
-        """ValueError -> 400 -> no log row."""
+        """A plain ValueError is internal -> 500 fixed text -> no log row."""
         mock_semantic_query_manager.query_user_repositories.side_effect = ValueError(
             "invalid parameter"
         )
@@ -204,9 +255,11 @@ class TestNoEnqueueOnFailure:
             json={"query_text": "find me", "repository_alias": "any"},
         )
 
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+        assert response.json()["detail"].startswith("Search failed")
+        assert "invalid parameter" not in response.text
         assert len(writer.enqueued) == 0, (
-            "Bug #1173: event was enqueued for a failed (400/ValueError) search"
+            "Bug #1173: event was enqueued for a failed (500/ValueError) search"
         )
 
     def test_no_enqueue_on_unexpected_exception(

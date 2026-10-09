@@ -22,6 +22,19 @@ class UsersBackend(Protocol):
         created_at: Optional[str] = None,
     ) -> None: ...
 
+    def create_user_if_store_empty(
+        self, username: str, password_hash: str, role: str
+    ) -> bool:
+        """Create the user only while the store holds no users at all.
+
+        The emptiness check and the insert are one atomic step, so of any
+        number of concurrent callers on an empty store exactly one creates
+        its user.  Returns True when the user was created.
+        """
+        ...
+
+    def has_any_user(self) -> bool: ...
+
     def get_user(self, username: str) -> Optional[Dict[str, Any]]: ...
 
     def list_users(self) -> list: ...

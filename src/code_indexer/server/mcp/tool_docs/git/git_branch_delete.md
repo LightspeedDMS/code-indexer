@@ -15,11 +15,10 @@ inputSchema:
       description: Branch name to delete
     confirmation_token:
       type: string
-      description: Confirmation token (must be 'CONFIRM_DELETE_BRANCH')
+      description: Token returned by a previous git_branch_delete call for this repository and branch. Omit it on the first call.
   required:
   - repository_alias
   - branch_name
-  - confirmation_token
   additionalProperties: false
 outputSchema:
   oneOf:
@@ -32,15 +31,40 @@ outputSchema:
       deleted_branch:
         type: string
         description: Name of deleted branch
+    required:
+    - success
+    - deleted_branch
   - type: object
-    description: Confirmation token response
+    description: Confirmation required; nothing was deleted
     properties:
-      requires_confirmation:
+      success:
         type: boolean
-        description: Confirmation required
-      token:
-        type: string
-        description: Confirmation token to use in next call
+        description: Always false
+      confirmation_token_required:
+        type: object
+        description: Token to send back as confirmation_token
+        properties:
+          token:
+            type: string
+            description: Single-use token, valid for 5 minutes, for this user, repository and branch
+          message:
+            type: string
+            description: What to do next, and why a presented token was rejected
+        required:
+        - token
+        - message
+    required:
+    - success
+    - confirmation_token_required
 ---
 
-TL;DR: Delete a git branch (DESTRUCTIVE). USE CASES: (1) Delete merged feature branch, (2) Remove obsolete branch, (3) Clean up branches. SAFETY: Requires confirmation_token to prevent accidental deletion. Cannot delete current branch. PERMISSIONS: Requires repository:admin (destructive operation). EXAMPLE: {"repository_alias": "my-repo", "branch_name": "old-feature", "confirmation_token": "CONFIRM_DELETE_BRANCH"} Returns: {"success": true, "deleted_branch": "old-feature"}
+TL;DR: Delete a local git branch (DESTRUCTIVE). Runs `git branch -d <branch_name>`, so git refuses to delete the current branch or a branch that is not fully merged. USE CASES: (1) Delete merged feature branch, (2) Remove obsolete branch, (3) Clean up branches.
+
+CONFIRMATION (two calls):
+1. Call without confirmation_token (an empty string counts as none). Nothing is deleted; the response carries confirmation_token_required.token.
+2. Call again with the same branch_name and that token. The branch is deleted.
+The token is single-use, expires after 5 minutes, and is valid only for the same user, repository and branch; a missing, invalid or expired token returns a fresh one instead.
+
+PERMISSIONS: Requires repository:admin (destructive operation).
+
+EXAMPLE: first {"repository_alias": "my-repo", "branch_name": "old-feature"}, then {"repository_alias": "my-repo", "branch_name": "old-feature", "confirmation_token": "<token from the first response>"} Returns: {"success": true, "deleted_branch": "old-feature"}

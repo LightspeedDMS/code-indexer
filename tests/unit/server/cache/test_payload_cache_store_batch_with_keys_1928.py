@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import threading
+import time
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 import pytest
 
@@ -61,9 +63,29 @@ class _FakeStrictBackend:
     delegation path. `raise_on_call`, when set, makes the call raise --
     proving the facade does not swallow a backend failure."""
 
-    def __init__(self, raise_on_call: Optional[Exception] = None) -> None:
+    def __init__(
+        self,
+        raise_on_call: Optional[Exception] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.calls: List[Tuple[Tuple[str, str, str, int], ...]] = []
         self._raise_on_call = raise_on_call
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._expiring: Dict[str, Tuple[str, float]] = {}
+
+    def store_expiring(self, cache_handle: str, content: str, ttl_seconds: int) -> None:
+        """Insert or replace one entry living `ttl_seconds` on this
+        store's own clock (the protocol's database clock)."""
+        with self._lock:
+            self._expiring[cache_handle] = (content, self._clock() + ttl_seconds)
+
+    def consume(self, cache_handle: str) -> bool:
+        """Atomically delete a live entry: True only for the one caller
+        whose delete removed it; missing or expired yields False."""
+        with self._lock:
+            entry = self._expiring.pop(cache_handle, None)
+            return entry is not None and self._clock() < entry[1]
 
     def store_batch_strict(
         self,
@@ -214,3 +236,35 @@ class TestStoreBatchWithKeysBackendPath:
 
         with pytest.raises(RuntimeError, match="backend write failed"):
             cache.store_batch_with_keys([("handle-a", "content-a")])
+
+
+class TestFakeStrictBackendExpiringEntries:
+    """The fake honours the PayloadCacheBackend expiring-entry contract."""
+
+    def test_live_entry_is_consumed_exactly_once(self) -> None:
+        backend = _FakeStrictBackend()
+        backend.store_expiring("handle-a", "content-a", 300)
+
+        assert backend.consume("handle-a") is True
+        assert backend.consume("handle-a") is False
+
+    def test_missing_entry_is_not_consumed(self) -> None:
+        assert _FakeStrictBackend().consume("handle-missing") is False
+
+    def test_expired_entry_is_not_consumed(self) -> None:
+        now = [1000.0]
+        backend = _FakeStrictBackend(clock=lambda: now[0])
+        backend.store_expiring("handle-a", "content-a", 300)
+
+        now[0] += 300
+        assert backend.consume("handle-a") is False
+
+    def test_store_replaces_an_entry_and_its_expiry(self) -> None:
+        now = [1000.0]
+        backend = _FakeStrictBackend(clock=lambda: now[0])
+        backend.store_expiring("handle-a", "content-a", 10)
+        now[0] += 5
+        backend.store_expiring("handle-a", "content-b", 10)
+
+        now[0] += 8
+        assert backend.consume("handle-a") is True

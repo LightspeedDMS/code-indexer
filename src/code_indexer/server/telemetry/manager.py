@@ -225,7 +225,14 @@ class TelemetryManager:
                     endpoint = f"{endpoint.rstrip('/')}/v1/traces"
                 exporter = OTLPSpanExporter(endpoint=endpoint)
 
-            self._tracer_provider.add_span_processor(BatchSpanProcessor(exporter))  # type: ignore[attr-defined]
+            from code_indexer.server.telemetry.export_redaction import (
+                RedactingSpanExporter,
+            )
+
+            # Every span is redacted at the exporter boundary.
+            self._tracer_provider.add_span_processor(  # type: ignore[attr-defined]
+                BatchSpanProcessor(RedactingSpanExporter(exporter))
+            )
 
         except Exception as e:
             logger.warning(
@@ -269,8 +276,13 @@ class TelemetryManager:
                     endpoint = f"{endpoint.rstrip('/')}/v1/logs"
                 exporter = OTLPLogExporter(endpoint=endpoint)
 
+            from code_indexer.server.telemetry.export_redaction import (
+                RedactingLogRecordExporter,
+            )
+
+            # Every log record is redacted at the exporter boundary.
             self._logger_provider.add_log_record_processor(  # type: ignore[attr-defined]
-                BatchLogRecordProcessor(exporter)
+                BatchLogRecordProcessor(RedactingLogRecordExporter(exporter))
             )
 
         except Exception as e:

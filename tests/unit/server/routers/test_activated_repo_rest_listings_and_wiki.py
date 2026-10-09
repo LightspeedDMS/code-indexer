@@ -50,6 +50,10 @@ from tests.unit.server.routers.activated_repo_access_env import (  # noqa: F401
 SECOND_ACTIVATION = "my-second-repo"
 ASSET = "logo.png"
 
+# The shared module-scoped real app (activated_repo_access_env, ~5.4 s alone)
+# is paid by whichever test runs first, slower under parallel gate load.
+pytestmark = pytest.mark.timeout(45)
+
 WIKI: Dict[str, Probe] = {
     "page": ("GET", f"/wiki/u/{USER}/{{a}}/", {}, 200),
     "article": ("GET", f"/wiki/u/{USER}/{{a}}/README", {}, 200),

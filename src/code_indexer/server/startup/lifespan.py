@@ -628,7 +628,7 @@ def make_lifespan(
     """
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def _lifespan_body(app: FastAPI):
         """
         Lifespan context manager for server startup and shutdown.
 
@@ -777,6 +777,42 @@ def make_lifespan(
                     f"Failed to initialize SQLite log handler: {e}",
                 ),
                 exc_info=True,
+            )
+
+        # Access lines never carry a confirmation_token query value in clear.
+        from code_indexer.server.utils.access_log_redaction import (
+            install_access_log_redaction,
+        )
+
+        install_access_log_redaction()
+
+        # Every handler in the process -- the HTTP server's own console
+        # handlers and handlers attached before the queue listener --
+        # masks credentials, not only those behind the listener.
+        from code_indexer.server.services.async_logging import (
+            attach_redacting_filter_to_all_handlers,
+        )
+
+        attach_redacting_filter_to_all_handlers()
+
+        # Story S12 (#2087): worker-stall watchdog, one per uvicorn worker (this
+        # lifespan runs once per worker). It leaves every thread's stack and the
+        # memory samples in <server_dir>/logs/worker-stall-<pid>-<UTC>.log when no
+        # Python thread can run for 3 s, i.e. before uvicorn's 5 s health-check
+        # SIGKILL. Started after logging so its startup sweep's ERROR lines about
+        # killed workers reach logs.db. start() only spawns a thread (no I/O).
+        try:
+            from code_indexer.server.utils.stall_watchdog import (
+                start_stall_watchdog,
+            )
+
+            start_stall_watchdog(app, server_data_dir)
+        except Exception:
+            logger.error(
+                "Story S12: worker stall watchdog failed to start; stalls of "
+                "this worker will not be captured",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
             )
 
         # Bootstrap-only: bump anyio threadpool size so concurrent sync handlers
@@ -1696,6 +1732,15 @@ def make_lifespan(
             payload_cache.start_background_cleanup()
             app.state.payload_cache = payload_cache
 
+            # Confirmation tokens for destructive git operations live in
+            # this cluster-shared store, so any worker or node can redeem
+            # a token issued by another.
+            from code_indexer.server.services.git_operations_service import (
+                git_operations_service,
+            )
+
+            git_operations_service.payload_cache = payload_cache
+
             logger.info(
                 f"PayloadCache initialized: {cache_db_path} "
                 f"(preview_size={payload_cache_config.preview_size_chars}, "
@@ -1765,6 +1810,13 @@ def make_lifespan(
             )
 
             reset_registered_payload_cache()
+            # Destructive git confirmations never use a cache this block
+            # declared unavailable: the service fails loudly instead.
+            from code_indexer.server.services.git_operations_service import (
+                git_operations_service,
+            )
+
+            git_operations_service.payload_cache = None
 
         # Bug fix: Early ConfigService PG pool so scheduler inits read merged runtime config.
         # In postgres/cluster mode, ConfigService.set_connection_pool() triggers
@@ -5379,34 +5431,45 @@ def make_lifespan(
                 _see_stop_exc,
             )
 
+        # Story S12: stop this worker's stall watchdog (cancels the faulthandler
+        # timer, removes its armed files) before the log listener drains, so a
+        # stall it reports while stopping is still logged. The join runs in a
+        # worker thread, never on the event loop. Non-fatal.
+        try:
+            from code_indexer.server.utils.stall_watchdog import (
+                stop_stall_watchdog,
+            )
+
+            await stop_stall_watchdog(app)
+        except Exception as _stall_watchdog_stop_exc:
+            logger.warning(
+                "Story S12: failed to stop the worker stall watchdog: %s",
+                _stall_watchdog_stop_exc,
+            )
+
         # Shutdown: Stop the async-logging QueueListener FIRST (py-spy logging
         # follow-up to Bug #1078). The listener owns the real handlers behind the
-        # root QueueHandler; stop() drains every queued record and then closes the
-        # real handlers, so no logs are lost on a clean shutdown. Must run before
+        # root QueueHandler; its stop sentinel queues after every pending record,
+        # so a healthy listener drains them all before exiting. Must run before
         # any other shutdown step that could raise and skip it. Idempotent and
         # non-fatal — never abort the remaining shutdown chain.
+        # A cancellation returned by the logging shutdown is held and re-raised
+        # at the very end of this chain, so every later step still runs.
+        _logging_cancelled: Optional[asyncio.CancelledError] = None
         _log_queue_listener = getattr(app.state, "log_queue_listener", None)
         if _log_queue_listener is not None:
-            try:
-                # Drain in-flight records before stopping the listener.
-                _log_queue_listener.flush()
-                _log_queue_listener.stop()
-            except Exception:
-                pass
-            # Detach the IdentityQueueHandler we installed on the root logger so
-            # it is not leaked across lifespan cycles (mirrors the Bug #1060
-            # symmetry below). removeHandler is a no-op if already detached.
-            try:
-                from code_indexer.server.services.async_logging import (
-                    IdentityQueueHandler,
-                )
+            # Stop the listener (bounded wait, in a worker thread so a stuck
+            # sink never blocks the event loop) and detach the queue handler it
+            # installed on the root logger, clearing the module handles so a
+            # later teardown is a no-op. Never raises.
+            from code_indexer.server.services.async_logging import (
+                shutdown_queue_logging_off_loop,
+            )
 
-                _root = logging.getLogger()
-                for _h in list(_root.handlers):
-                    if isinstance(_h, IdentityQueueHandler):
-                        _root.removeHandler(_h)
-            except Exception:
-                pass
+            _logging_cancelled = await shutdown_queue_logging_off_loop()
+            # The outer ``lifespan`` wrapper re-raises this even if a later
+            # step below raises first.
+            app.state.pending_shutdown_cancellation = _logging_cancelled
 
         # Shutdown: Remove SQLiteLogHandler from root logger (Bug #1060).
         # Symmetric with the install in startup: without this, the handler remains
@@ -6103,5 +6166,67 @@ def make_lifespan(
             "Server shutdown: Cleaning up resources",
             extra={"correlation_id": get_correlation_id()},
         )
+
+        # The whole chain has run: now honour a cancellation that arrived
+        # during the logging shutdown.
+        if _logging_cancelled is not None:
+            raise _logging_cancelled
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """Run ``_lifespan_body`` and guarantee the stall watchdog stops.
+
+        Story S12: the body starts the watchdog early in startup and, on a
+        normal shutdown, stops it before the log listener drains. An exception
+        raised by a later startup step, or thrown into the lifespan at its
+        yield, skips that post-yield code; the cleanup below covers the
+        watchdog's whole active lifetime. After a normal shutdown it is a
+        no-op (``app.state.stall_watchdog`` is already None).
+
+        The stop is requested before the cleanup awaits, so the watchdog stops
+        even if that await is cancelled. A cancellation absorbed there never
+        replaces an exception that is already ending the lifespan; on a normal
+        exit it is re-raised.
+
+        The same holds for async logging: a lifespan ended by an exception or
+        a cancellation (e.g. a startup or shutdown timeout) still stops the
+        queue listener and detaches the queue handler it put on the root
+        logger. After a normal shutdown this is a no-op.
+        """
+        from code_indexer.server.services.async_logging import (
+            shutdown_queue_logging_off_loop,
+        )
+        from code_indexer.server.utils.stall_watchdog import (
+            stop_stall_watchdog_on_exit,
+        )
+
+        # Scoped to this run: a value left by an earlier run on the same app
+        # never replaces this run's exception.
+        app.state.pending_shutdown_cancellation = None
+        try:
+            async with _lifespan_body(app):
+                yield
+        except BaseException as exc:
+            pending = app.state.pending_shutdown_cancellation
+            app.state.pending_shutdown_cancellation = None
+            try:
+                await stop_stall_watchdog_on_exit(app)
+            finally:
+                # Bounded, in a worker thread; a cancellation it absorbs is
+                # dropped -- the exception ending the lifespan wins.
+                await shutdown_queue_logging_off_loop()
+            if pending is not None and isinstance(exc, Exception):
+                # A shutdown step after the logging shutdown failed: the
+                # saved cancellation still ends the lifespan, carrying it.
+                # A second cancellation (any BaseException) ends it as is.
+                logger.error(
+                    "Shutdown step failed after a pending cancellation",
+                    exc_info=exc,
+                )
+                raise pending from exc
+            raise  # the exception ending the lifespan wins
+        cancelled = await stop_stall_watchdog_on_exit(app)
+        if cancelled is not None:
+            raise cancelled
 
     return lifespan

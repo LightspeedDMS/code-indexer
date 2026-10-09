@@ -153,6 +153,16 @@ class SmartIndexer(HighThroughputProcessor):
     #: Set by each smart_index() run: it created or rebuilt the FTS index,
     #: so it changed the index even if it processed no file (_finish_run).
     _run_rebuilt_fts: bool = False
+    #: Files this run's processing failed (its stats, set by _finish_run);
+    #: those it cannot name count as missing from FTS (Bug #2056).
+    _run_failed_files: int = 0
+    #: The failed files it names (relative paths): the FTS finish rebuilds
+    #: their documents from disk -- FTS needs no embedding (Bug #2056).
+    _run_failed_paths: FrozenSet[str] = frozenset()
+    #: This run's processing was cancelled (its stats): its FTS content is
+    #: incomplete, so the FTS finish treats it like a run that raised and
+    #: leaves the index unmarked (Bug #2056).
+    _run_cancelled: bool = False
 
     def __init__(
         self,
@@ -441,6 +451,12 @@ class SmartIndexer(HighThroughputProcessor):
         # Initialized here so it's always in scope when passed to _do_incremental_index,
         # even when enable_fts=False (in which case fts_manager is also None).
         create_new_fts: bool = False
+        # Bug #2056: the empty-FTS guard in `finally` runs only for a run
+        # that is not already propagating an exception (never masks it).
+        run_raised = False
+        # Bug #2056: files the FTS bootstrap could not index; they leave the
+        # rebuilt index unmarked, so the next run rebuilds it again.
+        fts_bootstrap_failures: List[Tuple[Path, str]] = []
 
         try:
             # Server context: trust stored resume state only when the server
@@ -455,142 +471,53 @@ class SmartIndexer(HighThroughputProcessor):
             provider_name = self.embedding_provider.get_provider_name()
             model_name = self.embedding_provider.get_current_model()
 
-            # Initialize FTS manager if requested
+            # FTS requested: open (or rebuild once from disk) the index --
+            # the lifecycle lives in fts_lifecycle (Bugs #1763, #2056). An
+            # FTS infrastructure failure fails the run; per-file failures
+            # follow its per-file rule (reported, index left unmarked).
             if enable_fts:
-                try:
-                    # CRITICAL: Lazy import - only load Tantivy when --fts flag used
-                    from .tantivy_index_manager import TantivyIndexManager
+                from .fts_lifecycle import open_fts_index_for_run
 
-                    fts_index_dir = (
-                        self.config.codebase_dir / ".code-indexer" / "tantivy_index"
-                    )
-                    fts_manager = TantivyIndexManager(fts_index_dir)
-
-                    # Check if FTS index already exists to enable incremental updates
-                    # FTS uses meta.json as the marker file for existing indexes
-                    fts_index_exists = (fts_index_dir / "meta.json").exists()
-
-                    # Bug #1763: an existing index built before Bug #1761
-                    # introduced _PATH_EXACT_FIELD lacks that field forever
-                    # unless forced through a one-time rebuild -- #1761's
-                    # dedup fix is a safe no-op on such a stale-schema
-                    # index, so duplicates would silently keep
-                    # accumulating on every already-indexed repo. Detect +
-                    # self-heal automatically (no new setting).
-                    fts_schema_stale = fts_index_exists and (
-                        fts_manager.schema_needs_rebuild()
-                    )
-                    if fts_schema_stale:
-                        # Tantivy refuses to build the new schema in place
-                        # over an on-disk index whose physical schema
-                        # differs ("Schema error: An index exists but the
-                        # schema does not match.") -- the directory must
-                        # be cleared first, same pattern already used by
-                        # cli.py's rebuild-fts command and the daemon's
-                        # exposed_rebuild_fts_index() before any
-                        # create_new=True call.
-                        import shutil
-
-                        logger.info(
-                            f"FTS index at {fts_index_dir} has a stale "
-                            f"pre-#1761 schema -- clearing for a one-time "
-                            f"rebuild so the dedup fix takes effect"
-                        )
-
-                        try:
-                            shutil.rmtree(fts_index_dir)
-                        except OSError as e:
-                            # MEDIUM-4 (#1763 code review): a partial
-                            # rmtree (disk full, EACCES mid-delete) can
-                            # leave the index directory in a half-deleted
-                            # state. Log this distinctly and loudly
-                            # (ERROR, with the specific "rebuild step
-                            # itself failed" framing) before re-raising,
-                            # so this is distinguishable in logs from an
-                            # unrelated FTS setup failure caught by the
-                            # generic handler below -- that handler still
-                            # degrades gracefully (fts_manager=None), this
-                            # just makes the half-deleted-state risk loud.
-                            logger.error(
-                                f"FTS stale-schema rebuild failed while "
-                                f"clearing {fts_index_dir} -- the index "
-                                f"directory may be left in a "
-                                f"partially-deleted state: {e}"
-                            )
-                            raise
-
-                    # Only force full rebuild if forcing full reindex,
-                    # index doesn't exist, or the existing index's
-                    # physical schema is stale (Bug #1763).
-                    create_new_fts = (
-                        force_full or not fts_index_exists or fts_schema_stale
+                fts_manager, create_new_fts = open_fts_index_for_run(
+                    self.config, force_full=force_full
+                )
+                # CRITICAL-1 (#1763): a new or rebuilt index is empty, and
+                # an incremental run only re-adds CHANGED files -- fill it
+                # from every file on disk first (per-file supersession keeps
+                # re-processed files duplicate-free). A full re-index walks
+                # every file itself, so it skips this.
+                if create_new_fts and not force_full:
+                    fts_bootstrap_failures = self._populate_fts_from_all_files(
+                        fts_manager, progress_callback
                     )
 
-                    fts_manager.initialize_index(create_new=create_new_fts)
-
-                    # CRITICAL-1 (#1763 code review): a stale-schema or
-                    # brand-new FTS index was just wiped/created empty
-                    # above. _do_incremental_index()/_do_resume_interrupted()
-                    # (the paths a normal `cidx index` run with a
-                    # non-empty changed-files set takes) only re-add the
-                    # CHANGED subset of files to fts_manager -- so without
-                    # this, every untouched file's FTS entries would be
-                    # gone forever, not just re-added later. Repopulate
-                    # eagerly, right here, from every file on disk,
-                    # BEFORE any changed-files-only processing runs;
-                    # per-file supersession (delete_document_deferred()
-                    # then add_document(), file_chunking_manager.py) makes
-                    # re-adding the same changed files afterward safe --
-                    # no duplicate rows. Skipped for force_full: that path
-                    # already walks every file itself via _do_full_index()
-                    # and would otherwise pay this cost twice.
-                    if create_new_fts and not force_full:
-                        self._populate_fts_from_all_files(
-                            fts_manager, progress_callback
+                if progress_callback:
+                    if create_new_fts:
+                        info_message = (
+                            "✅ FTS indexing enabled - Creating new Tantivy index"
                         )
-
-                    if progress_callback:
-                        if create_new_fts:
-                            info_message = (
-                                "✅ FTS indexing enabled - Creating new Tantivy index"
-                            )
-                        else:
-                            info_message = "✅ FTS indexing enabled - Opening existing Tantivy index for incremental updates"
-                        progress_callback(
-                            0,
-                            0,
-                            Path(""),
-                            info=info_message,
-                        )
-                    logger.info(
-                        f"FTS indexing enabled: {fts_index_dir} (create_new={create_new_fts})"
+                    else:
+                        info_message = "✅ FTS indexing enabled - Opening existing Tantivy index for incremental updates"
+                    progress_callback(
+                        0,
+                        0,
+                        Path(""),
+                        info=info_message,
                     )
-                except ImportError as e:
-                    logger.error(
-                        f"FTS indexing failed - Tantivy library not installed: {e}"
-                    )
-                    if progress_callback:
-                        progress_callback(
-                            0,
-                            0,
-                            Path(""),
-                            info="⚠️ FTS indexing disabled - Tantivy library not installed",
-                        )
-                    # Continue without FTS - graceful degradation
-                    fts_manager = None
-                except Exception as e:
-                    logger.error(f"FTS initialization failed: {e}")
-                    if progress_callback:
-                        progress_callback(
-                            0,
-                            0,
-                            Path(""),
-                            info=f"⚠️ FTS indexing disabled - initialization failed: {e}",
-                        )
-                    # Continue without FTS - graceful degradation
-                    fts_manager = None
+                logger.info(f"FTS indexing enabled (create_new={create_new_fts})")
 
             self._run_rebuilt_fts = fts_manager is not None and create_new_fts
+            self._run_failed_files = 0  # set by this run's _finish_run
+            self._run_failed_paths = frozenset()  # likewise
+            self._run_cancelled = False  # likewise
+            # Bug #2056: every FileChunkingManager of this run records the
+            # files whose FTS documents could not be replaced; the finish
+            # retries them from disk (_finish_fts_run).
+            from .fts_file_documents import FtsWriteFailures
+
+            self._fts_write_failures = (
+                FtsWriteFailures() if fts_manager is not None else None
+            )
 
             # Ensure git hook is installed for branch change detection
             try:
@@ -677,6 +604,9 @@ class SmartIndexer(HighThroughputProcessor):
                                 "Graph-optimized branch indexing was cancelled, not marking as completed for resume capability"
                             )
 
+                        # Bug #2056: returns without _finish_run; the FTS
+                        # finish still needs its cancellation.
+                        self._run_cancelled = stats.cancelled
                         return stats
 
                     except Exception as e:
@@ -909,10 +839,14 @@ class SmartIndexer(HighThroughputProcessor):
             )
 
         except KeyboardInterrupt:
+            # Only tells `finally` an exception is propagating, so the
+            # empty-FTS guard never masks it (metadata stays resumable).
+            run_raised = True
             # User cancellation should NOT mark as failed - leave in resumable state
             logger.info("Indexing operation was cancelled by user - can be resumed")
             raise
         except Exception as e:
+            run_raised = True  # see the KeyboardInterrupt branch
             # Bug #467: Don't poison metadata on process interruptions.
             # Interruptions leave status="in_progress" so resume works on next run.
             # Only genuine errors (import failures, config errors, etc.) get "failed".
@@ -936,18 +870,59 @@ class SmartIndexer(HighThroughputProcessor):
             else:
                 self.progressive_metadata.fail_indexing(str(e))
             raise
+        except BaseException:
+            run_raised = True  # see the KeyboardInterrupt branch
+            raise
         finally:
-            # Commit FTS index if it was initialized
-            if fts_manager is not None:
-                try:
-                    fts_manager.commit()
-                    logger.info("FTS index committed successfully")
-                except Exception as e:
-                    logger.error(f"Failed to commit FTS index: {e}")
-                    # Don't raise - FTS commit failure shouldn't block semantic indexing completion
+            try:
+                if fts_manager is not None:
+                    self._finish_fts_run(
+                        fts_manager,
+                        # A cancelled run's FTS content is incomplete: it is
+                        # settled like one that raised (left unmarked).
+                        run_raised=run_raised or self._run_cancelled,
+                        bootstrap_failures=fts_bootstrap_failures,
+                        progress_callback=progress_callback,
+                    )
+            finally:
+                # Always release the lock, even on exception
+                indexing_lock.release()
 
-            # Always release the lock, even on exception
-            indexing_lock.release()
+    def _finish_fts_run(
+        self,
+        fts_manager: "TantivyIndexManager",
+        *,
+        run_raised: bool,
+        bootstrap_failures: List[Tuple[Path, str]],
+        progress_callback: Optional[Callable],
+    ) -> None:
+        """Complete, commit and settle the run's FTS index (Bug #2056,
+        fts_lifecycle.finish_fts_run): files whose processing or FTS write
+        failed are rebuilt from disk, files still missing follow the
+        per-file rule. An infrastructure failure fails the run: the metadata
+        records it first, so the stale-index retry sees a failed run."""
+        from .fts_lifecycle import finish_fts_run
+
+        codebase_dir = Path(self.config.codebase_dir)
+        retry_files = {codebase_dir / path for path in self._run_failed_paths}
+        if self._fts_write_failures is not None:
+            retry_files.update(self._fts_write_failures.paths())
+        try:
+            finish_fts_run(
+                fts_manager,
+                self.config,
+                run_raised=run_raised,
+                failed_files=bootstrap_failures,
+                retry_files=sorted(retry_files),
+                unknown_failures=max(
+                    0, self._run_failed_files - len(self._run_failed_paths)
+                ),
+                source_files=self.file_finder.find_files(),
+                progress_callback=progress_callback,
+            )
+        except Exception as e:
+            self.progressive_metadata.fail_indexing(str(e))
+            raise
 
     def _finish_run(
         self, stats: ProcessingStats, git_status: Dict[str, Any]
@@ -957,6 +932,9 @@ class SmartIndexer(HighThroughputProcessor):
         the run found nothing to index; ignored unless the run is left
         completed) and whether it changed the index at all (processed
         files, hidden/deleted/un-hidden paths, a rebuilt full-text index)."""
+        self._run_failed_files = stats.failed_files
+        self._run_failed_paths = stats.failed_paths
+        self._run_cancelled = stats.cancelled
         if not stats.cancelled:
             changed = (
                 stats.files_processed > 0
@@ -2069,43 +2047,17 @@ class SmartIndexer(HighThroughputProcessor):
         stats.index_entries_changed += len(deleted_files)
         return stats
 
-    def _populate_fts_from_all_files(self, fts_manager, progress_callback=None):
-        """Build FTS index from all codebase files when no semantic re-indexing is needed."""
-        if progress_callback:
-            progress_callback(
-                0,
-                0,
-                Path(""),
-                info="FTS index is new - scanning all files to build full-text index...",
-            )
-        files = list(self.file_finder.find_files())
-        count = 0
-        for file_path in files:
-            try:
-                self._add_file_to_fts(fts_manager, file_path)
-                count += 1
-            except Exception as e:
-                logger.warning(f"FTS: skipping {file_path}: {e}")
-        if progress_callback:
-            progress_callback(
-                0, 0, Path(""), info=f"FTS index built from {count} files"
-            )
+    def _populate_fts_from_all_files(
+        self, fts_manager, progress_callback=None
+    ) -> List[Tuple[Path, str]]:
+        """Fill a new or rebuilt FTS index from every file on disk (chunk
+        level, no embedding). Returns the (file, error) pairs it could not
+        index, for finish_fts_run's per-file rule (#2056): reported and the
+        index left unmarked; the run fails only if nothing was indexed."""
+        from .fts_lifecycle import bootstrap_fts_from_disk
 
-    def _add_file_to_fts(self, fts_manager, file_path: Path) -> None:
-        """Add one file's current content to FTS as a whole-file document
-        (no embedding). Raises on read/add failure; callers decide."""
-        text = file_path.read_text(encoding="utf-8", errors="replace")
-        lines = text.splitlines()
-        fts_manager.add_document(
-            {
-                "path": str(file_path.relative_to(Path(self.config.codebase_dir))),
-                "content": text,
-                "content_raw": text,
-                "identifiers": text.split(),
-                "line_start": 1,
-                "line_end": max(len(lines), 1),
-                "language": file_path.suffix.lstrip(".") or "txt",
-            }
+        return bootstrap_fts_from_disk(
+            fts_manager, self.config, self.file_finder.find_files(), progress_callback
         )
 
     def _reconcile_and_verify(
@@ -2169,15 +2121,16 @@ class SmartIndexer(HighThroughputProcessor):
         return restored
 
     def _restore_file_in_fts(self, fts_manager, relative_path: str) -> bool:
-        """Re-add an un-hidden file's FTS document from its current content.
-        Any stale document for the path is deleted first (deferred) so the
-        file is never listed twice. Returns False after logging a per-file
-        failure at ERROR (the caller records it for retry); RuntimeError
-        (writer not initialized -- a wiring bug) propagates, as on the
-        per-file indexing path (file_chunking_manager)."""
+        """Re-add an un-hidden file's FTS documents from its current content,
+        through the ONE shared replacement (every stale document of the path
+        deleted first, then one per current chunk: never listed twice).
+        Returns False after logging a per-file failure at ERROR (the caller
+        records it for retry); RuntimeError (writer not initialized -- a
+        wiring bug) propagates, as on the per-file indexing path."""
+        from .fts_file_documents import FileFtsDocuments
+
         try:
-            fts_manager.delete_document_deferred(relative_path)
-            self._add_file_to_fts(
+            FileFtsDocuments(self.config).replace_in_index(
                 fts_manager, Path(self.config.codebase_dir) / relative_path
             )
             return True

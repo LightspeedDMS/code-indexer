@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 from starlette import status
 
 from ...global_repos.alias_manager import AliasManager
+from ...utils.path_confinement import is_readable_within_root
 from ..auth.dependencies import get_current_user_hybrid
 from ..auth.user_manager import User
 from ..routers import repo_access_http
@@ -112,6 +113,14 @@ def _reset_wiki_cache():
     _wiki_cache = None
 
 
+def _refuse_unreadable(repo_dir: Path, file_path: Path) -> None:
+    """404 (the same answer as a missing page) unless *file_path* resolves
+    inside *repo_dir* and not into the repository's .git -- whatever the
+    file's own name (e.g. a committed ``link.md -> .git/config``)."""
+    if not is_readable_within_root(file_path, repo_dir.resolve()):
+        raise HTTPException(status_code=404, detail="Not found")
+
+
 def _get_wiki_config(request: Request):
     """Return the WikiConfig from ConfigService, or a default WikiConfig.
 
@@ -204,10 +213,7 @@ def serve_user_wiki_asset(
     repo_path = _check_user_wiki_access(request, username, alias, current_user)
     repo_dir = Path(repo_path)
     file_path = repo_dir / asset_path
-    try:
-        file_path.resolve().relative_to(repo_dir.resolve())
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Not found")
+    _refuse_unreadable(repo_dir, file_path)
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
     if file_path.suffix.lower() not in WIKI_ASSET_EXTENSIONS:
@@ -380,6 +386,8 @@ def serve_user_wiki_root(
         rel = md_file.relative_to(repo_dir)
         if any(part.startswith(".") for part in rel.parts):
             continue
+        if not is_readable_within_root(md_file, repo_dir.resolve()):
+            continue
         stem = md_file.stem.replace("-", " ").replace("_", " ").title()
         articles.append({"path": str(rel.with_suffix("")), "title": stem})
     return wiki_templates.TemplateResponse(
@@ -409,16 +417,16 @@ def serve_user_wiki_article(
     url_prefix = f"u/{username}/{alias}"
 
     article_path = repo_dir / path
-    try:
-        article_path.resolve().relative_to(repo_dir.resolve())
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Not found")
+    _refuse_unreadable(repo_dir, article_path)
     if not article_path.exists() and not article_path.suffix:
         md_path = article_path.with_suffix(".md")
         if md_path.exists():
             article_path = md_path
     if article_path.suffix.lower() not in WIKI_ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=404, detail="Not found")
+    # The final file (after the .md fallback) is checked before any cache
+    # lookup, so a page cached for such a path is never served either.
+    _refuse_unreadable(repo_dir, article_path)
     if not article_path.exists() or not article_path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
 
@@ -530,10 +538,7 @@ def serve_wiki_asset(
     actual_path = _check_wiki_access(request, repo_alias, current_user)
     repo_dir = Path(actual_path)
     file_path = repo_dir / asset_path
-    try:
-        file_path.resolve().relative_to(repo_dir.resolve())
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Not found")
+    _refuse_unreadable(repo_dir, file_path)
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
     if file_path.suffix.lower() not in WIKI_ASSET_EXTENSIONS:
@@ -630,6 +635,8 @@ def serve_wiki_root(
     for md_file in sorted(repo_dir.rglob("*.md")):
         rel = md_file.relative_to(repo_dir)
         if any(part.startswith(".") for part in rel.parts):
+            continue
+        if not is_readable_within_root(md_file, repo_dir.resolve()):
             continue
         stem = md_file.stem.replace("-", " ").replace("_", " ").title()
         articles.append({"path": str(rel.with_suffix("")), "title": stem})
@@ -741,16 +748,16 @@ def serve_wiki_article(
     actual_path = _check_wiki_access(request, repo_alias, current_user)
     repo_dir = Path(actual_path)
     article_path = repo_dir / path
-    try:
-        article_path.resolve().relative_to(repo_dir.resolve())
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Not found")
+    _refuse_unreadable(repo_dir, article_path)
     if not article_path.exists() and not article_path.suffix:
         md_path = article_path.with_suffix(".md")
         if md_path.exists():
             article_path = md_path
     if article_path.suffix.lower() not in WIKI_ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=404, detail="Not found")
+    # The final file (after the .md fallback) is checked before any cache
+    # lookup, so a page cached for such a path is never served either.
+    _refuse_unreadable(repo_dir, article_path)
     if not article_path.exists() or not article_path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
 

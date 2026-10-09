@@ -9,7 +9,7 @@ import logging
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 
 from code_indexer.server.auth.dependencies import require_permission
 from code_indexer.server.auth.user_manager import User
@@ -536,6 +536,12 @@ def git_commit(
     response_model=GitPushResponse,
     responses={
         200: {"description": "Push completed successfully"},
+        400: {
+            "description": (
+                "Invalid remote/branch, or set_upstream with no branch on a "
+                "branch without an upstream"
+            )
+        },
         401: {"description": "Missing or invalid authentication"},
         403: {"description": "Missing repository:write permission"},
         404: {"description": "Repository not found"},
@@ -560,7 +566,14 @@ def git_push(
             branch=request.branch,
             set_upstream=request.set_upstream,
         )
-        return GitPushResponse(**result)
+        # The service reports {"success", "pushed_commits"}; the REST
+        # response names the remote and branch as requested.
+        return GitPushResponse(
+            success=result["success"],
+            remote=request.remote,
+            branch=request.branch,
+            commits_pushed=result["pushed_commits"],
+        )
     except FileNotFoundError as e:
         logger.warning(
             format_error_log(
@@ -1096,7 +1109,7 @@ def git_branch_switch(
 
 
 @router.delete(
-    "/branches/{name}",
+    "/branches/{name:path}",
     status_code=status.HTTP_200_OK,
     response_model=GitBranchDeleteResponse,
     responses={
@@ -1111,7 +1124,16 @@ def git_branch_switch(
 def git_branch_delete(
     alias: str,
     name: str,
-    confirmation_token: Optional[str] = Query(None, description="Confirmation token"),
+    confirmation_token: Optional[str] = Query(
+        None,
+        description=(
+            "Deprecated, kept for compatibility: send the token in the "
+            "X-Confirmation-Token header instead"
+        ),
+    ),
+    x_confirmation_token: Optional[str] = Header(
+        None, alias="X-Confirmation-Token", description="Confirmation token"
+    ),
     user: User = Depends(require_permission("repository:admin")),
 ) -> GitBranchDeleteResponse:
     """Delete a branch."""
@@ -1121,7 +1143,7 @@ def git_branch_delete(
         result = service.delete_branch(
             repo_alias=alias,
             branch_name=name,
-            confirmation_token=confirmation_token,
+            confirmation_token=x_confirmation_token or confirmation_token,
             username=user.username,
         )
         return GitBranchDeleteResponse(**result)

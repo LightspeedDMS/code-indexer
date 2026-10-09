@@ -410,14 +410,14 @@ class GenericReferences {
 /// enum constant's implicit call to its enum's own constructor is
 /// structurally invisible to the graph today. See "Enum-constant
 /// construction" under "What is invisible to the graph" in
-/// `docs/xray-architecture.md`.
+/// `docs/architecture/xray/architecture.md`.
 ///
 /// If a future change teaches the extractor to model enum-constant
 /// construction, THIS TEST WILL FAIL -- that failure is the fix working
 /// correctly and should be embraced, not treated as a regression: update
 /// the assertion to `Some(false)`, delete this test's KNOWN LIMITATION
 /// framing, and remove the corresponding bullet from
-/// `docs/xray-architecture.md`.
+/// `docs/architecture/xray/architecture.md`.
 #[test]
 fn known_limitation_enum_constant_constructor_not_referenced() {
     let source = r#"
@@ -440,7 +440,7 @@ enum Status {
         Some(true),
         "KNOWN LIMITATION: the correct answer is Some(false) -- READY(\"ready\") \
          does call this private constructor, but enum-constant construction has \
-         no extraction path yet. See docs/xray-architecture.md, \
+         no extraction path yet. See docs/architecture/xray/architecture.md, \
          \"What is invisible to the graph\" -> \"Enum-constant construction\"."
     );
 }
@@ -458,14 +458,14 @@ enum Status {
 /// node at all for an implicit `super()` (there is nothing to walk), so
 /// this edge is structurally invisible to the graph today. See "Implicit
 /// superclass-constructor calls" under "What is invisible to the graph" in
-/// `docs/xray-architecture.md`.
+/// `docs/architecture/xray/architecture.md`.
 ///
 /// If a future change synthesizes an implicit-super-constructor edge for
 /// every constructor with no explicit invocation, THIS TEST WILL FAIL --
 /// that failure is the fix working correctly and should be embraced, not
 /// treated as a regression: update the assertion to `Some(false)`, delete
 /// this test's KNOWN LIMITATION framing, and remove the corresponding
-/// bullet from `docs/xray-architecture.md`.
+/// bullet from `docs/architecture/xray/architecture.md`.
 ///
 /// Bug #1926 addendum: `Base` deliberately declares a SECOND, unrelated
 /// constructor overload (`Base(int)`) purely so this fixture is not ALSO
@@ -507,7 +507,7 @@ class Outer {
         "KNOWN LIMITATION: the correct answer is Some(false) -- Child()'s \
          implicit super() call does reach Base()'s private constructor, but \
          Java's implicit super() insertion has no AST node to extract and no \
-         synthesized edge yet. See docs/xray-architecture.md, \"What is \
+         synthesized edge yet. See docs/architecture/xray/architecture.md, \"What is \
          invisible to the graph\" -> \"Implicit superclass-constructor calls\"."
     );
 }

@@ -152,9 +152,15 @@ def _provider_http_error(
     error: "ops.ProviderIndexRequestError", alias: str, provider: str, verb: str
 ) -> HTTPException:
     """This door's HTTP error for a refused provider-index request."""
-    if error.kind == ops.INVALID_PROVIDER:
+    if error.kind in (ops.INVALID_PROVIDER, ops.INVALID_FILTER):
         return HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=error.detail
+        )
+    if error.kind == ops.CATEGORIES_UNAVAILABLE:
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Repository category service not available; "
+            "the category filter cannot be applied",
         )
     if error.kind == ops.REPO_NOT_FOUND:
         return HTTPException(

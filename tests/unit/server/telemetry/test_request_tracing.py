@@ -144,7 +144,9 @@ class TestFastAPIInstrumentation:
         # means TelemetryManager never even constructs an exporter, so no
         # collector address is needed for this test at all -- relying on
         # TelemetryConfig's own default value here would be misleading.
-        config = TelemetryConfig(enabled=True, export_traces=False)
+        config = TelemetryConfig(
+            enabled=True, export_traces=False, export_metrics=False
+        )
         telemetry_manager = get_telemetry_manager(config)
 
         tracer_provider = telemetry_manager.tracer_provider

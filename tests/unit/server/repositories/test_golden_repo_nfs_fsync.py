@@ -127,6 +127,7 @@ def test_fetch_includes_fsync_none_flag():
             base_clone_path=_FAKE_BASE_CLONE_PATH,
             target_branch=_FAKE_BRANCH,
             git_timeout=_FAKE_GIT_TIMEOUT,
+            credentials_url=None,
         )
 
     # First subprocess.run call is git fetch; second is git branch -r (read-only)
@@ -150,6 +151,7 @@ def test_pull_includes_fsync_none_flag():
             base_clone_path=_FAKE_BASE_CLONE_PATH,
             target_branch=_FAKE_BRANCH,
             git_timeout=_FAKE_GIT_TIMEOUT,
+            credentials_url=None,
         )
 
     # First subprocess.run call is git checkout (read-only); second is git pull

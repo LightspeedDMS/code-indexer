@@ -337,7 +337,7 @@ class SearchTimeoutsConfig:
     from the MCP tool-call layer and the embedding/reranking pipeline into a
     single Web-UI-editable config section, following the exact
     SearchLimitsConfig pattern. Each field replaces one specific hardcoded
-    constant -- see docs/architecture-invariants.md for the full mapping.
+    constant -- see docs/architecture/invariants/query-path.md for the full mapping.
     """
 
     # Replaces protocol.py's SEARCH_HANDLER_TIMEOUT_SECONDS (Bug #1319):
@@ -855,7 +855,10 @@ class ClaudeIntegrationConfig:
     # Loopback (127.0.0.0/8 and ::1/128) is always appended by the wrapper at runtime.
     # Default empty = only loopback is reachable (fail-closed posture).
     # Example: ["10.5.0.0/24", "192.168.100.0/24"] for a cluster spanning two subnets.
-    # Bootstrap-only: lives in config.json (not runtime DB). Restart required after change.
+    # A RUNTIME setting: claude_integration_config is not a bootstrap key, so
+    # with a runtime database this list is stored in the runtime row, not in
+    # config.json. Reset to Defaults keeps it (config_reset, Bug #2094).
+    # Note: scripts/cidx-curl.sh reads it from config.json.
     ra_curl_allowed_cidrs: List[str] = field(default_factory=list)
 
 

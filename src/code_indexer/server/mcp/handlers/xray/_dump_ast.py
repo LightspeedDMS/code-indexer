@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from code_indexer.server.auth.user_manager import User
+from code_indexer.utils.path_confinement import has_git_segment
 from code_indexer.xray.search_engine import XRaySearchEngine
 
 from ._infra import (
@@ -125,7 +126,7 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     # 4. Path traversal protection — resolve and verify the path stays within repo root.
     target = (repo_root / file_path_raw).resolve()
     try:
-        target.relative_to(repo_root.resolve())
+        target_relative = target.relative_to(repo_root.resolve())
     except ValueError:
         return _mcp_response(
             {
@@ -136,8 +137,9 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
 
-    # 5. File existence check
-    if not target.is_file():
+    # 5. File existence check. A path inside the repository's .git is
+    # answered exactly as a missing file.
+    if has_git_segment(target_relative.parts) or not target.is_file():
         return _mcp_response(
             {
                 "error": "file_not_found",

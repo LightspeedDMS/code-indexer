@@ -23,7 +23,7 @@ from collections import defaultdict
 from concurrent.futures import as_completed, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable, Tuple
+from typing import TYPE_CHECKING, List, Dict, Any, Optional, Callable, Tuple
 from queue import Queue, Empty
 import threading
 
@@ -38,6 +38,9 @@ from ..storage.filesystem_vector_store import FilesystemVectorStore
 # SURGICAL FIX: Remove RealTimeFeedbackManager import - causes individual callback spam
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .fts_file_documents import FtsWriteFailures
 
 # Export imports for tests
 __all__ = [
@@ -72,6 +75,13 @@ class ChunkTask:
 
 class HighThroughputProcessor(GitAwareDocumentProcessor):
     """Processor that maximizes throughput by pre-queuing all chunks."""
+
+    #: Bug #2056: files whose FTS documents could not be replaced during the
+    #: current `--fts` run (set fresh by SmartIndexer for each run, passed to
+    #: every FileChunkingManager). The run's FTS finish retries them from
+    #: disk; files still failing are missing from FTS (the per-file rule of
+    #: fts_lifecycle: reported, index left unmarked).
+    _fts_write_failures: Optional["FtsWriteFailures"] = None
 
     def __init__(self, *args, progress_log=None, **kwargs):
         """Initialize the processor with cancellation support and structured logging."""
@@ -327,6 +337,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 codebase_dir=self.config.codebase_dir,
                 fts_manager=fts_manager,
                 multimodal_client=multimodal_client,
+                fts_write_failures=self._fts_write_failures,
             ) as file_manager:
                 # Bug #1746 Change 4 (M1 fix): preflight the target chunk
                 # store's writability BEFORE any file is hashed, chunked,

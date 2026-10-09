@@ -49,17 +49,25 @@ outputSchema:
 Perform operations on composite repositories (multi-repo activations).
 
 WHAT IS A COMPOSITE REPOSITORY:
-A composite repository is a virtual repository that combines multiple golden repositories into a single searchable unit. Example: Combine 'backend-golden', 'frontend-golden', 'shared-golden' into one composite 'fullstack' activation. Queries against the composite search across all component repositories simultaneously.
+A composite repository is a virtual repository that combines multiple golden repositories into a single searchable unit. Example: Combine 'backend-repo', 'frontend-repo', 'shared-repo' into one composite 'fullstack' activation. Queries against the composite search across all component repositories simultaneously.
 
 OPERATION TYPES:
-- 'create': Create new composite repository from multiple golden repos
-- 'update': Add or remove component repositories from existing composite
-- 'delete': Remove composite repository entirely
+- 'create': Activate a new composite from `golden_repo_aliases` (same as activate_repository with golden_repo_aliases)
+- 'update': Replace the composite's component list: the handler submits a deactivation of the existing composite, then an activation of `user_alias` with the new `golden_repo_aliases` (pass the complete new list, not just the changes). A failure to deactivate is ignored and the activation is still attempted.
+- 'delete': Deactivate the composite (same as deactivate_repository)
+
+Each operation runs as a background job and returns `{"success": true, "job_id": "...", "message": "Composite repository '<alias>' creation|update|deletion started"}`; for 'update' the job_id is the activation job. Track it with get_job_details.
 
 CRITICAL REQUIREMENT:
-Composites must have at least 2 component repositories. Cannot create with 1 component, and cannot remove components if only 2 remain.
+Composites must have at least 2 component repositories; create and update are rejected with `Composite activation requires at least 2 repositories` otherwise.
+
+WARNING (update): the deactivation of the existing composite is submitted BEFORE the new list is checked. An update with fewer than 2 aliases is rejected, but removal of the existing composite has already been queued. Always pass at least 2 aliases to update.
+
+ACCESS: When group-based access control is configured, every component alias (with or without '-global') must be accessible to the caller, otherwise `Access denied: repository '<alias>' is not accessible.`
 
 PARAMETERS:
 - user_alias: Your alias for the composite repository
 - operation: One of 'create', 'update', 'delete'
-- golden_repo_aliases: Array of golden repo aliases (required for create/update)
+- golden_repo_aliases: Array of golden repo aliases without '-global' (required for create/update)
+
+ERRORS (`{"success": false, "error": "...", ...}`): `Missing required parameters: operation and user_alias`, `Unknown operation: <operation>`, the requirement and access errors above, and activation/deactivation failures.

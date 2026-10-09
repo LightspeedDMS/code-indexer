@@ -7,7 +7,7 @@ import pathspec
 
 from ..config import Config
 from ..services.override_filter_service import OverrideFilterService
-from ..utils.path_confinement import is_resolved_within_root
+from ..utils.path_confinement import is_indexable_location
 from ..utils.source_text_decoding import decode_source_bytes
 
 
@@ -123,7 +123,14 @@ class FileFinder:
     def _add_gitignore_patterns(self, directory: Path, patterns: list) -> None:
         """Add patterns from .gitignore files recursively."""
         gitignore_path = directory / ".gitignore"
-        if gitignore_path.exists():
+        # A .gitignore is read only from a location the indexer may read: never
+        # one resolving into the repository's .git (nor, in server context,
+        # one resolving outside the codebase root).
+        if gitignore_path.exists() and is_indexable_location(
+            gitignore_path,
+            self.resolved_codebase_dir,
+            self.config.confined_to_codebase_root,
+        ):
             try:
                 with open(gitignore_path, "r", encoding="utf-8", errors="ignore") as f:
                     for line in f:
@@ -206,12 +213,14 @@ class FileFinder:
             if not self.override_filter_service and not base_result:
                 return False
 
-            # Server context only (config.confined_to_codebase_root): reject
-            # any candidate whose resolved location (following symlinks,
+            # Server context (config.confined_to_codebase_root): reject any
+            # candidate whose resolved location (following symlinks,
             # collapsing '..') is not strictly inside the resolved codebase
             # root -- a symlink in-tree can have an eligible name/extension
             # while its real target lies outside the codebase directory
-            # entirely. Local CLI indexing follows such symlinks.
+            # entirely. Local CLI indexing follows such symlinks. In EVERY
+            # context a symlink resolving into the repository's own .git
+            # (e.g. ``link.py -> .git/config``) is refused.
             #
             # os.walk() is called with followlinks=False, which means it
             # never descends into a symlinked directory -- every
@@ -219,13 +228,13 @@ class FileFinder:
             # therefore a real, non-symlink directory, and file_path can
             # only escape the codebase root through its OWN final
             # component being a symlink. is_symlink() is a single lstat
-            # on that final component; the full resolve()+containment
+            # on that final component; the full resolve()+location
             # check (several stats, one per path component) only runs
             # when it fires, instead of unconditionally on every file.
-            if (
-                self.config.confined_to_codebase_root
-                and file_path.is_symlink()
-                and not is_resolved_within_root(file_path, self.resolved_codebase_dir)
+            if file_path.is_symlink() and not is_indexable_location(
+                file_path,
+                self.resolved_codebase_dir,
+                self.config.confined_to_codebase_root,
             ):
                 return False
 

@@ -72,6 +72,10 @@ class ToolAccessMemo:
         if not self._ready:
             # AC9: before Story 2's readiness marker, callers retain the
             # legacy role/permission decision rather than being denied.
+            # Bug #2076: nothing writes the marker in this version, so grants
+            # are not enforced (the REST grant routes report enforced=false).
+            # Invariant: a per-group tool grant may only restrict the
+            # caller's role permissions, never extend them.
             return None
 
         username = str(user.username)

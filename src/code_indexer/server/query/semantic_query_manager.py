@@ -31,12 +31,24 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from code_indexer.services.query_strategy import (
     apply_score_gate,
-    PARALLEL_FETCH_MULTIPLIER,
-    MAX_PARALLEL_FETCH,
+    parallel_fetch_limit,
     PARALLEL_TIMEOUT_SECONDS,
 )
 from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+from code_indexer.services.multi_index_query_service import (
+    MultiIndexQueryTimeoutError,
+)
 
+from code_indexer.services.extension_filter import (
+    normalize_extensions,
+    path_matches_extensions,
+)
+
+from .filtered_search import (
+    extension_overfetch_deadline,
+    filtered_semantic_search,
+    fts_filter_kwargs,
+)
 from .parallel_query_executor import get_global_parallel_query_executor
 from ..models.api_models import MAX_CANDIDATE_LIMIT
 from ..repositories.activated_repo_manager import ActivatedRepoManager
@@ -55,6 +67,39 @@ class SemanticQueryError(Exception):
     """Base exception for semantic query operations."""
 
     pass
+
+
+class SearchFailedError(SemanticQueryError):
+    """The search itself failed (storage, provider, configuration) -- a
+    server-side failure, distinct from a rejected request (#2109)."""
+
+    pass
+
+
+class SearchRequestError(SemanticQueryError):
+    """The request itself was rejected. Its message describes only the
+    caller's own input and is safe to return to the client."""
+
+    pass
+
+
+class SearchParameterError(SearchRequestError):
+    """A request parameter is invalid for every repository (e.g. a malformed
+    time range). A multi-repository search stops at it instead of skipping
+    one repository; a repository-scoped ``SearchRequestError`` (such as a
+    missing FTS index) is logged and skipped like any per-repository
+    failure."""
+
+    pass
+
+
+class SearchRepositoryNotFoundError(SearchRequestError):
+    """The requested repository does not exist or is not accessible. The
+    message names only the caller's alias, never a disk path."""
+
+    def __init__(self, alias: str) -> None:
+        super().__init__(f"Repository '{alias}' not found")
+        self.alias = alias
 
 
 class QueryBudgetExceeded(Exception):
@@ -760,6 +805,8 @@ class SemanticQueryManager:
         # is required instead of an exception attribute. None (default,
         # every caller that does not opt in) preserves today's behavior.
         _provider_completeness_out: Optional[Dict[str, Any]] = None,
+        # #2047: a caller-supplied request-wide over-fetch time budget.
+        extension_deadline: Optional[float] = None,
         # Story #883 Phase C: reuse a pre-computed Voyage vector so the handler
         # makes exactly ONE embedding API call per request (shared with memory retrieval).
         # MUST remain the LAST parameter any existing caller passes
@@ -861,7 +908,7 @@ class SemanticQueryManager:
         all_repos = user_repos + global_repos_list
 
         if not all_repos:
-            raise SemanticQueryError(
+            raise SearchRequestError(
                 f"No activated repositories found for user '{username}'"
             )
 
@@ -871,7 +918,7 @@ class SemanticQueryManager:
                 repo for repo in all_repos if repo["user_alias"] == repository_alias
             ]
             if not all_repos:
-                raise SemanticQueryError(
+                raise SearchRequestError(
                     f"Repository '{repository_alias}' not found for user '{username}'"
                 )
         elif search_mode in ("fts", "hybrid"):
@@ -969,6 +1016,8 @@ class SemanticQueryManager:
                 _degraded_repos_out=_degraded_repos_out,
                 # Bug #1804: relay the completeness out-param
                 _provider_completeness_out=_provider_completeness_out,
+                # #2047: a caller-supplied request-wide over-fetch budget
+                extension_deadline=extension_deadline,
             )
             # Unpack (results, effective_strategy) tuple; fall back gracefully if
             # a test patches _perform_search to return a plain list.
@@ -978,12 +1027,15 @@ class SemanticQueryManager:
                 results = _raw
             execution_time_ms = int((time.time() - start_time) * 1000)
             timeout_occurred = False
+        except MultiIndexQueryTimeoutError:
+            # #2109: keep the type so the front doors answer a timeout.
+            raise
         except TimeoutError as e:
             execution_time_ms = int((time.time() - start_time) * 1000)
             timeout_occurred = True
-            raise SemanticQueryError(f"Query timed out: {str(e)}")
-        except ValueError:
-            # Propagate ValueError (e.g., temporal validation errors like invalid date format)
+            raise SemanticQueryError(f"Query timed out: {str(e)}") from e
+        except SearchRequestError:
+            # A rejected request keeps its type: never a server failure.
             execution_time_ms = int((time.time() - start_time) * 1000)
             raise
         except Exception as e:
@@ -991,7 +1043,7 @@ class SemanticQueryManager:
             execution_time_ms = int((time.time() - start_time) * 1000)
             if "timeout" in str(e).lower():
                 raise SemanticQueryError(f"Query timed out: {str(e)}")
-            raise SemanticQueryError(f"Search failed: {str(e)}")
+            raise SearchFailedError(f"Search failed: {str(e)}") from e
 
         # Create metadata — AC7 (Bug #1202): include effective routing decision
         # from the per-request out-param (no singleton state).
@@ -1164,13 +1216,13 @@ class SemanticQueryManager:
             SemanticQueryError: If parameters are invalid
         """
         if not query_text or not query_text.strip():
-            raise SemanticQueryError("Query text cannot be empty")
+            raise SearchRequestError("Query text cannot be empty")
 
         if limit <= 0:
-            raise SemanticQueryError("Limit must be greater than 0")
+            raise SearchRequestError("Limit must be greater than 0")
 
         if min_score is not None and (min_score < 0.0 or min_score > 1.0):
-            raise SemanticQueryError("Min score must be between 0.0 and 1.0")
+            raise SearchRequestError("Min score must be between 0.0 and 1.0")
 
     def _perform_search(
         self,
@@ -1227,6 +1279,9 @@ class SemanticQueryManager:
         # _search_single_repository -- see its docstring for why this must
         # be a mutable out-param rather than an exception attribute.
         _provider_completeness_out: Optional[Dict[str, Any]] = None,
+        # #2047: a caller-supplied request-wide over-fetch time budget (REST
+        # hybrid shares one with its FTS half); None starts one here.
+        extension_deadline: Optional[float] = None,
     ) -> "Tuple[List[QueryResult], str]":
         """
         Perform the actual search across user repositories.
@@ -1266,6 +1321,20 @@ class SemanticQueryManager:
         Returns:
             List of QueryResult objects sorted by similarity score
         """
+        # #2047: validate file_extensions ONCE, before any repository is
+        # searched, with the shared validator (MCP passes raw parameters): a
+        # non-list or a value that can never be a suffix is a clear
+        # ValueError, never swallowed per provider into an empty answer.
+        from code_indexer.services.extension_filter import (
+            validate_file_extensions_field,
+        )
+
+        try:
+            file_extensions = validate_file_extensions_field(file_extensions)
+        except ValueError as e:
+            # The message describes only the caller's own input.
+            raise SearchParameterError(str(e)) from e
+
         # Story #4 AC2: Track search metrics at service layer
         # This ensures both MCP and REST API calls are counted
         from code_indexer.server.services.api_metrics_service import api_metrics_service
@@ -1289,8 +1358,25 @@ class SemanticQueryManager:
         # constant across the loop).
         _effective_strategy: str = query_strategy or "primary_only"
 
+        # #2047: ONE extension over-fetch time budget for this whole request,
+        # shared by every repository searched below.
+        if extension_deadline is None:
+            extension_deadline = extension_overfetch_deadline(file_extensions)
+
+        from .filtered_search import extension_budget_spent
+
         # Search each repository
-        for repo_info in user_repos:
+        for repo_index, repo_info in enumerate(user_repos):
+            # #2047: no repository search STARTS after the request's budget
+            # (a running one finishes); the short answer is logged.
+            if extension_budget_spent(extension_deadline):
+                logger.info(
+                    "file_extensions search time budget ran out: %d of %d "
+                    "repositories not searched",
+                    len(user_repos) - repo_index,
+                    len(user_repos),
+                )
+                break
             try:
                 repo_alias = repo_info["user_alias"]
 
@@ -1445,6 +1531,8 @@ class SemanticQueryManager:
                         activation_id=activation_id,
                         # Bug #1804: relay the completeness out-param
                         _provider_completeness_out=_provider_completeness_out,
+                        # #2047: the request-wide over-fetch time budget
+                        extension_deadline=extension_deadline,
                     )
                 # AC7: capture routing decision from the first resolved repo
                 if _strat_out and _effective_strategy == (
@@ -1465,14 +1553,20 @@ class SemanticQueryManager:
                 all_results.extend(results)
 
             except (TimeoutError, Exception) as e:
+                # #2109: a search timeout keeps its type end to end.
+                if isinstance(e, MultiIndexQueryTimeoutError):
+                    raise
+                # A parameter invalid for every repository (e.g. an invalid
+                # date format) is the caller's error, not one repository's:
+                # re-raise it unchanged. A repository-scoped request error
+                # (e.g. a missing FTS index) is logged and skipped below.
+                if isinstance(e, SearchParameterError):
+                    raise
                 # If it's a timeout or other critical error from one repo, propagate it
                 if isinstance(e, TimeoutError) or "timeout" in str(e).lower():
                     raise TimeoutError(
                         f"Query timed out while searching repository {repo_info['user_alias']}: {str(e)}"
                     )
-                # Propagate ValueError (e.g., temporal validation errors like invalid date format)
-                if isinstance(e, ValueError):
-                    raise
                 # For other errors, log warning and continue with other repos
                 logger.warning(
                     format_error_log(
@@ -1607,6 +1701,7 @@ class SemanticQueryManager:
                 exclude_path=exclude_path,
                 accuracy=accuracy,
                 activation_id=activation_id,
+                file_extensions=file_extensions,
             )
         except Exception as e:
             # Bug #1480 follow-up: multimodal is a best-effort SUPPLEMENT to the
@@ -1627,14 +1722,15 @@ class SemanticQueryManager:
 
         existing_keys = {(r.file_path, r.line_number) for r in results}
         merged = list(results)
+        # #2047: None = no filter (an empty list is no filter too).
+        extension_set = normalize_extensions(file_extensions)
         for item in multimodal_items:
             if min_score is not None and item.score < min_score:
                 continue
-            if file_extensions is not None:
-                if Path(item.file_path).suffix.lower() not in [
-                    ext.lower() for ext in file_extensions
-                ]:
-                    continue
+            if extension_set is not None and not path_matches_extensions(
+                item.file_path, extension_set
+            ):
+                continue
             key = (item.file_path, item.line_start)
             if key in existing_keys:
                 continue
@@ -1718,6 +1814,8 @@ class SemanticQueryManager:
         # own except block -- neither of which preserves attributes set on
         # the original exception object. Per-request, no shared state.
         _provider_completeness_out: Optional[Dict[str, Any]] = None,
+        # #2047: the request-wide time budget for extension over-fetch.
+        extension_deadline: Optional[float] = None,
     ) -> List[QueryResult]:
         """
         Search a single repository using the appropriate search service.
@@ -1759,17 +1857,27 @@ class SemanticQueryManager:
             edit_distance: Fuzzy match tolerance 0-3
             snippet_lines: Context lines around FTS matches 0-50
             regex: Interpret query as regex pattern
+            extension_deadline: #2047 request-wide time budget (a
+                time.monotonic() reading) for the FTS extension fill rounds
+                (semantic search is one store query); a multi-repo caller
+                passes one value shared by all its repositories, a direct
+                caller's budget starts here.
 
         Returns:
             List of QueryResult objects from this repository
         """
+        if extension_deadline is None:
+            extension_deadline = extension_overfetch_deadline(file_extensions)
+
         # Story #593: Handle SPECIFIC strategy routing before composite check
         if query_strategy == "specific" or preferred_provider:
             if not preferred_provider:
-                raise ValueError("preferred_provider required for specific strategy")
+                raise SearchParameterError(
+                    "preferred_provider required for specific strategy"
+                )
             _supported_providers = {"voyage-ai", "cohere"}
             if preferred_provider not in _supported_providers:
-                raise ValueError(
+                raise SearchParameterError(
                     f"Provider '{preferred_provider}' not available. "
                     f"Supported providers: {sorted(_supported_providers)}"
                 )
@@ -1956,10 +2064,9 @@ class SemanticQueryManager:
             )
 
             # Story #638: Over-fetch each provider to widen the candidate pool
-            # before score-gated filtering and fusion.
-            _provider_fetch_limit = min(
-                limit * PARALLEL_FETCH_MULTIPLIER, MAX_PARALLEL_FETCH
-            )
+            # before score-gated filtering and fusion; #2108: never below the
+            # requested limit.
+            _provider_fetch_limit = parallel_fetch_limit(limit)
 
             # Story #619 Gap 1: health-gated parallel dispatch — skip "down" providers
             _health_monitor = ProviderHealthMonitor.get_instance()
@@ -2411,7 +2518,7 @@ class SemanticQueryManager:
                 # temporal request explicitly instead of partially honoring
                 # it.
                 if time_range or time_range_all or at_commit:
-                    raise SemanticQueryError(
+                    raise SearchRequestError(
                         "Temporal queries are not supported for composite repositories"
                     )
                 # Use CLI integration for composite repos (supports all filters)
@@ -2500,17 +2607,12 @@ class SemanticQueryManager:
                     edit_distance=edit_distance,
                     snippet_lines=snippet_lines,
                     regex=regex,
+                    # #2047: pushed down into Tantivy (fills the limit).
+                    file_extensions=file_extensions,
+                    deadline=extension_deadline,
                 )
 
-                # For pure FTS mode, apply file_extensions filter and return
                 if search_mode == "fts":
-                    if file_extensions is not None:
-                        fts_results = [
-                            r
-                            for r in fts_results
-                            if Path(r.file_path).suffix.lower()
-                            in [ext.lower() for ext in file_extensions]
-                        ]
                     return fts_results
 
                 # For hybrid mode, continue to semantic search and merge results
@@ -2519,50 +2621,35 @@ class SemanticQueryManager:
             # SEMANTIC SEARCH
             # Import SemanticSearchService and related models
             from ..services.search_service import SemanticSearchService
-            from ..models.api_models import InternalSemanticSearchRequest
 
             # Create search service instance
             search_service = SemanticSearchService()
 
-            # Create search request — Story #375: wire filter params through.
-            # Internal type: `limit` may carry rerank/access-filter over-fetch
-            # above the public 100 cap (up to MAX_CANDIDATE_LIMIT).
-            search_request = InternalSemanticSearchRequest(
+            # Story #375 filters + #2047 file_extensions (pushed into ONE
+            # store query): the one shared semantic search. Story #883
+            # Phase C: the precomputed vector avoids a duplicate Voyage call.
+            search_items = filtered_semantic_search(
+                search_service.search_repository_path,
                 query=query_text,
                 limit=limit,
-                include_source=True,
-                path_filter=path_filter,
                 language=language,
+                path_filter=path_filter,
                 exclude_language=exclude_language,
                 exclude_path=exclude_path,
                 accuracy=accuracy,
-                # Story #1108 (S4): per-request cache bypass
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-            )
-
-            # Perform search on the repository using direct path
-            # Story #883 Phase C: pass precomputed vector to avoid duplicate Voyage call
-            search_response = search_service.search_repository_path(
-                repo_path=repo_path,
-                search_request=search_request,
+                file_extensions=file_extensions,
                 precomputed_query_vector=precomputed_query_vector,
+                repo_path=repo_path,
                 activation_id=activation_id,
             )
 
             # Convert search results to QueryResult objects
             semantic_results = []
-            for search_item in search_response.results:
+            for search_item in search_items:
                 # Apply min_score filter if specified
                 if min_score is not None and search_item.score < min_score:
                     continue
-
-                # Apply file extension filter if specified
-                if file_extensions is not None:
-                    file_path = Path(search_item.file_path)
-                    if file_path.suffix.lower() not in [
-                        ext.lower() for ext in file_extensions
-                    ]:
-                        continue
 
                 # Convert SearchResultItem to QueryResult
                 # Annotate source_provider: named provider if given, else "primary" (Story #593)
@@ -2643,40 +2730,31 @@ class SemanticQueryManager:
             List of QueryResult objects from this repository
         """
         from ..services.search_service import SemanticSearchService
-        from ..models.api_models import InternalSemanticSearchRequest
 
         search_service = SemanticSearchService()
-        # Internal type: `limit` may include over-fetch above the public cap.
-        search_request = InternalSemanticSearchRequest(
+
+        # The one shared semantic search (filters, #2047 file_extensions
+        # pushed into ONE store query on THIS provider).
+        search_items = filtered_semantic_search(
+            search_service.search_repository_path_with_provider,
             query=query_text,
             limit=limit,
-            include_source=True,
-            path_filter=path_filter,
             language=language,
+            path_filter=path_filter,
             exclude_language=exclude_language,
             exclude_path=exclude_path,
             accuracy=accuracy,
-            # Story #1108 (S4): per-request cache bypass
             no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-        )
-        search_response = search_service.search_repository_path_with_provider(
+            file_extensions=file_extensions,
             repo_path=repo_path,
-            search_request=search_request,
             provider_name=provider_name,
             activation_id=activation_id,
         )
 
         results = []
-        for search_item in search_response.results:
+        for search_item in search_items:
             if min_score is not None and search_item.score < min_score:
                 continue
-            if file_extensions is not None:
-                from pathlib import Path as _Path
-
-                if _Path(search_item.file_path).suffix.lower() not in [
-                    ext.lower() for ext in file_extensions
-                ]:
-                    continue
             results.append(
                 QueryResult(
                     file_path=search_item.file_path,
@@ -3110,6 +3188,7 @@ class SemanticQueryManager:
         )
         from ...services.temporal.temporal_search_service import (
             ALL_TIME_RANGE,
+            TemporalParameterError,
             parse_date_range,
         )
 
@@ -3229,7 +3308,7 @@ class SemanticQueryManager:
 
             return query_results
 
-        except ValueError as e:
+        except TemporalParameterError as e:
             # Clear error messages for invalid parameters (Acceptance Criterion 10)
             logger.error(
                 format_error_log(
@@ -3237,7 +3316,9 @@ class SemanticQueryManager:
                 ),
                 extra=get_log_extra("QUERY-MIGRATE-010"),
             )
-            raise ValueError(str(e))
+            # Only a temporal parameter error describes the caller's input;
+            # any other ValueError is internal and handled below.
+            raise SearchParameterError(str(e)) from e
         except Exception as e:
             # Log error and propagate as SemanticQueryError
             logger.error(
@@ -3268,6 +3349,8 @@ class SemanticQueryManager:
         edit_distance: int = 0,
         snippet_lines: int = 5,
         regex: bool = False,
+        file_extensions: Optional[List[str]] = None,
+        deadline: Optional[float] = None,
     ) -> List[QueryResult]:
         """
         Execute FTS search using TantivyIndexManager.
@@ -3289,6 +3372,9 @@ class SemanticQueryManager:
             edit_distance: Fuzzy match tolerance 0-3
             snippet_lines: Context lines around matches
             regex: Interpret query as regex pattern
+            file_extensions: #2047 extension filter, pushed down into Tantivy
+            deadline: #2047 request-wide time budget for the extension
+                refetch (a time.monotonic() reading, shared by every repo)
 
         Returns:
             List of QueryResult objects from FTS search
@@ -3299,7 +3385,7 @@ class SemanticQueryManager:
         # Check if FTS index exists
         fts_index_dir = repo_path / ".code-indexer" / "tantivy_index"
         if not fts_index_dir.exists():
-            raise SemanticQueryError(
+            raise SearchRequestError(
                 f"FTS index not available for repository '{repository_alias}'. "
                 "Build FTS index with 'cidx index --fts' in the repository."
             )
@@ -3307,7 +3393,6 @@ class SemanticQueryManager:
         try:
             # Import TantivyIndexManager (lazy import to avoid startup overhead)
             from ...services.tantivy_index_manager import TantivyIndexManager
-            from ...services.path_pattern_matcher import parse_exclude_patterns
 
             # Initialize Tantivy manager
             tantivy_manager = TantivyIndexManager(fts_index_dir)
@@ -3318,21 +3403,23 @@ class SemanticQueryManager:
             if fuzzy and edit_distance == 0:
                 effective_edit_distance = 1
 
-            # Split comma-separated exclude_path into independent patterns (bug #1095)
-            exclude_paths_list = parse_exclude_patterns(exclude_path) or None
-
-            # Execute FTS query
+            # Execute FTS query; the filters come from the one shared builder
+            # (comma-split exclude_path, Bug #1095; #2047 file_extensions).
             fts_raw_results = tantivy_manager.search(
                 query_text=query_text,
                 case_sensitive=case_sensitive,
                 edit_distance=effective_edit_distance,
                 snippet_lines=snippet_lines,
                 limit=limit,
-                language_filter=language,
-                path_filter=path_filter,
-                exclude_languages=[exclude_language] if exclude_language else None,
-                exclude_paths=exclude_paths_list,
                 use_regex=regex,
+                **fts_filter_kwargs(
+                    language=language,
+                    path_filter=path_filter,
+                    exclude_language=exclude_language,
+                    exclude_path=exclude_path,
+                    file_extensions=file_extensions,
+                    deadline=deadline,
+                ),
             )
 
             # Convert FTS results to QueryResult objects

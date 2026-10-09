@@ -29,3 +29,16 @@ def _scratch_global_git_config(
         tmp_path_factory.mktemp("global-git"), monkeypatch, _developer_git_identity
     )
     yield
+
+
+@pytest.fixture(autouse=True)
+def _scratch_run_once_redeploy_marker(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bug #2064: run_once's retry branch unlinks PENDING_REDEPLOY_MARKER, a
+    constant bound at import time to the developer's real ~/.cidx-server.
+    Point it at scratch so no test can consume a real marker."""
+    from code_indexer.server.auto_update import run_once
+
+    scratch = tmp_path_factory.mktemp("redeploy-marker") / "pending-redeploy"
+    monkeypatch.setattr(run_once, "PENDING_REDEPLOY_MARKER", scratch)

@@ -232,17 +232,18 @@ class TestFtsBootstrap:
         fts_index_dir = git_repo / ".code-indexer" / "tantivy_index"
         assert not (fts_index_dir / "meta.json").exists()
 
-        mock_fts = MagicMock()
+        indexer.smart_index(enable_fts=True)
 
-        with patch(
-            "code_indexer.services.tantivy_index_manager.TantivyIndexManager",
-            return_value=mock_fts,
-        ):
-            indexer.smart_index(enable_fts=True)
+        # Observable outcome (real Tantivy): the new index was bootstrapped
+        # from the files on disk -- nothing was embedded -- and committed,
+        # and is marked content-current (Bug #2056).
+        from code_indexer.services.fts_file_documents import (
+            fts_content_version_is_current,
+        )
+        from code_indexer.services.fts_lifecycle import committed_document_count
 
-        # Observable outcome: add_document must have been called at least once
-        # (bootstrapping from disk files), proving the FTS index was populated.
-        assert mock_fts.add_document.call_count >= 1
+        assert committed_document_count(fts_index_dir) >= 1
+        assert fts_content_version_is_current(fts_index_dir)
 
     def test_populate_fts_not_called_when_fts_index_already_exists(
         self, tmp_path: Path, git_repo: Path, mock_vector_store: MagicMock
@@ -254,14 +255,42 @@ class TestFtsBootstrap:
         indexer.embedding_provider.get_current_model.return_value = "voyage-code-3"
         self._seed_completed_metadata(indexer, git_repo)
 
-        # Create meta.json so the FTS index appears to already exist.
-        self._seed_stub_fts_meta_json(git_repo)
+        # Bug #2056: a REAL current-schema index holding one repo-relative
+        # document -- smart_index() now probes the on-disk index (empty or
+        # absolute-path documents force a one-time rebuild), so a stub
+        # meta.json would fail that probe and silently disable FTS.
+        from code_indexer.services.tantivy_index_manager import (
+            TantivyIndexManager as RealTantivyIndexManager,
+        )
+
+        real_fts = RealTantivyIndexManager(git_repo / ".code-indexer" / "tantivy_index")
+        real_fts.initialize_index(create_new=True)
+        real_fts.add_document(
+            {
+                "path": "existing.py",
+                "content": "EXISTING = 1",
+                "content_raw": "EXISTING = 1",
+                "identifiers": ["EXISTING"],
+                "line_start": 1,
+                "line_end": 1,
+                "language": "py",
+            }
+        )
+        real_fts.commit()
+        real_fts.close()
+        from code_indexer.services.fts_file_documents import (
+            mark_fts_content_current,
+        )
+
+        # Built by fixed code: content-current, so no one-time rebuild.
+        mark_fts_content_current(git_repo / ".code-indexer" / "tantivy_index")
 
         mock_fts = MagicMock()
         # Bug #1763: smart_index() now also consults schema_needs_rebuild()
         # -- False represents a genuinely current-schema existing index,
         # matching this test's "already exists, no bootstrap" intent.
         mock_fts.schema_needs_rebuild.return_value = False
+        mock_fts.get_document_count.return_value = 1  # the seeded document
 
         with patch(
             "code_indexer.services.tantivy_index_manager.TantivyIndexManager",
@@ -271,6 +300,7 @@ class TestFtsBootstrap:
 
         # FTS index already existed with a current schema ->
         # create_new_fts=False -> no bootstrap.
+        mock_fts.initialize_index.assert_called_with(create_new=False)
         assert mock_fts.add_document.call_count == 0
 
     def _seed_stub_fts_meta_json(self, git_repo: Path) -> Path:
@@ -298,24 +328,44 @@ class TestFtsBootstrap:
         indexer.embedding_provider.get_current_model.return_value = "voyage-code-3"
         self._seed_completed_metadata(indexer, git_repo)
 
-        # meta.json exists (pre-#1763 code would treat this as
-        # create_new_fts=False) but represents a stale schema.
-        self._seed_stub_fts_meta_json(git_repo)
+        # A REAL pre-#1761 (stale schema) index already exists, holding a
+        # document for a path that is not in the repository.
+        fts_index_dir = git_repo / ".code-indexer" / "tantivy_index"
+        _build_legacy_fts_index(
+            fts_index_dir,
+            [
+                {
+                    "path": "legacy_only.py",
+                    "content": "LEGACYONLY",
+                    "content_raw": "LEGACYONLY",
+                    "identifiers": ["LEGACYONLY"],
+                    "line_start": 1,
+                    "line_end": 1,
+                    "language": "py",
+                }
+            ],
+        )
 
-        mock_fts = MagicMock()
-        mock_fts.schema_needs_rebuild.return_value = True
+        indexer.smart_index(enable_fts=True)
 
-        with patch(
-            "code_indexer.services.tantivy_index_manager.TantivyIndexManager",
-            return_value=mock_fts,
-        ):
-            indexer.smart_index(enable_fts=True)
+        # The stale schema drove a rebuild from disk (real Tantivy): the
+        # legacy document is gone, the repository's files are indexed under
+        # the current schema, and the index is marked content-current.
+        from code_indexer.services.fts_file_documents import (
+            fts_content_version_is_current,
+        )
+        from code_indexer.services.fts_lifecycle import committed_document_count
+        from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
-        # schema_needs_rebuild() must actually have been consulted, and
-        # its True answer must have driven create_new_fts=True.
-        mock_fts.schema_needs_rebuild.assert_called()
-        mock_fts.initialize_index.assert_called_with(create_new=True)
-        assert mock_fts.add_document.call_count >= 1
+        assert committed_document_count(fts_index_dir) >= 1
+        assert fts_content_version_is_current(fts_index_dir)
+        fts = TantivyIndexManager(fts_index_dir)
+        fts.initialize_index(create_new=False)
+        try:
+            assert not fts.schema_needs_rebuild()
+            assert "legacy_only.py" not in fts.get_all_indexed_paths()
+        finally:
+            fts.close()
 
     def test_populate_fts_from_all_files_reads_files_and_adds_documents(
         self, tmp_path: Path, mock_vector_store: MagicMock

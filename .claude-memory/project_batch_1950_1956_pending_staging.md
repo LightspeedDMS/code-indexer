@@ -85,7 +85,7 @@ local gates):
   `privateHelperNotVisibleToKotlin` correctly IS. Rust positive+negative control
   tests green.
 - #1961 CLOSED: `analyze_graph.md` restructured, agent-visible cost 85,968 ->
-  61,403 chars (-28.6%), binder internals split to `docs/xray-graph-binder-internals.md`.
+  61,403 chars (-28.6%), binder internals split to `docs/architecture/xray/graph-binder-internals.md`.
   Committed as f7e2ca34.
 
 **The measurement lesson from #1961, worth keeping**: a tool doc's frontmatter is

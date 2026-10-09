@@ -51,7 +51,7 @@ Usage:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from code_indexer.server.logging_utils import format_error_log
 
@@ -86,6 +86,66 @@ def _validate_excluded_urls(excluded_urls: Optional[List[str]]) -> List[str]:
     return excluded_urls
 
 
+# Request-span attributes that carry the request URL or its query string.
+_URL_ATTRIBUTES = ("http.url", "http.target", "url.full", "url.query")
+
+
+# Written over a URL attribute whose value could not be redacted.
+_UNREDACTABLE_URL = "[REDACTED]"
+
+
+def _mask_url_attributes(span: Any) -> None:
+    from code_indexer.server.utils.access_log_redaction import (
+        redact_sensitive_query_values,
+    )
+    from code_indexer.utils.credential_redaction import redact_secret_fields
+
+    # Only a recording SDK span has attributes; any other span records none.
+    is_recording = getattr(span, "is_recording", None)
+    attributes = getattr(span, "attributes", None)
+    if not callable(is_recording) or not is_recording() or not attributes:
+        return
+    for name in _URL_ATTRIBUTES:
+        value = attributes.get(name)
+        if not isinstance(value, str):
+            continue
+        redacted = redact_secret_fields(redact_sensitive_query_values(value))
+        if redacted != value:
+            span.set_attribute(name, redacted)
+
+
+def _redact_span_url_attributes(span: Any) -> None:
+    """A span never carries a secret query value or URL credential in its
+    URL attributes. Never raises: when masking fails, every URL attribute is
+    overwritten (best effort), so a raw value is never kept knowingly."""
+    try:
+        _mask_url_attributes(span)
+    except Exception:  # noqa: BLE001 -- a tracing hook must never fail a request
+        logger.warning("Span URL redaction failed; URL attributes dropped")
+        for name in _URL_ATTRIBUTES:
+            try:
+                span.set_attribute(name, _UNREDACTABLE_URL)
+            except Exception:  # noqa: BLE001
+                continue
+
+
+def _redact_request_span(span: Any, scope: Dict[str, Any]) -> None:
+    """server_request_hook: runs after the instrumentation has set the
+    request span's URL attributes."""
+    _redact_span_url_attributes(span)
+
+
+def _redact_client_request_span(span: Any, request: Any) -> None:
+    """httpx request_hook: an outgoing request's span is redacted like a
+    server request span."""
+    _redact_span_url_attributes(span)
+
+
+async def _redact_async_client_request_span(span: Any, request: Any) -> None:
+    """httpx async_request_hook (the instrumentation requires a coroutine)."""
+    _redact_span_url_attributes(span)
+
+
 def _apply_instrumentation(app: "FastAPI", urls_to_exclude: List[str]) -> None:
     """Call the real FastAPIInstrumentor with the resolved exclusion list."""
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -99,6 +159,7 @@ def _apply_instrumentation(app: "FastAPI", urls_to_exclude: List[str]) -> None:
         app,
         excluded_urls=exclude_pattern,
         tracer_provider=None,
+        server_request_hook=_redact_request_span,
     )
 
 
@@ -224,7 +285,10 @@ def instrument_httpx() -> bool:
             logger.debug("httpx already instrumented, skipping")
             return True
 
-        instrumentor.instrument()
+        instrumentor.instrument(
+            request_hook=_redact_client_request_span,
+            async_request_hook=_redact_async_client_request_span,
+        )
         logger.info("httpx instrumented with OTEL tracing (process-global)")
         return True
     except ImportError as e:

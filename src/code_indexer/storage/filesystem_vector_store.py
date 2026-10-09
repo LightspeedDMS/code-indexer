@@ -5406,6 +5406,22 @@ class FilesystemVectorStore:
                         substring = match_spec["contains"]
                         return substring.lower() in current.lower()
 
+                    # #2047: "any_ext" -- K is a path (or a list of paths, true
+                    # if any one matches) whose lowercased suffix is one of
+                    # the requested extensions (shared rule, case-insensitive;
+                    # an extensionless path never matches).
+                    if "any_ext" in match_spec:
+                        from code_indexer.services.extension_filter import (
+                            path_matches_extensions,
+                        )
+
+                        wanted = frozenset(match_spec["any_ext"])
+                        candidates = current if isinstance(current, list) else [current]
+                        return any(
+                            isinstance(p, str) and path_matches_extensions(p, wanted)
+                            for p in candidates
+                        )
+
                     # Support both "value" (exact match) and "text" (pattern match)
                     if "value" in match_spec:
                         # Exact match

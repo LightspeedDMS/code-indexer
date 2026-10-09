@@ -74,7 +74,7 @@ outputSchema:
   - success
 ---
 
-TL;DR: Unified SSH key management (Story #992). Replaces cidx_ssh_key_create, cidx_ssh_key_delete, cidx_ssh_key_show_public, cidx_ssh_key_assign_host.
+TL;DR: Manage CIDX-managed SSH keys: create a key pair, delete a key, show a public key, or assign a key to an SSH config host.
 
 ACTIONS:
 - create: Generate new SSH key pair. Required: name. Optional: key_type (ed25519/rsa), email, description.
@@ -82,11 +82,12 @@ ACTIONS:
 - show_public: Get public key content for copy/paste. Required: name. Requires elevation, like REST GET /api/ssh-keys/{name}/public.
 - assign_host: Add SSH config Host entry. Required: name, hostname. Optional: force (overwrite conflict).
 
-ADMIN ONLY. Every action requires MCP elevation (TOTP step-up), like its REST /api/ssh-keys twin. Without an elevation window no action reveals key content or whether a key name exists.
+ADMIN ONLY. Every action requires MCP elevation (TOTP step-up) when elevation enforcement is on, like its REST /api/ssh-keys twin. With enforcement on, no action reveals key content or whether a key name exists without an elevation window.
 
 ERRORS:
 - elevation_required: TOTP step-up needed (call elevate_session, then retry)
 - totp_setup_required: TOTP not yet configured for this account (setup_url provided)
+- `Missing required parameter: action` / `Invalid action '<action>'. Valid actions: [...]`
 
 RELATED TOOLS: list_ssh_keys (view all keys).
 
