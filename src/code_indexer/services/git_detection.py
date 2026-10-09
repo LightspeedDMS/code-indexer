@@ -136,20 +136,35 @@ class GitDetectionService:
         }
 
         if identifier.git_available:
-            state.update(self._get_detailed_git_state())
+            state.update(self._get_detailed_git_state(identifier))
 
         return state
 
-    def _get_detailed_git_state(self) -> Dict[str, Any]:
+    def _get_detailed_git_state(
+        self, identifier: Optional[FileIdentifier] = None
+    ) -> Dict[str, Any]:
         """
         Get detailed git state information.
 
         Returns:
             Dictionary containing detailed git state
         """
+        # The identifier that decided git_available has already asked (and
+        # memoized) the same two questions; reuse its answers rather than ask
+        # the backend again.
         git_state: Dict[str, Any] = {
-            "commit_hash": read_head_commit(self.project_dir, self._git_backend),
-            "branch": read_head_branch(self.project_dir, self._git_backend),
+            "commit_hash": (
+                identifier._get_cached_commit_hash()
+                if identifier is not None
+                else read_head_commit(self.project_dir, self._git_backend)
+            )
+            or "unknown",
+            "branch": (
+                identifier._get_cached_branch()
+                if identifier is not None
+                else read_head_branch(self.project_dir, self._git_backend)
+            )
+            or "unknown",
         }
 
         if self._git_backend is not None:
