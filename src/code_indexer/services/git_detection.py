@@ -9,10 +9,11 @@ import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Optional, Tuple
 
 from ..config import Config
 from .file_identifier import FileIdentifier
+from .git_head import read_head_branch, read_head_commit
 from ..utils.git_runner import run_git_command
 
 
@@ -26,16 +27,22 @@ class GitDetectionService:
     - Other significant git state changes that require re-indexing
     """
 
-    def __init__(self, project_dir: Path, config: Config):
+    def __init__(
+        self, project_dir: Path, config: Config, git_backend: Optional[Any] = None
+    ):
         """
         Initialize GitDetectionService.
 
         Args:
             project_dir: Path to the project directory
             config: Project configuration
+            git_backend: the git seam (git-mcp) for a repository this machine
+                does not hold; HEAD's commit and branch are asked of it. None
+                keeps local git.
         """
         self.project_dir = project_dir
         self.config = config
+        self._git_backend = git_backend
         # Create metadata directory path
         metadata_dir = project_dir / ".code-indexer"
         self.git_state_file = metadata_dir / "git_state.json"
@@ -119,7 +126,9 @@ class GitDetectionService:
         Returns:
             Dictionary containing current git state
         """
-        identifier = FileIdentifier(self.project_dir, self.config)
+        identifier = FileIdentifier(
+            self.project_dir, self.config, git_backend=self._git_backend
+        )
 
         state = {
             "git_available": identifier.git_available,
@@ -138,48 +147,21 @@ class GitDetectionService:
         Returns:
             Dictionary containing detailed git state
         """
-        git_state: Dict[str, Any] = {}
+        git_state: Dict[str, Any] = {
+            "commit_hash": read_head_commit(self.project_dir, self._git_backend),
+            "branch": read_head_branch(self.project_dir, self._git_backend),
+        }
 
-        try:
-            # Current commit hash
-            result = run_git_command(
-                ["git", "rev-parse", "HEAD"],
-                cwd=self.project_dir,
-            )
-            git_state["commit_hash"] = result.stdout.strip()
-        except subprocess.CalledProcessError:
-            git_state["commit_hash"] = "unknown"
-
-        try:
-            # Current branch
-            result = run_git_command(
-                ["git", "branch", "--show-current"],
-                cwd=self.project_dir,
-            )
-            branch = result.stdout.strip()
-
-            if not branch:
-                # Handle detached HEAD
-                try:
-                    result = run_git_command(
-                        ["git", "rev-parse", "--short", "HEAD"],
-                        cwd=self.project_dir,
-                    )
-                    branch = f"detached-{result.stdout.strip()}"
-                except subprocess.CalledProcessError:
-                    branch = "unknown"
-
-            git_state["branch"] = branch
-        except subprocess.CalledProcessError:
-            # Fallback to HEAD for detached HEAD state
+        if self._git_backend is not None:
+            # The repository is addressed by this path through the seam; there
+            # is no local toplevel to discover.
+            git_state["repo_root"] = str(self.project_dir)
             try:
-                result = run_git_command(
-                    ["git", "rev-parse", "--short", "HEAD"],
-                    cwd=self.project_dir,
-                )
-                git_state["branch"] = f"detached-{result.stdout.strip()}"
-            except subprocess.CalledProcessError:
-                git_state["branch"] = "unknown"
+                status = self._git_backend.status_porcelain(str(self.project_dir))
+                git_state["has_uncommitted_changes"] = bool(str(status).strip())
+            except (subprocess.CalledProcessError, OSError):
+                git_state["has_uncommitted_changes"] = None
+            return git_state
 
         try:
             # Repository root
@@ -240,7 +222,9 @@ class GitDetectionService:
         Returns:
             Dictionary containing file count and other summary information
         """
-        identifier = FileIdentifier(self.project_dir, self.config)
+        identifier = FileIdentifier(
+            self.project_dir, self.config, git_backend=self._git_backend
+        )
         current_files = identifier.get_current_files()
 
         summary = {

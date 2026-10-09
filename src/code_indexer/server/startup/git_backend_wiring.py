@@ -104,12 +104,34 @@ def build_configured_git_backend(config: Any) -> GitBackend:
     plugin fails LOUD (never a silent local fallback) — see ``build_git_backend``
     and ``git_backend_plugin``.
     """
+    return build_named_git_backend(getattr(config, "git_backend", "local") or "local")
+
+
+def build_named_git_backend(backend_type: str) -> GitBackend:
+    """Resolve the delegated plugin (if *backend_type* asks for it) and build.
+
+    The by-name twin of :func:`build_configured_git_backend`, for where only the
+    selection travels -- the ``cidx index`` child, which receives it as
+    ``--git-backend`` from the server that spawned it. The plugin reads its
+    endpoint from the environment the child inherits.
+    """
+    from types import SimpleNamespace
+
     # Imported lazily so the local-default path never imports the plugin seam
     # (and so a plugin import error only surfaces when delegation is requested).
     from code_indexer.server.services.git_backend_plugin import (
         resolve_delegated_git_backend,
     )
 
-    backend_type = getattr(config, "git_backend", "local") or "local"
     delegated = resolve_delegated_git_backend() if backend_type == "delegated" else None
-    return build_git_backend(config, delegated_backend=delegated)
+    return build_git_backend(
+        SimpleNamespace(git_backend=backend_type), delegated_backend=delegated
+    )
+
+
+def configured_git_backend_name() -> str:
+    """The running server's ``git_backend`` selection, ``local`` when unset."""
+    from code_indexer.server.services.config_service import get_config_service
+
+    config = get_config_service().get_config()
+    return getattr(config, "git_backend", "local") or "local"
