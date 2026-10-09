@@ -190,6 +190,7 @@ smoke:
       tests/unit/services/test_index_git_seam.py
       tests/unit/global_repos/test_refresh_git_seam_mountless.py
       tests/unit/global_repos/test_reclone_mountless.py
+      tests/unit/global_repos/test_trigram_mountless.py
       tests/unit/server/startup/test_ripgrep_backend_wiring.py
       tests/unit/server/startup/test_ripgrep_backend_parked_on_app_state.py
       tests/unit/indexing/test_content_prefetcher.py

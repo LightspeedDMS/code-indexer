@@ -400,10 +400,22 @@ def _build_source_trigram_index(alias_name: str, source_path: str) -> None:
             TrigramIndexManager,
             remove_leftover_build_files,
             trigram_index_dir,
+            trigram_prefilter_available,
         )
 
         tri_source_path = Path(source_path)
         tri_dir = trigram_index_dir(tri_source_path)
+        if not trigram_prefilter_available():
+            # Delegated content: the files are not on this disk, so a build
+            # would publish an empty index. Remove one an earlier build left,
+            # and let regex search full-scan.
+            if tri_dir.exists():
+                shutil.rmtree(tri_dir)
+            logger.info(
+                f"Trigram index skipped for {alias_name}: repository is not on "
+                "this pod (regex search will full-scan)"
+            )
+            return
         remove_leftover_build_files(tri_dir)
         tri_files = TrigramIndexManager(tri_dir).build(tri_source_path)
         logger.info(f"Trigram index built for {alias_name} ({tri_files} files)")

@@ -199,6 +199,30 @@ _COMMIT_EVERY_FILES = 2000
 _STALE_BUILD_FILE_AGE_SECONDS = 6 * 60 * 60
 
 
+def trigram_prefilter_available() -> bool:
+    """Whether a trigram index can be built and trusted on this server.
+
+    The index is built by listing (``rg --files``) and reading every file on
+    THIS disk. Under a delegated content backend the repository is not here:
+    the listing is empty, so every refresh and every lazy self-heal rebuilds an
+    empty index for nothing (an empty one reads as absent), and an index built
+    while the files WERE here would still be consulted, steering searches at
+    paths this pod cannot read. So there the pre-filter does not exist: nothing
+    builds it and nothing consults it (regex search full-scans). False also
+    when the setting cannot be read -- a missing pre-filter costs time, a
+    wrong one costs results.
+    """
+    try:
+        from code_indexer.server.startup.content_backend_wiring import (
+            configured_content_backend_name,
+        )
+
+        return configured_content_backend_name() != "delegated"
+    except Exception as exc:  # the server config, whatever its state
+        logger.warning("trigram pre-filter disabled: content backend unknown (%s)", exc)
+        return False
+
+
 def trigram_index_dir(repo_path: Path) -> Path:
     """Return the trigram index directory of the repository at ``repo_path``."""
     return index_root(repo_path) / "trigram_index"
