@@ -43,10 +43,21 @@ hundreds of repositories.
 
 Threads do not substitute: the same per-file work across eight of them was still
 slower than batching on one, at twice the memory.
+
+Why the request is bounded too
+------------------------------
+The request is a JSON body, ``{"source_path": ..., "paths": [...]}``, and
+workspace-mcp refuses a body over 100 KB (Nest's default JSON limit) with a 413.
+A file COUNT does not bound that: 1000 paths of 85 bytes -- an ordinary depth
+for a TypeScript monorepo -- is 87 KB of paths alone, and measured against the
+server a batch like that from agent-e2e came back 413, failing every file in
+it. So a batch is also capped by the encoded size of its paths, counted exactly
+as the plugin serialises them.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Callable, Iterator, List, Optional, Sequence
 
 #: Bytes per fetch request. Chosen from the measurements above: large enough
@@ -60,6 +71,21 @@ DEFAULT_FETCH_BUDGET_BYTES = 8 * 1024 * 1024
 #: typical 40-byte path this keeps the request itself under ~40 KB.
 DEFAULT_FETCH_BUDGET_FILES = 1000
 
+#: Encoded bytes of the ``paths`` array per fetch request. workspace-mcp's body
+#: limit is 100 KB; this leaves room for the envelope and ``source_path`` (at
+#: most PATH_MAX), so no batch the planner forms can be refused for its size.
+DEFAULT_FETCH_BUDGET_REQUEST_BYTES = 64 * 1024
+
+
+def encoded_path_cost(path: str) -> int:
+    """Bytes ``path`` adds to the request body, exactly as the plugin encodes it.
+
+    ``json.dumps`` with its defaults (quotes, escapes, ``ensure_ascii``) plus
+    the ``", "`` separator -- so a path of non-ASCII names or quotes is charged
+    for its escaped length, not its character count.
+    """
+    return len(json.dumps(path)) + 2
+
 
 def plan_fetch_batches(
     paths: Sequence[str],
@@ -67,6 +93,7 @@ def plan_fetch_batches(
     *,
     budget_bytes: int = DEFAULT_FETCH_BUDGET_BYTES,
     budget_files: int = DEFAULT_FETCH_BUDGET_FILES,
+    budget_request_bytes: int = DEFAULT_FETCH_BUDGET_REQUEST_BYTES,
 ) -> Iterator[List[str]]:
     """Yield the requested paths grouped into batches, in order.
 
@@ -76,6 +103,8 @@ def plan_fetch_batches(
             manifest's ``size`` is exactly this.
         budget_bytes: ceiling on the summed size of one batch.
         budget_files: ceiling on the number of paths in one batch.
+        budget_request_bytes: ceiling on the encoded size of one batch's paths
+            in the request body (see :func:`encoded_path_cost`).
 
     A file whose own size exceeds the budget ends up ALONE rather than dropped
     or refused: the point is to bound a batch, not to decide what is indexable,
@@ -95,9 +124,14 @@ def plan_fetch_batches(
         raise ValueError(f"budget_bytes must be positive, got {budget_bytes}")
     if budget_files <= 0:
         raise ValueError(f"budget_files must be positive, got {budget_files}")
+    if budget_request_bytes <= 0:
+        raise ValueError(
+            f"budget_request_bytes must be positive, got {budget_request_bytes}"
+        )
 
     batch: List[str] = []
     used = 0
+    request = 0
 
     for path in paths:
         size = size_of(path)
@@ -116,16 +150,22 @@ def plan_fetch_batches(
         if size is None:
             if batch:
                 yield batch
-                batch, used = [], 0
+                batch, used, request = [], 0, 0
             yield [path]
             continue
 
-        if batch and (used + size > budget_bytes or len(batch) >= budget_files):
+        cost = encoded_path_cost(path)
+        if batch and (
+            used + size > budget_bytes
+            or len(batch) >= budget_files
+            or request + cost > budget_request_bytes
+        ):
             yield batch
-            batch, used = [], 0
+            batch, used, request = [], 0, 0
 
         batch.append(path)
         used += size
+        request += cost
 
     if batch:
         yield batch
