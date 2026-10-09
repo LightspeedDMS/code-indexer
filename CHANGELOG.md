@@ -5,11 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [12.84.0] - 2026-10-08
+
+### Upgrade notes
+
+- Full-text indexes built before this version are rebuilt once from disk on their next normal indexing run or server refresh (no embedding calls). If you roll back below this version and later upgrade again, run `cidx index --rebuild-fts-index` on each project, or let the next refresh rebuild it.
+
+### Added
+
+- Each server worker runs a stall watchdog. When a worker stops responding, its stack dump and bounded heartbeat evidence (thread table, memory, swap and I/O pressure, NFS mounts) are combined into `logs/worker-stall-<pid>-<UTC>.log`, either by the surviving worker or by its replacement at startup. Disk use is bounded, and a watchdog that cannot start never blocks server startup or shutdown.
+- The CLI reference, the MCP tool reference and the error-code reference are generated from code, and lint fails on a reference to a documentation path that does not exist.
 
 ### Fixed
 
+- REST and MCP git push share one implementation. A successful REST push no longer answers 500, and `set_upstream` works for new branches. Push, pull, fetch and the scheduled repository refresh supply a registered credential only at run time, through a credential helper scoped to the host of the remote's effective URL, over https only, and never on the command line, in configuration or in a file. Stored remote URLs are made credential-free first, and an operation stops if that fails. Git output and errors never contain the supplied credential in any encoding. Local git lookups before a network operation are time-bounded.
+- Repository URLs are shown with their credentials masked on every REST, MCP and Web response, error message, log line, stored job record and cidx-meta description. Server-managed clones store their remote URL without credentials; existing clones are rewritten on their next operation. Credential fields containing a line break or NUL are refused. Git remote URLs are parsed by one shared parser.
+- Content inside a `.git` directory, including content reached through a symlink, is never read, listed, searched, X-Rayed, rendered by the wiki or indexed; such a path is answered exactly like a missing file.
+- Access logs mask query parameters whose names identify secrets. Every server log handler redacts messages, arguments, tracebacks and extra fields, including URL credentials, private keys and JWTs, and withholds a record entirely when redaction fails. Spans and log records are redacted at the telemetry exporter. Langfuse uses its own tracer provider and masks exported payloads. Redaction runs in linear time on large inputs.
+- Server start-up creates the initial administrator only when the user store holds no accounts and no legacy `users.json` import is pending, in one atomic step on SQLite and PostgreSQL. The installer no longer creates accounts.
+- Git reset, clean and branch delete confirmation tokens are stored in the shared payload cache, bound to user, repository, operation and parameters, valid for 300 seconds and usable once, so they work across workers and nodes. REST accepts them in the `X-Confirmation-Token` header, and branch names containing a slash can be deleted.
+- Mutating git operations (stage, unstage, commit, amend, merge, merge abort, mark resolved, reset, clean, checkout file, branch create, switch and delete, stash and push) are refused on a global repository's immutable versioned snapshot; activate the repository to change it. Cleaning untracked files keeps the repository's index directory, and the pre-refresh local-changes check ignores only untracked index files, so a tracked change is still reset.
+- A remote git operation on an activated repository with no clone on disk answers not found (REST 404, MCP `success=false`) instead of an internal error.
+- Search failures are reported, not returned as empty results. REST `/api/query` answers a timeout with 504 and a failure with 500; MCP `search_code`, omni search, REST `/api/query/multi` and the Web query page report them as errors; `cidx query` exits non-zero, including in daemon mode. One rule decides which errors are client errors: those keep their message, and every other failure returns a fixed message with a correlation id and is logged as an ERROR. An unavailable access-filtering service keeps its fixed message and is logged as an internal failure. Multi-repository searches report a timeout as a timeout and every other failure as a failure.
+- A parallel multi-provider search fills requests for more than 40 results: each provider fetches at least the requested number.
+- The full-text index stays consistent with the indexed content. Every writer (normal indexing, bootstrap, `--rebuild-fts-index`, the daemon rebuild and `cidx watch`) replaces a changed file's documents with all of its current chunks, including reused chunks. The index is marked complete only when a run settles with every file indexed, so a run that is killed, cancelled or fails, or a watch failure, leaves it to be rebuilt by the next run.
+- The CLI copies daemon results before closing the connection, so `cidx watch` and other daemon commands no longer lose their result or leave the daemon unreachable. A stale daemon socket is removed only after a probe shows no daemon answers on it.
+- `.code-indexer/error_*.log` is created only when an error is written. Errors for a project inside a versioned snapshot are logged to the server log directory instead.
+- "Reset to Defaults" resets runtime tunables only and keeps bootstrap and launch settings, stored credentials, security controls and deployment identity.
+- The group tool-grant routes report whether per-group MCP tool grants are enforced, and writing a grant that is not enforced logs a warning.
+- The CI/CD MCP tools resolve repository access, grants and tokens in a worker thread, off the event loop. An empty GitLab base URL means gitlab.com.
+- Bulk provider-index add accepts only `category:<name>` filters and refuses the request when the category service is unavailable.
+- Server shutdown detaches the async logging queue on every exit, stays bounded and off the event loop, and finishes before honouring a cancellation.
+- The auto-updater runs its git commands non-interactively, and after a deploy that changed the auto-updater itself, it removes its pending-redeploy marker only after the server restarted successfully.
+- The installer verifies the started server with the unauthenticated `/healthz` endpoint.
+- A new chunk store creates its schema in one transaction.
 - `file_extensions` follows one rule in semantic, FTS and hybrid search on every door: REST `/api/query`, MCP `search_code` (single repository and omni), REST `/api/query/multi`, and the CLI in standalone and daemon mode. Values are case-insensitive, the leading dot is optional, several values are OR-ed (the CLI used to AND them), files without an extension never match, and the filter is intersected with `language`. A non-list, an empty value, or a value containing `.` or `/` is rejected (HTTP 422, MCP error, CLI usage error). FTS pushes the values into the existing index field (no re-index); semantic search filters inside the vector store in one query per repository over the first 400 candidates. An extension-filtered request uses 80% of the search handler timeout as its budget: no further repository search starts after it, and a short answer is never wrong and is logged at INFO. Any filtered semantic search (`language`, path, exclude-path or `file_extensions`) on the server, the standalone CLI and the CLI daemon searches the same first 400 candidates (or twice the requested store limit, if larger) and returns up to `limit` matches, so a selective filter no longer comes back empty while matches exist; unfiltered searches are unchanged. REST `/api/query` semantic search now applies `language` (it was ignored); REST FTS now splits `exclude_path` on commas into independent patterns (as in Bug #1095); FTS `language` combined with `exclude_language` now intersects (the `language` inclusion used to be dropped); and REST `/api/query/multi` enforces the same repository-count cap as MCP omni search (`omni_max_repos_per_search`, HTTP 422 `repo_count_cap_exceeded`).
+
+### Documentation
+
+- The documentation is reorganised into audience folders and rewritten: getting started, query, temporal, SCIP and meta-repository guides, server operator guides (deployment, upgrades, cluster, storage, auth, accounts, administration, settings reference, SIEM), remote CLI, forge and write tools, embedding providers and REST API guides, the architecture set with split invariants, and corrected MCP tool documents. Examples use neutral sample data.
 
 ## [12.83.0] - 2026-10-06
 
