@@ -21,12 +21,15 @@ import secrets
 import hashlib
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional
+from typing import TYPE_CHECKING, Dict, Any, Optional
 from dataclasses import dataclass
 import threading
 from pathlib import Path
 
 from .jwt_manager import JWTManager
+
+if TYPE_CHECKING:
+    from .user_manager import UserManager
 from .audit_logger import password_audit_logger
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -337,7 +340,11 @@ class RefreshTokenManager:
             }
 
     def validate_and_rotate_refresh_token(
-        self, refresh_token: str, client_ip: str = "unknown", user_manager=None
+        self,
+        refresh_token: str,
+        client_ip: str = "unknown",
+        *,
+        user_manager: "UserManager",
     ) -> Dict[str, Any]:
         """
         Validate refresh token and create new token pair.
@@ -347,11 +354,13 @@ class RefreshTokenManager:
         - Prevents concurrent refresh attempts
         - Rotates tokens for security
         - Revokes family on suspicious activity
+        - Mints access only for an account that still exists, with its
+          current role; otherwise the family is revoked and nothing is minted
 
         Args:
             refresh_token: Refresh token to validate and rotate
             client_ip: Client IP for audit logging
-            user_manager: Optional user manager for retrieving current user role
+            user_manager: User manager resolving the token's account and role
 
         Returns:
             Dictionary with validation result and new tokens (if valid)
@@ -602,32 +611,28 @@ class RefreshTokenManager:
             username = result_holder["username"]
 
         # User lookup and JWT creation happen OUTSIDE the lock - no shared state.
-        if user_manager:
-            # Retrieve actual user role from user manager
-            try:
-                user = user_manager.get_user(username)
-                user_role = (
-                    user.role.value if hasattr(user.role, "value") else str(user.role)
-                )
-                user_data = {
-                    "username": username,
-                    "role": user_role,
-                }
-            except Exception:
-                # Fallback if user lookup fails
-                user_data = {
-                    "username": username,
-                    "role": "normal_user",
-                }
-        else:
-            # Fallback for backwards compatibility
-            user_data = {
-                "username": username,
-                "role": "normal_user",
-            }
+        # The account must still exist: a token family outliving its account
+        # is revoked and mints nothing.  Lookup errors propagate (fail closed).
+        user = user_manager.get_user(username)
+        if user is None:
+            self.revoke_token_family(family_id, reason="account_missing")
+            return {"valid": False, "error": "Account no longer exists"}
+        # The family began at sign-in: a family older than the account (one
+        # that outlived an earlier account with this name) mints nothing, and
+        # the access token keeps that sign-in instant as its auth_time.
+        from code_indexer.server.auth.dependencies import credential_predates_account
+
+        signed_in = self._family_signed_in_at(family_id)
+        if credential_predates_account(signed_in, user):
+            self.revoke_token_family(family_id, reason="account_recreated")
+            return {"valid": False, "error": "Account no longer exists"}
+        user_role = user.role.value if hasattr(user.role, "value") else str(user.role)
+        user_data = {"username": username, "role": user_role}
 
         # Create new access token outside the lock
-        new_access_token = self.jwt_manager.create_token(user_data)
+        new_access_token = self.jwt_manager.create_token(
+            {**user_data, "auth_time": signed_in}
+        )
 
         return {
             "valid": True,
@@ -638,6 +643,27 @@ class RefreshTokenManager:
             "token_id": new_token_id,
             "parent_token_id": token_id,
         }
+
+    def _family_signed_in_at(self, family_id: str) -> Optional[float]:
+        """Epoch seconds at which the token family (the sign-in) began."""
+        if self._backend:
+            record = self._backend.get_token_family(family_id)
+            created = record.get("created_at") if record else None
+        else:
+            row = (
+                self._conn_manager.get_connection()  # type: ignore[union-attr]
+                .execute(
+                    "SELECT created_at FROM token_families WHERE family_id = ?",
+                    (family_id,),
+                )
+                .fetchone()
+            )
+            created = row[0] if row else None
+        if created is None:
+            return None
+        if isinstance(created, datetime):
+            return created.timestamp()
+        return datetime.fromisoformat(str(created)).timestamp()
 
     def _handle_replay_attack(self, family_id: str, username: str, client_ip: str):
         """

@@ -427,9 +427,16 @@ class TestManageGroupMembersDispatcher:
         assert content["success"] is False
 
     def test_add_action_routes_through_elevation(
-        self, admin_user, group_manager, tmp_path
+        self, admin_user, group_manager, tmp_path, monkeypatch
     ):
         """add action reaches inner handler which requires elevation."""
+        from code_indexer.server.auth import dependencies
+        from code_indexer.server.auth.user_manager import UserManager
+
+        # Memberships are written only for accounts in the server's store.
+        accounts = UserManager(users_file_path=str(tmp_path / "users.json"))
+        accounts.create_user("test_user", "Example-Passw0rd!x", UserRole.NORMAL_USER)
+        monkeypatch.setattr(dependencies, "user_manager", accounts)
         with (
             patch(
                 "code_indexer.server.mcp.handlers.admin._get_group_manager",

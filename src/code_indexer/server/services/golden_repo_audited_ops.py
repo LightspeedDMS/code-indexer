@@ -20,38 +20,25 @@ no row, so no per-repository audit work happens at fleet scale.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, Dict, List, Optional, Tuple, cast
-from urllib.parse import urlsplit
 
 from code_indexer.server.services.audit_outcome import (
     AuditActor,
     conforming_details,
     record_outcome,
 )
+from code_indexer.utils.git_remote_url import parse_git_remote_url
 
 logger = logging.getLogger(__name__)
 
-_URL_SCHEMES_WITH_HOST = frozenset({"http", "https", "ssh", "git", "git+ssh"})
-# scp-like ``user@host:path`` (no scheme): the host sits between "@" and ":".
-_SCP_LIKE = re.compile(r"^[^@/\s]+@([^:/\s]+):")
-
 
 def repo_host(repo_url: object) -> Optional[str]:
-    """The host name of a clone URL, or None; never the URL or its userinfo."""
-    if not isinstance(repo_url, str) or not repo_url:
+    """The host name of a clone URL, lower-cased, or None; never the URL,
+    its port or its userinfo."""
+    if not isinstance(repo_url, str):
         return None
-    scp = _SCP_LIKE.match(repo_url)
-    if scp is not None and "://" not in repo_url:
-        return scp.group(1).lower()
-    try:
-        parts = urlsplit(repo_url)
-        host = parts.hostname
-    except ValueError:
-        return None
-    if parts.scheme.lower() not in _URL_SCHEMES_WITH_HOST or not host:
-        return None
-    return host.lower()
+    parsed = parse_git_remote_url(repo_url)
+    return parsed.host.lower() if parsed is not None else None
 
 
 def record_repo_outcome(
@@ -142,6 +129,8 @@ REPO_NOT_FOUND = "repo_not_found"
 BASE_CLONE_UNRESOLVED = "base_clone_unresolved"
 CONFIG_WRITE_FAILED = "config_write_failed"
 JOB_MANAGER_UNAVAILABLE = "job_manager_unavailable"
+INVALID_FILTER = "invalid_filter"
+CATEGORIES_UNAVAILABLE = "categories_unavailable"
 
 _PROVIDER_JOB_ACTIONS = {
     "add": "provider_index_added",
@@ -288,13 +277,72 @@ def remove_provider_index_audited(
     return result
 
 
+_CATEGORY_FILTER_PREFIX = "category:"
+
+
+def parse_bulk_add_filter(filter_str: Any) -> Optional[str]:
+    """The category name a bulk-add *filter_str* selects, or None for no filter.
+
+    The ONLY supported filter is ``category:<name>`` (Bug #2038).  The
+    ``category:`` prefix is case-insensitive; ``<name>`` must be non-blank
+    and is matched EXACTLY, case-sensitively: category names are stored as
+    UNIQUE case-sensitive TEXT (``Backend`` and ``backend`` may coexist) and
+    ``list_repositories`` filters by exact name the same way.  Anything else
+    raises ``INVALID_FILTER``, so an unsupported filter can never widen the
+    operation to every repository.  None or "" means no filter.
+    """
+    if filter_str is None or filter_str == "":
+        return None
+    prefix = _CATEGORY_FILTER_PREFIX
+    if not isinstance(filter_str, str) or filter_str[: len(prefix)].lower() != prefix:
+        raise ProviderIndexRequestError(
+            INVALID_FILTER,
+            f"Unsupported filter {filter_str!r}: the only supported filter is "
+            "'category:<name>'",
+        )
+    name = filter_str[len(prefix) :]
+    if not name.strip():
+        raise ProviderIndexRequestError(
+            INVALID_FILTER,
+            "Invalid filter: the category name after 'category:' is empty",
+        )
+    return name
+
+
+def _repo_category_names() -> Dict[str, Optional[str]]:
+    """Golden alias -> category name from the server's RepoCategoryService.
+
+    Raises ``CATEGORIES_UNAVAILABLE`` when the service is not wired or its
+    lookup raises (logged at WARNING by exception type only), rather than
+    silently treating every repository as uncategorized.
+    """
+    from code_indexer.server.mcp.handlers._utils import _lazy_module_attr_or_none
+
+    manager = _lazy_module_attr_or_none("golden_repo_manager")
+    if manager is None:
+        raise ProviderIndexRequestError(CATEGORIES_UNAVAILABLE)
+    category_service = getattr(manager, "_repo_category_service", None)
+    if category_service is None:
+        raise ProviderIndexRequestError(CATEGORIES_UNAVAILABLE)
+    try:
+        category_map = category_service.get_repo_category_map()
+    except Exception as exc:
+        logger.warning(
+            "bulk provider-index add: repository category lookup failed (%s)",
+            type(exc).__name__,
+        )
+        raise ProviderIndexRequestError(CATEGORIES_UNAVAILABLE) from exc
+    return {alias: info.get("category_name") for alias, info in category_map.items()}
+
+
 def prepare_bulk_add_jobs(
     global_repos: List[Dict[str, Any]],
-    filter_str: Optional[str],
+    category: Optional[str],
     provider: str,
     service: Any,
 ) -> Tuple[List[Dict[str, str]], List[str]]:
-    """Per-repo preparation for a bulk add: resolve each repo's paths, skip
+    """Per-repo preparation for a bulk add: keep only repos whose category
+    is exactly *category* (when given), resolve each repo's paths, skip
     repos that already have *provider*, and write *provider* into each base
     clone's config.
 
@@ -307,14 +355,17 @@ def prepare_bulk_add_jobs(
         _resolve_golden_repo_path,
     )
 
+    category_names = _repo_category_names() if category is not None else {}
     to_submit: List[Dict[str, str]] = []
     skipped: List[str] = []
     for repo in global_repos:
         alias = repo.get("alias_name", "")
-        if filter_str and filter_str.startswith("category:"):
-            filter_cat = filter_str.split(":", 1)[1]
-            if filter_cat.lower() not in repo.get("category", "").lower():
-                continue
+        # A global repo's repo_name is its golden alias (the category key).
+        if (
+            category is not None
+            and category_names.get(repo.get("repo_name", "")) != category
+        ):
+            continue
         repo_path = _resolve_golden_repo_path(alias)
         if not repo_path:
             continue
@@ -367,8 +418,9 @@ def bulk_add_provider_index_audited(
             raise ProviderIndexRequestError(INVALID_PROVIDER, error)
         if job_manager is None:
             raise ProviderIndexRequestError(JOB_MANAGER_UNAVAILABLE)
+        category = parse_bulk_add_filter(filter_str)
         to_submit, skipped = prepare_bulk_add_jobs(
-            _list_global_repos(), filter_str, provider, service
+            _list_global_repos(), category, provider, service
         )
         for item in to_submit:
             job_id = job_manager.submit_job(

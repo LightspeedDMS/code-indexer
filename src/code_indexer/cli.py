@@ -21,7 +21,6 @@ from typing import (
     List,
     Literal,
     cast,
-    TYPE_CHECKING,
 )
 
 import click
@@ -32,12 +31,6 @@ from rich.table import Table
 # Rich progress imports removed - using MultiThreadedProgressManager instead
 
 from .config import ConfigManager, Config, ConfigCorruptionError
-
-# CRITICAL: TYPE_CHECKING-only import -- Tantivy must NOT load eagerly at
-# CLI-startup import time (see the "Tantivy lazy import" perf rule).
-# TYPE_CHECKING imports are erased at runtime (mypy-only), so this is safe.
-if TYPE_CHECKING:
-    from .services.tantivy_index_manager import TantivyIndexManager
 from .services.temporal.temporal_migration import migrate_legacy_temporal_collection
 from .disabled_commands import get_command_mode_icons
 from .utils.enhanced_messaging import (
@@ -218,26 +211,36 @@ _RERANK_OVERFETCH_MULTIPLIER = 4
 def _parse_file_extensions(raw: Optional[str]) -> List[str]:
     """Parse --file-extensions CLI flag into a normalized list (Story #906).
 
-    Comma-separated input. Each token is whitespace-stripped, then any leading
-    dots are stripped (so '.py' and 'py' are equivalent). Tokens that are empty
-    after BOTH normalization steps are skipped (handles inputs like '.' or
-    '.,py' that would otherwise produce empty entries). Returns [] when input
-    is None, empty, or whitespace-only.
+    Comma-separated input; EVERY token goes through the shared #2047 rule
+    (services/extension_filter.normalize_extension): stripped,
+    lowercased, one leading dot dropped. A blank token, or one that can never
+    be a file suffix, raises the same ValueError every other door raises --
+    nothing is silently dropped. Returns [] (no filter) when the flag is
+    absent or its whole value is empty, as the --file-extensions help states.
 
     Examples:
       _parse_file_extensions(None)           == []
       _parse_file_extensions("")             == []
       _parse_file_extensions("py")           == ["py"]
-      _parse_file_extensions("py,js")        == ["py", "js"]
-      _parse_file_extensions(".py,.js")      == ["py", "js"]
+      _parse_file_extensions(".py,.JS")      == ["py", "js"]
       _parse_file_extensions("py, js, ts")   == ["py", "js", "ts"]
-      _parse_file_extensions(".")            == []
-      _parse_file_extensions(".,py")         == ["py"]
+      _parse_file_extensions("py, ")         -> ValueError (blank token)
     """
-    if not raw:
+    from .services.extension_filter import normalize_extension
+
+    if raw is None or not raw.strip():
         return []
-    normalized = (ext.strip().lstrip(".") for ext in raw.split(","))
-    return [ext for ext in normalized if ext]
+    return [normalize_extension(token) for token in raw.split(",")]
+
+
+def _file_extension_condition(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    """--file-extensions as ONE vector-store condition (#2047), built by the
+    builder the server and daemon share: the store's ``any_ext`` operator on
+    the ``path`` payload, so several extensions are OR-ed and the condition
+    still intersects with --language inside ``must``. None if empty."""
+    from .services.extension_filter import vector_store_extension_condition
+
+    return vector_store_extension_condition(_parse_file_extensions(raw))
 
 
 def _log_skipped_provider_warning(provider_name: str) -> None:
@@ -1030,6 +1033,11 @@ def _display_semantic_results(
         except Exception:
             current_display_branch = "unknown"
 
+    from code_indexer.utils.content_availability import (
+        CONTENT_UNAVAILABLE_MARKER,
+        is_content_unavailable,
+    )
+
     for i, result in enumerate(results, 1):
         payload = result["payload"]
         score = result["score"]
@@ -1038,6 +1046,8 @@ def _display_semantic_results(
         file_path = payload.get("path", "unknown")
         language = payload.get("language", "unknown")
         content = payload.get("content", "")
+        # Bug #1991: content could not be read -- show a marker, never "".
+        unavailable = is_content_unavailable(result)
 
         # Staleness info (if available)
         staleness_info = result.get("staleness", {})
@@ -1064,7 +1074,9 @@ def _display_semantic_results(
                 )
             else:
                 console.print(f"{i}. {score:.3f} {file_path_with_lines}")
-            if content:
+            if unavailable:
+                console.print(f"  {CONTENT_UNAVAILABLE_MARKER}", markup=False)
+            elif content:
                 # Show full content with line numbers in quiet mode (no truncation)
                 content_lines = content.split("\n")
 
@@ -1135,7 +1147,11 @@ def _display_semantic_results(
             # Note: Fixed-size chunking no longer provides semantic metadata
 
             # Content display with line numbers (full chunk, no truncation)
-            if content:
+            if unavailable:
+                console.print("\n📖 Content:")
+                console.print("─" * 50)
+                console.print(f"  {CONTENT_UNAVAILABLE_MARKER}", markup=False)
+            elif content:
                 # Create content header with line range
                 if line_start is not None and line_end is not None:
                     if line_start == line_end:
@@ -1410,16 +1426,12 @@ def _execute_semantic_search(
                         {"key": "path", "match": {"text": path_filter[0]}}
                     )
 
-            # Story #906: --file-extensions wiring into filter_conditions_list.
-            # The "language" field IS cidx's file-extension field (test helper
-            # _must_extension_conditions matches c.get("key") == "language").
-            # Multiple extensions appended as DIRECT must-entries (cidx
-            # vector_store OR-merges multiple direct entries with same key).
-            # Composes with --language as INTERSECTION.
-            for ext in _parse_file_extensions(file_extensions):
-                filter_conditions_list.append(
-                    {"key": "language", "match": {"value": ext}}
-                )
+            # Story #906 / #2047: --file-extensions is ONE any_ext condition
+            # on the "path" payload (shared builder, values OR-ed); inside
+            # `must` it composes with --language as INTERSECTION.
+            extension_condition = _file_extension_condition(file_extensions)
+            if extension_condition is not None:
+                filter_conditions_list.append(extension_condition)
 
             # Build filter conditions preserving both must and must_not conditions
             query_filter_conditions = (
@@ -1434,6 +1446,7 @@ def _execute_semantic_search(
                 query_text=query,
                 limit=limit * 2,
                 collection_name=collection_name,
+                # #2047: the service applies the filtered window.
                 filter_conditions=query_filter_conditions,
             )
 
@@ -1462,6 +1475,7 @@ def _execute_semantic_search(
                 query_text=query,
                 limit=limit * 2,
                 collection_name=collection_name,
+                # #2047: the service applies the filtered window.
                 filter_conditions=filter_conditions if filter_conditions else None,
             )
 
@@ -1546,11 +1560,11 @@ def _execute_semantic_search(
         return results
 
     except Exception as e:
-        if not quiet:
-            console.print(f"[yellow]⚠️  Semantic search failed: {e}[/yellow]")
+        # #2109: a failed search is reported by the caller, never returned
+        # as an empty result.
         logger = logging.getLogger(__name__)
         logger.error(f"Semantic search error: {e}", exc_info=True)
-        return []
+        raise
 
 
 def _display_hybrid_results(
@@ -2139,8 +2153,8 @@ def init(
 
     \b
     INITIALIZATION MODES:
-      🏠 Local Mode (default): Creates local configuration with VoyageAI embeddings
-      ☁️  Remote Mode: Connects to existing CIDX server (--remote option)
+      • Local Mode (default): Creates local configuration with VoyageAI embeddings
+      • Remote Mode: Connects to existing CIDX server (--remote option)
 
     \b
     CONFIGURATION OPTIONS:
@@ -3269,8 +3283,8 @@ def index(
       • Processing speed and time estimates
       • Error reporting for failed files
       • Throttling status indicators (VoyageAI only):
-        ⚡ Full speed - no throttling detected
-        🔴 Server throttling - API rate limits detected, backing off automatically
+        - Full speed: no throttling detected
+        - Server throttling: API rate limits detected, backing off automatically
 
     \b
     SMART INDEXING:
@@ -4298,7 +4312,9 @@ def index(
                 sys.exit(1)
 
             # Lazy import FTS components
-            from .services.tantivy_index_manager import TantivyIndexManager
+            from .services.fts_lifecycle import (
+                rebuild_fts_index as rebuild_fts_index_from_disk,
+            )
             from .indexing.file_finder import FileFinder
 
             console.print("🔍 Discovering files...")
@@ -4319,21 +4335,9 @@ def index(
             console.print("🔧 Rebuilding FTS index...")
             console.print(f"📄 Found {len(discovered_files)} files")
 
-            # Initialize Tantivy manager
-            fts_index_dir = config.codebase_dir / ".code-indexer" / "tantivy_index"
-            tantivy_manager = TantivyIndexManager(fts_index_dir)
-
-            # Clear and recreate FTS index
-            import shutil
-
-            if fts_index_dir.exists():
-                console.print("🧹 Clearing existing FTS index...")
-                shutil.rmtree(fts_index_dir)
-
-            tantivy_manager.initialize_index(create_new=True)
-            console.print("✅ FTS index initialized")
-
-            # Re-index all completed files to FTS
+            # Bug #2056: THE one rebuild (fts_lifecycle) -- under the repo
+            # indexing lock, normal indexing's chunk-level documents, marked
+            # content-current only when every file was indexed.
             from rich.progress import (
                 Progress,
                 BarColumn,
@@ -4352,57 +4356,28 @@ def index(
                     "Rebuilding FTS index...", total=len(discovered_files)
                 )
 
-                indexed_count = 0
-                failed_count = 0
-
-                for file_path in discovered_files:
-                    try:
-                        # Read file content (file_path is already a Path object from FileFinder)
-                        if not file_path.exists():
-                            failed_count += 1
-                            progress.advance(task)
-                            continue
-
-                        with open(
-                            file_path, "r", encoding="utf-8", errors="ignore"
-                        ) as f:
-                            content = f.read()
-
-                        # Detect language from file extension
-                        extension = file_path.suffix.lstrip(".")
-                        language = extension if extension else "unknown"
-
-                        # Create FTS document
-                        doc = {
-                            "path": str(file_path),
-                            "content": content,
-                            "content_raw": content,
-                            "identifiers": [],  # Empty for now
-                            "line_start": 1,
-                            "line_end": len(content.splitlines()),
-                            "language": language,
-                        }
-
-                        # Add to FTS index
-                        tantivy_manager.add_document(doc)
-                        indexed_count += 1
-
-                    except Exception as e:
-                        failed_count += 1
+                def _on_file(file_path: Path, error: Optional[str]) -> None:
+                    if error is not None:
                         console.print(
-                            f"⚠️  Failed to index {file_path}: {e}", style="yellow"
+                            f"⚠️  Failed to index {file_path}: {error}", style="yellow"
                         )
-
                     progress.advance(task)
 
-                # Commit all documents
-                tantivy_manager.commit()
+                fts_rebuild_result = rebuild_fts_index_from_disk(
+                    config, discovered_files, _on_file
+                )
+
+            # Files missing from FTS (fts_lifecycle's per-file rule): the
+            # rebuild succeeded but stays unmarked; it raised (exit 1 below)
+            # when it could index no file at all.
+            if fts_rebuild_result.missing_message:
+                console.print(
+                    f"⚠️  {fts_rebuild_result.missing_message}", style="yellow"
+                )
 
             # Show completion summary
             console.print("\n✅ FTS index rebuilt successfully")
-            console.print(f"📄 Files indexed: {indexed_count}")
-            if failed_count > 0:
-                console.print(f"⚠️  Failed files: {failed_count}", style="yellow")
+            console.print(f"📄 Files indexed: {fts_rebuild_result.indexed_files}")
 
             sys.exit(0)
 
@@ -5003,66 +4978,6 @@ def index(
         _index_mutation_lock_ctx.__exit__(None, None, None)
 
 
-def _populate_fts_index_from_disk(
-    config: Config,
-    fts_manager: "TantivyIndexManager",
-    console: Optional[Console] = None,
-) -> int:
-    """Bug #1763 (CRITICAL-2, code review): fully repopulate an FTS index
-    from every file currently on disk.
-
-    Used by `cidx watch`'s FTS handler initialization when a stale-schema
-    or brand-new Tantivy index was just wiped/created empty (see the
-    fts_needs_full_population check in watch() below). This watch-mode
-    entry point does not always run through smart_index() first (e.g.
-    semantic indexing disabled, or this is not the initial sync), so it
-    cannot rely on SmartIndexer._populate_fts_from_all_files() having
-    already repopulated the index -- this mirrors that method's discover
-    + add_document approach as a standalone helper since no SmartIndexer
-    instance is guaranteed to exist here.
-
-    Args:
-        config: Loaded Config instance (codebase_dir + file discovery
-            rules).
-        fts_manager: An initialized TantivyIndexManager (writer already
-            created via initialize_index()).
-        console: Optional Rich console for a completion message.
-
-    Returns:
-        Number of files successfully added to the FTS index.
-    """
-    from .indexing.file_finder import FileFinder
-
-    file_finder = FileFinder(config)
-    discovered_files = list(file_finder.find_files())
-    codebase = Path(config.codebase_dir)
-    count = 0
-    for file_path in discovered_files:
-        try:
-            text = file_path.read_text(encoding="utf-8", errors="replace")
-            lines = text.splitlines()
-            rel_path = str(file_path.relative_to(codebase))
-            language = file_path.suffix.lstrip(".") or "txt"
-            fts_manager.add_document(
-                {
-                    "path": rel_path,
-                    "content": text,
-                    "content_raw": text,
-                    "identifiers": text.split(),
-                    "line_start": 1,
-                    "line_end": max(len(lines), 1),
-                    "language": language,
-                }
-            )
-            count += 1
-        except Exception as e:
-            logger.warning(f"FTS: skipping {file_path}: {e}")
-    fts_manager.commit()
-    if console is not None:
-        console.print(f"✅ FTS index repopulated from {count} files", style="green")
-    return count
-
-
 @cli.command()
 @click.option(
     "--debounce", default=2.0, help="Seconds to wait before processing changes"
@@ -5128,7 +5043,7 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
     # Auto-detect existing indexes
     from .cli_watch_helpers import detect_existing_indexes
 
-    available_indexes = detect_existing_indexes(project_root)
+    available_indexes = detect_existing_indexes(project_root, config_manager.load())
     detected_count = sum(available_indexes.values())
 
     if detected_count == 0:
@@ -5289,71 +5204,24 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
         if available_indexes["fts"] or fts:
             # Lazy import FTS components
             from .services.fts_watch_handler import FTSWatchHandler
-            from .services.tantivy_index_manager import TantivyIndexManager
+            from .services.fts_lifecycle import open_fts_index_for_watch
 
-            fts_index_dir = config.codebase_dir / ".code-indexer" / "tantivy_index"
-            tantivy_manager = TantivyIndexManager(fts_index_dir)
-
-            # Initialize or open existing index. Bug #1763: an existing
-            # index built before Bug #1761 introduced _PATH_EXACT_FIELD
-            # lacks that field forever unless forced through a one-time
-            # rebuild -- self-heal it here too, same as smart_indexer.py.
-            fts_index_exists = (fts_index_dir / "meta.json").exists()
-            fts_schema_stale = (
-                fts_index_exists and tantivy_manager.schema_needs_rebuild()
-            )
-            # CRITICAL-2 (#1763 code review): this init runs independently
-            # of smart_index()'s own initial-sync FTS bootstrap -- e.g.
-            # when semantic indexing is disabled, or this is not the
-            # initial sync -- so it cannot assume that path already
-            # repopulated a wiped/brand-new index. Track whether a full
-            # from-disk repopulation is needed here too.
-            fts_needs_full_population = fts_schema_stale or not fts_index_exists
-            if fts_schema_stale:
-                logger.warning(
-                    f"FTS index at {fts_index_dir} has a stale pre-#1761 "
-                    f"schema -- clearing for a one-time rebuild so the "
-                    f"dedup fix takes effect (existing entries will be "
-                    f"re-added from disk)"
-                )
+            # Bugs #1763/#2056: the SAME decision and rebuild as
+            # `cidx index --fts` (fts_lifecycle) -- a stale schema, no
+            # current content marker, an empty or absolute-path index is
+            # rebuilt from disk with normal indexing's documents and marked.
+            # Any failure propagates to this command's error handling.
+            tantivy_manager, watch_fts_rebuild = open_fts_index_for_watch(config)
+            if watch_fts_rebuild is not None:
                 console.print(
-                    "🔧 FTS index has a stale schema -- rebuilding from "
-                    "disk (existing entries will be re-added)...",
-                    style="yellow",
+                    f"✅ FTS index rebuilt from "
+                    f"{watch_fts_rebuild.indexed_files} files",
+                    style="green",
                 )
-                import shutil
-
-                try:
-                    shutil.rmtree(fts_index_dir)
-                except OSError as e:
-                    # MEDIUM-4-equivalent hardening: a mid-rmtree failure
-                    # (disk full, EACCES) must not propagate raw and
-                    # unhandled -- log distinctly (the index directory may
-                    # be left partially deleted) before re-raising. The
-                    # surrounding try/except at the bottom of this command
-                    # already prints "Git-aware watch failed" and exits
-                    # non-zero on any exception here, so this re-raise is
-                    # still caught loudly rather than crashing raw.
-                    logger.error(
-                        f"FTS stale-schema rebuild failed while clearing "
-                        f"{fts_index_dir} -- the index directory may be "
-                        f"left in a partially-deleted state: {e}"
+                if watch_fts_rebuild.missing_message:
+                    console.print(
+                        f"⚠️  {watch_fts_rebuild.missing_message}", style="yellow"
                     )
-                    raise
-
-            tantivy_manager.initialize_index(
-                create_new=(not fts_index_exists) or fts_schema_stale
-            )
-
-            # CRITICAL-1/2 (#1763 code review): a stale-schema or
-            # brand-new FTS index was just wiped/created empty above --
-            # repopulate ALL files from disk now so untouched files' FTS
-            # entries aren't silently lost. This watch-mode entry point
-            # has no SmartIndexer instance available when FTS is enabled
-            # without semantic indexing, so it cannot delegate to
-            # SmartIndexer._populate_fts_from_all_files().
-            if fts_needs_full_population:
-                _populate_fts_index_from_disk(config, tantivy_manager, console)
 
             fts_watch_handler = FTSWatchHandler(
                 tantivy_index_manager=tantivy_manager,
@@ -5710,7 +5578,12 @@ def _annotate_staleness(
         New list of result dicts with a ``staleness`` key on each entry that
         had a matching enhanced result.  Entries with no match are included
         unchanged (no ``staleness`` key).
+
+        Bug #1991: a result whose store-reported staleness says its content
+        could not be read keeps that staleness (the mtime check cannot see it).
     """
+    from code_indexer.utils.content_availability import staleness_after_local_check
+
     if preserve_order:
         # Reranked path: iterate results in caller order, look up staleness by
         # (path, line_number) composite key so sibling chunks from the same file
@@ -5723,11 +5596,14 @@ def _annotate_staleness(
             enhanced = enhanced_by_chunk.get((path, line_start))
             result_copy = original.copy()
             if enhanced:
-                result_copy["staleness"] = {
-                    "is_stale": enhanced.is_stale,
-                    "staleness_indicator": enhanced.staleness_indicator,
-                    "staleness_delta_seconds": enhanced.staleness_delta_seconds,
-                }
+                result_copy["staleness"] = staleness_after_local_check(
+                    original,
+                    {
+                        "is_stale": enhanced.is_stale,
+                        "staleness_indicator": enhanced.staleness_indicator,
+                        "staleness_delta_seconds": enhanced.staleness_delta_seconds,
+                    },
+                )
             annotated.append(result_copy)
         return annotated
     else:
@@ -5748,11 +5624,14 @@ def _annotate_staleness(
             if matched is None:
                 continue
             result_copy = matched.copy()
-            result_copy["staleness"] = {
-                "is_stale": enhanced.is_stale,
-                "staleness_indicator": enhanced.staleness_indicator,
-                "staleness_delta_seconds": enhanced.staleness_delta_seconds,
-            }
+            result_copy["staleness"] = staleness_after_local_check(
+                matched,
+                {
+                    "is_stale": enhanced.is_stale,
+                    "staleness_indicator": enhanced.staleness_indicator,
+                    "staleness_delta_seconds": enhanced.staleness_delta_seconds,
+                },
+            )
             annotated.append(result_copy)
         annotated.sort(key=lambda r: (r["staleness"]["is_stale"], -r.get("score", 0.0)))
         return annotated
@@ -5897,11 +5776,13 @@ def _annotate_staleness(
     default=None,
     type=str,
     help=(
-        'Comma-separated list of file extensions to include (e.g., "py,js,ts"). '
+        'Comma-separated list of file extensions to include (e.g., "py,js,ts"), '
+        "OR-ed, case-insensitive, in semantic, --fts and hybrid search. "
         "Leading dot optional (.py and py both work). "
         "Whitespace around commas is tolerated. "
         "Composes with --language as intersection (both filters must match). "
-        "Empty string is treated as no filter."
+        "Empty string is treated as no filter; a blank entry, or one "
+        "containing '.' or '/', is an error."
     ),
 )
 # --show-unchanged removed: Story 2 - all temporal results are changes now
@@ -6031,6 +5912,12 @@ def query(
     Results show file paths, matched content, and similarity scores.
     Filter conflicts are automatically detected and warnings are displayed.
     """
+    # #2047: reject an invalid --file-extensions token before any search runs.
+    try:
+        _parse_file_extensions(file_extensions)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--file-extensions") from exc
+
     # AC5: Validate --chunk-type requires temporal flags (Story #476)
     if chunk_type and not (time_range or time_range_all):
         console = Console()
@@ -6136,6 +6023,8 @@ def query(
                 exclude_paths=exclude_paths,
                 min_score=min_score,
                 accuracy=accuracy,
+                # #2047: sent as the REST file_extensions field.
+                file_extensions=_parse_file_extensions(file_extensions) or None,
             )
 
             # AC4: Format and display multi-repo results
@@ -6287,6 +6176,10 @@ def query(
                             edit_distance=edit_distance,
                             snippet_lines=snippet_lines,
                             regex=regex,
+                            # #2047: the daemon applies the same rule
+                            # (validated up front by this command).
+                            file_extensions=_parse_file_extensions(file_extensions)
+                            or None,
                         )
                         sys.exit(exit_code)
         except Exception:
@@ -6841,6 +6734,8 @@ def query(
                         path_filters=list(path_filter) if path_filter else None,
                         exclude_paths=list(exclude_paths) if exclude_paths else None,
                         use_regex=regex,  # Pass regex flag
+                        # #2047: same extension rule as the semantic half.
+                        file_extensions=_parse_file_extensions(file_extensions) or None,
                     )
                 except Exception as e:
                     console.print(f"[yellow]⚠️  FTS search failed: {e}[/yellow]")
@@ -6878,8 +6773,11 @@ def query(
                 try:
                     semantic_results = semantic_future.result()
                 except Exception as e:
-                    console.print(f"[yellow]⚠️  Semantic search failed: {e}[/yellow]")
-                    semantic_results = []
+                    # #2109: a failed semantic half fails the query.
+                    console.print(
+                        f"❌ Semantic search failed: {e}", style="red", markup=False
+                    )
+                    sys.exit(1)
 
             # Story #694: apply reranker stage to each sub-list independently.
             if effective_rerank_query:
@@ -6947,6 +6845,8 @@ def query(
                         list(exclude_languages) if exclude_languages else None
                     ),
                     use_regex=regex,  # Pass regex flag
+                    # #2047: same extension rule as semantic search.
+                    file_extensions=_parse_file_extensions(file_extensions) or None,
                 )
 
                 # Story #694: apply reranker stage if effective_rerank_query is set.
@@ -7029,6 +6929,11 @@ def query(
 
             from .remote.query_execution import execute_remote_query
             from .server.models.api_models import QueryResultItem
+            from .utils.content_availability import (
+                CONTENT_UNAVAILABLE_KEY,
+                CONTENT_UNAVAILABLE_MARKER,
+                is_content_unavailable,
+            )
 
             # NOTE: Remote query API currently supports single language only
             # Use first language from tuple, ignore additional languages for remote mode
@@ -7043,6 +6948,8 @@ def query(
                 min_score=min_score,
                 include_source=True,
                 accuracy=accuracy,
+                # #2047: sent as the REST file_extensions field.
+                file_extensions=_parse_file_extensions(file_extensions) or None,
             )
 
             # Cast to help MyPy understand the actual return type
@@ -7090,6 +6997,15 @@ def query(
                         ),
                     }
 
+                # Bug #1991: the server could not read this chunk's content.
+                if getattr(result_item, "content_unavailable", False):
+                    existing = converted_result.get("staleness")
+                    staleness: Dict[str, Any] = (
+                        dict(existing) if isinstance(existing, dict) else {}
+                    )
+                    staleness[CONTENT_UNAVAILABLE_KEY] = True
+                    converted_result["staleness"] = staleness
+
                 converted_results.append(converted_result)
 
             # Use existing display logic for local queries
@@ -7133,7 +7049,9 @@ def query(
                         )
                     else:
                         console.print(f"{score:.3f} {file_path_with_lines}")
-                    if content:
+                    if is_content_unavailable(result):
+                        console.print(f"  {CONTENT_UNAVAILABLE_MARKER}", markup=False)
+                    elif content:
                         # Show content with line numbers
                         content_lines = content.split("\n")
                         if line_start is not None:
@@ -7176,7 +7094,12 @@ def query(
                                 staleness_detail = f"Local file newer by {delta_days}d"
                             console.print(f"Staleness: {staleness_detail}")
 
-                    if content:
+                    if is_content_unavailable(result):
+                        console.print("Content:")
+                        console.print("-" * 40)
+                        console.print(f"  {CONTENT_UNAVAILABLE_MARKER}", markup=False)
+                        console.print("-" * 40)
+                    elif content:
                         if not quiet:
                             console.print(f"Relevance: {score:.3f}/1.0")
                         console.print("Content:")
@@ -7558,16 +7481,12 @@ def query(
                         {"key": "path", "match": {"text": path_filter[0]}}
                     )
 
-            # Story #906: --file-extensions wiring into filter_conditions_list.
-            # The "language" field IS cidx's file-extension field (test helper
-            # _must_extension_conditions matches c.get("key") == "language").
-            # Multiple extensions appended as DIRECT must-entries (cidx
-            # vector_store OR-merges multiple direct entries with same key).
-            # Composes with --language as INTERSECTION.
-            for ext in _parse_file_extensions(file_extensions):
-                filter_conditions_list.append(
-                    {"key": "language", "match": {"value": ext}}
-                )
+            # Story #906 / #2047: --file-extensions is ONE any_ext condition
+            # on the "path" payload (shared builder, values OR-ed); inside
+            # `must` it composes with --language as INTERSECTION.
+            extension_condition = _file_extension_condition(file_extensions)
+            if extension_condition is not None:
+                filter_conditions_list.append(extension_condition)
 
             # Build filter conditions preserving both must and must_not conditions
             query_filter_conditions = (
@@ -7597,6 +7516,7 @@ def query(
                     query_text=query,
                     limit=_semantic_fetch_limit,
                     collection_name=collection_name,
+                    # #2047: the service applies the filtered window.
                     filter_conditions=query_filter_conditions,
                 )
                 # Use multi-index timing from service
@@ -7686,6 +7606,7 @@ def query(
                     query_text=query,
                     limit=limit * 2,
                     collection_name=collection_name,
+                    # #2047: the service applies the filtered window.
                     filter_conditions=filter_conditions if filter_conditions else None,
                 )
                 # Use multi-index timing from service
@@ -10257,7 +10178,7 @@ def fix_config(ctx, dry_run: bool, verbose: bool, force: bool):
 @click.option(
     "--issuer-url",
     type=str,
-    help="OAuth issuer URL for remote access (e.g., https://your-domain.com:8383)",
+    help="OAuth issuer URL for remote access (e.g., https://cidx.example.com)",
 )
 @click.option(
     "--voyage-api-key",
@@ -10284,13 +10205,13 @@ def install_server(
     • Finds available port starting from 8090 (or --port if specified)
     • Generates server configuration (config.json)
     • Creates executable startup script (start-server.sh)
-    • Seeds initial admin user (admin/admin)
+    • Leaves accounts to the server: its first start creates the initial
+      admin user (admin/admin), only when no users exist
     • Displays startup instructions
 
     \b
     WHAT IT CREATES:
     • ~/.cidx-server/config.json           # Server configuration
-    • ~/.cidx-server/users.json            # User database with hashed passwords
     • ~/.cidx-server/logs/                 # Server logs directory
     • ~/.cidx-server/start-server.sh       # Executable startup script
 
@@ -10303,7 +10224,7 @@ def install_server(
     • Repository idle timeout: 10 minutes
 
     \b
-    INITIAL CREDENTIALS:
+    INITIAL CREDENTIALS (created by the first server start, only when no users exist):
     Username: admin
     Password: admin
     Role: admin (full access to all features)
@@ -10319,6 +10240,7 @@ def install_server(
     \b
     API DOCUMENTATION:
     Once running, access Swagger UI at: http://localhost:<port>/docs
+    (requires login: sign in to the Web UI first, or send a bearer token)
 
     \b
     EXAMPLES:
@@ -10369,6 +10291,7 @@ def install_server(
                 console.print(
                     f"   http://127.0.0.1:{existing_port}/docs", style="white"
                 )
+                console.print("   (requires login)", style="dim")
                 console.print()
                 console.print("💡 Use --force to reinstall", style="dim yellow")
                 return
@@ -10420,6 +10343,10 @@ def install_server(
 
         # Initial credentials
         console.print("🔑 Initial Admin Credentials:", style="cyan bold")
+        console.print(
+            "   Created by the first server start, only when no users exist",
+            style="dim",
+        )
         console.print("   Username: admin", style="white")
         console.print("   Password: admin", style="white")
         console.print("   Role: admin (full access)", style="white")
@@ -10461,6 +10388,11 @@ def install_server(
         )
         console.print(
             f"   OpenAPI spec: http://127.0.0.1:{allocated_port}/openapi.json",
+            style="dim",
+        )
+        console.print(
+            "   API documentation requires login: sign in to the Web UI first, "
+            "or send a bearer token.",
             style="dim",
         )
         console.print()
@@ -11803,6 +11735,7 @@ def server_start(ctx, server_dir: Optional[str]):
         console.print()
         console.print("📚 API Documentation:", style="cyan")
         console.print(f"   {result['server_url']}/docs", style="white")
+        console.print("   (requires login)", style="dim")
 
     except Exception as e:
         console.print(f"❌ Error: {str(e)}", style="red")
@@ -12162,6 +12095,7 @@ def server_restart(ctx, server_dir: Optional[str]):
         console.print()
         console.print("📚 API Documentation:", style="cyan")
         console.print(f"   {result['server_url']}/docs", style="white")
+        console.print("   (requires login)", style="dim")
 
     except KeyboardInterrupt:
         console.print("\n❌ Operation cancelled by user", style="red")
@@ -13497,7 +13431,12 @@ def discover(ctx, source: str):
             sys.exit(1)
 
         # Create client and discover repositories
-        console.print(f"🔍 Discovering repositories from: {source}", style="blue")
+        from .utils.credential_redaction import mask_url_credentials
+
+        console.print(
+            f"🔍 Discovering repositories from: {mask_url_credentials(source)}",
+            style="blue",
+        )
 
         async def discover_repositories():
             client = ReposAPIClient(
@@ -14712,10 +14651,12 @@ def _display_repository_info(
 
     # Basic Information Section
     console.print("\n[bold]Basic Information:[/bold]")
+    from .utils.credential_redaction import mask_url_credentials
+
     basic_info = [
         f"  Alias: {repo_info.get('alias', 'N/A')}",
         f"  Golden Repository: {repo_info.get('golden_repository', 'N/A')}",
-        f"  Git URL: {repo_info.get('git_url', 'N/A')}",
+        f"  Git URL: {mask_url_credentials(repo_info.get('git_url', 'N/A'))}",
         f"  Current Branch: {repo_info.get('current_branch', 'N/A')}",
         f"  Activated: {repo_info.get('activation_date', 'N/A')}",
     ]
@@ -17649,8 +17590,11 @@ def admin_repos_add(
 
         try:
             if not json_output:
+                from .utils.credential_redaction import mask_url_credentials
+
                 console.print(
-                    f"📁 Adding golden repository '{alias}' from {git_url}...",
+                    f"📁 Adding golden repository '{alias}' from "
+                    f"{mask_url_credentials(git_url)}...",
                     style="blue",
                 )
 
@@ -18067,8 +18011,11 @@ def admin_repos_show(ctx, alias: str, json_output: bool):
 
             # Basic information
             console.print(f"[bold]Alias:[/bold] {target_repo.get('alias', 'N/A')}")
+            from .utils.credential_redaction import mask_url_credentials
+
             console.print(
-                f"[bold]Repository URL:[/bold] {target_repo.get('repo_url', 'N/A')}"
+                "[bold]Repository URL:[/bold] "
+                f"{mask_url_credentials(target_repo.get('repo_url', 'N/A'))}"
             )
             console.print(
                 f"[bold]Default Branch:[/bold] {target_repo.get('default_branch', 'N/A')}"
@@ -18730,8 +18677,11 @@ def admin_repos_delete(ctx, alias: str, confirm: bool, force: bool, json_output:
                         f"\n⚠️  This will permanently delete the golden repository '{alias}'.",
                         style="yellow bold",
                     )
+                    from .utils.credential_redaction import mask_url_credentials
+
                     console.print(
-                        f"📍 Repository: {target_repo.get('repo_url', 'N/A')}"
+                        "📍 Repository: "
+                        f"{mask_url_credentials(target_repo.get('repo_url', 'N/A'))}"
                     )
                     console.print(
                         f"📂 Description: {target_repo.get('description', 'No description')}"

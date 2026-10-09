@@ -58,7 +58,7 @@ def _short_token(value: Any, limit: int) -> bool:
 
 def _check_base(name: str, value: Any) -> bool:
     """Type rules of the fixed-type attributes (FALLBACK_PROJECTION)."""
-    if name == "actor":
+    if name in ("actor", "impersonated_user"):
         return conforms(AUDIT_TARGET_ID_TYPE["user"], value)
     if name == "outcome":
         return value in OUTCOMES
@@ -94,6 +94,9 @@ FALLBACK_PROJECTION = (
     "auth_method",
     "actor_is_system",
     "event_uuid",
+    # Set only during MCP impersonation: the subject ("actor" is then the
+    # authenticated administrator).
+    "impersonated_user",
 )
 
 

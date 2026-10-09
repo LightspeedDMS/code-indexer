@@ -88,13 +88,20 @@ def _reconcile_call_count(tmp_path: Path, n_files: int) -> int:
 class _HidingVectorStore(FakeVectorStoreClient):
     """In-memory substitute that also applies branch-visibility updates."""
 
-    def _batch_update_points(
+    def _batch_update_payload_only(
         self, points: List[Dict[str, Any]], collection_name: str
     ) -> bool:
+        # Payload merge, as the real store does; branch-visibility updates
+        # (hide/un-hide) use this primitive.
         by_id = {p["id"]: p for p in self.points}
         for update in points:
             by_id[update["id"]]["payload"].update(update["payload"])
         return True
+
+    def _batch_update_points(
+        self, points: List[Dict[str, Any]], collection_name: str
+    ) -> bool:
+        return self._batch_update_payload_only(points, collection_name)
 
 
 def test_reconcile_completes_with_foreign_absolute_indexed_path(

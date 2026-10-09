@@ -19,6 +19,7 @@ from tests.unit.server.routers.inline_routes_test_helpers import (
     _find_route_handler,
     _patch_closure,
     user_client,  # noqa: F401
+    caller_is_access_admin,  # noqa: F401
 )
 from unittest.mock import patch
 

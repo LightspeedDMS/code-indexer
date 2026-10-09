@@ -10,11 +10,44 @@ Provides global exception logging with full debugging context including:
 
 import json
 import os
+import sys
 import threading
 import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
+
+_VERSIONED_SEGMENT = ".versioned"
+
+
+def _server_log_dir() -> Path:
+    """Server-mode log directory.
+
+    Honors CIDX_SERVER_DATA_DIR (Bug #1776) so an isolated/test server
+    instance never leaks log files into the real ~/.cidx-server/ directory;
+    falls back to Path.home()/.cidx-server, matching the established pattern
+    used across other server-mode modules (e.g. health_service.py,
+    diagnostics_service.py).
+    """
+    server_data_dir = Path(
+        os.environ.get("CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server"))
+    )
+    return server_data_dir / "logs"
+
+
+def _is_inside_versioned_snapshot(path: Path) -> bool:
+    """True when *path* lies in (or is) a ``.versioned`` snapshot tree.
+
+    Rule: any component of the absolute path is ``.versioned``. This is a
+    superset of the canonical predicate's shape (``.../.versioned/{ns}/v_<ts>``
+    in server/storage/shared/snapshot_paths.is_versioned_snapshot), so every
+    canonical snapshot and everything below it is covered. It is kept here,
+    pure and import-free, because utils/ is on the CLI start-up path and must
+    not import the server package. Paths reached only through a symlink, and
+    the mount-point-dependent legacy shapes (unknowable to a CLI process),
+    are not detected. No filesystem access.
+    """
+    return _VERSIONED_SEGMENT in Path(os.path.abspath(path)).parts
 
 
 class ExceptionLogger:
@@ -34,6 +67,9 @@ class ExceptionLogger:
             log_file_path: Path to the log file for writing exceptions
         """
         self.log_file_path = log_file_path
+        # Serializes each complete entry (Bug #2060): concurrent threads
+        # sharing this logger must never interleave their writes.
+        self._write_lock = threading.Lock()
 
     @classmethod
     def initialize(cls, project_root: Path, mode: str = "cli") -> "ExceptionLogger":
@@ -61,28 +97,21 @@ class ExceptionLogger:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         pid = os.getpid()
 
-        if mode == "server":
-            # Server mode: honor CIDX_SERVER_DATA_DIR (Bug #1776) so an
-            # isolated/test server instance never leaks log files into the
-            # real ~/.cidx-server/ directory. Falls back to
-            # Path.home()/.cidx-server, matching the established pattern
-            # used across ~10+ other server-mode modules (e.g.
-            # health_service.py, diagnostics_service.py,
-            # research_assistant_service.py).
-            server_data_dir = Path(
-                os.environ.get(
-                    "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
-                )
-            )
-            log_dir = server_data_dir / "logs"
+        if mode == "server" or _is_inside_versioned_snapshot(project_root):
+            # Server mode -- and any CLI/daemon run from inside an immutable
+            # .versioned snapshot (the server runs cidx there, e.g. for
+            # multi-repo regex queries; Bug #2060), which must never be
+            # written to.
+            log_dir = _server_log_dir()
         else:
             # CLI/Daemon mode: <project>/.code-indexer/
             log_dir = project_root / ".code-indexer"
 
-        # Create log directory if it doesn't exist
-        log_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create log file path with timestamp and PID
+        # Log file path with timestamp and PID. Neither the directory nor the
+        # file is created here (Bug #2060): log_exception creates them on the
+        # first write, so a run without an exception writes nothing -- in
+        # particular nothing inside a .versioned/ snapshot the server runs
+        # cidx from.
         log_file_path = log_dir / f"error_{timestamp}_{pid}.log"
 
         # Create the instance
@@ -90,9 +119,6 @@ class ExceptionLogger:
 
         # Store as singleton
         cls._instance = instance
-
-        # Create the log file (touch it to ensure it exists)
-        log_file_path.touch()
 
         return instance
 
@@ -121,22 +147,39 @@ class ExceptionLogger:
         if not self.log_file_path:
             return  # Logger not initialized
 
-        timestamp = datetime.now().isoformat()
-        thread_info = thread_name or threading.current_thread().name
-
-        log_entry = {
-            "timestamp": timestamp,
-            "thread": thread_info,
-            "exception_type": type(exception).__name__,
-            "exception_message": str(exception),
-            "stack_trace": traceback.format_exc(),
-            "context": context or {},
-        }
-
-        # Write to log file (append mode)
-        with open(self.log_file_path, "a") as f:
-            f.write(json.dumps(log_entry, indent=2))
-            f.write("\n---\n")
+        try:
+            # Everything that renders the exception is inside the guard: a
+            # broken __str__ or traceback must not escape (Bug #2060).
+            log_entry = {
+                "timestamp": datetime.now().isoformat(),
+                "thread": thread_name or threading.current_thread().name,
+                "exception_type": type(exception).__name__,
+                "exception_message": str(exception),
+                "stack_trace": traceback.format_exc(),
+                "context": context or {},
+            }
+            entry_text = json.dumps(log_entry, indent=2) + "\n---\n"
+            # One complete entry at a time (Bug #2060); the first write
+            # creates the directory and file (lazy).
+            with self._write_lock:
+                self.log_file_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.log_file_path, "a") as f:
+                    f.write(entry_text)
+        except Exception as log_error:
+            # Never raise from here: that would replace the exception being
+            # logged. Report both types only -- no paths or messages, which
+            # can carry sensitive detail.
+            try:
+                print(
+                    f"cidx: could not write the error log "
+                    f"({type(log_error).__name__}) while logging "
+                    f"{type(exception).__name__}",
+                    file=sys.stderr,
+                )
+            except Exception:
+                # stderr itself unusable: nothing left to report to. Only
+                # Exception -- KeyboardInterrupt/SystemExit still propagate.
+                pass
 
     def install_thread_exception_hook(self) -> None:
         """Install global thread exception handler.

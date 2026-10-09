@@ -327,7 +327,7 @@ class Client {
 /// N4 (#1873/#1875 second-review, LOW): NOT a real-Java-semantics claim --
 /// Foo's real superclass is `Object`, so `javac` never reaches `Bar.
 /// toString()`. Proves the deliberately IMPRECISE conservative fallback
-/// instead. See `docs/xray-architecture.md`/`analyze_graph.md` (corrected).
+/// instead. See `docs/architecture/xray/architecture.md`/`analyze_graph.md` (corrected).
 #[test]
 fn super_call_with_no_recorded_superclass_falls_back_to_leaving_the_sole_candidate_referenced() {
     let source = r#"

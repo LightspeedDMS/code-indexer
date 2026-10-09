@@ -43,7 +43,7 @@
 //! caller edge; that guarantee is retired and those five tests are
 //! renamed/re-scoped to assert the actual (accepted-regression) outcome,
 //! pending the receiver-type hard-narrowing follow-up issue named in
-//! `docs/xray-architecture.md`'s candidate-admission section. The
+//! `docs/architecture/xray/architecture.md`'s candidate-admission section. The
 //! genuinely-ambiguous lambda-parameter form (which never claimed
 //! exclusion in the first place) and the `var`/generic-type-parameter
 //! forms (which resolve via the unique-name shortcut, never receiver-type

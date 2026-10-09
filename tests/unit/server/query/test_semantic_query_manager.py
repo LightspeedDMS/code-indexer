@@ -141,7 +141,9 @@ class TestSemanticQueryManager:
         assert semantic_query_manager.background_job_manager is not None
         assert semantic_query_manager.query_timeout_seconds == 30
         assert semantic_query_manager.max_concurrent_queries_per_user == 5
-        assert semantic_query_manager.max_results_per_query == 100
+        # Internal candidate cap: rerank/access-filter over-fetch above the
+        # public 100 limit must not be trimmed by the aggregate cap.
+        assert semantic_query_manager.max_results_per_query == 200
 
     def test_query_user_repositories_basic(
         self, semantic_query_manager, search_engine_mock
@@ -490,7 +492,8 @@ class TestSemanticQueryManager:
             accuracy=None,
             **kwargs,
         ):
-            # Return 75 results per repo (150 total from 2 repos, should be limited to 100)
+            # Return 150 results per repo (300 total from 2 repos, should be
+            # limited to max_results_per_query = 200)
             return [
                 QueryResult(
                     file_path=f"{repo_path}/test{i}.py",
@@ -499,7 +502,7 @@ class TestSemanticQueryManager:
                     similarity_score=0.8,
                     repository_alias=repo_alias,
                 )
-                for i in range(75)
+                for i in range(150)
             ]
 
         with patch.object(
@@ -510,11 +513,11 @@ class TestSemanticQueryManager:
             results = semantic_query_manager.query_user_repositories(
                 username="testuser",
                 query_text="test",
-                limit=120,  # Exceeds max_results_per_query (100)
+                limit=250,  # Exceeds max_results_per_query (200)
             )
 
             # Should be limited to max_results_per_query
-            assert len(results["results"]) == 100
+            assert len(results["results"]) == 200
 
     def test_invalid_query_parameters(self, semantic_query_manager):
         """Test validation of query parameters."""

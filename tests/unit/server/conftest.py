@@ -98,6 +98,8 @@ import importlib
 import logging
 import os
 import sqlite3
+import sys
+import threading
 from pathlib import Path
 from typing import Any, Callable, Generator, List, Set, Type
 
@@ -111,6 +113,7 @@ from tests.fixtures import real_server_home_guard as _real_home_guard
 import code_indexer.server.app as _server_app_module
 import code_indexer.server.auth.dependencies as _auth_dependencies_module
 from code_indexer.server.auth.login_rate_limiter import (
+    _SqliteStore as _LoginThrottleSqliteStore,
     login_rate_limiter as _login_lockout_limiter,
 )
 from code_indexer.server.auth.token_bucket import rate_limiter as _login_token_bucket
@@ -217,10 +220,22 @@ def _reset_login_rate_limiter_state() -> None:
         _login_token_bucket._buckets.clear()
         _login_token_bucket._last_access.clear()
         _login_token_bucket._pool = None
+    # The login throttle keeps its state in a DB-backed store; a test (or a
+    # create_app() run) may have wired it to a SQLite file or a PG pool, so
+    # the reset swaps in a fresh private in-memory store.
     with _login_lockout_limiter._lock:
-        _login_lockout_limiter._failures.clear()
-        _login_lockout_limiter._lockout_until.clear()
         _login_lockout_limiter._pool = None
+        _login_lockout_limiter._store = _LoginThrottleSqliteStore(None)
+    # The per-process reservation rate cap (10/s, burst 10) would make
+    # login-heavy tests in this one process answer 503 "busy"; each test gets
+    # a fresh, effectively unlimited bucket.  The shipped cap is pinned by the
+    # dedicated tests in tests/unit/server/auth/test_login_throttle.py.
+    from code_indexer.server.auth import login_rate_limiter as _throttle_module
+    from code_indexer.server.auth.token_bucket import TokenBucket
+
+    _throttle_module._RESERVATION_BUCKET = TokenBucket(
+        capacity=10**9, refill_rate=10**9
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -350,6 +365,46 @@ def _reset_correlation_id_contextvar() -> Generator[None, None, None]:
         yield
     finally:
         _correlation_id_var.set(None)
+
+
+def _all_logging_handlers() -> List[logging.Handler]:
+    """Every handler on the root logger and on every registered logger."""
+    loggers: List[logging.Logger] = [logging.getLogger()]
+    loggers.extend(
+        candidate
+        for candidate in list(logging.Logger.manager.loggerDict.values())
+        if isinstance(candidate, logging.Logger)
+    )
+    return [handler for each in loggers for handler in list(each.handlers)]
+
+
+@pytest.fixture(autouse=True)
+def _detach_redacting_filter_added_by_test() -> Generator[None, None, None]:
+    """A test that runs the server startup attaches the redacting filter to
+    EVERY handler in the process (``attach_redacting_filter_to_all_handlers``)
+    -- including pytest's own session-long log capture handlers. The filter
+    turns each record's ``exc_info`` into a redacted ``exc_text`` (correct
+    in production), so once it is left on a capture handler every later
+    test's ``caplog`` record loses ``exc_info``. Remove the filter from
+    each handler that gained it during the test; handlers that already
+    carried it keep it.
+    """
+    from code_indexer.server.logging_utils import REDACTING_LOG_FILTER
+
+    already_filtered = {
+        id(handler)
+        for handler in _all_logging_handlers()
+        if REDACTING_LOG_FILTER in handler.filters
+    }
+    try:
+        yield
+    finally:
+        for handler in _all_logging_handlers():
+            if (
+                id(handler) not in already_filtered
+                and REDACTING_LOG_FILTER in handler.filters
+            ):
+                handler.removeFilter(REDACTING_LOG_FILTER)
 
 
 @pytest.fixture(autouse=True)
@@ -499,12 +554,97 @@ def _teardown_all_background_job_managers_impl(
 
     yield
 
-    seen_ids: Set[int] = set()
+    # The `code_indexer.server.app` singleton is built once per session (by
+    # whichever test first touches it) and its routes stay bound to its
+    # BackgroundJobManager. Shutting that one down would leave every later
+    # test's submitted job unexecuted, so it lives for the session. Read
+    # without triggering the lazy initialization.
+    session_manager = _server_app_module._lazy_values.get("background_job_manager")
+    seen_ids: Set[int] = {id(session_manager)} if session_manager else set()
     for instance in created_instances:
         if id(instance) in seen_ids:
             continue
         seen_ids.add(id(instance))
         _safe_shutdown(instance)
+
+
+GOVERNOR_THREAD = "memory-governor-sampler"
+TRACKER_THREAD = "DependencyLatencyTracker-writer"
+# Thread name -> the owner's real stop API (both bounded joins, idempotent).
+_SERVICE_THREAD_STOPS = {
+    GOVERNOR_THREAD: lambda owner: owner.stop(timeout=5.0),
+    TRACKER_THREAD: lambda owner: owner.shutdown(timeout=10),
+}
+
+
+def _guarded_service_threads() -> List[Any]:
+    return [
+        t
+        for t in threading.enumerate()
+        if t.name in _SERVICE_THREAD_STOPS and t.is_alive()
+    ]
+
+
+def _installed_service_singletons() -> Set[int]:
+    """ids of the process-wide governor / latency tracker (canonical and
+    ``src.``-alias module trees): later code may still read these, so they
+    keep running until something replaces them."""
+    ids: Set[int] = set()
+    for prefix in ("", "src."):
+        governors = sys.modules.get(f"{prefix}{_GOVERNOR_MODULE}")
+        trackers = sys.modules.get(f"{prefix}{_TRACKER_MODULE}")
+        for owner in (
+            governors.get_memory_governor() if governors else None,
+            trackers.get_instance() if trackers else None,
+        ):
+            if owner is not None:
+                ids.add(id(owner))
+    return ids
+
+
+_GOVERNOR_MODULE = "code_indexer.server.services.memory_governor"
+_TRACKER_MODULE = "code_indexer.server.services.dependency_latency_tracker"
+
+
+def _stop_leaked_service_threads_impl() -> Generator[None, None, None]:
+    """Core of the ``_stop_leaked_service_threads`` autouse fixture, a plain
+    generator so tests/unit/server/test_service_thread_teardown.py can drive
+    it directly.
+
+    ``create_app()`` starts a memory-governor sampler and a latency-tracker
+    writer that only the app's lifespan shutdown stops, so every test that
+    builds an app without its lifespan (or starts either service directly)
+    used to leave both threads running for the rest of the process. After
+    the test this stops the owner of EVERY live guarded thread (found from
+    the thread's bound target) through its real stop API, except the
+    installed singletons; then fails if a guarded thread the test started is
+    still alive."""
+    before = set(_guarded_service_threads())
+    yield
+    keep = _installed_service_singletons()
+    for thread in _guarded_service_threads():
+        owner = getattr(getattr(thread, "_target", None), "__self__", None)
+        if owner is None or id(owner) in keep:
+            continue
+        try:
+            _SERVICE_THREAD_STOPS[thread.name](owner)
+        except Exception:
+            logger.exception("Stopping leaked %s thread failed", thread.name)
+    survivors = [
+        t.name
+        for t in _guarded_service_threads()
+        if t not in before
+        and id(getattr(getattr(t, "_target", None), "__self__", None)) not in keep
+    ]
+    if survivors:
+        pytest.fail(f"test left service threads running: {survivors}")
+
+
+@pytest.fixture(autouse=True)
+def _stop_leaked_service_threads() -> Generator[None, None, None]:
+    """Stop the governor / latency-tracker threads a test leaves behind and
+    fail the test if one cannot be stopped (see the impl above)."""
+    yield from _stop_leaked_service_threads_impl()
 
 
 @pytest.fixture(autouse=True)

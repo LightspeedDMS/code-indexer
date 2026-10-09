@@ -13,6 +13,30 @@ from ..database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
 
+_MS_PER_DAY = 86_400_000
+_MS_PER_SECOND = 1000
+_SQLITE_NOW = "'now'"
+
+
+def _epoch_ms(time_sql: str) -> str:
+    """SQL for a timestamp as whole INTEGER milliseconds. julianday() accepts
+    every stored created_at form (ISO-8601, any fractional digits, '+00:00'
+    or 'Z') and keeps millisecond precision; rounding removes its
+    floating-point error, so the result is exact."""
+    return f"CAST(ROUND(julianday({time_sql}) * {_MS_PER_DAY}) AS INTEGER)"
+
+
+def _live_predicate(now_sql: str) -> str:
+    """SQL true while an entry is younger than its TTL -- the one expiry rule
+    (consume() keeps what it accepts, cleanup_expired() deletes its
+    negation). Both timestamps are integer milliseconds before they are
+    compared. `now_sql` is the SQL for the current time (_SQLITE_NOW in
+    production)."""
+    return (
+        f"{_epoch_ms(now_sql)} - {_epoch_ms('created_at')}"
+        f" < ttl_seconds * {_MS_PER_SECOND}"
+    )
+
 
 class PayloadCacheSqliteBackend:
     """
@@ -202,30 +226,59 @@ class PayloadCacheSqliteBackend:
             "node_id": row[5],
         }
 
+    def store_expiring(self, cache_handle: str, content: str, ttl_seconds: int) -> None:
+        """Insert or replace one entry living exactly `ttl_seconds`, stamped
+        by the database clock (see PayloadCacheBackend.store_expiring)."""
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO payload_cache
+                    (cache_handle, content, preview, created_at, ttl_seconds, node_id)
+                VALUES (?, ?, '', strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), ?, NULL)
+                """,
+                (cache_handle, content, ttl_seconds),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def consume(self, cache_handle: str) -> bool:
+        """Atomically delete a live entry; True only for the one caller
+        whose single DELETE removed it (see PayloadCacheBackend.consume).
+
+        Age is measured at sub-second precision on the database clock, the
+        clock store_expiring() stamps entries with.
+        """
+
+        def operation(conn: Any) -> int:
+            cursor = conn.execute(
+                f"""
+                DELETE FROM payload_cache
+                WHERE cache_handle = ? AND {_live_predicate(_SQLITE_NOW)}
+                """,
+                (cache_handle,),
+            )
+            return int(cursor.rowcount)
+
+        deleted: int = self._conn_manager.execute_atomic(operation)
+        return deleted == 1
+
     def cleanup_expired(self) -> int:
-        """Delete all entries that have exceeded their TTL.
+        """Delete all entries that have exceeded their TTL, measured at
+        sub-second precision on the database clock (the exact inverse of
+        consume()'s liveness).
 
         Returns:
             Number of rows deleted.
         """
-        # Use Unix epoch seconds for reliable comparison (SQLite strftime
-        # cannot parse ISO timestamps with '+00:00' timezone offsets).
-        now_epoch = int(datetime.now(timezone.utc).timestamp())
 
         def operation(conn: Any) -> int:
             # conn is the raw sqlite3 connection DatabaseConnectionManager's
             # generic execute_atomic(Callable[[Any], T]) passes through --
             # matches the identical Any annotation used for this same
             # closure parameter throughout every sibling module.
-            # Strip timezone suffix from created_at so strftime can parse it,
-            # then compare epoch seconds.
             cursor = conn.execute(
-                """
-                DELETE FROM payload_cache
-                WHERE (? - strftime('%s', REPLACE(REPLACE(created_at, '+00:00', ''), 'Z', '')))
-                      >= ttl_seconds
-                """,
-                (now_epoch,),
+                f"DELETE FROM payload_cache WHERE NOT ({_live_predicate(_SQLITE_NOW)})"
             )
             return int(cursor.rowcount)
 

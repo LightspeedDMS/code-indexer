@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from rich.console import Console
 from .config import ConfigManager
-from .cli_daemon_delegation import _start_daemon
+from .cli_daemon_delegation import _start_daemon, obtain_daemon_result
 
 console = Console()
 
@@ -169,7 +169,9 @@ def watch_stop_command() -> int:
         from rpyc.utils.factory import unix_connect
 
         conn = unix_connect(str(socket_path))
-        stats = conn.root.exposed_watch_stop(str(Path.cwd()))
+        # Copy while the connection is open: a netref read after close
+        # raises, which the except below would report as a dead daemon.
+        stats = obtain_daemon_result(conn.root.exposed_watch_stop(str(Path.cwd())))
         conn.close()
 
         if stats.get("status") == "not_running":

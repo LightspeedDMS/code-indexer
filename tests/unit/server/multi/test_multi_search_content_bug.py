@@ -1,16 +1,30 @@
 """
 Tests for MultiSearchService include_source bug fix.
 
-BUG: Multi-repo semantic search returns empty `content` fields because
-`include_source=False` is hardcoded in _search_semantic_sync().
+BUG: Multi-repo semantic search returned empty `content` fields because
+`include_source=False` was hardcoded in the multi-repo request construction.
 
-FIX: Change `include_source=False` to `include_source=True` to match
-single-repo behavior and return actual source code content.
-
-These tests are written FIRST (TDD) to demonstrate the bug before implementing the fix.
+FIX: `include_source=True`, matching single-repo behavior. Since #2047 the
+request is built by the ONE shared builder every door uses
+(server/query/filtered_search.filtered_semantic_search), to which
+MultiSearchService._search_semantic_sync delegates; these tests pin both.
 """
 
 import inspect
+
+
+def _semantic_request_source() -> str:
+    """Source of the code that builds the multi-repo semantic request,
+    after checking _search_semantic_sync delegates to it."""
+    from code_indexer.server.multi.multi_search_service import MultiSearchService
+    from code_indexer.server.query.filtered_search import filtered_semantic_search
+
+    method_source = inspect.getsource(MultiSearchService._search_semantic_sync)
+    assert "filtered_semantic_search(" in method_source, (
+        "_search_semantic_sync must build its request through the shared "
+        "filtered_semantic_search"
+    )
+    return inspect.getsource(filtered_semantic_search)
 
 
 class TestSemanticSearchIncludesSourceContent:
@@ -22,19 +36,13 @@ class TestSemanticSearchIncludesSourceContent:
 
         Bug: include_source=False was hardcoded, causing empty content fields.
         Fix: Change to include_source=True to match single-repo behavior.
-
-        This test reads the source code to verify include_source=True is set.
         """
-        from code_indexer.server.multi.multi_search_service import MultiSearchService
-
-        # Get the source code of the method that creates SemanticSearchRequest
-        source = inspect.getsource(MultiSearchService._search_semantic_sync)
+        source = _semantic_request_source()
 
         # Should NOT find include_source=False (the bug)
         assert "include_source=False" not in source, (
-            "Bug detected: include_source=False found in _search_semantic_sync. "
-            "Multi-repo search won't return content. "
-            "Fix: Change to include_source=True"
+            "Bug detected: include_source=False found in the semantic request "
+            "construction. Multi-repo search won't return content."
         )
 
         # Should find include_source=True (the fix)
@@ -49,21 +57,14 @@ class TestSemanticSearchIncludesSourceContent:
 
         This test verifies the actual request construction pattern.
         """
-        from code_indexer.server.multi.multi_search_service import MultiSearchService
+        source = _semantic_request_source()
 
-        # Read full source of the method
-        source = inspect.getsource(MultiSearchService._search_semantic_sync)
-
-        # Find the SemanticSearchRequest construction
-        # It should contain include_source=True, not False
         request_pattern = "SemanticSearchRequest("
-
         assert request_pattern in source, (
-            "SemanticSearchRequest should be constructed in _search_semantic_sync"
+            "SemanticSearchRequest should be constructed by the shared builder"
         )
 
         # The construction should have include_source=True
-        # Find the line with SemanticSearchRequest and check context
         lines = source.split("\n")
         in_request_block = False
         found_include_source_true = False
@@ -94,9 +95,7 @@ class TestIncludeSourceMatchesSingleRepoBehavior:
         When users search via MCP/REST multi-repo APIs, they expect content
         in results, just like single-repo search returns.
         """
-        from code_indexer.server.multi.multi_search_service import MultiSearchService
-
-        source = inspect.getsource(MultiSearchService._search_semantic_sync)
+        source = _semantic_request_source()
 
         # The bug was that multi-repo excluded content while single-repo included it
         # After the fix, both should include content

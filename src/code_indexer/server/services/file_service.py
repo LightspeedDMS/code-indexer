@@ -27,7 +27,11 @@ from ..models.api_models import (
     FileListQueryParams,
 )
 from ..services.config_service import get_config_service
-from code_indexer.utils.path_confinement import resolve_confined_path
+from code_indexer.utils.path_confinement import (
+    GitDirectoryPathError,
+    is_readable_within_root,
+    resolve_confined_path,
+)
 
 if TYPE_CHECKING:
     # Bug #1650: type-only import for the lazily-constructed
@@ -411,6 +415,7 @@ class FileListingService:
         # Hoist the indexable-extensions lookup out of the per-file loop below
         # (it was one get_config() call PER FILE via _is_file_indexed()).
         indexable_extensions = self._get_indexable_extensions()
+        resolved_root = repo_root.resolve()
 
         try:
             for file_path in repo_root.rglob("*"):
@@ -421,6 +426,14 @@ class FileListingService:
 
                         # Skip files in always-excluded directories
                         if self._is_in_excluded_dir(relative_path):
+                            continue
+
+                        # A symlink is listed only when it resolves inside
+                        # the repository and outside its .git -- the same
+                        # rule every file read applies.
+                        if file_path.is_symlink() and not is_readable_within_root(
+                            file_path, resolved_root
+                        ):
                             continue
 
                         # Skip files matching .gitignore patterns
@@ -811,7 +824,11 @@ class FileListingService:
         # name (e.g. repo_root=".../foo" admits ".../foo-private/...").
         # resolve_confined_path() confines via Path.relative_to() instead,
         # which is immune to that class of bug.
-        full_file_path = resolve_confined_path(Path(repo_path), file_path)
+        # A path inside the repository's .git is answered as a missing file.
+        try:
+            full_file_path = resolve_confined_path(Path(repo_path), file_path)
+        except GitDirectoryPathError:
+            raise FileNotFoundError(f"File not found: {file_path}")
         if not full_file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         if not full_file_path.is_file():
@@ -995,7 +1012,11 @@ class FileListingService:
         # name (e.g. repo_root=".../foo" admits ".../foo-private/...").
         # resolve_confined_path() confines via Path.relative_to() instead,
         # which is immune to that class of bug.
-        full_file_path = resolve_confined_path(Path(repo_path), file_path)
+        # A path inside the repository's .git is answered as a missing file.
+        try:
+            full_file_path = resolve_confined_path(Path(repo_path), file_path)
+        except GitDirectoryPathError:
+            raise FileNotFoundError(f"File not found: {file_path}")
         if not full_file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         if not full_file_path.is_file():

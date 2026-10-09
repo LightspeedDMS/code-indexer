@@ -30,7 +30,10 @@ import httpx
 import pytest
 
 from tests.e2e.server.conftest import AdminTokenProvider
-from tests.e2e.siem_delivery.log_allowlist import PHASE7_LOG_ALLOWLIST
+from tests.e2e.siem_delivery.log_allowlist import (
+    PHASE7_LOG_ALLOWLIST,
+    deliberately_killed_worker_allowlist,
+)
 from tests.e2e.siem_delivery.outage_probe_window import (
     EXCUSED_LOG_IDS,
     without_excused,
@@ -159,7 +162,10 @@ def _private_server_log_audit(
             admin.get_token(),
             watermark_id=watermark,
             phase_name="Phase 7 (SIEM Delivery, restartable server)",
-            extra_allowlist=PHASE7_LOG_ALLOWLIST,
+            # The watchdog reports a deliberate SIGKILL on restart: excused
+            # only for the PIDs this test killed itself.
+            extra_allowlist=PHASE7_LOG_ALLOWLIST
+            + deliberately_killed_worker_allowlist(server.killed_pids),
         )
     return None if result.passed else result.failure_message()
 

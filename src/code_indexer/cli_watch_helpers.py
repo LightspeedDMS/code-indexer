@@ -1,20 +1,17 @@
-"""Watch mode helper functions for auto-detection and orchestration.
-
-This module provides functions for:
-1. Auto-detecting existing indexes (semantic, FTS, temporal)
-2. Orchestrating watch mode with detected indexes
+"""Watch mode helper: auto-detection of existing indexes (semantic, FTS,
+temporal) for `cidx watch`.
 
 Story: 02_Feat_WatchModeAutoDetection/01_Story_WatchModeAutoUpdatesAllIndexes.md
 """
 
 import logging
-import time
 from pathlib import Path
-from typing import Dict
-from rich.console import Console
+from typing import TYPE_CHECKING, Dict
+
+if TYPE_CHECKING:
+    from .config import Config
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 
 def _any_temporal_collection_exists(index_base: Path, project_root: Path) -> bool:
@@ -67,240 +64,45 @@ def _any_temporal_collection_exists(index_base: Path, project_root: Path) -> boo
         return False
 
 
-def detect_existing_indexes(project_root: Path) -> Dict[str, bool]:
+def semantic_collection_name(config: "Config") -> str:
+    """The semantic collection `cidx index` writes for `config`: the
+    configured provider's embedding model, made filesystem-safe exactly as
+    FilesystemVectorStore.resolve_collection_name() does.
+
+    Raises:
+        ValueError: unknown embedding provider.
+    """
+    if config.embedding_provider == "voyage-ai":
+        model = config.voyage_ai.model
+    elif config.embedding_provider == "cohere":
+        model = config.cohere.model
+    else:
+        raise ValueError(f"Unknown embedding provider: {config.embedding_provider}")
+    return model.replace("/", "_").replace(":", "_")
+
+
+def detect_existing_indexes(project_root: Path, config: "Config") -> Dict[str, bool]:
     """Detect which indexes exist and should be watched.
 
     Args:
         project_root: Path to project root directory
+        config: The project's configuration (its embedding model names the
+            semantic collection)
 
     Returns:
         Dict mapping index type to existence boolean:
         {
-            "semantic": bool,  # code-indexer-HEAD collection
-            "fts": bool,       # tantivy-fts index
-            "temporal": bool,  # code-indexer-temporal collection
+            "semantic": bool,  # .code-indexer/index/<embedding model>
+            "fts": bool,       # .code-indexer/tantivy_index (meta.json)
+            "temporal": bool,  # a temporal collection
         }
-
-    Examples:
-        >>> result = detect_existing_indexes(Path("/project"))
-        >>> result["semantic"]
-        True
-        >>> result["fts"]
-        False
     """
+    from .services.fts_lifecycle import fts_index_dir_for_repo
+
     index_base = project_root / ".code-indexer" / "index"
 
     return {
-        "semantic": (index_base / "code-indexer-HEAD").exists(),
-        "fts": (index_base / "tantivy-fts").exists(),
+        "semantic": (index_base / semantic_collection_name(config)).is_dir(),
+        "fts": (fts_index_dir_for_repo(project_root) / "meta.json").exists(),
         "temporal": _any_temporal_collection_exists(index_base, project_root),
     }
-
-
-def start_watch_mode(
-    project_root: Path,
-    config_manager,
-    smart_indexer=None,
-    git_topology_service=None,
-    watch_metadata=None,
-    debounce: float = 2.0,
-    batch_size: int = 100,
-    enable_fts: bool = False,
-):
-    """Start watch mode with auto-detected handlers.
-
-    This function orchestrates watch mode by:
-    1. Detecting existing indexes
-    2. Initializing appropriate handlers
-    3. Starting watchdog Observer
-    4. Monitoring for Ctrl+C to stop
-
-    Args:
-        project_root: Path to project root directory
-        config_manager: ConfigManager instance
-        smart_indexer: Optional SmartIndexer for semantic indexing
-        git_topology_service: Optional GitTopologyService for git-aware watching
-        watch_metadata: Optional WatchMetadata for watch session tracking
-        debounce: Debounce delay in seconds (default: 2.0)
-        batch_size: Batch size for indexing (default: 100)
-        enable_fts: Enable FTS watch (legacy flag, auto-detection overrides)
-
-    Returns:
-        None (blocks until Ctrl+C)
-    """
-    from watchdog.observers import Observer
-
-    # Detect available indexes
-    available_indexes = detect_existing_indexes(project_root)
-
-    # Count detected indexes
-    detected_count = sum(available_indexes.values())
-
-    if detected_count == 0:
-        console.print("⚠️ No indexes found. Run 'cidx index' first.", style="yellow")
-        return
-
-    console.print(f"🔍 Detected {detected_count} index(es) to watch:", style="blue")
-
-    # Initialize handlers for detected indexes
-    handlers = []
-
-    # Semantic index handler (GitAwareWatchHandler)
-    if available_indexes["semantic"]:
-        console.print("  ✅ Semantic index (HEAD collection)", style="green")
-
-        # Import semantic watch dependencies lazily
-        if (
-            smart_indexer is None
-            or git_topology_service is None
-            or watch_metadata is None
-        ):
-            from code_indexer.services.smart_indexer import SmartIndexer
-            from code_indexer.services.git_topology_service import GitTopologyService
-            from code_indexer.services.watch_metadata import WatchMetadata
-            from code_indexer.services.embedding_factory import EmbeddingProviderFactory
-            from code_indexer.storage.filesystem_vector_store import (
-                FilesystemVectorStore,
-            )
-
-            config = config_manager.load()
-
-            # Initialize semantic indexing components
-            embedding_provider = EmbeddingProviderFactory.create(config, console)
-            index_dir = Path(config.codebase_dir) / ".code-indexer" / "index"
-            vector_store_client = FilesystemVectorStore(
-                base_path=index_dir, project_root=Path(config.codebase_dir)
-            )
-
-            # Health checks
-            if not embedding_provider.health_check():
-                console.print(
-                    f"❌ {embedding_provider.get_provider_name().title()} service not available",
-                    style="red",
-                )
-                return
-
-            if not vector_store_client.health_check():
-                console.print("❌ Filesystem service not available", style="red")
-                return
-
-            # Initialize SmartIndexer
-            metadata_path = config_manager.config_path.parent / "metadata.json"
-            smart_indexer = SmartIndexer(
-                config, embedding_provider, vector_store_client, metadata_path
-            )
-
-            # Initialize git topology service
-            git_topology_service = GitTopologyService(config.codebase_dir)
-
-            # Initialize watch metadata
-            watch_metadata_path = (
-                config_manager.config_path.parent / "watch_metadata.json"
-            )
-            watch_metadata = WatchMetadata.load_from_disk(watch_metadata_path)
-
-        # Create GitAwareWatchHandler
-        from code_indexer.services.git_aware_watch_handler import GitAwareWatchHandler
-
-        semantic_handler = GitAwareWatchHandler(
-            config_manager.load(),
-            smart_indexer,
-            git_topology_service,
-            watch_metadata,
-            debounce_seconds=debounce,
-        )
-        handlers.append(semantic_handler)
-
-        # Start git-aware monitoring
-        semantic_handler.start_watching()
-
-    # FTS index handler
-    if available_indexes["fts"]:
-        console.print("  ✅ FTS index (full-text search)", style="green")
-
-        # Import FTS watch dependencies lazily
-        from code_indexer.services.fts_watch_handler import FTSWatchHandler
-        from code_indexer.services.tantivy_index_manager import TantivyIndexManager
-
-        config = config_manager.load()
-        fts_index_dir = project_root / ".code-indexer/index/tantivy-fts"
-
-        tantivy_manager = TantivyIndexManager(fts_index_dir)
-        fts_handler = FTSWatchHandler(tantivy_manager, config)
-        handlers.append(fts_handler)
-
-    # Temporal index handler
-    if available_indexes["temporal"]:
-        console.print("  ✅ Temporal index (git history commits)", style="green")
-
-        # Import temporal watch dependencies lazily
-        from code_indexer.cli_temporal_watch_handler import TemporalWatchHandler
-        from code_indexer.services.temporal.temporal_indexer import TemporalIndexer
-        from code_indexer.services.temporal.temporal_progressive_metadata import (
-            TemporalProgressiveMetadata,
-        )
-
-        from code_indexer.services.temporal.temporal_collection_naming import (
-            resolve_temporal_collection_from_config,
-        )
-
-        _config = config_manager.get_config()
-        _temporal_coll = resolve_temporal_collection_from_config(_config)
-        index_root = project_root / ".code-indexer" / "index"
-        temporal_index_dir = index_root / _temporal_coll
-
-        # Initialize vector store (FilesystemVectorStore) at index root, not collection subdir
-        vector_store = FilesystemVectorStore(index_root)
-
-        # Create temporal indexer with provider-aware collection name
-        temporal_indexer = TemporalIndexer(
-            config_manager, vector_store, collection_name=_temporal_coll
-        )
-
-        # Create progressive metadata
-        progressive_metadata = TemporalProgressiveMetadata(temporal_index_dir)
-
-        # Create TemporalWatchHandler
-        temporal_handler = TemporalWatchHandler(
-            project_root,
-            temporal_indexer=temporal_indexer,
-            progressive_metadata=progressive_metadata,
-        )
-        handlers.append(temporal_handler)
-
-    # Start watchdog observer with all handlers
-    observer = Observer()
-
-    for handler in handlers:
-        observer.schedule(handler, path=str(project_root), recursive=True)
-
-    observer.start()
-
-    console.print(
-        f"👀 Watching {detected_count} index(es). Press Ctrl+C to stop.",
-        style="blue",
-    )
-
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        console.print("\n🛑 Watch mode stopped", style="yellow")
-
-    observer.stop()
-    observer.join()
-
-    # Stop semantic handler if present
-    if available_indexes["semantic"] and handlers:
-        semantic_handler = handlers[0]
-        if hasattr(semantic_handler, "stop_watching"):
-            semantic_handler.stop_watching()
-
-    # Bug #1825: observer.stop() only stops the watchdog Observer's inotify-
-    # event thread -- the temporal handler's polling fallback (when active)
-    # runs on its OWN independent thread that observer.stop() never
-    # touches. Without this, a session that fell back to polling leaked
-    # that thread for the rest of the process's life.
-    for handler in handlers:
-        if hasattr(handler, "stop"):
-            handler.stop()

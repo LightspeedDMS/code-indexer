@@ -36,7 +36,7 @@ inputSchema:
 ---
 Retrieve the directed domain-to-domain dependency graph, optionally filtered by source, target, or minimum edge count.
 
-Filter parameters (Story #889, all optional):
+Filter parameters (all optional):
 
   source_domain (str | list[str]):
     Restrict edges to those whose source_domain is in the given value.

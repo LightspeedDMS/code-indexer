@@ -22,6 +22,7 @@ from ..api_clients.repository_linking_client import (
     ActivationError,
 )
 from ..api_clients.base_client import NetworkError
+from ..utils.credential_redaction import mask_url_credentials
 from ..config import write_json_atomic
 
 logger = logging.getLogger(__name__)
@@ -168,7 +169,14 @@ class ExactBranchMatcher:
                     repo_url
                 )
             except RepositoryNotFoundError as e:
-                logger.warning(f"No repositories found for URL {repo_url}: {e}")
+                from urllib.parse import unquote
+
+                # Server error text may quote the URL, also percent-encoded.
+                logger.warning(
+                    "No repositories found for URL %s: %s",
+                    mask_url_credentials(repo_url),
+                    mask_url_credentials(unquote(str(e))),
+                )
                 return None
             except NetworkError as e:
                 raise RepositoryLinkingError(
@@ -975,7 +983,7 @@ class AutoRepositoryActivator:
         print(f"Golden Repository: {golden_repo.display_name}")
         print(f"Repository Alias:  {golden_repo.alias}")
         print(f"Branch:           {golden_repo.branch}")
-        print(f"Git URL:          {golden_repo.git_url}")
+        print(f"Git URL:          {mask_url_credentials(golden_repo.git_url)}")
         print(f"Your Alias:       {user_alias}")
         print(f"Access Level:     {golden_repo.access_level}")
         print("\nThis will activate the repository for your personal use.")

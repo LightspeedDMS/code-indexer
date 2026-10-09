@@ -32,6 +32,10 @@ from tests.unit.server._audit_read_support import make_event
 
 _ELEVATION_QUALNAME = "require_elevation.<locals>._check"
 
+# The module-scoped real create_app() (~6.3 s alone) is paid by whichever
+# test runs first, slower under parallel gate load.
+pytestmark = pytest.mark.timeout(45)
+
 
 def _ago(**delta) -> str:
     """A time *delta* before NOW (the moment of the call, never import time:

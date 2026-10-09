@@ -11,6 +11,10 @@ from code_indexer.server.git.git_subprocess_env import build_non_interactive_git
 from code_indexer.utils.subprocess_diagnostics import (
     format_completed_process_diagnostic,
 )
+from code_indexer.utils.credential_redaction import (
+    mask_url_credentials,
+    with_masked_repo_url,
+)
 
 import os
 import subprocess
@@ -108,8 +112,12 @@ class RepositoryListingManager:
                 "Invalid status filter. Must be 'available' or 'activated'"
             )
 
-        # Get all golden repositories
-        all_golden_repos = self.golden_repo_manager.list_golden_repos()
+        # Get all golden repositories. URLs are returned with their userinfo
+        # redacted, and the search filter below matches the URL as returned.
+        all_golden_repos = [
+            with_masked_repo_url(repo)
+            for repo in self.golden_repo_manager.list_golden_repos()
+        ]
 
         # Get user's activated repositories
         activated_repos = self.activated_repo_manager.list_activated_repositories(
@@ -197,10 +205,11 @@ class RepositoryListingManager:
         )
         activated_aliases = {repo["golden_repo_alias"] for repo in activated_repos}
 
-        # Build detailed response
+        # Build detailed response (the URL is returned with its userinfo
+        # redacted).
         details: Dict[str, Any] = {
             "alias": golden_repo["alias"],
-            "repo_url": golden_repo["repo_url"],
+            "repo_url": mask_url_credentials(golden_repo["repo_url"]),
             "default_branch": golden_repo["default_branch"],
             "clone_path": golden_repo["clone_path"],
             "created_at": golden_repo["created_at"],

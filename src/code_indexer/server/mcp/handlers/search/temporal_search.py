@@ -107,12 +107,17 @@ def _execute_temporal_via_live_dispatch(
         config_service=get_config_service(),
     )
 
+    from code_indexer.server.query.semantic_query_manager import SearchRequestError
+
     try:
         worker_input = build_temporal_worker_input_from_mcp_dict(
             {**params, "repository_alias": repository_alias},
             user.username,
             fusion_fetch_limit,
         )
+    except ValueError as exc:
+        # The builder only normalizes the caller's own parameters.
+        raise SearchRequestError(str(exc)) from exc
     except TemporalAliasRejectedError as exc:
         return _mcp_response(
             {

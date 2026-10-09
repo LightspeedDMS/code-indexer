@@ -682,7 +682,7 @@ class TestAC2OmniPrecomputedVectorReuse:
     the warm-HIT path (timing-fragile) but to compute the embedding ONCE before
     fan-out (_omni_search_code -> _compute_shared_query_vector) and pass the
     resulting vector to every per-repo search call as precomputed_query_vector
-    (threaded via MultiSearchRequest -> _search_semantic_sync ->
+    (threaded via InternalMultiSearchRequest -> _search_semantic_sync ->
     search_repository_path -> _PrecomputedEmbeddingProvider).
 
     _PrecomputedEmbeddingProvider.get_embedding() returns the stored vector directly
@@ -1084,7 +1084,7 @@ class TestMixedConfigOmniVectorIsolation:
     provider, model, endpoint) must receive None and embed via its own chokepoint.
 
     These tests model the digest-guard in _search_semantic_sync by exercising
-    the MultiSearchRequest.precomputed_query_vector_digest field and the
+    the InternalMultiSearchRequest.precomputed_query_vector_digest field and the
     _digest_for_provider-based comparison that guards the precomputed vector.
 
     No real repo paths are needed: we verify the guard logic by inspecting
@@ -1152,16 +1152,16 @@ class TestMixedConfigOmniVectorIsolation:
         )
 
     def test_precomputed_query_vector_digest_field_exists_on_request(self):
-        """MultiSearchRequest has precomputed_query_vector_digest field (DEFECT 1 fix)."""
-        from code_indexer.server.multi.models import MultiSearchRequest
+        """InternalMultiSearchRequest has precomputed_query_vector_digest field (DEFECT 1 fix)."""
+        from code_indexer.server.multi.models import InternalMultiSearchRequest
 
-        req = MultiSearchRequest(
+        req = InternalMultiSearchRequest(
             repositories=["repo-a"],
             query="test query",
             search_type="semantic",
         )
         assert hasattr(req, "precomputed_query_vector_digest"), (
-            "MultiSearchRequest must have precomputed_query_vector_digest field"
+            "InternalMultiSearchRequest must have precomputed_query_vector_digest field"
         )
         assert req.precomputed_query_vector_digest is None
 
@@ -1170,9 +1170,9 @@ class TestMixedConfigOmniVectorIsolation:
 
     def test_precomputed_query_vector_digest_excluded_from_json(self):
         """precomputed_query_vector_digest must not appear in JSON serialisation."""
-        from code_indexer.server.multi.models import MultiSearchRequest
+        from code_indexer.server.multi.models import InternalMultiSearchRequest
 
-        req = MultiSearchRequest(
+        req = InternalMultiSearchRequest(
             repositories=["repo-a"],
             query="test query",
             search_type="semantic",
@@ -1295,7 +1295,7 @@ class TestSentinelCollapseVectorLeakDefect:
         """
         from code_indexer.server.multi.multi_search_config import MultiSearchConfig
         from code_indexer.server.multi.multi_search_service import MultiSearchService
-        from code_indexer.server.multi.models import MultiSearchRequest
+        from code_indexer.server.multi.models import InternalMultiSearchRequest
 
         if precomp_vec is None:
             precomp_vec = self._PRECOMP_VEC
@@ -1375,7 +1375,7 @@ class TestSentinelCollapseVectorLeakDefect:
         #    (os.path.exists check is inside search_repository_path which we
         #    replaced, so no issue — but _search_semantic_sync itself also
         #    calls _get_repository_path which we patched).
-        request = MultiSearchRequest(
+        request = InternalMultiSearchRequest(
             repositories=["dummy-repo"],
             query="test query",
             search_type="semantic",

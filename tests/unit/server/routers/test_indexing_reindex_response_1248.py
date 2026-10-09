@@ -28,6 +28,9 @@ from fastapi.testclient import TestClient
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.routers.indexing import router
+from tests.unit.server.routers.inline_routes_test_helpers import (
+    caller_is_access_admin,  # noqa: F401
+)
 
 TRIGGER_REINDEX_TARGET = (
     "code_indexer.server.services.activated_repo_index_manager."

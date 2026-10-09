@@ -16,6 +16,7 @@ from tests.unit.server.routers.inline_routes_test_helpers import (
     _patch_closure,
     user_client,  # noqa: F401
     anon_client,  # noqa: F401
+    caller_is_access_admin,  # noqa: F401
 )
 
 
@@ -139,12 +140,14 @@ class TestGetReposStatusSummary:
         mock_arm.list_activated_repositories.return_value = [
             {
                 "user_alias": "backend-repo",
+                "golden_repo_alias": "backend-repo",
                 "sync_status": "synced",
                 "activated_at": "2025-01-15T10:00:00Z",
                 "last_accessed": "2025-01-20T10:00:00Z",
             },
             {
                 "user_alias": "frontend-repo",
+                "golden_repo_alias": "frontend-repo",
                 "sync_status": "needs_sync",
                 "activated_at": "2025-01-10T10:00:00Z",
                 "last_accessed": "2025-01-18T10:00:00Z",
@@ -157,12 +160,20 @@ class TestGetReposStatusSummary:
             {"alias": "frontend-repo"},
             {"alias": "infra-repo"},
         ]
+        mock_grm.existing_golden_aliases.return_value = [
+            "backend-repo",
+            "frontend-repo",
+        ]
+        mock_arm.golden_repo_manager = mock_grm
 
         # The status counts cover only granted repositories: grant all three.
+        # The access service judges the caller's activations by their source
+        # repositories (both granted), through the route's own manager.
         with _access_service_granting(
             tmp_path / "groups.db",
             "testuser",
             ["backend-repo", "frontend-repo", "infra-repo"],
+            activated_repo_manager=mock_arm,
         ):
             with _patch_closure(handler, "activated_repo_manager", mock_arm):
                 with _patch_closure(handler, "golden_repo_manager", mock_grm):

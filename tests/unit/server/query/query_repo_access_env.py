@@ -213,7 +213,11 @@ class QueryAccessEnv:
         admins = gam.get_group_by_name("admins")
         assert admins is not None, "bootstrap must create the 'admins' group"
         gam.assign_user_to_group(ADMIN, admins.id, assigned_by="test")
-        self.access_service = AccessFilteringService(gam)
+        self.group_manager = gam
+        self.group_id = group.id
+        self.access_service = AccessFilteringService(
+            gam, activated_repo_manager=self.activated_repo_manager
+        )
 
         self.searched_paths: List[str] = []
         self.failing_repos: Set[str] = set()
@@ -244,10 +248,15 @@ class QueryAccessEnv:
         """
         app_module = importlib.import_module("code_indexer.server.app")
         namespace = vars(app_module)
+        # Every lazy name a query path probes must be installed: probing a
+        # missing one (e.g. golden_repo_manager in the category-map lookup)
+        # constructs the full application, which replaces the stand-in app
+        # mid-request and silently drops the access service.
         installs = {
             "app": self.app_stand_in(access_service),
             "semantic_query_manager": self.query_manager,
             "activated_repo_manager": self.activated_repo_manager,
+            "golden_repo_manager": self.golden_repo_manager,
         }
         previous = {name: namespace[name] for name in installs if name in namespace}
         namespace.update(installs)

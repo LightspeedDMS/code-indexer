@@ -53,6 +53,9 @@ class TestServerLifecycleCommands:
             assert result.exit_code == 0
             assert "Server started successfully" in result.output
             assert "http://127.0.0.1:8090" in result.output
+            # API documentation requires an authenticated session or token.
+            assert "http://127.0.0.1:8090/docs" in result.output
+            assert "requires login" in result.output
             mock_manager.start_server.assert_called_once()
 
     def test_server_start_command_handles_already_running_error(self):
@@ -236,6 +239,9 @@ class TestServerLifecycleCommands:
             assert result.exit_code == 0
             assert "Server restarted successfully" in result.output
             assert "http://127.0.0.1:8090" in result.output
+            # API documentation requires an authenticated session or token.
+            assert "http://127.0.0.1:8090/docs" in result.output
+            assert "requires login" in result.output
             mock_manager.restart_server.assert_called_once()
 
     def test_server_restart_command_handles_not_running_server(self):

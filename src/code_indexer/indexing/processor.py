@@ -11,7 +11,7 @@ from ..services.embedding_provider import EmbeddingProvider
 from ..services.vector_calculation_manager import VectorCalculationManager
 from .file_finder import FileFinder
 from .fixed_size_chunker import FixedSizeChunker
-from ..utils.path_confinement import is_resolved_within_root
+from ..utils.path_confinement import is_indexable_location
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,10 @@ class ProcessingStats:
     #: internal executor error) -- callers must treat that as "some
     #: failure is unattributed" rather than assuming completeness.
     failed_paths: FrozenSet[str] = frozenset()
+    #: Index entries the run changed without processing a file: deleted or
+    #: hidden paths, un-hidden paths, restored full-text documents. With
+    #: `files_processed`, tells a run that changed nothing apart.
+    index_entries_changed: int = 0
 
     @property
     def duration(self) -> float:
@@ -88,24 +92,24 @@ class DocumentProcessor:
         test double, which would otherwise turn the containment root
         into an unrelated mock value and reject every real file.
 
-        Server context only (``config.confined_to_codebase_root``); local
-        CLI indexing keeps every candidate, following symlinks wherever
-        they point.
+        Server context (``config.confined_to_codebase_root``) drops a
+        candidate resolving outside the root or into its ``.git``; local
+        CLI indexing follows symlinks wherever they point, except into the
+        repository's own ``.git``, which no context indexes.
         """
-        if not self.config.confined_to_codebase_root:
-            return list(candidates)
         resolved_root = Path(self.config.codebase_dir).resolve()
+        confined = self.config.confined_to_codebase_root
         kept: List[Path] = []
         rejected_count = 0
         for candidate in candidates:
-            if is_resolved_within_root(candidate, resolved_root):
+            if is_indexable_location(candidate, resolved_root, confined):
                 kept.append(candidate)
             else:
                 rejected_count += 1
         if rejected_count:
             logger.warning(
-                "%d candidate file path(s) resolve outside the codebase "
-                "root; dropping them from this indexing pass.",
+                "%d candidate file path(s) do not resolve to an indexable "
+                "location; dropping them from this indexing pass.",
                 rejected_count,
             )
         return kept

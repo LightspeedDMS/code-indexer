@@ -45,12 +45,13 @@ _TRACE_ID_LIMIT = (1 << 64) - 1
 @contextmanager
 def _telemetry_manager(**config_kwargs):
     """Construct a real, enabled TelemetryManager and guarantee shutdown.
-    Deliberately does not override collector_endpoint -- TelemetryConfig's
-    own default is never actually dialed by these tests (TelemetryManager
-    only configures the exporter; nothing here awaits an export cycle)."""
+    These tests inspect sampler wiring only, which the TracerProvider
+    carries with or without an exporter, so nothing is exported."""
     from code_indexer.server.telemetry import TelemetryManager
 
     config_kwargs.setdefault("enabled", True)
+    config_kwargs.setdefault("export_traces", False)
+    config_kwargs.setdefault("export_metrics", False)
     config = TelemetryConfig(**config_kwargs)
     manager = TelemetryManager(config)
     try:

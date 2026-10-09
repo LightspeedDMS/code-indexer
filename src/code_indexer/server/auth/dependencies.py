@@ -12,7 +12,7 @@ from code_indexer.server.middleware.audit_request_context import (
     AUTH_METHOD_WEB_SESSION,
     note_auth_method,
 )
-from typing import Optional, TYPE_CHECKING, Dict, Any, Tuple, cast
+from typing import Optional, TYPE_CHECKING, Callable, Dict, Any, Tuple, cast
 from fastapi import Depends, HTTPException, status, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from datetime import datetime, timezone
@@ -112,6 +112,74 @@ def _check_non_sso_api_restriction(user: User) -> None:
         )
 
 
+def credential_predates_account(issued_at: Any, user: User) -> bool:
+    """True when a credential was issued before *user*'s account was created.
+
+    Such a credential (JWT ``iat``, Web session ``created_at``) belongs to an
+    earlier, deleted account with the same name and must not authenticate
+    this one.  An account with no recorded creation instant (created before
+    the instant was recorded) carries no restriction.  When the account has
+    one, a credential whose issue time is missing or unreadable is refused.
+    """
+    created = user.account_created_at
+    if created is None:
+        return False
+    issued = _instant_to_epoch(issued_at)
+    if issued is None:
+        return True
+    return issued < created.timestamp()
+
+
+def _instant_to_epoch(value: Any) -> Optional[float]:
+    """Epoch seconds of an issue instant: epoch number, datetime or ISO-8601
+    text (naive values are UTC); None when unreadable."""
+    if isinstance(value, datetime):
+        moment = value
+    elif isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            pass
+        try:
+            moment = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    else:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.timestamp()
+
+
+def resolve_credential_account(
+    lookup: Callable[[str], Optional[User]], username: Any, issued_at: Any
+) -> Optional[User]:
+    """The live account a credential issued to *username* at *issued_at*
+    authenticates, or None.
+
+    None when the account no longer exists or was created after the
+    credential was issued.  The account is looked up on every call (never
+    cached) so a removal or role change takes effect at once.
+    """
+    if not isinstance(username, str) or not username:
+        return None
+    user = lookup(username)
+    if user is None or credential_predates_account(issued_at, user):
+        return None
+    return user
+
+
+def lookup_live_account(username: str) -> Optional[User]:
+    """The account named *username*, read from the server's account store at
+    call time (never cached).  Raises when no account store is wired."""
+    if user_manager is None:
+        raise RuntimeError("Account store not initialized")
+    return user_manager.get_user(username)
+
+
 def _validate_jwt_and_get_user(token: str) -> User:
     """Validate JWT token and return User object or raise HTTPException 401."""
     if not jwt_manager or not user_manager:
@@ -147,6 +215,14 @@ def _validate_jwt_and_get_user(token: str) -> User:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User not found",
+                headers={"WWW-Authenticate": _build_www_authenticate_header()},
+            )
+        from code_indexer.server.auth.jwt_manager import original_auth_time
+
+        if credential_predates_account(original_auth_time(payload), user):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token predates account",
                 headers={"WWW-Authenticate": _build_www_authenticate_header()},
             )
 
@@ -204,11 +280,16 @@ def _refresh_jwt_cookie(response: Response, payload: Dict[str, Any]) -> None:
 
         blacklist_token(old_jti)
 
+    from code_indexer.server.auth.jwt_manager import original_auth_time
+
+    # The refreshed cookie continues the same authentication: it keeps the
+    # original auth_time, so the account check cannot be reset by refresh.
     new_token = jwt_manager.create_token(
         {
             "username": payload.get("username"),
             "role": payload.get("role"),
             "created_at": payload.get("created_at"),
+            "auth_time": original_auth_time(payload),
         }
     )
 
@@ -294,7 +375,10 @@ def get_current_user(
             # Valid OAuth token - get user
             username = oauth_result.get("user_id")
             if username:
-                user = user_manager.get_user(username)  # type: ignore[assignment]
+                # Only the live account the token was issued to.
+                user = resolve_credential_account(  # type: ignore[assignment]
+                    user_manager.get_user, username, oauth_result.get("created_at")
+                )
                 if user is None:
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -605,7 +689,9 @@ def get_current_user_web_or_api(
             if session_data:
                 # Valid web session - get User object
                 user = user_manager.get_user(session_data.username)
-                if user:
+                if user and not credential_predates_account(
+                    session_data.issued_at, user
+                ):
                     # Elevation windows opened through the Web UI (e.g.
                     # /admin/elevate) are keyed by the raw "session" cookie
                     # value -- the same value _hybrid_auth_impl's web-session
@@ -869,6 +955,12 @@ def _hybrid_auth_impl(
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"User '{session.username}' not found in user database",
+                )
+            if credential_predates_account(session.issued_at, user):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session predates account",
+                    headers={"WWW-Authenticate": _build_www_authenticate_header()},
                 )
 
             # Check admin requirement using DATABASE role, not session role

@@ -35,15 +35,18 @@ from code_indexer.server.auth import dependencies
 from code_indexer.server.auth import elevation_routes
 from code_indexer.server.auth.elevated_session_manager import ElevatedSessionManager
 from code_indexer.server.auth.jwt_manager import JWTManager
-from code_indexer.server.auth.login_rate_limiter import login_rate_limiter
+from code_indexer.server.auth.login_rate_limiter import (
+    SCOPE_STEP_UP,
+    login_rate_limiter,
+)
 from code_indexer.server.auth.totp_service import TOTPService
 from code_indexer.server.auth.user_manager import UserManager, UserRole
 from code_indexer.server.web import elevation_web_routes, mfa_routes
 
 _PASSWORD = "Front-Door-Pa55word!"
 _USERNAME = "alice"
-# TestClient reports this as request.client.host.
-_LIMITER_KEY = f"testclient:{_USERNAME}"
+# The step-up throttle is keyed by the username alone (step-up namespace).
+_LIMITER_KEY = _USERNAME
 _MAX_ATTEMPTS = 5
 _WEB = "code_indexer.server.web.elevation_web_routes"
 _REST = "code_indexer.server.auth.elevation_routes"
@@ -119,7 +122,7 @@ def _run(tmp_path: Path, enforcement: bool) -> Iterator[_Door]:
     door = _Door(tmp_path)
     previous_totp: Optional[Any] = mfa_routes.get_totp_service()
     mfa_routes.set_totp_service(door.totp)
-    login_rate_limiter.record_success(_LIMITER_KEY)
+    login_rate_limiter.record_success(_LIMITER_KEY, scope=SCOPE_STEP_UP)
     try:
         with (
             patch.object(dependencies, "jwt_manager", door.jwt),
@@ -138,7 +141,7 @@ def _run(tmp_path: Path, enforcement: bool) -> Iterator[_Door]:
         ):
             yield door
     finally:
-        login_rate_limiter.record_success(_LIMITER_KEY)
+        login_rate_limiter.record_success(_LIMITER_KEY, scope=SCOPE_STEP_UP)
         mfa_routes.set_totp_service(previous_totp)
 
 
@@ -171,6 +174,49 @@ class TestSharedCounterAcrossFrontDoors:
         assert ajax.json()["success"] is False
         form = door.form(totp_code=door.valid_code())
         assert form.status_code == 429, form.text
+        assert not door.window_open()
+
+    def test_throttled_step_ups_carry_retry_after(self, door):
+        for _ in range(_MAX_ATTEMPTS):
+            assert door.ajax(totp_code=door.wrong_code()).status_code == 401
+
+        refused = [
+            door.rest(door.valid_code()),
+            door.ajax(totp_code=door.valid_code()),
+            door.form(totp_code=door.valid_code()),
+        ]
+        for response in refused:
+            assert response.status_code == 429, response.text
+            # The first backoff window is 5 s; the header is whole seconds.
+            assert 1 <= int(response.headers["Retry-After"]) <= 5
+
+    # Three doors each wait the real 2 s reservation busy timeout (~6 s
+    # idle): the wait is the behaviour under test, slower under gate load.
+    @pytest.mark.timeout(45)
+    def test_busy_store_answers_503_try_again_shortly(self, door, tmp_path):
+        import sqlite3
+
+        # The shared limiter on a solo SQLite file (the tree-wide conftest
+        # resets it after the test); another writer holds that file's lock.
+        db_path = str(tmp_path / "throttle-busy.db")
+        login_rate_limiter.set_sqlite_path(db_path)
+        writer = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
+        try:
+            writer.execute("BEGIN IMMEDIATE")
+            try:
+                answers = [
+                    door.rest(door.valid_code()),
+                    door.ajax(totp_code=door.valid_code()),
+                    door.form(totp_code=door.valid_code()),
+                ]
+            finally:
+                writer.execute("ROLLBACK")
+        finally:
+            writer.close()
+        for response in answers:
+            assert response.status_code == 503, response.text
+            assert "Elevation is busy, try again shortly." in response.text
+            assert response.headers["Retry-After"] == "1"
         assert not door.window_open()
 
     def test_web_form_failures_lock_out_rest(self, door):
@@ -233,7 +279,9 @@ class TestWindowReadBackFailure:
         assert unconfirmed.status_code == 500, unconfirmed.text
         assert unconfirmed.json()["success"] is False
 
-        assert door.ajax(totp_code=door.wrong_code()).status_code == 401
+        # The history was kept, and the unconfirmed attempt itself was
+        # reserved (never cleared by a success): with the wrong codes above
+        # it reaches the threshold, so the very next attempt is refused.
         locked = door.ajax(recovery_code=recovery_code)
         assert locked.status_code == 429, locked.text
 
@@ -253,5 +301,9 @@ class TestEnforcementOff:
         form = door.form(totp_code=door.wrong_code())
         assert form.status_code == 303
 
-        assert login_rate_limiter.is_locked(_LIMITER_KEY)[0] is False
-        assert login_rate_limiter._failures.get(_LIMITER_KEY, []) == []
+        scoped = {"scope": SCOPE_STEP_UP}
+        assert login_rate_limiter.is_throttled(_LIMITER_KEY, **scoped)[0] is False
+        # Zero attempts were reserved: max-1 more still do not throttle.
+        for _ in range(_MAX_ATTEMPTS - 1):
+            login_rate_limiter.begin_attempt(_LIMITER_KEY, **scoped)
+        assert login_rate_limiter.is_throttled(_LIMITER_KEY, **scoped)[0] is False

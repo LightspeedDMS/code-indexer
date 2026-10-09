@@ -63,6 +63,11 @@ def _client_ip(http_request: Optional[Request]) -> str:
 
 def _step_up_payload(result: StepUpResult) -> Dict[str, Any]:
     """This door's payload for a step-up result (same shapes as REST)."""
+    if result.outcome is StepUpOutcome.BUSY:
+        return {
+            "error": "busy",
+            "message": "Elevation is busy, try again shortly.",
+        }
     if result.outcome is StepUpOutcome.LOCKED_OUT:
         return {
             "error": "rate_limited",

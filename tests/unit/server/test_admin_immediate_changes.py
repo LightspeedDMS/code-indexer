@@ -64,7 +64,7 @@ def mock_admin_user():
 
 
 @pytest.fixture
-def test_client(group_manager, mock_admin_user):
+def test_client(group_manager, mock_admin_user, tmp_path, monkeypatch):
     """Create a test client with mocked dependencies."""
     from code_indexer.server.routers.groups import (
         router as groups_router,
@@ -72,10 +72,17 @@ def test_client(group_manager, mock_admin_user):
         set_group_manager,
         get_group_manager,
     )
+    from code_indexer.server.auth import dependencies
     from code_indexer.server.auth.dependencies import (
         get_current_admin_user,
         get_current_user,
     )
+    from code_indexer.server.auth.user_manager import UserManager, UserRole
+
+    # Group assignments are written only for accounts in the server's store.
+    accounts = UserManager(users_file_path=str(tmp_path / "users.json"))
+    accounts.create_user("testuser", "Example-Passw0rd!x", UserRole.NORMAL_USER)
+    monkeypatch.setattr(dependencies, "user_manager", accounts)
 
     app = FastAPI()
     app.include_router(groups_router)

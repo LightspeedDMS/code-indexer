@@ -165,13 +165,14 @@ def _lifespan_shutdown_calls() -> list:
 
     Parses ``lifespan.py`` rather than matching text, so a comment, a docstring
     or a stray mention cannot satisfy the assertion -- only an actual ``Call``
-    node placed on the post-``yield`` shutdown half of ``lifespan``.
+    node placed on the post-``yield`` shutdown half of ``_lifespan_body``, which
+    holds the server's shutdown chain (the ``lifespan`` wrapper runs it).
     """
     from code_indexer.server.startup import lifespan as lifespan_module
 
     tree = ast.parse(inspect.getsource(lifespan_module))
     for node in ast.walk(tree):
-        if not isinstance(node, ast.AsyncFunctionDef) or node.name != "lifespan":
+        if not isinstance(node, ast.AsyncFunctionDef) or node.name != "_lifespan_body":
             continue
         yields = [y.lineno for y in ast.walk(node) if isinstance(y, ast.Yield)]
         if not yields:

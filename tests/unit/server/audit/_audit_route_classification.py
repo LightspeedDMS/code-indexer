@@ -48,7 +48,7 @@ ROUTE_EXEMPT: Dict[str, str] = {
     "POST /admin/partials/query-results": READ_ONLY,
     "POST /api/v1/repos/{alias}/git/reset": WORKSPACE_GIT,
     "POST /api/v1/repos/{alias}/git/clean": WORKSPACE_GIT,
-    "DELETE /api/v1/repos/{alias}/git/branches/{name}": WORKSPACE_GIT,
+    "DELETE /api/v1/repos/{alias}/git/branches/{name:path}": WORKSPACE_GIT,
     **{
         f"POST /api/api-keys/{provider}/{probe}": _PROBE_ONLY
         for provider in ("anthropic", "voyageai", "cohere")

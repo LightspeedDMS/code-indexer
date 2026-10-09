@@ -11,10 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.git.git_subprocess_env import (
+    ensure_remote_url_without_credentials,
+)
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
@@ -29,11 +33,45 @@ from code_indexer.server.services.git_operations_service import (
     GitCommandError,
     git_operations_service,
 )
+from code_indexer.server.storage.shared.snapshot_manager import (
+    is_versioned_snapshot_in_running_server,
+)
 
 from ..auth.elevation_decorator import require_mcp_elevation
 from ._utils import _admin_role_first, _mcp_response, app_module
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_mutable_git_repo_path(
+    repository_alias: str, username: str
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve the repository path for a MUTATING git operation.
+
+    The single choke point for every git write tool in this module: the
+    path comes from ``_resolve_git_repo_path`` and is refused when it is an
+    immutable versioned snapshot in ANY layout the wired clone backend
+    produces (a global alias resolves to its snapshot target), so no write
+    ever runs inside one.
+
+    Returns:
+        (path, error_message), same contract as ``_resolve_git_repo_path``.
+    """
+    import code_indexer.server.mcp.handlers._legacy as _legacy
+
+    repo_path, error_msg = _legacy._resolve_git_repo_path(repository_alias, username)
+    if (
+        error_msg is None
+        and repo_path is not None
+        and is_versioned_snapshot_in_running_server(repo_path)
+    ):
+        return None, (
+            f"Repository '{repository_alias}' resolves to an immutable versioned "
+            "snapshot; git write operations are not allowed on it. Activate the "
+            "repository to get a writable workspace."
+        )
+    return repo_path, error_msg
+
 
 # Error codes for git write operations (named constants for traceability)
 _ERR_STAGE = "MCP-GENERAL-064"
@@ -62,8 +100,6 @@ def _handle_git_file_operation(
     operation_name: str,
 ) -> Dict[str, Any]:
     """Execute a git file operation (stage/unstage) with standard validation and error handling."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -76,7 +112,7 @@ def _handle_git_file_operation(
         )
 
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -153,6 +189,7 @@ def _get_pat_credential_for_remote(
         (credential, remote_url, error_msg) tuple.
     """
     from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+    from code_indexer.utils import git_runner
     from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
 
     remote_url = ""
@@ -161,8 +198,13 @@ def _get_pat_credential_for_remote(
             ["git", "remote", "get-url", remote],
             cwd=Path(repo_path),
             check=True,
+            timeout=git_runner.REMOTE_RESOLVE_TIMEOUT_SECONDS,
         )
         remote_url = url_result.stdout.strip()
+    except subprocess.TimeoutExpired as e:
+        message = f"resolving remote '{remote}' timed out after {e.timeout}s"
+        logger.warning(message)
+        return None, None, message
     except Exception as e:
         logger.warning(f"Failed to get remote URL for '{remote}': {e}")
         return None, None, f"Failed to get remote URL for '{remote}': {e}"
@@ -244,8 +286,6 @@ def _resolve_commit_identity(
 
 def git_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_commit tool - create a git commit."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -257,7 +297,7 @@ def git_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: message"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -339,6 +379,13 @@ def _handle_write_error(
             extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response({"success": False, "error": str(exc)})
+    if isinstance(exc, GitArgumentValidationError):
+        # A rejected caller argument is a client error, not a server fault.
+        logger.warning(
+            f"{operation} rejected an invalid argument: {exc}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(exc)})
     logger.exception(
         f"Unexpected error in {operation}: {exc}",
         extra={"correlation_id": get_correlation_id()},
@@ -349,32 +396,28 @@ def _handle_write_error(
 def _confirmation_response(
     result: Dict[str, Any], label: str
 ) -> Optional[Dict[str, Any]]:
-    """If result requires confirmation, return formatted token response; else None."""
+    """If result requires confirmation, return formatted token response; else None.
+
+    The service returns a fresh token both on the first call and when the
+    presented token is rejected; a rejection also carries ``message``.
+    """
     if result.get("requires_confirmation"):
+        # The token value travels only in its own field, never in prose.
+        prompt = (
+            f"{label} requires confirmation. Call again with "
+            "confirmation_token set to the value of the `token` field."
+        )
+        rejection = result.get("message")
         return _mcp_response(
             {
                 "success": False,
                 "confirmation_token_required": {
                     "token": result["token"],
-                    "message": (
-                        f"{label} requires confirmation. "
-                        f"Call again with confirmation_token='{result['token']}'"
-                    ),
+                    "message": f"{rejection}. {prompt}" if rejection else prompt,
                 },
             }
         )
     return None
-
-
-def _new_confirmation_token(action: str, exc: ValueError) -> Dict[str, Any]:
-    """Generate a fresh confirmation token response after validation failure."""
-    token = git_operations_service.generate_confirmation_token(action)
-    return _mcp_response(
-        {
-            "success": False,
-            "confirmation_token_required": {"token": token, "message": str(exc)},
-        }
-    )
 
 
 def _invalidate_wiki_cache(repository_alias: str, operation: str) -> None:
@@ -420,8 +463,6 @@ def git_merge(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     Story #388: Git Merge with Conflict Detection.
     """
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -433,7 +474,7 @@ def git_merge(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: source_branch"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -561,8 +602,6 @@ def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]
 def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_branch_delete tool - delete branch (admin role, like
     the ``repository:admin`` REST twin, however the call was admitted)."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -575,7 +614,7 @@ def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
     confirmation_token = args.get("confirmation_token")
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -586,7 +625,11 @@ def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         result = git_operations_service.git_branch_delete(
-            Path(repo_path), branch_name, confirmation_token=confirmation_token
+            Path(repo_path),
+            branch_name,
+            confirmation_token=confirmation_token,
+            username=user.username,
+            repo_alias=repository_alias,
         )
         confirm = _confirmation_response(result, "Branch deletion")
         if confirm is not None:
@@ -600,7 +643,7 @@ def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     except GitArgumentValidationError as e:
         return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
-        return _new_confirmation_token("git_branch_delete", e)
+        return _mcp_response({"success": False, "error": str(e)})
     except GitCommandError as e:
         return _handle_write_error("git_branch_delete", _ERR_BRANCH_DELETE, e)
     except FileNotFoundError as e:
@@ -615,8 +658,6 @@ def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_branch_switch tool - switch to different branch."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -639,7 +680,7 @@ def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: branch_name"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -673,8 +714,6 @@ def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_branch_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_branch_create tool - create new branch."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -686,7 +725,7 @@ def git_branch_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: branch_name"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -719,8 +758,6 @@ def git_branch_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_checkout_file(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_checkout_file tool - restore file from HEAD."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -732,7 +769,7 @@ def git_checkout_file(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: file_path"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -759,15 +796,13 @@ def git_checkout_file(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_merge_abort(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_merge_abort tool - abort in-progress merge."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -794,8 +829,6 @@ def git_merge_abort(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_mark_resolved(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_mark_resolved tool - mark a conflicted file as resolved."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -807,7 +840,7 @@ def git_mark_resolved(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: file_path"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -844,8 +877,6 @@ def git_mark_resolved(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_reset tool - reset working tree (admin role, like the
     ``repository:admin`` REST twin, however the call was admitted)."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -863,7 +894,7 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     confirmation_token = args.get("confirmation_token")
 
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -878,6 +909,8 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             mode=mode,
             commit_hash=target,
             confirmation_token=confirmation_token,
+            username=user.username,
+            repo_alias=repository_alias,
         )
         confirm = _confirmation_response(result, "Hard reset")
         if confirm is not None:
@@ -887,7 +920,7 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     except GitArgumentValidationError as e:
         return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
-        return _new_confirmation_token("git_reset_hard", e)
+        return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
         return _handle_write_error("git_reset", _ERR_RESET, e)
 
@@ -896,8 +929,6 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_clean tool - remove untracked files (admin role, like
     the ``repository:admin`` REST twin, however the call was admitted)."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -906,7 +937,7 @@ def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     confirmation_token = args.get("confirmation_token")
 
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -917,7 +948,10 @@ def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         result = git_operations_service.git_clean(
-            Path(repo_path), confirmation_token=confirmation_token
+            Path(repo_path),
+            confirmation_token=confirmation_token,
+            username=user.username,
+            repo_alias=repository_alias,
         )
         confirm = _confirmation_response(result, "Git clean")
         if confirm is not None:
@@ -927,7 +961,7 @@ def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     except GitArgumentValidationError as e:
         return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
-        return _new_confirmation_token("git_clean", e)
+        return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
         return _handle_write_error("git_clean", _ERR_CLEAN, e)
 
@@ -937,8 +971,6 @@ def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     Story #387: PAT-Authenticated Git Push with User Attribution.
     """
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -949,7 +981,7 @@ def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         branch = args.get("branch")
         set_upstream = args.get("set_upstream", True)
 
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -979,6 +1011,11 @@ def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         git_operations_service._trigger_migration_if_needed(
             repo_path, user.username, repository_alias
         )
+        # The stored origin converges to its credential-free URL before the
+        # push resolves it (a versioned snapshot is never rewritten). No PAT
+        # is selected for a clone whose stored URL could not be sanitized:
+        # the sanitization raises GitCommandError first.
+        ensure_remote_url_without_credentials(repo_path)
 
         credential, remote_url, cred_error = _get_pat_credential_for_remote(
             repo_path, remote, user.username
@@ -1078,7 +1115,6 @@ def git_amend(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     Originally Story #454, extracted as part of Story #496 modularisation.
     Uses PAT credential identity for GIT_AUTHOR/COMMITTER env vars.
     """
-    import code_indexer.server.mcp.handlers._legacy as _legacy
     import os as _os
 
     repository_alias = args.get("repository_alias")
@@ -1089,7 +1125,7 @@ def git_amend(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -1139,8 +1175,6 @@ def git_stash(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     Originally Story #453, extracted as part of Story #496 modularisation.
     """
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     parsed, err = _validate_stash_args(args)
     if err is not None:
         return err
@@ -1148,7 +1182,7 @@ def git_stash(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     action = parsed["action"]
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             parsed["repository_alias"], user.username
         )
         if error_msg is not None:

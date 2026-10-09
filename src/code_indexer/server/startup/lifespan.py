@@ -546,6 +546,68 @@ def _start_hnsw_orphan_repair_sweep_scheduler(
     return scheduler
 
 
+def _legacy_json_migration(
+    server_data_dir: str, db_path: str, user_manager: Any, storage_mode: str
+) -> Any:
+    """The start-up legacy JSON migration for the configured storage mode.
+
+    Solo (SQLite): the users.json import creates new names through the
+    shared pre-creation step.  Cluster (PostgreSQL): accounts live in
+    PostgreSQL, so the local users.json import never runs (and never reaches
+    the shared purge); the other legacy files migrate as before.
+    """
+    from code_indexer.server.storage.migration_service import MigrationService
+
+    if storage_mode == "postgres":
+        return MigrationService(server_data_dir, db_path, import_users=False)
+    return MigrationService(
+        server_data_dir,
+        db_path,
+        prepare_new_account=user_manager.prepare_name_for_new_account,
+    )
+
+
+def _build_oidc_manager(
+    config: Any, user_manager: Any, jwt_manager: Any, backend_registry: Any
+) -> Any:
+    """The SSO manager, storing identity links in the configured OAuth store
+    (``oauth.db`` in solo mode, PostgreSQL in cluster mode): the same store
+    account deletion purges."""
+    from code_indexer.server.auth.oidc.oidc_manager import OIDCManager
+
+    return OIDCManager(
+        config=config,
+        user_manager=user_manager,
+        jwt_manager=jwt_manager,
+        oauth_backend=(
+            backend_registry.oauth if backend_registry is not None else None
+        ),
+    )
+
+
+def _start_account_orphan_sweep(app: FastAPI, user_manager: Any) -> None:
+    """Schedule the start-up sweep removing rows whose account is gone.
+
+    Runs in the background on a worker thread (``run_startup_orphan_sweep``)
+    and never fails start-up: the sweep logs its own outcome.  The task is
+    kept on ``app.state`` so it is not garbage-collected mid-run.
+    """
+    from code_indexer.server.services.account_data_purge import (
+        run_startup_orphan_sweep,
+    )
+
+    purger = user_manager.account_data_purger
+    if purger is None:
+        logger.warning(
+            "Account data purge not configured: orphaned account data sweep skipped",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return
+    app.state.account_orphan_sweep_task = asyncio.create_task(
+        run_startup_orphan_sweep(purger)
+    )
+
+
 def make_lifespan(
     background_job_manager: Any,
     job_tracker: Any,
@@ -566,7 +628,7 @@ def make_lifespan(
     """
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def _lifespan_body(app: FastAPI):
         """
         Lifespan context manager for server startup and shutdown.
 
@@ -715,6 +777,42 @@ def make_lifespan(
                     f"Failed to initialize SQLite log handler: {e}",
                 ),
                 exc_info=True,
+            )
+
+        # Access lines never carry a confirmation_token query value in clear.
+        from code_indexer.server.utils.access_log_redaction import (
+            install_access_log_redaction,
+        )
+
+        install_access_log_redaction()
+
+        # Every handler in the process -- the HTTP server's own console
+        # handlers and handlers attached before the queue listener --
+        # masks credentials, not only those behind the listener.
+        from code_indexer.server.services.async_logging import (
+            attach_redacting_filter_to_all_handlers,
+        )
+
+        attach_redacting_filter_to_all_handlers()
+
+        # Story S12 (#2087): worker-stall watchdog, one per uvicorn worker (this
+        # lifespan runs once per worker). It leaves every thread's stack and the
+        # memory samples in <server_dir>/logs/worker-stall-<pid>-<UTC>.log when no
+        # Python thread can run for 3 s, i.e. before uvicorn's 5 s health-check
+        # SIGKILL. Started after logging so its startup sweep's ERROR lines about
+        # killed workers reach logs.db. start() only spawns a thread (no I/O).
+        try:
+            from code_indexer.server.utils.stall_watchdog import (
+                start_stall_watchdog,
+            )
+
+            start_stall_watchdog(app, server_data_dir)
+        except Exception:
+            logger.error(
+                "Story S12: worker stall watchdog failed to start; stalls of "
+                "this worker will not be captured",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
             )
 
         # Bootstrap-only: bump anyio threadpool size so concurrent sync handlers
@@ -897,7 +995,6 @@ def make_lifespan(
         )
         try:
             from code_indexer.server.storage.database_manager import DatabaseSchema
-            from code_indexer.server.storage.migration_service import MigrationService
 
             db_path = Path(server_data_dir) / "data" / "cidx_server.db"
             schema = DatabaseSchema(str(db_path))
@@ -911,7 +1008,12 @@ def make_lifespan(
             # Run migration of legacy JSON files to SQLite
             # Note: JSON files are in server_data_dir (e.g., ~/.cidx-server/users.json)
             # not in the data subdirectory
-            migration = MigrationService(str(server_data_dir), str(db_path))
+            # Solo: new names from the legacy import go through the same
+            # pre-creation step as every other account.  Cluster: accounts
+            # live in PostgreSQL, so the local users.json import is skipped.
+            migration = _legacy_json_migration(
+                str(server_data_dir), str(db_path), user_manager, storage_mode
+            )
             if migration.is_migration_needed():
                 logger.info(
                     "Legacy JSON files found, running migration to SQLite",
@@ -1168,6 +1270,10 @@ def make_lifespan(
             )
             app.state.ssh_migration_result = None
 
+        # Startup: remove rows left keyed to account names that no longer
+        # exist (background task, worker thread, never fails start-up).
+        _start_account_orphan_sweep(app, user_manager)
+
         # Startup: Initialize GroupAccessManager for group-based access control
         logger.info(
             "Server startup: Initializing GroupAccessManager",
@@ -1320,7 +1426,12 @@ def make_lifespan(
                 AccessFilteringService,
             )
 
-            access_filtering_service = AccessFilteringService(group_manager)
+            access_filtering_service = AccessFilteringService(
+                group_manager,
+                activated_repo_manager=getattr(
+                    app.state, "activated_repo_manager", None
+                ),
+            )
             app.state.access_filtering_service = access_filtering_service
             logger.info(
                 "AccessFilteringService initialized for query-time access filtering",
@@ -1621,6 +1732,15 @@ def make_lifespan(
             payload_cache.start_background_cleanup()
             app.state.payload_cache = payload_cache
 
+            # Confirmation tokens for destructive git operations live in
+            # this cluster-shared store, so any worker or node can redeem
+            # a token issued by another.
+            from code_indexer.server.services.git_operations_service import (
+                git_operations_service,
+            )
+
+            git_operations_service.payload_cache = payload_cache
+
             logger.info(
                 f"PayloadCache initialized: {cache_db_path} "
                 f"(preview_size={payload_cache_config.preview_size_chars}, "
@@ -1690,6 +1810,13 @@ def make_lifespan(
             )
 
             reset_registered_payload_cache()
+            # Destructive git confirmations never use a cache this block
+            # declared unavailable: the service fails loudly instead.
+            from code_indexer.server.services.git_operations_service import (
+                git_operations_service,
+            )
+
+            git_operations_service.payload_cache = None
 
         # Bug fix: Early ConfigService PG pool so scheduler inits read merged runtime config.
         # In postgres/cluster mode, ConfigService.set_connection_pool() triggers
@@ -2223,6 +2350,9 @@ def make_lifespan(
                     group_manager,
                     memory_metadata_cache=_memory_metadata_cache,
                     memories_dir=_memories_dir,
+                    activated_repo_manager=getattr(
+                        app.state, "activated_repo_manager", None
+                    ),
                 )
                 app.state.access_filtering_service = (
                     _access_filtering_service_with_cache
@@ -3636,7 +3766,6 @@ def make_lifespan(
 
         try:
             from code_indexer.server.services.config_service import get_config_service
-            from code_indexer.server.auth.oidc.oidc_manager import OIDCManager
             from code_indexer.server.auth.oidc.state_manager import StateManager
 
             # Bug #578: Read from ConfigService (has merged runtime from DB),
@@ -3656,10 +3785,11 @@ def make_lifespan(
                 # Use existing user_manager and jwt_manager (defined at module level below)
                 # Note: These are defined after the lifespan function, so we reference them here
                 state_manager = StateManager()
-                oidc_manager = OIDCManager(
-                    config=config.oidc_provider_config,
-                    user_manager=user_manager,  # Global from module level
-                    jwt_manager=jwt_manager,  # Global from module level
+                oidc_manager = _build_oidc_manager(
+                    config.oidc_provider_config,
+                    user_manager,
+                    jwt_manager,
+                    backend_registry,
                 )
 
                 # Initialize OIDC database schema (no network calls)
@@ -4400,18 +4530,16 @@ def make_lifespan(
                             and _late_config.oidc_provider_config
                             and _late_config.oidc_provider_config.enabled
                         ):
-                            from code_indexer.server.auth.oidc.oidc_manager import (
-                                OIDCManager,
-                            )
                             from code_indexer.server.auth.oidc.state_manager import (
                                 StateManager,
                             )
 
                             _late_state_mgr = StateManager()
-                            _late_oidc_mgr = OIDCManager(
-                                config=_late_config.oidc_provider_config,
-                                user_manager=user_manager,
-                                jwt_manager=jwt_manager,
+                            _late_oidc_mgr = _build_oidc_manager(
+                                _late_config.oidc_provider_config,
+                                user_manager,
+                                jwt_manager,
+                                backend_registry,
                             )
                             await _late_oidc_mgr.initialize()
 
@@ -5303,34 +5431,45 @@ def make_lifespan(
                 _see_stop_exc,
             )
 
+        # Story S12: stop this worker's stall watchdog (cancels the faulthandler
+        # timer, removes its armed files) before the log listener drains, so a
+        # stall it reports while stopping is still logged. The join runs in a
+        # worker thread, never on the event loop. Non-fatal.
+        try:
+            from code_indexer.server.utils.stall_watchdog import (
+                stop_stall_watchdog,
+            )
+
+            await stop_stall_watchdog(app)
+        except Exception as _stall_watchdog_stop_exc:
+            logger.warning(
+                "Story S12: failed to stop the worker stall watchdog: %s",
+                _stall_watchdog_stop_exc,
+            )
+
         # Shutdown: Stop the async-logging QueueListener FIRST (py-spy logging
         # follow-up to Bug #1078). The listener owns the real handlers behind the
-        # root QueueHandler; stop() drains every queued record and then closes the
-        # real handlers, so no logs are lost on a clean shutdown. Must run before
+        # root QueueHandler; its stop sentinel queues after every pending record,
+        # so a healthy listener drains them all before exiting. Must run before
         # any other shutdown step that could raise and skip it. Idempotent and
         # non-fatal — never abort the remaining shutdown chain.
+        # A cancellation returned by the logging shutdown is held and re-raised
+        # at the very end of this chain, so every later step still runs.
+        _logging_cancelled: Optional[asyncio.CancelledError] = None
         _log_queue_listener = getattr(app.state, "log_queue_listener", None)
         if _log_queue_listener is not None:
-            try:
-                # Drain in-flight records before stopping the listener.
-                _log_queue_listener.flush()
-                _log_queue_listener.stop()
-            except Exception:
-                pass
-            # Detach the IdentityQueueHandler we installed on the root logger so
-            # it is not leaked across lifespan cycles (mirrors the Bug #1060
-            # symmetry below). removeHandler is a no-op if already detached.
-            try:
-                from code_indexer.server.services.async_logging import (
-                    IdentityQueueHandler,
-                )
+            # Stop the listener (bounded wait, in a worker thread so a stuck
+            # sink never blocks the event loop) and detach the queue handler it
+            # installed on the root logger, clearing the module handles so a
+            # later teardown is a no-op. Never raises.
+            from code_indexer.server.services.async_logging import (
+                shutdown_queue_logging_off_loop,
+            )
 
-                _root = logging.getLogger()
-                for _h in list(_root.handlers):
-                    if isinstance(_h, IdentityQueueHandler):
-                        _root.removeHandler(_h)
-            except Exception:
-                pass
+            _logging_cancelled = await shutdown_queue_logging_off_loop()
+            # The outer ``lifespan`` wrapper re-raises this even if a later
+            # step below raises first.
+            app.state.pending_shutdown_cancellation = _logging_cancelled
 
         # Shutdown: Remove SQLiteLogHandler from root logger (Bug #1060).
         # Symmetric with the install in startup: without this, the handler remains
@@ -6027,5 +6166,67 @@ def make_lifespan(
             "Server shutdown: Cleaning up resources",
             extra={"correlation_id": get_correlation_id()},
         )
+
+        # The whole chain has run: now honour a cancellation that arrived
+        # during the logging shutdown.
+        if _logging_cancelled is not None:
+            raise _logging_cancelled
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """Run ``_lifespan_body`` and guarantee the stall watchdog stops.
+
+        Story S12: the body starts the watchdog early in startup and, on a
+        normal shutdown, stops it before the log listener drains. An exception
+        raised by a later startup step, or thrown into the lifespan at its
+        yield, skips that post-yield code; the cleanup below covers the
+        watchdog's whole active lifetime. After a normal shutdown it is a
+        no-op (``app.state.stall_watchdog`` is already None).
+
+        The stop is requested before the cleanup awaits, so the watchdog stops
+        even if that await is cancelled. A cancellation absorbed there never
+        replaces an exception that is already ending the lifespan; on a normal
+        exit it is re-raised.
+
+        The same holds for async logging: a lifespan ended by an exception or
+        a cancellation (e.g. a startup or shutdown timeout) still stops the
+        queue listener and detaches the queue handler it put on the root
+        logger. After a normal shutdown this is a no-op.
+        """
+        from code_indexer.server.services.async_logging import (
+            shutdown_queue_logging_off_loop,
+        )
+        from code_indexer.server.utils.stall_watchdog import (
+            stop_stall_watchdog_on_exit,
+        )
+
+        # Scoped to this run: a value left by an earlier run on the same app
+        # never replaces this run's exception.
+        app.state.pending_shutdown_cancellation = None
+        try:
+            async with _lifespan_body(app):
+                yield
+        except BaseException as exc:
+            pending = app.state.pending_shutdown_cancellation
+            app.state.pending_shutdown_cancellation = None
+            try:
+                await stop_stall_watchdog_on_exit(app)
+            finally:
+                # Bounded, in a worker thread; a cancellation it absorbs is
+                # dropped -- the exception ending the lifespan wins.
+                await shutdown_queue_logging_off_loop()
+            if pending is not None and isinstance(exc, Exception):
+                # A shutdown step after the logging shutdown failed: the
+                # saved cancellation still ends the lifespan, carrying it.
+                # A second cancellation (any BaseException) ends it as is.
+                logger.error(
+                    "Shutdown step failed after a pending cancellation",
+                    exc_info=exc,
+                )
+                raise pending from exc
+            raise  # the exception ending the lifespan wins
+        cancelled = await stop_stall_watchdog_on_exit(app)
+        if cancelled is not None:
+            raise cancelled
 
     return lifespan

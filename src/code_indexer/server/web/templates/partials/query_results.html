@@ -1,3 +1,9 @@
+{% if warning_message and not error_message %}
+<div class="message-warning">
+    <strong>Warning:</strong> {{ warning_message }}
+</div>
+{% endif %}
+
 {% if error_message %}
 <div class="message-error">
     <strong>Error:</strong> {{ error_message }}

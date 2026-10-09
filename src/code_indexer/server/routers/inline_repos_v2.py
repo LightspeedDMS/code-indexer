@@ -94,6 +94,24 @@ def register_repos_v2_routes(
             getattr(app.state, "access_filtering_service", None), username, repo_id
         )
 
+    def _enforce_activation_access(
+        username: str,
+        user_alias: str,
+        refusal: HTTPException,
+        activation_required: bool = True,
+    ) -> None:
+        """Require the caller's grants on the source golden repositories of
+        their own activation *user_alias* (the MCP rule), answering
+        *refusal* -- the route's response for a repository the caller cannot
+        reach -- otherwise (shared guard; fails closed with 500)."""
+        repo_access_http.enforce_activated_repo_access(
+            getattr(app.state, "access_filtering_service", None),
+            username,
+            user_alias,
+            refusal,
+            activation_required=activation_required,
+        )
+
     @app.get("/api/repositories/{repo_id}")
     def get_repository_details_v2(
         repo_id: str,
@@ -137,6 +155,18 @@ def register_repos_v2_routes(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid repository ID format",
             )
+
+        # A repo_id naming one of the caller's own activations is served from
+        # it (Strategy 1, whose block swallows every exception): require the
+        # activation's source grants first, refused like an unknown repo.
+        _enforce_activation_access(
+            current_user.username,
+            cleaned_repo_id,
+            repo_access_http.access_denied_error(
+                cleaned_repo_id, current_user.username
+            ),
+            activation_required=False,
+        )
 
         # Strategy 1: Try to find repository among user's activated repositories
         try:
@@ -496,6 +526,13 @@ def register_repos_v2_routes(
                         repo["user_alias"] == cleaned_repo_id
                         or repo["golden_repo_alias"] == cleaned_repo_id
                     ):
+                        _enforce_activation_access(
+                            current_user.username,
+                            repo["user_alias"],
+                            repo_access_http.access_denied_error(
+                                cleaned_repo_id, current_user.username
+                            ),
+                        )
                         repo_found = True
                         # Construct path from activated_repos_dir + username + user_alias
                         repo_path = (
@@ -618,6 +655,13 @@ def register_repos_v2_routes(
                         repo["user_alias"] == cleaned_repo_id
                         or repo["golden_repo_alias"] == cleaned_repo_id
                     ):
+                        _enforce_activation_access(
+                            current_user.username,
+                            repo["user_alias"],
+                            repo_access_http.access_denied_error(
+                                cleaned_repo_id, current_user.username
+                            ),
+                        )
                         repo_found = True
                         break
 
@@ -765,6 +809,14 @@ def register_repos_v2_routes(
         Following CLAUDE.md Foundation #1: Uses real file system operations,
         no mocks or simulated data.
         """
+        _enforce_activation_access(
+            current_user.username,
+            repo_id,
+            HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Repository '{repo_id}' not found",
+            ),
+        )
         try:
             stats_response = stats_service.get_repository_stats(repo_id)
             return stats_response
@@ -818,6 +870,20 @@ def register_repos_v2_routes(
         If content=True and path points to a single file, return file content.
         Uses real file system operations following CLAUDE.md Foundation #1.
         """
+        # Both branches below serve the caller's own activation repo_id.
+        _enforce_activation_access(
+            current_user.username,
+            repo_id,
+            HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "Repository not found"
+                    if content and path
+                    else f"Repository '{repo_id}' not found"
+                ),
+            ),
+        )
+
         # If content requested and path is a file, return content
         if content and path:
             repo_dict = activated_repo_manager.get_repository(

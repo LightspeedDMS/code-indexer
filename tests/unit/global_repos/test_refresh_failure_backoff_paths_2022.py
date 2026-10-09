@@ -83,6 +83,8 @@ def _next_refresh(harness: Harness) -> float:
     return float(repo["next_refresh"])
 
 
+# Runs a real indexing subprocess: several seconds alone, slower under load.
+@pytest.mark.timeout(60)
 def test_git_schedule_defers_backed_off_alias_via_next_refresh(
     tmp_path: Path, metadata: Any
 ) -> None:
@@ -145,6 +147,8 @@ def _sync_once(service: LangfuseTraceSyncService) -> None:
         service.sync_project("https://langfuse.example.com", creds, trace_age_days=1)
 
 
+# Runs a real indexing subprocess: several seconds alone, slower under load.
+@pytest.mark.timeout(60)
 def test_trace_sync_trigger_skips_backed_off_alias(
     tmp_path: Path, metadata: Any
 ) -> None:
@@ -164,6 +168,8 @@ def test_trace_sync_trigger_skips_backed_off_alias(
     assert jobs.submitted == [ALIAS], "trace sync re-submitted a backed-off alias"
 
 
+# Runs a real indexing subprocess: several seconds alone, slower under load.
+@pytest.mark.timeout(60)
 def test_trace_write_during_backoff_is_refreshed_once_backoff_ends(
     tmp_path: Path,
     metadata: Any,
@@ -195,6 +201,8 @@ def test_trace_write_during_backoff_is_refreshed_once_backoff_ends(
     assert jobs.submitted == [ALIAS], "deferred trigger fired more than once"
 
 
+# Runs a real refresh's snapshot subprocesses: seconds alone, slower under load.
+@pytest.mark.timeout(60)
 def test_backed_off_alias_without_changes_regates_publishes_and_clears(
     tmp_path: Path, metadata: Any
 ) -> None:

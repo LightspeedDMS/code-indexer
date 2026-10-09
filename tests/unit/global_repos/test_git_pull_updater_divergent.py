@@ -350,7 +350,7 @@ class TestForceResetPath:
 
         assert mock_run.call_count == 2
         pull_cmd = mock_run.call_args_list[1][0][0]
-        assert pull_cmd == ["git", "pull"]
+        assert pull_cmd == ["git", "pull", "origin"]
 
 
 # ---------------------------------------------------------------------------

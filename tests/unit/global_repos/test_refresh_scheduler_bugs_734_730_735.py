@@ -189,45 +189,33 @@ class TestBug734StartSurvivesCleanupException:
 # ---------------------------------------------------------------------------
 
 
-def _find_scip_subprocess_run_call(source: str) -> ast.Call:
+def _find_scip_command_calls(source: str) -> list:
     """
-    AST-parse _index_source source and return the ast.Call node for the
-    subprocess.run() invocation whose first positional argument is the Name
-    node 'scip_command'.
-
-    Raises AssertionError if no such call is found.
+    AST-parse a function's source and return every ast.Call node whose first
+    positional argument is the Name node 'scip_command' (Bug #2012: the SCIP
+    step runs via subprocess.run without a job, and via the cancellable
+    runner under a job -- both must be guarded).
     """
-    dedented = textwrap.dedent(source)
-    tree = ast.parse(dedented)
+    runners = {"run_with_cancel", "run", "run_cancellable_subprocess"}
 
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
+    def _callee(call: ast.Call) -> str:
+        func = call.func
+        if isinstance(func, ast.Name):
+            return func.id
+        if isinstance(func, ast.Attribute):
+            return func.attr
+        return ""
 
-        # Match `subprocess.run(...)` attribute call
-        func = node.func
-        is_subprocess_run = (
-            isinstance(func, ast.Attribute)
-            and func.attr == "run"
-            and isinstance(func.value, ast.Name)
-            and func.value.id == "subprocess"
-        )
-        if not is_subprocess_run:
-            continue
-
-        # First positional argument must be the Name 'scip_command'
-        if not node.args:
-            continue
-        first_arg = node.args[0]
-        if not (isinstance(first_arg, ast.Name) and first_arg.id == "scip_command"):
-            continue
-
-        return node
-
-    raise AssertionError(
-        "No subprocess.run(scip_command, ...) call found in _index_source(). "
-        "The method structure may have changed — verify the SCIP subprocess block."
-    )
+    tree = ast.parse(textwrap.dedent(source))
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _callee(node) in runners
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "scip_command"
+    ]
 
 
 class TestBug730ScipGenerateHasTimeout:
@@ -251,18 +239,19 @@ class TestBug730ScipGenerateHasTimeout:
         mid-flight, producing a partial/corrupt index.  The only legitimate
         timeouts are per-request outbound embedding-provider HTTP calls.
         """
-        source = inspect.getsource(RefreshScheduler._index_source)
-
-        # AST-parse to find the exact subprocess.run(scip_command, ...) call
-        scip_call = _find_scip_subprocess_run_call(source)
-
-        # Check that NO 'timeout' keyword argument is present on that call
-        timeout_kwargs = [kw for kw in scip_call.keywords if kw.arg == "timeout"]
-        assert not timeout_kwargs, (
-            "subprocess.run(scip_command, ...) in _index_source() still has a "
-            "'timeout' keyword argument. "
-            "Bug #1218 removes all overarching per-job timeouts on the indexing+SCIP path."
+        # Bug #2012: the SCIP subprocess runs via run_with_cancel(scip_command,
+        # ...) -- plain subprocess.run without a job, cancellable under one.
+        scip_calls = _find_scip_command_calls(
+            inspect.getsource(RefreshScheduler._index_source)
         )
+        assert len(scip_calls) == 1, "expected one scip_command invocation"
+        for scip_call in scip_calls:
+            timeout_kwargs = [kw for kw in scip_call.keywords if kw.arg == "timeout"]
+            assert not timeout_kwargs, (
+                "a scip_command subprocess call still has a 'timeout' keyword "
+                "argument. Bug #1218 removes all overarching per-job timeouts "
+                "on the indexing+SCIP path."
+            )
 
 
 # ---------------------------------------------------------------------------

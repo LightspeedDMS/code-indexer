@@ -113,9 +113,16 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
         return None, None, err
 
     if not Path(target_path).exists():
-        raise FileNotFoundError(
-            f"Global repository '{repository_alias}' not found at {target_path}"
+        from code_indexer.server.query.semantic_query_manager import (
+            SearchRepositoryNotFoundError,
         )
+
+        logger.error(
+            "Global repository %r target is missing on disk: %s",
+            repository_alias,
+            target_path,
+        )
+        raise SearchRepositoryNotFoundError(repository_alias)
 
     return repo_entry, target_path, None
 
@@ -208,7 +215,7 @@ def _execute_tracked_search(
     """Execute _perform_search with query-tracker ref counting and timing.
 
     Args:
-        limit: must be > 0; raises ValueError otherwise.
+        limit: must be > 0; raises SearchRequestError otherwise.
 
     Returns:
         (results, execution_time_ms, timeout_occurred, effective_strategy)
@@ -220,7 +227,11 @@ def _execute_tracked_search(
     plain list the plain list is passed through unchanged.
     """
     if limit <= 0:
-        raise ValueError(f"limit must be > 0, got {limit}")
+        from code_indexer.server.query.semantic_query_manager import (
+            SearchRequestError,
+        )
+
+        raise SearchRequestError(f"limit must be > 0, got {limit}")
 
     query_tracker = _get_query_tracker()
     kwargs = _build_search_kwargs(params, user, user_repos, limit)

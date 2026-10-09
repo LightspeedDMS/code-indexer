@@ -49,10 +49,8 @@ from typing import Callable, List, Optional
 from code_indexer.services.activity_heartbeat_writer import (
     ACTIVITY_HEARTBEAT_PATH_ENV,
 )
-from code_indexer.services.activity_watchdog import (
-    check_and_terminate_if_stale,
-    terminate_process_group,
-)
+from code_indexer.services.activity_watchdog import check_and_terminate_if_stale
+from code_indexer.utils.process_group import terminate_process_group
 from code_indexer.storage.hnsw_index_manager import HNSW_ORPHAN_REPAIR_MARKER
 
 logger = logging.getLogger(__name__)
@@ -75,6 +73,33 @@ READ_BUFFER_SIZE = 4096
 #: waiting for more output or a watchdog check. Promoted to module scope
 #: alongside READ_BUFFER_SIZE, for the same reason.
 POLL_INTERVAL_SECONDS = 0.05
+
+#: Bug #2012: how often (seconds) a running child's owning job is checked
+#: for cancellation. Only a check cadence -- never a deadline (Bug #1218).
+_CANCEL_CHECK_INTERVAL_SECONDS = 2.0
+
+
+def _cancel_requested(
+    cancel_check: Optional[Callable[[], bool]], error_label: str
+) -> bool:
+    """Bug #2012: True when `cancel_check` reports the job cancelled.
+
+    A check that itself raises (e.g. a transient DB read error) is logged
+    and treated as "not cancelled": an unreadable cancel flag must never
+    stop a legitimately long indexing run.
+    """
+    if cancel_check is None:
+        return False
+    try:
+        return bool(cancel_check())
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logger.warning(
+            "run_with_popen_progress: cancel check for %s raised; "
+            "continuing as not cancelled: %s",
+            error_label,
+            exc,
+        )
+        return False
 
 
 def _forward_hnsw_orphan_events(
@@ -145,11 +170,45 @@ class IndexingWatchdogKillError(IndexingSubprocessError):
     """
 
 
+class IndexingCancelledError(Exception):
+    """Bug #2012: the owning job was cancelled, so the indexing subprocess
+    was stopped (its whole process group terminated) or never started.
+
+    Deliberately NOT a subclass of `IndexingSubprocessError`: callers that
+    translate a genuine indexing failure (`except IndexingSubprocessError`)
+    must never mistake a cancellation for one.
+    """
+
+
 # Timeout for quick git metadata commands (ls-files, rev-list --count)
 GIT_COMMAND_TIMEOUT_SECONDS = 30
 
 
-def gather_repo_metrics(repo_path) -> tuple:
+def _metrics_git_runner(cancel_check: Optional[Callable[[], bool]]) -> tuple:
+    """Bug #2012: (runner, cancellation exception types) for gather_repo_metrics.
+
+    With no owning job: plain ``subprocess.run`` and no cancellation type.
+    With a job's cancel check: the server's ``run_with_cancel`` (process-group
+    kill on cancel) -- imported lazily so the standalone CLI path, which
+    never passes a cancel check, never imports the server layer -- plus
+    ``SubprocessCancelledError``, which callers must re-raise.
+    """
+    if cancel_check is None:
+        return subprocess.run, ()
+    from code_indexer.server.utils.cancellable_subprocess import (
+        SubprocessCancelledError,
+        run_with_cancel,
+    )
+
+    def run(args: List[str], **run_kwargs) -> "subprocess.CompletedProcess[str]":
+        return run_with_cancel(args, cancel_check, **run_kwargs)
+
+    return run, (SubprocessCancelledError,)
+
+
+def gather_repo_metrics(
+    repo_path, cancel_check: Optional[Callable[[], bool]] = None
+) -> tuple:
     """
     Gather file count and commit count for a repository.
 
@@ -158,6 +217,10 @@ def gather_repo_metrics(repo_path) -> tuple:
 
     Args:
         repo_path: Path to the git repository (str or Path)
+        cancel_check: Bug #2012 -- the owning job's cancel check. When set,
+            both git calls are terminated on cancel and the cancellation
+            propagates (never degraded to a 0 count). Their 30 s timeouts
+            are metadata-command bounds, not indexing timeouts.
 
     Returns:
         (file_count, commit_count) as integers.  Returns (0, 0) if repo is
@@ -169,10 +232,11 @@ def gather_repo_metrics(repo_path) -> tuple:
         return (0, 0)
 
     repo_str = str(repo_path)
+    run, cancelled = _metrics_git_runner(cancel_check)
 
     # Count tracked files
     try:
-        ls_result = subprocess.run(
+        ls_result = run(
             ["git", "-C", repo_str, "ls-files"],
             capture_output=True,
             text=True,
@@ -191,6 +255,8 @@ def gather_repo_metrics(repo_path) -> tuple:
             )
             file_count = 0
     except Exception as e:
+        if isinstance(e, cancelled):
+            raise  # Bug #2012: a cancelled job, not a metrics failure
         logger.warning(
             "gather_repo_metrics: failed to count tracked files in %s: %s", repo_str, e
         )
@@ -198,7 +264,7 @@ def gather_repo_metrics(repo_path) -> tuple:
 
     # Count commits on current branch
     try:
-        rev_result = subprocess.run(
+        rev_result = run(
             ["git", "-C", repo_str, "rev-list", "--count", "HEAD"],
             capture_output=True,
             text=True,
@@ -215,6 +281,8 @@ def gather_repo_metrics(repo_path) -> tuple:
             )
             commit_count = 0
     except Exception as e:
+        if isinstance(e, cancelled):
+            raise  # Bug #2012: a cancelled job, not a metrics failure
         logger.warning(
             "gather_repo_metrics: failed to count commits in %s: %s", repo_str, e
         )
@@ -335,7 +403,7 @@ def _fd_is_open(fd: int) -> bool:
 # _stderr_reader_loop and the WARNING logged near their join() below.
 #
 # This project targets Linux-only server deployments (systemd units, see
-# docs/server-deployment.md) -- selectors.DefaultSelector resolves to the
+# docs/server/deployment.md) -- selectors.DefaultSelector resolves to the
 # epoll-backed selector there. It would fall back to a plain
 # SelectSelector (same FD_SETSIZE ceiling this fix exists to remove) only
 # on a platform lacking epoll/kqueue/poll, which this project does not
@@ -552,6 +620,7 @@ def run_with_popen_progress(
     orphan_event_callback: Optional[Callable[[str], None]] = None,
     stale_activity_timeout_seconds: Optional[float] = None,
     heartbeat_dir: Optional[str] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> int:
     """Arm the Issue #1530 watchdog (when requested), then run the command.
 
@@ -595,6 +664,7 @@ def run_with_popen_progress(
             stale_activity_timeout_seconds=stale_activity_timeout_seconds,
             heartbeat_path=heartbeat_path,
             process_holder=process_holder,
+            cancel_check=cancel_check,
         )
     finally:
         _terminate_and_delete_heartbeat(heartbeat_path, process_holder)
@@ -615,6 +685,7 @@ def _run_with_popen_progress_impl(
     stale_activity_timeout_seconds: Optional[float] = None,
     heartbeat_path: Optional[str] = None,
     process_holder: Optional[List["subprocess.Popen"]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> int:
     """
     Run a command with Popen, reading JSON progress lines from stdout.
@@ -665,6 +736,16 @@ def _run_with_popen_progress_impl(
              each matching line is forwarded verbatim to this callback.
              Defaults to None (no-op; most callers don't care about this
              event).
+        cancel_check: Bug #2012 optional zero-arg callable returning True
+             once the owning job has been cancelled. Consulted before the
+             child is spawned and then every _CANCEL_CHECK_INTERVAL_SECONDS
+             while it runs; on True the child's whole process group is
+             terminated (SIGTERM, grace, SIGKILL) and IndexingCancelledError
+             is raised. This only controls how often cancellation is
+             checked -- it is never a deadline on the child (Bug #1218).
+
+    Raises:
+        IndexingCancelledError: cancel_check() returned True.
 
     Returns:
         The highest progress value reported during this call (or last_reported if
@@ -692,6 +773,14 @@ def _run_with_popen_progress_impl(
     # threshold; the heartbeat path and its env injection are owned by
     # run_with_popen_progress (the single generator), never re-derived here.
     watchdog_enabled = stale_activity_timeout_seconds is not None
+
+    # Bug #2012: a job cancelled before (or between) indexing steps must
+    # never start another subprocess.
+    if _cancel_requested(cancel_check, error_label):
+        raise IndexingCancelledError(
+            f"{error_label}: cancelled before the subprocess was started"
+        )
+
     spawn_monotonic = time.monotonic()
 
     process = subprocess.Popen(
@@ -894,12 +983,47 @@ def _run_with_popen_progress_impl(
     # never detected at all. With the watchdog armed the loop instead keeps
     # polling the child; with it disarmed both breaks fire exactly as before.
     reader_finished = False
+    # Bug #2012: an armed cancel check must, like the watchdog, keep
+    # observing a child that closed its stdout but is still running.
+    keep_polling = watchdog_enabled or cancel_check is not None
+    cancelled = False
+    last_cancel_check = spawn_monotonic
     try:
         while True:
             if _drain_line_queue():
                 # Sentinel received — reader is done.
                 reader_finished = True
-                if not watchdog_enabled:
+                if not keep_polling:
+                    break
+
+            if (
+                cancel_check is not None
+                # never signal an already-reaped child (its pid may be reused)
+                and process.returncode is None
+                and time.monotonic() - last_cancel_check
+                >= _CANCEL_CHECK_INTERVAL_SECONDS
+            ):
+                last_cancel_check = time.monotonic()
+                if _cancel_requested(cancel_check, error_label):
+                    logger.info(
+                        "run_with_popen_progress: job cancelled -- "
+                        "terminating process group of pid=%s for %s",
+                        process.pid,
+                        error_label,
+                    )
+                    terminate_process_group(process)
+                    cancelled = True
+                    try:
+                        os.write(shutdown_w, b"x")
+                    except OSError as exc:
+                        logger.warning(
+                            "run_with_popen_progress: could not signal "
+                            "shutdown pipe for %s: %s",
+                            error_label,
+                            exc,
+                        )
+                    stdout_reader_thread.join(timeout=GIT_COMMAND_TIMEOUT_SECONDS)
+                    _drain_line_queue()
                     break
 
             if process.poll() is not None:
@@ -950,8 +1074,8 @@ def _run_with_popen_progress_impl(
                     break
 
             if reader_finished:
-                # Reader is done but the child is still alive (watchdog
-                # armed). Wait on the CHILD rather than joining an already-
+                # Reader is done but the child is still alive (watchdog or
+                # cancel check armed). Wait on the CHILD rather than joining an already-
                 # dead thread, which would spin: this blocks for one poll
                 # interval, or returns early the moment the child exits --
                 # the next iteration then takes the process.poll() branch.
@@ -966,7 +1090,7 @@ def _run_with_popen_progress_impl(
             if not stdout_reader_thread.is_alive():
                 # Reader finished on its own (natural EOF before child exited).
                 _drain_line_queue()
-                if not watchdog_enabled:
+                if not keep_polling:
                     break
                 reader_finished = True
     finally:
@@ -1045,6 +1169,14 @@ def _run_with_popen_progress_impl(
     stderr_output = "".join(stderr_lines)
     all_stderr.append(stderr_output)
     _forward_hnsw_orphan_events(stderr_output, orphan_event_callback)
+
+    # Bug #2012: checked first -- a cancelled child's signal exit code is
+    # the cancellation itself, never an indexing failure.
+    if cancelled:
+        raise IndexingCancelledError(
+            f"{error_label}: subprocess pid={process.pid} terminated because "
+            f"the job was cancelled (exit code {process.returncode})"
+        )
 
     # Heartbeat cleanup is the wrapper's `finally` (Issue #1530): one
     # owner, covering all raises below and the successful return.

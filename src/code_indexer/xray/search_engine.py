@@ -20,7 +20,10 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 if TYPE_CHECKING:
     from code_indexer.xray.rust_backend import SharedIdentityCache, XrayCacheBackend
 
-from code_indexer.utils.path_confinement import is_resolved_within_root
+from code_indexer.utils.path_confinement import (
+    has_git_segment,
+    is_readable_within_root,
+)
 from code_indexer.global_repos.regex_search import (
     RegexSearchService,
     RipgrepExecutionError,
@@ -1107,8 +1110,9 @@ class XRaySearchEngine:
             # p.is_file() follows a symlink's target regardless of where
             # it points -- when confined (server context), reject any
             # candidate whose resolved location is not strictly inside the
-            # repository root.
-            if self._confine_to_repo_root and not is_resolved_within_root(
+            # repository root, or is inside the repository's .git (e.g. a
+            # committed ``link.py -> .git/config``).
+            if self._confine_to_repo_root and not is_readable_within_root(
                 p, resolved_repo_root
             ):
                 continue
@@ -1118,8 +1122,9 @@ class XRaySearchEngine:
             if rel.startswith(".code-indexer/") or rel == ".code-indexer":
                 continue
             # v10.4.6 (Defect 2): also exclude .git/ — git internals
-            # (FETCH_HEAD, COMMIT_EDITMSG, objects/, etc.) are never code candidates.
-            if rel.startswith(".git/") or rel == ".git":
+            # (FETCH_HEAD, COMMIT_EDITMSG, objects/, etc.) are never code
+            # candidates, at any depth (a nested .git included).
+            if has_git_segment(Path(rel).parts):
                 continue
             all_rel_paths.append(rel)
 

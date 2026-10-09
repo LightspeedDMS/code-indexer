@@ -3,7 +3,7 @@ name: exit_write_mode
 category: files
 required_permission: repository:write
 tl_dr: Exit write mode for a write-exception repository, triggering a synchronous refresh.
-slim_description: "Release the exclusive write lock on a write-exception repository (e.g."
+slim_description: "Leave write mode on a write-exception repository such as cidx-meta-global: releases the write lock, then refreshes the repository synchronously so the queryable snapshot includes your changes."
 inputSchema:
   type: object
   properties:
@@ -32,4 +32,22 @@ outputSchema:
   - success
 ---
 
-Exit write mode for a write-exception repository such as cidx-meta-global. WHAT IT DOES: (1) Calls _execute_refresh() synchronously (blocks until complete), (2) Removes the write-mode marker file, (3) Releases the exclusive write lock. BLOCKS UNTIL COMPLETE: The handler does not return until the refresh finishes, ensuring the versioned snapshot is up to date when this tool returns. NON-WRITE-EXCEPTION REPOS: Returns success with a no-op message; no refresh is triggered. NOT IN WRITE MODE: Returns success with a warning if write mode was not active. WRITE MODE WORKFLOW: call enter_write_mode -> use create_file/edit_file/delete_file -> call exit_write_mode. ALWAYS CALL EXIT: Failing to call exit_write_mode leaves the write lock held, blocking the background refresh scheduler. PERMISSIONS: Requires repository:write. EXAMPLE: {"repo_alias": "cidx-meta-global"}
+Exit write mode for a write-exception repository such as cidx-meta-global.
+
+WHAT IT DOES, in order: (1) removes the write-mode marker, so reads go back to the versioned snapshot, (2) releases the exclusive write lock, (3) stops the auto-watch on the source directory, (4) runs a refresh of the repository synchronously.
+
+BLOCKS UNTIL COMPLETE: The tool does not return until the refresh finishes, so the queryable snapshot reflects your changes when it returns: `{"success": true, "message": "Refresh complete, write mode exited for '<alias>'"}`.
+
+NON-WRITE-EXCEPTION REPOS: Returns `{"success": true, "message": "no-op: '<alias>' is not a write-exception repo"}`; nothing is refreshed.
+
+NOT IN WRITE MODE: Returns `{"success": true, "warning": "Write mode was not active for '<alias>'", "message": "not in write mode — nothing to exit"}`.
+
+ERRORS: `{"success": false, "error": "..."}`, for example `Missing required parameter: repo_alias`, `RefreshScheduler not available`, or a refresh failure.
+
+WRITE MODE WORKFLOW: call enter_write_mode -> use create_file/edit_file/delete_file -> call exit_write_mode.
+
+ALWAYS CALL EXIT: Until exit_write_mode runs (or the lock expires), the write lock stays held and scheduled refreshes of the repository wait for it, and your edits are not refreshed into the queryable snapshot.
+
+PERMISSIONS: Requires repository:write.
+
+EXAMPLE: {"repo_alias": "cidx-meta-global"}

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Callable, Optional
 
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.utils.cancellable_subprocess import run_with_cancel
 
 from .branch_detect import detect_default_branch
 
@@ -22,6 +24,11 @@ class CidxMetaBackupBootstrap:
         ".snapshot-reader-leases/",
     )
 
+    def __init__(self, cancel_check: Optional[Callable[[], bool]] = None) -> None:
+        # Bug #2012: the owning refresh job's cancel check; every git call
+        # made by bootstrap() (via _git) is then terminated on cancel.
+        self._cancel_check = cancel_check
+
     def _git(
         self, cidx_meta_path: str, *args: str, check: bool = True
     ) -> subprocess.CompletedProcess:
@@ -36,8 +43,9 @@ class CidxMetaBackupBootstrap:
         # an interactive editor in the non-interactive systemd job context
         # -- see CidxMetaBackupSync._git() for the active fix this mirrors.
         env.setdefault("GIT_EDITOR", "true")
-        return subprocess.run(
+        return run_with_cancel(
             ["git", *args],
+            self._cancel_check,
             cwd=cidx_meta_path,
             capture_output=True,
             text=True,
@@ -83,7 +91,10 @@ class CidxMetaBackupBootstrap:
     def bootstrap(self, cidx_meta_path: str, remote_url: str) -> str:
         """Initialize or re-point git backup state for cidx-meta."""
         git_dir = Path(cidx_meta_path) / ".git"
-        branch = detect_default_branch(cidx_meta_path) or "master"
+        branch = (
+            detect_default_branch(cidx_meta_path, cancel_check=self._cancel_check)
+            or "master"
+        )
 
         if not git_dir.exists():
             self._git(cidx_meta_path, "init")

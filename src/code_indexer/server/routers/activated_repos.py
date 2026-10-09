@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from code_indexer.server.routers import repo_access_http
 from code_indexer.server.services.repository_health_aggregator import (
     compute_repository_health,
     get_shared_health_service,
@@ -161,6 +162,24 @@ def _get_activated_repo_manager():
     return manager
 
 
+async def _require_activation_access(user_alias: str, current_user: User) -> None:
+    """Every route here serves the caller's own activation *user_alias*:
+    require the caller's grants on its source golden repositories (the MCP
+    rule), refusing exactly like an alias never activated. The lookup runs
+    on a worker thread, never on the event loop. Called first in each route
+    body, outside its broad except. An admin (admins group) bypasses, which
+    also keeps the admin-only ``owner`` parameter working."""
+    await repo_access_http.enforce_activated_repo_access_async(
+        repo_access_http.module_app_access_filtering_service(),
+        current_user.username,
+        user_alias,
+        refusal=HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Activated repository '{user_alias}' not found",
+        ),
+    )
+
+
 def _get_background_job_manager():
     """Get background job manager from app state."""
     from code_indexer.server import app as app_module
@@ -286,14 +305,23 @@ async def get_indexes_status(
         HTTPException 404: Repository not found
         HTTPException 500: Failed to retrieve status
     """
+    await _require_activation_access(user_alias, current_user)
     try:
         # Get activated repo manager
         activated_manager = _get_activated_repo_manager()
 
         # Determine which username to use
-        # Admin users can specify owner parameter to check other users' repos
-        # Non-admin users always use their own username (owner parameter ignored)
-        if owner and current_user.role == UserRole.ADMIN:
+        # Admins (admins group, the access model's admin -- never the role)
+        # can specify owner to check other users' repos; anyone else always
+        # uses their own username (owner parameter ignored).
+        if (
+            owner
+            and owner != current_user.username
+            and await repo_access_http.is_access_admin_async(
+                repo_access_http.module_app_access_filtering_service(),
+                current_user.username,
+            )
+        ):
             target_username = owner
         else:
             target_username = current_user.username
@@ -478,6 +506,7 @@ async def trigger_reindex(
                 ),
             )
 
+    await _require_activation_access(user_alias, current_user)
     try:
         # Get managers
         activated_manager = _get_activated_repo_manager()
@@ -602,6 +631,7 @@ async def add_index_type(
             detail=f"Invalid index type '{index_type}'. Must be one of: {', '.join(valid_index_types)}",
         )
 
+    await _require_activation_access(user_alias, current_user)
     try:
         # Get managers
         activated_manager = _get_activated_repo_manager()
@@ -709,6 +739,7 @@ async def check_activated_repo_health_async(
         HTTPException 409: A health check job is already running for this repo
         HTTPException 500: Failed to start health check job
     """
+    await _require_activation_access(user_alias, current_user)
     try:
         activated_manager = _get_activated_repo_manager()
         repo_path = activated_manager.get_activated_repo_path(
@@ -793,6 +824,7 @@ async def sync_repository(
         HTTPException 404: Repository not found
         HTTPException 500: Failed to start sync job
     """
+    await _require_activation_access(user_alias, current_user)
     try:
         # Get managers
         activated_manager = _get_activated_repo_manager()
@@ -924,6 +956,7 @@ async def switch_branch(
             ),
         )
 
+    await _require_activation_access(user_alias, current_user)
     try:
         # Get managers
         activated_manager = _get_activated_repo_manager()
@@ -1020,6 +1053,7 @@ async def list_branches(
         HTTPException 404: Repository not found
         HTTPException 500: Failed to list branches
     """
+    await _require_activation_access(user_alias, current_user)
     try:
         # Get activated repo manager
         activated_manager = _get_activated_repo_manager()

@@ -77,7 +77,7 @@ inputSchema:
   required: []
 ---
 
-Query the audit log with optional filtering (admin only). Requires MCP elevation (TOTP step-up). The Web Audit Logs page, this tool and REST `GET /api/v1/audit-logs` read through the same query, so the same filters return the same rows, order, counts and paging tokens.
+Query the audit log with optional filtering (admin only). Requires MCP elevation (TOTP step-up) when elevation enforcement is on. The Web Audit Logs page, this tool and REST `GET /api/v1/audit-logs` read through the same query, so the same filters return the same rows, order, counts and paging tokens.
 
 USE CASES:
 - Investigate security incidents
@@ -98,7 +98,7 @@ INPUTS:
 - aggregate / all_time (optional): authentication-activity counts, see above
 
 RETURNS (rows):
-- entries: newest first. Each entry has id, timestamp, admin_id (also as user), action_type (also as action), target_type, target_id, resource (the recorded pull request URL for PR-creation entries -- a plain web URL, also in details.pr_url -- otherwise target_id), outcome, pairing_state, submitted_only, source, ip_address, node_id, correlation_id, auth_method, actor_is_system, actor_is_authenticated, event_uuid and details.
+- entries: newest first. Each entry has id, timestamp, admin_id (also as user), action_type (also as action), target_type, target_id, resource (the recorded pull request URL for PR-creation entries -- a plain web URL, also in details.pr_url -- otherwise target_id), outcome, pairing_state, submitted_only, source, ip_address, node_id, correlation_id, auth_method, actor_is_system, actor_is_authenticated, event_uuid, details and impersonated_user (the user an administrator was impersonating over MCP when the action was performed -- admin_id is then the administrator; null otherwise).
 - details: the decoded object with only the fields a reader may see; the names of any other stored fields are listed under omitted_fields, and content that is not a JSON object appears as omitted_fields ["(unstructured)"]
 - total: matching entries across every page, exact up to 10,000
 - total_capped: true when more than 10,000 entries match (total then reads 10,000)

@@ -291,8 +291,16 @@ def register_inline_routes(
     from fastapi.staticfiles import StaticFiles
     from pathlib import Path as PathLib
 
-    # Initialize session manager for web UI
-    init_session_manager(secret_key, server_config, server_config.web_security_config)
+    # Initialize session manager for web UI; sessions are bound to live
+    # accounts, looked up in the shared account store at request time.
+    from ..auth.dependencies import lookup_live_account
+
+    init_session_manager(
+        secret_key,
+        server_config,
+        server_config.web_security_config,
+        account_lookup=lookup_live_account,
+    )
 
     # Mount static files for web UI
     # NOTE: __file__ is in routers/, so use .parent.parent to reach server/ root

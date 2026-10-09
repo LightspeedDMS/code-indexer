@@ -14,19 +14,21 @@ inputSchema:
   - group_id
 ---
 
-TL;DR: Get detailed information about a specific group. Get detailed information about a specific group including its members and accessible repositories. Use this tool to see who belongs to a group and what repositories they can access.
+TL;DR: Get a group's details, including its members and the repositories it can access. Requires the admin role.
 
 INPUTS:
-- group_id (required): The unique identifier of the group
+- group_id (required): Numeric group id as a string (for example `"3"`), as returned by `list_groups`
 
 RETURNS:
-- id: Group identifier
+- id: Integer group id
 - name: Group name
 - description: Group description
-- members: Array of user IDs in the group
-- repos: Array of repository names accessible by the group
+- members: Array of usernames in the group
+- repos: Array of repository names the group can access; cidx-meta is always listed first
 
-ERRORS:
-- 'Group not found': Invalid group_id
+ERRORS (returned as `{"success": false, "error": "..."}`):
+- `Permission denied: admin role required`
+- `Missing required parameter: group_id` / `Invalid group_id: <value>` (not an integer)
+- `Group not found: <id>`
 
-EXAMPLE: {"group_id": "grp_abc123"} Returns: {"success": true, "id": "grp_abc123", "name": "backend-team", "members": ["alice", "bob"], "repos": ["backend-global"]}
+EXAMPLE: {"group_id": "3"} Returns: {"success": true, "id": 3, "name": "backend-team", "description": "Backend developers", "members": ["example-user"], "repos": ["cidx-meta", "example-repo"]}

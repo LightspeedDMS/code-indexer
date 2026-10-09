@@ -233,8 +233,12 @@ def test_database_backend_auto_runs_migration():
         initial_version = get_scip_db_version(config_path)
         assert initial_version == 0, "Version should be 0 initially"
 
-        # Create DatabaseBackend (should trigger migration automatically)
-        backend = DatabaseBackend(db_path, project_root=str(tmpdir_path))
+        # Create DatabaseBackend (should trigger migration automatically).
+        # The db sits outside the .code-indexer/scip layout, so the repository
+        # root that owns the version marker is named explicitly.
+        backend = DatabaseBackend(
+            db_path, project_root=str(tmpdir_path), trusted_root=tmpdir_path
+        )
 
         # Verify indexes were created
         cursor = backend.conn.cursor()

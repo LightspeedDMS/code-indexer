@@ -13,7 +13,13 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Any, Callable, List, Dict, Optional, Sequence, Tuple
+
+# The ONE bound for local metadata git calls on the push, pull and fetch
+# paths (argument validation, upstream checks, remote URL resolution) --
+# metadata lookups, not indexing work. Read as
+# git_runner.REMOTE_RESOLVE_TIMEOUT_SECONDS at call time.
+REMOTE_RESOLVE_TIMEOUT_SECONDS = 30
 
 
 def get_git_environment(project_dir: Path) -> Dict[str, str]:
@@ -78,10 +84,18 @@ def run_git_command(
     capture_output: bool = True,
     text: bool = True,
     timeout: Optional[float] = None,
+    credentials_url: Optional[str] = None,
+    run_time_config: Sequence[Tuple[str, str]] = (),
+    cancel_check: Optional[Callable[[], bool]] = None,
     **kwargs,
 ) -> subprocess.CompletedProcess:
     """
     Run a git command with proper environment handling for dubious ownership.
+
+    ``cancel_check``: the owning job's cancel check. When set, the command
+    runs through ``run_with_cancel`` (its own process group, terminated on
+    cancel with SubprocessCancelledError); None runs it with
+    ``subprocess.run``.
 
     Args:
         cmd: Git command as a list (e.g., ["git", "status"])
@@ -90,6 +104,12 @@ def run_git_command(
         capture_output: Whether to capture stdout and stderr
         text: Whether to decode output as text
         timeout: Optional timeout in seconds
+        credentials_url: The registered repository URL for a network
+            command; its credentials are supplied to git at run time
+            through the environment (never on argv nor stored in the
+            clone). None when the command needs none.
+        run_time_config: (key, value) git configuration for this run only,
+            supplied through the environment; never stored in the clone.
         **kwargs: Additional arguments to pass to subprocess.run
 
     Returns:
@@ -99,6 +119,11 @@ def run_git_command(
         subprocess.CalledProcessError: If check=True and command fails
         subprocess.TimeoutExpired: If timeout is exceeded
     """
+    from code_indexer.server.git.git_subprocess_env import (
+        append_run_time_git_config,
+        supply_remote_credentials,
+    )
+
     if not cmd or cmd[0] != "git":
         raise ValueError("Command must start with 'git'")
 
@@ -110,16 +135,68 @@ def run_git_command(
         env.update(kwargs["env"])
         kwargs.pop("env")
 
-    return subprocess.run(
-        cmd,
-        cwd=cwd,
-        check=check,
-        capture_output=capture_output,
-        text=text,
-        timeout=timeout,
-        env=env,
-        **kwargs,
+    # Appended after the safe.directory/inherited GIT_CONFIG_* entries.
+    if run_time_config:
+        append_run_time_git_config(env, run_time_config)
+    supply_remote_credentials(env, credentials_url)
+
+    # Output that echoes the supplied credential is redacted before it can
+    # reach any exception, log or response. (CalledProcessError and
+    # TimeoutExpired both carry settable output/stderr; redact_command_output
+    # returns None and other non-text values unchanged.)
+    from code_indexer.server.git.git_subprocess_env import (
+        supplied_credential_secret,
     )
+    from code_indexer.utils.credential_redaction import redact_command_output
+
+    # The supplied credential is known exactly: masked at every occurrence.
+    secret = supplied_credential_secret(credentials_url)
+    supplied = [secret] if secret is not None else []
+
+    def redact_supplied(text: Any) -> Any:
+        """The ONE redactor for this command's output: the supplied
+        credential masked at every occurrence. Also handed to the
+        cancellable runner, which logs lines while git is still running."""
+        if not credentials_url:
+            return text
+        return redact_command_output(text, [credentials_url], supplied)
+
+    try:
+        if cancel_check is None:
+            result = subprocess.run(
+                cmd,
+                cwd=cwd,
+                check=check,
+                capture_output=capture_output,
+                text=text,
+                timeout=timeout,
+                env=env,
+                **kwargs,
+            )
+        else:
+            from code_indexer.server.utils.cancellable_subprocess import (
+                run_with_cancel,
+            )
+
+            result = run_with_cancel(
+                cmd,
+                cancel_check,
+                cwd=cwd,
+                check=check,
+                capture_output=capture_output,
+                text=text,
+                timeout=timeout,
+                env=env,
+                redact=redact_supplied,
+                **kwargs,
+            )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        error.output = redact_supplied(error.output)
+        error.stderr = redact_supplied(error.stderr)
+        raise
+    result.stdout = redact_supplied(result.stdout)
+    result.stderr = redact_supplied(result.stderr)
+    return result
 
 
 def run_git_command_with_retry(

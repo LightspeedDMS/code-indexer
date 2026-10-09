@@ -61,6 +61,12 @@ class ProgressiveMetadata:
             # Git commit watermark tracking for incremental indexing
             "branch_commit_watermarks": {},  # Per-branch last indexed commit: {branch: commit_hash}
             "last_commit_check_timestamp": 0.0,  # When we last checked for git changes
+            # Issue #1975: a completed reconcile verified the stored points
+            # against disk; cleared whenever a new run starts from zero.
+            "store_verified_by_reconcile": False,
+            # Outcome of the last finished run (record_finished_run).
+            "run_sequence": 0,
+            "last_run_changed_index": None,
         }
 
         if self.metadata_path.exists():
@@ -183,8 +189,28 @@ class ProgressiveMetadata:
                 "files_processed": 0,
                 "chunks_indexed": 0,
                 "failed_files": 0,
+                "store_verified_by_reconcile": False,
             }
         )
+        self._save_metadata()
+
+    def get_fts_restore_pending(self) -> List[str]:
+        """Un-hidden files whose full-text document could not be restored;
+        a later reconcile retries them (Issue #1999)."""
+        return [str(p) for p in self.metadata.get("fts_restore_pending") or []]
+
+    def set_fts_restore_pending(self, paths: List[str]) -> None:
+        """Replace the list of files whose FTS restore is still owed."""
+        self.metadata["fts_restore_pending"] = list(
+            dict.fromkeys(str(p) for p in paths)
+        )
+        self._save_metadata()
+
+    def mark_store_verified(self) -> None:
+        """Record that a completed reconcile verified the stored points
+        against disk, so a zero processed-file count is no longer ambiguous
+        (Issue #1975)."""
+        self.metadata["store_verified_by_reconcile"] = True
         self._save_metadata()
 
     def start_fresh_indexing(
@@ -221,6 +247,31 @@ class ProgressiveMetadata:
         # Update last_index_timestamp to current time for incremental indexing
         self.metadata["last_index_timestamp"] = time.time()
         self.metadata.pop("error_message", None)
+        self._save_metadata()
+
+    def record_finished_run(self, commit: Optional[str], changed_index: bool) -> None:
+        """Record the outcome of a run that returned (was not cancelled).
+
+        ``run_sequence`` advances on every finished run, so the refresh
+        scheduler sees that this file was rewritten by a run, and
+        ``last_run_changed_index`` says whether that run changed the index
+        (a forced reconcile that changed nothing publishes no snapshot).
+
+        A run left ``completed`` records the HEAD it indexed as
+        ``current_commit``: ``start_indexing`` writes it only when a run
+        starts a session, so a run that found nothing to (re)index would
+        leave the previous commit behind and the scheduler's drift check
+        (current_commit != HEAD) would force a reconcile forever. An
+        interrupted or failed run keeps its stale signal. A commit git could
+        not detect ("unknown") never replaces the recorded one."""
+        self.metadata["run_sequence"] = int(self.metadata.get("run_sequence") or 0) + 1
+        self.metadata["last_run_changed_index"] = bool(changed_index)
+        commit_known = commit is not None and commit.strip().lower() not in (
+            "",
+            "unknown",
+        )
+        if commit_known and self.metadata.get("status") == "completed":
+            self.metadata["current_commit"] = commit
         self._save_metadata()
 
     def fail_indexing(self, error_message: Optional[str] = None):
@@ -355,6 +406,7 @@ class ProgressiveMetadata:
             # Git commit watermark tracking for incremental indexing
             "branch_commit_watermarks": {},
             "last_commit_check_timestamp": 0.0,
+            "store_verified_by_reconcile": False,
         }
         self._save_metadata()
 

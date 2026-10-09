@@ -184,6 +184,7 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
                 force_reset=False,
                 progress_callback=None,
                 tracked_by_caller=True,
+                cancel_check=None,
             )
 
     def test_execute_refresh_raises_exception_on_timeout(

@@ -33,6 +33,9 @@ from code_indexer.server.services.git_operations_service import (
     GitOperationsService,
     git_operations_service,
 )
+from tests.unit.server.services._git_confirm_helpers import (
+    singleton_confirmation_store_fixture,  # noqa: F401 -- registers the fixture
+)
 
 
 def _git(args: list, cwd: Path) -> subprocess.CompletedProcess:
@@ -314,27 +317,35 @@ class TestGitBranchNameValidation:
         assert result["success"] is True
         assert result["current_branch"] == "feature/nested"
 
-    def test_git_branch_delete_rejects_leading_dash(self, repo: Path):
+    def test_git_branch_delete_rejects_leading_dash(
+        self, repo: Path, singleton_confirmation_store
+    ):
         svc = _make_service()
-        first = svc.git_branch_delete(repo, branch_name="feature/nested")
+        binding = {"username": "alice", "repo_alias": "example-repo"}
+        first = svc.git_branch_delete(repo, branch_name="feature/nested", **binding)
         token = first["token"]
 
         with pytest.raises(GitArgumentValidationError):
-            svc.git_branch_delete(repo, branch_name="-D", confirmation_token=token)
+            svc.git_branch_delete(
+                repo, branch_name="-D", confirmation_token=token, **binding
+            )
 
         branches = _git(["branch"], repo).stdout
         assert "feature/nested" in branches, (
             "feature/nested must remain -- git branch -d must never have run"
         )
 
-    def test_git_branch_delete_accepts_valid_branch(self, repo: Path):
+    def test_git_branch_delete_accepts_valid_branch(
+        self, repo: Path, singleton_confirmation_store
+    ):
         svc = _make_service()
+        binding = {"username": "alice", "repo_alias": "example-repo"}
         svc.git_branch_create(repo, branch_name="to-delete")
-        first = svc.git_branch_delete(repo, branch_name="to-delete")
+        first = svc.git_branch_delete(repo, branch_name="to-delete", **binding)
         token = first["token"]
 
         result = svc.git_branch_delete(
-            repo, branch_name="to-delete", confirmation_token=token
+            repo, branch_name="to-delete", confirmation_token=token, **binding
         )
 
         assert result["success"] is True

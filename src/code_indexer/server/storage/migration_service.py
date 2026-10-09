@@ -11,8 +11,10 @@ import json
 import logging
 import os
 import sqlite3
+import stat
+from contextlib import closing
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 
 from .sqlite_backends import (
     GlobalReposSqliteBackend,
@@ -28,6 +30,14 @@ from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 
+# Legacy files holding credentials (password hashes, tokens) end owner-only.
+OWNER_ONLY_MODE = 0o600
+
+
+def _restrict_to_owner(path: Path) -> None:
+    """Drop every group/other permission bit of *path*; never add a bit."""
+    os.chmod(str(path), stat.S_IMODE(path.stat().st_mode) & OWNER_ONLY_MODE)
+
 
 class MigrationService:
     """
@@ -40,16 +50,30 @@ class MigrationService:
     Migration is idempotent - safe to run multiple times.
     """
 
-    def __init__(self, source_dir: str, db_path: str) -> None:
+    def __init__(
+        self,
+        source_dir: str,
+        db_path: str,
+        *,
+        prepare_new_account: Optional[Callable[[str], None]] = None,
+        import_users: bool = True,
+    ) -> None:
         """
         Initialize the migration service.
 
         Args:
             source_dir: Directory containing legacy JSON files.
             db_path: Path to target SQLite database.
+            prepare_new_account: The server's account pre-creation step
+                (refuses a name whose earlier repositories remain, removes
+                rows left under it); run before the import creates a name.
+            import_users: False in cluster storage mode, where accounts live
+                in PostgreSQL: the local users.json import is skipped.
         """
         self.source_dir = source_dir
         self.db_path = db_path
+        self._prepare_new_account = prepare_new_account
+        self._import_users = import_users
 
     def is_migration_needed(self) -> bool:
         """
@@ -251,6 +275,18 @@ class MigrationService:
         """
         Migrate users.json to SQLite with normalized tables.
 
+        The import completes -- completion recorded in the database, then
+        users.json renamed to an owner-only ``users.json.migrated`` -- only
+        when every entry was imported or already had an account.  Otherwise
+        users.json is atomically rewritten (owner-only) to hold only the
+        entries still to import, nothing is recorded, and the import runs
+        again at the next start; start-up seeds no initial administrator
+        while it is pending.  Entries that can never be imported keep it
+        pending for good: the ERROR is logged at every start until an
+        operator fixes or removes them in users.json.  Rows are written
+        before the record and the record before the rename, so a stop at
+        any point leaves the rows written or the import pending.
+
         Returns:
             Migration result with counts.
         """
@@ -258,6 +294,24 @@ class MigrationService:
 
         if not source_file.exists():
             logger.info("No users.json found, skipping migration")
+            return {"migrated": 0, "errors": 0, "skipped": True}
+
+        # Owner-only from the first look, whatever happens to it later.
+        try:
+            _restrict_to_owner(source_file)
+        except OSError as e:
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-205",
+                    f"Failed to make {source_file} owner-only: {e}",
+                )
+            )
+
+        # Completion is recorded in the database: once the import ran it
+        # never runs again, even when the file could not be renamed.
+        if self._users_import_recorded():
+            logger.info("users.json was already imported; not importing again")
+            self._rename_imported(source_file)
             return {"migrated": 0, "errors": 0, "skipped": True}
 
         try:
@@ -274,97 +328,51 @@ class MigrationService:
         already_exists = 0
         errors = 0
 
+        not_imported: Dict[str, str] = {}
         try:
             for username, user_data in users_data.items():
                 try:
-                    # Create user
+                    if backend.get_user(username) is not None:
+                        raise sqlite3.IntegrityError(f"account exists: {username}")
+                    # New name: the shared pre-creation step (refused while an
+                    # earlier account's repositories remain; rows left under
+                    # the name removed) runs before the account is created.
+                    if self._prepare_new_account is not None:
+                        self._prepare_new_account(username)
                     backend.create_user(
                         username=username,
                         password_hash=user_data.get("password_hash", ""),
                         role=user_data.get("role", "normal_user"),
                         email=user_data.get("email"),
                     )
-
-                    # Migrate API keys
-                    api_keys = user_data.get("api_keys", [])
-                    for key in api_keys:
-                        try:
-                            backend.add_api_key(
-                                username=username,
-                                key_id=key.get("key_id", ""),
-                                key_hash=key.get("hash", ""),
-                                key_prefix=key.get("key_prefix", ""),
-                                name=key.get("name"),
-                            )
-                        except sqlite3.IntegrityError:
-                            pass  # API key already exists, skip
-
-                    # Migrate MCP credentials
-                    mcp_creds = user_data.get("mcp_credentials", [])
-                    for cred in mcp_creds:
-                        try:
-                            backend.add_mcp_credential(
-                                username=username,
-                                credential_id=cred.get("credential_id", ""),
-                                client_id=cred.get("client_id", ""),
-                                client_secret_hash=cred.get("client_secret_hash", ""),
-                                client_id_prefix=cred.get("client_id_prefix", ""),
-                                name=cred.get("name"),
-                            )
-                        except sqlite3.IntegrityError:
-                            pass  # MCP credential already exists, skip
-
+                    self._import_legacy_credentials(backend, username, user_data)
                     migrated += 1
                     logger.debug(f"Migrated user: {username}")
                 except sqlite3.IntegrityError:
-                    # User already exists (e.g., from seed_initial_admin)
-                    # UPDATE the password_hash from migrated data - critical for preserving real passwords
-                    migrated_password_hash = user_data.get("password_hash", "")
-                    if migrated_password_hash:
-                        backend.update_password_hash(username, migrated_password_hash)
+                    # The name already has an account: it is never overwritten
+                    # or augmented.  Only the seeded bootstrap admin, still on
+                    # its default password, adopts its legacy password and
+                    # credentials (an upgrade must not keep the default).
+                    if self._is_untouched_bootstrap_admin(backend, username):
+                        legacy_hash = user_data.get("password_hash", "")
+                        if legacy_hash:
+                            backend.update_password_hash(username, legacy_hash)
+                        self._import_legacy_credentials(backend, username, user_data)
                         logger.info(
-                            f"Updated existing user password_hash from migration: {username}"
+                            f"Bootstrap admin adopted its legacy account: {username}"
                         )
-                    # Also migrate API keys and MCP credentials for existing users
-                    api_keys = user_data.get("api_keys", [])
-                    for key in api_keys:
-                        try:
-                            backend.add_api_key(
-                                username=username,
-                                key_id=key.get("key_id", ""),
-                                key_hash=key.get("hash", ""),
-                                key_prefix=key.get("key_prefix", ""),
-                                name=key.get("name"),
-                            )
-                        except sqlite3.IntegrityError:
-                            logger.debug(
-                                f"API key already exists, skipping: {key.get('key_id', '')}"
-                            )
-                    mcp_creds = user_data.get("mcp_credentials", [])
-                    for cred in mcp_creds:
-                        try:
-                            backend.add_mcp_credential(
-                                username=username,
-                                credential_id=cred.get("credential_id", ""),
-                                client_id=cred.get("client_id", ""),
-                                client_secret_hash=cred.get("client_secret_hash", ""),
-                                client_id_prefix=cred.get("client_id_prefix", ""),
-                                name=cred.get("name"),
-                            )
-                        except sqlite3.IntegrityError:
-                            logger.debug(
-                                f"MCP credential already exists, skipping: {cred.get('credential_id', '')}"
-                            )
+                    else:
+                        logger.info(
+                            f"Account already exists, legacy entry ignored: {username}"
+                        )
                     already_exists += 1
-                    logger.debug(
-                        f"User already exists, updated from migration: {username}"
-                    )
                 except Exception as e:
                     logger.error(
                         format_error_log(
                             "MCP-GENERAL-204", f"Failed to migrate user {username}: {e}"
                         )
                     )
+                    not_imported[username] = str(e)
                     errors += 1
         finally:
             backend.close()
@@ -373,27 +381,182 @@ class MigrationService:
             f"Users migration complete: {migrated} migrated, "
             f"{already_exists} already existed, {errors} errors"
         )
-
-        # Rename JSON file to .migrated after successful migration (Story #702)
-        # Only real errors block rename - already_exists is expected for idempotency
-        if errors == 0 and (migrated > 0 or already_exists > 0):
-            try:
-                os.rename(str(source_file), str(source_file) + ".migrated")
-                logger.info(f"Renamed {source_file} to {source_file}.migrated")
-            except OSError as e:
-                logger.warning(
-                    format_error_log(
-                        "MCP-GENERAL-205",
-                        f"Failed to rename {source_file} to .migrated: {e}",
-                    )
-                )
-
-        return {
+        result = {
             "migrated": migrated,
             "already_exists": already_exists,
             "errors": errors,
             "skipped": False,
         }
+        if not_imported:
+            # Not complete: users.json keeps only the entries still to import
+            # (imported and existing names leave it, so a retry never brings
+            # back an account removed after its import, unless the rewrite of
+            # the pending file fails), no completion is recorded, and the
+            # import runs again at the next start.
+            self._keep_pending_entries(
+                source_file, {name: users_data[name] for name in not_imported}
+            )
+            logger.error(
+                f"users.json import incomplete: {len(not_imported)} entries could "
+                "not be imported; it runs again at the next start and the initial "
+                "admin is not seeded until it completes.  Fix or remove those "
+                "entries in users.json."
+            )
+            return result
+
+        # Every entry was imported or already had an account.  Order: rows
+        # (above), then the durable completion record, then the rename -- a
+        # stop at any point leaves the import pending or its rows written.
+        try:
+            self._record_users_import()
+        except Exception as e:  # noqa: BLE001 - the rename below still records it
+            logger.error(f"Recording the users.json import as complete failed: {e}")
+        self._rename_imported(source_file)
+        return result
+
+    @staticmethod
+    def _keep_pending_entries(source_file: Path, entries: Dict[str, Any]) -> None:
+        """Atomically rewrite users.json to hold only *entries*.
+
+        A failed rewrite leaves the original file in place: the import stays
+        pending either way, and its already-imported names are skipped.
+        """
+        temp_file = source_file.with_name(source_file.name + ".tmp")
+        try:
+            temp_file.unlink(missing_ok=True)  # never reuse a stale file's mode
+            fd = os.open(
+                str(temp_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_ONLY_MODE
+            )
+            try:
+                f = os.fdopen(fd, "w")
+            except BaseException:
+                os.close(fd)
+                raise
+            with f:
+                os.fchmod(f.fileno(), OWNER_ONLY_MODE)  # exact, whatever the umask
+                json.dump(entries, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(str(temp_file), str(source_file))
+        except OSError as e:
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-205",
+                    f"Failed to keep pending users.json entries: {e}",
+                )
+            )
+            try:
+                temp_file.unlink()
+            except FileNotFoundError:
+                pass
+
+    _IMPORT_STATE_DDL = (
+        "CREATE TABLE IF NOT EXISTS legacy_import_state ("
+        "name TEXT PRIMARY KEY, completed_at TEXT NOT NULL)"
+    )
+    _USERS_IMPORT = "users.json"
+
+    def has_pending_users_import(self) -> bool:
+        """True while a users.json import with accounts is still to run.
+
+        That is: this service imports users, users.json exists, its import is
+        not recorded as complete, and the file holds at least one entry.  A
+        file that cannot be read counts as pending: it may hold accounts, and
+        the import itself reports the read failure.
+        """
+        source_file = Path(self.source_dir) / "users.json"
+        if not self._import_users or not source_file.exists():
+            return False
+        if self._users_import_recorded():
+            return False
+        try:
+            with open(source_file, "r") as f:
+                users_data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return True
+        return bool(users_data)
+
+    def _users_import_recorded(self) -> bool:
+        """True once the users.json import has completed (database marker)."""
+        with closing(sqlite3.connect(self.db_path, timeout=30)) as conn:
+            conn.execute(self._IMPORT_STATE_DDL)
+            row = conn.execute(
+                "SELECT 1 FROM legacy_import_state WHERE name = ?",
+                (self._USERS_IMPORT,),
+            ).fetchone()
+        return row is not None
+
+    def _record_users_import(self) -> None:
+        """Record the users.json import as complete (idempotent)."""
+        with closing(sqlite3.connect(self.db_path, timeout=30)) as conn:
+            conn.execute(self._IMPORT_STATE_DDL)
+            conn.execute(
+                "INSERT OR IGNORE INTO legacy_import_state (name, completed_at) "
+                "VALUES (?, datetime('now'))",
+                (self._USERS_IMPORT,),
+            )
+            conn.commit()
+
+    @staticmethod
+    def _rename_imported(source_file: Path) -> None:
+        """Rename an imported users.json to .migrated, owner-only; a failure
+        is loud."""
+        try:
+            _restrict_to_owner(source_file)
+            os.rename(str(source_file), str(source_file) + ".migrated")
+            logger.info(f"Renamed {source_file} to {source_file}.migrated")
+        except OSError as e:
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-205",
+                    f"Failed to rename {source_file} to .migrated: {e}",
+                )
+            )
+
+    @staticmethod
+    def _is_untouched_bootstrap_admin(
+        backend: UsersSqliteBackend, username: str
+    ) -> bool:
+        """True for the seeded bootstrap admin still on its default password."""
+        if username != "admin":
+            return False
+        from code_indexer.server.auth.password_manager import PasswordManager
+
+        existing = backend.get_user(username)
+        if existing is None or not existing.get("password_hash"):
+            return False
+        return PasswordManager().verify_password("admin", existing["password_hash"])
+
+    @staticmethod
+    def _import_legacy_credentials(
+        backend: UsersSqliteBackend, username: str, user_data: Dict[str, Any]
+    ) -> None:
+        """Add the legacy API keys and MCP credentials of *username*."""
+        for key in user_data.get("api_keys", []):
+            try:
+                backend.add_api_key(
+                    username=username,
+                    key_id=key.get("key_id", ""),
+                    key_hash=key.get("hash", ""),
+                    key_prefix=key.get("key_prefix", ""),
+                    name=key.get("name"),
+                )
+            except sqlite3.IntegrityError:
+                logger.debug(f"API key already exists: {key.get('key_id', '')}")
+        for cred in user_data.get("mcp_credentials", []):
+            try:
+                backend.add_mcp_credential(
+                    username=username,
+                    credential_id=cred.get("credential_id", ""),
+                    client_id=cred.get("client_id", ""),
+                    client_secret_hash=cred.get("client_secret_hash", ""),
+                    client_id_prefix=cred.get("client_id_prefix", ""),
+                    name=cred.get("name"),
+                )
+            except sqlite3.IntegrityError:
+                logger.debug(
+                    f"MCP credential already exists: {cred.get('credential_id', '')}"
+                )
 
     def migrate_sync_jobs(self) -> Dict[str, Any]:
         """Migrate jobs.json to SQLite sync_jobs table."""
@@ -598,6 +761,7 @@ class MigrationService:
         )
         if errors == 0 and (migrated > 0 or already_exists > 0):
             try:
+                _restrict_to_owner(source_file)
                 os.rename(str(source_file), str(source_file) + ".migrated")
             except OSError as e:
                 logger.warning(
@@ -846,7 +1010,9 @@ class MigrationService:
         logger.info("Starting migration of legacy JSON files to SQLite")
 
         results["global_repos"] = self.migrate_global_repos()
-        results["users"] = self.migrate_users()
+        results["users"] = (
+            self.migrate_users() if self._import_users else self._skip_users_import()
+        )
         # background_jobs must run BEFORE sync_jobs because jobs.json contains
         # BackgroundJobManager jobs (operation_type field), not SyncJobManager jobs
         results["background_jobs"] = self.migrate_background_jobs()
@@ -864,3 +1030,13 @@ class MigrationService:
         )
 
         return results
+
+    def _skip_users_import(self) -> Dict[str, Any]:
+        """Cluster mode: accounts live in PostgreSQL, never in a local file."""
+        logger.info("Legacy users.json import skipped in cluster storage mode")
+        if (Path(self.source_dir) / "users.json").exists():
+            logger.warning(
+                "users.json is present and ignored: in cluster storage mode "
+                "accounts live in PostgreSQL"
+            )
+        return {"migrated": 0, "errors": 0, "skipped": True}

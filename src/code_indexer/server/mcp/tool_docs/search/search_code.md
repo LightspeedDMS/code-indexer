@@ -17,7 +17,7 @@ inputSchema:
         items:
           type: string
       description: 'Repository alias(es) to search. String for single repo, array for multi-repo, or a wildcard pattern
-        (e.g. ''*-global'', ''pch-*-global'').'
+        (e.g. ''*-global'', ''backend-*-global'').'
     aggregation_mode:
       type: string
       enum:
@@ -39,7 +39,9 @@ inputSchema:
       maximum: 100
     min_score:
       type: number
-      description: Minimum similarity score
+      description: 'Minimum similarity score (0-1). Results scoring below it are dropped. When the field is not sent, the
+        server applies 0.3 to a single-repository search and no threshold to a multi-repository search (array or wildcard
+        repository_alias).'
       default: 0.5
       minimum: 0
       maximum: 1
@@ -70,7 +72,14 @@ inputSchema:
       type: array
       items:
         type: string
-      description: 'Filter by file extensions (e.g., [''.py'', ''.js'']).'
+      description: 'Keep only files with one of these extensions (a list, e.g., [''py'', ''.js'']), in semantic, fts
+        and hybrid modes. Case-insensitive, leading dot optional, several values OR-ed; files without an extension
+        never match; intersected with language when both are given. A non-list, an empty value, or one containing
+        ''.'' or ''/'' after the optional leading dot, is rejected. Bounds: full-text search inspects at most
+        50 x limit hits per repository; semantic search filters inside the vector store over the first 400
+        candidates for the query (one store query per repository); once the query''s time budget (80% of the handler
+        timeout) has run out, no further repository search starts. If a bound stops the search first, fewer than limit
+        results may be returned (never a non-matching one; logged at INFO on the server).'
     accuracy:
       type: string
       enum:
@@ -241,6 +250,10 @@ outputSchema:
                 - 'null'
                 description: Exact matched text from FTS engine. Only present in FTS and hybrid search modes for
                   FTS-originated results. Null or absent for pure semantic results.
+              content_unavailable:
+                type: boolean
+                description: Present and true only when the matched chunk's content could not be read from the
+                  working tree or git (code_snippet is then empty). Absent for normal results.
               file_last_modified:
                 type:
                 - number

@@ -61,15 +61,15 @@ class TestLoginLockoutDoesNotLeakAcrossTests:
         actually engages, so a failure of test_b can only be explained by
         a missing reset, not by lockout never triggering."""
         for _ in range(_LOCKOUT_MAX_ATTEMPTS):
-            login_rate_limiter.check_and_record_failure(_LOCKOUT_USERNAME)
-        is_locked, _ = login_rate_limiter.is_locked(_LOCKOUT_USERNAME)
+            login_rate_limiter.begin_attempt(_LOCKOUT_USERNAME)
+        is_locked, _ = login_rate_limiter.is_throttled(_LOCKOUT_USERNAME)
         assert is_locked is True
 
     def test_b_lockout_from_previous_test_must_not_leak(self):
         """If the tree-wide autouse fixture correctly resets
         LoginRateLimiter state between tests, this username must NOT still
         be locked out from test_a above."""
-        is_locked, _ = login_rate_limiter.is_locked(_LOCKOUT_USERNAME)
+        is_locked, _ = login_rate_limiter.is_throttled(_LOCKOUT_USERNAME)
         assert is_locked is False, (
             "LoginRateLimiter lockout leaked across tests -- the tree-wide "
             "autouse reset fixture in tests/unit/server/conftest.py must "

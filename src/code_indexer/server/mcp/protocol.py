@@ -6,7 +6,7 @@ and execution. Phase 1 implementation with stub handlers for tools/list and tool
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from typing import Dict, Any, List, Optional, Set, Tuple, Union
+from typing import Callable, Dict, Any, List, Optional, Set, Tuple, Union
 from code_indexer.server.auth.dependencies import (
     get_current_user,
     get_current_user_for_mcp,
@@ -16,8 +16,12 @@ from code_indexer.server.auth.dependencies import (
 )
 from code_indexer.server.auth import dependencies as auth_deps
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.access_filtering_service import (
+    AccessFilteringService,
+)
 from code_indexer.server.services.config_service import get_config_service
 from sse_starlette.sse import EventSourceResponse
+import anyio.to_thread
 import asyncio
 import contextvars
 import functools
@@ -27,6 +31,11 @@ import json
 import logging
 from code_indexer import __version__
 from .tool_access import ToolAccessMemo, resolve_effective_user
+from code_indexer.server.middleware.audit_request_context import (
+    note_mcp_principal,
+    reset_mcp_principal,
+)
+from .session_registry import MCPSessionOwnerMismatch
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +106,18 @@ def _recognized_repo_param_names(tool_name: str) -> Tuple[str, ...]:
     if tool_name in _REPO_NAME_PARAM_TOOLS:
         names = names + ("repo_name",)
     return names
+
+
+# Recognized parameters that can only name a GOLDEN repository (activation
+# source aliases, write-exception and wiki repos, dep-map entries). Their
+# handlers look the value up in golden-keyed stores, never among the
+# caller's activations, so they are judged by golden name alone: the
+# caller's own activation alias is never a grant here, whatever its
+# sources. repository_alias, alias and user_alias can name the caller's
+# own activation and are judged by its source repositories instead.
+_GOLDEN_ONLY_REPO_PARAMS: frozenset = frozenset(
+    {"golden_repo_alias", "golden_repo_aliases", "repo_alias", "repo_name"}
+)
 
 
 # Timeout in seconds for sync tool handlers executed via run_in_executor.
@@ -613,6 +634,27 @@ def _resolve_acting_users_scope(
     return set(admin_repos & union_repos)
 
 
+def _read_for_access_check(tool_name: str, what: str, read: Callable[[], Any]) -> Any:
+    """Run one store read an access decision needs, failing closed.
+
+    A failure inside the read is refused with a fixed message: its text
+    (paths, SQL) is logged at WARNING with the traceback, never returned
+    to the client.
+    """
+    try:
+        return read()
+    except Exception:
+        logger.warning(
+            "Repository access check for tool %s failed reading %s",
+            tool_name,
+            what,
+            exc_info=True,
+        )
+        raise ValueError(
+            f"Access denied: access check failed for tool '{tool_name}'"
+        ) from None
+
+
 def _check_repository_access(
     arguments: Dict[str, Any],
     effective_user: User,
@@ -682,46 +724,70 @@ def _check_repository_access(
             f" to the specified acting users"
         )
 
-    # is_admin_user()/get_accessible_repos() are computed AT MOST ONCE per
-    # call (memoized here), not once per checked alias -- multiple
-    # recognized repo params may be present and every one of them must be
-    # checked, but the underlying service lookups never need repeating.
+    # is_admin_user()/get_accessible_repos()/caller_activation_sources() are
+    # computed AT MOST ONCE per call (memoized here), not once per checked
+    # alias -- multiple recognized repo params may be present and every one
+    # of them must be checked, but the underlying service lookups never
+    # need repeating.
     _memo: Dict[str, Any] = {}
 
+    def _lookup(key: str, read: Callable[[str], Any]) -> Any:
+        """One memoized service lookup for the effective user.
+
+        *read* is resolved by the caller, so a missing service or method
+        still raises AttributeError there (the dispatcher's "service
+        unavailable" refusal); a failure inside it fails closed
+        (:func:`_read_for_access_check`).
+        """
+        if key not in _memo:
+            _memo[key] = _read_for_access_check(
+                tool_name, key, lambda: read(effective_user.username)
+            )
+        return _memo[key]
+
     def _is_admin() -> bool:
-        if "is_admin" not in _memo:
-            _memo["is_admin"] = access_service.is_admin_user(effective_user.username)
-        return bool(_memo["is_admin"])
+        return bool(_lookup("is_admin", access_service.is_admin_user))
 
     def _accessible() -> Any:
-        if "accessible" not in _memo:
-            _memo["accessible"] = access_service.get_accessible_repos(
-                effective_user.username
-            )
-        return _memo["accessible"]
+        return _lookup("accessible", access_service.get_accessible_repos)
 
-    def _check_one(raw_alias: str) -> None:
+    def _activations() -> Any:
+        return _lookup("activations", access_service.caller_activation_sources)
+
+    def _sources(golden_only: bool) -> Any:
+        # A golden-only parameter (_GOLDEN_ONLY_REPO_PARAMS) never reads
+        # the caller's activations: it is judged by golden name alone.
+        return {} if golden_only else _activations()
+
+    def _check_one(raw_alias: str, golden_only: bool) -> None:
         """Check ONE alias string against accessible/scoped repos."""
-        normalized = _normalize(raw_alias)
         if scoped_repos is not None:
-            if normalized not in scoped_repos:
+            # Same rule against the acting users' narrowed set: an alias of
+            # the caller's own activation needs its SOURCE repos in scope.
+            if not AccessFilteringService.alias_granted(
+                raw_alias, scoped_repos, _sources(golden_only)
+            ):
                 _deny_scoped(raw_alias)
             return
         if _is_admin():
             return
-        if normalized not in _accessible():
+        # The query access filter's own rule: an alias of the caller's own
+        # activation is judged by that activation's source repositories.
+        if not AccessFilteringService.alias_granted(
+            raw_alias, _accessible(), _sources(golden_only)
+        ):
             _deny_single(raw_alias)
 
-    def _check_alias_list(aliases: list) -> None:
+    def _check_alias_list(aliases: list, golden_only: bool) -> None:
         """Check each string entry in a list of aliases.
 
         Shared by the golden_repo_aliases param and the omni list-form
         path (v10.4.3 security fix).
         """
-        for entry in aliases:
-            if not isinstance(entry, str) or not entry:
-                continue  # skip non-string / empty entries
-            _check_one(entry)
+        for entry in aliases:  # every entry is a string (validated below)
+            if not entry:
+                continue  # skip empty entries
+            _check_one(entry, golden_only)
 
     def _try_decode_json_array(value: Any) -> Any:
         """Return decoded list when value is a JSON-array string, else value.
@@ -754,6 +820,10 @@ def _check_repository_access(
         tool_name in _NEW_ALIAS_PARAM_TOOLS or tool_name in _OWNER_ENFORCED_TOOLS
     )
 
+    # Every present repository parameter is a string or a list of strings,
+    # validated before any is authorised: a malformed value is refused here
+    # rather than skipped and handed to a handler that cannot use it.
+    present: List[Tuple[str, Any]] = []
     for param_name in _recognized_repo_param_names(tool_name):
         if param_name == "user_alias" and skip_user_alias:
             continue
@@ -761,12 +831,24 @@ def _check_repository_access(
         if value is None:
             continue
         value = _try_decode_json_array(value)
+        if not (
+            isinstance(value, str)
+            or (isinstance(value, list) and all(isinstance(e, str) for e in value))
+        ):
+            raise ValueError(
+                f"Invalid repository parameter '{param_name}': expected a string"
+                f" or a list of strings"
+            )
+        present.append((param_name, value))
+
+    for param_name, value in present:
+        golden_only = param_name in _GOLDEN_ONLY_REPO_PARAMS
         if isinstance(value, list):
             if value:  # non-empty list only
-                _check_alias_list(value)
+                _check_alias_list(value, golden_only)
             continue
-        if isinstance(value, str) and value:
-            _check_one(value)
+        if value:
+            _check_one(value, golden_only)
 
 
 async def handle_tools_call(
@@ -801,9 +883,7 @@ async def handle_tools_call(
     Raises:
         ValueError: If required parameters are missing or tool not found
     """
-    from .handlers import HANDLER_REGISTRY
     from .tools import TOOL_REGISTRY
-    from code_indexer.server.services.langfuse_service import get_langfuse_service
 
     # Validate required 'name' parameter
     if "name" not in params:
@@ -820,13 +900,52 @@ async def handle_tools_call(
     if session_state is None:
         session_state = _get_session_state(session_id, user)
 
-    # Determine effective user for permission checks (CRITICAL 2 fix)
-    # When impersonating, use the impersonated user's permissions
-    effective_user = resolve_effective_user(user, session_state)
+    # Who the call runs as: the impersonated user while the session
+    # impersonates one, except for the tools that manage impersonation
+    # itself, which run as the authenticated administrator.  Read ONCE.
+    #
+    # Each call's audit principal is fixed when the call starts, from the
+    # same effective user it runs as: the authenticated administrator is the
+    # actor and the impersonated user, if any, the subject.  The value is
+    # immutable and bound for this call only; the context copied into the
+    # call's worker thread keeps it.
+    effective_user = resolve_effective_user(user, session_state, tool_name)
+    principal_token = note_mcp_principal(
+        user.username,
+        effective_user.username if effective_user.username != user.username else None,
+    )
+    try:
+        return await _dispatch_tool_call(
+            tool_name,
+            arguments,
+            user,
+            effective_user,
+            session_state,
+            session_id=session_id,
+            elevation_key=elevation_key,
+            http_request=http_request,
+            http_response=http_response,
+            tool_access_memo=tool_access_memo,
+        )
+    finally:
+        reset_mcp_principal(principal_token)
 
-    if tool_access_memo is None:
-        tool_access_memo = _new_tool_access_memo()
 
+def _authorize_tool_call(
+    tool_name: str,
+    arguments: Dict[str, Any],
+    effective_user: User,
+    tool_access_memo: ToolAccessMemo,
+) -> None:
+    """Every authorization step of one ``tools/call``, in order; raises
+    ValueError on the first refusal and pops ``acting_users`` from
+    *arguments*. It reads the group, grant and activation stores
+    synchronously: :func:`_dispatch_tool_call` runs it on a worker thread."""
+    from .tools import TOOL_REGISTRY
+
+    # Invariant for per-group tool grants (Bug #2076): a grant may only
+    # restrict the caller's role permissions, never extend them. Grants are
+    # not enforced in this version.
     group_decision = tool_access_memo.is_allowed(tool_name, effective_user)
     if group_decision is False:
         raise ValueError(f"Permission denied: tool access denied for {tool_name}")
@@ -857,15 +976,27 @@ async def handle_tools_call(
 
         # Story #568: Resolve acting_users to scoped repo set for admin users.
         # Non-admin users: acting_users silently ignored (AC3).
+        # A missing service or user manager raises AttributeError here (the
+        # "service unavailable" refusal below); a failure inside a read
+        # fails closed with a fixed message (_read_for_access_check).
         _scoped_repos = None
         if acting_users_emails is not None:
-            if _access_service.is_admin_user(effective_user.username):
+            _is_admin_user = _access_service.is_admin_user
+            if _read_for_access_check(
+                tool_name,
+                "admin status",
+                lambda: _is_admin_user(effective_user.username),
+            ):
                 _user_manager = _handlers_module.app_module.app.state.user_manager
-                _scoped_repos = _resolve_acting_users_scope(
-                    emails=acting_users_emails,
-                    user_manager=_user_manager,
-                    access_service=_access_service,
-                    admin_username=effective_user.username,
+                _scoped_repos = _read_for_access_check(
+                    tool_name,
+                    "acting users scope",
+                    lambda: _resolve_acting_users_scope(
+                        emails=acting_users_emails,
+                        user_manager=_user_manager,
+                        access_service=_access_service,
+                        admin_username=effective_user.username,
+                    ),
                 )
 
         _check_repository_access(
@@ -886,12 +1017,10 @@ async def handle_tools_call(
         # Uses the SAME recognized-parameter set as the main check above
         # (_recognized_repo_param_names) so a parameter recognized there can
         # never fail OPEN here for being missing from a separately
-        # maintained list.
-        _repo_param_names = _recognized_repo_param_names(tool_name)
+        # maintained list. Any non-empty value counts, malformed ones too.
         _has_repo_param = any(
-            (isinstance(arguments.get(p), str) and arguments.get(p))
-            or (isinstance(arguments.get(p), list) and arguments.get(p))
-            for p in _repo_param_names
+            arguments.get(p) not in (None, "", [])
+            for p in _recognized_repo_param_names(tool_name)
         )
         if _has_repo_param:
             logger.warning(
@@ -906,6 +1035,47 @@ async def handle_tools_call(
             "Access filtering service not available for tool %s (no repo param), proceeding",
             tool_name,
         )
+
+
+async def _dispatch_tool_call(
+    tool_name: str,
+    arguments: Dict[str, Any],
+    user: User,
+    effective_user: User,
+    session_state: Any,
+    *,
+    session_id: Optional[str],
+    elevation_key: Optional[str],
+    http_request: Optional[Request],
+    http_response: Optional[Response],
+    tool_access_memo: Optional[ToolAccessMemo],
+) -> Dict[str, Any]:
+    """Authorize and run one ``tools/call`` for :func:`handle_tools_call`,
+    which has resolved the session, read *effective_user* from it once and
+    bound the call's audit principal from that same user."""
+    from .handlers import HANDLER_REGISTRY
+    from code_indexer.server.services.langfuse_service import get_langfuse_service
+
+    # Permission checks and the handler use *effective_user* (CRITICAL 2
+    # fix): the impersonated user's permissions while impersonating, except
+    # for the tools that manage impersonation itself.  Never re-read from
+    # the session here: the audit principal was bound from this value.
+
+    if tool_access_memo is None:
+        tool_access_memo = _new_tool_access_memo()
+
+    # Every authorization step reads the group, grant and activation stores
+    # (database and filesystem I/O): run them, in order, on a worker thread,
+    # never on the event loop.
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _authorize_tool_call,
+            tool_name,
+            arguments,
+            effective_user,
+            tool_access_memo,
+        )
+    )
 
     # Get handler function
     if tool_name not in HANDLER_REGISTRY:
@@ -1186,6 +1356,16 @@ async def process_batch_request(
     return responses
 
 
+def _session_not_found_response() -> Response:
+    """The refusal of a session id bound to another account: HTTP 404, which
+    makes a spec-compliant MCP client start a new session."""
+    return Response(
+        status_code=404,
+        content=json.dumps(create_jsonrpc_error(-32001, "Session not found", None)),
+        media_type="application/json",
+    )
+
+
 @mcp_router.post("/mcp", response_model=None)
 async def mcp_endpoint(
     request: Request,
@@ -1225,6 +1405,14 @@ async def mcp_endpoint(
         session_id = str(uuid.uuid4())
     response.headers["Mcp-Session-Id"] = session_id
 
+    # A session id is bound to the user it was created for: another user's
+    # session (and any impersonation it holds) is never inherited.  HTTP 404
+    # makes a spec-compliant client start a new session.
+    try:
+        _get_session_state(session_id, current_user)
+    except MCPSessionOwnerMismatch:
+        return _session_not_found_response()
+
     # Extract JWT jti for TOTP elevation window lookup.
     # CLAUDE.md invariant: session_key = JWT jti (Bearer) OR cidx_session cookie.
     # The MCP session UUID (session_id) is NOT the elevation key.
@@ -1252,35 +1440,42 @@ async def mcp_endpoint(
         # Parse error - return JSON-RPC error
         return create_jsonrpc_error(-32700, "Parse error: Invalid JSON", None)
 
-    # Check if batch request (array) or single request (object)
-    if isinstance(body, list):
-        return await process_batch_request(
-            body,
-            current_user,
-            session_id=session_id,
-            elevation_key=elevation_key,
-            http_request=request,
-            http_response=response,
-        )
-    elif isinstance(body, dict):
-        # MCP Streamable HTTP spec: notifications (no "id") must return HTTP 202 with no body.
-        # Still process internally for side effects (e.g. notifications/initialized state).
-        is_notification = "id" not in body
-        jsonrpc_result = await process_jsonrpc_request(
-            body,
-            current_user,
-            session_id=session_id,
-            elevation_key=elevation_key,
-            http_request=request,
-            http_response=response,
-        )
-        if is_notification:
-            return Response(status_code=202, headers={"Mcp-Session-Id": session_id})
-        return jsonrpc_result
-    else:
-        return create_jsonrpc_error(
-            -32600, "Invalid Request: body must be object or array", None
-        )
+    # Check if batch request (array) or single request (object).  The
+    # dispatcher looks the session up again: should another account have
+    # taken the session id over since the check above (evicted and
+    # recreated), the request is refused the same way.
+    try:
+        if isinstance(body, list):
+            return await process_batch_request(
+                body,
+                current_user,
+                session_id=session_id,
+                elevation_key=elevation_key,
+                http_request=request,
+                http_response=response,
+            )
+        elif isinstance(body, dict):
+            # MCP Streamable HTTP spec: notifications (no "id") must return HTTP 202 with no body.
+            # Still process internally for side effects (e.g. notifications/initialized state).
+            is_notification = "id" not in body
+            jsonrpc_result = await process_jsonrpc_request(
+                body,
+                current_user,
+                session_id=session_id,
+                elevation_key=elevation_key,
+                http_request=request,
+                http_response=response,
+            )
+            if is_notification:
+                return Response(status_code=202, headers={"Mcp-Session-Id": session_id})
+            return jsonrpc_result
+        else:
+            return create_jsonrpc_error(
+                -32600, "Invalid Request: body must be object or array", None
+            )
+    except MCPSessionOwnerMismatch:
+        # In a batch, calls before the refused one may already have run.
+        return _session_not_found_response()
 
 
 async def sse_event_generator():
@@ -1619,17 +1814,18 @@ async def mcp_public_endpoint(
     """Public MCP endpoint (no OAuth challenge)."""
     session_id = str(uuid.uuid4())
     response.headers["Mcp-Session-Id"] = session_id
-    # Sliding expiration for cookie-authenticated sessions
+    # Full cookie validation first (signature, revocation, live account,
+    # account creation instant); the sliding refresh is only for a cookie
+    # that authenticated a user.
+    user = get_optional_user_from_cookie(request)
     token = request.cookies.get("cidx_session")
-    if token and auth_deps.jwt_manager is not None:
+    if user is not None and token and auth_deps.jwt_manager is not None:
         try:
             payload = auth_deps.jwt_manager.validate_token(token)
             if _should_refresh_token(payload):
                 _refresh_jwt_cookie(response, payload)
         except Exception as e:
             logger.debug("mcp_public cookie refresh error: %s", e)
-
-    user = get_optional_user_from_cookie(request)
 
     # Extract JWT jti for TOTP elevation window lookup (Web UI cookie-auth path).
     # CLAUDE.md invariant: session_key = JWT jti (Bearer) OR cidx_session cookie.

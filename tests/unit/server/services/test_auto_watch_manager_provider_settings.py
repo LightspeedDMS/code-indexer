@@ -169,6 +169,9 @@ def _run_watch_and_edit(
         manager.stop_watch(str(repo_path))
 
 
+# A real watch plus the debounced reindex, polled up to 13 s (~8.4 s idle):
+# the wait is the behaviour under test, slower under gate load.
+@pytest.mark.timeout(45)
 def test_auto_watch_never_sends_repo_configured_provider_endpoint(
     tmp_path, loopback_listener, monkeypatch
 ) -> None:
@@ -199,6 +202,8 @@ def test_auto_watch_never_sends_repo_configured_provider_endpoint(
     )
 
 
+# Same real watch and debounced-reindex poll (~7.5 s idle) as above.
+@pytest.mark.timeout(45)
 def test_auto_watch_targets_repo_endpoint_when_enforcement_is_skipped(
     tmp_path, loopback_listener, monkeypatch
 ) -> None:

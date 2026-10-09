@@ -182,22 +182,25 @@ class TestWriteEmbeddingProvidersAtomicity:
                     time.sleep(0.00005)
 
             def writer():
-                with patch(
-                    "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-                    ".get_configured_providers",
-                    return_value=["voyage-ai"],
-                ):
-                    for _ in range(30):
-                        manager._write_embedding_providers_to_config(tmp_dir)
+                for _ in range(30):
+                    manager._write_embedding_providers_to_config(tmp_dir)
 
             reader_thread = threading.Thread(target=reader, daemon=True)
             writer_threads = [threading.Thread(target=writer) for _ in range(3)]
 
             reader_thread.start()
-            for wt in writer_threads:
-                wt.start()
-            for wt in writer_threads:
-                wt.join(timeout=10.0)
+            # Patched once, here: unittest.mock.patch is not thread-safe, and
+            # concurrent enter/exit on one attribute can restore another
+            # thread's mock, leaving it installed for every later test.
+            with patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+                ".get_configured_providers",
+                return_value=["voyage-ai"],
+            ):
+                for wt in writer_threads:
+                    wt.start()
+                for wt in writer_threads:
+                    wt.join(timeout=10.0)
             stop_event.set()
             reader_thread.join(timeout=2.0)
 
@@ -233,3 +236,23 @@ class TestWriteEmbeddingProvidersAtomicity:
             # Atomic write: no temp files left behind
             leftover = list((Path(tmp_dir) / ".code-indexer").glob("*.tmp"))
             assert leftover == [], f"Temp files left behind: {leftover}"
+
+
+def test_write_is_not_skipped_when_voyage_key_unset(tmp_path, monkeypatch, caplog):
+    """With VOYAGE_API_KEY unset and Cohere configured, the real provider
+    check no longer raises, so the write happens instead of being skipped."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    monkeypatch.setenv("CO_API_KEY", "example-cohere-key")
+    config_file = _setup_repo_config(str(tmp_path), {"embedding_provider": "voyage-ai"})
+
+    with caplog.at_level("WARNING"):
+        _make_manager()._write_embedding_providers_to_config(str(tmp_path))
+
+    skipped = [
+        r
+        for r in caplog.records
+        if "Could not write embedding_providers" in r.getMessage()
+    ]
+    assert skipped == []
+    written = json.loads(config_file.read_text())
+    assert "cohere" in written["embedding_providers"]

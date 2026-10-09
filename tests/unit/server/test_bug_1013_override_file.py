@@ -233,7 +233,9 @@ class TestUntrackedFilesErrorRecovery:
         assert not override_file.exists(), (
             "Conflicting file must be removed after error recovery"
         )
-        pull_calls = [c for c in mock_run.call_args_list if c[0][0] == ["git", "pull"]]
+        pull_calls = [
+            c for c in mock_run.call_args_list if c[0][0] == ["git", "pull", "origin"]
+        ]
         assert len(pull_calls) == 2, (
             "git pull must be retried once after error recovery"
         )

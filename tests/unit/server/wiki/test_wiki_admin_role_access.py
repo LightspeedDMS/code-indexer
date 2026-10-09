@@ -4,8 +4,11 @@ The bug: _check_wiki_access() used access_svc.is_admin_user() (group membership)
 while the rest of the app uses user.has_permission("manage_users") (role-based).
 A user with role=admin but not in the "admins" group got 404 on the wiki.
 
-Fix: both _check_wiki_access() and _check_user_wiki_access() now accept either
-group-based admin OR role-based admin.
+Fix: _check_wiki_access() (the golden-repo wiki these tests cover) accepts
+either group-based admin OR role-based admin. The user wiki
+(_check_user_wiki_access) is different: another user's wiki is readable by
+an admins-group member only (covered by
+tests/unit/server/routers/test_activated_repo_rest_listings_and_wiki.py).
 """
 
 import os

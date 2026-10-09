@@ -34,6 +34,7 @@
                     {% elif row.actor.kind == 'attempted' %}attempted: {{ row.actor.name }}
                     {% elif row.actor.kind == 'not_system' %}{{ row.actor.name }}<span class="audit-actor-marker">not a system actor</span>
                     {% else %}{{ row.actor.name }}{% endif %}
+                    {% if row.actor.impersonated_user %}<span class="audit-actor-marker">acting as {{ row.actor.impersonated_user }}</span>{% endif %}
                 </td>
                 <td>{{ row.action_type }}</td>
                 <td>{{ row.target }}</td>

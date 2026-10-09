@@ -36,25 +36,29 @@ outputSchema:
   - success
 ---
 
-TL;DR: Unified group member management (Story #992). Replaces add_member_to_group and remove_member_from_group. Requires MCP elevation (TOTP step-up).
+TL;DR: Add a user to a group or remove them from it. Requires the admin role and, when elevation enforcement is on, an active elevation window (TOTP step-up via `elevate_session`).
 
 ACTIONS:
-- add: Assign user to group. Each user can only belong to one group — this moves them from any prior group.
-- remove: Remove user's group membership, leaving them without any group assignment.
+- add: Assign the user to the group. A user belongs to at most one group, so this moves them out of any prior group. The username must belong to an existing account.
+- remove: Remove the user's membership in this group, leaving them without a group. Removing a user who is not in the group changes nothing and returns success.
 
 INPUTS:
-- action (required): 'add' or 'remove'
-- group_id (required): The unique identifier of the target group
-- user_id (required): The username/ID of the user to add or remove
+- action (required): `add` or `remove`
+- group_id (required): Numeric group id as a string (for example `"3"`)
+- user_id (required): Username of the user to add or remove
 
 RETURNS:
-- success: Boolean indicating if operation succeeded
+- success: true when the operation completed
 
-ERRORS:
-- elevation_required: TOTP step-up needed
-- 'Group not found': Invalid group_id
-- 'Missing required parameter': Missing user_id
+ERRORS (returned as `{"success": false, "error": "..."}` except the elevation codes):
+- `Permission denied: admin role required`
+- `elevation_required` / `totp_setup_required` (only when elevation enforcement is on)
+- `Invalid action '<action>'. Valid actions: [...]`
+- `Missing required parameter: group_id` / `Invalid group_id: <value>` (not an integer)
+- `Missing required parameter: user_id`
+- `Group not found: <id>`
+- `User not found: <user_id>` (add)
 
 EXAMPLES:
-- Add: {"action": "add", "group_id": "grp_abc123", "user_id": "alice"}
-- Remove: {"action": "remove", "group_id": "grp_abc123", "user_id": "alice"}
+- Add: {"action": "add", "group_id": "3", "user_id": "example-user"}
+- Remove: {"action": "remove", "group_id": "3", "user_id": "example-user"}

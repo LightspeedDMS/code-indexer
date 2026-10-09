@@ -24,6 +24,16 @@ class InvalidTokenError(Exception):
     pass
 
 
+def original_auth_time(payload: Dict[str, Any]) -> Any:
+    """The instant of a token's original authentication.
+
+    ``auth_time`` is set once and carried by every re-issue; tokens minted
+    before the claim existed fall back to their ``iat``.
+    """
+    auth_time = payload.get("auth_time")
+    return auth_time if auth_time is not None else payload.get("iat")
+
+
 class JWTManager:
     """
     Manages JWT tokens for user authentication.
@@ -63,13 +73,16 @@ class JWTManager:
         now = datetime.now(timezone.utc)
         expire = now + timedelta(minutes=self.token_expiration_minutes)
 
-        # Create JWT payload with high-precision timestamps
+        # Create JWT payload with high-precision timestamps.  auth_time is the
+        # instant of the original authentication: set once, carried unchanged
+        # by every re-issue (refresh, expiry extension) via user_data.
         payload = {
             "username": user_data["username"],
             "role": user_data["role"],
             "created_at": user_data.get("created_at"),
             "exp": expire.timestamp(),  # Use timestamp() for microsecond precision
             "iat": now.timestamp(),  # Use timestamp() for microsecond precision
+            "auth_time": user_data.get("auth_time") or now.timestamp(),
             "jti": str(uuid.uuid4()),  # JWT ID for blacklist support
         }
 
@@ -109,7 +122,7 @@ class JWTManager:
             token: Current JWT token
 
         Returns:
-            New JWT token with extended expiration
+            New JWT token with extended expiration (same auth_time)
 
         Raises:
             TokenExpiredError: If current token has expired
@@ -129,6 +142,7 @@ class JWTManager:
             "created_at": payload.get("created_at"),
             "exp": expire.timestamp(),  # Use timestamp() for microsecond precision
             "iat": now.timestamp(),  # Use timestamp() for microsecond precision
+            "auth_time": original_auth_time(payload),
             "jti": payload.get(
                 "jti", str(uuid.uuid4())
             ),  # Preserve JTI or create new one

@@ -51,17 +51,16 @@ from __future__ import annotations
 import json
 import logging
 import os
-import signal
 import subprocess
 import time
 from dataclasses import dataclass
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+# Bug #2012: the single, layer-neutral group-termination implementation
+# (previously duplicated here and in server/utils/cancellable_subprocess.py).
+from code_indexer.utils.process_group import terminate_process_group
 
-#: Grace period after SIGTERM before escalating to SIGKILL when a stale
-#: subprocess's process group is terminated.
-_SIGTERM_GRACE_SECONDS = 2.0
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -164,57 +163,6 @@ def evaluate_staleness(
         )
 
     return None
-
-
-def terminate_process_group(proc: "subprocess.Popen") -> None:
-    """SIGTERM the process group, wait a grace period, escalate to SIGKILL.
-    Always blocks until the child is reaped.
-
-    Deliberately DUPLICATED from
-    `server/utils/cancellable_subprocess.py::_terminate_process_group`
-    rather than imported -- but NOT for the import-budget reason first
-    claimed here, which measurement disproves. Actual numbers: importing
-    `server.utils.cancellable_subprocess` into a cold interpreter pulls 16
-    modules (~48 ms), not "~70", and `cidx`'s own CLI already imports
-    `code_indexer.server.utils` (config_manager, registry_factory,
-    global_repos) today, so the marginal cost of importing it from here is
-    exactly ONE module.
-
-    The reason that does hold is layering: this module lives under
-    `services/`, which the plain standalone CLI depends on, and that layer
-    must not depend on `code_indexer.server` -- today's CLI import graph is
-    an accident that a future import-budget cleanup (Bug #1468's own
-    ambition) should be free to fix without dragging the indexing path
-    back in. Messi Rule #4's three-strike rule permits this second copy of
-    a ~15-line, stdlib-only algorithm (os/signal/subprocess, no
-    project-specific dependencies). A THIRD occurrence must instead be
-    extracted into the existing layer-neutral `code_indexer/utils/`
-    package ("shared, layer-agnostic utilities importable by both CLI and
-    server") and imported by all three.
-    """
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        proc.wait()
-        return
-
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except ProcessLookupError:
-        proc.wait()
-        return
-
-    try:
-        proc.wait(timeout=_SIGTERM_GRACE_SECONDS)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    proc.wait()
 
 
 def _read_heartbeat_mtime_age(heartbeat_path: str) -> Optional[float]:

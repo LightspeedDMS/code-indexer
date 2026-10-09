@@ -422,6 +422,24 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # real downstream outage) would still surface via other assertions in
     # that code path, and a 503 on any OTHER endpoint is NOT suppressed.
     "HTTP 503 | Request: POST /api/query",
+    # First cidx-meta index of the session (fresh data dir): the first golden
+    # registration writes a description and the cidx-meta refresh runs a full
+    # index IN the base clone -- the collection (collection_meta.json) is
+    # created first and the HNSW is only built when the run finalizes.
+    # cidx-meta-global points at that base clone until its first snapshot is
+    # published, so an omni/no-alias semantic query landing inside that window
+    # gets FilesystemVectorStore.search's "stale and missing" WARNING and an
+    # empty cidx-meta contribution, until the index finalizes moments later.
+    # Benign and transient, and it was already possible at v12.82.0: the same
+    # one-file full index of the base clone runs at the same point of the
+    # session there; the window is the embedding latency of that file (about
+    # 1 s normally, 15 s in the run that surfaced it). Anchored on the base
+    # clone path plus the WARNING form's suffix: a .versioned cidx-meta
+    # snapshot, any other repo, another model and the persistent-staleness
+    # ERROR ("-- Run 'cidx index' to rebuild.") are all still audited.
+    "/golden-repos/cidx-meta/.code-indexer/index/voyage-code-3, "
+    "model=voyage-code-3 -- Run 'cidx index' to build the index. "
+    "Returning empty results.",
 ]
 
 

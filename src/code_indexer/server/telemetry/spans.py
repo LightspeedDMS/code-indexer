@@ -12,6 +12,10 @@ Usage:
     with create_span("cidx.git.clone", attributes={"repo": url}) as span:
         # Do work
         span.set_attribute("files_count", 100)
+
+Invariant: span attributes, event attributes and exception text pass through
+the shared redact_secret_fields() before they reach an OpenTelemetry span,
+so no secret value is exported through tracing.
 """
 
 from __future__ import annotations
@@ -19,6 +23,8 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Dict, Generator, Optional
+
+from code_indexer.utils.credential_redaction import redact_secret_fields
 
 if TYPE_CHECKING:
     from opentelemetry.trace import Tracer
@@ -116,29 +122,84 @@ def create_span(
     ctx = set_span_in_context(span)
     token = context.attach(ctx)
 
+    # Everything reaching the span goes through the redacting wrapper.
+    safe = _RedactingSpan(span)
     try:
         # Add correlation ID if available
         correlation_id = _get_correlation_id()
         if correlation_id:
-            span.set_attribute("correlation.id", correlation_id)
+            safe.set_attribute("correlation.id", correlation_id)
 
         # Add custom attributes
         if attributes:
             for key, value in attributes.items():
                 if value is not None:
-                    span.set_attribute(key, value)
+                    safe.set_attribute(key, value)
 
-        yield span
+        yield safe
 
     except Exception as e:
         if record_exception:
-            span.record_exception(e)
-            span.set_status(Status(StatusCode.ERROR, str(e)))
+            safe.record_exception(e)
+            safe.set_status(Status(StatusCode.ERROR, str(e)))
         raise
 
     finally:
         span.end()
         context.detach(token)
+
+
+class _RedactingSpan:
+    """The span create_span() yields: the same interface as _NoOpSpan, with
+    every attribute and event attribute redacted before it reaches the
+    OpenTelemetry span."""
+
+    def __init__(self, span: Any) -> None:
+        self._span = span
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        """Set one attribute, its value redacted by its key."""
+        self._span.set_attribute(key, redact_secret_fields({key: value})[key])
+
+    def add_event(self, name: str, attributes: Optional[Dict[str, Any]] = None) -> None:
+        """Add an event with redacted attributes."""
+        self._span.add_event(name, attributes=redact_secret_fields(attributes))
+
+    def record_exception(self, exception: BaseException) -> None:
+        """Record an exception as an ``exception`` event whose message is
+        redacted (the SDK's record_exception would export it raw)."""
+        self.add_event(
+            "exception",
+            {
+                "exception.type": type(exception).__name__,
+                "exception.message": str(exception),
+            },
+        )
+
+    def set_status(self, status: Any) -> None:
+        """Set an OpenTelemetry Status with its description redacted.
+
+        Any: opentelemetry is an optional dependency imported lazily, so its
+        Status type cannot be named at module scope. redact_secret_fields()
+        accepts a plain string (or None) and returns it masked.
+        """
+        from opentelemetry.trace import Status
+
+        self._span.set_status(
+            Status(status.status_code, redact_secret_fields(status.description))
+        )
+
+    def is_recording(self) -> bool:
+        """Whether the underlying span is recording."""
+        return bool(self._span.is_recording())
+
+    def get_span_context(self) -> Any:
+        """The underlying span's context (trace and span ids, no payload).
+
+        Any: opentelemetry is an optional dependency imported lazily, so its
+        SpanContext type cannot be named at module scope.
+        """
+        return self._span.get_span_context()
 
 
 class _NoOpSpan:

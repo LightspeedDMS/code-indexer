@@ -29,7 +29,8 @@
 #   3. Installs Python dependencies
 #   4. Creates ~/.cidx-server data directory + default sqlite config.json
 #   5. Creates and enables a systemd service
-#   6. Starts the server and verifies GET /docs returns 200
+#   6. Starts the server and verifies GET /healthz returns 200 (health checks
+#      use the unauthenticated /healthz endpoint; /docs requires login)
 #
 # Cluster path additionally (only when --node-id + --postgres-dsn given):
 #   - Mounts the CoW-daemon shared NFS export (idempotent fstab entry)
@@ -171,7 +172,7 @@ cluster.node_id):
   --cow-local-bind              This node is co-located with the CoW daemon
                                 on the same host: bind-mount --nfs-export onto
                                 --nfs-mount (mount --bind) instead of an NFS
-                                mount. See docs/cow-storage-setup.md "Bind
+                                mount. See docs/server/cow-storage-setup.md "Bind
                                 Mount on the Daemon Host".
   --workers N                   uvicorn workers (default: 1)
   --auto-update-branch BRANCH   CIDX_AUTO_UPDATE_BRANCH env var (default: --branch)
@@ -553,7 +554,7 @@ add_fstab_bind_entry() {
 # ---------------------------------------------------------------------------
 # Cluster step: CoW-daemon LOCAL BIND mount (this node co-located with the
 # daemon on the same host — it cannot NFS-mount its own export). See
-# docs/cow-storage-setup.md "Bind Mount on the Daemon Host". --nfs-export is
+# docs/server/cow-storage-setup.md "Bind Mount on the Daemon Host". --nfs-export is
 # used as the local source directory; --nfs-server is not required/used here.
 # ---------------------------------------------------------------------------
 
@@ -1358,14 +1359,17 @@ open_firewall_port() {
 }
 
 # ---------------------------------------------------------------------------
-# Step: start server + health check (GET /docs, matches HAProxy httpchk)
+# Step: start server + health check (GET /healthz, matches HAProxy httpchk)
+#
+# Health checks use the unauthenticated /healthz endpoint; /docs requires
+# login (an unauthenticated GET /docs answers 303 to /login, never 200).
 # ---------------------------------------------------------------------------
 
 start_and_verify_server() {
     info "--- Starting server ---"
     if [[ "${DRY_RUN}" == "true" ]]; then
         echo "  [dry-run] sudo systemctl restart cidx-server"
-        echo "  [dry-run] poll http://localhost:${PORT}/docs for HTTP 200 (up to 30s)"
+        echo "  [dry-run] poll http://localhost:${PORT}/healthz for HTTP 200 (up to 30s)"
         return 0
     fi
 
@@ -1373,16 +1377,16 @@ start_and_verify_server() {
 
     local waited=0 http_code="000"
     while (( waited < 30 )); do
-        http_code="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${PORT}/docs" || echo "000")"
+        http_code="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${PORT}/healthz" || echo "000")"
         if [[ "${http_code}" == "200" ]]; then
-            info "Health check PASS: GET /docs returned 200 (after ${waited}s)"
+            info "Health check PASS: GET /healthz returned 200 (after ${waited}s)"
             return 0
         fi
         sleep 2
         waited=$((waited + 2))
     done
 
-    die "Health check FAIL: GET http://localhost:${PORT}/docs did not return 200 within 30s (last code: ${http_code}). Check: journalctl -u cidx-server --no-pager -n 30"
+    die "Health check FAIL: GET http://localhost:${PORT}/healthz did not return 200 within 30s (last code: ${http_code}). Check: journalctl -u cidx-server --no-pager -n 30"
 }
 
 # ---------------------------------------------------------------------------

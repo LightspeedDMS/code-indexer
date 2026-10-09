@@ -90,14 +90,24 @@ def mock_user():
 
 
 @pytest.fixture()
-def test_client(mock_user):
+def test_client(mock_user, tmp_path):
+    from tests.unit.server.routers.inline_routes_test_helpers import (
+        _access_service_admin,
+    )
+
     def override():
         return mock_user
 
     app.dependency_overrides[get_current_user] = override
     try:
         with TestClient(app) as client:
-            yield client
+            # After lifespan startup (it installs its own access service):
+            # the caller is an admin of a real access service, so the
+            # activated-repo guard passes; these tests pin route behaviour.
+            with _access_service_admin(
+                tmp_path / "access-groups.db", mock_user.username
+            ):
+                yield client
     finally:
         app.dependency_overrides.clear()
 

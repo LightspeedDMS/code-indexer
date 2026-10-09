@@ -40,6 +40,30 @@ def test_exception_set_is_exactly_authenticate() -> None:
     assert _ALWAYS_AVAILABLE_TOOLS == frozenset({"authenticate"})
 
 
+def test_authenticated_principal_tool_set_is_exactly_impersonation() -> None:
+    """Security boundary: only the impersonation tool is authorized for the
+    authenticated principal during impersonation; every other tool uses the
+    impersonated user."""
+    from code_indexer.server.mcp.tool_access import (
+        AUTHENTICATED_PRINCIPAL_TOOLS,
+        resolve_effective_user,
+    )
+
+    assert AUTHENTICATED_PRINCIPAL_TOOLS == frozenset({"set_session_impersonation"})
+    authenticated = FakeUser("admin")
+    impersonated = FakeUser("allowed")
+
+    class Session:
+        is_impersonating = True
+        effective_user = impersonated
+
+    assert (
+        resolve_effective_user(authenticated, Session(), "set_session_impersonation")
+        is authenticated
+    )
+    assert resolve_effective_user(authenticated, Session(), "git_push") is impersonated
+
+
 def test_ready_group_without_tool_is_denied() -> None:
     from code_indexer.server.mcp.tool_access import ToolAccessMemo
 

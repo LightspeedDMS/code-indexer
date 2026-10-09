@@ -287,6 +287,9 @@ class TestSafePrunePersistentFailureAndCatchUp:
 # ---------------------------------------------------------------------------
 
 
+# A real second connection holds the SQLite lock 6 s (twice in one test,
+# ~13 s idle): the wait is the behaviour under test, slower under gate load.
+@pytest.mark.timeout(45)
 class TestTokenBlacklistRealLockContention:
     def test_prune_absorbs_real_lock_via_connection_timeout(
         self, tmp_path: Path
@@ -375,6 +378,9 @@ class TestTokenBlacklistRealLockContention:
         )
 
 
+# A real second connection holds the SQLite lock 6 s (~8 s idle): the wait
+# is the behaviour under test, slower under gate load.
+@pytest.mark.timeout(45)
 class TestElevatedSessionManagerRealLockContention:
     def test_create_absorbs_real_lock_via_connection_timeout(
         self, tmp_path: Path
@@ -420,6 +426,9 @@ class TestElevatedSessionManagerRealLockContention:
         )
 
 
+# A real second connection holds the SQLite lock 6 s: the wait is the
+# behaviour under test, slower under gate load.
+@pytest.mark.timeout(45)
 class TestOidcStateManagerRealLockContention:
     def test_create_state_absorbs_real_lock_via_connection_timeout(
         self, tmp_path: Path

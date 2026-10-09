@@ -7,6 +7,7 @@ from pathlib import Path
 from ..config import IndexingConfig
 from .image_extractor import ImageExtractorFactory
 from ..logging import AdaptiveLogger
+from ..utils.source_text_decoding import read_source_text
 
 
 class TextChunker:
@@ -962,20 +963,8 @@ class TextChunker:
             f.flush()
 
         try:
-            # Try different encodings
-            encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1252"]
-            text = None
-
-            for encoding in encodings:
-                try:
-                    with open(file_path, "r", encoding=encoding) as f:
-                        text = f.read()
-                    break
-                except UnicodeDecodeError:
-                    continue
-
-            if text is None:
-                raise ValueError(f"Could not decode file {file_path}")
+            # Shared with query-time retrieval (Bug #1991).
+            text = read_source_text(file_path)
 
             with open(debug_file, "a") as f:
                 f.write(

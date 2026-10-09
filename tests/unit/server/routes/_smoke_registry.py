@@ -24,12 +24,12 @@ from code_indexer.server.auth.dependencies import get_current_user
 
 COVERED_ROUTES: set[str] = set()
 
-# Routes legitimately excluded — FastAPI built-ins and SSE/protocol endpoints.
+# Routes legitimately excluded — API documentation (routers/api_docs.py,
+# covered by test_api_docs_require_auth.py) and SSE/protocol endpoints.
 EXCLUDED_ROUTES: set[str] = {
     "GET /docs",
     "GET /redoc",
     "GET /openapi.json",
-    "GET /docs/oauth2-redirect",
     # DELETE /mcp is the MCP SSE protocol disconnect, not a standard REST DELETE
     "DELETE /mcp",
     # GET /mcp-public is the MCP SSE stream/subscribe endpoint — a plain

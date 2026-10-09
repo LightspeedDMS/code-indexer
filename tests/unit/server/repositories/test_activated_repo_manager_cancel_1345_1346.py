@@ -289,6 +289,9 @@ class TestRunBranchDeltaIndexCancelLogging1346:
         assert error_records, "expected an ERROR log for a genuine reindex failure"
 
 
+# A clone that fails before creating its destination runs the real orphan
+# cleanup grace loop (12 retries x 1 s, ~12 s idle), slower under gate load.
+@pytest.mark.timeout(45)
 class TestDoActivateRepositoryCancelLogging1346:
     def test_clone_phase_cancel_does_not_log_error(
         self, activated_repo_manager, mock_clone_backend, caplog

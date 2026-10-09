@@ -51,6 +51,8 @@ def _make_access_service(
     service.get_accessible_repos = Mock(
         return_value=accessible_repos if accessible_repos is not None else set()
     )
+    # The caller has no activations of their own.
+    service.caller_activation_sources = Mock(return_value={})
     return service
 
 
@@ -171,10 +173,10 @@ class TestNativeListRepositoryAliasAccess:
             access_service=access_service,
         )
 
-    def test_list_with_non_string_entries_skips_non_strings(self):
+    def test_list_with_non_string_entries_is_rejected(self):
         """
-        A list containing non-string entries (e.g. integers) must skip those.
-        String entries are still checked. Deny applies to denied string entries.
+        A list containing non-string entries (e.g. integers) is a malformed
+        repository parameter: refused before any entry is authorised.
         """
         user = _make_user("seba")
         access_service = _make_access_service(
@@ -182,7 +184,7 @@ class TestNativeListRepositoryAliasAccess:
             accessible_repos={"cidx-meta", "allowed-repo"},
         )
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(ValueError, match="Invalid repository parameter"):
             _check_repository_access(
                 arguments={
                     "repository_alias": [42, "denied-repo", None, "allowed-repo"]
@@ -191,14 +193,12 @@ class TestNativeListRepositoryAliasAccess:
                 tool_name="xray_search",
                 access_service=access_service,
             )
+        access_service.get_accessible_repos.assert_not_called()
 
-        error_str = str(exc_info.value)
-        assert "denied-repo" in error_str
-
-    def test_list_with_only_non_string_entries_skips_all(self):
+    def test_list_with_only_non_string_entries_is_rejected(self):
         """
-        A list containing only non-string entries — no string to check.
-        Guard treats this as absent; no exception raised.
+        A list of only non-string entries is never treated as absent: it is
+        refused, so no handler receives it.
         """
         user = _make_user("seba")
         access_service = _make_access_service(
@@ -206,13 +206,13 @@ class TestNativeListRepositoryAliasAccess:
             accessible_repos=set(),
         )
 
-        # Must not raise — no valid strings to check
-        _check_repository_access(
-            arguments={"repository_alias": [42, None, True]},
-            effective_user=user,
-            tool_name="xray_search",
-            access_service=access_service,
-        )
+        with pytest.raises(ValueError, match="Invalid repository parameter"):
+            _check_repository_access(
+                arguments={"repository_alias": [42, None, True]},
+                effective_user=user,
+                tool_name="xray_search",
+                access_service=access_service,
+            )
 
     def test_global_suffix_stripped_from_each_list_entry(self):
         """

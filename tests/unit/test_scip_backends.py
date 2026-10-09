@@ -15,6 +15,12 @@ except ImportError:
 
 _SRC_ROOT = str(Path(__file__).parent.parent.parent / "src")
 
+# Returning SCIP context needs opened-file verification via /proc/self/fd.
+_requires_proc_fd = pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="SCIP context verification reads /proc/self/fd (Linux only)",
+)
+
 
 @pytest.fixture
 def scip_fixture_path():
@@ -435,13 +441,16 @@ class TestContextFieldBug662:
     file at project_root/file_path at the 0-based line number stored in the DB.
     """
 
+    @_requires_proc_fd
     def test_find_definition_context_is_populated(self, tmp_path: Path):
         """find_definition() must return context populated from source file."""
         from code_indexer.scip.query.backends import DatabaseBackend
 
         db_path, project_root = _build_minimal_scip_db(tmp_path, _FIXTURE_SOURCE_LINES)
 
-        backend = DatabaseBackend(db_path, project_root=str(project_root))
+        backend = DatabaseBackend(
+            db_path, project_root=str(project_root), trusted_root=project_root
+        )
 
         results = backend.find_definition("MyClass", exact=False)
 
@@ -450,13 +459,16 @@ class TestContextFieldBug662:
         assert results[0].context is not None, "context must be populated, not None"
         assert "MyClass" in results[0].context
 
+    @_requires_proc_fd
     def test_find_references_context_is_populated(self, tmp_path: Path):
         """find_references() must return context populated from source file."""
         from code_indexer.scip.query.backends import DatabaseBackend
 
         db_path, project_root = _build_minimal_scip_db(tmp_path, _FIXTURE_SOURCE_LINES)
 
-        backend = DatabaseBackend(db_path, project_root=str(project_root))
+        backend = DatabaseBackend(
+            db_path, project_root=str(project_root), trusted_root=project_root
+        )
 
         results = backend.find_references("MyClass", exact=False)
 
@@ -464,6 +476,7 @@ class TestContextFieldBug662:
         contexts = [r.context for r in results if r.context is not None]
         assert len(contexts) > 0, "At least one reference must have context populated"
 
+    @_requires_proc_fd
     @pytest.mark.timeout(60)
     def test_find_definition_context_matches_correct_line(self, tmp_path: Path):
         """context field value must be the exact source line at the reported line."""
@@ -472,7 +485,9 @@ class TestContextFieldBug662:
         custom_lines = ["class MyClass:  # annotated version", "MyClass()"]
         db_path, project_root = _build_minimal_scip_db(tmp_path, custom_lines)
 
-        backend = DatabaseBackend(db_path, project_root=str(project_root))
+        backend = DatabaseBackend(
+            db_path, project_root=str(project_root), trusted_root=project_root
+        )
         results = backend.find_definition("MyClass", exact=False)
 
         assert len(results) > 0
@@ -488,7 +503,9 @@ class TestContextFieldBug662:
         # Delete the source file after building the DB
         (project_root / "src" / "sample.py").unlink()
 
-        backend = DatabaseBackend(db_path, project_root=str(project_root))
+        backend = DatabaseBackend(
+            db_path, project_root=str(project_root), trusted_root=project_root
+        )
         # Must not raise — context should be None when file is missing
         results = backend.find_definition("MyClass", exact=False)
 

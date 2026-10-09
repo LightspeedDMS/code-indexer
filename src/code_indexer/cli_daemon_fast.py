@@ -334,8 +334,10 @@ def execute_via_daemon(argv: List[str], config_path: Path) -> int:
             # Execute query via daemon RPC
             if is_fts and is_semantic:
                 # Hybrid search
-                response = conn.root.exposed_query_hybrid(
-                    str(Path.cwd()), query_text, **options
+                response = cli_daemon_delegation.obtain_daemon_result(
+                    conn.root.exposed_query_hybrid(
+                        str(Path.cwd()), query_text, **options
+                    )
                 )
                 # Extract results from response dict
                 result = (
@@ -346,8 +348,8 @@ def execute_via_daemon(argv: List[str], config_path: Path) -> int:
                 timing_info = None
             elif is_fts:
                 # FTS only
-                response = conn.root.exposed_query_fts(
-                    str(Path.cwd()), query_text, **options
+                response = cli_daemon_delegation.obtain_daemon_result(
+                    conn.root.exposed_query_fts(str(Path.cwd()), query_text, **options)
                 )
                 # Extract results from response dict
                 result = (
@@ -358,9 +360,19 @@ def execute_via_daemon(argv: List[str], config_path: Path) -> int:
                 timing_info = None
             else:
                 # Semantic only
-                response = conn.root.exposed_query(
-                    str(Path.cwd()), query_text, limit, **filters
+                response = cli_daemon_delegation.obtain_daemon_result(
+                    conn.root.exposed_query(
+                        str(Path.cwd()), query_text, limit, **filters
+                    )
                 )
+                if not isinstance(response, dict):
+                    console.print("[red]Search failed: unexpected daemon answer[/red]")
+                    return 1
+                # A failed search arrives as results=[] plus an error field:
+                # report it and fail, never render it as "no results".
+                if response.get("error"):
+                    console.print(f"[red]Search failed: {response['error']}[/red]")
+                    return 1
                 # CRITICAL FIX: Parse response dict with results and timing
                 result = response.get("results", [])
                 timing_info = response.get("timing", None)

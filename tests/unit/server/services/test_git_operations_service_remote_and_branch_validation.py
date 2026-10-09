@@ -189,13 +189,10 @@ class TestRemoteArgumentValidation:
 
 
 # ---------------------------------------------------------------------------
-# git_push_with_pat is a SEPARATE argv-building path from git_push() above --
-# the MCP git_push handler calls it directly. It must validate remote/branch
-# itself, before ANY subprocess (including its own "get remote URL"
-# preflight and the upstream-tracking `git branch --set-upstream-to=...`
-# call, which takes `branch` as a bare positional argument), so no caller --
-# present or future -- can bypass validation by using this entry point
-# instead of git_push().
+# git_push_with_pat is the MCP git_push front door into git_push() above. It
+# must validate remote/branch itself, before ANY subprocess (including its
+# own "get remote URL" preflight), so no caller -- present or future -- can
+# reach a subprocess with unvalidated values through this entry point.
 # ---------------------------------------------------------------------------
 
 

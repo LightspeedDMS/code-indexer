@@ -3,24 +3,24 @@ name: activate_repository
 category: repos
 required_permission: activate_repos
 tl_dr: Create user workspace for editing files, non-default branches, or composites.
-slim_description: "Create a user-specific workspace for editing files, working on non-default branches, or combining multiple repos into a composite."
+slim_description: "Create a user-specific workspace for editing files, working on non-default branches, or combining multiple repos into a composite. Pass exactly one of golden_repo_alias or golden_repo_aliases."
 inputSchema:
   type: object
   properties:
     golden_repo_alias:
       type: string
-      description: Golden repository alias (for single repo)
+      description: Golden repository alias without the -global suffix, for a single-repository workspace. Pass this or golden_repo_aliases, not both.
     golden_repo_aliases:
       type: array
       items:
         type: string
-      description: Multiple golden repos (for composite)
+      description: Two or more golden repository aliases for a composite workspace. Pass this or golden_repo_alias, not both.
     branch_name:
       type: string
-      description: Branch to activate (optional)
+      description: Branch to activate (optional; defaults to the golden repository's default branch)
     user_alias:
       type: string
-      description: User-defined alias (optional)
+      description: Alias for the new workspace (optional; defaults to the golden repository alias)
   required: []
 outputSchema:
   type: object
@@ -51,16 +51,28 @@ USE CASES:
 (3) Set up an editable workspace for file CRUD and git write operations
 
 WHAT IT DOES:
-Creates a user-specific repository workspace with custom alias. Clones or references golden repository for your exclusive use. Enables file CRUD and git write operations. Optionally combines multiple golden repos into single searchable composite.
+Starts a background job that creates a workspace owned by the caller, under `user_alias`, from one golden repository or (composite) from several. The workspace supports file CRUD and git write operations. The call returns a `job_id` immediately: `{"success": true, "job_id": "...", "message": "Repository activation started"}`.
 
-PARAMETER MUTUAL EXCLUSIVITY:
-Only ONE of the following at a time:
-- golden_repo_alias: Single repo to activate (mutually exclusive with golden_repo_aliases)
-- golden_repo_aliases: Array of repos for composite (mutually exclusive with golden_repo_alias)
+PARAMETERS:
+Exactly one of these is required (the schema cannot express this, so the handler enforces it):
+- golden_repo_alias: One golden repository alias, without the `-global` suffix (for example `example-repo`).
+- golden_repo_aliases: Array of at least two golden repository aliases for a composite workspace.
+Optional:
+- branch_name: Defaults to the golden repository's default branch.
+- user_alias: Defaults to the golden repository alias.
+
+When group-based access control is configured, every requested golden repository must be accessible to the caller.
+
+ERRORS (returned as `{"success": false, "error": "...", "job_id": null}`):
+- `Missing required parameter: golden_repo_alias or golden_repo_aliases`
+- `golden_repo_alias must be a string` / `golden_repo_aliases must be a list of non-empty strings`
+- `Cannot specify both golden_repo_alias and golden_repo_aliases`
+- `Composite activation requires at least 2 repositories`
+- `Repository not accessible. Contact your administrator for access.`
 
 WORKFLOW:
-1. Find available repo: list_global_repos()
-2. Activate with custom alias: activate_repository(golden_repo_alias='backend', user_alias='my-work')
-3. Monitor progress: get_job_statistics() until active=0
-4. Use your workspace: edit_file(repository_alias='my-work', ...)
-5. Cleanup when done: deactivate_repository('my-work')
+1. Find an available repository: list_global_repos() (use its `repo_name`, the alias without `-global`)
+2. Activate with a custom alias: activate_repository(golden_repo_alias='example-repo', user_alias='my-work')
+3. Track the returned job: get_job_details(job_id='<job_id>')
+4. Use the workspace: edit_file(repository_alias='my-work', ...)
+5. Clean up when done: deactivate_repository(user_alias='my-work')

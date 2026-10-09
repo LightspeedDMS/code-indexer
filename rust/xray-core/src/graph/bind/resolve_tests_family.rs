@@ -153,7 +153,7 @@ fn same_class_or_super_tags_the_callers_own_type_hierarchy_but_never_narrows() {
 /// exclusion is exactly the "hard-narrow to a non-empty subset" path
 /// round4-findings.md found unsound (Positive evidence is not
 /// closed-world), so it moved whole-cloth to the receiver-type
-/// hard-narrowing follow-up issue named in `docs/xray-architecture.md`'s
+/// hard-narrowing follow-up issue named in `docs/architecture/xray/architecture.md`'s
 /// candidate-admission section. This test now asserts what the code
 /// actually guarantees: `Base.doSomething` is present and tagged, and
 /// `Other.doSomething` is accepted noise, not silently excluded from the
@@ -610,7 +610,7 @@ fn enclosing_symbol_falls_back_to_a_sentinel_when_nothing_precedes_the_line() {
 /// (every unrelated same-named method elsewhere in the repo) survives
 /// untouched. Exclusive binding to the qualified type moves to the
 /// receiver-type hard-narrowing follow-up issue named in `docs/
-/// xray-architecture.md`'s candidate-admission section.
+/// architecture/xray/architecture.md`'s candidate-admission section.
 #[test]
 fn receiver_type_with_no_matching_member_keeps_the_full_pool_pending_the_hard_narrowing_followup() {
     use crate::graph::extract::local_index::MethodOwnerRecord;

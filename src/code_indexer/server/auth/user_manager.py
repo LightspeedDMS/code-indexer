@@ -10,7 +10,7 @@ import os
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import TYPE_CHECKING, Dict, List, Optional, Any
 from pydantic import BaseModel
 
 from .password_manager import PasswordManager
@@ -22,6 +22,10 @@ from ...validation.user_validation import (
     validate_username_path_safe,
     UserValidationError,
 )
+
+if TYPE_CHECKING:
+    from ..services.account_activations import AccountActivations
+    from ..services.account_data_purge import AccountDataPurger
 
 
 def _name_of(user: Optional["User"]) -> Optional[str]:
@@ -55,6 +59,10 @@ class User(BaseModel):
     role: UserRole
     created_at: datetime
     email: Optional[str] = None
+    # Instant this account was created; credentials issued before it belong
+    # to an earlier account with the same name.  None for accounts that
+    # predate the record (no restriction).
+    account_created_at: Optional[datetime] = None
 
     def to_dict(self) -> Dict[str, str]:
         """Convert user to dictionary (excludes password_hash)."""
@@ -139,6 +147,7 @@ class UserManager:
         use_sqlite: bool = False,
         db_path: Optional[str] = None,
         storage_backend: Optional[Any] = None,
+        account_data_purger: Optional["AccountDataPurger"] = None,
     ):
         """
         Initialize user manager.
@@ -151,9 +160,13 @@ class UserManager:
             storage_backend: Optional pre-created storage backend (e.g. from StorageFactory).
                 When provided, used directly instead of creating a new SQLite backend.
                 Takes precedence over use_sqlite/db_path when supplied.
+            account_data_purger: Removes every row keyed to an account name
+                when the account is deleted (wired at server start-up for the
+                configured storage mode).
         """
         self._use_sqlite = use_sqlite
         self._sqlite_backend: Optional[Any] = None
+        self._account_data_purger = account_data_purger
 
         self.password_manager = PasswordManager()
         self.password_strength_validator = PasswordStrengthValidator(
@@ -188,6 +201,24 @@ class UserManager:
 
             self._ensure_users_file_exists()
 
+    @property
+    def account_data_purger(self) -> Optional["AccountDataPurger"]:
+        """The step removing every row keyed to a deleted account's name."""
+        return self._account_data_purger
+
+    # Wired at start-up once the activated-repository manager exists.
+    _account_activations: Optional["AccountActivations"] = None
+
+    def set_account_activations(self, activations: "AccountActivations") -> None:
+        """Remove a deleted account's repositories, and refuse re-creating its
+        name while any remain, through *activations*."""
+        self._account_activations = activations
+
+    @property
+    def account_activations(self) -> Optional["AccountActivations"]:
+        """The repositories step, or None when not wired."""
+        return self._account_activations
+
     def _ensure_users_file_exists(self):
         """Ensure users.json file exists, create empty dict if not."""
         if not os.path.exists(self.users_file_path):
@@ -204,36 +235,58 @@ class UserManager:
         with open(self.users_file_path, "w") as f:
             json.dump(users_data, f, indent=2)
 
-    def seed_initial_admin(self):
-        """Create initial admin user (admin/admin) if no users exist."""
+    def seed_initial_admin(self) -> bool:
+        """Seed the initial administrator only when the user store is empty.
+
+        A store holding any user is left exactly as it is: no account is
+        created, and no existing account's password or role changes.
+
+        Returns:
+            True when the initial administrator was created.
+        """
         if self._use_sqlite and self._sqlite_backend is not None:
-            # SQLite backend (Story #702)
-            existing = self._sqlite_backend.get_user("admin")
-            if existing is None:
-                # Create initial admin user
-                admin_password_hash = self.password_manager.hash_password("admin")
-                self._sqlite_backend.create_user(
-                    username="admin",
-                    password_hash=admin_password_hash,
-                    role="admin",
-                )
-        else:
-            # JSON file storage (backward compatible)
-            users_data = self._load_users()
+            # SQLite (Story #702) or PostgreSQL backend.
+            if self._sqlite_backend.has_any_user():
+                return False
+            # Leftover rows under the name are removed only while no account
+            # has it, so a seeder that loses the race to another seeder never
+            # removes rows of the account the winner just created.
+            if self._account_activations is not None:
+                self._account_activations.ensure_name_free("admin")
+            if self._account_data_purger is not None:
+                self._account_data_purger.purge_deleted("admin")
+            created: bool = self._sqlite_backend.create_user_if_store_empty(
+                username="admin",
+                password_hash=self.password_manager.hash_password("admin"),
+                role="admin",
+            )
+            return created
 
-            if "admin" not in users_data:
-                # Create initial admin user
-                admin_password_hash = self.password_manager.hash_password("admin")
+        # JSON file storage (backward compatible)
+        users_data = self._load_users()
+        if users_data:
+            return False
+        users_data["admin"] = {
+            "role": "admin",
+            "password_hash": self.password_manager.hash_password("admin"),
+            "created_at": DateTimeParser.format_for_storage(datetime.now(timezone.utc)),
+        }
+        self._save_users(users_data)
+        return True
 
-                users_data["admin"] = {
-                    "role": "admin",
-                    "password_hash": admin_password_hash,
-                    "created_at": DateTimeParser.format_for_storage(
-                        datetime.now(timezone.utc)
-                    ),
-                }
+    def prepare_name_for_new_account(self, username: str) -> None:
+        """Make *username* clean before it is created.
 
-                self._save_users(users_data)
+        Refused (``ValueError``) while repositories activated by an earlier
+        account with the same name are still being removed; then every row
+        still keyed to the name (a deletion whose cleanup failed, or one from
+        an older release) is removed so it is never inherited.  A failure
+        propagates: the account is not created.
+        """
+        if self._account_activations is not None:
+            self._account_activations.ensure_name_free(username)
+        if self._account_data_purger is not None:
+            self._account_data_purger.purge(username)
 
     def create_user(self, username: str, password: str, role: UserRole) -> User:
         """
@@ -285,6 +338,7 @@ class UserManager:
             existing = self._sqlite_backend.get_user(username)
             if existing is not None:
                 raise ValueError(f"User already exists: {username}")
+            self.prepare_name_for_new_account(username)
 
             self._sqlite_backend.create_user(
                 username=username,
@@ -386,12 +440,18 @@ class UserManager:
             if user_data is None:
                 return None
 
+            account_created = user_data.get("account_created_at")
             return User(
                 username=username,
                 password_hash=user_data["password_hash"],
                 role=UserRole(user_data["role"]),
                 created_at=DateTimeParser.parse_user_datetime(user_data["created_at"]),
                 email=user_data.get("email"),
+                account_created_at=(
+                    DateTimeParser.parse_user_datetime(account_created)
+                    if account_created
+                    else None
+                ),
             )
         else:
             # JSON file storage (backward compatible)
@@ -744,7 +804,15 @@ class UserManager:
         return user
 
     def delete_user_audited(self, username: str, *, actor: str) -> bool:
-        """:meth:`delete_user`, recording ``user_deleted``."""
+        """:meth:`delete_user`, recording ``user_deleted``.
+
+        The account row is deleted FIRST; only then is every row keyed to the
+        name (group membership, MFA, SSO links, tokens, keys, credentials)
+        removed.  Once the row is gone nothing can authenticate as the
+        account, so a purge that fails part-way never leaves a live account
+        weakened; its leftovers are removed before the name is created again
+        and by the start-up sweep.
+        """
         verified: Optional[User] = None
         try:
             verified = self.get_user(username)
@@ -762,7 +830,44 @@ class UserManager:
             "success",
             {"deleted_role": verified.role.value},
         )
+        self._clean_up_after_delete(verified.username, actor)
         return True
+
+    def _clean_up_after_delete(self, username: str, actor: str) -> None:
+        """Remove what a just-deleted account left; failures are logged.
+
+        Rows keyed to the name are purged -- each only while no account with
+        the name exists, so an account re-created meanwhile keeps its rows --
+        then removal of every repository the account activated is submitted
+        (admin deactivation path, as *actor*).  The account row is already
+        gone, so a failure here cannot leave a live account weakened: leftover
+        rows are removed before the name is created again and by the start-up
+        sweep, and leftover repositories keep the name from being created
+        again.
+        """
+        import logging
+
+        log = logging.getLogger(__name__)
+        if self._account_data_purger is not None:
+            try:
+                self._account_data_purger.purge_deleted(username)
+            except Exception as exc:  # noqa: BLE001 - account already deleted
+                log.error(
+                    "Removing rows keyed to deleted account %r failed: %s",
+                    username,
+                    exc,
+                    exc_info=True,
+                )
+        if self._account_activations is not None:
+            try:
+                self._account_activations.submit_removal(username, actor=actor)
+            except Exception as exc:  # noqa: BLE001 - account already deleted
+                log.error(
+                    "Removing repositories of deleted account %r failed: %s",
+                    username,
+                    exc,
+                    exc_info=True,
+                )
 
     def update_user_role_audited(
         self, username: str, new_role: UserRole, *, actor: str
@@ -1577,6 +1682,7 @@ class UserManager:
             existing_user = self._sqlite_backend.get_user(username)
             if existing_user is not None:
                 raise ValueError(f"User already exists: {username}")
+            self.prepare_name_for_new_account(username)
 
             # Generate random password that user will never know (for password_hash field)
             random_password = secrets.token_urlsafe(32)

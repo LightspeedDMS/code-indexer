@@ -206,7 +206,7 @@ def _pg_golden_repos_dir() -> Path:
     Mirrors production's own topology exactly: on every real multi-node
     cluster sharing a PostgreSQL backend, each node ALSO bind/NFS-mounts its
     own ``<server_dir>/data/golden-repos`` onto the SAME shared directory
-    (see ``docs/cluster-setup.md``'s "Golden Repository Shared Storage"
+    (see ``docs/server/cluster-setup.md``'s "Golden Repository Shared Storage"
     section) -- ``golden_repos_dir`` has no independent config override, it
     is derived unconditionally from ``CIDX_SERVER_DATA_DIR``
     (``lifespan.py``).  This helper is the single source of truth for that

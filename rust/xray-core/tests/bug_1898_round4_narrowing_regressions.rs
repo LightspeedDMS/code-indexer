@@ -45,7 +45,7 @@
 //! class/field must NEVER gain a fabricated caller edge" has been renamed
 //! and re-scoped to assert the actual (regressed, accepted) outcome: the
 //! coincidental candidate now KEEPS that edge, pending a follow-up issue
-//! (named in `docs/xray-architecture.md`'s candidate-admission section)
+//! (named in `docs/architecture/xray/architecture.md`'s candidate-admission section)
 //! that redesigns hard receiver-type narrowing on genuinely closed-world
 //! evidence. The "real target keeps its own edge" half of each test is
 //! UNCHANGED and still passes -- that guarantee never depended on
@@ -153,7 +153,7 @@ fn assert_keeps_a_real_caller_edge(
 /// never removes anything, so this candidate now KEEPS a caller edge from
 /// the receiver-type collision -- an accepted regression, not silently
 /// dropped from the suite's coverage, pending the receiver-type
-/// hard-narrowing follow-up issue named in `docs/xray-architecture.md`'s
+/// hard-narrowing follow-up issue named in `docs/architecture/xray/architecture.md`'s
 /// candidate-admission section.
 fn assert_now_carries_the_accepted_regression_edge(
     graph: &xray_core::graph::csr::CodeGraph,
@@ -432,7 +432,7 @@ fn instanceof_pattern_reaches_the_real_type_and_the_coincidental_field_now_regre
 /// fabricated caller edge from `connection.commit()`, an EXPLICITLY
 /// ACCEPTED regression (named in the #1898 scope-split task) pending the
 /// receiver-type hard-narrowing follow-up issue named in `docs/
-/// xray-architecture.md`'s candidate-admission section.
+/// architecture/xray/architecture.md`'s candidate-admission section.
 #[test]
 fn external_receiver_with_matching_arity_now_keeps_the_fabricated_edge_pending_the_followup() {
     let dir = tempfile::tempdir().unwrap();

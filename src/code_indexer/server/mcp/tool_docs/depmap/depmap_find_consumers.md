@@ -39,10 +39,8 @@ Use this tool to perform blast-radius analysis before modifying a shared library
 service, or data contract. The result covers all 41+ domain files exhaustively,
 not just a semantic search sample.
 
-BREAKING CHANGE (Story #888): Empty-string repo_name now returns success=false,
-resolution=invalid_input. Previous behavior was success=true with an empty consumers
-list. Callers that relied on empty-success must add input validation before calling
-this tool.
+EMPTY INPUT: An empty-string repo_name returns success=false,
+resolution=invalid_input.
 
 Response structure:
 

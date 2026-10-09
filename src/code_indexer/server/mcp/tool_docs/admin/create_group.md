@@ -9,7 +9,7 @@ inputSchema:
   properties:
     name:
       type: string
-      description: Unique group name (1-100 characters)
+      description: Group name; must be unique, compared case-insensitively
     description:
       type: string
       description: Optional group description
@@ -17,20 +17,20 @@ inputSchema:
   - name
 ---
 
-TL;DR: Create a new custom group for organizing users and repository access. Requires MCP elevation (TOTP step-up). Custom groups can be assigned users and granted access to specific repositories. Default groups (admins, powerusers, users) cannot be created - they exist automatically.
+TL;DR: Create a new custom group for organizing users and repository access. Requires the admin role and, when elevation enforcement is on, an active elevation window (TOTP step-up via `elevate_session`). Custom groups can be assigned users (`manage_group_members`) and granted repositories (`manage_group_repos`). The default groups (admins, powerusers, users) always exist and are not created with this tool.
 
 INPUTS:
-- name (required): Unique group name (1-100 chars, alphanumeric with hyphens/underscores)
+- name (required): Group name. It must not match an existing group name, ignoring case.
 - description (optional): Description of the group's purpose
 
 RETURNS:
-- group_id: ID of the newly created group
+- group_id: Integer id of the new group. Pass it as a string (for example `"4"`) to the other group tools.
 - name: Name of the created group
 
-ERRORS:
-- elevation_required: TOTP step-up needed
-- totp_setup_required: TOTP not yet configured for this account (setup_url provided)
-- 'Group name already exists': Name must be unique
-- 'Invalid group name': Name contains invalid characters
+ERRORS (returned as `{"success": false, "error": "..."}` except the elevation codes):
+- `Permission denied: admin role required`
+- `elevation_required` / `totp_setup_required` (only when elevation enforcement is on; `totp_setup_required` includes `setup_url`)
+- `Missing required parameter: name`
+- `Group with name '<name>' already exists`
 
-EXAMPLE: {"name": "backend-team", "description": "Backend developers"} Returns: {"success": true, "group_id": "grp_abc123", "name": "backend-team"}
+EXAMPLE: {"name": "backend-team", "description": "Backend developers"} Returns: {"success": true, "group_id": 4, "name": "backend-team"}

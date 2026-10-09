@@ -55,10 +55,11 @@ outputSchema:
   - success
 ---
 
-TL;DR: Create new user account with specified username, password, and role. ADMIN ONLY (requires manage_users permission). Requires MCP elevation (TOTP step-up). QUICK START: create_user('alice', 'secure_password', 'power_user') creates power user. REQUIRED FIELDS: username (unique identifier), password (stored securely), role (admin/power_user/normal_user). ROLE SELECTION: Choose based on needed permissions - normal_user (activate personal workspaces + switch branches on own workspace + sync + query; cannot write files or manage users/golden repos), power_user (activate repos + write files + query), admin (full access including user/repo management). SECURITY: Passwords are hashed before storage. Username must be unique. USE CASES: (1) Onboard new team members, (2) Create service accounts for automation, (3) Grant appropriate access levels. VERIFICATION: Use list_users to confirm user creation. User can immediately authenticate with credentials. TROUBLESHOOTING: Username exists? Must be unique across system. Permission denied? Requires admin role.
+TL;DR: Create new user account with specified username, password, and role. ADMIN ONLY: requires the admin role and, when elevation enforcement is on, an active elevation window (TOTP step-up via `elevate_session`). QUICK START: {"username": "example-user", "password": "<password>", "role": "power_user"} creates a power user. REQUIRED FIELDS: username (unique identifier), password (stored hashed), role (admin/power_user/normal_user). ROLE SELECTION: normal_user (query, activate personal workspaces, switch branches on and sync own workspace; cannot write files or manage users/golden repos), power_user (normal_user plus file and git write operations), admin (full access including user and golden repository management). DEFAULT GROUP: The new user is added to the `admins` group (role admin) or the `users` group (other roles); if that assignment fails, the account is still created and the failure is logged on the server. USE CASES: (1) Onboard new team members, (2) Create service accounts for automation, (3) Grant appropriate access levels. RETURNS: {"success": true, "user": {"username", "role", "created_at"}, "message": "User '<username>' created successfully"}. VERIFICATION: Use list_users to confirm user creation.
 
-ERRORS:
-- elevation_required: TOTP step-up needed
-- totp_setup_required: TOTP not yet configured for this account (setup_url provided)
+ERRORS (returned as `{"success": false, "error": "...", "user": null}` except the elevation codes):
+- `Permission denied: admin role required`
+- `elevation_required` / `totp_setup_required` (only when elevation enforcement is on)
+- Username already exists, invalid role, or a missing field: the error text describes the cause
 
-RELATED TOOLS: list_users (verify creation), authenticate (test login).
+RELATED TOOLS: list_users (verify creation), manage_group_members (move the user to another group).

@@ -17,7 +17,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import IO, Optional
+from typing import IO, List, Optional
 
 import httpx
 
@@ -41,6 +41,9 @@ class RestartableServer:
         self.data_dir = Path(tempfile.mkdtemp(prefix="server-", dir=str(SCRATCH_ROOT)))
         self.process: Optional["subprocess.Popen[bytes]"] = None
         self._log: Optional[IO[bytes]] = None
+        # PIDs this test SIGKILLed on purpose: the only workers whose unclean
+        # exit the post-test log audit may excuse.
+        self.killed_pids: List[int] = []
         (self.data_dir / "config.json").write_text(
             json.dumps(
                 {
@@ -109,6 +112,7 @@ class RestartableServer:
         if self.process is not None and self.process.poll() is None:
             self.process.send_signal(signal.SIGKILL)
             self.process.wait(timeout=STOP_TIMEOUT_SECONDS)
+            self.killed_pids.append(self.process.pid)
         self._close_log()
 
     def close(self) -> None:

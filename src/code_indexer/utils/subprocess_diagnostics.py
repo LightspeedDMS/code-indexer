@@ -39,6 +39,11 @@ import subprocess
 from collections.abc import Sequence as _Sequence
 from typing import Optional, Sequence, Union
 
+from code_indexer.utils.credential_redaction import (
+    redact_command,
+    redact_command_output,
+)
+
 # Bug #1832: dependency_map_analyzer.py:2813 already established a 1000-char
 # cap (`(result.stderr or "")[:1000]`) as the in-tree precedent -- reuse
 # that limit rather than inventing a new one.
@@ -81,10 +86,19 @@ def format_subprocess_failure_diagnostic(
     """Build a diagnostic naming the command, exit code, and BOTH captured
     streams (each capped at max_chars) -- never rely on stderr alone,
     which can be empty when the failing command's real diagnostic lands
-    on stdout instead (Bug #1832)."""
+    on stdout instead (Bug #1832).
+
+    Bug #2012: the command and both streams are credential-redacted (URL
+    userinfo, token-bearing option values) -- a diagnostic is logged and
+    returned, so it must never carry what the command was given.
+    """
+    safe_cmd = redact_command(cmd) if cmd is not None else None
+    safe_stdout = redact_command_output(stdout, cmd or ())
+    safe_stderr = redact_command_output(stderr, cmd or ())
     return (
-        f"command='{_format_cmd(cmd)}' exit_code={returncode} "
-        f"stdout={_cap(stdout, max_chars)!r} stderr={_cap(stderr, max_chars)!r}"
+        f"command='{_format_cmd(safe_cmd)}' exit_code={returncode} "
+        f"stdout={_cap(safe_stdout, max_chars)!r} "
+        f"stderr={_cap(safe_stderr, max_chars)!r}"
     )
 
 

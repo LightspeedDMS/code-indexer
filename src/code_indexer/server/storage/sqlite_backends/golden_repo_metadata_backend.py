@@ -16,7 +16,13 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from code_indexer.utils.credential_redaction import mask_url_credentials
 from ..database_manager import DatabaseConnectionManager
+from ._forced_reconcile_state_mixin import (
+    _ForcedReconcileStateSqliteMixin,
+    create_forced_reconcile_state_table,
+    delete_forced_reconcile_state_for_repo,
+)
 from ._golden_repo_metadata_extra_mixin import _GoldenRepoMetadataExtraMixin
 from ._refresh_failure_backoff_mixin import (
     _RefreshFailureBackoffSqliteMixin,
@@ -28,7 +34,9 @@ logger = logging.getLogger(__name__)
 
 
 class GoldenRepoMetadataSqliteBackend(
-    _GoldenRepoMetadataExtraMixin, _RefreshFailureBackoffSqliteMixin
+    _GoldenRepoMetadataExtraMixin,
+    _RefreshFailureBackoffSqliteMixin,
+    _ForcedReconcileStateSqliteMixin,
 ):
     """
     SQLite backend for golden repository metadata (Story #711).
@@ -435,6 +443,7 @@ class GoldenRepoMetadataSqliteBackend(
             )
             deleted_row = cursor.rowcount > 0
             delete_refresh_failure_backoff_for_repo(conn, alias)
+            delete_forced_reconcile_state_for_repo(conn, alias)
             return deleted_row
 
         deleted: bool = self._conn_manager.execute_atomic(operation)
@@ -458,6 +467,38 @@ class GoldenRepoMetadataSqliteBackend(
             (alias,),
         )
         return cursor.fetchone() is not None
+
+    # Stays well under SQLite's bound-parameter limit (999 on older builds).
+    _EXISTING_ALIASES_CHUNK = 500
+
+    def existing_aliases(self, names: List[str]) -> set[str]:
+        """
+        Return which of *names* are golden repository aliases.
+
+        The lookup is bounded to the given names (``WHERE alias IN (...)``,
+        parameterized, chunked), never a listing of every repository.
+
+        Args:
+            names: Candidate aliases.
+
+        Returns:
+            The subset of *names* that exist as golden repository aliases.
+        """
+        unique = sorted(set(names))
+        if not unique:
+            return set()
+        conn = self._conn_manager.get_connection()
+        found: set[str] = set()
+        for start in range(0, len(unique), self._EXISTING_ALIASES_CHUNK):
+            chunk = unique[start : start + self._EXISTING_ALIASES_CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = conn.execute(
+                "SELECT alias FROM golden_repos_metadata "
+                f"WHERE alias IN ({placeholders})",
+                chunk,
+            )
+            found.update(str(row[0]) for row in cursor.fetchall())
+        return found
 
     def update_enable_temporal(self, alias: str, enable: bool) -> bool:
         """
@@ -539,7 +580,11 @@ class GoldenRepoMetadataSqliteBackend(
 
         updated: bool = self._conn_manager.execute_atomic(operation)
         if updated:
-            logger.info(f"Updated repo_url={repo_url} for golden repo: {alias}")
+            logger.info(
+                "Updated repo_url=%s for golden repo: %s",
+                mask_url_credentials(repo_url),
+                alias,
+            )
         return updated
 
     def update_category(
@@ -839,3 +884,4 @@ def _create_golden_repo_metadata_support_tables(conn: sqlite3.Connection) -> Non
     _create_cidx_meta_conflict_table(conn)
     _create_cleanup_pending_deletion_table(conn)
     create_refresh_failure_backoff_table(conn)
+    create_forced_reconcile_state_table(conn)

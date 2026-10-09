@@ -46,6 +46,18 @@ from code_indexer.storage.hnsw_index_manager import (
 )
 from tests.utils.hnsw_orphan_corpus import near_tie_corpus
 
+
+@pytest.fixture(autouse=True)
+def _no_stored_url_rewrite(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GitPullUpdater is mocked here and no clone exists on disk, so the
+    credential-free rewrite of stored URLs has nothing to act on."""
+    monkeypatch.setattr(
+        "code_indexer.global_repos.refresh_scheduler."
+        "ensure_remote_url_without_credentials",
+        lambda _path: 0,
+    )
+
+
 _ALIAS_BASE = "typer"
 CORPUS_DIM = 1024
 _MARKER_LINE = (

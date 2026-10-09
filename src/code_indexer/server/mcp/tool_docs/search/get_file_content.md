@@ -124,7 +124,7 @@ outputSchema:
 
 Read file content from an indexed repository with line-offset pagination. Default returns FIRST CHUNK ONLY (up to ~5000 tokens, ~200-250 lines), NOT the entire file.
 
-PAGINATION CONTRACT (Bug #1080 - line-offset only): Check metadata.has_more in response. If true, call again with offset=metadata.next_offset. Repeat until has_more=false. All pagination is line-based -- no byte-envelopes, no cache_handle, no page numbers.
+PAGINATION CONTRACT (line-offset only): Check metadata.has_more in response. If true, call again with offset=metadata.next_offset. Repeat until has_more=false. All pagination is line-based -- no byte-envelopes, no cache_handle, no page numbers.
 
 - metadata.next_offset: canonical next-page cursor (offset + returned_lines, or null when done)
 - metadata.returned_lines: number of complete lines in this response (never cut mid-line)

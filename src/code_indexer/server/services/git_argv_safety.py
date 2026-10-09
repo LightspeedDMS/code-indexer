@@ -44,6 +44,55 @@ from typing import Iterable, List, Optional
 
 from code_indexer.utils.git_runner import run_git_command
 
+# cidx's own untracked working paths inside a repository clone: the index
+# directory and the project-level override file. Unanchored patterns, so
+# they are kept at any depth.
+CIDX_OWNED_WORKING_PATHS = (".code-indexer", ".code-indexer-override.yaml")
+
+# The ONE argv every server-side "remove untracked files" runs (REST and
+# MCP git_clean, and the pre-refresh clearing of a dirty repository). Each
+# `-e` adds an ignore rule, and without `-x` git clean keeps ignored paths,
+# so the repository's index survives the clean.
+GIT_CLEAN_UNTRACKED_ARGV = ["git", "clean", "-fd"] + [
+    arg for path in CIDX_OWNED_WORKING_PATHS for arg in ("-e", path)
+]
+
+# Every uncommitted change, tracked and untracked. Untracked files are
+# listed individually so `uncommitted_status_lines` can recognise cidx's
+# own working paths inside an otherwise-collapsed untracked directory.
+GIT_STATUS_UNCOMMITTED_ARGV = [
+    "git",
+    "status",
+    "--porcelain",
+    "--untracked-files=all",
+]
+
+_UNTRACKED_PREFIX = "?? "
+
+
+def _is_untracked_cidx_working_path(line: str) -> bool:
+    if not line.startswith(_UNTRACKED_PREFIX):
+        return False
+    path = line[len(_UNTRACKED_PREFIX) :]
+    if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
+        path = path[1:-1]
+    return any(part in CIDX_OWNED_WORKING_PATHS for part in path.split("/"))
+
+
+def uncommitted_status_lines(status_stdout: str) -> List[str]:
+    """The porcelain lines of `GIT_STATUS_UNCOMMITTED_ARGV` that are real
+    local changes.
+
+    Only UNTRACKED entries under cidx's own working paths (the ones the
+    clean above keeps) are dropped, so they never make a repository look
+    dirty; a TRACKED change to those paths (M/A/D/R/...) is kept.
+    """
+    return [
+        line
+        for line in status_stdout.splitlines()
+        if line.strip() and not _is_untracked_cidx_working_path(line)
+    ]
+
 
 class GitArgumentValidationError(ValueError):
     """Raised when a caller-supplied git argv component fails safety validation.
@@ -109,8 +158,15 @@ def validate_remote_name(remote: str, repo_path: Path) -> str:
         return remote
     validate_remote_syntax(remote)
 
+    from code_indexer.utils import git_runner
+
     try:
-        result = run_git_command(["git", "remote"], cwd=repo_path, check=True)
+        result = run_git_command(
+            ["git", "remote"],
+            cwd=repo_path,
+            check=True,
+            timeout=git_runner.REMOTE_RESOLVE_TIMEOUT_SECONDS,
+        )
     except subprocess.CalledProcessError as e:
         raise GitArgumentValidationError(
             f"Unable to list configured remotes for repository: {e}"

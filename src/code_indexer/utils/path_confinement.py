@@ -14,7 +14,28 @@ module directly.
 """
 
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
+
+# The repository's git directory. Its contents (configuration with remote
+# URLs, hooks, objects) are never served or written through a file front
+# door: a repository-relative path with a ``.git`` segment is refused.
+GIT_DIRECTORY_NAME = ".git"
+
+
+def has_git_segment(parts: Iterable[str]) -> bool:
+    """True when any path segment is ``.git``, compared case-insensitively
+    (a case-insensitive filesystem would resolve ``.GIT`` to the same
+    directory). ``.gitignore``, ``.github`` and the like are not ``.git``."""
+    return any(part.casefold() == GIT_DIRECTORY_NAME for part in parts)
+
+
+class GitDirectoryPathError(PermissionError):
+    """A confined path lies inside, or is, the repository's ``.git``.
+
+    A PermissionError, so every caller that refuses an out-of-repository
+    path refuses this one too; read front doors answer it exactly as they
+    answer a nonexistent path."""
+
 
 # Linux NAME_MAX is 255 bytes. resolve_confined_path rejects any single
 # path component longer than this BEFORE it ever reaches a stat/lstat
@@ -108,9 +129,13 @@ def resolve_confined_path(repo_root: Path, relative_path: str) -> Path:
         raise PermissionError("Access denied") from exc
 
     try:
-        candidate.relative_to(repo_root_resolved)
+        relative = candidate.relative_to(repo_root_resolved)
     except ValueError:
         raise PermissionError("Access denied")
+    # Checked on the RESOLVED location, so "./.git", "a/../.git" and a
+    # symlink into .git are all refused.
+    if has_git_segment(relative.parts):
+        raise GitDirectoryPathError("Access denied")
     return candidate
 
 
@@ -176,6 +201,46 @@ def is_resolved_within_root(candidate: Path, resolved_root: Path) -> bool:
     return resolve_if_within_root(candidate, resolved_root) is not None
 
 
+def is_readable_within_root(candidate: Path, resolved_root: Path) -> bool:
+    """The read-side rule for a repository file: True only when ``candidate``
+    resolves (following symlinks, collapsing ``..``) inside
+    ``resolved_root`` AND its RESOLVED location, relative to the root, has
+    no ``.git`` segment. A committed symlink such as ``link.py ->
+    .git/config`` or ``gitdir -> .git`` is therefore refused whatever its
+    own name. ``resolved_root`` must already be resolved. Fails closed on
+    any resolution error."""
+    resolved = resolve_if_within_root(candidate, resolved_root)
+    if resolved is None:
+        return False
+    return not has_git_segment(resolved.relative_to(resolved_root).parts)
+
+
+def resolves_into_git_directory(candidate: Path, resolved_root: Path) -> bool:
+    """True when ``candidate`` resolves inside ``resolved_root`` AND its
+    resolved location, relative to the root, has a ``.git`` segment (e.g. a
+    committed ``link.py -> .git/config``). A target outside the root
+    returns False, so callers keep their own outside-root behaviour while a
+    file resolving into the repository's own .git is excluded in every
+    mode. ``resolved_root`` must already be resolved."""
+    resolved = resolve_if_within_root(candidate, resolved_root)
+    return resolved is not None and has_git_segment(
+        resolved.relative_to(resolved_root).parts
+    )
+
+
+def is_indexable_location(candidate: Path, resolved_root: Path, confined: bool) -> bool:
+    """The indexing-side location rule for a file about to be read.
+
+    Server context (``confined``): ``is_readable_within_root`` -- inside the
+    root and outside its ``.git``. Local CLI context: any location (a
+    symlink may point outside the repository) except one resolving into
+    the repository's own ``.git``. ``resolved_root`` must already be
+    resolved."""
+    if confined:
+        return is_readable_within_root(candidate, resolved_root)
+    return not resolves_into_git_directory(candidate, resolved_root)
+
+
 def reject_if_within_git_directory(
     repo_root: Path, resolved_path: Path, operation: str
 ) -> None:
@@ -218,7 +283,7 @@ def reject_if_within_git_directory(
         # Not confined to repo_root -- resolve_confined_path() should
         # already have rejected this; nothing further to do here.
         return
-    if ".git" in rel.parts:
-        raise PermissionError(
+    if has_git_segment(rel.parts):
+        raise GitDirectoryPathError(
             f"{operation} blocked: Access to .git/ directory is forbidden"
         )

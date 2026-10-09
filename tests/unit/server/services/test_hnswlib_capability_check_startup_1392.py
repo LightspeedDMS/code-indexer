@@ -59,7 +59,7 @@ class TestCheckHnswlibCapability:
         assert ok is False
         assert sys.executable in message
         assert EXPECTED_HNSWLIB_FORK_COMMIT in message
-        assert "docs/hnswlib-custom-build.md" in message
+        assert "docs/server/hnswlib-custom-build.md" in message
 
     def test_returns_failure_when_hnswlib_not_installed(self) -> None:
         # Setting a sys.modules entry to None forces the next `import X` to

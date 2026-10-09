@@ -183,11 +183,39 @@ class TestExposedIndexingMethods:
         service.cache_entry = CacheEntry(project_path)
         service.cache_entry.hnsw_index = Mock()
 
-        with patch("code_indexer.services.smart_indexer.SmartIndexer"):
-            with patch("code_indexer.config.ConfigManager"):
-                service.exposed_index(str(project_path))
+        # The invalidation runs on the background indexing thread, so the test
+        # must synchronize on that thread rather than assert right after
+        # exposed_index() returns (a race any GIL-releasing logging handler
+        # loses). Loading the config is the first indexing step: record the
+        # cache state there, then stop the thread before any real work.
+        # The thread object is captured here because the service nulls its own
+        # `indexing_thread` reference in the background thread's `finally`.
+        cache_state_when_indexing_began = []
+        indexing_threads = []
+        indexing_began = threading.Event()
 
-        # Cache should be invalidated
+        def _record_cache_state_and_stop(_project_path):
+            cache_state_when_indexing_began.append(service.cache_entry)
+            indexing_threads.append(threading.current_thread())
+            indexing_began.set()
+            raise RuntimeError("stop background indexing after invalidation")
+
+        with patch("code_indexer.services.smart_indexer.SmartIndexer"):
+            with patch("code_indexer.config.ConfigManager") as MockConfigManager:
+                MockConfigManager.load_verified_config.side_effect = (
+                    _record_cache_state_and_stop
+                )
+                service.exposed_index(str(project_path))
+                assert indexing_began.wait(
+                    timeout=_BACKGROUND_INDEXING_JOIN_TIMEOUT_SECONDS
+                ), "background indexing never reached config loading"
+                indexing_threads[0].join(
+                    timeout=_BACKGROUND_INDEXING_JOIN_TIMEOUT_SECONDS
+                )
+
+        assert not indexing_threads[0].is_alive()
+        # Cache was already invalidated when indexing began, and stays so.
+        assert cache_state_when_indexing_began == [None]
         assert service.cache_entry is None
 
     def test_exposed_index_calls_smart_indexer(self, service, tmp_path):

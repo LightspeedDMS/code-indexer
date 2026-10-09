@@ -27,6 +27,7 @@ from code_indexer.server.telemetry.instrumentation import (
 )
 from code_indexer.server.telemetry.manager import TelemetryManager
 from code_indexer.server.utils.config_manager import TelemetryConfig
+from tests.unit.server.telemetry.otlp_sink import OtlpHttpSink
 
 
 @pytest.fixture(autouse=True)
@@ -125,7 +126,9 @@ class TestTelemetryManagerShutdownUninstallsHttpx:
     (as happen throughout the test suite) never leave it dangling.
     """
 
-    def test_shutdown_uninstalls_httpx_when_it_was_instrumented(self):
+    def test_shutdown_uninstalls_httpx_when_it_was_instrumented(
+        self, otlp_sink: OtlpHttpSink
+    ):
         instrument_httpx()
         assert _is_httpx_instrumented() is True
 
@@ -134,7 +137,8 @@ class TestTelemetryManagerShutdownUninstallsHttpx:
                 enabled=True,
                 export_traces=True,
                 export_metrics=False,
-                collector_endpoint="http://127.0.0.1:1",
+                collector_endpoint=otlp_sink.endpoint,
+                collector_protocol="http",
             )
         )
         try:
@@ -144,7 +148,9 @@ class TestTelemetryManagerShutdownUninstallsHttpx:
 
         assert _is_httpx_instrumented() is False
 
-    def test_shutdown_is_a_no_op_when_httpx_was_never_instrumented(self):
+    def test_shutdown_is_a_no_op_when_httpx_was_never_instrumented(
+        self, otlp_sink: OtlpHttpSink
+    ):
         assert _is_httpx_instrumented() is False
 
         manager = TelemetryManager(
@@ -152,7 +158,8 @@ class TestTelemetryManagerShutdownUninstallsHttpx:
                 enabled=True,
                 export_traces=True,
                 export_metrics=False,
-                collector_endpoint="http://127.0.0.1:1",
+                collector_endpoint=otlp_sink.endpoint,
+                collector_protocol="http",
             )
         )
         manager.shutdown()

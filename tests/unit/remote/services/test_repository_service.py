@@ -229,9 +229,9 @@ class TestRemoteRepositoryService:
         assert repository_service._urls_match(url1, url2)
 
     def test_normalize_url_ssh_conversion(self, repository_service):
-        """Test SSH URL normalization to HTTPS format."""
+        """SSH and HTTPS forms normalize to the shared repository identity."""
         ssh_url = "git@github.com:user/repo.git"
-        expected = "https://github.com/user/repo"
+        expected = "github.com/user/repo"
 
         normalized = repository_service._normalize_url(ssh_url)
         assert normalized == expected
@@ -239,10 +239,35 @@ class TestRemoteRepositoryService:
     def test_normalize_url_https_cleanup(self, repository_service):
         """Test HTTPS URL cleanup."""
         https_url = "https://GitHub.com/User/Repo.git/"
-        expected = "https://github.com/user/repo"
+        expected = "github.com/user/repo"
 
         normalized = repository_service._normalize_url(https_url)
         assert normalized == expected
+
+    def test_normalize_url_keeps_trailing_letters_of_the_name(self, repository_service):
+        """Only a '.git' suffix is removed (previously rstrip(".git") also
+        stripped trailing '.', 'g', 'i', 't' characters of the name)."""
+        assert repository_service._normalize_url(
+            "https://github.com/acme/widget"
+        ).endswith("/acme/widget")
+        assert repository_service._normalize_url(
+            "git@github.com:acme/cli-git.git"
+        ).endswith("/acme/cli-git")
+
+    def test_urls_differing_only_in_trailing_letters_do_not_match(
+        self, repository_service
+    ):
+        assert not repository_service._urls_match(
+            "https://github.com/acme/widget", "https://github.com/acme/widge"
+        )
+        assert not repository_service._urls_match(
+            "git@github.com:acme/cli-git.git", "https://github.com/acme/cli-"
+        )
+
+    def test_urls_match_ssh_non_git_user_with_port(self, repository_service):
+        assert repository_service._urls_match(
+            "ssh://deploy@github.com:22/user/repo.git", "https://github.com/user/repo"
+        )
 
     def test_calculate_staleness_for_repos(
         self, mock_api_client, mock_staleness_detector

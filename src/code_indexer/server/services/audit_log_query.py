@@ -120,7 +120,7 @@ _PAIRING_CHUNK = 400
 AUDIT_READ_COLUMNS = (
     "id, timestamp, admin_id, action_type, target_type, target_id, details, "
     "outcome, source, ip_address, correlation_id, node_id, auth_method, "
-    "actor_is_system, event_uuid"
+    "actor_is_system, event_uuid, impersonated_user"
 )
 
 
@@ -524,6 +524,9 @@ class CanonicalAuditRow:
     actor_is_authenticated: bool
     pairing_state: Optional[str]
     submitted_only: bool
+    # The user an administrator was impersonating over MCP (the subject);
+    # ``admin_id`` is then the administrator.  None outside impersonation.
+    impersonated_user: Optional[str] = None
 
 
 # The fields every door exposes for one row, in export column order: the
@@ -548,6 +551,8 @@ AUDIT_ROW_FIELDS: Tuple[str, ...] = (
     "auth_method",
     "event_uuid",
     "details",
+    # Appended last so existing export columns keep their positions.
+    "impersonated_user",
 )
 
 
@@ -954,6 +959,7 @@ def _to_canonical(
         ),
         pairing_state=_pairing_state(row, terminal, now),
         submitted_only=row.get("action_type") in JOB_BASED_ACTION_TYPES,
+        impersonated_user=row.get("impersonated_user"),
     )
 
 

@@ -9,7 +9,7 @@ inputSchema:
   properties:
     repo_alias:
       type: string
-      description: Repository alias (e.g., sf-kb-wiki-global). Must be a wiki-enabled golden repo.
+      description: Repository alias (e.g., example-wiki-global). Must be a wiki-enabled golden repo.
     sort_by:
       type: string
       enum: [most_viewed, least_viewed]
@@ -89,7 +89,7 @@ USE CASES:
 - Search for articles matching a topic and see which are most read
 
 PARAMETERS:
-- repo_alias: The repository alias (e.g., sf-kb-wiki-global). Must be a golden repo with wiki enabled.
+- repo_alias: The repository alias (e.g., example-wiki-global). Must be a golden repo with wiki enabled.
 - sort_by: most_viewed (default, descending by real_views) or least_viewed (ascending). Ties broken alphabetically by path.
 - limit: Cap on results returned. Default 20, max 500.
 - search_query: Optional CIDX query to filter articles. Results still sorted by view count, not relevance.
@@ -101,9 +101,9 @@ RESPONSE FIELDS per article:
 - real_views: Integer view count
 - first_viewed_at: ISO timestamp of first view
 - last_viewed_at: ISO timestamp of most recent view
-- wiki_url: URL to the wiki article (e.g., /wiki/sf-kb-wiki/Customer/getting-started)
+- wiki_url: URL to the wiki article (e.g., /wiki/example-wiki/Customer/getting-started)
 
 ERROR CASES:
 - "Wiki is not enabled for this repository" if repo_alias does not point to a wiki-enabled golden repo
 
-EXAMPLE: wiki_article_analytics(repo_alias='sf-kb-wiki-global', sort_by='most_viewed', limit=10)
+EXAMPLE: wiki_article_analytics(repo_alias='example-wiki-global', sort_by='most_viewed', limit=10)

@@ -155,7 +155,7 @@ def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
             "Filesystem configuration has been removed in v8.0. "
             "Filesystem is now the only storage backend. "
             "Please remove 'filesystem_config' from your config.json. "
-            "See migration guide at docs/migration-to-v8.md"
+            "See migration guide at docs/archive/migration-to-v8.md"
         )
 
     # Check for legacy voyage_config field (removed in v8.0)
@@ -164,7 +164,7 @@ def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
             "Voyage configuration has been removed in v8.0. "
             "VoyageAI is now configured via VOYAGE_API_KEY environment variable only. "
             "Please remove 'voyage_config' from your config.json. "
-            "See migration guide at docs/migration-to-v8.md"
+            "See migration guide at docs/archive/migration-to-v8.md"
         )
 
     # Check for invalid fields
@@ -186,7 +186,7 @@ def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
             f"Docker/container configuration removed in v8.0. "
             f"Use daemon mode or filesystem storage instead. "
             f"Invalid fields: {', '.join(invalid_fields)}. "
-            f"See migration guide at docs/migration-to-v8.md"
+            f"See migration guide at docs/archive/migration-to-v8.md"
         )
 
     # Check for invalid vector store provider (must be filesystem in v8.0+)
@@ -196,7 +196,7 @@ def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
             raise ValueError(
                 f"Vector store provider '{provider}' is not supported in v8.0. "
                 f"Only 'filesystem' backend is supported. "
-                f"See migration guide at docs/migration-to-v8.md"
+                f"See migration guide at docs/archive/migration-to-v8.md"
             )
 
     # Check for invalid embedding provider
@@ -206,7 +206,7 @@ def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
             raise ValueError(
                 f"Embedding provider '{provider}' is not supported. "
                 f"Supported providers: voyage-ai, cohere. "
-                f"See migration guide at docs/migration-to-v8.md"
+                f"See migration guide at docs/archive/migration-to-v8.md"
             )
 
 

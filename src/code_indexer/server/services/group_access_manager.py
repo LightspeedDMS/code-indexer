@@ -90,6 +90,10 @@ class GroupNotFoundError(ValueError):
     """Raised by an audited operation when the group it names does not exist."""
 
 
+class UnknownAccountError(ValueError):
+    """Raised when a group membership would name an account that does not exist."""
+
+
 @dataclass
 class Group:
     """Represents a user group."""
@@ -697,17 +701,26 @@ class GroupAccessManager:
         self._conn_manager.execute_atomic(_do_assign)
 
     def assign_user_to_group_audited(
-        self, user_id: str, group_id: int, *, actor: str
+        self,
+        user_id: str,
+        group_id: int,
+        *,
+        actor: str,
+        account_exists: Callable[[str], bool],
     ) -> Group:
         """Move *user_id* into group *group_id*, recording ``user_group_change``.
 
         The one entry point of every door that moves a user between groups.
+        A membership is only written for a name that has an account
+        (*account_exists*, supplied by the door from its user store).
         One row per call: ``success`` once the membership is written (target:
         the member now persisted; details: the previous and new group names),
-        or ``failure`` when the group does not exist or the write raised, after
-        which the exception propagates.  A failure names no member.
+        or ``failure`` when the account or group does not exist or the write
+        raised, after which the exception propagates.  A failure names no
+        member.
 
         Raises:
+            UnknownAccountError: *user_id* names no account.
             GroupNotFoundError: *group_id* names no group.
         """
         action = "user_group_change"
@@ -715,6 +728,8 @@ class GroupAccessManager:
             group = self.get_group(group_id)
             if group is None:
                 raise GroupNotFoundError(f"Group with ID {group_id} not found")
+            if not account_exists(user_id):
+                raise UnknownAccountError(f"User '{user_id}' not found")
             previous = self.get_user_group(user_id)
             self.assign_user_to_group(user_id, group_id, actor)
         except Exception:
@@ -1323,6 +1338,11 @@ class GroupAccessManager:
         LIVE read every call, never decided once at construction, so a
         node started before seeding completed observes a later flip to
         True on its very next call with no restart.
+
+        Only an ABSENT marker table reads as not-ready (Bug #2076); any
+        other read failure propagates, so a caller never reports "not
+        enforced" from a read that did not happen. The PostgreSQL backend
+        matches this (it maps only UndefinedTable to False).
         """
         if self._backend is not None:
             return self._backend.is_tool_access_enforcement_ready()  # type: ignore[no-any-return]
@@ -1334,8 +1354,10 @@ class GroupAccessManager:
                 cursor.execute(
                     "SELECT complete FROM tool_access_migration_state WHERE id = 1"
                 )
-            except sqlite3.OperationalError:
-                return False
+            except sqlite3.OperationalError as exc:
+                if str(exc).startswith("no such table"):
+                    return False
+                raise
             row = cursor.fetchone()
             return bool(row[0]) if row is not None else False
         finally:

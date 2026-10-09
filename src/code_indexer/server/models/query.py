@@ -28,7 +28,11 @@ class SemanticQueryRequest(BaseModel):
     )
     file_extensions: Optional[List[str]] = Field(
         None,
-        description="Filter results to specific file extensions (e.g., ['.py', '.js'])",
+        description=(
+            "Keep only files with one of these extensions (e.g., ['py', '.js']). "
+            "Case-insensitive, leading dot optional, several values OR-ed; "
+            "extensionless files never match; intersected with 'language'."
+        ),
     )
     async_query: bool = Field(
         default=False, description="Submit as background job if True"
@@ -204,39 +208,11 @@ class SemanticQueryRequest(BaseModel):
     @field_validator("file_extensions")
     @classmethod
     def validate_file_extensions(cls, v: Optional[List[str]]) -> Optional[List[str]]:
-        """Validate file extensions format and convert empty list to None."""
-        if v is None:
-            return None
+        """Validate file extensions with the shared #2047 rule (the same
+        restriction MCP and the CLI apply); an empty list means no filter."""
+        from ...services.extension_filter import validate_file_extensions_field
 
-        if len(v) == 0:
-            return None  # Convert empty list to None (no filtering)
-
-        validated_extensions = []
-        for ext in v:
-            if not ext or not ext.strip():
-                raise ValueError(
-                    "File extensions cannot be empty or contain only whitespace"
-                )
-
-            ext = ext.strip()
-
-            # Must start with dot
-            if not ext.startswith("."):
-                raise ValueError(f"File extensions must start with dot: {ext}")
-
-            # Must contain only alphanumeric characters after the dot
-            if len(ext) <= 1:
-                raise ValueError(f"File extensions must have content after dot: {ext}")
-
-            extension_part = ext[1:]  # Remove the dot
-            if not extension_part.replace("_", "").replace("-", "").isalnum():
-                raise ValueError(
-                    f"File extensions must contain only alphanumeric characters, hyphens, and underscores: {ext}"
-                )
-
-            validated_extensions.append(ext)
-
-        return validated_extensions
+        return validate_file_extensions_field(v)  # ValueError -> HTTP 422
 
     @field_validator("time_range")
     @classmethod

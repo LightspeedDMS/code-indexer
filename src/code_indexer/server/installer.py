@@ -19,7 +19,6 @@ import urllib.request
 from pathlib import Path
 from typing import Tuple, Optional
 
-from .auth.user_manager import UserManager
 from .utils.config_manager import ServerConfigManager
 from .utils.jwt_secret_manager import JWTSecretManager
 from .utils.ripgrep_installer import RipgrepInstaller
@@ -35,8 +34,9 @@ class ServerInstaller:
     """
     Handles CIDX server installation and setup.
 
-    Creates server directory structure, allocates ports, generates startup scripts,
-    and seeds initial admin user.
+    Creates server directory structure, allocates ports and generates startup
+    scripts.  It writes no accounts: the first server start seeds the initial
+    administrator, and only into an empty user store.
     """
 
     def __init__(self, base_port: int = 8090):
@@ -177,7 +177,7 @@ cd "{self.home_dir}"
 
         Args:
             port: Server port
-            issuer_url: OAuth issuer URL (e.g., https://cidx.example.com:8383)
+            issuer_url: OAuth issuer URL (e.g., https://cidx.example.com)
             voyage_api_key: VoyageAI API key (WARNING: stored in plaintext in service file)
 
         Returns:
@@ -231,24 +231,6 @@ WantedBy=multi-user.target
 
         return service_path
 
-    def seed_initial_admin_user(self) -> bool:
-        """
-        Seed initial admin user (admin/admin).
-
-        Returns:
-            True if user was created, False if already exists
-        """
-        user_manager = UserManager()
-
-        # Check if admin user already exists
-        existing_admin = user_manager.get_user("admin")
-        if existing_admin:
-            return False  # Already exists
-
-        # Seed initial admin
-        user_manager.seed_initial_admin()
-        return True
-
     def install(self) -> Tuple[int, Path, Path, bool]:
         """
         Perform complete server installation.
@@ -289,9 +271,6 @@ WantedBy=multi-user.target
 
             # Try to install Coursier (non-fatal if fails)
             self.install_coursier()
-
-            # Seed initial admin user
-            self.seed_initial_admin_user()
 
             return port, config_path, script_path, is_new_installation
 

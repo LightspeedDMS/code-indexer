@@ -196,12 +196,19 @@ class TestDaemonRebuildFTS:
             f"Non-success result must include 'error' or 'message', got: {result}"
         )
 
-    def test_partial_success_still_returns_success(self):
+    def test_partial_failure_succeeds_with_warning_and_leaves_index_unmarked(
+        self,
+    ):
         """
-        Guard: partial success (>=1 file indexed, >=1 failed) must still be 'success'.
-        The total-failure guard must NOT over-fire.
+        Bug #2056: per-file failures follow the semantic rule -- a rebuild
+        that indexed some files succeeds, reports the files missing from FTS
+        as a warning, and is not marked content-current, so the next
+        `cidx index --fts` rebuilds it (never a partial index marked current).
         """
         from unittest.mock import patch
+        from code_indexer.services.fts_file_documents import (
+            fts_content_version_is_current,
+        )
         from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -223,12 +230,94 @@ class TestDaemonRebuildFTS:
                 result = service.exposed_rebuild_fts_index(
                     str(project_dir), callback=None
                 )
+            marked = fts_content_version_is_current(
+                project_dir / ".code-indexer" / "tantivy_index"
+            )
 
-        assert result.get("status") == "success", (
-            f"Partial success must still return 'success', got: {result}"
-        )
+        assert result.get("status") == "success", result
         assert result.get("files_indexed", 0) >= 1
         assert result.get("files_failed", 0) >= 1
+        assert "missing from the FTS index" in result.get("warning", ""), result
+        assert not marked, "an incomplete rebuild is never marked content-current"
+
+    def test_rebuilt_documents_store_repo_relative_paths(self):
+        """Bug #2056: the daemon rebuild must store repo-relative FTS paths,
+        exactly like normal indexing -- path filters and per-file
+        supersession (delete-by-path) only ever see relative paths."""
+        from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir, service = self._make_project(
+                tmpdir, [("main.py", "def main(): return 'MAINTOKEN'")]
+            )
+            (project_dir / "src").mkdir()
+            (project_dir / "src" / "util.py").write_text("UTILTOKEN = 1\n")
+
+            result = service.exposed_rebuild_fts_index(str(project_dir), callback=None)
+            assert result.get("status") == "success", result
+
+            fts = TantivyIndexManager(project_dir / ".code-indexer" / "tantivy_index")
+            fts.initialize_index(create_new=False)
+            try:
+                paths = sorted(fts.get_all_indexed_paths())
+                filtered = fts.search("UTILTOKEN", path_filters=["src/*"])
+            finally:
+                fts.close()
+
+        assert paths == ["main.py", "src/util.py"]
+        assert [hit["path"] for hit in filtered] == ["src/util.py"]
+
+    def test_rebuild_writes_chunk_level_documents(self):
+        """Bug #2056: the daemon rebuild writes exactly normal indexing's
+        documents -- one per chunk -- so a file with matches in two chunks
+        returns both, never just its first match."""
+        from code_indexer.config import ConfigManager
+        from code_indexer.indexing.fixed_size_chunker import FixedSizeChunker
+        from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+        filler = "".join(f"value_{i:05d} = {i}\n" for i in range(700))
+        content = f"FIRST = 1  # TWICETOKEN\n{filler}LAST = 2  # TWICETOKEN\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir, service = self._make_project(tmpdir, [("big.py", content)])
+            config = ConfigManager.load_verified_config(project_dir)
+            chunks = FixedSizeChunker(config).chunk_file(
+                project_dir / "big.py", repo_root=Path(config.codebase_dir)
+            )
+            assert len(chunks) > 1
+
+            result = service.exposed_rebuild_fts_index(str(project_dir), callback=None)
+            assert result.get("status") == "success", result
+
+            fts = TantivyIndexManager(project_dir / ".code-indexer" / "tantivy_index")
+            fts.initialize_index(create_new=False)
+            try:
+                documents = fts.get_document_count()
+                hits = fts.search("TWICETOKEN", limit=10)
+            finally:
+                fts.close()
+
+        assert documents == len(chunks)
+        lines = sorted(hit["line"] for hit in hits)
+        assert [hit["path"] for hit in hits] == ["big.py", "big.py"]
+        assert lines[0] != lines[1]
+
+    def test_rebuild_marks_fts_content_current(self):
+        """Bug #2056: a rebuilt index holds every file's current content, so
+        it is marked content-current and the next `cidx index --fts` does
+        not rebuild it again."""
+        from code_indexer.services.fts_file_documents import (
+            fts_content_version_is_current,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir, service = self._make_project(
+                tmpdir, [("main.py", "def main(): pass")]
+            )
+            result = service.exposed_rebuild_fts_index(str(project_dir), callback=None)
+            index_dir = project_dir / ".code-indexer" / "tantivy_index"
+
+            assert result.get("status") == "success", result
+            assert fts_content_version_is_current(index_dir)
 
     def test_normal_success_unchanged(self):
         """Regression guard: all files succeed => status must still be 'success'."""
@@ -243,3 +332,49 @@ class TestDaemonRebuildFTS:
         )
         assert result.get("files_indexed", 0) >= 1
         assert result.get("files_failed", 0) == 0
+
+
+class TestRebuildFtsViaDaemonWarning2056:
+    """The CLI side of a daemon `--rebuild-fts-index` shows the daemon's
+    missing-files warning (Bug #2056 per-file rule). The real daemon service
+    runs in-process; only the socket transport is replaced."""
+
+    def test_missing_files_warning_is_printed(self, monkeypatch) -> None:
+        import os
+        from types import SimpleNamespace
+
+        from rich.console import Console
+
+        from code_indexer import cli_daemon_delegation
+        from code_indexer.config import ConfigManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # _make_project is a @staticmethod of TestDaemonRebuildFTS.
+            project_dir, service = TestDaemonRebuildFTS._make_project(
+                tmpdir,
+                [("main.py", "def main(): pass"), ("locked.py", "def x(): pass")],
+            )
+            config_manager = ConfigManager(
+                project_dir / ".code-indexer" / "config.json"
+            )
+            # In-process connection to the REAL service: `.root` is the
+            # service itself, exactly what RPyC exposes over the socket.
+            connection = SimpleNamespace(root=service, close=lambda: None)
+            monkeypatch.setattr(cli_daemon_delegation, "_start_daemon", lambda p: None)
+            monkeypatch.setattr(
+                cli_daemon_delegation, "_connect_to_daemon", lambda s, c: connection
+            )
+            monkeypatch.chdir(project_dir)
+            console = Console(record=True, width=400)
+            locked = project_dir / "locked.py"
+            os.chmod(locked, 0)
+            try:
+                code = cli_daemon_delegation.rebuild_fts_via_daemon(
+                    config_manager, console
+                )
+            finally:
+                os.chmod(locked, 0o644)
+
+        output = console.export_text()
+        assert code == 0, output
+        assert "1 file(s) missing from the FTS index" in output, output

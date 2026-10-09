@@ -117,6 +117,7 @@ def event_from_audit_row(row: Mapping[str, Any]) -> AuditEvent:
         node_id=row.get("node_id"),
         auth_method=row.get("auth_method"),
         details_json=details,
+        impersonated_user=row.get("impersonated_user"),
     )
 
 

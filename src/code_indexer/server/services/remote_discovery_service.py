@@ -5,9 +5,10 @@ Discovers remote hostnames from activated repositories.
 """
 
 import json
-import re
 from pathlib import Path
 from typing import Optional, Set
+
+from code_indexer.utils.git_remote_url import credential_scope_host
 
 
 class RemoteDiscoveryService:
@@ -34,34 +35,17 @@ class RemoteDiscoveryService:
         """
         Extract hostname from a git remote URL.
 
-        Supports formats:
-        - git@github.com:user/repo.git (SSH shorthand)
-        - ssh://git@github.com/user/repo.git (SSH URL)
-        - https://github.com/user/repo.git (HTTPS URL)
+        The host SSH keys are tried against, so it follows the credential
+        scoping rule (``credential_scope_host``): an SSH form yields a host
+        only for login user ``git``.
 
         Args:
             remote_url: Git remote URL
 
         Returns:
-            Hostname or None if URL format not recognized
+            Hostname or None if the URL scopes no credential
         """
-        # SSH shorthand format: git@github.com:user/repo.git
-        match = re.match(r"^git@([^:]+):", remote_url)
-        if match:
-            return match.group(1)
-
-        # SSH URL format: ssh://git@github.com/user/repo.git
-        # May include port: ssh://git@host:port/path
-        match = re.match(r"^ssh://[^@]+@([^/:]+)", remote_url)
-        if match:
-            return match.group(1)
-
-        # HTTPS format: https://github.com/user/repo.git
-        match = re.match(r"^https?://([^/]+)/", remote_url)
-        if match:
-            return match.group(1)
-
-        return None
+        return credential_scope_host(remote_url)
 
     def discover_remote_hostnames(self) -> Set[str]:
         """
