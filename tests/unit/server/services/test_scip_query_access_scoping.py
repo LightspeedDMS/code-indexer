@@ -64,6 +64,11 @@ def _build_repo(repo: Path, tag: str) -> None:
     (scip_dir / "index.scip").write_bytes(index.SerializeToString())
     SCIPDatabaseBuilder().build(scip_dir / "index.scip", scip_dir / "index.scip.db")
     (scip_dir / "index.scip").unlink()
+    # One open through the real backend runs the production migration (query
+    # indexes + version marker), so every later open is the fast-path check.
+    from code_indexer.scip.query.backends import DatabaseBackend
+
+    DatabaseBackend(scip_dir / "index.scip.db").conn.close()
 
 
 def _user(name: str, role: UserRole) -> User:
@@ -80,8 +85,11 @@ ALICE = _user("alice", UserRole.NORMAL_USER)
 ROOT = _user("root", UserRole.ADMIN)
 
 
-@pytest.fixture
-def env(tmp_path: Path) -> Dict[str, Any]:
+@pytest.fixture(scope="module")
+def env(tmp_path_factory: pytest.TempPathFactory) -> Dict[str, Any]:
+    """Built once per module: every test only reads the repositories, the
+    SCIP databases and the group grants."""
+    tmp_path = tmp_path_factory.mktemp("scip-access")
     golden = tmp_path / "golden-repos"
     _build_repo(golden / "repo-a", GRANTED_TAG)
     _build_repo(golden / "repo-b", UNGRANTED_TAG)

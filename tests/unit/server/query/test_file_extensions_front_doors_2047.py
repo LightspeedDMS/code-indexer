@@ -50,6 +50,10 @@ ADMIN = User(
 )
 NEVER_A_SUFFIX = "never be a file extension"
 
+# The module-scoped env starts a real create_app() and indexes a real corpus
+# once (~7 s alone); whichever test runs first pays it, slower under load.
+pytestmark = pytest.mark.timeout(60)
+
 # (case id, file_extensions, language)
 CASES: List[Tuple[str, List[str], Optional[str]]] = [
     ("bare-lowercase", ["md"], None),
@@ -378,13 +382,17 @@ def test_multimodal_repo_fans_out_once(env, tmp_path) -> None:
     assert fan_outs.call_count == 1
 
 
-def _two_repo_manager(first_repo: Path, tmp_path: Path) -> Any:
+@pytest.fixture(scope="module")
+def second_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A second corpus repository, built once: the tests using it only search."""
+    return build_corpus_repo(tmp_path_factory.mktemp("ext-filter-2047-second"))
+
+
+def _two_repo_manager(first_repo: Path, second_repo: Path, tmp_path: Path) -> Any:
     from code_indexer.server.query.semantic_query_manager import (
         SemanticQueryManager,
     )
 
-    (tmp_path / "second").mkdir()
-    second_repo = build_corpus_repo(tmp_path / "second")
     listing = MagicMock()
     listing.list_activated_repositories.return_value = [
         {"user_alias": "repo-a", "repo_path": str(first_repo)},
@@ -397,12 +405,14 @@ def _two_repo_manager(first_repo: Path, tmp_path: Path) -> Any:
     )
 
 
-def test_one_request_deadline_shared_across_repositories(env, tmp_path) -> None:
+def test_one_request_deadline_shared_across_repositories(
+    env, second_repo, tmp_path
+) -> None:
     import time
 
     from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
-    manager = _two_repo_manager(env[1], tmp_path)
+    manager = _two_repo_manager(env[1], second_repo, tmp_path)
     deadline = time.monotonic() + 3600
     with patch.object(
         TantivyIndexManager,
@@ -425,7 +435,7 @@ def test_one_request_deadline_shared_across_repositories(env, tmp_path) -> None:
 
 
 def test_expired_deadline_starts_no_further_repository_search(
-    env, tmp_path, caplog
+    env, second_repo, tmp_path, caplog
 ) -> None:
     """No repository search starts once the request's budget has passed:
     the index is never queried, although .md files would match."""
@@ -434,7 +444,7 @@ def test_expired_deadline_starts_no_further_repository_search(
 
     from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
-    manager = _two_repo_manager(env[1], tmp_path)
+    manager = _two_repo_manager(env[1], second_repo, tmp_path)
     with (
         patch.object(
             TantivyIndexManager,
