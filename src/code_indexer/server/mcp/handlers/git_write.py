@@ -33,11 +33,38 @@ from code_indexer.server.services.git_operations_service import (
     GitCommandError,
     git_operations_service,
 )
+from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
 
 from ..auth.elevation_decorator import require_mcp_elevation
 from ._utils import _admin_role_first, _mcp_response, app_module
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_mutable_git_repo_path(
+    repository_alias: str, username: str
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve the repository path for a MUTATING git operation.
+
+    The single choke point for every git write tool in this module: the
+    path comes from ``_resolve_git_repo_path`` and is refused when it is an
+    immutable versioned snapshot (a global alias resolves to its snapshot
+    target), so no write ever runs inside one.
+
+    Returns:
+        (path, error_message), same contract as ``_resolve_git_repo_path``.
+    """
+    import code_indexer.server.mcp.handlers._legacy as _legacy
+
+    repo_path, error_msg = _legacy._resolve_git_repo_path(repository_alias, username)
+    if error_msg is None and repo_path is not None and is_versioned_snapshot(repo_path):
+        return None, (
+            f"Repository '{repository_alias}' resolves to an immutable versioned "
+            "snapshot; git write operations are not allowed on it. Activate the "
+            "repository to get a writable workspace."
+        )
+    return repo_path, error_msg
+
 
 # Error codes for git write operations (named constants for traceability)
 _ERR_STAGE = "MCP-GENERAL-064"
@@ -66,8 +93,6 @@ def _handle_git_file_operation(
     operation_name: str,
 ) -> Dict[str, Any]:
     """Execute a git file operation (stage/unstage) with standard validation and error handling."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -80,7 +105,7 @@ def _handle_git_file_operation(
         )
 
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -254,8 +279,6 @@ def _resolve_commit_identity(
 
 def git_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_commit tool - create a git commit."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -267,7 +290,7 @@ def git_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: message"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -433,8 +456,6 @@ def git_merge(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     Story #388: Git Merge with Conflict Detection.
     """
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -446,7 +467,7 @@ def git_merge(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: source_branch"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -574,8 +595,6 @@ def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]
 def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_branch_delete tool - delete branch (admin role, like
     the ``repository:admin`` REST twin, however the call was admitted)."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -588,7 +607,7 @@ def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
     confirmation_token = args.get("confirmation_token")
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -632,8 +651,6 @@ def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_branch_switch tool - switch to different branch."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -656,7 +673,7 @@ def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: branch_name"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -690,8 +707,6 @@ def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_branch_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_branch_create tool - create new branch."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -703,7 +718,7 @@ def git_branch_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: branch_name"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -736,8 +751,6 @@ def git_branch_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_checkout_file(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_checkout_file tool - restore file from HEAD."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -749,7 +762,7 @@ def git_checkout_file(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: file_path"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -776,15 +789,13 @@ def git_checkout_file(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_merge_abort(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_merge_abort tool - abort in-progress merge."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -811,8 +822,6 @@ def git_merge_abort(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_mark_resolved(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_mark_resolved tool - mark a conflicted file as resolved."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -824,7 +833,7 @@ def git_mark_resolved(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: file_path"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -861,8 +870,6 @@ def git_mark_resolved(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_reset tool - reset working tree (admin role, like the
     ``repository:admin`` REST twin, however the call was admitted)."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -880,7 +887,7 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     confirmation_token = args.get("confirmation_token")
 
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -915,8 +922,6 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_clean tool - remove untracked files (admin role, like
     the ``repository:admin`` REST twin, however the call was admitted)."""
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -925,7 +930,7 @@ def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     confirmation_token = args.get("confirmation_token")
 
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -959,8 +964,6 @@ def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     Story #387: PAT-Authenticated Git Push with User Attribution.
     """
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -971,7 +974,7 @@ def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         branch = args.get("branch")
         set_upstream = args.get("set_upstream", True)
 
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
@@ -1105,7 +1108,6 @@ def git_amend(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     Originally Story #454, extracted as part of Story #496 modularisation.
     Uses PAT credential identity for GIT_AUTHOR/COMMITTER env vars.
     """
-    import code_indexer.server.mcp.handlers._legacy as _legacy
     import os as _os
 
     repository_alias = args.get("repository_alias")
@@ -1116,7 +1118,7 @@ def git_amend(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             repository_alias, user.username
         )
         if error_msg is not None:
