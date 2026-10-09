@@ -99,10 +99,139 @@ _FUNCTIONS = frozenset(
         "os.truncate",
         "glob.glob",
         "glob.iglob",
+        "os.open",
+        "os.access",
+        "os.readlink",
+        "os.statvfs",
+        "os.chdir",
+        "os.path.realpath",
+        "os.path.lexists",
+        "os.path.ismount",
+        "os.path.getctime",
+        "os.path.getatime",
+        "os.path.samefile",
+        "io.open",
+        "codecs.open",
+        "tarfile.open",
+        "zipfile.ZipFile",
+        # A temp file can be created INSIDE a repository (atomic writes pass
+        # dir=), so tempfile creators are inventoried like any other create.
+        "tempfile.mkstemp",
+        "tempfile.mkdtemp",
+        "tempfile.NamedTemporaryFile",
+        "tempfile.TemporaryDirectory",
+        "tempfile.TemporaryFile",
+        "tempfile.SpooledTemporaryFile",
     }
 )
+
+#: Calls into the same modules that do NOT touch a path: string-only path
+#: arithmetic, process and environment queries, in-memory streams, and
+#: operations on an already-open descriptor (the ``os.open`` that produced it is
+#: what is inventoried). Every call into GOVERNED_MODULES must be in this set or
+#: in _FUNCTIONS -- test_every_module_call_is_accounted_for keeps the scanner
+#: closed instead of trusting a hand-picked list.
+KNOWN_NOT_FS = frozenset(
+    {
+        "os.path.join",
+        "os.path.basename",
+        "os.path.dirname",
+        "os.path.split",
+        "os.path.splitext",
+        "os.path.normpath",
+        "os.path.relpath",
+        "os.path.isabs",
+        "os.path.abspath",
+        "os.path.expanduser",
+        "os.path.expandvars",
+        "os.path.commonpath",
+        "os.path.commonprefix",
+        "os.fspath",
+        "os.getcwd",
+        "os.getenv",
+        "os.putenv",
+        "os.getpid",
+        "os.getppid",
+        "os.getpgid",
+        "os.getuid",
+        "os.geteuid",
+        "os.getgid",
+        "os.getegid",
+        "os.getlogin",
+        "os.getloadavg",
+        "os.cpu_count",
+        "os.uname",
+        "os.urandom",
+        "os.strerror",
+        "os.umask",
+        "os.kill",
+        "os.killpg",
+        "os.execv",
+        "os.execvp",
+        "os.pipe",
+        "os.close",
+        "os.fsync",
+        "os.fdatasync",
+        "os.read",
+        "os.write",
+        "os.fstat",
+        "os.fchmod",
+        "os.fchown",
+        "os.fdopen",
+        "os.dup",
+        "os.dup2",
+        "os.set_blocking",
+        "os.waitpid",
+        "os.environ.get",
+        "os.environ.copy",
+        "os.environ.setdefault",
+        "os.environ.pop",
+        "os.environ.items",
+        "os.environ.keys",
+        "os.environ.update",
+        "io.BytesIO",
+        "io.StringIO",
+        "io.TextIOWrapper",
+        "io.BufferedReader",
+        "codecs.getincrementaldecoder",
+        "codecs.lookup",
+        "shutil.which",
+        "shutil.ignore_patterns",
+        "shutil.get_terminal_size",
+        "shutil.copyfileobj",
+        "tempfile.gettempdir",
+        "tempfile.gettempdirb",
+    }
+)
+
+#: Modules whose every call must be classified one way or the other.
+GOVERNED_MODULES = (
+    "os",
+    "os.path",
+    "os.environ",
+    "shutil",
+    "io",
+    "glob",
+    "tarfile",
+    "zipfile",
+    "codecs",
+    "tempfile",
+)
 _SHUTIL = frozenset(
-    {"copy", "copy2", "copyfile", "copytree", "rmtree", "move", "copymode", "copystat"}
+    {
+        "copy",
+        "copy2",
+        "copyfile",
+        "copytree",
+        "rmtree",
+        "move",
+        "copymode",
+        "copystat",
+        "disk_usage",
+        "chown",
+        "make_archive",
+        "unpack_archive",
+    }
 )
 #: pathlib methods. Matched by name on any receiver, so this over-matches on
 #: purpose (fail closed); a non-path receiver is classified not-repo.
@@ -133,6 +262,12 @@ _METHODS = frozenset(
         "samefile",
         "chmod",
         "readlink",
+        "is_mount",
+        "owner",
+        "group",
+        "walk",
+        "copy",
+        "move",
     }
 )
 
@@ -190,6 +325,12 @@ def fenced_files() -> List[Path]:
         if rel in seen:
             continue
         seen[rel] = path
+        # Importing a.b.c RUNS a/__init__.py and a/b/__init__.py too, so every
+        # ancestor package's __init__ is in the fence -- and whatever it imports.
+        for parent in path.relative_to(_SRC).parents:
+            init = _SRC / parent / "__init__.py"
+            if parent != Path(".") and init.is_file():
+                stack.append(init)
         for module in _first_party_imports(path):
             nxt = _module_path(module)
             if nxt is not None and nxt.relative_to(_SRC).as_posix() not in seen:
@@ -209,16 +350,48 @@ def _dotted(node: ast.AST) -> Optional[str]:
     return None
 
 
-def operation(call: ast.Call) -> Optional[str]:
+def import_aliases(tree: ast.Module) -> Dict[str, str]:
+    """Local name -> real dotted name for this module's imports, anywhere in it.
+
+    So `import os as _os`, `from os import remove` and `from os.path import
+    exists` resolve to os.*, os.remove and os.path.exists before matching --
+    matching the literal dotted text alone let every aliased call through.
+    """
+    aliases: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return aliases
+
+
+def resolved_name(func: ast.AST, aliases: Dict[str, str]) -> Optional[str]:
+    name = _dotted(func)
+    if not name:
+        return None
+    head, _, rest = name.partition(".")
+    real = aliases.get(head)
+    if real is None:
+        return name
+    return f"{real}.{rest}" if rest else real
+
+
+def operation(
+    call: ast.Call, aliases: Optional[Dict[str, str]] = None
+) -> Optional[str]:
     """The filesystem operation a call performs, or None if it is not one."""
-    name = _dotted(call.func)
+    name = resolved_name(call.func, aliases or {})
     if name in _FUNCTIONS:
         return name
     if name and name.startswith("shutil.") and name.split(".", 1)[1] in _SHUTIL:
         return name
     if not isinstance(call.func, ast.Attribute):
         return None
-    if name and name.startswith(("os.", "shutil.", "glob.")):
+    if name and name.split(".")[0] in {m.split(".")[0] for m in GOVERNED_MODULES}:
         return None
     attr = call.func.attr
     # Path.replace(target) takes one argument; str.replace(old, new) two.
@@ -229,6 +402,7 @@ def operation(call: ast.Call) -> Optional[str]:
 
 def scan_source(module: str, source: str) -> Counter:
     tree = ast.parse(source)
+    aliases = import_aliases(tree)
     found: Counter = Counter()
     scopes: List[str] = []
 
@@ -248,7 +422,7 @@ def scan_source(module: str, source: str) -> Counter:
             self._scoped(node, node.name)
 
         def visit_Call(self, node: ast.Call) -> None:
-            op = operation(node)
+            op = operation(node, aliases)
             if op is not None:
                 found[(module, ".".join(scopes) or "<module>", op)] += 1
             self.generic_visit(node)
@@ -391,6 +565,36 @@ def test_the_summary_matches_the_inventory() -> None:
 # ── the guard sees what it claims to ────────────────────────────────────────
 
 
+def unaccounted_module_calls() -> Counter:
+    """Calls into GOVERNED_MODULES that are neither inventoried nor known not-fs."""
+    governed_heads = {m.split(".")[0] for m in GOVERNED_MODULES}
+    unknown: Counter = Counter()
+    for path in fenced_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        aliases = import_aliases(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = resolved_name(node.func, aliases)
+            if not name or name.split(".")[0] not in governed_heads:
+                continue
+            if name.rsplit(".", 1)[0] not in GOVERNED_MODULES:
+                continue
+            if operation(node, aliases) is None and name not in KNOWN_NOT_FS:
+                unknown[name] += 1
+    return unknown
+
+
+def test_every_module_call_is_accounted_for() -> None:
+    """The scanner is closed over its modules: a call it does not recognise
+    fails here rather than silently staying out of the inventory."""
+    unknown = unaccounted_module_calls()
+    assert not unknown, (
+        "calls the scanner neither inventories nor knows to be non-filesystem -- "
+        f"add each to _FUNCTIONS or KNOWN_NOT_FS: {dict(unknown)}"
+    )
+
+
 class TestScannerSeesEveryShape:
     def _ops(self, source: str) -> Counter:
         return Counter({k[2]: v for k, v in scan_source("m.py", source).items()})
@@ -425,8 +629,40 @@ class TestScannerSeesEveryShape:
         src = "class C:\n    def m(self, p):\n        p.exists(); p.exists()\n"
         assert scan_source("m.py", src) == Counter({("m.py", "C.m", ".exists"): 2})
 
+    def test_aliased_imports_resolve_before_matching(self) -> None:
+        src = (
+            "import os as _os\nfrom os import remove\nfrom os.path import exists\n"
+            "from shutil import rmtree as nuke\n"
+            "def f(p):\n    _os.listdir(p); remove(p); exists(p); nuke(p)\n"
+        )
+        assert set(self._ops(src)) == {
+            "os.listdir",
+            "os.remove",
+            "os.path.exists",
+            "shutil.rmtree",
+        }
+
+    def test_fd_opens_realpath_and_tempfiles_are_listed(self) -> None:
+        src = (
+            "import os, tempfile\n"
+            "def f(p):\n    os.open(p, 0); os.path.realpath(p); tempfile.mkstemp(dir=p)\n"
+        )
+        assert set(self._ops(src)) == {
+            "os.open",
+            "os.path.realpath",
+            "tempfile.mkstemp",
+        }
+
+    def test_path_arithmetic_is_not_listed(self) -> None:
+        src = "import os\ndef f(p):\n    os.path.join(p, 'x'); os.path.dirname(p)\n"
+        assert not self._ops(src)
+
     def test_the_fence_reaches_through_imports_and_includes_the_cli(self) -> None:
         fenced = {p.relative_to(_SRC).as_posix() for p in fenced_files()}
+        assert "indexing/__init__.py" in fenced, "ancestor package inits are skipped"
+        assert "indexing/processor.py" in fenced, (
+            "an __init__'s own imports are skipped"
+        )
         assert "cli.py" in fenced, "the spawned `cidx index` child is out of scope"
         assert "indexing/file_finder.py" in fenced, "the import closure is not followed"
         assert "server/app.py" in fenced
