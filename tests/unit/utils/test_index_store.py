@@ -372,6 +372,139 @@ def test_every_scip_cli_command_reads_the_stores_scip_dir(
     assert seen == [root / "scip"], f"{args[0]}: {seen}"
 
 
+# ── per-repo config and mode detection ─────────────────────────────────────
+
+
+def test_config_discovery_finds_the_config_in_the_store(elsewhere: Any) -> None:
+    from code_indexer.config import ConfigManager
+
+    repo, root = elsewhere
+    root.mkdir(parents=True)
+    (root / "config.json").write_text("{}")
+    (repo / "sub").mkdir()
+
+    manager = ConfigManager.create_with_backtrack(repo / "sub")
+
+    assert manager.config_path == root / "config.json"
+    assert manager.project_root == repo, "discovery did not record the repo"
+    assert ConfigManager.find_config_path(repo / "sub") == root / "config.json"
+
+
+@pytest.mark.parametrize("cwd_gone", [False, True])
+def test_discovery_from_the_cwd_records_the_repo(
+    elsewhere: Any, monkeypatch: pytest.MonkeyPatch, cwd_gone: bool
+) -> None:
+    """No start_dir: the walk starts at the cwd -- or, when the cwd was deleted,
+    at the temp dir -- and the root must still be the repo, not the store's
+    parent that config_path.parent.parent would name."""
+    import tempfile
+
+    from code_indexer.config import ConfigManager
+
+    repo, root = elsewhere
+    root.mkdir(parents=True)
+    (root / "config.json").write_text("{}")
+    (repo / "sub").mkdir()
+    if cwd_gone:
+        doomed = repo / "doomed"
+        doomed.mkdir()
+        monkeypatch.chdir(doomed)
+        doomed.rmdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(repo / "sub"))
+    else:
+        monkeypatch.chdir(repo / "sub")
+
+    manager = ConfigManager.create_with_backtrack()
+
+    assert manager.config_path == root / "config.json"
+    assert manager.project_root == repo
+
+
+def test_with_no_config_anywhere_the_default_is_rooted_at_the_start(
+    elsewhere: Any,
+) -> None:
+    from code_indexer.config import ConfigManager
+
+    repo, root = elsewhere
+
+    manager = ConfigManager.create_with_backtrack(repo)
+
+    assert manager.config_path == root / "config.json"
+    assert manager.project_root == repo
+
+
+@pytest.mark.parametrize("socket_base", [None, "custom-sockets"])
+def test_the_daemon_socket_is_keyed_by_the_repo_not_the_store(
+    elsewhere: Any, monkeypatch: pytest.MonkeyPatch, socket_base: Any
+) -> None:
+    """Keyed by the store, every repo under one store parent could share a socket."""
+    from code_indexer.config import ConfigManager
+    from code_indexer.daemon import socket_helper
+
+    repo, root = elsewhere
+    root.mkdir(parents=True)
+    (root / "config.json").write_text("{}")
+    keyed_by: List[Path] = []
+
+    def record(name: str, result: Any) -> None:
+        def fake(repo_path: Path, *args: Any) -> Any:
+            keyed_by.append(Path(repo_path))
+            return result
+
+        monkeypatch.setattr(socket_helper, name, fake)
+
+    record("generate_repo_hash", "hash")
+    record("generate_socket_path", repo.parent / "s.sock")
+    record("create_mapping_file", None)
+    monkeypatch.setattr(socket_helper, "ensure_socket_directory", lambda *a: None)
+    manager = ConfigManager.create_with_backtrack(repo)
+    base = str(repo.parent / socket_base) if socket_base else None
+    daemon = {**ConfigManager.DAEMON_DEFAULTS, "socket_base": base}
+    monkeypatch.setattr(manager, "get_daemon_config", lambda: daemon)
+
+    manager.get_socket_path()
+
+    assert keyed_by == [repo, repo], keyed_by
+
+
+def test_a_relative_codebase_dir_resolves_against_the_repo_not_the_store(
+    elsewhere: Any,
+) -> None:
+    """The reverse mapping config -> repo: with the index elsewhere, the old
+    config_path.parent.parent would land in the store, not the repository."""
+    from code_indexer.config import ConfigManager
+
+    repo, root = elsewhere
+    root.mkdir(parents=True)
+    (root / "config.json").write_text(json.dumps({"codebase_dir": "."}))
+
+    config = ConfigManager.create_with_backtrack(repo).load()
+
+    assert config.codebase_dir == repo.resolve()
+
+
+def test_mode_detection_finds_the_project_through_the_store(elsewhere: Any) -> None:
+    from code_indexer.mode_detection.command_mode_detector import (
+        CommandModeDetector,
+        find_project_root,
+    )
+
+    repo, root = elsewhere
+    root.mkdir(parents=True)
+    (repo / "deep").mkdir()
+
+    assert find_project_root(repo / "deep") == repo
+    assert CommandModeDetector(repo).config_dir == root
+
+
+def test_a_directly_built_manager_keeps_todays_layout(tmp_path: Path) -> None:
+    """No recorded root: the local backend's <repo>/.code-indexer/config.json."""
+    from code_indexer.config import ConfigManager
+
+    manager = ConfigManager(tmp_path / ".code-indexer" / "config.json")
+    assert manager.project_root == tmp_path
+
+
 if __name__ == "__main__":
     if "--write" in sys.argv:
         _BASELINE.write_text(json.dumps(scan(), indent=1, sort_keys=True) + "\n")

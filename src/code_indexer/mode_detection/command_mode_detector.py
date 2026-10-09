@@ -4,6 +4,7 @@ Automatically detects whether commands should run in local, remote, or uninitial
 based on configuration file presence and validation.
 """
 
+from ..utils.index_store import index_root
 import json
 import logging
 from pathlib import Path
@@ -35,7 +36,7 @@ def find_project_root(start_path: Path) -> Path:
         search_paths = [current] + list(current.parents)[:10]  # Limit to 10 levels up
         for path in search_paths:
             try:
-                config_dir = path / ".code-indexer"
+                config_dir = index_root(path)
                 if config_dir.exists() and config_dir.is_dir():
                     return path
             except (PermissionError, OSError):
@@ -58,7 +59,7 @@ class CommandModeDetector:
             project_root: Path to the project root directory (can be None)
         """
         self.project_root = project_root
-        self.config_dir = project_root / ".code-indexer" if project_root else None
+        self.config_dir = index_root(project_root) if project_root else None
         self._is_proxy_mode = False
 
     def detect_mode(self) -> Literal["local", "remote", "proxy", "uninitialized"]:
