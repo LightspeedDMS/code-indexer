@@ -18,7 +18,7 @@ from ..config import Config
 from ..utils.git_runner import run_git_command, is_git_repository
 from ..indexing.repo_manifest import RepoManifest
 from ..utils.blob_hash import git_blob_hash, git_blob_hash_bytes
-from .git_head import UNKNOWN, read_head_branch, read_head_commit
+from .git_head import probe_backend_repository, read_head_branch, read_head_commit
 
 logger = logging.getLogger(__name__)
 
@@ -77,12 +77,17 @@ class FileIdentifier:
         # IS a repository. The server stamps the backend on every spawn,
         # including non-git sources (cidx-meta, local:// folders); treating one
         # as git-addressable would switch its file signatures to git hashes and
-        # change its point ids. So the backend is asked once: HEAD resolving is
-        # the proof, and the answer is kept as this run's commit.
+        # change its point ids. So the backend is asked -- and ONLY its explicit
+        # "not a git repository" makes the path non-git: a transient failure
+        # must not demote a real repository (that would change ITS point ids).
         self._git_backend = git_backend
         self._backend_repo = False
         if git_backend is not None:
-            self._backend_repo = self._backend_resolves_head()
+            # The resolved commit is kept as this run's commit (same question),
+            # so a real repository pays no extra call.
+            self._backend_repo, self._cached_commit_hash = probe_backend_repository(
+                project_dir, git_backend
+            )
             if manifest is None:
                 self.git_available = self._backend_repo
 
@@ -108,18 +113,6 @@ class FileIdentifier:
             self.git_available = self._backend_repo
         else:
             self.git_available = self._detect_git()
-
-    def _backend_resolves_head(self) -> bool:
-        """Whether the git backend knows this path as a repository with a HEAD.
-
-        The resolved commit is kept as this run's commit (it is the same
-        question), so the probe costs no extra call on a real repository.
-        """
-        commit = read_head_commit(self.project_dir, self._git_backend)
-        if commit == UNKNOWN:
-            return False
-        self._cached_commit_hash = commit
-        return True
 
     def _detect_git(self) -> bool:
         """

@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional, Tuple, Union
 
 from ..server.storage.shared.git_backend import head_branch
 from ..utils.git_runner import run_git_command
@@ -27,6 +27,32 @@ from ..utils.git_runner import run_git_command
 logger = logging.getLogger(__name__)
 
 UNKNOWN = "unknown"
+
+#: What git says for a path that is not inside a repository. The ONLY failure
+#: that means "not a repository"; anything else (git-mcp unreachable, a timeout)
+#: says nothing about the path and must not be read as an answer.
+NOT_A_REPOSITORY_MARKER = "not a git repository"
+
+
+def probe_backend_repository(
+    project_dir: Union[str, Path], git_backend: Any
+) -> Tuple[bool, Optional[str]]:
+    """``(is_repository, head_commit)`` as the git backend answers them.
+
+    Resolving HEAD answers both at once. ONLY git's explicit "not a git
+    repository" makes the path non-git; a transient failure answers neither
+    question, so it is reported as a repository with an unknown commit -- the
+    safe side, since the other one switches a real repository's file
+    signatures to file hashes and changes every point id.
+    """
+    try:
+        commit = str(git_backend.rev_parse(str(project_dir), "HEAD")).strip()
+    except subprocess.CalledProcessError as exc:
+        return NOT_A_REPOSITORY_MARKER not in str(exc.stderr or ""), None
+    except Exception as exc:  # the backend's transport, whatever it is
+        logger.debug("git backend probe failed for %s: %s", project_dir, exc)
+        return True, None
+    return True, commit or None
 
 
 def read_head_commit(project_dir: Union[str, Path], git_backend: Optional[Any]) -> str:
