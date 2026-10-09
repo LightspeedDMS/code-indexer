@@ -373,9 +373,16 @@ build:image:
       # `docker push` produced before. The ${LATEST_TAG} re-point below copies
       # that manifest verbatim via put-image, and the ArgoCD overlay consumes
       # it, so keep the artifact shape byte-for-byte what it has always been.
+      # The content-backend plugin is installed from the evo-sandbox private PyPI
+      # registry. Its index URL goes in as a BuildKit secret (never a build-arg,
+      # which would land in the image history). Reading another project
+      # registry with CI_JOB_TOKEN needs the evo-sandbox job-token allowlist to
+      # include this project.
+      export PLUGIN_INDEX_URL="https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/api/v4/projects/85492596/packages/pypi/simple"
       docker buildx build \
         --builder cidx-builder \
         --provenance=false --sbom=false \
+        --secret id=plugin_index,env=PLUGIN_INDEX_URL \
         $CACHE_FROM \
         --cache-to "type=registry,ref=${ECR_REPOSITORY}:${NEW_CACHE_TAG},mode=max,image-manifest=true,oci-mediatypes=true" \
         -t "$FULL" --push .
@@ -416,6 +423,10 @@ build:image:
       # that actually ships. Pointing at the mount tested the working tree, and
       # the bind mount import overhead also pushed `cidx --help` from ~1.0s to
       # ~1.7s, intermittently tripping the 2s startup assertion.
+      # The shipped image must carry the content-backend plugin, or
+      # content_backend=delegated fails at runtime. The Dockerfile only skips it
+      # when the build secret is absent, which CI never does -- assert it.
+      python -c "from importlib.metadata import entry_points; eps = [e.value for e in entry_points(group='code_indexer.content_backend')]; assert eps == ['cidx_content_backend:make_content_backend'], eps; print('content backend plugin:', eps)"
       python -m pip install --quiet --no-input pytest pytest-asyncio pytest-timeout
       python -m pytest \
         tests/unit/xray/ \

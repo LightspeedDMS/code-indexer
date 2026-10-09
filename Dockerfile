@@ -56,6 +56,31 @@ RUN pip install ./plugins/cidx_orchestrator_invoker
 COPY plugins/cidx_git_backend ./plugins/cidx_git_backend
 RUN pip install ./plugins/cidx_git_backend
 
+# Content seam: delegate cidx's repository reads (manifest + fetch) to
+# workspace-mcp, so a pod can index with no repo mount. The plugin lives in
+# evo-sandbox and is published to its PyPI package registry; this installs a
+# PINNED version. Like the git backend it registers on an entry point
+# (`code_indexer.content_backend`), so installing it is what makes
+# `content_backend=delegated` resolvable; default config is `local`, so it is
+# inert until the config flips. Endpoint and token at runtime come from
+# CIDX_CONTENT_MCP_URL / CIDX_CONTENT_MCP_TOKEN.
+#
+# The registry is private: the index URL (with credentials) arrives as a
+# BuildKit SECRET, never a build arg, so it is not written into any layer or the
+# image history. CI's build:image always supplies it, and its in-image step
+# asserts the entry point resolves -- so a CI image can never ship without the
+# plugin. A local `docker build` without the secret skips the plugin, loudly.
+ARG CIDX_CONTENT_BACKEND_VERSION=0.2.0
+RUN --mount=type=secret,id=plugin_index,required=false \
+    if [ -s /run/secrets/plugin_index ]; then \
+      pip install --no-cache-dir --no-deps \
+        --index-url "$(cat /run/secrets/plugin_index)" \
+        "cidx-content-backend==${CIDX_CONTENT_BACKEND_VERSION}"; \
+    else \
+      echo "WARNING: no plugin_index secret -- cidx-content-backend NOT installed;" \
+           "content_backend=delegated will fail loud in this image" >&2; \
+    fi
+
 # ---- xray-cli build stage ----
 # WHY THIS STAGE EXISTS: xray_search / xray_explore / xray_search_batch /
 # xray_analyze_graph have NO Python fallback -- they shell out to the native
