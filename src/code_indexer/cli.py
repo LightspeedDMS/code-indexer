@@ -20,6 +20,7 @@ from typing import (
     Any,
     List,
     Literal,
+    Sequence,
     Tuple,
     cast,
     TYPE_CHECKING,
@@ -4361,7 +4362,9 @@ def index(
             # delegated backend there is no SmartIndexer pass, so the manifest
             # is built here: discovery and text both come from it, not the disk.
             fts_backend, fts_manifest = _delegated_fts_source(
-                content_backend, config.codebase_dir
+                content_backend,
+                config.codebase_dir,
+                prune_dirs=file_finder.manifest_prune_dirs(),
             )
             if fts_manifest is not None:
                 file_finder.set_manifest(fts_manifest, fts_backend)
@@ -5097,14 +5100,18 @@ def _build_index_content_backend(backend_type: str) -> Any:
     return build_named_content_backend(backend_type)
 
 
-def _delegated_fts_source(backend_type: str, codebase_dir: Path) -> Tuple[Any, Any]:
+def _delegated_fts_source(
+    backend_type: str, codebase_dir: Path, *, prune_dirs: Sequence[str] = ()
+) -> Tuple[Any, Any]:
     """(backend, manifest) for a delegated FTS rebuild, or (None, None) for local."""
     if backend_type == "local":
         return None, None
     from .indexing.repo_manifest import RepoManifest
 
     backend = _build_index_content_backend(backend_type)
-    return backend, RepoManifest.build(codebase_dir, backend=backend)
+    return backend, RepoManifest.build(
+        codebase_dir, backend=backend, prune_dirs=prune_dirs
+    )
 
 
 def _populate_fts_index_from_disk(

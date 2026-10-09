@@ -70,7 +70,7 @@ RUN pip install ./plugins/cidx_git_backend
 # image history. CI's build:image always supplies it, and its in-image step
 # asserts the entry point resolves -- so a CI image can never ship without the
 # plugin. A local `docker build` without the secret skips the plugin, loudly.
-ARG CIDX_CONTENT_BACKEND_VERSION=0.2.0
+ARG CIDX_CONTENT_BACKEND_VERSION=0.3.0
 RUN --mount=type=secret,id=plugin_index,required=false \
     if [ -s /run/secrets/plugin_index ]; then \
       pip install --no-cache-dir --no-deps \

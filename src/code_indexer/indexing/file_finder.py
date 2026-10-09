@@ -58,11 +58,8 @@ class FileFinder:
                 # If initialization fails (e.g., due to mock objects), skip override filtering
                 pass
 
-    def _create_gitignore_spec(self) -> None:
-        """Create pathspec for excluded directories."""
-        patterns = []
-
-        # Merge base + override exclude directories for consistent pathspec-based exclusion
+    def _all_exclude_dirs(self) -> List[str]:
+        """Base + override exclude directories, as discovery applies them."""
         all_exclude_dirs = list(self.config.exclude_dirs)
         if (
             hasattr(self.config, "override_config")
@@ -80,9 +77,49 @@ class FileFinder:
             except (TypeError, AttributeError):
                 # Skip override dirs if initialization fails (e.g., mock objects)
                 pass
+        return all_exclude_dirs
+
+    def manifest_prune_dirs(self) -> List[str]:
+        """Directory names a delegated manifest may skip without reading them.
+
+        A manifest hashes every file it walks, and a golden repo's own
+        ``.code-indexer`` and ``node_modules`` are often most of the tree (one
+        manifest of agent-orchestrator hashed 3.26 GB for 512 tracked files).
+        The backend prunes by NAME at any depth, so a name qualifies only when
+        THIS finder would prune it wherever it appears -- asked of
+        ``_should_prune_dir`` itself at three depths, never re-derived:
+
+        * a literal, single-component exclude dir (no ``/``, no glob);
+        * and no force-include patterns at all: one can rescue a directory by
+          its ancestor's name (``_should_prune_dir``), which a name-only prune
+          cannot express. Those repos keep today's full walk.
+
+        Pruning only what discovery would discard anyway is what keeps the file
+        set -- and so every point id -- identical to an unpruned run.
+        """
+        if self._force_include_spec is not None:
+            return []
+        names: List[str] = []
+        for name in self._all_exclude_dirs():
+            if (
+                not name
+                or "/" in name
+                or any(c in name for c in "*?[]!")
+                or name in names
+            ):
+                continue
+            if all(
+                self._should_prune_dir(at) for at in (name, f"a/{name}", f"a/b/{name}")
+            ):
+                names.append(name)
+        return names
+
+    def _create_gitignore_spec(self) -> None:
+        """Create pathspec for excluded directories."""
+        patterns = []
 
         # Add patterns for all excluded directories
-        for exclude_dir in all_exclude_dirs:
+        for exclude_dir in self._all_exclude_dirs():
             # Use /** suffix to exclude all contents under the directory
             # This works for both single-level ("temp") and multi-level ("help/Source") paths
             patterns.append(f"{exclude_dir}/**")  # Matches from root: help/Source/**

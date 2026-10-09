@@ -95,7 +95,9 @@ class GitAwareDocumentProcessor(DocumentProcessor):
         # nor leave a half-installed manifest serving stale hashes.
         try:
             self.repo_manifest = RepoManifest.build(
-                self.config.codebase_dir, backend=self.content_backend
+                self.config.codebase_dir,
+                backend=self.content_backend,
+                prune_dirs=self.file_finder.manifest_prune_dirs(),
             )
             self.file_identifier.set_manifest(self.repo_manifest)
             self.file_finder.set_manifest(self.repo_manifest, self.content_backend)

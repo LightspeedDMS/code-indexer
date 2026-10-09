@@ -39,10 +39,11 @@ must be caught by the read, not papered over from here.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 from pathlib import Path, PurePosixPath
-from typing import Dict, Iterator, Optional, Union
+from typing import Any, Dict, Iterator, Optional, Sequence, Union
 
 from ..server.storage.shared.content_backend import (
     ContentBackend,
@@ -51,6 +52,17 @@ from ..server.storage.shared.content_backend import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _accepts_prune_dirs(backend: Any) -> bool:
+    """Whether ``backend.manifest`` takes ``prune_dirs`` (or arbitrary kwargs)."""
+    try:
+        params = inspect.signature(backend.manifest).parameters
+    except (TypeError, ValueError):
+        return False
+    return "prune_dirs" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
 
 
 class RepoManifest:
@@ -77,18 +89,37 @@ class RepoManifest:
         repo_path: Union[str, Path],
         backend: Optional[ContentBackend] = None,
         page_size: int = 1000,
+        prune_dirs: Sequence[str] = (),
     ) -> "RepoManifest":
         """Page the whole repository once.
 
         Paging rather than one huge call: a repository is not bounded, and the
         cursor contract exists so neither side has to hold it whole.
+
+        ``prune_dirs``: directory names discovery always discards
+        (``FileFinder.manifest_prune_dirs``), sent on EVERY page so the backend
+        never reads or hashes them. Sent only to a backend whose ``manifest``
+        accepts it: one predating the argument (a plugin older than 0.3.0)
+        still works, unpruned -- slower, and exactly as correct, because
+        discovery filters what comes back either way.
         """
         chosen = backend if backend is not None else ContentBackendFactory.create()
         root = Path(repo_path)
         entries: Dict[str, ContentEntry] = {}
         cursor: Optional[str] = None
+        prune = list(prune_dirs) if _accepts_prune_dirs(chosen) else []
+        if prune_dirs and not prune:
+            logger.info(
+                "content backend %s cannot prune directories; manifest walks them",
+                type(chosen).__name__,
+            )
         while True:
-            page = chosen.manifest(root, cursor=cursor, page_size=page_size)
+            if prune:
+                page = chosen.manifest(
+                    root, cursor=cursor, page_size=page_size, prune_dirs=prune
+                )
+            else:
+                page = chosen.manifest(root, cursor=cursor, page_size=page_size)
             for entry in page.entries:
                 entries[entry.path] = entry
             if page.next_cursor is None:
