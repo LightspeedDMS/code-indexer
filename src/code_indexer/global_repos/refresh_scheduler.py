@@ -58,6 +58,7 @@ from code_indexer.server.services.cidx_meta_backup import (
     detect_default_branch,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.utils.index_command_layout import is_pod_local_repo
 from code_indexer.server.startup.content_backend_wiring import (
     configured_content_backend_name,
     content_backend_name_or_none,
@@ -3573,7 +3574,13 @@ class RefreshScheduler:
 
         # Story #1488: server states the new-collection layout explicitly
         # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
-        index_command = append_server_layout_args(index_command)
+        _source_info = self.registry.get_global_repo(alias_name)
+        _pod_local = is_pod_local_repo(
+            _source_info.get("repo_url") if _source_info else None, alias_name
+        )
+        index_command = append_server_layout_args(
+            index_command, local_content=_pod_local
+        )
 
         # Step 2: Temporal indexing on source (if enabled and not local://)
         repo_info = self.registry.get_global_repo(alias_name)
@@ -3644,7 +3651,8 @@ class RefreshScheduler:
             # (CHUNKS_DB); append_server_layout_args imported above in this
             # method for the semantic command.
             temporal_command = append_server_layout_args(
-                ["cidx", "index", "--index-commits", "--progress-json"]
+                ["cidx", "index", "--index-commits", "--progress-json"],
+                local_content=_pod_local,
             )
             logger.info(f"Temporal indexing enabled for {alias_name}")
 

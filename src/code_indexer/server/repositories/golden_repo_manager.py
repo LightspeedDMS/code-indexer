@@ -54,6 +54,7 @@ from code_indexer.server.storage.shared.content_backend import (
     LocalContentBackend,
 )
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.utils.index_command_layout import is_pod_local_repo
 from code_indexer.utils.git_runner import run_git_command
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
@@ -855,7 +856,8 @@ class GoldenRepoManager:
         # clean URL; the persistence point strips again as defense-in-depth.
         repo_url = self._strip_credentials_if_delegated(repo_url)
 
-        self._refuse_local_git_under_delegated_content()
+        if not repo_url.startswith("local://"):  # local:// lives on this pod
+            self._refuse_local_git_under_delegated_content()
         if enable_temporal:
             self._refuse_temporal_under_delegated_content()
 
@@ -1018,6 +1020,7 @@ class GoldenRepoManager:
                     orphan_event_callback=_make_hnsw_orphan_event_logger(alias),
                     golden_repo_alias=alias,
                     job_id=job_id,
+                    local_content=is_pod_local_repo(repo_url, alias),
                 )
 
                 # Create golden repository record
@@ -2480,6 +2483,10 @@ class GoldenRepoManager:
         starts: git-mcp and workspace-mcp can be different NFS clients, so a
         clone git-mcp reports done can still be briefly missing for the reader.
         """
+        if repo_url.startswith("local://"):
+            # cidx's own repositories (cidx-meta, uploads): created and written
+            # on THIS pod, never with workspace-mcp -- the local behaviour.
+            return self._clone_local_repository_with_regular_copy(repo_url, clone_path)
         self._refuse_local_git_under_delegated_content()
         if self._is_local_path(repo_url):
             source = (
@@ -3251,6 +3258,7 @@ class GoldenRepoManager:
         orphan_event_callback: Optional[Any] = None,
         golden_repo_alias: Optional[str] = None,
         job_id: Optional[str] = None,
+        local_content: bool = False,
     ) -> None:
         """
         Execute the required workflow after successful repository cloning.
@@ -3322,7 +3330,8 @@ class GoldenRepoManager:
             # Story #1488: server states the new-collection layout explicitly
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
             temporal_command = append_server_layout_args(
-                ["cidx", "index", "--index-commits", "--progress-json"]
+                ["cidx", "index", "--index-commits", "--progress-json"],
+                local_content=local_content,
             )
 
             # Story #1404: global temporal indexing floor date, composed
@@ -3612,7 +3621,8 @@ class GoldenRepoManager:
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
             _run_popen_with_telemetry(
                 append_server_layout_args(
-                    ["cidx", "index", "--fts", "--progress-json"]
+                    ["cidx", "index", "--fts", "--progress-json"],
+                    local_content=local_content,
                 ),
                 phase_name="semantic",
                 error_label="semantic+FTS indexing",
@@ -3637,6 +3647,7 @@ class GoldenRepoManager:
                 Path(clone_path),
                 alias=golden_repo_alias,
                 subprocess_env=build_cidx_subprocess_env(),
+                local_content=local_content,
             )
             if not _fts_outcome.ok:
                 logging.error(
@@ -5272,6 +5283,9 @@ class GoldenRepoManager:
         # job_id into any worker whose signature declares a `job_id` param,
         # straight from the dequeued (job_id, func, args, kwargs) tuple --
         # race-free, so no post-submit mutable holder is needed.
+        _golden = self._resolve_golden_repo(alias)
+        _pod_local = is_pod_local_repo(getattr(_golden, "repo_url", None), alias)
+
         def background_worker(progress_callback=None, job_id=None) -> Dict[str, Any]:
             """Execute add index operations in a single background thread with write lock + CoW."""
             # Acquire write lock (Bug #473 Fix 1)
@@ -5444,7 +5458,8 @@ class GoldenRepoManager:
                         )
 
                         command = append_server_layout_args(
-                            ["cidx", "index", "--clear", "--progress-json"]
+                            ["cidx", "index", "--clear", "--progress-json"],
+                            local_content=_pod_local,
                         )
                         _run_with_popen_progress(
                             command,
@@ -5468,7 +5483,8 @@ class GoldenRepoManager:
                         )
 
                         command = append_server_layout_args(
-                            ["cidx", "index", "--rebuild-fts-index"]
+                            ["cidx", "index", "--rebuild-fts-index"],
+                            local_content=_pod_local,
                         )
                         from code_indexer.storage.shared.hnsw_sync_state import (
                             resolve_hnsw_sync_epoch_env_var as _resolve_fts_hnsw_epoch,
@@ -5541,7 +5557,8 @@ class GoldenRepoManager:
                                 "--index-commits",
                                 *_clear_flags,
                                 "--progress-json",
-                            ]
+                            ],
+                            local_content=_pod_local,
                         )
 
                         max_commits = temporal_options.get("max_commits")

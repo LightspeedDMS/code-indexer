@@ -30,7 +30,10 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from code_indexer.server.utils.index_command_layout import append_server_layout_args
+from code_indexer.server.utils.index_command_layout import (
+    append_server_layout_args,
+    is_pod_local_repo,
+)
 from code_indexer.utils.index_store import index_root
 from code_indexer.server.services.index_freshness import (
     build_commit_is_current,
@@ -181,6 +184,7 @@ def ensure_fts_index(
     subprocess_env: Optional[dict] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
     timeout: Optional[int] = None,
+    local_content: bool = False,
 ) -> FtsBuildOutcome:
     """Guarantee a Tantivy FTS index for the in-place golden repo at ``repo_path``.
 
@@ -202,7 +206,11 @@ def ensure_fts_index(
 
     Args:
         repo_path: the in-place golden repo root (parent of ``.code-indexer``).
-        alias: golden-repo alias, for log/outcome attribution only.
+        alias: golden-repo alias, for log/outcome attribution (and it
+            identifies cidx-meta as pod-local).
+        local_content: the repository's files are on this pod (a
+            ``local://`` repo); the rebuild then reads the pod's disk, never
+            a delegated backend.
         subprocess_env: environment for the child ``cidx`` processes (typically
             ``build_cidx_subprocess_env()``); ``None`` inherits the parent env.
         runner: injection seam for tests; defaults to :func:`subprocess.run`.
@@ -257,7 +265,12 @@ def ensure_fts_index(
 
     result, launch_outcome = _run_or_fail(
         runner,
-        append_server_layout_args(["cidx", "index", "--rebuild-fts-index"]),
+        append_server_layout_args(
+            ["cidx", "index", "--rebuild-fts-index"],
+            # A pod-local repository (local://, cidx-meta) is never with
+            # workspace-mcp; the caller knows its URL, the alias covers cidx-meta.
+            local_content=local_content or is_pod_local_repo(None, alias),
+        ),
         cwd=str(repo_path),
         env=subprocess_env,
         timeout=timeout,

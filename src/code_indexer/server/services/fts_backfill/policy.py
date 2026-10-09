@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, Optional
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+from code_indexer.server.utils.index_command_layout import is_pod_local_repo
 
 from ..fts_index_builder import (
     ensure_fts_index,
@@ -51,7 +52,8 @@ def fts_backfill_build_executor(
     timeout: Optional[int] = None
     try:
         cfg = get_config_service().get_config().fts_backfill_sweep_config
-        timeout = int(cfg.build_timeout_seconds)
+        if cfg is not None:
+            timeout = int(cfg.build_timeout_seconds)
     except Exception as exc:  # noqa: BLE001 — a config glitch must not block the build
         logger.warning("fts_backfill_build: config read failed, no timeout: %s", exc)
 
@@ -60,12 +62,32 @@ def fts_backfill_build_executor(
         alias=alias,
         subprocess_env=build_cidx_subprocess_env(),
         timeout=timeout,
+        local_content=is_pod_local_repo(_golden_repo_url(alias), alias),
     )
     return {
         "status": outcome.status.value,
         "alias": outcome.alias,
         "detail": outcome.detail,
     }
+
+
+def _golden_repo_url(alias: str) -> Optional[str]:
+    """The golden repo's URL, or None when the registry cannot say.
+
+    Decides whether the repository's files are on this pod (``local://``);
+    None falls back to the alias rule (cidx-meta), today's behaviour for
+    everything else.
+    """
+    try:
+        from code_indexer.server.repositories.golden_repo_manager import (
+            get_golden_repo_manager,
+        )
+
+        repo = get_golden_repo_manager().get_golden_repo(alias)
+        return getattr(repo, "repo_url", None)
+    except Exception as exc:  # the server's state, whatever it is
+        logger.debug("fts_backfill_build: no repo_url for %s: %s", alias, exc)
+        return None
 
 
 class FtsBackfillPolicy:

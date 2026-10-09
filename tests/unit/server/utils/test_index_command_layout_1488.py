@@ -16,6 +16,8 @@ endpoint or a daemon-mode override for server-spawned indexing -- only
 server-managed provider settings are used.
 """
 
+import pytest
+
 from code_indexer.server.utils.index_command_layout import append_server_layout_args
 
 
@@ -164,3 +166,71 @@ class TestGitBackendStamp:
             result = append_server_layout_args(["cidx", "index"])
 
         assert result[-2:] == ["--content-backend=delegated", "--git-backend=delegated"]
+
+
+class TestPodLocalRepos:
+    """local:// repositories -- cidx-meta first among them -- are created and
+    written on THIS pod; a delegated backend cannot see them. Their spawns must
+    read the pod's disk (verified on EKS: cidx-meta's refresh failed under
+    --content-backend=delegated)."""
+
+    @pytest.mark.parametrize(
+        "url, alias, local",
+        [
+            ("local://notes", "notes", True),
+            (None, "cidx-meta", True),
+            (None, "cidx-meta-global", True),
+            ("https://gitlab.com/x/y.git", "y", False),
+            ("/data/data/golden-repos/y", "y", False),  # in place, with workspace-mcp
+            (None, None, False),
+        ],
+    )
+    def test_which_repos_are_pod_local(self, url, alias, local) -> None:
+        from code_indexer.server.utils.index_command_layout import is_pod_local_repo
+
+        assert is_pod_local_repo(url, alias) is local
+
+    def test_a_pod_local_repo_gets_no_backend_flags_on_a_delegated_server(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        service = SimpleNamespace(
+            get_config=lambda: SimpleNamespace(
+                content_backend="delegated", git_backend="delegated"
+            )
+        )
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service",
+            return_value=service,
+        ):
+            assert (
+                append_server_layout_args(["cidx", "index"], local_content=True)
+                == TestGitBackendStamp._BASE
+            )
+            assert append_server_layout_args(["cidx", "index"])[-2:] == [
+                "--content-backend=delegated",
+                "--git-backend=delegated",
+            ]
+
+    @pytest.mark.parametrize(
+        "module",
+        [
+            "code_indexer.server.services.claude_cli_manager",
+            "code_indexer.server.services.fts_index_builder",
+        ],
+    )
+    def test_the_cidx_meta_spawn_sites_say_so(self, module: str) -> None:
+        """Source-level: these spawn for cidx-meta (always, or by alias)."""
+        import ast
+        import importlib
+        import inspect
+
+        tree = ast.parse(inspect.getsource(importlib.import_module(module)))
+        calls = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and getattr(n.func, "id", None) == "append_server_layout_args"
+        ]
+        assert calls
+        assert all("local_content" in {k.arg for k in c.keywords} for c in calls)
