@@ -155,6 +155,36 @@ def test_the_gitignores_are_fetched_in_one_call(repo: Path) -> None:
     assert backend.fetches == [[".gitignore", "pkg/.gitignore"]]
 
 
+def test_thousands_of_top_level_gitignores_are_fetched_in_requests_the_server_accepts(
+    tmp_path: Path,
+) -> None:
+    """The gitignore fetch goes through the planner like every other fetch: a
+    repository with thousands of top-level directories used to put every
+    ``<dir>/.gitignore`` in ONE request, past workspace-mcp's 100 KB body
+    limit -- a 413, and discovery without the ignore rules."""
+    import json
+
+    root = tmp_path / "many"
+    for i in range(3000):
+        _write(root, f"service-module-number-{i:05d}/.gitignore", b"secret.py\n")
+    _write(root, "service-module-number-00007/secret.py", b"x = 1\n")
+    _write(root, "service-module-number-00007/kept.py", b"x = 1\n")
+    backend = _Delegated(root)
+    finder = FileFinder(_config(root))
+    finder.set_manifest(RepoManifest.build(root, backend=backend), backend)
+
+    assert len(backend.fetches) > 1, "every .gitignore went in one request"
+    for batch in backend.fetches:
+        body = json.dumps({"source_path": str(root), "paths": batch}).encode()
+        assert len(body) <= 100 * 1024
+    assert sorted(p for b in backend.fetches for p in b) == sorted(
+        f"service-module-number-{i:05d}/.gitignore" for i in range(3000)
+    )
+    found = _relative(root, finder.find_files())
+    assert "service-module-number-00007/kept.py" in found
+    assert "service-module-number-00007/secret.py" not in found, "a rule was lost"
+
+
 def test_clearing_the_manifest_restores_the_walk_without_rereading(
     repo: Path,
 ) -> None:

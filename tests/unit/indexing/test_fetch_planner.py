@@ -5,7 +5,9 @@ Three things have to hold or it does not do its job:
 
 * no batch exceeds the budget, except a single file that cannot fit anywhere;
 * every path is fetched exactly once, in order, so results zip back;
-* a repository of tiny files does not become one enormous request.
+* a repository of tiny files does not become one enormous request;
+* no request BODY exceeds what workspace-mcp accepts (100 KB), however deep
+  the paths are.
 
 The first is the whole point; the second is what a caller relies on; the third
 is the bound the byte budget alone does not give.
@@ -18,11 +20,18 @@ from typing import Dict, List, Mapping, Optional
 
 import pytest
 
+import json
+
 from code_indexer.indexing.fetch_planner import (
     DEFAULT_FETCH_BUDGET_BYTES,
     DEFAULT_FETCH_BUDGET_FILES,
+    DEFAULT_FETCH_BUDGET_REQUEST_BYTES,
+    encoded_path_cost,
     plan_fetch_batches,
 )
+
+#: workspace-mcp's JSON body limit (Nest's default), which a 413 enforces.
+SERVER_BODY_LIMIT = 100 * 1024
 
 
 def sizer(sizes: Mapping[str, Optional[int]]):
@@ -152,7 +161,70 @@ def test_a_single_file_is_one_batch() -> None:
     assert plan({"a.py": 10}) == [["a.py"]]
 
 
+# ── the request body ───────────────────────────────────────────────────────
+
+
+def _body(batch: List[str]) -> bytes:
+    """The fetch request exactly as the plugin sends it, with the longest
+    source_path a Linux path can have."""
+    return json.dumps({"source_path": "/" + "d" * 4095, "paths": batch}).encode()
+
+
+def test_deep_paths_never_make_a_request_the_server_refuses() -> None:
+    """agent-e2e's shape: 85-byte paths, tiny files. 1000 of them (the file
+    budget) came back 413 and failed every file in the batch."""
+    sizes = {
+        f"packages/app/src/modules/feature_{i:05d}/components/widget.spec.ts{'x' * 20}": 100
+        for i in range(3000)
+    }
+    batches = plan(sizes)
+
+    assert len(batches) > 3, "the request bound never split the batch"
+    for batch in batches:
+        assert len(_body(batch)) <= SERVER_BODY_LIMIT
+
+
+def test_the_request_bound_packs_every_batch_not_just_the_first() -> None:
+    """Each batch starts with a fresh request count; carrying it over would
+    send every file after the first batch alone -- per-file fetching again."""
+    paths = [f"{i:06d}" for i in range(100)]  # each costs 8 + 2 = 10 bytes
+    batches = plan({p: 1 for p in paths}, budget_request_bytes=100)
+
+    assert [len(b) for b in batches] == [10] * 10
+
+
+def test_escaped_paths_are_charged_their_encoded_length() -> None:
+    """A name of non-ASCII characters is several times longer on the wire."""
+    path = "docs/" + "\u00fc" * 10 + '"q".md'
+    assert encoded_path_cost(path) == len(json.dumps(path)) + 2
+    assert encoded_path_cost(path) > len(path) + 2
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_no_multi_path_batch_encodes_past_the_request_budget(seed: int) -> None:
+    rng = random.Random(seed)
+    alphabet = 'abcdefghij/\u00e9\u4e2d"-_'
+    sizes = {
+        "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 300))) + str(i): 1
+        for i in range(rng.randint(1, 3000))
+    }
+    budget = rng.choice([512, 4096, DEFAULT_FETCH_BUDGET_REQUEST_BYTES])
+
+    batches = plan(sizes, budget_request_bytes=budget)
+
+    assert [p for b in batches for p in b] == list(sizes)
+    for batch in batches:
+        if len(batch) > 1:
+            assert sum(encoded_path_cost(p) for p in batch) <= budget
+
+
 # ── guard rails ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_a_non_positive_request_budget_is_rejected(bad: int) -> None:
+    with pytest.raises(ValueError, match="budget_request_bytes"):
+        list(plan_fetch_batches(["a"], lambda p: 1, budget_request_bytes=bad))
 
 
 @pytest.mark.parametrize("bad", [0, -1])
@@ -176,6 +248,7 @@ def test_the_defaults_are_the_measured_ones() -> None:
     """
     assert DEFAULT_FETCH_BUDGET_BYTES == 8 * 1024 * 1024
     assert DEFAULT_FETCH_BUDGET_FILES == 1000
+    assert DEFAULT_FETCH_BUDGET_REQUEST_BYTES == 64 * 1024
 
 
 # ── the property, over shapes nobody would think to write ──────────────────
