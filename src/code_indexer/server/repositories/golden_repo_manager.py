@@ -855,6 +855,8 @@ class GoldenRepoManager:
         # clean URL; the persistence point strips again as defense-in-depth.
         repo_url = self._strip_credentials_if_delegated(repo_url)
 
+        self._refuse_local_git_under_delegated_content()
+
         # Skip git validation for local:// URLs (Story #538) or when caller
         # explicitly opts out (Story #1092: batch-create fast path).
         if not skip_pre_flight_git_validation and not repo_url.startswith("local://"):
@@ -2464,8 +2466,11 @@ class GoldenRepoManager:
 
         Refused rather than degraded:
 
-        * a local git backend -- the clone would land on THIS pod's disk, where
-          the content backend never looks, and the index would come out empty;
+        * a local git backend, for ANY source -- a clone would land on THIS
+          pod's disk, where the content backend never looks, and the index would
+          come out empty; and even in place, the pre-flight ``ls-remote`` and the
+          branch lookup would run against this pod's disk, where the repository
+          is not, failing the add or silently recording ``main``;
         * a local source that is not already at ``clone_path`` -- copying it
           means reading this pod's disk, which a delegated pod may not have.
 
@@ -2473,6 +2478,7 @@ class GoldenRepoManager:
         starts: git-mcp and workspace-mcp can be different NFS clients, so a
         clone git-mcp reports done can still be briefly missing for the reader.
         """
+        self._refuse_local_git_under_delegated_content()
         if self._is_local_path(repo_url):
             source = (
                 repo_url[len("file://") :]
@@ -2487,16 +2493,27 @@ class GoldenRepoManager:
                     "pod's disk"
                 )
         else:
-            if isinstance(self._git_backend, LocalGitBackend):
-                raise GitOperationError(
-                    "content_backend='delegated' needs git_backend='delegated': "
-                    "a local clone would land on this pod, where the content "
-                    "backend never reads, and the index would come out empty"
-                )
             self._clone_remote_repository(repo_url, clone_path, branch)
         self._await_clone_visible_through_content_backend(clone_path)
         os.makedirs(clone_path, exist_ok=True)
         return clone_path
+
+    def _refuse_local_git_under_delegated_content(self) -> None:
+        """Raise when the repositories are elsewhere but git would run here.
+
+        Checked at submission (before the pre-flight ``ls-remote``, which would
+        otherwise fail with a misleading "inaccessible repository") and again
+        in the job, which a reclaiming pod may run without the submission path.
+        """
+        if not self._content_backend.is_local and isinstance(
+            self._git_backend, LocalGitBackend
+        ):
+            raise GitOperationError(
+                "content_backend='delegated' needs git_backend='delegated': with "
+                "git run on this pod, a clone would land where the content "
+                "backend never reads and the branch would be looked up in a "
+                "directory that holds no repository"
+            )
 
     def _await_clone_visible_through_content_backend(
         self, clone_path: str, *, attempts: int = 100, delay_seconds: float = 0.1

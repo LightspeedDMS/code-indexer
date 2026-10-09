@@ -173,13 +173,34 @@ def test_a_clone_the_reader_never_sees_fails_with_the_readers_error(
     )
 
 
-def test_a_local_git_backend_is_refused(pod: Any) -> None:
+@pytest.mark.parametrize("in_place", [False, True])
+def test_a_local_git_backend_is_refused_for_any_source(
+    pod: Any, in_place: bool
+) -> None:
+    """In place too: ls-remote and the branch lookup would read this pod's disk."""
     make, _, git = pod
+    manager = make(git_backend=LocalGitBackend())
+    url = str(Path(manager.golden_repos_dir, "r")) if in_place else REMOTE_URL
+
+    with pytest.raises(GitOperationError, match="git_backend='delegated'"):
+        manager._clone_repository(url, "r", None)
+    assert git.cloned == []
+    assert not Path(manager.golden_repos_dir, "r").exists()
+
+
+def test_submission_refuses_a_local_git_backend_before_the_pre_flight(
+    pod: Any,
+) -> None:
+    """Otherwise ls-remote on a path this pod lacks reports an inaccessible repo."""
+    make, _, _ = pod
     manager = make(git_backend=LocalGitBackend())
 
     with pytest.raises(GitOperationError, match="git_backend='delegated'"):
-        manager._clone_repository(REMOTE_URL, "r", None)
-    assert git.cloned == []
+        manager.add_golden_repo(
+            repo_url=str(Path(manager.golden_repos_dir, "r")),
+            alias="r",
+            submitter_username="admin",
+        )
 
 
 def test_a_local_source_that_would_be_copied_is_refused(
