@@ -99,6 +99,41 @@ def test_a_clone_that_is_here_is_still_swapped_in(
     assert not (master.parent / ".reclone-agent-router-tmp").exists()
 
 
+def test_an_unreadable_setting_refuses_rather_than_raising(
+    master: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The method is documented "never raises"; and not knowing where the
+    repository lives is no reason to delete anything."""
+
+    def unavailable() -> str:
+        raise RuntimeError("config service not initialised")
+
+    monkeypatch.setattr(rs, "configured_content_backend_name", unavailable)
+    git = _Git(where=lambda dest: dest)
+
+    ok = _scheduler(git)._attempt_reclone("agent-router-global", URL, str(master))
+
+    assert ok is False
+    assert git.cloned == []
+    assert (master / ".code-indexer" / "chunks.db").is_file()
+
+
+def test_the_orphaned_clone_is_named_for_the_operator(
+    master: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: Any
+) -> None:
+    monkeypatch.setattr(rs, "configured_content_backend_name", lambda: "local")
+    git = _Git(where=lambda dest: tmp_path / "service-volume" / dest.name)
+
+    with caplog.at_level(logging.CRITICAL):
+        _scheduler(git)._attempt_reclone("agent-router-global", URL, str(master))
+
+    orphan = str(master.parent / ".reclone-agent-router-tmp")
+    assert any(
+        "ORPHANED" in r.getMessage() and orphan in r.getMessage()
+        for r in caplog.records
+    )
+
+
 def test_a_failed_clone_still_leaves_the_master(
     master: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

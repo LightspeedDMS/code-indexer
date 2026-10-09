@@ -1266,8 +1266,19 @@ class RefreshScheduler:
         # the index state, and the clone below would land with git-mcp, not
         # here: the swap would delete the index and then fail to rename a
         # directory this pod cannot see, orphaning the clone on the shared
-        # volume. Refused, loudly, before anything is cloned or deleted.
-        if configured_content_backend_name() == "delegated":
+        # volume. Refused, loudly, before anything is cloned or deleted. If the
+        # selection cannot even be read, refuse too: not knowing where the
+        # repository lives is no reason to delete anything.
+        try:
+            content_backend = configured_content_backend_name()
+        except Exception as e:
+            logger.critical(
+                f"Auto re-clone SKIPPED for {alias_name}: could not read the "
+                f"content_backend setting ({type(e).__name__}: {e}); nothing "
+                "was cloned or deleted."
+            )
+            return False
+        if content_backend == "delegated":
             logger.critical(
                 f"Auto re-clone SKIPPED for {alias_name}: content_backend="
                 "'delegated' -- the repository lives with git-mcp/workspace-mcp, "
@@ -1278,8 +1289,15 @@ class RefreshScheduler:
             return False
 
         # Clean up any leftover temp dir from a previous failed attempt.
-        if temp_clone.exists():
-            shutil.rmtree(str(temp_clone))
+        try:
+            if temp_clone.exists():
+                shutil.rmtree(str(temp_clone))
+        except OSError as e:
+            logger.critical(
+                f"Auto re-clone SKIPPED for {alias_name}: could not remove the "
+                f"leftover {temp_clone} ({type(e).__name__}: {e})."
+            )
+            return False
 
         try:
             # EVO-64678: routed through the git seam (default LocalGitBackend ==
@@ -1317,7 +1335,8 @@ class RefreshScheduler:
             logger.critical(
                 f"Auto re-clone swap SKIPPED for {alias_name}: the clone at "
                 f"{temp_clone} is not visible on this pod; {master} is left "
-                "untouched."
+                f"untouched. The clone was ORPHANED where the git backend put "
+                f"it -- remove {temp_clone} on that volume by hand."
             )
             return False
 
