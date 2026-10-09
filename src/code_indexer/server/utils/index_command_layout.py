@@ -49,6 +49,10 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from code_indexer.server.startup.content_backend_wiring import (
+    configured_content_backend_name,
+)
+
 #: The explicit server-context layout arg. Single `--opt=value` token so it
 #: is a single, greppable list element that Click parses identically to the
 #: two-token form.
@@ -89,7 +93,7 @@ def append_server_layout_args(
         that order. The input list is not mutated.
     """
     if content_backend is None:
-        content_backend = _configured_content_backend()
+        content_backend = configured_content_backend_name()
     stamped = [
         *cmd,
         SERVER_NEW_COLLECTION_LAYOUT_ARG,
@@ -99,11 +103,3 @@ def append_server_layout_args(
     if content_backend == "delegated":
         stamped.append(SERVER_DELEGATED_CONTENT_BACKEND_ARG)
     return stamped
-
-
-def _configured_content_backend() -> str:
-    """The server config's ``content_backend``, ``local`` when unset."""
-    from code_indexer.server.services.config_service import get_config_service
-
-    config = get_config_service().get_config()
-    return getattr(config, "content_backend", "local") or "local"

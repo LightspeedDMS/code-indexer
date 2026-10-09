@@ -16,6 +16,9 @@ from typing import Dict, Any, Optional, cast
 from code_indexer.daemon.watch_manager import DaemonWatchManager
 from code_indexer.config import ConfigManager
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.startup.content_backend_wiring import (
+    configured_content_backend_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +134,22 @@ class AutoWatchManager:
             return {
                 "status": "disabled",
                 "message": "Auto-watch is disabled",
+            }
+
+        # Content seam: under a delegated content backend the repository is not
+        # on this pod -- workspace-mcp serves its bytes -- so there is nothing
+        # here to put an inotify watch on. Starting one anyway would watch an
+        # empty directory, or a mount that is about to be removed, and silently
+        # never see a change. Changes reach a delegated index through re-index.
+        if configured_content_backend_name() == "delegated":
+            logger.info(
+                f"Content backend is delegated, not starting watch for {repo_path}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return {
+                "status": "disabled",
+                "message": "Auto-watch is unavailable under a delegated content "
+                "backend: the repository is not on this pod",
             }
 
         # Bug #1689: lazily start the background timeout-checker thread on
