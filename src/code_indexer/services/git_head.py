@@ -58,9 +58,13 @@ def read_head_branch(project_dir: Union[str, Path], git_backend: Optional[Any]) 
             )
     except (subprocess.CalledProcessError, OSError) as exc:
         logger.debug("HEAD branch unavailable for %s: %s", project_dir, exc)
-        # Not a detached HEAD (head_branch reports that as None) but a failure:
-        # try the short hash, as the local path always has; if git itself is
-        # unreachable that fails too and the answer is "unknown".
+        if git_backend is not None:
+            # head_branch reports a real detached HEAD as None, so this is a
+            # FAILURE. Reading it as detached (via the short hash) would record
+            # a branch change that did not happen -- and detect_branch_change
+            # would force a re-index. Unknown is the honest answer.
+            return UNKNOWN
+        # The local path keeps its long-standing fallback to the short hash.
         branch = None
     if branch:
         return branch

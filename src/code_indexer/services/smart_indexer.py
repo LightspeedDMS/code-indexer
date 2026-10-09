@@ -146,6 +146,18 @@ class SmartIndexer(HighThroughputProcessor):
         # Initialize git hook manager for branch change detection
         self.git_hook_manager = GitHookManager(config.codebase_dir, metadata_path)
 
+    def _paths_present_at_head(self, repo: str) -> set:
+        """What exists now, for classifying touched paths as kept or deleted.
+
+        The pass's manifest when there is one -- it is already in hand, and on
+        a repository this pod does not hold there always is one -- else the
+        tracked list from the git backend, which grows with the repository.
+        """
+        manifest = getattr(self, "repo_manifest", None)
+        if manifest is not None:
+            return set(manifest.paths())
+        return set(self.git_backend.ls_files(repo))
+
     def _git_deltas_via_seam(
         self, last_commit: str, current_commit: str
     ) -> Optional[GitDelta]:
@@ -175,7 +187,7 @@ class SmartIndexer(HighThroughputProcessor):
                     repo, f"{current_commit}..{last_commit}"
                 )
             )
-            tracked = set(self.git_backend.ls_files(repo)) if touched else set()
+            tracked = self._paths_present_at_head(repo) if touched else set()
         except Exception as e:  # the backend's transport, whatever it is
             logger.error(
                 f"Git delta through the git backend failed "

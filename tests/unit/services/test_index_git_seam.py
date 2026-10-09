@@ -307,3 +307,70 @@ def test_an_incremental_run_without_a_delta_does_a_full_index(empty_repo: Path) 
     )
 
     assert result == "FULL" and len(full) == 1
+
+
+# ── review follow-ups (!143) ────────────────────────────────────────────────
+
+
+class _BranchCallFails(_GitMcp):
+    """git-mcp fails the symbolic-ref call only (not a detached HEAD)."""
+
+    def symbolic_ref(self, repo_path: str, short: bool = True, **kw: Any) -> str:
+        self.calls.append("symbolic_ref")
+        raise subprocess.CalledProcessError(
+            1, "git-mcp", stderr="git-mcp git_symbolic_ref request failed: reset"
+        )
+
+
+def test_a_failed_branch_lookup_is_unknown_not_detached(empty_repo: Path) -> None:
+    """Reading it as detached-<sha> would report a branch change that did not
+    happen, and detect_branch_change would force a re-index."""
+    assert read_head_branch(empty_repo, _BranchCallFails()) == "unknown"
+
+
+class _NotARepository(_GitMcp):
+    def rev_parse(self, repo_path: str, *args: str, **kw: Any) -> str:
+        self.calls.append("rev_parse " + " ".join(args))
+        raise subprocess.CalledProcessError(
+            128, "git-mcp", stderr="fatal: not a git repository"
+        )
+
+
+def test_a_non_git_source_stays_non_git_under_a_git_backend(empty_repo: Path) -> None:
+    """The server stamps the backend on every spawn, cidx-meta and local://
+    folders included. Flipping them to git-addressable would switch their file
+    signatures to git hashes and change their point ids."""
+    (empty_repo / "notes.md").write_text("hello\n")
+    plain = FileIdentifier(empty_repo)
+    behind_backend = FileIdentifier(empty_repo, git_backend=_NotARepository())
+
+    assert behind_backend.git_available is plain.git_available is False
+    assert behind_backend._get_cached_commit_hash() is None
+    note = empty_repo / "notes.md"
+    assert behind_backend.get_file_signature(
+        behind_backend.get_file_metadata(note)
+    ) == plain.get_file_signature(plain.get_file_metadata(note))
+
+
+def test_the_delta_classifies_against_the_passs_manifest(empty_repo: Path) -> None:
+    """The manifest is already in hand; ls_files grows with the repository."""
+
+    class _NoLsFiles(_DiffingGitMcp):
+        def ls_files(self, repo_path: str, **kw: Any) -> List[str]:
+            raise AssertionError("ls_files called although the pass has a manifest")
+
+    git = _NoLsFiles(
+        forward=["src/edited.py", "src/new_name.py"],
+        reverse=["src/edited.py", "src/old_name.py"],
+        tracked=[],
+    )
+    indexer = _indexer(empty_repo, git)
+    manifest = MagicMock()
+    manifest.paths.return_value = ["src/edited.py", "src/new_name.py", "README.md"]
+    indexer.repo_manifest = manifest
+
+    delta = indexer._git_deltas_via_seam(OLD, NEW)
+
+    assert delta is not None
+    assert delta.modified == ["src/edited.py", "src/new_name.py"]
+    assert delta.deleted == ["src/old_name.py"]

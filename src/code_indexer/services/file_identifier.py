@@ -18,7 +18,7 @@ from ..config import Config
 from ..utils.git_runner import run_git_command, is_git_repository
 from ..indexing.repo_manifest import RepoManifest
 from ..utils.blob_hash import git_blob_hash, git_blob_hash_bytes
-from .git_head import read_head_branch, read_head_commit
+from .git_head import UNKNOWN, read_head_branch, read_head_commit
 
 logger = logging.getLogger(__name__)
 
@@ -67,16 +67,24 @@ class FileIdentifier:
         # every hash came back None while the backend was answering perfectly.
         if manifest is not None:
             self.git_available = True
-        # Likewise a git backend: git-mcp answers for the repository whether or
-        # not this machine can see a .git directory.
-        self._git_backend = git_backend
-        if git_backend is not None:
-            self.git_available = True
         self._project_id: Optional[str] = None
         # Issue #676: Memoized per-run invariants — branch and commit hash do not
         # change during a single indexing run, so we fetch them once and cache.
         self._cached_branch: Optional[str] = None
         self._cached_commit_hash: Optional[str] = None
+        # Likewise a git backend: git-mcp answers for the repository whether or
+        # not this machine can see a .git directory -- but only for a path that
+        # IS a repository. The server stamps the backend on every spawn,
+        # including non-git sources (cidx-meta, local:// folders); treating one
+        # as git-addressable would switch its file signatures to git hashes and
+        # change its point ids. So the backend is asked once: HEAD resolving is
+        # the proof, and the answer is kept as this run's commit.
+        self._git_backend = git_backend
+        self._backend_repo = False
+        if git_backend is not None:
+            self._backend_repo = self._backend_resolves_head()
+            if manifest is None:
+                self.git_available = self._backend_repo
 
     def set_manifest(self, manifest: Optional["RepoManifest"]) -> None:
         """Point at the manifest for the CURRENT pass, or None for no manifest.
@@ -94,11 +102,24 @@ class FileIdentifier:
         self._manifest = manifest
         # Same reason as in __init__: attaching a manifest makes the repository
         # git-addressable, and detaching one restores the local probe's answer.
-        self.git_available = (
-            True
-            if manifest is not None or self._git_backend is not None
-            else self._detect_git()
-        )
+        if manifest is not None:
+            self.git_available = True
+        elif self._git_backend is not None:
+            self.git_available = self._backend_repo
+        else:
+            self.git_available = self._detect_git()
+
+    def _backend_resolves_head(self) -> bool:
+        """Whether the git backend knows this path as a repository with a HEAD.
+
+        The resolved commit is kept as this run's commit (it is the same
+        question), so the probe costs no extra call on a real repository.
+        """
+        commit = read_head_commit(self.project_dir, self._git_backend)
+        if commit == UNKNOWN:
+            return False
+        self._cached_commit_hash = commit
+        return True
 
     def _detect_git(self) -> bool:
         """
