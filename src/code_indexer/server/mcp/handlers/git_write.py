@@ -33,7 +33,9 @@ from code_indexer.server.services.git_operations_service import (
     GitCommandError,
     git_operations_service,
 )
-from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
+from code_indexer.server.storage.shared.snapshot_manager import (
+    is_versioned_snapshot_in_running_server,
+)
 
 from ..auth.elevation_decorator import require_mcp_elevation
 from ._utils import _admin_role_first, _mcp_response, app_module
@@ -48,8 +50,9 @@ def _resolve_mutable_git_repo_path(
 
     The single choke point for every git write tool in this module: the
     path comes from ``_resolve_git_repo_path`` and is refused when it is an
-    immutable versioned snapshot (a global alias resolves to its snapshot
-    target), so no write ever runs inside one.
+    immutable versioned snapshot in ANY layout the wired clone backend
+    produces (a global alias resolves to its snapshot target), so no write
+    ever runs inside one.
 
     Returns:
         (path, error_message), same contract as ``_resolve_git_repo_path``.
@@ -57,7 +60,11 @@ def _resolve_mutable_git_repo_path(
     import code_indexer.server.mcp.handlers._legacy as _legacy
 
     repo_path, error_msg = _legacy._resolve_git_repo_path(repository_alias, username)
-    if error_msg is None and repo_path is not None and is_versioned_snapshot(repo_path):
+    if (
+        error_msg is None
+        and repo_path is not None
+        and is_versioned_snapshot_in_running_server(repo_path)
+    ):
         return None, (
             f"Repository '{repository_alias}' resolves to an immutable versioned "
             "snapshot; git write operations are not allowed on it. Activate the "
@@ -1168,8 +1175,6 @@ def git_stash(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     Originally Story #453, extracted as part of Story #496 modularisation.
     """
-    import code_indexer.server.mcp.handlers._legacy as _legacy
-
     parsed, err = _validate_stash_args(args)
     if err is not None:
         return err
@@ -1177,7 +1182,7 @@ def git_stash(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     action = parsed["action"]
     try:
-        repo_path, error_msg = _legacy._resolve_git_repo_path(
+        repo_path, error_msg = _resolve_mutable_git_repo_path(
             parsed["repository_alias"], user.username
         )
         if error_msg is not None:

@@ -24,6 +24,9 @@ from code_indexer.server.git.git_subprocess_env import (
     remote_url_without_credentials,
     supply_remote_credentials,
 )
+from tests.unit.server.git._running_server_snapshot_manager import (
+    wire_running_server_snapshot_manager,
+)
 from tests.unit.server.git.auth_http_git_server import served_bare_remote
 
 USER = "example-user"
@@ -183,6 +186,19 @@ def test_versioned_snapshot_is_never_rewritten(remote: str, tmp_path: Path) -> N
     snapshot = _clone_with_stored_userinfo(
         remote, tmp_path, ".versioned/repo/v_1700000000"
     )
+    before = (snapshot / ".git" / "config").read_text()
+
+    assert ensure_remote_url_without_credentials(str(snapshot)) == 0
+    assert (snapshot / ".git" / "config").read_text() == before
+
+
+def test_flat_ontap_snapshot_is_never_rewritten(
+    remote: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A snapshot in the flat ONTAP layout ``{mount}/v_<ts>`` is recognised
+    through the running server's wired snapshot manager and left as is."""
+    snapshot = _clone_with_stored_userinfo(remote, tmp_path, "ontap-mount/v_1700000000")
+    wire_running_server_snapshot_manager(monkeypatch, str(tmp_path / "ontap-mount"))
     before = (snapshot / ".git" / "config").read_text()
 
     assert ensure_remote_url_without_credentials(str(snapshot)) == 0

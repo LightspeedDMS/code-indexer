@@ -314,20 +314,22 @@ def ensure_remote_url_without_credentials(repo_path: str) -> int:
     command line, and no log line names a URL. Local git calls only -- run
     it from a worker/job thread, never on the event loop.
 
-    A versioned snapshot (``.versioned/<alias>/v_<ts>``) is NEVER modified:
-    snapshots are immutable once published and are not used for network
-    operations; the base clone they are taken from is the one rewritten.
+    A versioned snapshot, in any layout the server's clone backend produces
+    (canonical ``.versioned/<alias>/v_<ts>``, flat ONTAP ``{mount}/v_<ts>``,
+    legacy ``{mount}/<alias>/v_<ts>``), is NEVER modified: snapshots are
+    immutable once published and are not used for network operations; the
+    base clone they are taken from is the one rewritten.
 
     Raises:
         GitCommandError: The stored URLs could not be read or one could not
             be rewritten (after a WARNING); the message says what failed and
             names no URL. No credential may be handed to git for the clone.
     """
-    from code_indexer.server.storage.shared.snapshot_paths import (
-        is_versioned_snapshot,
+    from code_indexer.server.storage.shared.snapshot_manager import (
+        is_versioned_snapshot_in_running_server,
     )
 
-    if is_versioned_snapshot(repo_path):
+    if is_versioned_snapshot_in_running_server(repo_path):
         return 0
     try:
         stored = _stored_remote_urls(repo_path)

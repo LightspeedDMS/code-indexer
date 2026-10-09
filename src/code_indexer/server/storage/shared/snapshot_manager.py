@@ -722,3 +722,29 @@ class VersionedSnapshotManager:
             ) from exc
         logger.info("CoW snapshot deleted: '%s'", version_path)
         return True
+
+
+def is_versioned_snapshot_in_running_server(path: str) -> bool:
+    """Return ``True`` when *path* is a versioned snapshot in this process.
+
+    Inside a running server, delegates to the snapshot manager wired on
+    ``app.state.snapshot_manager`` (:meth:`VersionedSnapshotManager.
+    is_versioned_snapshot`), which supplies the clone backend's mount point
+    so the flat ONTAP ``{mount}/v_<ts>`` and legacy cow-daemon
+    ``{mount}/{ns}/v_<ts>`` shapes are recognised along with the canonical
+    ``.versioned/{ns}/v_<ts>`` one. Where no snapshot manager is wired (a
+    CLI process, or a server whose manager failed to build) only the
+    canonical shape is recognised -- the same rule
+    ``GoldenRepoManager._is_versioned_snapshot`` applies.
+
+    The running app is probed without ever constructing it.
+    """
+    from code_indexer.server.utils.registry_factory import (
+        _running_server_app_state,
+    )
+
+    app_state = _running_server_app_state()
+    manager = getattr(app_state, "snapshot_manager", None)
+    if manager is not None:
+        return bool(manager.is_versioned_snapshot(path))
+    return _is_versioned_snapshot(path)
