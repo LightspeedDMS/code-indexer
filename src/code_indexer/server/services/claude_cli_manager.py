@@ -589,7 +589,8 @@ class ClaudeCliManager:
             )
             _reindex_env.update(resolve_hnsw_sync_epoch_env_var())
             _result = subprocess.run(
-                append_server_layout_args(["cidx", "index"]),
+                # cidx-meta is written on this pod; never a delegated read.
+                append_server_layout_args(["cidx", "index"], local_content=True),
                 cwd=str(self._meta_dir),
                 capture_output=True,
                 env=_reindex_env,

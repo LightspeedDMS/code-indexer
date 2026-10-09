@@ -79,11 +79,29 @@ SERVER_DELEGATED_CONTENT_BACKEND_ARG = "--content-backend=delegated"
 SERVER_DELEGATED_GIT_BACKEND_ARG = "--git-backend=delegated"
 
 
+#: The meta repository cidx writes itself (descriptions, dependency maps).
+CIDX_META_ALIASES = ("cidx-meta", "cidx-meta-global")
+
+
+def is_pod_local_repo(repo_url: Optional[str], alias: Optional[str] = None) -> bool:
+    """Whether a golden repo's files live on THIS pod, whatever the backends.
+
+    ``local://`` repositories -- cidx-meta first among them -- are created by
+    cidx in its own data directory and written by it (descriptions, memories,
+    uploads). They are never with workspace-mcp, so a delegated content or git
+    backend cannot see them: their index spawns must read the pod's disk.
+    """
+    return bool(repo_url and repo_url.startswith("local://")) or alias in (
+        CIDX_META_ALIASES
+    )
+
+
 def append_server_layout_args(
     cmd: List[str],
     *,
     content_backend: Optional[str] = None,
     git_backend: Optional[str] = None,
+    local_content: bool = False,
 ) -> List[str]:
     """Return a NEW command list with the explicit CHUNKS_DB new-collection
     layout arg, the resume-state-distrust arg, the
@@ -97,6 +115,9 @@ def append_server_layout_args(
             (every production caller) reads it from the server config, so a
             spawn site cannot forget to pass it.
         git_backend: The server's git-backend selection, read the same way.
+        local_content: the repository's files are on this pod
+            (``is_pod_local_repo``); neither backend flag is stamped, so the
+            child reads the pod's disk and runs its own git, as it always has.
 
     Returns:
         A new list equal to ``cmd`` with ``--new-collection-layout=chunks_db``,
@@ -105,6 +126,8 @@ def append_server_layout_args(
         ``--git-backend=delegated`` appended, in that order. The input list is
         not mutated.
     """
+    if local_content:
+        content_backend, git_backend = "local", "local"
     if content_backend is None:
         content_backend = configured_content_backend_name()
     if git_backend is None:

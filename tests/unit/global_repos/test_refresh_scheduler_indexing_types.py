@@ -438,6 +438,54 @@ class TestTemporalIndexingInIndexSource:
             "Skipping temporal indexing" in r.getMessage() for r in caplog.records
         )
 
+    @pytest.mark.parametrize(
+        "repo_url, delegated_flags",
+        [("local:///some/path", False), ("https://git.example/r.git", True)],
+    )
+    def test_a_local_repo_reads_the_pods_disk_on_a_delegated_server(
+        self, scheduler, registry, source_repo, monkeypatch, repo_url, delegated_flags
+    ):
+        """cidx-meta and other local:// repositories are written on this pod;
+        under --content-backend=delegated their refresh failed (seen on EKS)."""
+        from code_indexer.server.utils import index_command_layout as icl
+
+        monkeypatch.setattr(icl, "configured_content_backend_name", lambda: "delegated")
+        monkeypatch.setattr(icl, "configured_git_backend_name", lambda: "delegated")
+        registry.register_global_repo(
+            "podlocal-test", "podlocal-test-global", repo_url, str(source_repo)
+        )
+        commands = []
+
+        def mock_popen_progress(**kwargs):
+            command = kwargs.get("command", [])
+            commands.append(list(command))
+            if "--fts" in command:
+                (Path(kwargs.get("cwd", "")) / ".code-indexer" / "index").mkdir(
+                    parents=True, exist_ok=True
+                )
+            return 50
+
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=mock_popen_progress,
+            ):
+                with patch(
+                    "subprocess.run",
+                    return_value=MagicMock(returncode=0, stdout="", stderr=""),
+                ):
+                    scheduler._index_source(
+                        alias_name="podlocal-test-global",
+                        source_path=str(source_repo),
+                    )
+
+        semantic = next(c for c in commands if "--fts" in c)
+        assert ("--content-backend=delegated" in semantic) is delegated_flags
+        assert ("--git-backend=delegated" in semantic) is delegated_flags
+
 
 # ---------------------------------------------------------------------------
 # Tests: SCIP indexing in _index_source() (C7)

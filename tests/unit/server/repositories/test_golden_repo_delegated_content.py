@@ -278,3 +278,31 @@ def test_a_temporal_index_cannot_be_added_later(pod: Any) -> None:
         manager._submit_add_indexes_job(
             alias="r", index_types=["semantic", "temporal"], submitter_username="admin"
         )
+
+
+def test_a_local_repo_is_created_on_this_pod(pod: Any) -> None:
+    """local:// repositories (cidx-meta, uploads) are cidx's own and live on
+    this pod: allowed under a delegated backend, even with git run here."""
+    make, volume, git = pod
+    manager = make(git_backend=LocalGitBackend())
+
+    clone_path = manager._clone_repository("local://notes", "notes", None)
+
+    assert Path(clone_path).is_dir()
+    assert git.cloned == []
+    assert not volume(clone_path).exists(), "created with the service, not here"
+
+
+def test_a_local_repo_is_not_refused_at_submission(pod: Any) -> None:
+    from unittest.mock import MagicMock
+
+    make, _, _ = pod
+    manager = make(git_backend=LocalGitBackend())
+    manager.background_job_manager = MagicMock()
+    manager.background_job_manager.submit_job.return_value = "job-1"
+
+    manager.add_golden_repo(
+        repo_url="local://notes", alias="notes", submitter_username="admin"
+    )
+
+    assert manager.background_job_manager.submit_job.called
