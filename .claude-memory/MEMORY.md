@@ -36,6 +36,7 @@
 - [No nested subagents](feedback_no_subagent_to_subagent_delegation.md) - subagents act directly; never spawn nested Task/Agent calls
 - [Verify subagent commits](feedback_subagent_committed_against_explicit_instruction.md) - verify via git log; never trust a subagent's self-report on commits
 - [Bound every agent run](feedback_bound_every_agent_run.md) - every brief carries a turn/time budget + coordinator check-ins; S15 pair ran 87 rounds/13 h unchecked
+- [Netns shares host PIDs](feedback_netns_shares_host_pids.md) - unshare --net sandboxes share host PIDs; never kill by pgrep name (it hits the dev server)
 - [No gates during edits](feedback_no_gates_while_worker_edits.md) - never run fast/server-fast/e2e while an agent edits the tree; gates import live src
 - [Dispatch cap 1+1](feedback_parallel_dispatch_cap_4_on_20x.md) - 5x account: ONE worker + at most ONE reviewer at a time; Codex for the hardest reviews
 
