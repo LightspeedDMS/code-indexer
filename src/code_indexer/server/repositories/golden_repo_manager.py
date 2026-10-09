@@ -856,6 +856,8 @@ class GoldenRepoManager:
         repo_url = self._strip_credentials_if_delegated(repo_url)
 
         self._refuse_local_git_under_delegated_content()
+        if enable_temporal:
+            self._refuse_temporal_under_delegated_content()
 
         # Skip git validation for local:// URLs (Story #538) or when caller
         # explicitly opts out (Story #1092: batch-create fast path).
@@ -2497,6 +2499,22 @@ class GoldenRepoManager:
         self._await_clone_visible_through_content_backend(clone_path)
         os.makedirs(clone_path, exist_ok=True)
         return clone_path
+
+    def _refuse_temporal_under_delegated_content(self) -> None:
+        """Raise when temporal indexing is asked for a repository not on this pod.
+
+        Temporal indexing walks the history with ``git log`` and reads blobs,
+        run on this pod with the repository as cwd -- not through the git seam.
+        On a pod that holds only the index state it fails, and on refresh that
+        failure fails the whole job. Refused at the request instead, with the
+        reason, until temporal indexing runs through git-mcp.
+        """
+        if not self._content_backend.is_local:
+            raise GitOperationError(
+                "temporal indexing is not available with content_backend="
+                "'delegated': it runs git log on this pod, which does not hold "
+                "the repository"
+            )
 
     def _refuse_local_git_under_delegated_content(self) -> None:
         """Raise when the repositories are elsewhere but git would run here.
@@ -5247,6 +5265,8 @@ class GoldenRepoManager:
                 raise ValueError(
                     f"Invalid index_type: {index_type}. Must be one of: {', '.join(valid_index_types)}"
                 )
+        if "temporal" in index_types:
+            self._refuse_temporal_under_delegated_content()
 
         # EVO-66113: BackgroundJobManager._execute_job injects the assigned
         # job_id into any worker whose signature declares a `job_id` param,

@@ -369,6 +369,19 @@ def _read_max_commits_from_fixed_temporal_root(
         return None
 
 
+def _repository_is_elsewhere() -> bool:
+    """True when this pod does not hold the repositories (delegated content).
+
+    Fails toward "elsewhere" when the setting cannot be read: every caller uses
+    it to skip local-disk work, and skipping is the safe side of not knowing.
+    """
+    try:
+        return configured_content_backend_name() == "delegated"
+    except Exception as exc:  # the server config, whatever its state
+        logger.warning("content backend unknown (%s); treating as delegated", exc)
+        return True
+
+
 def _build_source_trigram_index(alias_name: str, source_path: str) -> None:
     """Build the trigram index of a golden repo base clone (refresh step 1b).
 
@@ -3593,6 +3606,19 @@ class RefreshScheduler:
             logger.warning(
                 f"Skipping temporal indexing for local repo {alias_name} "
                 f"(local:// repos have no git history, ignoring enable_temporal flag)"
+            )
+            enable_temporal = False
+
+        if enable_temporal and _repository_is_elsewhere():
+            # Temporal indexing runs git log on this pod with the repository as
+            # cwd; on a pod that does not hold it that fails, and the failure
+            # used to fail the WHOLE refresh. Skipped -- loudly, unlike the
+            # local:// case above, because here it is a lost feature, not an
+            # inapplicable one -- so the semantic and FTS indexes stay fresh.
+            logger.error(
+                f"Skipping temporal indexing for {alias_name}: content_backend="
+                "'delegated' and temporal indexing does not run through the git "
+                "seam yet; the temporal index is not refreshed"
             )
             enable_temporal = False
 

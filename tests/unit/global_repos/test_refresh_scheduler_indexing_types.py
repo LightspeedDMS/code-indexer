@@ -374,6 +374,70 @@ class TestTemporalIndexingInIndexSource:
             f"Got calls: {temporal_calls}"
         )
 
+    @pytest.mark.parametrize("backend", ["delegated", "unreadable"])
+    def test_temporal_indexing_skipped_where_the_repository_is_not_on_this_pod(
+        self, scheduler, registry, source_repo, monkeypatch, caplog, backend
+    ):
+        """
+        Temporal indexing runs git log on this pod; on a pod that does not hold
+        the repository that fails, and the failure used to fail the WHOLE
+        refresh. It is skipped -- at ERROR, a lost feature -- and the semantic
+        index still runs. Not knowing the backend counts as not holding it.
+        """
+        import logging
+
+        from code_indexer.global_repos import refresh_scheduler as rs
+
+        def unreadable() -> str:
+            raise RuntimeError("config service not initialised")
+
+        monkeypatch.setattr(
+            rs,
+            "configured_content_backend_name",
+            (lambda: "delegated") if backend == "delegated" else unreadable,
+        )
+        registry.register_global_repo(
+            "mountless-temporal-test",
+            "mountless-temporal-test-global",
+            "https://git.example/mountless.git",
+            str(source_repo),
+            enable_temporal=True,
+        )
+        calls = []
+
+        def mock_popen_progress(**kwargs):
+            command = kwargs.get("command", [])
+            calls.append(list(command))
+            if "--fts" in command:
+                (Path(kwargs.get("cwd", "")) / ".code-indexer" / "index").mkdir(
+                    parents=True, exist_ok=True
+                )
+            return 50
+
+        with caplog.at_level(logging.ERROR):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+                return_value=(0, 0),
+            ):
+                with patch(
+                    "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                    side_effect=mock_popen_progress,
+                ):
+                    with patch(
+                        "subprocess.run",
+                        return_value=MagicMock(returncode=0, stdout="", stderr=""),
+                    ):
+                        scheduler._index_source(
+                            alias_name="mountless-temporal-test-global",
+                            source_path=str(source_repo),
+                        )
+
+        assert not [c for c in calls if "--index-commits" in c], calls
+        assert [c for c in calls if "--fts" in c], "the semantic index did not run"
+        assert any(
+            "Skipping temporal indexing" in r.getMessage() for r in caplog.records
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests: SCIP indexing in _index_source() (C7)

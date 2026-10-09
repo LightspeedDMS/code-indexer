@@ -252,3 +252,29 @@ def test_the_server_hands_the_configured_backend_to_the_manager() -> None:
         if kw.arg == "content_backend" and isinstance(kw.value, ast.Name)
     ]
     assert passed and set(passed) <= bound, (passed, bound)
+
+
+def test_temporal_is_refused_at_registration(pod: Any) -> None:
+    """Temporal indexing runs git log on this pod, which holds no repository."""
+    make, _, git = pod
+    manager = make()
+
+    with pytest.raises(GitOperationError, match="temporal indexing"):
+        manager.add_golden_repo(
+            repo_url=REMOTE_URL,
+            alias="r",
+            enable_temporal=True,
+            submitter_username="admin",
+        )
+    assert git.cloned == []
+
+
+def test_a_temporal_index_cannot_be_added_later(pod: Any) -> None:
+    make, _, _ = pod
+    manager = make()
+    manager._resolve_golden_repo = lambda alias: object()  # registered
+
+    with pytest.raises(GitOperationError, match="temporal indexing"):
+        manager._submit_add_indexes_job(
+            alias="r", index_types=["semantic", "temporal"], submitter_username="admin"
+        )
