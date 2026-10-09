@@ -1673,10 +1673,13 @@ class DependencyMapService:
         try:
             cfg_path = Path.home() / ".cidx-server" / "config.json"
             if cfg_path.exists():
-                cfg_data = json.loads(cfg_path.read_text())
-                node_id = cfg_data.get("cluster", {}).get("node_id", "")
+                from code_indexer.server.utils.cluster_node_id import (
+                    configured_node_id,
+                )
+
+                node_id = configured_node_id(json.loads(cfg_path.read_text()))
                 if node_id:
-                    return str(node_id)
+                    return node_id
         except Exception as exc:
             logger.debug("_get_node_id: could not read bootstrap config: %s", exc)
         return socket.gethostname()

@@ -3149,11 +3149,12 @@ def make_lifespan(
                 try:
                     _sc_path = Path(server_data_dir) / "config.json"
                     if _sc_path.exists():
-                        _sc_data = _json_sentinel.loads(
-                            _sc_path.read_text(encoding="utf-8")
+                        from code_indexer.server.utils.cluster_node_id import (
+                            configured_node_id,
                         )
-                        _this_node_id = (
-                            _sc_data.get("cluster", {}).get("node_id", "") or ""
+
+                        _this_node_id = configured_node_id(
+                            _json_sentinel.loads(_sc_path.read_text(encoding="utf-8"))
                         )
                     if not _this_node_id:
                         _this_node_id = _socket_sentinel.gethostname()
