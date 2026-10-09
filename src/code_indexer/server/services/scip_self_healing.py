@@ -5,6 +5,7 @@ Handles automatic resolution of SCIP indexing failures through Claude Code integ
 Part of Story #645 - Core Self-Healing SCIP Loop.
 """
 
+from code_indexer.scip.paths import scip_index_dir
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
@@ -635,7 +636,7 @@ Status values:
                 return False
 
             # SCIP output directory
-            output_dir = self.repo_root / ".code-indexer" / "scip"
+            output_dir = scip_index_dir(self.repo_root)
             output_dir.mkdir(parents=True, exist_ok=True)
 
             # Get appropriate indexer for language

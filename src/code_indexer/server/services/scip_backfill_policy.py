@@ -14,6 +14,7 @@ SCIP reconcile has always reported (the generic engine only counts a single
 
 from __future__ import annotations
 
+from code_indexer.scip.paths import scip_index_dir
 import logging
 from pathlib import Path
 from typing import Any, Optional
@@ -39,7 +40,7 @@ class ScipBackfillPolicy:
         self.language_skipped = 0
 
     def is_present(self, repo_path: Path) -> bool:
-        return self._grm._scip_present(repo_path)
+        return bool(self._grm._scip_present(repo_path))
 
     def is_fresh(self, repo_path: Path) -> bool:
         # SCIP's own freshness rules, not the generic comparison: a build where
@@ -48,7 +49,7 @@ class ScipBackfillPolicy:
         # per-subproject layout does not read as current.
         from code_indexer.server.services.scip_lifecycle import scip_db_is_fresh
 
-        return scip_db_is_fresh(repo_path, repo_path / ".code-indexer" / "scip")
+        return scip_db_is_fresh(repo_path, scip_index_dir(repo_path))
 
     def eligibility(self, repo_path: Path) -> Optional[dict[str, Any]]:
         # A discovery error propagates -> the engine counts it as an error (matching the

@@ -15,6 +15,7 @@ Implements:
 - AC8: SCIP Index Availability Handling
 """
 
+from code_indexer.scip.paths import SCIP_DB_FILENAME, scip_index_dir
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
@@ -579,7 +580,7 @@ class SCIPMultiService:
         """
         try:
             repo_path = self._get_repository_path(repo_id)
-            scip_db_path = Path(repo_path) / ".code-indexer" / "scip" / "index.scip.db"
+            scip_db_path = scip_index_dir(repo_path) / SCIP_DB_FILENAME
 
             if scip_db_path.exists():
                 return scip_db_path
@@ -635,13 +636,7 @@ class SCIPMultiService:
         # but never build a path from an alias with a separator or traversal segment.
         if not bare_alias or "/" in bare_alias or bare_alias in (".", ".."):
             return None
-        return (
-            Path(golden_repos_dir)
-            / bare_alias
-            / ".code-indexer"
-            / "scip"
-            / "index.scip.db"
-        )
+        return scip_index_dir(Path(golden_repos_dir) / bare_alias) / SCIP_DB_FILENAME
 
     def _get_repository_path(self, repo_id: str) -> str:
         """

@@ -1,5 +1,7 @@
 """SCIP primitive query operations."""
 
+from ...utils.index_store import INDEX_DIRNAME
+from ..paths import SCIP_DIRNAME, scip_index_dir
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple, TYPE_CHECKING
@@ -200,7 +202,7 @@ def _find_scip_repo_root(scip_dir: Path) -> Optional[Path]:
     """
     current = scip_dir.resolve()
     for ancestor in [current] + list(current.parents):
-        if ancestor.name == "scip" and ancestor.parent.name == ".code-indexer":
+        if ancestor.name == SCIP_DIRNAME and ancestor.parent.name == INDEX_DIRNAME:
             return ancestor.parent.parent
     return None
 
@@ -282,7 +284,7 @@ class SCIPQueryEngine:
             if repo_root is None:
                 project_root = str(scip_dir.parent.parent)
             else:
-                scip_base_dir = repo_root / ".code-indexer" / "scip"
+                scip_base_dir = scip_index_dir(repo_root)
                 relative_suffix = scip_dir.resolve().relative_to(
                     scip_base_dir.resolve()
                 )

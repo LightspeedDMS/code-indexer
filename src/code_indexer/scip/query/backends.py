@@ -1,5 +1,6 @@
 """SCIP query backend abstraction layer."""
 
+from ...utils.index_store import index_root
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -260,9 +261,9 @@ class DatabaseBackend(SCIPBackend):
         project_root_path = Path(self.project_root) if self.project_root else Path.cwd()
         repo_root_candidate = _find_scip_repo_root(self.db_path.parent)
         if repo_root_candidate is not None:
-            config_path = repo_root_candidate / ".code-indexer" / "config.json"
+            config_path = index_root(repo_root_candidate) / "config.json"
         else:
-            config_path = project_root_path / ".code-indexer" / "config.json"
+            config_path = index_root(project_root_path) / "config.json"
 
         # Fast path: Skip migration if version >= 2
         current_version = get_scip_db_version(config_path)

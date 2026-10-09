@@ -1,5 +1,7 @@
 """SCIP CLI commands for code-indexer."""
 
+from .utils.index_store import index_root
+from .scip.paths import scip_index_dir
 import sys
 import click
 from typing import Optional
@@ -117,7 +119,7 @@ def _get_remote_config() -> dict:
     from .mode_detection.command_mode_detector import find_project_root
 
     project_root = find_project_root(Path.cwd())
-    config_file = project_root / ".code-indexer" / "config.json"
+    config_file = index_root(project_root) / "config.json"
 
     if not config_file.exists():
         raise click.ClickException(
@@ -428,7 +430,7 @@ def scip_status(ctx, verbose: bool):
     from code_indexer.scip.status import StatusTracker, OverallStatus
 
     repo_root = Path.cwd()
-    scip_dir = repo_root / ".code-indexer" / "scip"
+    scip_dir = scip_index_dir(repo_root)
     tracker = StatusTracker(scip_dir)
 
     try:
@@ -829,7 +831,7 @@ def scip_definition(
     from code_indexer.scip.status import StatusTracker
 
     repo_root = Path.cwd()
-    scip_dir = repo_root / ".code-indexer" / "scip"
+    scip_dir = scip_index_dir(repo_root)
 
     tracker = StatusTracker(scip_dir)
     status = tracker.load()
@@ -976,7 +978,7 @@ def scip_references(
     from code_indexer.scip.status import StatusTracker
 
     repo_root = Path.cwd()
-    scip_dir = repo_root / ".code-indexer" / "scip"
+    scip_dir = scip_index_dir(repo_root)
 
     tracker = StatusTracker(scip_dir)
     status = tracker.load()
@@ -1158,7 +1160,7 @@ def scip_dependencies(
     from code_indexer.scip.status import StatusTracker
 
     repo_root = Path.cwd()
-    scip_dir = repo_root / ".code-indexer" / "scip"
+    scip_dir = scip_index_dir(repo_root)
 
     tracker = StatusTracker(scip_dir)
     status = tracker.load()
@@ -1339,7 +1341,7 @@ def scip_dependents(
     from code_indexer.scip.status import StatusTracker
 
     repo_root = Path.cwd()
-    scip_dir = repo_root / ".code-indexer" / "scip"
+    scip_dir = scip_index_dir(repo_root)
 
     tracker = StatusTracker(scip_dir)
     status = tracker.load()
@@ -1509,7 +1511,7 @@ def scip_impact(
     from code_indexer.scip.status import StatusTracker
 
     repo_root = Path.cwd()
-    scip_dir = repo_root / ".code-indexer" / "scip"
+    scip_dir = scip_index_dir(repo_root)
 
     tracker = StatusTracker(scip_dir)
     status = tracker.load()
@@ -1660,7 +1662,7 @@ def scip_callchain(
     from code_indexer.scip.status import StatusTracker
 
     repo_root = Path.cwd()
-    scip_dir = repo_root / ".code-indexer" / "scip"
+    scip_dir = scip_index_dir(repo_root)
 
     # Check if SCIP indexes exist
     tracker = StatusTracker(scip_dir)
@@ -1979,7 +1981,7 @@ def scip_context(
     from code_indexer.scip.status import StatusTracker
 
     repo_root = Path.cwd()
-    scip_dir = repo_root / ".code-indexer" / "scip"
+    scip_dir = scip_index_dir(repo_root)
 
     tracker = StatusTracker(scip_dir)
     status = tracker.load()

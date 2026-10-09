@@ -40,6 +40,7 @@ therefore:
 
 from __future__ import annotations
 
+from code_indexer.scip.paths import scip_index_dir
 import logging
 from enum import Enum
 from pathlib import Path
@@ -300,7 +301,7 @@ def funnel_scip_generation(
             record_scip_metric("delegated_skipped_no_alias")
             return ScipDelegationOutcome.SKIPPED
 
-        scip_dir = repo_root / ".code-indexer" / "scip"
+        scip_dir = scip_index_dir(repo_root)
         if clear:
             # MAJOR-5: a clear rebuild must never be answered FRESH. Drop the
             # stale marker and skip the freshness short-circuit entirely.
