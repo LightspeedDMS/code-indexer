@@ -7,7 +7,22 @@ behind them.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Iterable, Tuple
+
+
+def deliberately_killed_worker_allowlist(pids: Iterable[int]) -> Tuple[str, ...]:
+    """Excuse the stall watchdog's unclean-exit WARNING for these PIDs ONLY.
+
+    Justification: test_04 SIGKILLs its own server on purpose, and on restart
+    the watchdog (stall_watchdog_sweep) reports that worker as having "ended
+    without a clean shutdown".  Each pattern is anchored on the killed PID
+    (``pid <N> ended``), so an unexpected death of any other worker still fails.
+    """
+    return tuple(
+        f"Worker stall watchdog: worker pid {pid} ended without a clean shutdown"
+        for pid in pids
+    )
+
 
 PHASE7_LOG_ALLOWLIST: Tuple[str, ...] = (
     # The Phase 7 servers run with the non-production fault-injection gate ON
