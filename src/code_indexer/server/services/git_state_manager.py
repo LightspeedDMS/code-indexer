@@ -26,6 +26,7 @@ from code_indexer.utils.git_runner import run_git_command
 from code_indexer.server.services.git_argv_safety import (
     GIT_CLEAN_UNTRACKED_ARGV,
     GIT_STATUS_UNCOMMITTED_ARGV,
+    uncommitted_status_lines,
 )
 from code_indexer.utils.credential_redaction import mask_url_credentials
 from code_indexer.utils.git_remote_url import parse_git_remote_url
@@ -117,8 +118,8 @@ class GitStateManager:
             raise GitStateError(f"git status failed: {e}")
 
         # Parse status output to count files
-        status_output = status_result.stdout.strip()
-        if not status_output:
+        changes = uncommitted_status_lines(status_result.stdout)
+        if not changes:
             # Already clean, no action needed
             logger.info(
                 f"Repository {repo_path} is already clean, skipping clearing",
@@ -127,9 +128,7 @@ class GitStateManager:
             return CleanupResult(was_dirty=False, files_cleared=0)
 
         # Count files to be cleared
-        files_to_clear = len(
-            [line for line in status_output.split("\n") if line.strip()]
-        )
+        files_to_clear = len(changes)
         logger.info(
             f"Repository {repo_path} has {files_to_clear} uncommitted changes, clearing",
             extra={"correlation_id": get_correlation_id()},
@@ -181,7 +180,7 @@ class GitStateManager:
         except subprocess.CalledProcessError as e:
             raise GitStateError(f"git status verification failed: {e}")
 
-        if final_status.stdout.strip():
+        if uncommitted_status_lines(final_status.stdout):
             # Still dirty after reset/clean - should never happen
             error_msg = f"Repository not clean after reset/clean: {final_status.stdout}"
             logger.error(

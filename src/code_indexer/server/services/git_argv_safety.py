@@ -57,22 +57,41 @@ GIT_CLEAN_UNTRACKED_ARGV = ["git", "clean", "-fd"] + [
     arg for path in CIDX_OWNED_WORKING_PATHS for arg in ("-e", path)
 ]
 
-# Uncommitted changes other than cidx's own working paths: the paths the
-# clean above keeps must not make the repository look dirty afterwards.
-# Untracked files are listed individually so the exclusions also apply
-# inside an otherwise-collapsed untracked directory.
+# Every uncommitted change, tracked and untracked. Untracked files are
+# listed individually so `uncommitted_status_lines` can recognise cidx's
+# own working paths inside an otherwise-collapsed untracked directory.
 GIT_STATUS_UNCOMMITTED_ARGV = [
     "git",
     "status",
     "--porcelain",
     "--untracked-files=all",
-    "--",
-    ".",
-] + [
-    f":(exclude,glob){pattern}"
-    for path in CIDX_OWNED_WORKING_PATHS
-    for pattern in (f"**/{path}", f"**/{path}/**")
 ]
+
+_UNTRACKED_PREFIX = "?? "
+
+
+def _is_untracked_cidx_working_path(line: str) -> bool:
+    if not line.startswith(_UNTRACKED_PREFIX):
+        return False
+    path = line[len(_UNTRACKED_PREFIX) :]
+    if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
+        path = path[1:-1]
+    return any(part in CIDX_OWNED_WORKING_PATHS for part in path.split("/"))
+
+
+def uncommitted_status_lines(status_stdout: str) -> List[str]:
+    """The porcelain lines of `GIT_STATUS_UNCOMMITTED_ARGV` that are real
+    local changes.
+
+    Only UNTRACKED entries under cidx's own working paths (the ones the
+    clean above keeps) are dropped, so they never make a repository look
+    dirty; a TRACKED change to those paths (M/A/D/R/...) is kept.
+    """
+    return [
+        line
+        for line in status_stdout.splitlines()
+        if line.strip() and not _is_untracked_cidx_working_path(line)
+    ]
 
 
 class GitArgumentValidationError(ValueError):
