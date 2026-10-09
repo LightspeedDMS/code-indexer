@@ -349,6 +349,13 @@ def _handle_write_error(
             extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response({"success": False, "error": str(exc)})
+    if isinstance(exc, GitArgumentValidationError):
+        # A rejected caller argument is a client error, not a server fault.
+        logger.warning(
+            f"{operation} rejected an invalid argument: {exc}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(exc)})
     logger.exception(
         f"Unexpected error in {operation}: {exc}",
         extra={"correlation_id": get_correlation_id()},

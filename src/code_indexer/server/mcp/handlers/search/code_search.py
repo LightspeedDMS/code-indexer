@@ -52,18 +52,6 @@ from .temporal_search import _execute_temporal_via_live_dispatch
 logger = logging.getLogger("code_indexer.server.mcp.handlers.search")
 
 
-def _search_error_message(error: Exception) -> str:
-    """Client-facing message for a failed search_code call.
-
-    Delegates to the shared allow-list classifier: only client errors keep
-    their text; every other failure answers a fixed message and its detail
-    goes to the server log only (logged by the caller).
-    """
-    from code_indexer.server.query.search_error_policy import classify_search_error
-
-    return classify_search_error(error).message
-
-
 def search_code(
     params: Dict[str, Any],
     user: User,
@@ -267,12 +255,21 @@ def search_code(
 
         return _result
     except Exception as e:
-        logger.exception(
+        from code_indexer.server.query.search_error_policy import (
+            classify_search_error,
+        )
+
+        outcome = classify_search_error(e)
+        # A request the caller can fix is not a server fault: WARNING, no
+        # traceback (as REST /api/query). Everything else keeps ERROR.
+        logger.log(
+            logging.WARNING if outcome.client_error else logging.ERROR,
             f"Error in search_code: {e}",
+            exc_info=not outcome.client_error,
             extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response(
-            {"success": False, "error": _search_error_message(e), "results": []}
+            {"success": False, "error": outcome.message, "results": []}
         )
     finally:
         # Issue #1159: always reset ContextVar so it never leaks into the next request.
