@@ -149,12 +149,19 @@ class ContentBackend(Protocol):
         *,
         cursor: Optional[str] = None,
         page_size: int = DEFAULT_PAGE_SIZE,
+        prune_dirs: Optional[Sequence[str]] = None,
     ) -> ContentPage:
         """One page of the repository's files, in a stable order.
 
         Paging is cursor-based rather than offset-based so a file appearing or
         vanishing mid-walk cannot make the traversal skip or repeat an unrelated
         entry.
+
+        ``prune_dirs`` are directory NAMES the caller will discard anyway,
+        skipped at any depth exactly as ``.git`` is -- never read, never hashed.
+        They are the caller's choice (cidx sends only names its own discovery
+        always prunes; see ``FileFinder.manifest_prune_dirs``), and the same
+        list must be sent on every page of one manifest.
         """
         ...
 
@@ -181,12 +188,13 @@ class LocalContentBackend:
         *,
         cursor: Optional[str] = None,
         page_size: int = DEFAULT_PAGE_SIZE,
+        prune_dirs: Optional[Sequence[str]] = None,
     ) -> ContentPage:
         root = Path(repo_path)
         collected: list = []
         last: Optional[str] = None
 
-        for rel in self._walk_ordered(root, cursor):
+        for rel in self._walk_ordered(root, cursor, frozenset(prune_dirs or ())):
             collected.append(self._describe(root, rel))
             last = rel
             if len(collected) >= page_size:
@@ -385,8 +393,14 @@ class LocalContentBackend:
                 prefix = f"{prefix}{part}/"
         return stack
 
-    def _walk_ordered(self, root: Path, cursor: Optional[str] = None) -> Iterator[str]:
-        """Repo-relative POSIX paths in ascending path order, ``.git`` excluded.
+    def _walk_ordered(
+        self,
+        root: Path,
+        cursor: Optional[str] = None,
+        prune: frozenset = frozenset(),
+    ) -> Iterator[str]:
+        """Repo-relative POSIX paths in ascending path order, ``.git`` and any
+        directory named in ``prune`` excluded.
 
         The order must be MONOTONIC in the emitted path, because the cursor is a
         path and resuming means "everything after this one". Emitting a
@@ -408,7 +422,7 @@ class LocalContentBackend:
             if entry.is_symlink():
                 yield rel
             elif entry.is_dir(follow_symlinks=False):
-                if entry.name == ".git":
+                if entry.name == ".git" or entry.name in prune:
                     continue
                 stack.append(iter(self._sorted_children(Path(entry.path), f"{rel}/")))
             elif entry.is_file(follow_symlinks=False):

@@ -194,6 +194,7 @@ smoke:
       tests/unit/server/startup/test_ripgrep_backend_parked_on_app_state.py
       tests/unit/indexing/test_content_prefetcher.py
       tests/unit/indexing/test_manifest_mtime.py
+      tests/unit/indexing/test_manifest_prune_dirs.py
       tests/unit/indexing/test_manifest_discovery.py
       tests/unit/indexing/test_fts_text_source.py
       tests/unit/test_content_backend_seam.py

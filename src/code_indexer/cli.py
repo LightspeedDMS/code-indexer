@@ -4361,10 +4361,8 @@ def index(
             # delegated backend there is no SmartIndexer pass, so the manifest
             # is built here: discovery and text both come from it, not the disk.
             fts_backend, fts_manifest = _delegated_fts_source(
-                content_backend, config.codebase_dir
+                content_backend, file_finder
             )
-            if fts_manifest is not None:
-                file_finder.set_manifest(fts_manifest, fts_backend)
             discovered_files = list(file_finder.find_files())
 
             if not discovered_files:
@@ -5097,14 +5095,18 @@ def _build_index_content_backend(backend_type: str) -> Any:
     return build_named_content_backend(backend_type)
 
 
-def _delegated_fts_source(backend_type: str, codebase_dir: Path) -> Tuple[Any, Any]:
-    """(backend, manifest) for a delegated FTS rebuild, or (None, None) for local."""
+def _delegated_fts_source(backend_type: str, file_finder: Any) -> Tuple[Any, Any]:
+    """(backend, manifest) for a delegated FTS rebuild, or (None, None) for local.
+
+    The manifest is attached to ``file_finder`` (discovery reads from it), built
+    the same way the indexing pass builds it.
+    """
     if backend_type == "local":
         return None, None
-    from .indexing.repo_manifest import RepoManifest
+    from .indexing.file_finder import attach_delegated_manifest
 
     backend = _build_index_content_backend(backend_type)
-    return backend, RepoManifest.build(codebase_dir, backend=backend)
+    return backend, attach_delegated_manifest(file_finder, backend)
 
 
 def _populate_fts_index_from_disk(
