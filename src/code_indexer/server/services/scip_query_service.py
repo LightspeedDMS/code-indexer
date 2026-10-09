@@ -26,6 +26,8 @@ SERVER-ONLY SCOPE:
     which operate on local repository paths rather than the golden repos.
 """
 
+from code_indexer.utils.index_store import INDEX_DIRNAME
+from code_indexer.scip.paths import SCIP_DIRNAME, scip_index_dir
 import logging
 import os
 from pathlib import Path
@@ -190,7 +192,7 @@ class SCIPQueryService:
                 return []
             alias_root = self._resolve_alias_scip_root(normalized_alias)
             if alias_root is not None:
-                scip_dir = alias_root / ".code-indexer" / "scip"
+                scip_dir = scip_index_dir(alias_root)
                 if scip_dir.exists():
                     dbs = list(scip_dir.glob("**/*.scip.db"))
                     if dbs:
@@ -204,8 +206,8 @@ class SCIPQueryService:
                 # snapshot-first, live-fallback). Without this, a freshly-built golden
                 # scip (java/csharp and any repo indexed after its last snapshot) is
                 # never queryable. normalized_alias is the bare, -global-stripped alias.
-                live_scip_dir = (
-                    self._golden_repos_dir / normalized_alias / ".code-indexer" / "scip"
+                live_scip_dir = scip_index_dir(
+                    self._golden_repos_dir / normalized_alias
                 )
                 if live_scip_dir.exists():
                     return list(live_scip_dir.glob("**/*.scip.db"))
@@ -239,7 +241,7 @@ class SCIPQueryService:
             scip_root = self._resolve_alias_scip_root(repo_dir.name) or repo_dir
 
             # Find .scip.db files in the repository's scip directory
-            scip_dir = scip_root / ".code-indexer" / "scip"
+            scip_dir = scip_index_dir(scip_root)
             if scip_dir.exists():
                 scip_files.extend(scip_dir.glob("**/*.scip.db"))
 
@@ -257,7 +259,7 @@ class SCIPQueryService:
         """
         first = scip_files[0]
         for parent in first.parents:
-            if parent.name == "scip" and parent.parent.name == ".code-indexer":
+            if parent.name == SCIP_DIRNAME and parent.parent.name == INDEX_DIRNAME:
                 return parent
         return first.parent
 
@@ -299,9 +301,7 @@ class SCIPQueryService:
                     repo_entry_global = backend_registry.global_repos.get_repo(
                         f"{repo_name}-global"
                     )
-                    repo_entry_bare = backend_registry.global_repos.get_repo(
-                        repo_name
-                    )
+                    repo_entry_bare = backend_registry.global_repos.get_repo(repo_name)
             except Exception as exc:
                 logger.warning(
                     "_resolve_alias_scip_root: swallowed %s: %s",

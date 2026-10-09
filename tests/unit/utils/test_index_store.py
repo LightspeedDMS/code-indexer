@@ -193,6 +193,60 @@ def test_semantic_query_reads_repo_config_from_the_store(elsewhere: Any) -> None
     assert not (repo / ".code-indexer").exists()
 
 
+# ── SCIP locations ─────────────────────────────────────────────────────────
+
+
+def test_scip_dir_comes_from_the_store(elsewhere: Any) -> None:
+    from code_indexer.scip.paths import scip_index_dir
+
+    repo, root = elsewhere
+    assert scip_index_dir(repo) == root / "scip"
+
+
+def test_the_scip_generator_writes_where_the_store_says(elsewhere: Any) -> None:
+    from code_indexer.scip.generator import SCIPGenerator
+
+    repo, root = elsewhere
+    assert SCIPGenerator(repo).scip_dir == root / "scip"
+
+
+def test_the_live_golden_scip_db_comes_from_the_store(
+    elsewhere: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from code_indexer.server.multi import scip_multi_service as sms
+
+    repo, root = elsewhere
+    monkeypatch.setattr(sms, "_get_golden_repos_dir", lambda: str(repo.parent))
+    service = sms.SCIPMultiService.__new__(sms.SCIPMultiService)
+    got = service._live_golden_scip_db_path(f"{repo.name}-global")
+    assert got == root / "scip" / "index.scip.db"
+
+
+def test_scip_query_finds_an_alias_db_through_the_store(
+    elsewhere: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The alias points at a versioned snapshot; its SCIP db is found where the
+    store keeps the SNAPSHOT's index -- not the live golden dir's, which is empty
+    here, so the live-fallback branch cannot answer for it."""
+    from code_indexer.server.services.scip_query_service import SCIPQueryService
+    from code_indexer.utils import index_store as store_module
+
+    repo, _ = elsewhere
+    snapshot = tmp_path / "versioned" / "v_1"
+    snapshot.mkdir(parents=True)
+    snapshot_root = store_module.index_root(snapshot)
+    (snapshot_root / "scip").mkdir(parents=True)
+    (snapshot_root / "scip" / "index.scip.db").write_bytes(b"")
+    service = SCIPQueryService.__new__(SCIPQueryService)
+    service._golden_repos_dir = repo.parent
+    monkeypatch.setattr(
+        service, "_resolve_alias_scip_root", lambda alias: snapshot, raising=False
+    )
+    found = service.find_scip_files(repository_alias=repo.name)
+    assert found == [snapshot_root / "scip" / "index.scip.db"]
+    assert not (snapshot / ".code-indexer").exists()
+
+
 if __name__ == "__main__":
     if "--write" in sys.argv:
         _BASELINE.write_text(json.dumps(scan(), indent=1, sort_keys=True) + "\n")

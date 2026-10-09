@@ -1,5 +1,6 @@
 """SCIP generation orchestration module."""
 
+from .paths import scip_index_dir
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Optional, Callable, Set
@@ -45,7 +46,10 @@ def indexer_result_is_unsupported_language(indexer_result: IndexerResult) -> boo
     """
     if indexer_result is None:
         return False
-    if getattr(indexer_result, "exit_code", None) == SCIP_UNSUPPORTED_LANGUAGE_EXIT_CODE:
+    if (
+        getattr(indexer_result, "exit_code", None)
+        == SCIP_UNSUPPORTED_LANGUAGE_EXIT_CODE
+    ):
         return True
     stderr = (getattr(indexer_result, "stderr", "") or "").lower()
     return any(marker in stderr for marker in _UNSUPPORTED_LANGUAGE_MARKERS)
@@ -158,7 +162,7 @@ class SCIPGenerator:
                 correct for the local backend and the non-golden delegated path.
         """
         self.repo_root = Path(repo_root)
-        self.scip_dir = self.repo_root / ".code-indexer" / "scip"
+        self.scip_dir = scip_index_dir(self.repo_root)
         self.max_workers = max_workers
         self.workspace_id = workspace_id
         self.golden_alias = golden_alias

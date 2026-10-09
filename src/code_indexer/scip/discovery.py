@@ -1,5 +1,6 @@
 """SCIP project auto-discovery module."""
 
+from ..utils.index_store import INDEX_DIRNAME
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +11,7 @@ from xml.etree import ElementTree
 # EVO-66190: directories that never hold a real project root. Pruned during the single
 # discovery walk so a large repo's VCS/index internals aren't traversed (a .git tree can
 # itself be tens of thousands of files). Safe: no build file inside these is a project.
-_PRUNE_DIRS: frozenset = frozenset({".git", ".code-indexer"})
+_PRUNE_DIRS: frozenset = frozenset({".git", INDEX_DIRNAME})
 
 
 # Build file mappings: filename/pattern -> (language, build_system)
