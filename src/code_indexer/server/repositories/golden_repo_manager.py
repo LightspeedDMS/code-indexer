@@ -3647,6 +3647,7 @@ class GoldenRepoManager:
                 Path(clone_path),
                 alias=golden_repo_alias,
                 subprocess_env=build_cidx_subprocess_env(),
+                local_content=local_content,
             )
             if not _fts_outcome.ok:
                 logging.error(

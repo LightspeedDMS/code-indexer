@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+
+import pytest
 from typing import List
 
 
@@ -227,3 +229,75 @@ def test_successful_rebuild_clears_a_stale_skip_marker(tmp_path: Path) -> None:
     assert outcome.status is FtsBuildStatus.REBUILT
     assert not _skip_marker(repo).exists()
     assert not fts_backfill_skip_present(repo)
+
+
+# ── pod-local repositories under a delegated server (!148) ─────────────────
+
+
+@pytest.fixture
+def delegated_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    from code_indexer.server.utils import index_command_layout as icl
+
+    monkeypatch.setattr(icl, "configured_content_backend_name", lambda: "delegated")
+    monkeypatch.setattr(icl, "configured_git_backend_name", lambda: "delegated")
+
+
+def _rebuild_cmd(runner: "_FakeRunner") -> List[str]:
+    return next(c for c in runner.calls if "--rebuild-fts-index" in c)
+
+
+@pytest.mark.parametrize(
+    "alias, local_content, delegated",
+    [
+        ("notes", True, False),  # a local:// repo: the caller says so
+        ("cidx-meta", False, False),  # cidx-meta: the alias says so
+        ("agent-router", False, True),  # with workspace-mcp: delegated
+    ],
+)
+def test_the_rebuild_reads_the_pod_for_a_pod_local_repo(
+    tmp_path: Path,
+    delegated_server: None,
+    alias: str,
+    local_content: bool,
+    delegated: bool,
+) -> None:
+    repo = _make_repo(tmp_path, config=True, fts=False)
+    runner = _FakeRunner(repo)
+
+    ensure_fts_index(repo, alias=alias, runner=runner, local_content=local_content)
+
+    cmd = _rebuild_cmd(runner)
+    assert ("--content-backend=delegated" in cmd) is delegated
+    assert ("--git-backend=delegated" in cmd) is delegated
+
+
+def test_the_backfill_sweep_asks_the_registry_whether_a_repo_is_pod_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from code_indexer.server.repositories import golden_repo_manager as grm
+    from code_indexer.server.services.fts_backfill import policy
+
+    monkeypatch.setattr(
+        grm,
+        "get_golden_repo_manager",
+        lambda: SimpleNamespace(
+            get_golden_repo=lambda alias: SimpleNamespace(repo_url="local://notes")
+        ),
+    )
+    seen = {}
+
+    def fake_ensure(repo_path, **kw):
+        seen.update(kw)
+        return SimpleNamespace(
+            status=FtsBuildStatus.PRESENT, alias=kw["alias"], detail="", ok=True
+        )
+
+    monkeypatch.setattr(policy, "ensure_fts_index", fake_ensure)
+
+    policy.fts_backfill_build_executor(
+        {"repo_path": str(tmp_path / "notes"), "alias": "notes"}
+    )
+
+    assert seen["local_content"] is True
