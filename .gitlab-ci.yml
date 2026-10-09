@@ -188,6 +188,16 @@ smoke:
       tests/unit/indexing/test_delegated_pod_has_no_local_repo.py
       tests/unit/server/startup/test_ripgrep_backend_wiring.py
       tests/unit/server/startup/test_ripgrep_backend_parked_on_app_state.py
+      tests/unit/indexing/test_content_prefetcher.py
+      tests/unit/indexing/test_manifest_mtime.py
+      tests/unit/indexing/test_manifest_discovery.py
+      tests/unit/indexing/test_fts_text_source.py
+      tests/unit/test_content_backend_seam.py
+      tests/unit/test_content_backend_invariants.py
+      tests/unit/test_manifest_backed_blob_hash.py
+      tests/unit/test_single_read_equivalence.py
+      tests/unit/services/test_progressive_metadata_lifecycle_1865.py
+      tests/unit/server/test_content_seam_inventory.py
       -v --tb=short
       --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
     # The plugins ship their own suites and NO job collected either of them.

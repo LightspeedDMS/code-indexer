@@ -41,6 +41,20 @@ _FLEET_INVARIANT_SEAMS = (
     "register_job_if_no_conflict",  # M4: the race-to-claim single-flight
 )
 
+# The content seam (removing cidx's repository mount). Same failure shape: its
+# phase-4 suites -- the prefetcher, manifest mtime, manifest discovery, FTS
+# text -- merged on green pipelines that never collected them. A regression
+# there is cidx quietly reading a disk the pod no longer has.
+_CONTENT_SEAM_SEAMS = (
+    "ContentPrefetcher",
+    "RepoManifest",
+    "file_facts",
+    "iter_file_texts",
+    "LocalContentBackend",
+    "content_backend_wiring",
+    "content_seam_inventory",
+)
+
 # Jobs whose pytest invocation counts as "CI runs this".
 _SMOKE_JOB = "smoke"
 _IMAGE_JOB = "build:image"
@@ -142,6 +156,10 @@ def _named_in_ci(rel: str) -> bool:
 
 
 def _tests_touching_invariants() -> Set[str]:
+    return _tests_touching(_FLEET_INVARIANT_SEAMS)
+
+
+def _tests_touching(seams: "tuple[str, ...]") -> Set[str]:
     found = set()
     for path in sorted(_TESTS.rglob("test_*.py")):
         try:
@@ -150,7 +168,7 @@ def _tests_touching_invariants() -> Set[str]:
             continue
         # Match the seam as a whole word so a passing mention in prose does not
         # drag an unrelated test into the required set.
-        if any(re.search(rf"\b{re.escape(s)}\b", body) for s in _FLEET_INVARIANT_SEAMS):
+        if any(re.search(rf"\b{re.escape(s)}\b", body) for s in seams):
             found.add(str(path.relative_to(_REPO)))
     return found
 
@@ -334,4 +352,22 @@ def test_derived_files_are_covered_by_a_pre_merge_job() -> None:
     assert not missing, (
         "covered only by a master-only job, so not checked before merge: "
         + ", ".join(missing)
+    )
+
+
+def test_the_content_seam_scan_finds_something() -> None:
+    found = _tests_touching(_CONTENT_SEAM_SEAMS)
+    assert len(found) >= 8, (
+        f"only {len(found)} tests matched the content-seam names; the scan is "
+        f"probably broken, and a broken scan silently requires nothing"
+    )
+
+
+@pytest.mark.parametrize("rel", sorted(_tests_touching(_CONTENT_SEAM_SEAMS)))
+def test_a_content_seam_test_runs_before_merge(rel: str) -> None:
+    smoke = _pytest_test_tokens(_SMOKE_JOB)
+    assert rel in smoke, (
+        f"{rel} covers the content seam but the `smoke` job does not collect it, "
+        f"so it never runs before merge. Add it to smoke's pytest arguments in "
+        f".gitlab-ci.yml."
     )
