@@ -8,11 +8,11 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | Class | Rows |
 |---|---|
 | unclassified | 0 |
-| repo-read | 397 |
+| repo-read | 401 |
 | repo-write | 93 |
-| cidx-state-in-repo | 1315 |
+| cidx-state-in-repo | 1319 |
 | migrated | 69 |
-| local-only | 154 |
+| local-only | 146 |
 | cidx-state | 521 |
 | not-repo | 363 |
 
@@ -26,6 +26,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `cli_scip.py` | 0 | 0 | 0 | 2 |
 | `config.py` | 0 | 2 | 0 | 22 |
 | `daemon/socket_helper.py` | 0 | 2 | 0 | 2 |
+| `daemon/watch_manager.py` | 0 | 1 | 0 | 0 |
 | `global_repos/alias_manager.py` | 0 | 1 | 0 | 25 |
 | `global_repos/cleanup_manager.py` | 0 | 2 | 5 | 0 |
 | `global_repos/dependency_map_analyzer.py` | 0 | 0 | 0 | 35 |
@@ -206,7 +207,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `services/progressive_metadata.py` | 0 | 0 | 0 | 11 |
 | `services/provider_health_bridge.py` | 0 | 0 | 0 | 13 |
 | `services/provider_rebuild_check.py` | 0 | 0 | 0 | 2 |
-| `services/smart_indexer.py` | 0 | 12 | 0 | 2 |
+| `services/smart_indexer.py` | 0 | 13 | 0 | 2 |
 | `services/tantivy_index_manager.py` | 0 | 0 | 0 | 17 |
 | `services/temporal/temporal_blank_out.py` | 0 | 0 | 0 | 4 |
 | `services/temporal/temporal_collection_naming.py` | 0 | 0 | 0 | 12 |
@@ -220,6 +221,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `services/temporal/temporal_status.py` | 0 | 0 | 0 | 5 |
 | `services/temporal/temporal_structure_marker.py` | 0 | 0 | 0 | 5 |
 | `services/vector_calculation_manager.py` | 0 | 0 | 0 | 1 |
+| `services/watch_metadata.py` | 0 | 2 | 0 | 4 |
 | `storage/background_index_rebuilder.py` | 0 | 0 | 0 | 12 |
 | `storage/filesystem_vector_store.py` | 0 | 3 | 0 | 74 |
 | `storage/hnsw_index_manager.py` | 0 | 0 | 0 | 47 |
