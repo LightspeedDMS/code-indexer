@@ -31,6 +31,9 @@ from code_indexer.server.services.repo_access_guard import (
 # Module-level import so test patches against
 # code_indexer.server.routes.regex_routes.RegexSearchService work correctly.
 from code_indexer.global_repos.regex_search import RegexSearchService
+from code_indexer.server.startup.ripgrep_backend_wiring import (
+    server_ripgrep_backend,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +183,9 @@ async def _execute_single_search(
     # per-call offload pattern already established elsewhere in this
     # search path (see regex_search.py's search() method).
     service = await anyio.to_thread.run_sync(
-        functools.partial(RegexSearchService, repo_path)
+        functools.partial(
+            RegexSearchService, repo_path, ripgrep_backend=server_ripgrep_backend()
+        )
     )
     result = await service.search(
         pattern=body.pattern,

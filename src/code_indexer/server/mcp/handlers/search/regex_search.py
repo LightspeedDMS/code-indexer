@@ -329,6 +329,9 @@ async def _execute_regex_search_impl(
         raw RegexSearchResult dataclass.
     """
     from code_indexer.global_repos.regex_search import RegexSearchService
+    from code_indexer.server.startup.ripgrep_backend_wiring import (
+        server_ripgrep_backend,
+    )
 
     config = get_config_service().get_config()
     search_limits = config.search_limits_config
@@ -365,6 +368,7 @@ async def _execute_regex_search_impl(
             # real user-facing alias, not just the (possibly
             # versioned-snapshot) repo_path.
             alias=repository_alias,
+            ripgrep_backend=server_ripgrep_backend(),
         )
     )
     search_result = await service.search(

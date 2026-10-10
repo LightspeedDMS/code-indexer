@@ -301,3 +301,233 @@ async def test_local_backend_rounds_the_deadline_up_and_drains_the_pool(
     assert captured["command"] == ["rg", "--json", "-e", "x"]
     # wait=True, matching the idiom the call sites used before the seam.
     assert captured["shutdown_wait"] is True
+
+
+# --- a pod that holds only the index state -----------------------------------
+#
+# Under a delegated backend the repository is not on this disk, so nothing in
+# a search may ask this disk about it: not the search path, not the files.
+
+
+class _WritingBackend(_RecordingBackend):
+    """Answers as workspace-mcp would: ripgrep's --json lines, or its error."""
+
+    def __init__(self, stdout: str = "", run: Optional[RipgrepRun] = None) -> None:
+        super().__init__(
+            run
+            or RipgrepRun(
+                exit_code=0, stderr_output="", timed_out=False, timeout_seconds=30.0
+            )
+        )
+        self._stdout = stdout
+
+    async def run(
+        self,
+        *,
+        argv: Sequence[str],
+        working_dir: str,
+        output_file_path: str,
+        timeout_seconds: float,
+        max_output_bytes: int,
+    ) -> RipgrepRun:
+        Path(output_file_path).write_text(self._stdout)
+        return await super().run(
+            argv=argv,
+            working_dir=working_dir,
+            output_file_path=output_file_path,
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=max_output_bytes,
+        )
+
+
+class _LocalWritingBackend(_WritingBackend):
+    @property
+    def is_local(self) -> bool:
+        return True
+
+
+def _rg_match(path: Path, line: int, text: str) -> str:
+    import json
+
+    return json.dumps(
+        {
+            "type": "match",
+            "data": {
+                "path": {"text": str(path)},
+                "lines": {"text": text},
+                "line_number": line,
+                "submatches": [{"match": {"text": "needle"}, "start": 0, "end": 6}],
+            },
+        }
+    )
+
+
+def _missing(search_path: Path) -> RipgrepRun:
+    return RipgrepRun(
+        exit_code=2,
+        stderr_output=f"{search_path}: No such file or directory (os error 2)\n",
+        timed_out=False,
+        timeout_seconds=30.0,
+        is_error=True,
+    )
+
+
+@pytest.fixture
+def index_state_only(tmp_path: Path) -> Path:
+    repo = tmp_path / "golden-repos" / "agent-router"
+    (repo / ".code-indexer").mkdir(parents=True)
+    return repo.resolve()
+
+
+@pytest.mark.asyncio
+async def test_a_sub_path_this_pod_lacks_is_searched_where_the_repo_is(
+    index_state_only: Path,
+) -> None:
+    hit = index_state_only / "src" / "router.py"
+    backend = _WritingBackend(_rg_match(hit, 3, "needle()\n") + "\n")
+    svc = RegexSearchService(index_state_only, ripgrep_backend=backend)
+
+    result = await svc.search(pattern="needle", path="src", max_results=5)
+
+    assert backend.calls[0]["argv"][-2:] == ["--", str(index_state_only / "src")]
+    assert [(m.file_path, m.line_number) for m in result.matches] == [
+        ("src/router.py", 3)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_path_missing_where_the_repo_is_is_still_a_caller_error(
+    index_state_only: Path,
+) -> None:
+    backend = _WritingBackend(run=_missing(index_state_only / "nope"))
+    svc = RegexSearchService(index_state_only, ripgrep_backend=backend)
+
+    with pytest.raises(ValueError, match="Path does not exist: nope"):
+        await svc.search(pattern="needle", path="nope", max_results=5)
+
+
+@pytest.mark.asyncio
+async def test_any_other_delegated_failure_is_still_a_ripgrep_error(
+    index_state_only: Path,
+) -> None:
+    from code_indexer.global_repos.regex_search import RipgrepExecutionError
+
+    other = index_state_only / "src" / "unreadable.py"
+    backend = _WritingBackend(run=_missing(other))  # names a file, not the path
+    svc = RegexSearchService(index_state_only, ripgrep_backend=backend)
+
+    with pytest.raises(RipgrepExecutionError):
+        await svc.search(pattern="needle", path="src", max_results=5)
+
+
+@pytest.mark.asyncio
+async def test_the_local_backend_keeps_the_local_existence_check(
+    index_state_only: Path,
+) -> None:
+    backend = _LocalWritingBackend()
+    svc = RegexSearchService(index_state_only, ripgrep_backend=backend)
+
+    with pytest.raises(ValueError, match="Path does not exist: src"):
+        await svc.search(pattern="needle", path="src", max_results=5)
+    assert backend.calls == [], "ripgrep ran for a path the local check rejects"
+
+
+@pytest.mark.asyncio
+async def test_a_local_missing_path_message_is_not_reinterpreted(
+    index_state_only: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Locally the existence check owns that answer; an rg error naming the
+    path (it vanished mid-search) stays a ripgrep error."""
+    import code_indexer.global_repos.regex_search as mod
+    from code_indexer.global_repos.regex_search import RipgrepExecutionError
+
+    # A local backend picks its engine from PATH; pin ripgrep so this holds
+    # where rg is not installed (the CI smoke image).
+    monkeypatch.setattr(mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    (index_state_only / "src").mkdir()
+    backend = _LocalWritingBackend(run=_missing(index_state_only / "src"))
+    svc = RegexSearchService(index_state_only, ripgrep_backend=backend)
+
+    with pytest.raises(RipgrepExecutionError):
+        await svc.search(pattern="needle", path="src", max_results=5)
+
+
+# --- the server hands its configured backend to every regex search ------------
+
+
+def test_the_server_accessor_returns_the_backend_startup_built(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from code_indexer.server.startup import ripgrep_backend_wiring as wiring
+    from code_indexer.server.utils import registry_factory
+
+    backend = _RecordingBackend()
+    monkeypatch.setattr(
+        registry_factory,
+        "_running_server_app_state",
+        lambda: SimpleNamespace(ripgrep_backend=backend),
+    )
+    assert wiring.server_ripgrep_backend() is backend
+    monkeypatch.setattr(registry_factory, "_running_server_app_state", lambda: None)
+    assert wiring.server_ripgrep_backend() is None
+
+
+class _Constructed(Exception):
+    pass
+
+
+def _record_construction(captured: dict):
+    def _service(*args, **kwargs):
+        captured.update(kwargs)
+        raise _Constructed
+
+    return _service
+
+
+@pytest.mark.asyncio
+async def test_the_rest_route_passes_the_servers_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from code_indexer.server.routes import regex_routes
+
+    backend = _RecordingBackend()
+    captured: dict = {}
+    monkeypatch.setattr(regex_routes, "server_ripgrep_backend", lambda: backend)
+    monkeypatch.setattr(
+        regex_routes, "RegexSearchService", _record_construction(captured)
+    )
+
+    with pytest.raises(_Constructed):
+        await regex_routes._execute_single_search(
+            regex_routes.RegexSearchRequest(repository_alias="r", pattern="x"),
+            str(tmp_path),
+        )
+    assert captured["ripgrep_backend"] is backend
+
+
+@pytest.mark.asyncio
+async def test_the_mcp_tool_passes_the_servers_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import MagicMock
+
+    import code_indexer.global_repos.regex_search as service_module
+    from code_indexer.server.mcp.handlers.search import regex_search as handler
+    from code_indexer.server.startup import ripgrep_backend_wiring as wiring
+
+    backend = _RecordingBackend()
+    captured: dict = {}
+    monkeypatch.setattr(wiring, "server_ripgrep_backend", lambda: backend)
+    monkeypatch.setattr(handler, "get_config_service", MagicMock())
+    monkeypatch.setattr(
+        service_module, "RegexSearchService", _record_construction(captured)
+    )
+
+    with pytest.raises(_Constructed):
+        await handler._execute_regex_search_impl(
+            {"pattern": "x"}, tmp_path, "r", MagicMock()
+        )
+    assert captured["ripgrep_backend"] is backend
