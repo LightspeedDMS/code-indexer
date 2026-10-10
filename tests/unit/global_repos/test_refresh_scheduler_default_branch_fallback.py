@@ -135,6 +135,8 @@ def _refresh_context(scheduler, golden_repos_dir, alias_name: str, updater):
             return_value=str(golden_repos_dir / ".versioned" / repo_stem / "v_2"),
         ),
         patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
+        # Story #2118: the mocked snapshot path above holds no index to count.
+        patch("code_indexer.server.services.index_spend_alarm.record_published_points"),
         patch(
             "code_indexer.global_repos.refresh_scheduler.GitPullUpdater",
             return_value=updater,
