@@ -52,6 +52,30 @@ __all__ = [
 ]
 
 
+def _first_copies_then_duplicates(
+    files: List[Path], hash_results: Dict[Path, tuple]
+) -> List[Path]:
+    """Story #2119: ``files`` reordered so the first file of every file-hash
+    group comes first (original order), then every later byte-identical copy
+    (original order). A file without a hash result (it vanished during the
+    hash phase) stays in the first part; the submission loop skips it."""
+    seen_hashes: set = set()
+    first_copies: List[Path] = []
+    later_copies: List[Path] = []
+    for file_path in files:
+        hashed = hash_results.get(file_path)
+        if hashed is None:
+            first_copies.append(file_path)
+            continue
+        file_hash = hashed[0]["file_hash"]
+        if file_hash in seen_hashes:
+            later_copies.append(file_path)
+        else:
+            seen_hashes.add(file_hash)
+            first_copies.append(file_path)
+    return first_copies + later_copies
+
+
 @dataclass
 class BranchIndexingResult:
     """Results of branch indexing operation."""
@@ -669,7 +693,15 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 # failure discovered later via a completed future.
                 _failed_relative_paths: set = set()
 
-                for file_path in files:
+                # Story #2119: byte-identical files share content-addressed
+                # point ids. The first file of each file-hash group is
+                # submitted first; each later copy waits for it, so its reuse
+                # lookup finds the rows the first copy committed instead of
+                # paying for the same chunks in the same run. Only the order
+                # changes; totals and per-file progress do not.
+                first_copy_futures: Dict[str, Any] = {}
+
+                for file_path in _first_copies_then_duplicates(files, hash_results):
                     if self.cancelled:
                         break
 
@@ -691,12 +723,15 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         # This prevents "collection_name is required when multiple collections exist" error
                         file_metadata["collection_name"] = collection_name
 
-                        # Submit for processing
+                        # Submit for processing (a copy runs after its first copy)
+                        content_key = file_metadata["file_hash"]
                         file_future = file_manager.submit_file_for_processing(
                             file_path,
                             file_metadata,
                             progress_callback,
+                            after=first_copy_futures.get(content_key),
                         )
+                        first_copy_futures.setdefault(content_key, file_future)
                         file_futures.append(file_future)
 
                         # Track file size (no duplicate stat() call)

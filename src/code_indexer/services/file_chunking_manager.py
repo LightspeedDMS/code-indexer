@@ -19,7 +19,7 @@ import hashlib
 import logging
 import sqlite3
 import time
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import CancelledError, ThreadPoolExecutor, Future
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Any, Optional, Callable, List
 from dataclasses import dataclass
@@ -288,6 +288,7 @@ class FileChunkingManager:
         file_path: Path,
         metadata: Dict[str, Any],
         progress_callback: Optional[Callable],
+        after: Optional["Future[FileProcessingResult]"] = None,
     ) -> "Future[FileProcessingResult]":
         """
         Submit file for complete lifecycle processing.
@@ -296,6 +297,11 @@ class FileChunkingManager:
             file_path: Path to file to process
             metadata: File metadata for processing
             progress_callback: Callback for progress updates
+            after: Story #2119 -- the future of an EARLIER-submitted file with
+                the same content (file hash). This file starts only once that
+                one has finished (``_process_after_first_copy``), so its reuse
+                lookup sees the rows the first copy committed instead of
+                paying for the same chunks again.
 
         Returns:
             Future that will contain FileProcessingResult when complete
@@ -325,18 +331,86 @@ class FileChunkingManager:
         # Always use clean implementation
         process_method = self._process_file_clean_lifecycle
 
-        future = self.executor.submit(
-            process_method,
-            file_path,
-            metadata,
-            progress_callback,
-            self.slot_tracker,
-        )
+        if after is None:
+            future = self.executor.submit(
+                process_method,
+                file_path,
+                metadata,
+                progress_callback,
+                self.slot_tracker,
+            )
+        else:
+            future = self.executor.submit(
+                self._process_after_first_copy,
+                after,
+                file_path,
+                metadata,
+                progress_callback,
+                self.slot_tracker,
+            )
 
         # Track future for clean shutdown
         self._pending_futures.append(future)
 
         return future
+
+    def _process_after_first_copy(
+        self,
+        first_copy: "Future[FileProcessingResult]",
+        file_path: Path,
+        metadata: Dict[str, Any],
+        progress_callback: Optional[Callable],
+        slot_tracker: CleanSlotTracker,
+    ) -> FileProcessingResult:
+        """Story #2119: process a byte-identical copy only after the first
+        copy of its content has finished. The pool is FIFO and the first copy
+        was submitted earlier, so it is running or done by the time this
+        worker waits: no deadlock, and the wait ends when that file does.
+
+        A cancelled first copy cancels this one too; a first copy that raised
+        (only a fatal chunk-store failure escapes a file) aborts this one
+        rather than letting it pay for content the run cannot store. A first
+        copy that FAILED (an unsuccessful result, e.g. the provider rejected
+        it) fails this copy too, without a provider call: the same content
+        would be paid again in this run. It is counted as a failed file, so
+        a later run retries both. A vanished first copy is a skip, not a
+        failure: this copy is then processed normally.
+
+        Waits through ``Future.exception()``, which raises ``CancelledError``
+        for a cancelled future and also wakes on a plain ``cancel()`` --
+        ``concurrent.futures.wait()`` never returns for a future cancelled
+        before any worker picked it up."""
+        try:
+            first_copy_error = first_copy.exception()
+        except CancelledError:
+            return FileProcessingResult(
+                success=False,
+                file_path=file_path,
+                chunks_processed=0,
+                processing_time=0.0,
+                error="Cancelled before processing",
+            )
+        if first_copy_error is not None:
+            raise ChunkStoreUnavailableError(
+                f"Not processing {file_path}: the first copy of its content "
+                f"failed fatally: {first_copy_error}"
+            ) from first_copy_error
+        first_copy_result = first_copy.result()
+        if not first_copy_result.success and not first_copy_result.vanished:
+            return FileProcessingResult(
+                success=False,
+                file_path=file_path,
+                chunks_processed=0,
+                processing_time=0.0,
+                error=(
+                    f"Not processed: the first copy of its content "
+                    f"({first_copy_result.file_path}) failed: "
+                    f"{first_copy_result.error}"
+                ),
+            )
+        return self._process_file_clean_lifecycle(
+            file_path, metadata, progress_callback, slot_tracker
+        )
 
     def _create_vector_point(
         self,
@@ -574,24 +648,40 @@ class FileChunkingManager:
 
             collection_name = metadata.get("collection_name")
             file_path_for_lookup = self._normalize_path_for_storage(file_path)
-            existing_hashes: Dict[int, Any] = {}
+            # Story #2119: content_hash -> stored embedding of this file's
+            # content ids and its path. Matched by content, never by chunk
+            # index, so a chunk that moved (e.g. a prepended chunk) is reused.
+            existing_hashes: Dict[str, Any] = {}
             if collection_name:
                 try:
                     existing_hashes = (
                         self.vector_store_client.get_existing_content_hashes(
-                            file_path_for_lookup, collection_name
+                            file_path_for_lookup,
+                            collection_name,
+                            project_id=metadata["project_id"],
+                            file_hash=metadata["file_hash"],
+                            chunk_count=len(chunks),
                         )
                     )
                 except Exception as e:
-                    logger.debug(f"Could not load existing hashes for {file_path}: {e}")
+                    # Story #2119: fail CLOSED. A lookup error is never "nothing
+                    # stored" -- that would pay the provider for embeddings the
+                    # store may already hold. Abort the whole run with the typed
+                    # fatal error (exit 86 when SQLite reports corruption, else
+                    # 87) before any chunk of this file is sent.
+                    logger.error(f"Embedding reuse lookup failed for {file_path}: {e}")
+                    raise ChunkStoreUnavailableError(
+                        f"Embedding reuse lookup failed for {file_path_for_lookup}; "
+                        f"aborting before any provider call: {e}"
+                    ) from e
 
             for chunk in regular_chunks:
                 chunk_text = chunk["text"]
                 new_hash = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
                 chunk_idx = chunk.get("chunk_index", 0)
-                existing = existing_hashes.get(chunk_idx)
+                existing = existing_hashes.get(new_hash)
 
-                if existing and existing.get("content_hash") == new_hash:
+                if existing:
                     # Cache hit: reuse existing vector, rebuild payload with current metadata
                     chunk_data = {
                         "text": chunk_text,

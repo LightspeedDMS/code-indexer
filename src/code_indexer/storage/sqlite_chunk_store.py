@@ -50,6 +50,7 @@ Two write/open modes
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -186,13 +187,48 @@ def is_fatal_chunk_store_write_error(exc: BaseException) -> bool:
         not ``PermissionError``.
 
     Not fatal (returns False): everything else, including the two lock
-    messages above.
+    messages above. A ``ChunkStoreUnavailableError`` (e.g. Story #2119's
+    refusal to recreate a missing established store) is fatal by definition.
     """
+    if isinstance(exc, ChunkStoreUnavailableError):
+        return True
     if isinstance(exc, sqlite3.DatabaseError):
         return not is_chunk_store_lock_contention(exc)
     if isinstance(exc, OSError):
         return True
     return False
+
+
+def refuse_missing_established_store(db_path: Union[str, Path]) -> None:
+    """Story #2119: raise when ``db_path`` (a collection's ``chunks.db``) is
+    missing although its collection is ESTABLISHED, i.e. the CHUNKS_DB layout
+    discriminator is committed in ``collection_meta.json`` (the layout
+    authority, ``resolve_chunk_layout``). Every creator of a store commits
+    that discriminator only after the store exists (``end_indexing``,
+    ``clear_collection``, fleet migration), and the destructive rebuilds
+    clear it first, so a missing store under a committed discriminator was
+    lost, never pending. A read-write open would silently recreate it empty,
+    and every later reuse lookup would read "nothing stored" and pay again.
+
+    Raises ``ChunkStoreUnavailableError`` chained from ``FileNotFoundError``:
+    an environment failure (exit 87), never corruption (86), so no restore
+    is triggered. Returns quietly when the store exists or the collection is
+    not established (a fresh build)."""
+    path = Path(db_path)
+    if path.exists():
+        return
+    from code_indexer.storage.shared.chunk_layout import (
+        ChunkLayout,
+        resolve_chunk_layout,
+    )
+
+    if resolve_chunk_layout(path.parent) != ChunkLayout.CHUNKS_DB:
+        return
+    missing = FileNotFoundError(errno.ENOENT, "chunk store missing", str(path))
+    raise ChunkStoreUnavailableError(
+        f"Chunk store {path} of an established CHUNKS_DB collection is "
+        f"missing; refusing to recreate it empty"
+    ) from missing
 
 
 #: SQLite result codes (and their extended codes) that report the database
@@ -364,6 +400,10 @@ class ChunkStore:
         self._durable_synchronous = durable_synchronous
         self._compressor = zstandard.ZstdCompressor()
         self._decompressor = zstandard.ZstdDecompressor()
+        if not immutable and not read_only:
+            # Story #2119: a read-write open would create a missing file;
+            # never for an established collection (see the guard).
+            refuse_missing_established_store(self.db_path)
         self._conn = self._open_connection()
         self._expected_dim = expected_dim
         if not immutable and not read_only:
@@ -813,6 +853,62 @@ class ChunkStore:
         if row is None:
             return None
         return self._row_to_record(row[0], row[1], row[2])
+
+    def set_busy_timeout(self, seconds: float) -> None:
+        """Story #2119: wait up to ``seconds`` for another connection's lock
+        before a statement raises "database is locked" (SQLite's own busy
+        handler, ``PRAGMA busy_timeout``; Python's default is 5 s). With the
+        rollback journal this store uses, a reader is blocked while a writer
+        commits."""
+        if not seconds > 0:
+            raise ValueError(f"busy timeout must be positive, got {seconds!r}")
+        self._conn.execute(f"PRAGMA busy_timeout = {int(seconds * 1000)}")
+
+    def read_many(
+        self, point_ids: Sequence[str], *, also_path: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Story #2119: full records (vector included) of every stored row
+        whose ``point_id`` is in ``point_ids`` and, when ``also_path`` is
+        given, of every row stored under exactly that ``path`` -- the
+        embedding-reuse lookup of one file in ONE statement per
+        ``_QUERY_IN_CHUNK_SIZE`` ids (the path clause rides on the first).
+        Each row is returned once.
+
+        Raises ``CorruptChunkDataError`` and ``sqlite3`` errors as they are:
+        a caller deciding whether to pay for an embedding must never read an
+        error as "nothing stored". A store without a ``chunks`` table holds
+        nothing and returns ``[]``.
+        """
+        if not self._chunks_table_exists():
+            return []
+        ids = list(point_ids)
+        batches = [
+            ids[start : start + _QUERY_IN_CHUNK_SIZE]
+            for start in range(0, len(ids), _QUERY_IN_CHUNK_SIZE)
+        ] or [[]]
+        results: List[Dict[str, Any]] = []
+        seen: set = set()
+        for batch_number, batch in enumerate(batches):
+            clauses: List[str] = []
+            params: List[str] = []
+            if batch:
+                clauses.append(f"point_id IN ({','.join('?' for _ in batch)})")
+                params.extend(batch)
+            if also_path is not None and batch_number == 0:
+                clauses.append("path = ?")
+                params.append(also_path)
+            if not clauses:
+                continue
+            rows = self._conn.execute(
+                f"SELECT point_id, vector, data FROM chunks WHERE {' OR '.join(clauses)}",
+                params,
+            ).fetchall()
+            for point_id, vector_blob, data_blob in rows:
+                if point_id in seen:
+                    continue
+                seen.add(point_id)
+                results.append(self._row_to_record(point_id, vector_blob, data_blob))
+        return results
 
     def stream_all(self):
         """Yield every stored record, one at a time.

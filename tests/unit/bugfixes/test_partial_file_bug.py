@@ -41,6 +41,12 @@ class TrackedFilesystemClient:
         """Atomic version of upsert_points."""
         return self.upsert_points(points)
 
+    def get_existing_content_hashes(
+        self, file_path, collection_name, *, project_id, file_hash, chunk_count
+    ):
+        """Story #2119 reuse lookup: nothing stored."""
+        return {}
+
     def create_point(self, point_id, vector, payload, embedding_model=None):
         return {"id": point_id, "vector": vector, "payload": payload}
 

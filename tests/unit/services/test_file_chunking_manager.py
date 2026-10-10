@@ -185,6 +185,12 @@ class MockFilesystemClient:
         """Mock upsert method - called by FileChunkingManager."""
         return self.upsert_points_batched(points, collection_name)
 
+    def get_existing_content_hashes(
+        self, file_path, collection_name, *, project_id, file_hash, chunk_count
+    ) -> Dict:
+        """Story #2119 reuse lookup: nothing stored."""
+        return {}
+
     def upsert_points_batched(self, points: List[Dict], collection_name=None) -> bool:
         """Mock atomic upsert method."""
         self.upsert_calls.append(
@@ -1094,6 +1100,8 @@ class TestFileChunkingManagerValidation:
         mock_filesystem_client.upsert_points = Mock(return_value=True)
         mock_filesystem_client.create_collection = Mock(return_value=True)
         mock_filesystem_client.collection_exists = Mock(return_value=False)
+        # Story #2119 reuse lookup: nothing stored (a dict, like the real store).
+        mock_filesystem_client.get_existing_content_hashes = Mock(return_value={})
 
         with FileChunkingManager(
             vector_manager=mock_vector_manager,

@@ -89,8 +89,9 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     return _parse_args(argv, description=__doc__ or "")
 
 
-def index_command(reconcile: bool) -> List[str]:
-    """The server's ``cidx index`` refresh command (``append_server_layout_args``)."""
+def index_command(reconcile: bool, src: Path) -> List[str]:
+    """The server's ``cidx index`` refresh command (``append_server_layout_args``)
+    as the server of the tree ``src`` builds it."""
     from code_indexer.server.services.embedding_stats_attribution import (
         StatsAttribution,
     )
@@ -107,7 +108,15 @@ def index_command(reconcile: bool) -> List[str]:
         node_id="reembed-repro",
         purpose="refresh",
     )
-    return list(append_server_layout_args(base, attribution=attribution))
+    argv = list(append_server_layout_args(base, attribution=attribution))
+    if not (
+        src / "code_indexer" / "server" / "services" / "embedding_stats_attribution.py"
+    ).exists():
+        # A release older than Story #2118 (e.g. the `default` scenario's
+        # v12.82.0) never received an attribution from its server and
+        # rejects the option (click exits 2).
+        argv = [t for t in argv if not t.startswith("--stats-attribution")]
+    return argv
 
 
 def kind_for(argv: List[str]) -> str:
@@ -184,7 +193,7 @@ class Harness:
             raise HarnessFailure(f"child imports code_indexer from {out[0]}, not {src}")
         self.versions[str(src)] = out[1]
 
-    def refresh_command(self) -> List[str]:
+    def refresh_command(self, src: Path) -> List[str]:
         """As refresh_scheduler._index_source: any in_progress/failed status reconciles."""
         from code_indexer.server.services.metadata_reader import read_index_states
 
@@ -192,7 +201,8 @@ class Harness:
             any(
                 s.status in ("in_progress", "failed")
                 for s in read_index_states(self.repo)
-            )
+            ),
+            src,
         )
 
     # -- one run -----------------------------------------------------------
@@ -532,7 +542,11 @@ class Harness:
     def setup(self) -> None:
         self._init_repo()
         initial = self.run_step(
-            "initial", "initial", index_command(False), self.initial_src, None
+            "initial",
+            "initial",
+            index_command(False, self.initial_src),
+            self.initial_src,
+            None,
         )
         if (
             self._snap is None
@@ -570,9 +584,9 @@ class Harness:
             if self.args.git:
                 commit_sync(self.repo, added, tag)
                 note = apply_op(self.repo, choose_op(git_rng), i, git_rng)
-            argv = self.refresh_command()
-            spec = None if entry == "none" else InterruptSpec.parse(entry)
             src = self.initial_src if i <= self.args.old_src_runs else self.src
+            argv = self.refresh_command(src)
+            spec = None if entry == "none" else InterruptSpec.parse(entry)
             self.run_step(f"cycle-{i}", kind_for(argv), argv, src, spec, note)
         if self.args.recovery_delay_seconds > 0:
             # The recovery runs on a later scheduler cycle (see scenarios.py).
@@ -582,15 +596,23 @@ class Harness:
             )
             time.sleep(self.args.recovery_delay_seconds)
         for j in range(1, self.args.final_runs + 1):
-            argv = self.refresh_command()
+            argv = self.refresh_command(self.src)
             self.run_step(f"final-{j}", kind_for(argv), argv, self.src, None)
         self.final_state = self._final_state()
         # A5: one more reconcile and one more incremental must plan and send nothing.
         self.run_step(
-            "converge-reconcile", "converge", index_command(True), self.src, None
+            "converge-reconcile",
+            "converge",
+            index_command(True, self.src),
+            self.src,
+            None,
         )
         self.run_step(
-            "converge-incremental", "converge", index_command(False), self.src, None
+            "converge-incremental",
+            "converge",
+            index_command(False, self.src),
+            self.src,
+            None,
         )
 
     def _final_state(self) -> FinalState:

@@ -95,7 +95,13 @@ class _FakeVectorStoreClient:
         return True
 
     def get_existing_content_hashes(
-        self, file_path: str, collection_name: str
+        self,
+        file_path: str,
+        collection_name: str,
+        *,
+        project_id: str,
+        file_hash: str,
+        chunk_count: int,
     ) -> Dict[int, Dict[str, Any]]:
         return {}
 

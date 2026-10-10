@@ -238,8 +238,10 @@ or guard failure, 3 INCOMPLETE (nothing failed, some checks skipped).
 4. Per cycle: sync (new files, optionally copies; git: commit plus one
    operation), choose the command exactly as `RefreshScheduler._index_source`
    does (any `in_progress`/`failed` status adds `--reconcile`), built with the
-   real `append_server_layout_args`, and interrupt it as configured. The
-   harness never writes metadata.
+   real `append_server_layout_args`, and interrupt it as configured. A tree
+   older than Story #2118 (the `default` scenario's v12.82.0) gets that
+   command without `--stats-attribution`, which it would reject (exit 2),
+   as its own server never passed it. The harness never writes metadata.
 5. The recovery delay, the final uninterrupted refreshes, the final R-c
    state, the two convergence runs, then the verdict.
 

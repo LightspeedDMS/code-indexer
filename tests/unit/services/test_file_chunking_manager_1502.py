@@ -103,11 +103,12 @@ class _FakeVectorManagerWithFalsyEmbedding(_FakeVectorManager):
 class _FakeCacheAwareFilesystemClient:
     """Minimal vector_store_client stand-in that tracks upserted points and
     lets the test control get_existing_content_hashes() to simulate a
-    Story #470 cache hit on an arbitrary chunk_index."""
+    Story #470 cache hit on an arbitrary chunk's content (keyed by content
+    hash, Story #2119)."""
 
     def __init__(self) -> None:
         self.upserted_points: List[Dict[str, Any]] = []
-        self.existing_hashes: Dict[int, Dict[str, Any]] = {}
+        self.existing_hashes: Dict[str, Dict[str, Any]] = {}
 
     def upsert_points(self, points: List[Dict[str, Any]], collection_name=None) -> bool:
         self.upserted_points.extend(points)
@@ -120,7 +121,13 @@ class _FakeCacheAwareFilesystemClient:
         return True
 
     def get_existing_content_hashes(
-        self, file_path: str, collection_name: str
+        self,
+        file_path: str,
+        collection_name: str,
+        *,
+        project_id: str,
+        file_hash: str,
+        chunk_count: int,
     ) -> Dict[int, Dict[str, Any]]:
         return self.existing_hashes
 
@@ -199,14 +206,17 @@ class TestBug1502StableChunkIndex:
         chunk1_text = "chunk number 1 unique content payload"
         client_b = _FakeCacheAwareFilesystemClient()
         client_b.existing_hashes = {
-            1: {
-                "content_hash": hashlib.sha256(chunk1_text.encode()).hexdigest(),
+            hashlib.sha256(chunk1_text.encode()).hexdigest(): {
                 "vector": [0.42] * 8,
                 "point_id": "irrelevant-cache-point-id",
             }
         }
-        result_b = _process_file(tmp_path / "b", _FakeVectorManager(), client_b, 4)
+        vm_b = _FakeVectorManager()
+        result_b = _process_file(tmp_path / "b", vm_b, client_b, 4)
         assert result_b.success is True, result_b.error
+        assert all(chunk1_text not in batch for batch in vm_b.batches), (
+            "chunk 1 must take the cache-hit path, never a fresh embedding"
+        )
 
         def _point_ids_by_text(points: List[Dict[str, Any]]) -> Dict[str, str]:
             return {p["payload"]["content"]: p["id"] for p in points}
@@ -260,13 +270,23 @@ class TestBug1502StableChunkIndex:
 class _UpsertTrackingFilesystemClient:
     """vector_store_client stand-in that tracks EVERY upsert_points call
     (collection_name + points) across BOTH the regular and multimodal
-    collections, to prove file-atomicity across both. Intentionally does
-    NOT implement get_existing_content_hashes -- FileChunkingManager
-    already wraps that lookup in try/except and degrades to an empty
-    dict on AttributeError."""
+    collections, to prove file-atomicity across both. Its reuse lookup
+    reports nothing stored (Story #2119: a lookup error is fatal, so the
+    double must answer it)."""
 
     def __init__(self) -> None:
         self.upsert_calls: List[Dict[str, Any]] = []
+
+    def get_existing_content_hashes(
+        self,
+        file_path: str,
+        collection_name: str,
+        *,
+        project_id: str,
+        file_hash: str,
+        chunk_count: int,
+    ) -> Dict[int, Dict[str, Any]]:
+        return {}
 
     def upsert_points(self, points: List[Dict[str, Any]], collection_name=None) -> bool:
         self.upsert_calls.append(

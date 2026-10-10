@@ -22,11 +22,27 @@ def test_index_command_stamps_a_refresh_attribution(reconcile):
         StatsAttribution,
     )
 
-    argv = index_command(reconcile)
+    argv = index_command(reconcile, REPO_ROOT / "src")
 
     prefix = "--stats-attribution="
     [token] = [t for t in argv if t.startswith(prefix)]
     assert StatsAttribution.from_json(token[len(prefix) :]).purpose == "refresh"
+    assert ("--reconcile" in argv) is reconcile
+
+
+@pytest.mark.parametrize("reconcile", [False, True])
+def test_index_command_omits_attribution_for_a_tree_without_it(reconcile, tmp_path):
+    """A release older than Story #2118 (the `default` scenario's v12.82.0)
+    neither accepts `--stats-attribution` (click exits 2) nor gets it from
+    its own server: its runs carry the rest of the server command only."""
+    old_src = tmp_path / "src"
+    (old_src / "code_indexer" / "server" / "services").mkdir(parents=True)
+
+    argv = index_command(reconcile, old_src)
+
+    assert not [t for t in argv if t.startswith("--stats-attribution")]
+    assert "--new-collection-layout=chunks_db" in argv
+    assert "--ignore-resume-state" in argv
     assert ("--reconcile" in argv) is reconcile
 
 

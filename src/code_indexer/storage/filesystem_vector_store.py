@@ -74,6 +74,15 @@ from code_indexer.storage.shared.chunk_layout import ChunkLayout
 _CHUNKS_DB_WRITE_MAX_ATTEMPTS = 5
 _CHUNKS_DB_WRITE_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0)
 
+#: Story #2119: how long the embedding-reuse lookup's read-only connection
+#: waits for a writer's lock before failing. chunks.db uses a rollback
+#: journal, so the run's own writer threads (one commit per file, 8+ threads)
+#: block a reader while they commit; commits are short, but NFS fsync stalls
+#: and back-to-back commits can starve a reader past SQLite's 5 s default.
+#: A minute absorbs that; a lock held longer still fails closed (exit 87),
+#: never a silent cache miss that would pay the provider.
+REUSE_LOOKUP_LOCK_WAIT_SECONDS = 60.0
+
 
 # Bug #1991: an unreadable file is hit by every query that matches it. Its
 # WARNING is logged once per (repository, path) per process (DEBUG after),
@@ -1319,15 +1328,19 @@ class FilesystemVectorStore:
         if not self._is_chunks_db_collection(collection_name, collection_path):
             return
 
-        chunks_db_path = collection_path / "chunks.db"
-        if not chunks_db_path.exists():
-            return
-
         from code_indexer.storage.sqlite_chunk_store import (
             ChunkStoreUnavailableError,
             is_fatal_chunk_store_write_error,
             open_chunk_store_for_path,
+            refuse_missing_established_store,
         )
+
+        chunks_db_path = collection_path / "chunks.db"
+        if not chunks_db_path.exists():
+            # Story #2119: a fresh build has no store yet; an established
+            # collection whose store is missing fails the run here (87).
+            refuse_missing_established_store(chunks_db_path)
+            return
 
         try:
             store = open_chunk_store_for_path(chunks_db_path, str(collection_path))
@@ -5228,22 +5241,59 @@ class FilesystemVectorStore:
         return points
 
     def get_existing_content_hashes(
-        self, file_path: str, collection_name: str
-    ) -> Dict[int, Dict[str, Any]]:
-        """Get existing content hashes for a file's chunks.
+        self,
+        file_path: str,
+        collection_name: str,
+        *,
+        project_id: str,
+        file_hash: str,
+        chunk_count: int,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Get the stored embeddings a file's chunks can reuse, by content.
 
         Story #470: Enables smart embedding cache by loading existing
         content_hash values for comparison before re-embedding.
 
+        Story #2119: for a CHUNKS_DB collection the lookup reads the
+        committed rows of ``chunks.db`` itself -- never ``path_index.bin``,
+        which a killed run never persisted -- in ONE read-only query: the
+        file's own content-addressed point ids
+        ``md5(f"{project_id}_{file_hash}_{i}")`` for ``i < chunk_count`` (the
+        writer's id, so an unchanged file, a byte-identical duplicate or rows
+        an interrupted run committed are all found), plus every row stored
+        under ``file_path`` (a changed file's unchanged chunks). Candidates
+        are keyed by ``content_hash``, never by chunk index, so a stored
+        chunk that moved to another index (e.g. a chunk was prepended) is
+        still reused. Every error propagates: the caller pays for an
+        embedding only on a real miss. SHARDED_JSON collections keep the
+        PathIndex lookup.
+
         Args:
             file_path: Relative file path (as stored in payload)
             collection_name: Vector collection name
+            project_id: The writer's project id for this file's points
+            file_hash: The file's content hash, as stored in ``file_hash``
+            chunk_count: Number of chunks the file has now
 
         Returns:
-            Dict mapping chunk_index -> {"content_hash": str, "vector": list, "point_id": str}
+            Dict mapping content_hash -> {"vector": list, "point_id": str}.
             Empty dict if no existing vectors or no content_hash.
         """
-        result: Dict[int, Dict[str, Any]] = {}
+        subdirectory = self._active_subdirectories.get(collection_name)
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            return self._existing_content_hashes_from_chunk_store(
+                collection_path,
+                file_path,
+                [
+                    hashlib.md5(
+                        f"{project_id}_{file_hash}_{index}".encode()
+                    ).hexdigest()
+                    for index in range(chunk_count)
+                ],
+            )
+
+        result: Dict[str, Dict[str, Any]] = {}
 
         # Resolved via _active_subdirectories (this method has no
         # subdirectory param) so a nested collection's lookup uses its OWN
@@ -5275,13 +5325,54 @@ class FilesystemVectorStore:
             content_hash = payload.get("content_hash")
             if not content_hash:
                 continue
-            chunk_idx = payload.get("chunk_index", 0)
-            result[chunk_idx] = {
-                "content_hash": content_hash,
+            result[content_hash] = {
                 "vector": point_data["vector"],
                 "point_id": point_data["id"],
             }
 
+        return result
+
+    @staticmethod
+    def _existing_content_hashes_from_chunk_store(
+        collection_path: Path, file_path: str, own_point_ids: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Story #2119: the CHUNKS_DB half of ``get_existing_content_hashes``.
+
+        Opens ``chunks.db`` READ-ONLY (``mode=ro``, or ``immutable=1`` for a
+        proven-immutable snapshot) through the one open authority -- never a
+        second writer connection. A store that does not exist yet holds
+        nothing only in a fresh build before its first write; the missing
+        store of an established collection is fatal
+        (``refuse_missing_established_store``), never an empty cache. Any
+        read error propagates. Candidates are keyed by ``content_hash``; for
+        the same hash the file's own content-addressed row is preferred."""
+        from code_indexer.storage.sqlite_chunk_store import (
+            open_chunk_store_for_path,
+            refuse_missing_established_store,
+        )
+
+        chunks_db_path = collection_path / "chunks.db"
+        if not chunks_db_path.exists():
+            refuse_missing_established_store(chunks_db_path)
+            return {}
+        with open_chunk_store_for_path(
+            chunks_db_path, str(collection_path), read_only=True
+        ) as chunk_store:
+            chunk_store.set_busy_timeout(REUSE_LOOKUP_LOCK_WAIT_SECONDS)
+            records = chunk_store.read_many(own_point_ids, also_path=file_path)
+
+        own_ids = set(own_point_ids)
+        result: Dict[str, Dict[str, Any]] = {}
+        for record in records:
+            content_hash = record.get("payload", {}).get("content_hash")
+            if not content_hash:
+                continue
+            if content_hash in result and record["id"] not in own_ids:
+                continue  # the file's own content-addressed row wins
+            result[content_hash] = {
+                "vector": record["vector"],
+                "point_id": record["id"],
+            }
         return result
 
     def _parse_filter(self, filter_conditions: Optional[Dict[str, Any]]) -> Any:
