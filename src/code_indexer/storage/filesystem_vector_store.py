@@ -4,6 +4,7 @@ Stores vectors in filesystem with path-as-vector quantization and git-aware chun
 Following Story 2 requirements.
 """
 
+import contextlib
 import contextvars
 import fcntl
 import hashlib
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
     # `Executor` is imported only for type-checking (used solely in a type
     # annotation below) so it costs nothing at runtime CLI-startup import.
     from concurrent.futures import Executor
+
+    from code_indexer.storage.sqlite_chunk_store import ChunkStore
 # Bug #1822 (DEFECT 1): unlike `Executor` above, `ThreadPoolExecutor` IS
 # needed at runtime (not just for type-checking) to construct the
 # module-level dedicated audit executor below. A bare ThreadPoolExecutor()
@@ -82,6 +85,16 @@ _CHUNKS_DB_WRITE_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0)
 #: A minute absorbs that; a lock held longer still fails closed (exit 87),
 #: never a silent cache miss that would pay the provider.
 REUSE_LOOKUP_LOCK_WAIT_SECONDS = 60.0
+
+#: Story #2120 (Codex P2): lock stripes serialising, per point, the legacy
+#: SHARDED_JSON writer against the conditional gone-path delete.
+_LEGACY_POINT_LOCK_STRIPES = 64
+
+#: Story #2120 / Bug #2124: candidates per conditional gone-path delete
+#: transaction. Readers are blocked while a delete transaction commits; a
+#: batch keeps that short (about 0.4 s per 2000 rows measured on local disk)
+#: while the path index is still persisted once per call.
+_GONE_DELETE_COMMIT_BATCH = 2000
 
 
 # Bug #1991: an unreadable file is hit by every query that matches it. Its
@@ -858,6 +871,17 @@ class FilesystemVectorStore:
         # HNSW-001 & HNSW-002: Incremental update change tracking
         # Structure: {collection_name: {'added': set(), 'updated': set(), 'deleted': set()}}
         self._indexing_session_changes: Dict[str, Dict[str, set]] = {}
+
+        # Story #2120 (Codex P2): per-point lock stripes for the legacy
+        # SHARDED_JSON layout. The writer holds its point's stripe across
+        # the vector-file write and the id-index update; the conditional
+        # delete holds every candidate's stripe across its path check and
+        # deletion, so a point a writer moves to a live path can never be
+        # deleted under its old path. Order: stripes (ascending) before
+        # _id_index_lock / _path_index_lock.
+        self._legacy_point_locks: Tuple[threading.Lock, ...] = tuple(
+            threading.Lock() for _ in range(_LEGACY_POINT_LOCK_STRIPES)
+        )
 
         # HNSW-001 (AC3): Daemon mode cache entry (optional, set by daemon service)
         # When set, enables in-memory HNSW updates for watch mode instead of disk I/O
@@ -2715,6 +2739,15 @@ class FilesystemVectorStore:
         # this CHUNKS_DB write path never collides with a bare-name
         # top-level/nested collection pair (Codex NEW Finding 2).
         _upsert_cdb_path_cache_key = self._id_cache_key(collection_name, subdirectory)
+        # Story #2120: a file's previous rows are what chunks.db holds under
+        # its path -- including rows an interrupted run committed but never
+        # recorded in path_index.bin -- not what the PathIndex remembers.
+        # Read before taking the lock (a read-only connection, no blob
+        # decoded). The PathIndex still decides shared ownership: an id
+        # another path owns (a byte-identical copy) is never deleted.
+        stored_ids_by_path = self._stored_point_ids_by_path(
+            collection_path, list(points_by_file)
+        )
         orphan_ids: List[str] = []
         with self._path_index_lock:
             if _upsert_cdb_path_cache_key not in self._path_indexes:
@@ -2727,10 +2760,11 @@ class FilesystemVectorStore:
 
             for file_path, file_points in points_by_file.items():
                 new_point_ids = {p["id"] for p in file_points}
-                old_point_ids = path_index.get_point_ids(file_path)
-                orphan_point_ids = old_point_ids - new_point_ids
+                for stale_entry in path_index.get_point_ids(file_path) - new_point_ids:
+                    path_index.remove_point(file_path, stale_entry)
 
-                for orphan_id in orphan_point_ids:
+                stored_ids = stored_ids_by_path.get(file_path, set())
+                for orphan_id in stored_ids - new_point_ids:
                     path_index.remove_point(file_path, orphan_id)
                     if not path_index.has_other_owner(orphan_id):
                         orphan_ids.append(orphan_id)
@@ -3208,54 +3242,59 @@ class FilesystemVectorStore:
                 uncommitted_files=uncommitted_files,
             )
 
-            # Atomic write to filesystem. Bug #1407/#1223: fsync temporal
-            # vector JSON writes for crash-durability; non-temporal writes
-            # stay fsync=False (unchanged, avoids a fleet-wide perf hit).
-            self._atomic_write_json(vector_file, vector_data, fsync=is_temporal)
+            # Story #2120 (Codex P2): the point's lock stripe is held across
+            # the file write and the id-index update, so the legacy
+            # conditional delete never sees (and deletes) a half-moved point.
+            with self._legacy_point_lock(point_id):
+                # Atomic write to filesystem. Bug #1407/#1223: fsync temporal
+                # vector JSON writes for crash-durability; non-temporal writes
+                # stay fsync=False (unchanged, avoids a fleet-wide perf hit).
+                self._atomic_write_json(vector_file, vector_data, fsync=is_temporal)
 
-            # Update ID index and file path cache
-            with self._id_index_lock:
-                # Check if point existed before (for change tracking)
-                point_existed = point_id in self._id_index.get(_upsert_cache_key, {})
-
-                # Bug #1579: capture the point's PREVIOUS on-disk vector_file
-                # path BEFORE it gets overwritten below. The directory a
-                # point_id lands in is derived from its VECTOR (quantized
-                # projection), while the filename is derived from the
-                # point_id itself -- so a re-upsert of the same point_id with
-                # a marginally different vector can quantize to a DIFFERENT
-                # directory, leaving the OLD file behind as a "shifted
-                # duplicate" sharing the same point_id. This is distinct from
-                # the orphan-cleanup mechanism above (STEP 1-3): that only
-                # fires when a point_id vanishes entirely from a file's chunk
-                # set (in old_point_ids but not new_point_ids) -- a
-                # persisting-but-relocated point_id is never in
-                # orphan_point_ids since it stays in new_point_ids.
-                previous_vector_file = self._id_index.get(_upsert_cache_key, {}).get(
-                    point_id
-                )
-
-                self._id_index[_upsert_cache_key][point_id] = vector_file
-
-                # Update file path cache.
-                # Use setdefault because delete_points may have evicted the cache
-                # entry between the initialization at begin_indexing() and this
-                # point, causing a KeyError under concurrent upsert+delete.
-                if file_path:
-                    self._file_path_cache.setdefault(collection_name, set()).add(
-                        file_path
+                # Update ID index and file path cache
+                with self._id_index_lock:
+                    # Check if point existed before (for change tracking)
+                    point_existed = point_id in self._id_index.get(
+                        _upsert_cache_key, {}
                     )
 
-                # HNSW-001 & HNSW-002: Track changes for incremental updates
-                if collection_name in self._indexing_session_changes:
-                    if point_existed:
-                        self._indexing_session_changes[collection_name]["updated"].add(
-                            point_id
+                    # Bug #1579: capture the point's PREVIOUS on-disk
+                    # vector_file path BEFORE it gets overwritten below. The
+                    # directory a point_id lands in is derived from its
+                    # VECTOR (quantized projection), while the filename is
+                    # derived from the point_id itself -- so a re-upsert of
+                    # the same point_id with a marginally different vector
+                    # can quantize to a DIFFERENT directory, leaving the OLD
+                    # file behind as a "shifted duplicate" sharing the same
+                    # point_id. This is distinct from the orphan-cleanup
+                    # mechanism above (STEP 1-3): that only fires when a
+                    # point_id vanishes entirely from a file's chunk set (in
+                    # old_point_ids but not new_point_ids) -- a
+                    # persisting-but-relocated point_id is never in
+                    # orphan_point_ids since it stays in new_point_ids.
+                    previous_vector_file = self._id_index.get(
+                        _upsert_cache_key, {}
+                    ).get(point_id)
+
+                    self._id_index[_upsert_cache_key][point_id] = vector_file
+
+                    # Update file path cache.
+                    # Use setdefault because delete_points may have evicted the
+                    # cache entry between the initialization at begin_indexing()
+                    # and this point, causing a KeyError under concurrent
+                    # upsert+delete.
+                    if file_path:
+                        self._file_path_cache.setdefault(collection_name, set()).add(
+                            file_path
                         )
-                    else:
-                        self._indexing_session_changes[collection_name]["added"].add(
-                            point_id
-                        )
+
+                    # HNSW-001 & HNSW-002: Track changes for incremental updates
+                    if collection_name in self._indexing_session_changes:
+                        changes = self._indexing_session_changes[collection_name]
+                        if point_existed:
+                            changes["updated"].add(point_id)
+                        else:
+                            changes["added"].add(point_id)
 
             # Bug #1579: delete the stale prior-location file for a relocated
             # point_id OUTSIDE the id_index lock (I/O should not happen while
@@ -3398,6 +3437,29 @@ class FilesystemVectorStore:
                     collection_name, _count_points_subdirectory
                 )
             return len(self._id_index[_count_points_cache_key])
+
+    def has_committed_points(self, collection_name: str) -> bool:
+        """Story #2120 (Codex P1-2): whether the collection holds committed
+        points, read from the store itself -- never from the published
+        ``collection_meta.json`` count, which lags the store (e.g. rows an
+        interrupted run committed after the last publish). Read-only and
+        side-effect free: an existing ``chunks.db`` is probed with
+        ``chunk_store_has_real_data`` (``mode=ro``, never creates a file),
+        regardless of the layout discriminator, so an interrupted first
+        build counts; a legacy SHARDED_JSON collection asks its id index
+        (which scans the vector files when ``id_index.bin`` is absent).
+        Every read error propagates: a populated collection must never be
+        mistaken for an empty one."""
+        from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
+
+        subdirectory = self._active_subdirectories.get(collection_name)
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        if not collection_path.is_dir():
+            return False
+        chunks_db_path = collection_path / "chunks.db"
+        if chunks_db_path.exists():
+            return chunk_store_has_real_data(chunks_db_path, on_error="raise")
+        return len(self._load_id_index(collection_name, subdirectory)) > 0
 
     def delete_points(
         self, collection_name: str, point_ids: List[str]
@@ -3616,6 +3678,129 @@ class FilesystemVectorStore:
                 )
 
         return {"status": "ok", "deleted": deleted}
+
+    @staticmethod
+    def _legacy_stripe(point_id: str) -> int:
+        """Stripe index of a point's legacy lock (stable within a process)."""
+        return hash(point_id) % _LEGACY_POINT_LOCK_STRIPES
+
+    def _legacy_point_lock(self, point_id: str) -> threading.Lock:
+        """Story #2120 (Codex P2): the lock stripe of ``point_id`` on the
+        legacy SHARDED_JSON layout (see ``_legacy_point_locks``)."""
+        return self._legacy_point_locks[self._legacy_stripe(point_id)]
+
+    def delete_points_still_at_paths(
+        self, collection_name: str, expected: Dict[str, str]
+    ) -> int:
+        """Story #2120: delete each point of ``expected`` (point_id -> stored
+        path) only while it is still stored under that path. A point a live
+        byte-identical copy re-upserted in this run (same content-addressed
+        id, the copy's path) is never deleted with its gone twin.
+
+        Bug #2124: the whole batch is one store transaction and, outside an
+        indexing session, ONE ``path_index.bin`` persist (inside a session,
+        ``end_indexing`` persists it once) -- never one per file.
+
+        Returns the number of points deleted. Every error propagates."""
+        if not expected:
+            return 0
+        collection_path = self._get_collection_path(collection_name)
+        self._mark_hnsw_dirty_before_mutation(collection_path, collection_name)
+        subdirectory = self._active_subdirectories.get(collection_name)
+        cache_key = self._id_cache_key(collection_name, subdirectory)
+
+        if not self._is_chunks_db_collection(collection_name, collection_path):
+            # Codex P2: check-and-delete is atomic against the legacy writer:
+            # every candidate's stripe is held (ascending order, as nothing
+            # else takes more than one) across the check and the deletion.
+            stripes = sorted({self._legacy_stripe(pid) for pid in expected})
+            with contextlib.ExitStack() as held:
+                for stripe in stripes:
+                    held.enter_context(self._legacy_point_locks[stripe])
+                still_there = []
+                for point_id, path in expected.items():
+                    point = self.get_point(point_id, collection_name, self_heal=True)
+                    if (
+                        point is not None
+                        and point.get("payload", {}).get("path") == path
+                    ):
+                        still_there.append(point_id)
+                # Codex r2 P2-2: the gone path no longer owns candidates a
+                # live copy took over (a phantom owner would block that
+                # copy's orphan cleanup).
+                still_there_ids = set(still_there)
+                moved = {
+                    pid: path
+                    for pid, path in expected.items()
+                    if pid not in still_there_ids
+                }
+                if moved:
+                    with self._path_index_lock:
+                        if cache_key not in self._path_indexes:
+                            self._path_indexes[cache_key] = (
+                                self._lazy_load_path_index_tracked(
+                                    collection_name, cache_key
+                                )
+                            )
+                        for point_id, path in moved.items():
+                            self._path_indexes[cache_key].remove_point(path, point_id)
+                if not still_there:
+                    if moved:
+                        self._persist_out_of_session_path_index(
+                            collection_name, cache_key, subdirectory
+                        )
+                    return 0
+                result = self.delete_points(collection_name, still_there)
+                return int(result["deleted"])
+
+        from code_indexer.storage.sqlite_chunk_store import open_chunk_store_for_path
+
+        chunk_store = open_chunk_store_for_path(
+            collection_path / "chunks.db", str(collection_path)
+        )
+        # One transaction per _GONE_DELETE_COMMIT_BATCH candidates: a single
+        # transaction over ~200k rows held readers off for its whole length
+        # (measured 9.95 s for 50k rows); each batch blocks them briefly.
+        candidates = list(expected.items())
+        deleted: Dict[str, str] = {}
+        index_changed = False
+        try:
+            for start in range(0, len(candidates), _GONE_DELETE_COMMIT_BATCH):
+                batch = dict(candidates[start : start + _GONE_DELETE_COMMIT_BATCH])
+                with self._path_index_lock:
+                    batch_deleted = chunk_store.delete_points_still_at_paths(batch)
+                    # Recorded as soon as it is committed.
+                    deleted.update(batch_deleted)
+                    if cache_key not in self._path_indexes:
+                        self._path_indexes[cache_key] = (
+                            self._lazy_load_path_index_tracked(
+                                collection_name, cache_key
+                            )
+                        )
+                    path_index = self._path_indexes[cache_key]
+                    # Codex r2 P2-2: the gone path owns none of its candidates
+                    # any more -- deleted rows, and rows a live copy took over
+                    # (a phantom owner would block that copy's orphan cleanup).
+                    for point_id, path in batch.items():
+                        path_index.remove_point(path, point_id)
+                    index_changed = True
+        finally:
+            chunk_store.close()
+            if deleted and collection_name in self._indexing_session_changes:
+                self._indexing_session_changes[collection_name]["deleted"].update(
+                    deleted
+                )
+            if index_changed:
+                # Codex r2 P2-2: persisted on every exit path and inside a
+                # session too (an aborted session never reaches end_indexing),
+                # so path_index.bin never lags committed deletes. CHUNKS_DB
+                # upserts commit per call, so the live index describes
+                # committed rows. Outside _path_index_lock (B1 lock order);
+                # once per call, never per file (Bug #2124).
+                self._persist_out_of_session_path_index(
+                    collection_name, cache_key, subdirectory
+                )
+        return len(deleted)
 
     def _prepare_vector_data(
         self,
@@ -5316,8 +5501,18 @@ class FilesystemVectorStore:
             return result
 
         for point_id in point_ids:
+            # This lookup is a WRITE-path caller (it runs only inside an
+            # indexing run, right before the file's upsert), so it opts into
+            # the same bounded Bug #1969 self-heal the upsert uses: a
+            # duplicated point_id behind a corrupt id_index.bin is repaired
+            # (implicated files wiped and recorded for same-run reprocess),
+            # not reported. Every other error still propagates (Story #2119:
+            # never a silent cache miss that pays).
             point_data = self.get_point(
-                point_id, collection_name, subdirectory=_content_hashes_subdirectory
+                point_id,
+                collection_name,
+                subdirectory=_content_hashes_subdirectory,
+                self_heal=True,
             )
             if point_data is None:
                 continue
@@ -5346,19 +5541,12 @@ class FilesystemVectorStore:
         (``refuse_missing_established_store``), never an empty cache. Any
         read error propagates. Candidates are keyed by ``content_hash``; for
         the same hash the file's own content-addressed row is preferred."""
-        from code_indexer.storage.sqlite_chunk_store import (
-            open_chunk_store_for_path,
-            refuse_missing_established_store,
+        chunk_store = FilesystemVectorStore._open_committed_chunk_store_read_only(
+            collection_path
         )
-
-        chunks_db_path = collection_path / "chunks.db"
-        if not chunks_db_path.exists():
-            refuse_missing_established_store(chunks_db_path)
+        if chunk_store is None:
             return {}
-        with open_chunk_store_for_path(
-            chunks_db_path, str(collection_path), read_only=True
-        ) as chunk_store:
-            chunk_store.set_busy_timeout(REUSE_LOOKUP_LOCK_WAIT_SECONDS)
+        with chunk_store:
             records = chunk_store.read_many(own_point_ids, also_path=file_path)
 
         own_ids = set(own_point_ids)
@@ -5374,6 +5562,53 @@ class FilesystemVectorStore:
                 "point_id": record["id"],
             }
         return result
+
+    @staticmethod
+    def _open_committed_chunk_store_read_only(
+        collection_path: Path,
+    ) -> Optional["ChunkStore"]:
+        """A READ-ONLY handle on the collection's committed ``chunks.db``
+        (``mode=ro``, or ``immutable=1`` for a proven-immutable snapshot,
+        through the one open authority -- never a second writer
+        connection), waiting up to ``REUSE_LOOKUP_LOCK_WAIT_SECONDS`` for a
+        writer's lock. ``None`` when no store exists yet, which holds nothing
+        only in a fresh build before its first write; the missing store of
+        an established collection is fatal (Story #2119,
+        ``refuse_missing_established_store``)."""
+        from code_indexer.storage.sqlite_chunk_store import (
+            open_chunk_store_for_path,
+            refuse_missing_established_store,
+        )
+
+        chunks_db_path = collection_path / "chunks.db"
+        if not chunks_db_path.exists():
+            refuse_missing_established_store(chunks_db_path)
+            return None
+        chunk_store = open_chunk_store_for_path(
+            chunks_db_path, str(collection_path), read_only=True
+        )
+        try:
+            chunk_store.set_busy_timeout(REUSE_LOOKUP_LOCK_WAIT_SECONDS)
+        except BaseException:
+            chunk_store.close()
+            raise
+        return chunk_store
+
+    @staticmethod
+    def _stored_point_ids_by_path(
+        collection_path: Path, paths: List[str]
+    ) -> Dict[str, Set[str]]:
+        """Story #2120: the point ids committed in chunks.db under each of
+        ``paths`` -- the authority on what a file's previous rows are, also
+        for rows an interrupted run committed but never recorded in
+        ``path_index.bin``. Every error propagates."""
+        chunk_store = FilesystemVectorStore._open_committed_chunk_store_read_only(
+            collection_path
+        )
+        if chunk_store is None:
+            return {}
+        with chunk_store:
+            return chunk_store.point_ids_by_path(paths)
 
     def _parse_filter(self, filter_conditions: Optional[Dict[str, Any]]) -> Any:
         """Parse filter to callable that evaluates payload.

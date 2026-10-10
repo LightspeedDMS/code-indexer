@@ -191,6 +191,7 @@ publication.
 | `--dup-groups G` | duplicate-content groups of 2-50 copies under `dups/` |
 | `--sync-files K` | files the sync job adds before each refresh (default 5) |
 | `--sync-dup-fraction F` | fraction of each sync's files that copy existing content |
+| `--delete-dup-owners N` | before each cycle's sync, delete up to N files that are a duplicate group's stored owner (the path the shared rows carry; a live copy always stays). Non-git only. R-b, R-a content, A1 and A2 then check that the live copies reuse the stored rows and nothing is sent for that content (Story #2120) |
 | `--git` | git variant |
 | `--cycles LIST` | one refresh per entry: `SIGTERM\|SIGKILL\|CANCEL\|RESTART@early:<s>`, `@planned:<s>`, `@chunks:<n>`, `@inflight:<n>` (fake holds responses; fires when n are held), `@final:<s>` (after every planned file is processed), or `none` |
 | `--random-cycles N`, `--cycle-seed S`, `--random-kinds LIST`, `--max-chunks-trigger K` | N seeded random cycles plus the yield probe, instead of `--cycles` |

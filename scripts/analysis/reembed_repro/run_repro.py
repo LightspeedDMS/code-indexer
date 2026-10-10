@@ -68,7 +68,12 @@ from run_facts import (  # noqa: E402,F401
     unindexed_at_start,
 )
 from scenarios import build_cycles  # noqa: E402
-from synthetic_repo import add_files, generate_repo, list_repo_files  # noqa: E402
+from synthetic_repo import (  # noqa: E402
+    add_files,
+    delete_stored_dup_owners,
+    generate_repo,
+    list_repo_files,
+)
 
 SAMPLES_DIR = SCRATCH_ROOT / "samples"
 RUN_MAX_SECONDS = 4 * 3600
@@ -572,6 +577,18 @@ class Harness:
         git_rng = random.Random(f"{self.args.seed}:git-ops")
         for i, entry in enumerate(build_cycles(self.args), start=1):
             tag = f"sync-{i:03d}"
+            note = ""
+            if self.args.delete_dup_owners:
+                # Story #2120: a duplicate group's stored owner goes away;
+                # its live copies must reuse the stored rows (send nothing).
+                gone = delete_stored_dup_owners(
+                    self.repo,
+                    index_snapshot(self.repo).paths,
+                    self.args.delete_dup_owners,
+                )
+                self.added_paths.difference_update(gone)
+                note = f"deleted {len(gone)} dup owner(s)"
+                print(f"[{tag}] {note}: {gone}", flush=True)
             added = add_files(
                 self.repo,
                 self.args.sync_files,
@@ -580,7 +597,6 @@ class Harness:
                 dup_fraction=self.args.sync_dup_fraction,
             )
             self.added_paths.update(added)
-            note = ""
             if self.args.git:
                 commit_sync(self.repo, added, tag)
                 note = apply_op(self.repo, choose_op(git_rng), i, git_rng)

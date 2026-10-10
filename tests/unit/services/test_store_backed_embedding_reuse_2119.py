@@ -13,26 +13,22 @@ against the real store's rows.
 
 from __future__ import annotations
 
-import json
 import os
-import signal
-import site
 import sqlite3
-import subprocess
-import sys
 import time
 from pathlib import Path
-from typing import Dict, Iterator, List, Set
+from typing import Iterator, List
 
 import pytest
 
-import code_indexer
+from tests.utils.cidx_fake_provider_repo import (
+    FakeProviderRepo,
+    kill_after_rows as _kill_after_rows,
+    unique_python_text as _file_text,
+)
 from tests.utils.fake_voyage_provider import running_fake_voyage_server
 
-_SRC_DIR = Path(code_indexer.__file__).resolve().parents[1]
 _SENTINEL_KEY = "issue-2119-fake-key"
-_CLI_TIMEOUT_SECONDS = 120
-_COLLECTION = "voyage-code-3"
 
 pytestmark = pytest.mark.timeout(240)
 
@@ -44,114 +40,9 @@ def fake_provider() -> Iterator[object]:
         yield server
 
 
-def _file_text(name: str, lines: int) -> str:
-    """Unique content per file and per line, so every chunk is distinct."""
-    return "".join(
-        f"def {name}_function_{i}(value):\n"
-        f"    return value * {i} + len('{name}-{i}-unique-marker-text')\n"
-        for i in range(lines)
-    )
-
-
-class _Repo:
+def _Repo(root: Path, server) -> FakeProviderRepo:
     """A non-git repository initialised for cidx, pointed at the fake."""
-
-    def __init__(self, root: Path, server) -> None:
-        self.server = server
-        self.repo = root / "example-repo"
-        (self.repo / "src").mkdir(parents=True)
-        home = root / "home"
-        home.mkdir()
-        self.env: Dict[str, str] = {
-            "PATH": os.environ["PATH"],
-            "HOME": str(home),
-            "PYTHONPATH": str(_SRC_DIR),
-            "PYTHONUSERBASE": site.getuserbase(),
-            "VOYAGE_API_KEY": _SENTINEL_KEY,
-        }
-        proc = self.cidx("init")
-        assert proc.returncode == 0, proc.stderr[-3000:]
-        config_path = self.repo / ".code-indexer" / "config.json"
-        config = json.loads(config_path.read_text())
-        config.setdefault("voyage_ai", {})["api_endpoint"] = (
-            f"{server.base_url}/v1/embeddings"
-        )
-        config_path.write_text(json.dumps(config))
-
-    @property
-    def chunks_db(self) -> Path:
-        return self.repo / ".code-indexer" / "index" / _COLLECTION / "chunks.db"
-
-    def write_files(self, prefix: str, count: int, lines: int = 40) -> None:
-        for i in range(count):
-            name = f"{prefix}_{i:03d}"
-            (self.repo / "src" / f"{name}.py").write_text(_file_text(name, lines))
-
-    def index_args(self) -> List[str]:
-        # The server's new-collection layout, so the collection is CHUNKS_DB.
-        return ["index", "--new-collection-layout=chunks_db"]
-
-    def cidx(self, *args: str) -> "subprocess.CompletedProcess[str]":
-        return subprocess.run(
-            [sys.executable, "-m", "code_indexer.cli", *args],
-            cwd=self.repo,
-            env=self.env,
-            capture_output=True,
-            text=True,
-            timeout=_CLI_TIMEOUT_SECONDS,
-        )
-
-    def spawn_index(self) -> "subprocess.Popen[bytes]":
-        return subprocess.Popen(
-            [sys.executable, "-m", "code_indexer.cli", *self.index_args()],
-            cwd=self.repo,
-            env=self.env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-
-    def stored_content_hashes(self) -> Set[str]:
-        """content_hash of every committed row. A plain connection: after a
-        SIGKILL it rolls back a hot journal exactly as the next writer would,
-        leaving only committed rows."""
-        from code_indexer.storage.sqlite_chunk_store import ChunkStore
-
-        with ChunkStore(self.chunks_db) as store:
-            return {
-                record["payload"]["content_hash"]
-                for record in store.stream_all()
-                if record.get("payload", {}).get("content_hash")
-            }
-
-    def committed_row_count(self) -> int:
-        """Row count through a read-only connection; 0 while the writer holds
-        the lock or before the store exists."""
-        if not self.chunks_db.exists():
-            return 0
-        uri = f"{self.chunks_db.resolve().as_uri()}?mode=ro"
-        try:
-            conn = sqlite3.connect(uri, uri=True, timeout=0.05)
-            try:
-                return int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
-            finally:
-                conn.close()
-        except sqlite3.Error:
-            return 0
-
-
-def _kill_after_rows(repo: _Repo, minimum_rows: int, deadline_s: float) -> None:
-    proc = repo.spawn_index()
-    try:
-        deadline = time.monotonic() + deadline_s
-        while repo.committed_row_count() < minimum_rows:
-            assert proc.poll() is None, "the child finished before it could be killed"
-            assert time.monotonic() < deadline, "the child committed too few rows"
-            time.sleep(0.05)
-    finally:
-        if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
-        proc.wait(timeout=30)
+    return FakeProviderRepo(root, server, _SENTINEL_KEY)
 
 
 def test_rerun_after_kill_sends_no_committed_chunk(
@@ -228,7 +119,7 @@ def test_duplicate_files_in_one_run_are_embedded_once(
     }
 
 
-def _chunker(repo: "_Repo"):
+def _chunker(repo: FakeProviderRepo):
     """The tree's chunker, configured from the repository's own config."""
     from code_indexer.config import ConfigManager
     from code_indexer.indexing.fixed_size_chunker import FixedSizeChunker
@@ -238,7 +129,7 @@ def _chunker(repo: "_Repo"):
     )
 
 
-def _chunk_keys(chunker, repo: "_Repo", path: Path) -> List[str]:
+def _chunk_keys(chunker, repo: FakeProviderRepo, path: Path) -> List[str]:
     """sha256 of each chunk text (the indexer's content_hash)."""
     import hashlib
 

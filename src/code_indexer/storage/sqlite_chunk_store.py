@@ -65,6 +65,7 @@ from typing import (
     Literal,
     Optional,
     Sequence,
+    Set,
     Tuple,
     Union,
     cast,
@@ -1230,6 +1231,28 @@ class ChunkStore:
                     )
         return results
 
+    def point_ids_by_path(self, paths: Iterable[str]) -> Dict[str, Set[str]]:
+        """Story #2120: the point ids stored under each of ``paths`` (exact
+        stored strings), read through the indexed ``path`` column in chunks
+        of ``_QUERY_IN_CHUNK_SIZE`` -- never a full-table scan, and no blob
+        is decoded. Paths with no row are absent from the result. Read-only;
+        every error propagates. A store without a ``chunks`` table holds
+        nothing and returns ``{}``."""
+        if not self._chunks_table_exists():
+            return {}
+        paths_list = list(paths)
+        result: Dict[str, Set[str]] = {}
+        for start in range(0, len(paths_list), _QUERY_IN_CHUNK_SIZE):
+            batch = paths_list[start : start + _QUERY_IN_CHUNK_SIZE]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self._conn.execute(
+                f"SELECT point_id, path FROM chunks WHERE path IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for point_id, path in rows:
+                result.setdefault(path, set()).add(point_id)
+        return result
+
     def _row_to_payload_only_record(
         self, point_id: str, data_blob: bytes
     ) -> Dict[str, Any]:
@@ -1451,6 +1474,45 @@ class ChunkStore:
 
         self._conn.commit()
         return deleted_total
+
+    def delete_points_still_at_paths(self, expected: Dict[str, str]) -> Dict[str, str]:
+        """Story #2120: delete each ``point_id`` of ``expected`` only while
+        its stored ``path`` still equals ``expected[point_id]`` -- a row a
+        live byte-identical copy took over (same content-addressed id, its
+        own path) is kept. Bug #2124: the whole batch is ONE ``BEGIN
+        IMMEDIATE`` transaction (one commit), whatever its size.
+
+        Returns ``{point_id: path}`` of the rows actually deleted. Rolls back
+        and re-raises on any error: nothing is deleted then."""
+        self._require_mutable()
+        if not expected:
+            return {}
+        point_ids = list(expected)
+        deleted: Dict[str, str] = {}
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            for start in range(0, len(point_ids), self._DELETE_CHUNK_SIZE):
+                chunk = point_ids[start : start + self._DELETE_CHUNK_SIZE]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = self._conn.execute(
+                    f"SELECT point_id, path FROM chunks "
+                    f"WHERE point_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                matching = [
+                    (point_id, path)
+                    for point_id, path in rows
+                    if path is not None and path == expected[point_id]
+                ]
+                self._conn.executemany(
+                    "DELETE FROM chunks WHERE point_id = ? AND path = ?", matching
+                )
+                deleted.update(matching)
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        return deleted
 
     def delete_stray_points_fail_closed(self, point_ids: list) -> int:
         """Delete point_ids inside a SINGLE transaction, fail-closed (Story

@@ -23,7 +23,16 @@ from collections import defaultdict
 from concurrent.futures import as_completed, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Dict, Any, Optional, Callable, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    List,
+    Optional,
+    Tuple,
+)
 from queue import Queue, Empty
 import threading
 
@@ -85,6 +94,11 @@ class BranchIndexingResult:
     content_points_reused: int = 0
     processing_time: float = 0.0
     cancelled: bool = False
+    #: Story #2120 (Codex P1-1): processing failures of the changed files,
+    #: carried to the caller (relative paths; ``failed_files`` may exceed
+    #: ``len(failed_paths)`` when a failure has no attributable path).
+    failed_files: int = 0
+    failed_paths: FrozenSet[str] = frozenset()
 
 
 @dataclass
@@ -1129,6 +1143,8 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 result.files_processed = stats.files_processed
                 result.content_points_created = stats.chunks_created
                 result.cancelled = stats.cancelled
+                result.failed_files = stats.failed_files
+                result.failed_paths = frozenset(stats.failed_paths)
 
                 if result.cancelled:
                     logger.info("High-throughput branch processing was cancelled")

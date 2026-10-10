@@ -15,8 +15,9 @@ automatically safe to mutate.
 2. `HighThroughputProcessor._fetch_all_content_points`
    (high_throughput_processor.py)
 3. `SmartIndexer._scroll_all_content_points` (smart_indexer.py)
-4. `SmartIndexer._detect_and_handle_deletions` (smart_indexer.py,
-   non-git `detect_deletions=True` path)
+4. `SmartIndexer._detect_deleted_points` (smart_indexer.py,
+   non-git `detect_deletions=True` path; formerly
+   `_detect_and_handle_deletions`)
 5. `SmartIndexer._cleanup_multiple_visible_content_points` (reconcile)
 6. `SmartIndexer.cleanup_branch_data` (branch cleanup)
 
@@ -285,11 +286,11 @@ class TestDetectAndHandleDeletionsCallerAudit:
         # already-self_heal=True write-path call before this method's
         # own scroll_points call ever runs) -- so THIS is genuinely the
         # first vector-store touch and must face the corruption itself.
-        indexer2._detect_and_handle_deletions(None)
+        indexer2._detect_deleted_points(None)
 
         remaining = list(collection_path.rglob("vector_*.json"))
         assert remaining == [], (
-            "_detect_and_handle_deletions' own scroll_points call must "
+            "_detect_deleted_points' own scroll_points call must "
             "self-heal the corrupt duplicate rather than silently mask "
             "the failure via its broad except-Exception handler (which "
             "currently just logs 'Database query failed during deletion "

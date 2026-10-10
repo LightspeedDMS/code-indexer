@@ -218,6 +218,13 @@ def _build_parser(description: str) -> argparse.ArgumentParser:
         help="fraction of each sync's files that copy existing content",
     )
     add(
+        "--delete-dup-owners",
+        type=int,
+        default=0,
+        help="before each cycle's sync, delete up to N files that are a "
+        "duplicate group's stored owner (a live copy always stays; non-git)",
+    )
+    add(
         "--git",
         action="store_true",
         help="git variant: commits, edits, renames, branch switches",
@@ -315,6 +322,10 @@ def parse_args(argv: List[str], description: str = "") -> argparse.Namespace:
     parser = _build_parser(description)
     parser.set_defaults(**SCENARIOS[scenario])
     args = parser.parse_args(argv)
+    if args.delete_dup_owners < 0:
+        parser.error("--delete-dup-owners must not be negative")
+    if args.delete_dup_owners and args.git:
+        parser.error("--delete-dup-owners is a non-git step")
     if args.src_ref:
         args.src = str(archive_tree(args.src_ref, TREES_DIR))
     if args.initial_src is None and args.old_ref != "none":
