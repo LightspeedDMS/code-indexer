@@ -1,154 +1,153 @@
 # Memory Index
 
 ## Safety Rules (prevent recurring mistakes)
-- [Unwired work](feedback_never_ship_unwired_work.md) - unit tests over an unreachable capability are not "done" (#1786)
-- [Ready needs staging E2E](feedback_never_claim_ready_without_staging_e2e.md) - green gates are not evidence; drive the NEW capability through staging
-- [Always end with staging](feedback_everything_always_ends_with_staging.md) - broken staging access is a blocker to raise, never a reason to stop at local gates
+- [Unwired work](feedback_never_ship_unwired_work.md) - tests over an unreachable capability are not "done" (#1786)
+- [Ready needs staging E2E](feedback_never_claim_ready_without_staging_e2e.md) - green gates are not evidence; drive the NEW capability on staging
+- [Always end with staging](feedback_everything_always_ends_with_staging.md) - broken staging access is a blocker to raise, not a stop
 - [Grep absence](feedback_grep_absence_is_not_evidence.md) - zero hits proves a spelling absent, not a capability missing
-- [Verify brief premises](feedback_never_assert_unverified_facts_in_briefs.md) - verify every premise before writing it into a brief or an issue; an issue's own repro can be wrong
-- [Probe as service user](feedback_probe_in_service_execution_context.md) - probe as the SERVICE user with the unit's PATH/HOME; an SSH login's user-site silently shadows the real install
-- [Never reindex evolution](feedback_never_reindex_evolution.md) - never full-re-index evolution: hours + embedder cost; restore from copies
-- [Staging Langfuse lookback 3d](project_staging_langfuse_lookback_3_days.md) - set pull_trace_age_days=3 on staging BEFORE deleting old traces and before keys return
-- [Re-embed cost incident](project_reembed_cost_incident_2026_10_06.md) - costly staging re-embed via crash-recovery reconcile (#2087); watch embedding_call_stats after deploys; prove fixes locally with a fake endpoint
-- [Zero JSON chunks](feedback_verify_zero_json_chunks_on_indexing.md) - verify zero vector_*.json on all 3 envs before chunk/temporal work (#1528)
-- [Other repos](feedback_never_touch_other_repos.md) - never modify files outside the assigned working directory
-- [Admin password](feedback_admin_password_sacred.md) - never leave admin password changed; restore via DB bypass
-- [Ports locked](feedback_port_config_locked.md) - never change cidx-server/HAProxy/firewall ports — causes 503s
-- [SSH via MCP](feedback_ssh_mcp_only.md) - never raw ssh via Bash — MCP SSH tools only
-- [systemd restart](feedback_ssh_systemd_restart.md) - never kill+nohup to restart a server — systemd only
-- [Versioned path trap](feedback_versioned_path_trap.md) - resolver returns the VERSIONED path; never write to it
-- [convert_tool_docs](feedback_convert_tool_docs_destructive.md) - never run tools/convert_tool_docs.py — breaks the MCP tool surface
-- [Never assert on whole env](feedback_never_assert_on_whole_environment.md) - a failing `"X" not in env` dumps every inherited secret into transcripts; assert scalars only
-- [No leaked literals in guards](feedback_never_store_leaked_literals_in_public_guards.md) - never put a leaked value in a public denylist/test to block its return; the checker was deleted for this
-- [No secrets in memory](feedback_no_secrets_in_memory.md) - memory files are versioned: no secrets, PII, or topology
-- [Secrets in local output OK](feedback_staging_creds_local_exposure_ok.md) - any secret in local output/transcripts is NOT an incident, never ask to rotate; never commit/publish secrets
+- [Verify brief premises](feedback_never_assert_unverified_facts_in_briefs.md) - verify every premise before a brief/issue; repros can be wrong
+- [Probe as service user](feedback_probe_in_service_execution_context.md) - probe as the SERVICE user with the unit's PATH/HOME
+- [Never reindex evolution](feedback_never_reindex_evolution.md) - never full-re-index evolution; restore from copies
+- [Staging Langfuse lookback 3d](project_staging_langfuse_lookback_3_days.md) - pull_trace_age_days=3 BEFORE deleting traces / keys return
+- [Re-embed cost incident](project_reembed_cost_incident_2026_10_06.md) - crash-recovery reconcile re-embed (#2087); watch embedding_call_stats; prove fixes with a fake endpoint
+- [Zero JSON chunks](feedback_verify_zero_json_chunks_on_indexing.md) - verify zero vector_*.json on all envs before chunk work (#1528)
+- [Other repos](feedback_never_touch_other_repos.md) - never modify files outside the working directory
+- [Admin password](feedback_admin_password_sacred.md) - never leave admin password changed
+- [Ports locked](feedback_port_config_locked.md) - never change cidx-server/HAProxy/firewall ports
+- [SSH via MCP](feedback_ssh_mcp_only.md) - never raw ssh via Bash; MCP SSH tools only
+- [systemd restart](feedback_ssh_systemd_restart.md) - restart servers via systemd only
+- [Versioned path trap](feedback_versioned_path_trap.md) - resolver may return the VERSIONED path; never write to it
+- [convert_tool_docs](feedback_convert_tool_docs_destructive.md) - never run tools/convert_tool_docs.py
+- [Never assert on whole env](feedback_never_assert_on_whole_environment.md) - a failing env assertion dumps secrets; assert scalars only
+- [No leaked literals in guards](feedback_never_store_leaked_literals_in_public_guards.md) - never put a leaked value in a public denylist/test
+- [No secrets in memory](feedback_no_secrets_in_memory.md) - memory is versioned: no secrets, PII, topology
+- [Secrets in local output OK](feedback_staging_creds_local_exposure_ok.md) - local transcript exposure is not an incident; never commit secrets
 - [Auth retry loops](feedback_never_retry_loop_auth_endpoint.md) - auth rejection is terminal; retrying locks the account
-- [Own all changes](feedback_own_all_repo_changes.md) - never revert another subagent's changes; own everything in the tree
-- [Partial stage exact content](feedback_partial_stage_exact_content.md) - commit some hunks of a shared file via hash-object + update-index; never --unidiff-zero; --no-verify (pre-commit stashes)
-- [Shared tree git ops](feedback_parallel_agents_shared_tree_no_broad_git_ops.md) - N agents, one tree: forbid git checkout/restore/reset/clean/stash per prompt
+- [Own all changes](feedback_own_all_repo_changes.md) - never revert another subagent's changes
+- [Partial stage exact content](feedback_partial_stage_exact_content.md) - commit hunks via hash-object + update-index; --no-verify
+- [Shared tree git ops](feedback_parallel_agents_shared_tree_no_broad_git_ops.md) - N agents, one tree: forbid checkout/restore/reset/clean/stash
 - [No rogue agents](feedback_no_rogue_agents.md) - unexpected repo state is never "rogue agents"
-- [Local dev server](project_own_local_dev_cidx_server.md) - I own the local cidx-server.service; keep it healthy, no auto-update
-- [Sole developer](feedback_sole_developer_own_all_code.md) - sole developer across sessions — never call code "not ours"
-- [Cluster-aware state](feedback_cluster_aware_state_only.md) - no module-level dicts for cross-request state — PayloadCache or shared DB
-- [Bootstrap changes](feedback_bootstrap_changes_need_installer_and_autoupdater.md) - bootstrap/systemd/PATH changes need BOTH installer and auto-updater self-heal
-- [Self-upgrading deployer](feedback_self_upgrading_deployer_runs_old_code.md) - the auto-updater runs OLD in-memory code on the deploy that installs a deploy-time fix; validate the transitional deploy
-- [Reliability over purity](feedback_reliability_over_dependency_purity.md) - prefer installing the dependency over install-footprint purity
-- [No nested subagents](feedback_no_subagent_to_subagent_delegation.md) - subagents act directly; never spawn nested Task/Agent calls
-- [Verify subagent commits](feedback_subagent_committed_against_explicit_instruction.md) - verify via git log; never trust a subagent's self-report on commits
-- [Bound every agent run](feedback_bound_every_agent_run.md) - every brief carries a turn/time budget + coordinator check-ins; S15 pair ran 87 rounds/13 h unchecked
-- [Netns shares host PIDs](feedback_netns_shares_host_pids.md) - unshare --net sandboxes share host PIDs; never kill by pgrep name (it hits the dev server)
-- [No gates during edits](feedback_no_gates_while_worker_edits.md) - never run fast/server-fast/e2e while an agent edits the tree; gates import live src
-- [Dispatch cap 1+1](feedback_parallel_dispatch_cap_4_on_20x.md) - 5x account: ONE worker + at most ONE reviewer at a time; Codex for the hardest reviews
+- [Local dev server](project_own_local_dev_cidx_server.md) - I own the local cidx-server.service; keep it healthy
+- [Sole developer](feedback_sole_developer_own_all_code.md) - never call code "not ours"
+- [Cluster-aware state](feedback_cluster_aware_state_only.md) - no module-level dicts for cross-request state
+- [Bootstrap changes](feedback_bootstrap_changes_need_installer_and_autoupdater.md) - need BOTH installer and auto-updater self-heal
+- [Self-upgrading deployer](feedback_self_upgrading_deployer_runs_old_code.md) - auto-updater runs OLD code on the deploy installing a fix
+- [Reliability over purity](feedback_reliability_over_dependency_purity.md) - prefer installing the dependency
+- [No nested subagents](feedback_no_subagent_to_subagent_delegation.md) - subagents never spawn Task/Agent calls (also [incident](feedback_subagent_spawned_nested_agent.md))
+- [Verify subagent commits](feedback_subagent_committed_against_explicit_instruction.md) - verify via git log, not self-report
+- [Bound every agent run](feedback_bound_every_agent_run.md) - every brief carries a time budget + check-ins
+- [Netns shares host PIDs](feedback_netns_shares_host_pids.md) - never kill by pgrep name (hits the dev server)
+- [No gates during edits](feedback_no_gates_while_worker_edits.md) - never run full gates while an agent edits the tree
+- [Dispatch cap by tier](feedback_parallel_dispatch_cap_4_on_20x.md) - 20x: up to 3 agents (workers+reviewers); 5x: 1+1; extra usage: no timer polling
 
 ## Quality Standards
 - [Zero failures](feedback_zero_failures_no_excuses.md) - never dismiss failures as "pre-existing"
-- [Kill duplicates now](feedback_eliminate_duplicates_in_same_change.md) - a fix that introduces a shared implementation converts EVERY duplicate in the same change; never defer one
-- [Fix every issue](feedback_fix_every_issue_found_no_deferral.md) - fix every issue found in the same session, even out-of-scope
-- [Cluster edge cases: file and move on](feedback_cluster_edge_cases_document_and_move_on.md) - cluster-only races NEVER block a release; file a follow-up, keep moving (prod is solo)
-- [Review P1-P2 block](feedback_review_findings_fix_p1_p2_tolerate_p3_p4.md) - review findings block shipping only at P1-P2; P3-P4 get filed as follow-ups (rubric inside)
-- [Epic: fix all bugs](feedback_epic_fix_all_bugs_found.md) - on an epic, fix all bugs found incl. pre-existing flaky tests
-- [E2E is execution](feedback_e2e_not_code_inspection.md) - E2E means executing real functionality, never code inspection
-- [E2E verifies indexes](feedback_e2e_verify_indexes_work.md) - E2E must verify indexes exist on disk AND return results
-- [No fallbacks](feedback_no_fallbacks_ever.md) - never write fallback paths — one path that works or fails loudly
-- [900-repo scale](feedback_design_for_900_repo_scale.md) - design for ~900 repos; never sync I/O inside async def
-- [No gating settings](feedback_no_settings_to_gate_bug_fixes.md) - never add a setting unasked; never gate a bug fix behind one
-- [No half-wired features](feedback_no_half_wired_features.md) - never ship a write-path without its read-path and status-path
-- [No sleep in prod](feedback_no_sleep_in_production.md) - never time.sleep() for UI visibility — fix display logic
-- [No work budgets](feedback_no_artificial_work_budgets.md) - no hardcoded ceilings/turn-caps on legitimate work
-- [Dual backend](feedback_storage_backend_dual.md) - always cover both SQLite and PostgreSQL
-- [Front-door E2E](feedback_server_e2e_front_door_only.md) - server E2E via REST/MCP front door, never CLI
-- [Prove root cause](feedback_prove_root_cause_before_fix.md) - prove stall/concurrency root cause with py-spy before fixing
-- [Description scheduler](feedback_description_refresh_scheduler_requires_staging_validation.md) - scheduler changes need staging validation — runaway Claude cost risk
-- [X-Ray not in dashboard](feedback_xray_queries_not_in_dashboard.md) - xray_search jobs must not appear in the dashboard
-- [Test timeouts](feedback_run_tests_with_timeout_and_monitor.md) - never launch tests without a timeout and active monitoring
-- [Faithful DB mocks](feedback_faithful_db_mocks.md) - DB mocks must mirror the real driver; verify against real PG
-- [Audit logs after testing](feedback_review_local_and_staging_logs_after_testing.md) - audit both local and staging logs after testing; file AND fix
-- [Holistic anomaly scan](feedback_holistic_anomaly_scan_every_loop.md) - scan jobs/logs/health/artifacts holistically each loop
-- [Discriminating RED](feedback_tdd_red_must_be_discriminating.md) - RED must fail on the BEHAVIOUR, never on a missing symbol or a happy case
-- [mtime not isolation proof](feedback_mtime_not_valid_isolation_proof.md) - mtime/md5 is not proof a test never touched the DB — use open-tracing
-- [Scratch test copies](feedback_scratch_test_copies_bypass_isolation.md) - a test copied outside tests/ with its own --rootdir skips the home isolation; point CIDX_* dirs at scratch
-- [No git worktree](feedback_git_worktree_isolation_invalid_dual_import_path.md) - never use git worktree here — editable-install dual import path mixes trees
+- [Kill duplicates now](feedback_eliminate_duplicates_in_same_change.md) - a shared implementation converts EVERY duplicate in the same change
+- [Fix every issue](feedback_fix_every_issue_found_no_deferral.md) - fix every issue found in the session, even out-of-scope
+- [Cluster edge cases](feedback_cluster_edge_cases_document_and_move_on.md) - cluster-only races never block a release; file and move on
+- [Review P1-P2 block](feedback_review_findings_fix_p1_p2_tolerate_p3_p4.md) - only P1-P2 block shipping; P3-P4 become follow-ups
+- [Epic: fix all bugs](feedback_epic_fix_all_bugs_found.md) - on an epic, fix all bugs found incl. flaky tests
+- [E2E is execution](feedback_e2e_not_code_inspection.md) - E2E means executing real functionality
+- [E2E verifies indexes](feedback_e2e_verify_indexes_work.md) - indexes exist on disk AND return results
+- [No fallbacks](feedback_no_fallbacks_ever.md) - one path that works or fails loudly
+- [900-repo scale](feedback_design_for_900_repo_scale.md) - design for ~900 repos; no sync I/O in async def
+- [No gating settings](feedback_no_settings_to_gate_bug_fixes.md) - never add a setting unasked or gate a fix behind one
+- [No half-wired features](feedback_no_half_wired_features.md) - write-path needs its read-path and status-path
+- [No sleep in prod](feedback_no_sleep_in_production.md) - never time.sleep() for UI visibility
+- [No work budgets](feedback_no_artificial_work_budgets.md) - no hardcoded ceilings on legitimate work
+- [Dual backend](feedback_storage_backend_dual.md) - always cover SQLite and PostgreSQL
+- [Front-door E2E](feedback_server_e2e_front_door_only.md) - server E2E via REST/MCP, never CLI
+- [Prove root cause](feedback_prove_root_cause_before_fix.md) - prove stall/concurrency causes with py-spy first
+- [Description scheduler](feedback_description_refresh_scheduler_requires_staging_validation.md) - scheduler changes need staging validation (cost risk)
+- [X-Ray not in dashboard](feedback_xray_queries_not_in_dashboard.md) - xray_search jobs stay out of the dashboard
+- [Test timeouts](feedback_run_tests_with_timeout_and_monitor.md) - never launch tests without a timeout
+- [Faithful DB mocks](feedback_faithful_db_mocks.md) - DB mocks mirror the real driver; verify on real PG
+- [Audit logs after testing](feedback_review_local_and_staging_logs_after_testing.md) - audit local and staging logs; file AND fix
+- [Holistic anomaly scan](feedback_holistic_anomaly_scan_every_loop.md) - scan jobs/logs/health/artifacts each loop
+- [Discriminating RED](feedback_tdd_red_must_be_discriminating.md) - RED fails on BEHAVIOUR, never a missing symbol
+- [mtime not isolation proof](feedback_mtime_not_valid_isolation_proof.md) - use open-tracing, not mtime/md5
+- [Scratch test copies](feedback_scratch_test_copies_bypass_isolation.md) - copies outside tests/ skip home isolation
+- [No git worktree](feedback_git_worktree_isolation_invalid_dual_import_path.md) - editable install mixes trees
 
 ## Workflow Preferences
-- [Autonomous iterate](feedback_autonomous_overnight_file_fix_iterate.md) - work autonomously; every defect = file + fix + iterate until clean
+- [Autonomous iterate](feedback_autonomous_overnight_file_fix_iterate.md) - every defect = file + fix + iterate until clean
 - [Bug report = report](feedback_bug_report_means_report_not_fix.md) - "root cause + bug report" = investigate, file, STOP
-- [Issue routing](feedback_issue_routing_public_vs_security.md) - ALL regular issues -> PRIVATE dev repo (issue_manager's default origin); security -> private security repo; never file on public
-- [Commit issue refs](feedback_commit_issue_refs_overlap.md) - never bare #N in commits: private/public numbers overlap; use LightspeedDMS/code-indexer#N, no closing keyword
-- [Commit on development](feedback_always_checkout_development_before_commit.md) - always commit on development, never master/staging
-- [Bump before staging](feedback_bump_version_before_staging.md) - bump version + tag BEFORE promoting to staging
-- [Lint before commit](feedback_lint_before_commit.md) - run ruff/mypy before staging; the hook is a safety net
-- [No commit mid-agent](feedback_no_commit_during_background_agent.md) - never commit a running agent's files; verify with git show
-- [Bump is push tip](feedback_version_bump_must_be_push_tip.md) - the version-bump commit must be the push tip or CI skips tagging
-- [Delete old junk freely](feedback_delete_old_junk_freely.md) - NEVER ask before deleting junk in /tmp, ~/.tmp, scratchpad (clones too); just do it, skip only what a running process uses
-- [Check jobs before restart](feedback_check_running_jobs_before_restart.md) - check for active long-running jobs before restarting cidx-server
-- [Keep local server up](feedback_keep_local_server_running.md) - keep the local dev cidx-server running; relaunch if down
-- [Ruff version](feedback_ruff_black_version_alignment.md) - pre-commit ruff version must match system ruff
-- [REST model changes](feedback_rest_model_changes_need_fast_automation.md) - REST/MCP query-model changes need fast-automation too
-- [No needless questions](feedback_no_unnecessary_questions.md) - never stop for obvious next steps; only when genuinely blocked
-- [Agentic to staging](feedback_work_agentically_to_staging_no_questions.md) - mid-mission: no process questions; stop only for irreversible actions
-- [Commands are instructions](feedback_no_confirmation_on_commands.md) - direct commands are instructions, not proposals
-- [Local work no permission](feedback_no_permission_asking_local_machine_work.md) - never ask permission for routine local-machine work
-- [implement-story non-stop](feedback_implement_story_agentic_no_stops.md) - /implement-story-spec runs non-stop, no pre-flight questions
+- [Issue routing](feedback_issue_routing_public_vs_security.md) - issues -> PRIVATE dev repo; security -> private security repo; never public
+- [Commit issue refs](feedback_commit_issue_refs_overlap.md) - never bare #N in commits; use owner/repo#N, no closing keyword
+- [Commit on development](feedback_always_checkout_development_before_commit.md) - never commit on master/staging
+- [Bump before staging](feedback_bump_version_before_staging.md) - bump version BEFORE promoting to staging
+- [Lint before commit](feedback_lint_before_commit.md) - ruff/mypy before staging
+- [No commit mid-agent](feedback_no_commit_during_background_agent.md) - never commit a running agent's files
+- [Bump is push tip](feedback_version_bump_must_be_push_tip.md) - version-bump commit must be the push tip
+- [Delete old junk freely](feedback_delete_old_junk_freely.md) - never ask before deleting junk in tmp/scratchpad
+- [Check jobs before restart](feedback_check_running_jobs_before_restart.md) - check long-running jobs before restarting cidx-server
+- [Keep local server up](feedback_keep_local_server_running.md) - relaunch the local dev server if down
+- [Ruff version](feedback_ruff_black_version_alignment.md) - pre-commit ruff must match system ruff
+- [REST model changes](feedback_rest_model_changes_need_fast_automation.md) - query-model changes need fast-automation too
+- [No needless questions](feedback_no_unnecessary_questions.md) - stop only when genuinely blocked (also [plan authorized](feedback_dont_ask_when_plan_already_authorized.md))
+- [Agentic to staging](feedback_work_agentically_to_staging_no_questions.md) - no process questions mid-mission
+- [Commands are instructions](feedback_no_confirmation_on_commands.md) - direct commands are not proposals
+- [Local work no permission](feedback_no_permission_asking_local_machine_work.md) - no permission asks for routine local work
+- [implement-story non-stop](feedback_implement_story_agentic_no_stops.md) - /implement-story-spec runs non-stop
 - [Progress reporting](feedback_progress_reporting_delicate.md) - ask before ANY change to progress reporting
-- [CLI bugs reach server](feedback_cli_defects_reach_server.md) - never defer as "CLI-only" without proving no server path; the server spawns cidx and runs CLI services in-process
-- [Release inclusion bar](feedback_release_inclusion_bar.md) - mid-release additions only for high-severity security or P1/P2 showstoppers
-- [Targeted scope](feedback_targeted_scope_discipline.md) - targeted requests must not trigger unrelated rewrites
-- [Validation on scope](feedback_validation_runs_stay_on_scope.md) - staging validation proves the shipped fix only; side anomalies = one-line notes, never investigations
-- [Code reviewer](feedback_use_code_reviewer.md) - Codex is the PRIMARY reviewer; green tests never substitute for a review gate
-- [Agents on Opus](feedback_default_agents_to_sonnet5.md) - all agents on Opus 5.5 (model: "opus"); reviews go to Codex (supersedes Sonnet rule)
-- [Dual review](feedback_dual_review_claude_and_codex.md) - dual review (Claude + independent Codex) for every review gate
-- [Paired engineer](feedback_paired_engineer_two_models_for_quality.md) - tdd-paired-engineer for gnarly bugs; cost accepted for blind-spot coverage
-- [Opus arbiter](feedback_opus_arbiter_of_codex_nitpicking.md) - after 2-3 Codex REJECTs on one fix, dispatch Opus to judge materiality
-- [Trust codex simplify](feedback_trust_codex_first_pass.md) - when codex flags over-engineering, SIMPLIFY
-- [Index failures transient](feedback_index_failures_are_transient.md) - index file failures = transient embedder calls; retry, no caps or loop guards
-- [Session trailer OK](feedback_claude_session_trailer_ok.md) - Claude-Session commit trailer is owner-approved for public commits; don't re-raise
-- [Codex exhausted](feedback_codex_exhausted_fallback_to_claude.md) - codex out of credits/auth: coordinator switches pair->tdd-engineer, codex review->code-reviewer, announced
-- [Concurrent codex relays](feedback_concurrent_codex_relays_clobber_scratch.md) - parallel codex relays overwrite shared scratch files; use unique filenames, take verdicts from each run's own session log
-- [Relay scratch collision](feedback_parallel_codex_relays_scratchpad_collision.md) - parallel codex relays overwrite each other's scratch prompt files; per-run subdir + verify scope in sessions
-- [Verify codex ran](feedback_verify_codex_actually_ran.md) - codex wrappers fall back to Claude silently — verify via ~/.codex/sessions
-- [find is bfs](feedback_find_is_bfs_use_mmin.md) - `find` here is bfs: use -mmin, not relative -newermt
-- [Gate flakes](project_test_gates_flake_under_load.md) - gate flakiness = hardcoded 15s pytest timeout under load, NOT SQLite contention; grep .test-telemetry for "from pytest-timeout" before re-rolling
-- [Check back](feedback_active_monitoring_check_back.md) - never idle on background work; set a check-back timer
-- [Study anomalies](feedback_study_anomalies_deeply.md) - root-cause odd behavior with facts; never dismiss as benign
-- [Never blame env](feedback_never_stop_never_blame_env.md) - never self-abort or blame the environment; a stalled agent is a retry
-- [Stall detection](feedback_agent_stall_detection_needs_reply_not_just_mtime.md) - stale mtime triggers a PING, not a kill; wait for a real reply
-- [Phantom waits](feedback_subagent_phantom_background_wait.md) - tdd agents await phantom monitors; resume with a synchronous-check order
+- [CLI bugs reach server](feedback_cli_defects_reach_server.md) - the server spawns cidx; never defer as "CLI-only" unproven
+- [Release inclusion bar](feedback_release_inclusion_bar.md) - mid-release additions only for high-severity or P1/P2
+- [Targeted scope](feedback_targeted_scope_discipline.md) - targeted requests trigger no unrelated rewrites
+- [Validation on scope](feedback_validation_runs_stay_on_scope.md) - staging validation proves the shipped fix; side anomalies = notes
+- [Code reviewer](feedback_use_code_reviewer.md) - Codex is the PRIMARY reviewer
+- [Agents on Opus](feedback_default_agents_to_sonnet5.md) - all agents on Opus (model: "opus"); reviews to Codex
+- [Dual review](feedback_dual_review_claude_and_codex.md) - Claude + independent Codex at review gates
+- [Paired engineer](feedback_paired_engineer_two_models_for_quality.md) - tdd-paired-engineer for gnarly bugs
+- [Opus arbiter](feedback_opus_arbiter_of_codex_nitpicking.md) - after 2-3 Codex REJECTs, Opus judges materiality
+- [Trust codex simplify](feedback_trust_codex_first_pass.md) - when codex flags over-engineering, simplify
+- [Index failures transient](feedback_index_failures_are_transient.md) - retry embedder failures; no caps or loop guards
+- [Session trailer OK](feedback_claude_session_trailer_ok.md) - Claude-Session trailer is approved; don't re-raise
+- [Codex exhausted](feedback_codex_exhausted_fallback_to_claude.md) - codex unavailable: switch to Claude agents, announced
+- [Codex relay scratch](feedback_concurrent_codex_relays_clobber_scratch.md) - parallel relays clobber scratch files: unique per-run dirs, verdicts from session logs (also [collision](feedback_parallel_codex_relays_scratchpad_collision.md))
+- [Verify codex ran](feedback_verify_codex_actually_ran.md) - wrappers fall back silently; check ~/.codex/sessions
+- [find is bfs](feedback_find_is_bfs_use_mmin.md) - use -mmin, not -newermt
+- [Gate flakes](project_test_gates_flake_under_load.md) - flakes = 15s pytest timeout under load; check .test-telemetry first
+- [Check back](feedback_active_monitoring_check_back.md) - never idle on background work (no timers on extra usage)
+- [Study anomalies](feedback_study_anomalies_deeply.md) - root-cause odd behavior with facts
+- [Never blame env](feedback_never_stop_never_blame_env.md) - a stalled agent is a retry, not an excuse
+- [Stall detection](feedback_agent_stall_detection_needs_reply_not_just_mtime.md) - stale mtime triggers a PING, not a kill
+- [Phantom waits](feedback_subagent_phantom_background_wait.md) - resume phantom-waiting agents with a synchronous-check order
 
 ## Architectural Invariants
-- [EKS target](project_eks_is_eventual_deployment_target.md) - containerized EKS is the target; no DRBD/Pacemaker/EFS
-- [Both staging envs](project_verify_both_staging_environments.md) - verify BOTH clustered (postgres) and solo (SQLite) staging
-- [Staging solo host](feedback_staging_solo_is_a_separate_host.md) - always test staging solo too; prove "solo" from the host's config (storage_mode), never from docs -- .local-testing §1 is stale (it's a cluster node)
-- [Feature priority](project_production_feature_usage.md) - workhorses = X-Ray, regex, semantic, FTS, file list/read; SCIP rarely used
-- [Query is everything](project_query_is_everything.md) - query capability is core value; never break it
-- [Reranker point](project_reranker_injection_point.md) - reranker fires after RRF coalescing, before truncation
-- [Refresh tracking](project_description_refresh_tracking_split_brain.md) - fixed in #1100; scheduler uses the registry tracking backend
-- [Auto-updater service](project_cluster_auto_updater_service.md) - auto-updater is a separate service+timer the installer must provision
-- [NFS host down](project_nfs_host_down_hangs_systemd.md) - CoW/NFS host down hangs daemon-reload and sudo; use timeout-wrapped probes
-- [Temporal metadata PG](project_cluster_temporal_metadata_pg_backed.md) - cluster temporal metadata is PG-backed (#1313); 5 launch sites need the bootstrap dir
-- [Workers config](project_staging_workers_config_durability.md) - durable worker count is the DB runtime.workers setting, web-UI only
-- [Local server solo](project_local_server_solo_sqlite.md) - local server is solo/SQLite; PG/cluster needs staging
-- [Production solo SQLite](project_production_is_solo_sqlite.md) - PRODUCTION is solo/SQLite: verify SQLite first, PG is parity
-- [Backup scope](project_backup_scope_dev_staging_only.md) - backup-before-migration is dev/staging only; production has no room
-- [Default flip inert](project_config_default_flip_is_inert.md) - changing a dataclass default is inert on existing deployments
-- [Chunk write mode](project_chunk_storage_write_mode_context.md) - write mode is context-dependent (server=sqlite, CLI=json)
-- [Shadow mode](project_shadow_mode_not_used_in_production.md) - query-embedding cache "shadow" is not what production runs
-- [Staging cluster storage](project_staging_cluster_storage_owned_by_agent.md) - staging cluster storage is the agent's; clean it up (root cause first) without asking
-- [Solo chaos test](project_staging_solo_concurrent_chaos_test.md) - another agent may be chaos-testing staging solo; check first
-- [Backlog to zero](project_backlog_clear_to_zero_mandate.md) - standing goal: clear the bug backlog, running discovered-vs-closed tally
-- [Backlog closing E2E](project_backlog_clear_ends_with_staging_e2e.md) - at priority-4-only, raise staging E2E as the closing step (discuss first)
-- [Batch 1950-1956](project_batch_1950_1956_pending_staging.md) - six-issue batch after v12.69.0; NOT done until driven through both staging front doors
-- [Package 2087 resume](project_release_package_2087_resume_state.md) - READ FIRST after a reset: post-12.83.0 package state (G1 re-embed fix, S12/S21, docs merge, defect-list validation); no staging until new Voyage keys
-- [Release 1873-1876](project_release_1873_1876_overnight_state.md) - resume state for the 2026-09-16 overnight #1873/#1875/#1876/#1886 release — read first after a reset
-- [Backlog paused 08-27](project_backlog_session_paused_2026_08_27.md) - resume state for the backlog sweep paused 2026-08-27 — read this first (supersedes [VM migration pause](project_backlog_session_paused_for_vm_migration.md))
-- [pytest tmp](project_pytest_tmp_accumulates_unbounded.md) - pytest tmp grows to 70+ GB; safe to clean dirs >15min old
+- [EKS target](project_eks_is_eventual_deployment_target.md) - containerized EKS is the target
+- [Both staging envs](project_verify_both_staging_environments.md) - verify clustered (PG) AND solo (SQLite) staging
+- [Staging solo host](feedback_staging_solo_is_a_separate_host.md) - prove "solo" from storage_mode, never docs
+- [Feature priority](project_production_feature_usage.md) - workhorses: X-Ray, regex, semantic, FTS, file list/read
+- [Query is everything](project_query_is_everything.md) - never break query capability
+- [Reranker point](project_reranker_injection_point.md) - after RRF coalescing, before truncation
+- [Refresh tracking](project_description_refresh_tracking_split_brain.md) - fixed in #1100; registry tracking backend
+- [Auto-updater service](project_cluster_auto_updater_service.md) - separate service+timer the installer provisions
+- [NFS host down](project_nfs_host_down_hangs_systemd.md) - hangs daemon-reload/sudo; timeout-wrap probes
+- [Temporal metadata PG](project_cluster_temporal_metadata_pg_backed.md) - PG-backed in cluster (#1313)
+- [Workers config](project_staging_workers_config_durability.md) - worker count = DB runtime.workers, web-UI only
+- [Local server solo](project_local_server_solo_sqlite.md) - local is solo/SQLite; PG needs staging
+- [Production solo SQLite](project_production_is_solo_sqlite.md) - verify SQLite first, PG is parity
+- [Backup scope](project_backup_scope_dev_staging_only.md) - backup-before-migration is dev/staging only
+- [Default flip inert](project_config_default_flip_is_inert.md) - dataclass default changes are inert on existing deployments
+- [Chunk write mode](project_chunk_storage_write_mode_context.md) - server=sqlite, CLI=json
+- [Shadow mode](project_shadow_mode_not_used_in_production.md) - production does not run "shadow"
+- [Staging cluster storage](project_staging_cluster_storage_owned_by_agent.md) - ours to clean up (root cause first)
+- [Solo chaos test](project_staging_solo_concurrent_chaos_test.md) - another agent may be chaos-testing staging solo
+- [Backlog to zero](project_backlog_clear_to_zero_mandate.md) - clear the bug backlog, running tally
+- [Backlog closing E2E](project_backlog_clear_ends_with_staging_e2e.md) - at priority-4-only, raise staging E2E (discuss first)
+- [Batch 1950-1956](project_batch_1950_1956_pending_staging.md) - NOT done until driven through both staging front doors
+- [Package 2087 resume](project_release_package_2087_resume_state.md) - READ FIRST after a reset: 12.84.0 shipped, 12.85.0 G1-lite progress
+- [Release 1873-1876](project_release_1873_1876_overnight_state.md) - resume state for the 2026-09-16 release
+- [Backlog paused 08-27](project_backlog_session_paused_2026_08_27.md) - resume state for the 2026-08-27 sweep (supersedes [VM migration pause](project_backlog_session_paused_for_vm_migration.md))
+- [pytest tmp](project_pytest_tmp_accumulates_unbounded.md) - clean pytest tmp dirs >15 min old
 
 ## External References
-- [Staging MFA](project_staging_cluster_mfa_is_self_serviceable.md) - cluster staging MFA is ours to complete; never escalate as a blocker
-- [NFS wedge recovery](reference_staging_nfs_wedge_recovery.md) - recover a wedged cow-storage NFS mount
-- [Corrupt chunks.db restore](reference_corrupt_chunks_db_restore.md) - "malformed" refresh loop: restore from published snapshot under the alias lock (#2022)
-- [Reranker APIs](reference_reranker_api_signatures.md) - verified Voyage/Cohere rerank params; no native instruction field
-- [CoW daemon](reference_cow_daemon_architecture.md) - CoW daemon: REST for clone lifecycle, NFS for filesystem access
-- [Gemini/agy dead](reference_gemini_and_agy_relays_dead_on_this_host.md) - gemini-* and agy-* relays cannot run here; use codex or opus
-- [Codex lacks deps](feedback_codex_interpreter_lacks_project_deps.md) - codex half of the pair cannot run pytest; re-run every number it quotes
-- [Pair rulebook](feedback_pair_codex_never_sees_claude_md.md) - pair driver DOES inject CLAUDE.md now; check run.log for "RULEBOOK injected"
-- [Pair RUN_DIR](feedback_pair_driver_rundir_conflicts_with_sandbox_rule.md) - RUN_DIR under /tmp vs sandbox rule; read the turn-6 handoff
+- [Staging MFA](project_staging_cluster_mfa_is_self_serviceable.md) - cluster staging MFA is ours to complete
+- [NFS wedge recovery](reference_staging_nfs_wedge_recovery.md) - recover a wedged cow-storage mount
+- [Corrupt chunks.db restore](reference_corrupt_chunks_db_restore.md) - restore from published snapshot under the alias lock (#2022)
+- [Reranker APIs](reference_reranker_api_signatures.md) - verified Voyage/Cohere rerank params
+- [CoW daemon](reference_cow_daemon_architecture.md) - REST for clone lifecycle, NFS for access
+- [Gemini/agy dead](reference_gemini_and_agy_relays_dead_on_this_host.md) - use codex or opus
+- [Codex lacks deps](feedback_codex_interpreter_lacks_project_deps.md) - re-run every number the codex pair half quotes
+- [Pair rulebook](feedback_pair_codex_never_sees_claude_md.md) - check run.log for "RULEBOOK injected"
+- [Pair RUN_DIR](feedback_pair_driver_rundir_conflicts_with_sandbox_rule.md) - RUN_DIR under /tmp vs sandbox rule
