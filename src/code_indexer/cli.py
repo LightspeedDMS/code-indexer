@@ -2908,6 +2908,12 @@ def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
     migrated stale status self-heals on the very next index run with no
     special-casing needed here. The migration copy is therefore a plain,
     unconditional byte-for-byte copy with no status manipulation.
+
+    Story #2121: resume-from-list is retired. A stored status of
+    in_progress/failed now routes the next run to a reconcile of the store
+    against disk (the stored list fields are dropped on load), so the copy
+    must still carry the status unchanged: normalizing it would skip that
+    recovery.
     """
     provider_metadata = config_dir / f"metadata-{provider_name}.json"
     if provider_metadata.exists():
@@ -4647,6 +4653,9 @@ def index(
                 return "INTERRUPT"
             return None
 
+        # Story #2121: set once a file-plan line was printed on --progress-json.
+        json_file_plan_emitted = False
+
         if progress_json:
             # AC6: --progress-json active — emit JSON lines, suppress Rich display
             from .services.progress_phase_allocator import (
@@ -4663,8 +4672,10 @@ def index(
                 slot_tracker=None,
             ):
                 """JSON-emitting progress callback for --progress-json mode."""
+                nonlocal json_file_plan_emitted
                 if total and total > 0 and info:
                     _emit_json(current=current, total=total, info=info or "")
+                    json_file_plan_emitted = True
 
             # M4: Attach no-op implementations so indexing code that calls these
             # attributes does not raise AttributeError in --progress-json mode.
@@ -4849,6 +4860,21 @@ def index(
                     enable_fts=fts,
                     trust_resume_state=not ignore_resume_state,
                 )
+
+                # Story #2121: a run that planned no file prints its empty
+                # plan on --progress-json (machine channel only).
+                if (
+                    progress_json
+                    and not json_file_plan_emitted
+                    and not stats.cancelled
+                    and stats.files_processed == 0
+                    and stats.failed_files == 0
+                ):
+                    from .services.progress_phase_allocator import (
+                        emit_empty_plan_json,
+                    )
+
+                    emit_empty_plan_json()
 
                 # Show final completion state (if not interrupted)
                 if display_initialized and not handler.interrupted:
@@ -9203,13 +9229,10 @@ def _status_impl(ctx):
                 git_available = metadata.get("git_available", False)
                 project_id = metadata.get("project_id", "unknown")
 
-                # Check if indexing is incomplete (regardless of whether it's running or stopped)
-                has_incomplete_indexing = (
-                    metadata.get("status") == "in_progress"
-                    and len(metadata.get("files_to_index", [])) > 0
-                    and metadata.get("current_file_index", 0)
-                    < len(metadata.get("files_to_index", []))
-                )
+                # Check if indexing is incomplete (regardless of whether it's running or stopped).
+                # Story #2121: no file list is stored; the interrupted status and
+                # the recorded plan size (total_files_to_index) are what remain.
+                has_incomplete_indexing = metadata.get("status") == "in_progress"
 
                 index_details = f"Last indexed: {last_indexed}"
                 if git_available:
@@ -9218,9 +9241,7 @@ def _status_impl(ctx):
                 index_details += f" | Project: {project_id}"
 
                 if has_incomplete_indexing:
-                    total_files = metadata.get(
-                        "total_files_to_index", len(metadata.get("files_to_index", []))
-                    )
+                    total_files = metadata.get("total_files_to_index", 0)
                     files_processed = metadata.get("files_processed", 0)
                     remaining = max(
                         0, total_files - files_processed

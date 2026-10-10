@@ -135,7 +135,7 @@ def _seed_for_incremental(indexer: SmartIndexer, branch: str, last_commit: str) 
 
     Requirements:
     - status="completed" and last_index_timestamp>0 → get_resume_timestamp returns non-zero
-    - files_to_index=[]           → can_resume_interrupted_operation returns False
+    - status="completed"          → smart_index does not route to the reconcile (Story #2121)
     - branch_commit_watermarks set → get_last_indexed_commit returns last_commit
     """
     indexer.progressive_metadata.metadata["status"] = "completed"

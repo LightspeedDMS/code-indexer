@@ -15,7 +15,8 @@ raises ``TypeError: unhashable type: 'dict'`` deep inside ``scroll_points``
 valid dict key -- the internal per-collection lock lookup hashes it), caught
 by ``delete_by_filter``'s own broad ``except Exception`` and turned into a
 silent ``return False``. Both call sites' chunk-deletion has therefore never
-actually deleted anything.
+actually deleted anything. ``_process_files_with_metadata`` was later deleted
+as dead code (Story #2121), so only ``delete_file_branch_aware`` is checked.
 
 Structural (AST-based) regression test, deliberately mirroring the
 established pattern in ``test_smart_indexer_1575_fix4_ast_delete_order.py``
@@ -76,22 +77,6 @@ def _assert_first_positional_arg_is_collection_name(
         f"FilesystemVectorStore.delete_by_filter(self, collection_name, "
         f"filter_conditions) signature"
     )
-
-
-def test_process_files_with_metadata_delete_by_filter_call_passes_collection_name_first():
-    """`_process_files_with_metadata`'s per-modified-file cleanup loop must
-    call delete_by_filter(collection_name, filter_dict) -- never the swapped
-    (filter_dict, collection_name) order."""
-    method_name = "_process_files_with_metadata"
-    func_def = _parse_method(method_name)
-    delete_calls = _find_calls_to_attribute(func_def, _DELETE_METHOD_NAME)
-
-    assert len(delete_calls) == 1, (
-        f"expected exactly ONE delete_by_filter() call site in {method_name}, "
-        f"found {len(delete_calls)} -- if this method's structure changed, "
-        f"update this test to target the correct call site explicitly"
-    )
-    _assert_first_positional_arg_is_collection_name(method_name, delete_calls[0])
 
 
 def test_delete_file_branch_aware_delete_by_filter_call_passes_collection_name_first():

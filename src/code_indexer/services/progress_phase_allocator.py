@@ -274,3 +274,14 @@ def emit_progress_json(current: int, total: int, info: str = "") -> None:
     """
     payload = {"current": current, "total": total, "info": info}
     print(json.dumps(payload), flush=True)
+
+
+#: Story #2121: the plan line of a run that planned no file. It keeps the
+#: "<current>/<total> files" shape of every other file-plan line.
+EMPTY_PLAN_INFO = "0/0 files (nothing to index)"
+
+
+def emit_empty_plan_json() -> None:
+    """Emit the ``--progress-json`` plan line of a run that planned no file,
+    so its (empty) plan is observable like any other plan (Story #2121)."""
+    emit_progress_json(current=0, total=0, info=EMPTY_PLAN_INFO)

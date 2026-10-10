@@ -9,9 +9,10 @@ that call, so a resume candidate that happens to be part of a circular
 symlink chain (``x.py -> y.py -> x.py``) crashed the entire resume
 operation instead of simply being dropped like any other unsafe candidate.
 
-This test drives the REAL ``SmartIndexer._do_resume_interrupted()`` over a
-real repository containing a genuine circular symlink pair, with resume
-metadata that includes the looping entry alongside legitimate files, and
+This test drives the REAL ``SmartIndexer._merge_recorded_failures()`` (the
+failed-file retry, the one stored path list left after Story #2121) over a
+real repository containing a genuine circular symlink pair, with recorded
+failed files that include the looping entry alongside legitimate files, and
 asserts the operation completes without raising while still processing the
 legitimate remaining files.
 """
@@ -21,7 +22,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import List
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from code_indexer.config import Config
 from code_indexer.services.smart_indexer import SmartIndexer
@@ -76,48 +77,22 @@ def _mock_vector_store() -> MagicMock:
     return store
 
 
-def _seed_resumable_metadata_with_progress(
-    indexer: SmartIndexer, files_to_index: List[str], current_file_index: int
-) -> None:
-    """Plant an "in_progress" resume state with a subset already marked
-    completed via current_file_index, exactly as a genuine crash-interrupted
-    run (or a repository-authored metadata file) would look."""
+def _seed_failed_files(indexer: SmartIndexer, failed_files: List[str]) -> None:
+    """Plant a completed run whose repository-controlled failed_file_paths
+    the next run retries (Story #2121: the one remaining stored path list),
+    exactly as a repository-authored metadata file would look."""
     metadata = indexer.progressive_metadata.metadata
-    metadata["status"] = "in_progress"
-    metadata["files_to_index"] = list(files_to_index)
-    metadata["total_files_to_index"] = len(files_to_index)
-    metadata["current_file_index"] = current_file_index
-    metadata["completed_files"] = list(files_to_index[:current_file_index])
-    metadata["failed_file_paths"] = []
-    metadata["files_processed"] = current_file_index
+    metadata["status"] = "completed"
+    metadata["failed_file_paths"] = list(failed_files)
+    metadata["files_processed"] = 0
     metadata["chunks_indexed"] = 0
 
 
 def _run_resume_and_capture(indexer: SmartIndexer) -> List[Path]:
-    """Drive the REAL resume path, capturing exactly the file list that
-    would be handed to chunking/embedding, without invoking real
-    chunking/embedding/FTS I/O."""
-    captured_files: dict = {}
-
-    def _capture_files(files, **kwargs):
-        captured_files["files"] = list(files)
-        from code_indexer.indexing.processor import ProcessingStats
-
-        return ProcessingStats()
-
-    with patch.object(
-        indexer, "process_files_high_throughput", side_effect=_capture_files
-    ):
-        indexer._do_resume_interrupted(
-            batch_size=50,
-            progress_callback=None,
-            git_status={},
-            provider_name="voyage-ai",
-            model_name="voyage-code-3",
-        )
-
-    files: List[Path] = captured_files.get("files", [])
-    return files
+    """Drive the REAL failed-file retry merge and return exactly the files
+    it would hand to processing."""
+    retried, _merged = indexer._merge_recorded_failures([])
+    return retried
 
 
 class TestResumeSymlinkLoopSafety:
@@ -142,13 +117,8 @@ class TestResumeSymlinkLoopSafety:
         y_link.symlink_to(x_link)
 
         indexer = _make_indexer(repo, tmp_path, _mock_vector_store())
-        # "a.py" is already completed (current_file_index=1); remaining
-        # entries are b.py, x.py (the loop), c.py.
-        _seed_resumable_metadata_with_progress(
-            indexer,
-            ["a.py", "b.py", "x.py", "c.py"],
-            current_file_index=1,
-        )
+        # The retried entries are b.py, x.py (the loop), c.py.
+        _seed_failed_files(indexer, ["b.py", "x.py", "c.py"])
 
         # Must not raise RuntimeError (symlink loop) or any other exception.
         processed_files = _run_resume_and_capture(indexer)

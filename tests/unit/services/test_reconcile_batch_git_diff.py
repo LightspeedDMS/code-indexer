@@ -13,7 +13,8 @@ Tests:
 2. `_get_modified_files_set` includes staged changes
 3. Both staged and unstaged changes are merged in the set
 4. `_get_modified_files_set` returns empty set when no changes
-5. `_get_modified_files_set` returns empty set on exception
+5. `_get_modified_files_set` raises on any git failure (Story #2121); an
+   unborn HEAD yields an empty set
 6. `_get_modified_files_set` ignores blank lines in output
 7. `_file_differs_from_committed_version` returns True when file is in cached set
 8. `_file_differs_from_committed_version` returns False when file is absent from set
@@ -137,14 +138,103 @@ class TestGetModifiedFilesSet:
 
         assert modified == set()
 
-    def test_returns_empty_set_on_exception(self, tmp_path):
-        """If subprocess.run raises, the method returns an empty set gracefully."""
+    def test_raises_when_git_cannot_run(self, tmp_path):
+        """Story #2121 (Codex P1): a git that cannot run is never read as
+        "nothing modified"; the reconcile fails loudly instead."""
+        import pytest
+
         indexer = _make_indexer(tmp_path)
 
         with patch("subprocess.run", side_effect=OSError("git not found")):
-            modified = indexer._get_modified_files_set()
+            with pytest.raises(RuntimeError, match="working changes"):
+                indexer._get_modified_files_set()
 
-        assert modified == set()
+    def test_raises_when_git_diff_exits_non_zero(self, tmp_path):
+        """A failed ``git diff`` raises, naming the command."""
+        import subprocess
+
+        import pytest
+
+        indexer = _make_indexer(tmp_path)
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(cmd, 0, "abc123\n", "")
+            return subprocess.CompletedProcess(cmd, 128, "", "fatal: index broken\n")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(RuntimeError, match="git diff --name-only HEAD"):
+                indexer._get_modified_files_set()
+
+    def test_returns_empty_set_for_a_repository_without_commits(self, tmp_path):
+        """No commit yet (unborn HEAD) is not an error: nothing has a
+        committed version to differ from."""
+        import subprocess
+
+        indexer = _make_indexer(tmp_path)
+        codebase_dir = Path(indexer.config.codebase_dir)
+        subprocess.run(
+            ["git", "init", "-q", str(codebase_dir)], check=True, capture_output=True
+        )
+        (codebase_dir / "a.py").write_text("print('a')\n")
+
+        assert indexer._get_modified_files_set() == set()
+
+    @staticmethod
+    def _committed_repo(indexer) -> Path:
+        """A real repository with one commit in the indexer's codebase_dir."""
+        import subprocess
+
+        codebase_dir = Path(indexer.config.codebase_dir)
+        (codebase_dir / "a.py").write_text("print('a')\n")
+        for args in (
+            ["init", "-q", "-b", "main"],
+            ["add", "-A"],
+            [
+                "-c",
+                "user.name=E",
+                "-c",
+                "user.email=e@example.com",
+                "commit",
+                "-qm",
+                "i",
+            ],
+        ):
+            subprocess.run(
+                ["git", *args], cwd=codebase_dir, check=True, capture_output=True
+            )
+        return codebase_dir
+
+    def test_raises_when_head_ref_points_to_a_missing_object(self, tmp_path):
+        """A HEAD that cannot resolve is not an unborn branch: it raises
+        (Story #2121, Codex round 2)."""
+        import pytest
+
+        indexer = _make_indexer(tmp_path)
+        codebase_dir = self._committed_repo(indexer)
+        (codebase_dir / ".git" / "refs" / "heads" / "main").write_text("12" * 20 + "\n")
+
+        with pytest.raises(RuntimeError, match="working changes"):
+            indexer._get_modified_files_set()
+
+    def test_raises_for_an_orphan_branch_while_other_refs_exist(self, tmp_path):
+        """An unresolved branch in a repository that has other refs (an
+        orphan branch, or a lost ref file) is not provably unborn: raise."""
+        import subprocess
+
+        import pytest
+
+        indexer = _make_indexer(tmp_path)
+        codebase_dir = self._committed_repo(indexer)
+        subprocess.run(
+            ["git", "checkout", "-q", "--orphan", "other"],
+            cwd=codebase_dir,
+            check=True,
+            capture_output=True,
+        )
+
+        with pytest.raises(RuntimeError, match="working changes"):
+            indexer._get_modified_files_set()
 
     def test_ignores_blank_lines_in_output(self, tmp_path):
         """Blank lines in git output do not end up in the returned set."""

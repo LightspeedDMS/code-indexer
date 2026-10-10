@@ -656,7 +656,9 @@ class TestResumePathReanchoring:
 
 
 class TestResumeReanchorWiring:
-    """End-to-end proof that _do_resume_interrupted re-anchors stored paths.
+    """End-to-end proof that stored paths are re-anchored. Story #2121: the
+    one remaining stored path list is the failed-file retry
+    (failed_file_paths, merged by _merge_recorded_failures).
 
     Reproduces the cow-daemon mount-vs-daemon-local split using a real repo
     plus a symlinked "mount" alias directory. The prior run is simulated by
@@ -681,33 +683,14 @@ class TestResumeReanchorWiring:
         # Current run walks the real (daemon-local) path.
         indexer = _make_indexer(repo, tmp_path, mock_vector_store)
 
-        # Prior run stored the file under the stale MOUNT-alias prefix.
+        # Prior run recorded the failed file under the stale MOUNT-alias prefix.
         stale_stored = str(mount_alias / "trace.json")
-        indexer.progressive_metadata.metadata["files_to_index"] = [stale_stored]
-        indexer.progressive_metadata.metadata["total_files_to_index"] = 1
-        indexer.progressive_metadata.metadata["current_file_index"] = 0
+        indexer.progressive_metadata.metadata["failed_file_paths"] = [stale_stored]
 
-        captured: dict = {}
+        retried, _merged = indexer._merge_recorded_failures([])
 
-        def _capture(files, **kwargs):
-            captured["files"] = list(files)
-            from code_indexer.indexing.processor import ProcessingStats
-
-            return ProcessingStats()
-
-        with patch.object(
-            indexer, "process_files_high_throughput", side_effect=_capture
-        ):
-            indexer._do_resume_interrupted(
-                batch_size=50,
-                progress_callback=None,
-                git_status={},
-                provider_name="voyage-ai",
-                model_name="voyage-code-3",
-            )
-
-        assert captured.get("files"), "resume passed no files to the processor"
-        for file_path in captured["files"]:
+        assert retried, "the failed-file retry returned no files"
+        for file_path in retried:
             # Every file MUST be under the current walk root (no stale prefix).
             rel = file_path.relative_to(repo)
             assert rel == Path("trace.json")
