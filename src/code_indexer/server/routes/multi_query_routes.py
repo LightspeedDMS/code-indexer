@@ -276,11 +276,35 @@ def multi_repository_query(
             f"{len(request.repositories)} repos, type={request.search_type}"
         )
 
+        import time
+
+        from ..middleware.correlation import get_correlation_id
+        from ..services import search_event_recording
+
         # Get service instance
         service = get_multi_search_service()
 
-        # Execute search
-        response = service.search(request)
+        # Execute search. Story #2115: inside a search event context (the
+        # embedding call sites record their cache fields into it), then one
+        # row per searched repository; a search that raises records nothing.
+        started = time.monotonic()
+        with search_event_recording.search_event_scope(
+            username=user.username,
+            repo_alias=None,
+            search_type=request.search_type,
+            query_text=request.query,
+        ) as event_context:
+            response = service.search(request)
+        search_event_recording.record_grouped_search(
+            search_event_recording.writer_from_app(http_request.app),
+            response.results,
+            search_type=request.search_type,
+            username=user.username,
+            query_text=request.query,
+            started_monotonic=started,
+            correlation_id=get_correlation_id(),
+            context=event_context,
+        )
 
         # Story #683: Apply payload truncation to results
         # Story #50: Now sync call (underlying handlers are sync)

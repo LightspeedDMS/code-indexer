@@ -27,6 +27,10 @@ from ..models.api_models import (
     VolumeInfo,
 )
 from code_indexer.server.services import audit_capture
+from code_indexer.server.services.search_event_health import (
+    process_search_event_health,
+    search_event_drop_reasons,
+)
 from ...config import ConfigManager
 from .database_health_service import (
     DatabaseHealthStatus,
@@ -264,6 +268,7 @@ class HealthCheckService:
             last_golden_repo_reconcile_auto_heal=auto_heal_event,
             fleet_migration_dedup_state=dedup_state_summary,
             audit=_audit_health_info(),
+            search_events=process_search_event_health(),
         )
 
     def _check_database_health(self) -> ServiceHealthInfo:
@@ -1512,6 +1517,12 @@ class HealthCheckService:
         urf_warn, _urf_err, urf_reasons = self._collect_unrepairable_refresh_failures()
         has_warning = has_warning or urf_warn
         failure_reasons.extend(urf_reasons)
+
+        # Bug #2114: search events dropped recently on this node -- DEGRADED
+        # only (a full recording queue never drains a node).
+        sed_reasons = search_event_drop_reasons(process_search_event_health())
+        has_warning = has_warning or bool(sed_reasons)
+        failure_reasons.extend(sed_reasons)
 
         # Bug #1539's cidx-meta conflict-resolution quarantine escalation
         # (Bug #1555 Defect B) is RETIRED: Bug #1555's root-cause fix made

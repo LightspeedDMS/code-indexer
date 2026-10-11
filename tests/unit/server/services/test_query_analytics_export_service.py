@@ -282,6 +282,7 @@ class TestQueryAnalyticsExportServiceExcel:
             "repo_alias",
             "search_type",
             "query_text",
+            "query_text_truncated",
             "voyage_cache_hit",
             "voyage_cache_mode",
             "voyage_latency_ms",

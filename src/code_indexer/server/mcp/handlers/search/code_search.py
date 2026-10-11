@@ -45,7 +45,6 @@ from .._utils import (
 )
 from ._shared import (
     _QUERY_LOG_TRUNCATION_LIMIT,
-    _QUERY_TEXT_MAX_CODEPOINTS,
     _get_search_event_writer,
 )
 from .omni import _omni_search_code
@@ -122,7 +121,8 @@ def search_code(
     _event_ctx = SearchEventContext(
         username=user.username,
         repo_alias=_repo_alias_str,
-        query_text=_query_text_raw[:_QUERY_TEXT_MAX_CODEPOINTS],
+        # Full text: the shared recording module caps and marks it (#2114).
+        query_text=_query_text_raw,
         search_type=_search_mode,
     )
     _ctx_token = _search_event_ctx.set(_event_ctx)

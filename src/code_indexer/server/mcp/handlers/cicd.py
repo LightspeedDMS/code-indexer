@@ -37,6 +37,7 @@ from ._utils import (
     _list_global_repos,
     _get_global_repo,
     _get_access_filtering_service,
+    _lazy_module_attr_or_none,
 )
 
 logger = logging.getLogger(__name__)
@@ -2316,7 +2317,15 @@ async def handle_ci_search_logs(args: Dict[str, Any], user: Any) -> Dict[str, An
     assert target is not None  # noqa: S101
     forge_type, project_identifier, base_url, _forge_host, token = target
 
+    import time
+
+    from code_indexer.server.services.search_event_recording import (
+        record_completed_search,
+        writer_from_app,
+    )
+
     try:
+        started = time.monotonic()
         if forge_type == "github":
             client = GitHubActionsClient(token)
             matches = await client.search_logs(
@@ -2332,6 +2341,19 @@ async def handle_ci_search_logs(args: Dict[str, Any], user: Any) -> Dict[str, An
                 case_sensitive=case_sensitive,
             )
 
+        # Story #2116: a completed CI log search is recorded (enqueue only:
+        # never blocks this coroutine). query_text is the pattern,
+        # result_count the matching log lines returned.
+        record_completed_search(
+            writer_from_app(_lazy_module_attr_or_none("app")),
+            search_type="ci_logs",
+            username=user.username,
+            repo_alias=repository_alias,
+            query_text=str(pattern),
+            result_count=len(matches),
+            started_monotonic=started,
+            correlation_id=get_correlation_id(),
+        )
         return _mcp_response(
             {
                 "success": True,

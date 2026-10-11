@@ -470,7 +470,8 @@ def register_query_routes(
             username=current_user.username,
             repo_alias=request.repository_alias,
             search_type=_search_type,
-            query_text=(request.query_text or "")[:500],
+            # Full text: the shared recording module caps and marks it.
+            query_text=request.query_text or "",
         )
         _ctx_token = _search_event_ctx.set(_event_ctx)
         _result_count = 0

@@ -6,6 +6,7 @@ Provides admin web interface routes for CIDX server administration.
 
 from code_indexer import __version__ as _cidx_version
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.services import search_event_recording
 from code_indexer.validation.user_validation import RESERVED_ACTIVATED_REPOS_DIR_NAMES
 
 import asyncio
@@ -5705,6 +5706,7 @@ def query_submit(
             pass
 
     # Execute actual query
+    query_started = time.monotonic()
     results = []
     query_executed = True
     error_message = None
@@ -5985,6 +5987,9 @@ def query_submit(
                         case_sensitive=case_sensitive,
                         fuzzy=fuzzy,
                         regex=regex,
+                        event_writer=search_event_recording.writer_from_app(
+                            request.app
+                        ),
                     )
                 except WebQueryNotCompleted as e:
                     # The query was not completed (access refused, invalid
@@ -6001,6 +6006,17 @@ def query_submit(
         )
         error_message = f"Query failed: {message}"
 
+    _record_web_scip_search(
+        request,
+        session.username,
+        repository,
+        query_text,
+        search_mode,
+        scip_query_type,
+        error_message,
+        len(results),
+        query_started,
+    )
     return _create_query_page_response(
         request,
         session,
@@ -6069,6 +6085,60 @@ def _get_semantic_query_manager():
             extra={"correlation_id": get_correlation_id()},
         )
         return None
+
+
+# The SCIP query types the Web query page executes (both SCIP paths).
+_WEB_SCIP_QUERY_TYPES = (
+    "definition",
+    "references",
+    "dependencies",
+    "dependents",
+    "impact",
+    "callchain",
+    "context",
+)
+
+
+def _record_web_scip_search(
+    request: Request,
+    username: str,
+    repository: str,
+    query_text: str,
+    search_mode: str,
+    scip_query_type: str,
+    error_message: Optional[str],
+    result_count: int,
+    started: float,
+) -> None:
+    """Story #2115: record a completed SCIP-mode Web query as "scip".
+
+    Nothing is recorded for other modes (recorded by _execute_text_query),
+    when the query did not complete (an error message is shown instead), or
+    for an unrecognized query type (no query ran). `repository` is the form
+    value "alias (owner)".
+    """
+    if search_mode != "scip" or error_message is not None:
+        return
+    if scip_query_type not in _WEB_SCIP_QUERY_TYPES:
+        return
+    recorded_text = query_text.strip()
+    if scip_query_type == "callchain":
+        # A completed call chain had exactly two symbols (both SCIP paths
+        # refuse anything else with an error); same text as MCP and REST.
+        from_symbol, to_symbol = recorded_text.split(maxsplit=1)
+        recorded_text = search_event_recording.scip_callchain_query_text(
+            from_symbol, to_symbol
+        )
+    search_event_recording.record_completed_search(
+        search_event_recording.writer_from_app(request.app),
+        search_type="scip",
+        username=username,
+        repo_alias=repository.split(" (")[0],
+        query_text=recorded_text,
+        result_count=result_count,
+        started_monotonic=started,
+        correlation_id=get_correlation_id(),
+    )
 
 
 def _execute_scip_query(
@@ -6334,6 +6404,9 @@ def _execute_text_query(
     case_sensitive: bool,
     fuzzy: bool,
     regex: bool,
+    # Any: the app's SearchEventLogWriter, or None when it is not running
+    # (then nothing is recorded); typed loosely like every recording door.
+    event_writer: Any,
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """Run a semantic/FTS/hybrid/temporal Web query.
 
@@ -6350,8 +6423,16 @@ def _execute_text_query(
     is classified with ``classify_search_error``, logged here once at
     WARNING, and raised as ``WebQueryNotCompleted`` carrying the message the
     user is shown.
+
+    Story #2115: a completed query is recorded in the search event log
+    (``run_recorded_search``) as the signed-in user, with the mode that ran
+    ("temporal" whenever a time range or commit scopes it); a query that
+    raises records nothing.
     """
     from code_indexer.server.query.semantic_query_manager import SemanticQueryError
+    from code_indexer.server.services.search_event_recording import (
+        run_recorded_search,
+    )
 
     if target_repo.get("is_global"):
         username = session_username
@@ -6359,21 +6440,33 @@ def _execute_text_query(
         username = target_repo.get("username", session_username)
 
     try:
-        query_response = query_manager.query_user_repositories(
-            username=username,
+        query_response = run_recorded_search(
+            event_writer,
+            lambda: query_manager.query_user_repositories(
+                username=username,
+                query_text=query_text.strip(),
+                repository_alias=user_alias,
+                limit=limit,
+                min_score=min_score,
+                language=language if language else None,
+                path_filter=path_filter if path_filter else None,
+                search_mode=search_mode,
+                time_range=time_range if time_range else None,
+                time_range_all=time_range_all,
+                at_commit=at_commit if at_commit else None,
+                case_sensitive=case_sensitive,
+                fuzzy=fuzzy,
+                regex=regex,
+            ),
+            username=session_username,
+            repo_alias=user_alias,
+            search_type=(
+                "temporal"
+                if (time_range or time_range_all or at_commit)
+                else search_mode
+            ),
             query_text=query_text.strip(),
-            repository_alias=user_alias,
-            limit=limit,
-            min_score=min_score,
-            language=language if language else None,
-            path_filter=path_filter if path_filter else None,
-            search_mode=search_mode,
-            time_range=time_range if time_range else None,
-            time_range_all=time_range_all,
-            at_commit=at_commit if at_commit else None,
-            case_sensitive=case_sensitive,
-            fuzzy=fuzzy,
-            regex=regex,
+            correlation_id=get_correlation_id(),
         )
     except (SemanticQueryError, ValueError) as e:
         # The query layer logged the detail of a failure it raised itself.
@@ -6481,6 +6574,7 @@ def query_results_partial_post(
             pass
 
     # Execute actual query
+    query_started = time.monotonic()
     results = []
     query_executed = True
     error_message = None
@@ -6542,6 +6636,9 @@ def query_results_partial_post(
                         case_sensitive=case_sensitive,
                         fuzzy=fuzzy,
                         regex=regex,
+                        event_writer=search_event_recording.writer_from_app(
+                            request.app
+                        ),
                     )
                 except WebQueryNotCompleted as e:
                     # The query was not completed (access refused, invalid
@@ -6558,6 +6655,17 @@ def query_results_partial_post(
         )
         error_message = f"Query failed: {message}"
 
+    _record_web_scip_search(
+        request,
+        session.username,
+        repository,
+        query_text,
+        search_mode,
+        scip_query_type,
+        error_message,
+        len(results),
+        query_started,
+    )
     csrf_token_new = generate_csrf_token()
     response = templates.TemplateResponse(
         request,
@@ -8554,7 +8662,9 @@ def analytics_export_page(request: Request):
         return _create_login_redirect(request)
 
     # Bug #2110: the Search Type options are the one list writers record.
-    from code_indexer.server.services import search_event_recording
+    from code_indexer.server.services.search_event_health import (
+        search_event_health_info,
+    )
 
     csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
     response = templates.TemplateResponse(
@@ -8566,6 +8676,11 @@ def analytics_export_page(request: Request):
             "show_nav": True,
             "csrf_token": csrf_token,
             "search_types": search_event_recording.SEARCH_TYPES,
+            # Bug #2114: events this server process dropped (an export can
+            # be short).
+            "search_event_drops": search_event_health_info(
+                search_event_recording.writer_from_app(request.app)
+            ),
         },
     )
     set_csrf_cookie(response, csrf_token)

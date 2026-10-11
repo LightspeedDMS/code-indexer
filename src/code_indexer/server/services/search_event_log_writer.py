@@ -12,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass
 from queue import Empty, Full, Queue
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from code_indexer.server.services.config_service import (
     get_config_service as get_config_service_for_eviction,
@@ -66,7 +66,14 @@ class SearchEventRecord:
     result_count: int
     node_id: str
     correlation_id: Optional[str]
+    # Bug #2114: whether query_text was cut to the stored cap. None only for
+    # rows written before the column existed.
+    query_text_truncated: Optional[bool] = None
 
+
+# Bug #2114: added after the original DDL, so it is the LAST column of
+# `SELECT *` on every table (an existing table gains it by ADD COLUMN).
+_ADDED_COLUMN_TRUNCATED = "query_text_truncated"
 
 # Column order of `SELECT * FROM search_event_log` (both backends' DDL).
 _EVENT_COLUMNS = (
@@ -86,7 +93,13 @@ _EVENT_COLUMNS = (
     "result_count",
     "node_id",
     "correlation_id",
+    _ADDED_COLUMN_TRUNCATED,
 )
+
+
+def _sqlite_event_columns(conn: sqlite3.Connection) -> Set[str]:
+    """Column names of the search_event_log table as SQLite has them now."""
+    return {row[1] for row in conn.execute("PRAGMA table_info(search_event_log)")}
 
 
 def _pg_row_to_event(row: Any) -> Dict[str, Any]:
@@ -219,10 +232,25 @@ class SearchEventLogSqliteBackend:
                         total_latency_ms INTEGER NOT NULL,
                         result_count INTEGER NOT NULL,
                         node_id TEXT NOT NULL,
-                        correlation_id TEXT
+                        correlation_id TEXT,
+                        query_text_truncated INTEGER
                     )
                     """
                 )
+                # Bug #2114: a table created before the column existed (here
+                # or by DatabaseSchema) gains it in place; old rows read NULL.
+                if _ADDED_COLUMN_TRUNCATED not in _sqlite_event_columns(conn):
+                    try:
+                        conn.execute(
+                            "ALTER TABLE search_event_log "
+                            f"ADD COLUMN {_ADDED_COLUMN_TRUNCATED} INTEGER"
+                        )
+                    except sqlite3.OperationalError:
+                        # Another worker process added it between our read
+                        # and our ALTER (the read-then-add is not atomic).
+                        # Decided by the schema itself, never the message.
+                        if _ADDED_COLUMN_TRUNCATED not in _sqlite_event_columns(conn):
+                            raise
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_sel_timestamp
@@ -255,8 +283,9 @@ class SearchEventLogSqliteBackend:
                         (timestamp, username, repo_alias, search_type, query_text,
                          voyage_cache_hit, voyage_cache_mode, voyage_latency_ms,
                          cohere_cache_hit, cohere_cache_mode, cohere_latency_ms,
-                         total_latency_ms, result_count, node_id, correlation_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         total_latency_ms, result_count, node_id, correlation_id,
+                         query_text_truncated)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -283,6 +312,11 @@ class SearchEventLogSqliteBackend:
                             r.result_count,
                             r.node_id,
                             r.correlation_id,
+                            (
+                                int(r.query_text_truncated)
+                                if r.query_text_truncated is not None
+                                else None
+                            ),
                         )
                         for r in records
                     ],
@@ -491,10 +525,25 @@ class SearchEventLogPostgresBackend:
                         total_latency_ms    INTEGER NOT NULL,
                         result_count        INTEGER NOT NULL,
                         node_id             TEXT NOT NULL,
-                        correlation_id      TEXT
+                        correlation_id      TEXT,
+                        query_text_truncated BOOLEAN
                     )
                     """
                 )
+                # Bug #2114 (also PG migration 073): a table created before the
+                # column existed gains it. Checked first, so a node whose table
+                # already has it never takes ALTER TABLE's exclusive lock.
+                has_column = conn.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name = 'search_event_log' AND column_name = %s",
+                    (_ADDED_COLUMN_TRUNCATED,),
+                ).fetchone()
+                if has_column is None:
+                    conn.execute(
+                        "ALTER TABLE search_event_log ADD COLUMN IF NOT EXISTS "
+                        f"{_ADDED_COLUMN_TRUNCATED} BOOLEAN"
+                    )
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_sel_timestamp
@@ -527,8 +576,10 @@ class SearchEventLogPostgresBackend:
                             (timestamp, username, repo_alias, search_type, query_text,
                              voyage_cache_hit, voyage_cache_mode, voyage_latency_ms,
                              cohere_cache_hit, cohere_cache_mode, cohere_latency_ms,
-                             total_latency_ms, result_count, node_id, correlation_id)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                             total_latency_ms, result_count, node_id, correlation_id,
+                             query_text_truncated)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                %s, %s)
                         """,
                         (
                             r.timestamp,
@@ -546,6 +597,7 @@ class SearchEventLogPostgresBackend:
                             r.result_count,
                             r.node_id,
                             r.correlation_id,
+                            r.query_text_truncated,
                         ),
                     )
                 conn.commit()
@@ -692,15 +744,49 @@ class SearchEventLogPostgresBackend:
 # ---------------------------------------------------------------------------
 
 
+def _record_drop_metric() -> None:
+    """Count one dropped search event in OTEL (Bug #2114). Never raises."""
+    try:
+        from code_indexer.server.telemetry.manager import peek_telemetry_manager
+        from code_indexer.server.telemetry.metrics_instrumentation import (
+            get_application_metrics,
+        )
+
+        telemetry_manager = peek_telemetry_manager()
+        if telemetry_manager is None:
+            return
+        get_application_metrics(telemetry_manager).record_search_event_dropped()
+    except Exception as exc:  # telemetry never breaks the hot path
+        logger.debug("search event drop metric not recorded: %s", exc)
+
+
+@dataclass(frozen=True)
+class SearchEventDrops:
+    """Events one writer (one server process) dropped on queue overflow."""
+
+    dropped: int
+    # None until the first drop.
+    seconds_since_last_drop: Optional[float]
+
+
 class SearchEventLogWriter:
     """Background writer for search event records.
 
     Maintains an in-memory queue and drains it in a background thread,
     writing batches to the storage backend. The hot path (enqueue) NEVER
     blocks and NEVER raises (Messi #2 anti-fallback, Messi #13 anti-silent-failure).
+
+    Bug #2114: every event dropped on overflow is counted on this instance
+    (per process, never shared state); `drop_snapshot()` reads the count for
+    the health surface and the Query Analytics Export page.
     """
 
-    def __init__(self, backend: Any, maxsize: int = 5000) -> None:
+    def __init__(
+        self,
+        backend: Any,
+        maxsize: int = 5000,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._backend = backend
         self._queue: Queue = Queue(maxsize=maxsize)
         self._stop = threading.Event()
@@ -708,6 +794,21 @@ class SearchEventLogWriter:
         self._overflow_warned = False
         # 0.0 so the first _maybe_evict call always fires (Messi #14: provable bound).
         self._last_eviction: float = 0.0
+        self._clock = clock
+        self._drop_lock = threading.Lock()
+        self._dropped = 0
+        self._last_drop_at: Optional[float] = None
+
+    def drop_snapshot(self) -> SearchEventDrops:
+        """Events this writer dropped since it was created. O(1), no I/O."""
+        with self._drop_lock:
+            dropped, last_drop_at = self._dropped, self._last_drop_at
+        return SearchEventDrops(
+            dropped=dropped,
+            seconds_since_last_drop=(
+                None if last_drop_at is None else self._clock() - last_drop_at
+            ),
+        )
 
     @property
     def backend(self) -> Any:
@@ -727,6 +828,10 @@ class SearchEventLogWriter:
             self._queue.put_nowait(record)
             self._overflow_warned = False
         except Full:
+            with self._drop_lock:
+                self._dropped += 1
+                self._last_drop_at = self._clock()
+            _record_drop_metric()
             if not self._overflow_warned:
                 logger.warning("search_event_log queue full — dropping newest events")
                 self._overflow_warned = True

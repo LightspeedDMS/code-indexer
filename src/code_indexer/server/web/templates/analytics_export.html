@@ -8,6 +8,16 @@
     <p class="subtitle">Filter search event data and export to Excel for stakeholder reporting.</p>
 </div>
 
+{% if search_event_drops and search_event_drops.events_dropped_since_start > 0 %}
+<article id="search-event-drops" role="alert">
+    This server process (on node {{ search_event_drops.node_id }}) dropped
+    {{ search_event_drops.events_dropped_since_start }} search events since it started
+    because its recording queue was full. Exports do not contain those searches.
+    Other server processes and nodes report their own count in
+    <code>/api/system/health</code> (<code>search_events</code>).
+</article>
+{% endif %}
+
 <!-- Filter Panel -->
 <section>
     <article>

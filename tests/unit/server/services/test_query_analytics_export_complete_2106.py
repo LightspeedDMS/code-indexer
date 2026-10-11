@@ -185,9 +185,10 @@ class TestEveryMatchingRowIsExported:
         )
 
         assert record["status"] == "completed", record["error_message"]
-        # correlation_id is spreadsheet column O.
-        assert _CORRELATION_COL == ord("O") - ord("A")
-        exported = _column_values(record["file_path"], "O")
+        # correlation_id is spreadsheet column P (Bug #2114 added
+        # query_text_truncated after query_text).
+        assert _CORRELATION_COL == ord("P") - ord("A")
+        exported = _column_values(record["file_path"], "P")
         expected = _expected(predicate)
         assert len(exported) == len(set(exported)), "a row was exported twice"
         assert set(exported) == expected

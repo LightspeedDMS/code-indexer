@@ -23,7 +23,7 @@ import logging
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Sized
 
 from code_indexer.server.models.query import SEARCH_MODES
 from code_indexer.server.services.search_event_context import SearchEventContext
@@ -35,7 +35,22 @@ logger = logging.getLogger(__name__)
 # The search_type values a row can carry: the query modes (REST model and
 # MCP search_code) plus the search kinds that are not a query mode. Writers
 # and the Query Analytics Export page's Search Type filter use this one list.
-SEARCH_TYPES = SEARCH_MODES + ("temporal", "regex", "xray")
+# Story #2116 tool families (cache/provider columns always NULL):
+# - "scip": SCIP code intelligence. query_text is the symbol ("from -> to"
+#   for a call chain); result_count is the results returned (results,
+#   affected symbols, call chains or context files).
+# - "git_history": commit message / diff search. query_text is the query or
+#   search term; result_count is the matching commits returned.
+# - "ci_logs": CI run log search. query_text is the pattern; result_count is
+#   the matching log lines returned.
+SEARCH_TYPES = SEARCH_MODES + (
+    "temporal",
+    "regex",
+    "xray",
+    "scip",
+    "git_history",
+    "ci_logs",
+)
 
 # query_text is capped at this many characters before it is stored.
 QUERY_TEXT_MAX_CHARS = 500
@@ -123,7 +138,10 @@ def _enqueue(
             username=username,
             repo_alias=repo_alias,
             search_type=search_type,
+            # Bug #2114: the cap is applied here, and only here; doors pass
+            # the full text so a cut text is marked.
             query_text=query_text[:QUERY_TEXT_MAX_CHARS],
+            query_text_truncated=len(query_text) > QUERY_TEXT_MAX_CHARS,
             voyage_cache_hit=context.voyage_cache_hit if context else None,
             voyage_cache_mode=context.voyage_cache_mode if context else None,
             voyage_latency_ms=context.voyage_latency_ms if context else None,
@@ -136,6 +154,74 @@ def _enqueue(
             correlation_id=correlation_id,
         )
     )
+
+
+@contextmanager
+def search_event_scope(
+    *,
+    username: str,
+    repo_alias: Optional[str],
+    search_type: str,
+    query_text: str,
+) -> Iterator[SearchEventContext]:
+    """Install a search event context for one search (Story #2115).
+
+    While it is installed the embedding call sites write their cache fields
+    into it (a multi-repository fan-out shares it), so the row recorded
+    afterwards carries them. Reset on exit.
+    """
+    from code_indexer.server.services.search_event_context import _search_event_ctx
+
+    context = SearchEventContext(
+        username=username,
+        repo_alias=repo_alias,
+        search_type=search_type,
+        query_text=query_text,
+    )
+    token = _search_event_ctx.set(context)
+    try:
+        yield context
+    finally:
+        _search_event_ctx.reset(token)
+
+
+def run_recorded_search(
+    writer: Any,
+    search: Callable[[], Dict[str, Any]],
+    *,
+    username: str,
+    repo_alias: Optional[str],
+    search_type: str,
+    query_text: str,
+    correlation_id: Optional[str],
+) -> Dict[str, Any]:
+    """Run one synchronous query_user_repositories search and record it.
+
+    `search` runs inside `search_event_scope`; when it returns, one row is
+    recorded with the number of results it returned and the embedding cache
+    fields it collected. A search that raises records nothing (the exception
+    propagates unchanged). Recording never raises.
+    """
+    started = time.monotonic()
+    with search_event_scope(
+        username=username,
+        repo_alias=repo_alias,
+        search_type=search_type,
+        query_text=query_text,
+    ) as context:
+        result = search()
+    record_search_event(
+        writer,
+        username=username,
+        repo_alias=repo_alias,
+        search_type=search_type,
+        query_text=query_text,
+        result_count=len(result.get("results") or []),
+        total_latency_ms=elapsed_ms(started),
+        correlation_id=correlation_id,
+        context=context,
+    )
+    return result
 
 
 def elapsed_ms(started_monotonic: float) -> int:
@@ -303,6 +389,9 @@ def remember_deferred_search(
         if payload_cache is None:
             raise RuntimeError("no payload cache for the deferred search record")
         pending = {name: getattr(context, name) for name in _DEFERRED_CONTEXT_FIELDS}
+        # Bounded in the shared store, one character past the cap so the
+        # recorded row is still marked truncated (Bug #2114).
+        pending["query_text"] = context.query_text[: QUERY_TEXT_MAX_CHARS + 1]
         pending.update(started_at=started_at, correlation_id=correlation_id)
         payload_cache.store_expiring_key(
             _deferred_key(str(payload["job_id"]), context.username),
@@ -453,16 +542,143 @@ def record_regex_search(
     fans out one search per repository). query_text is the pattern;
     result_count is the number of matches returned.
     """
+    record_completed_search(
+        writer,
+        search_type="regex",
+        username=username,
+        repo_alias=repo_alias,
+        query_text=pattern,
+        result_count=result_count,
+        started_monotonic=started_monotonic,
+        correlation_id=correlation_id,
+    )
+
+
+def record_completed_search(
+    writer: Any,
+    *,
+    search_type: str,
+    username: str,
+    repo_alias: Optional[str],
+    query_text: str,
+    result_count: int,
+    started_monotonic: float,
+    correlation_id: Optional[str],
+) -> None:
+    """Record one search the caller knows completed successfully.
+
+    For searches that never embed (cache and provider columns stay NULL):
+    regex, git history, CI logs, a Web SCIP query. Latency runs from
+    `started_monotonic` (a time.monotonic()). Never raises.
+    """
     record_search_event(
         writer,
         username=username,
         repo_alias=repo_alias,
-        search_type="regex",
-        query_text=pattern,
+        search_type=search_type,
+        query_text=query_text,
         result_count=result_count,
         total_latency_ms=elapsed_ms(started_monotonic),
         correlation_id=correlation_id,
     )
+
+
+def record_grouped_search(
+    writer: Any,
+    grouped: Mapping[str, Sized],
+    *,
+    search_type: str,
+    username: str,
+    query_text: str,
+    started_monotonic: float,
+    correlation_id: Optional[str],
+    context: Optional[SearchEventContext] = None,
+) -> None:
+    """Record a multi-repository search: one row per searched repository.
+
+    `grouped` maps each repository that was searched to the results it
+    returned (a repository that failed or was skipped is not a key, so it
+    writes no row). `context` carries the request's embedding cache fields
+    for searches that embed. Never raises.
+    """
+    if writer is None:
+        return
+    with _never_raise(search_type):
+        total_latency_ms = elapsed_ms(started_monotonic)
+        for repo_alias, results in grouped.items():
+            _enqueue(
+                writer,
+                username=username,
+                repo_alias=repo_alias,
+                search_type=search_type,
+                query_text=query_text,
+                result_count=len(results),
+                total_latency_ms=total_latency_ms,
+                correlation_id=correlation_id,
+                context=context,
+            )
+
+
+# The list a SCIP response carries its results in, by operation:
+# definition/references/dependencies/dependents "results", impact
+# "affected_symbols", callchain "chains", context "files".
+_SCIP_RESULT_LISTS = ("results", "affected_symbols", "chains", "files")
+
+
+def scip_callchain_query_text(from_symbol: Any, to_symbol: Any) -> str:
+    """query_text of a call chain search (Story #2116)."""
+    return f"{from_symbol} -> {to_symbol}"
+
+
+def scip_payload_is_known(payload: Dict[str, Any]) -> bool:
+    """Whether a SCIP response payload (MCP or REST) is a search that ran:
+    `success` true and its result list present. A handled error, a timeout
+    and a rejected parameter answer success false."""
+    return payload.get("success") is True and any(
+        isinstance(payload.get(key), list) for key in _SCIP_RESULT_LISTS
+    )
+
+
+def scip_payload_result_count(payload: Dict[str, Any]) -> int:
+    """Number of results a SCIP response payload returned."""
+    for key in _SCIP_RESULT_LISTS:
+        if isinstance(payload.get(key), list):
+            return len(payload[key])
+    return 0
+
+
+def record_scip_search(
+    writer: Any,
+    payload: Dict[str, Any],
+    *,
+    username: str,
+    repo_alias: Optional[str],
+    query_text: str,
+    started_monotonic: float,
+    correlation_id: Optional[str],
+) -> None:
+    """Record one SCIP search from its response payload (Story #2116).
+
+    Records only when `scip_payload_is_known`; result_count is the number
+    of results the payload returns. query_text is the symbol
+    (`scip_callchain_query_text` for a call chain). Never raises.
+    """
+    if writer is None:
+        return
+    with _never_raise("scip"):
+        if not scip_payload_is_known(payload):
+            return
+        _enqueue(
+            writer,
+            username=username,
+            repo_alias=repo_alias,
+            search_type="scip",
+            query_text=query_text,
+            result_count=scip_payload_result_count(payload),
+            total_latency_ms=elapsed_ms(started_monotonic),
+            correlation_id=correlation_id,
+            context=None,
+        )
 
 
 def bind_xray_recorder(

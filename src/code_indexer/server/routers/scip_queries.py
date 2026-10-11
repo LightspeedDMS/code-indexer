@@ -10,12 +10,19 @@ Story #41: All routes delegate to SCIPQueryService for unified query execution a
 """
 
 import logging
+import time
 from fastapi import APIRouter, Query, Depends, Request
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.services.search_event_recording import (
+    record_scip_search,
+    scip_callchain_query_text,
+    writer_from_app,
+)
 from code_indexer.server.routers import repo_access_http
 from code_indexer.server.services.scip_query_service import SCIPQueryService
 from code_indexer.server.logging_utils import format_error_log
@@ -155,6 +162,27 @@ def _apply_scip_payload_truncation(
     return mcp_truncate(results)  # type: ignore[no-any-return]
 
 
+def _scip_search_payload(
+    request: Request,
+    user: User,
+    payload: Dict[str, Any],
+    project: Optional[str],
+    query_text: str,
+    started: float,
+) -> Dict[str, Any]:
+    """Record a completed SCIP search (Story #2116) and return its payload."""
+    record_scip_search(
+        writer_from_app(request.app),
+        payload,
+        username=user.username,
+        repo_alias=project,
+        query_text=query_text,
+        started_monotonic=started,
+        correlation_id=get_correlation_id(),
+    )
+    return payload
+
+
 @router.get("/definition")
 def get_definition(
     request: Request,
@@ -178,6 +206,7 @@ def get_definition(
     Returns:
         JSON response with success status, symbol, total_results, and results list
     """
+    started = time.monotonic()
     try:
         service = _get_scip_query_service(request)
         results = service.find_definition(
@@ -190,12 +219,19 @@ def get_definition(
         # Apply SCIP payload truncation for consistency
         results = _apply_scip_payload_truncation(results)
 
-        return {
-            "success": True,
-            "symbol": symbol,
-            "total_results": len(results),
-            "results": results,
-        }
+        return _scip_search_payload(
+            request,
+            current_user,
+            {
+                "success": True,
+                "symbol": symbol,
+                "total_results": len(results),
+                "results": results,
+            },
+            project,
+            symbol,
+            started,
+        )
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -236,6 +272,7 @@ def get_references(
     Returns:
         JSON response with success status, symbol, total_results, and results list
     """
+    started = time.monotonic()
     try:
         service = _get_scip_query_service(request)
         results = service.find_references(
@@ -249,12 +286,19 @@ def get_references(
         # Apply SCIP payload truncation for consistency
         results = _apply_scip_payload_truncation(results)
 
-        return {
-            "success": True,
-            "symbol": symbol,
-            "total_results": len(results),
-            "results": results,
-        }
+        return _scip_search_payload(
+            request,
+            current_user,
+            {
+                "success": True,
+                "symbol": symbol,
+                "total_results": len(results),
+                "results": results,
+            },
+            project,
+            symbol,
+            started,
+        )
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -295,6 +339,7 @@ def get_dependencies(
     Returns:
         JSON response with success status, symbol, total_results, and results list
     """
+    started = time.monotonic()
     try:
         service = _get_scip_query_service(request)
         results = service.get_dependencies(
@@ -308,12 +353,19 @@ def get_dependencies(
         # Apply SCIP payload truncation for consistency
         results = _apply_scip_payload_truncation(results)
 
-        return {
-            "success": True,
-            "symbol": symbol,
-            "total_results": len(results),
-            "results": results,
-        }
+        return _scip_search_payload(
+            request,
+            current_user,
+            {
+                "success": True,
+                "symbol": symbol,
+                "total_results": len(results),
+                "results": results,
+            },
+            project,
+            symbol,
+            started,
+        )
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -354,6 +406,7 @@ def get_dependents(
     Returns:
         JSON response with success status, symbol, total_results, and results list
     """
+    started = time.monotonic()
     try:
         service = _get_scip_query_service(request)
         results = service.get_dependents(
@@ -367,12 +420,19 @@ def get_dependents(
         # Apply SCIP payload truncation for consistency
         results = _apply_scip_payload_truncation(results)
 
-        return {
-            "success": True,
-            "symbol": symbol,
-            "total_results": len(results),
-            "results": results,
-        }
+        return _scip_search_payload(
+            request,
+            current_user,
+            {
+                "success": True,
+                "symbol": symbol,
+                "total_results": len(results),
+                "results": results,
+            },
+            project,
+            symbol,
+            started,
+        )
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -405,6 +465,7 @@ def get_impact(
     Returns:
         JSON response with impact analysis results
     """
+    started = time.monotonic()
     try:
         service = _get_scip_query_service(request)
         result = service.analyze_impact(
@@ -414,15 +475,22 @@ def get_impact(
             username=current_user.username,
         )
 
-        return {
-            "success": True,
-            "target_symbol": result["target_symbol"],
-            "depth_analyzed": result["depth_analyzed"],
-            "total_affected": result["total_affected"],
-            "truncated": result["truncated"],
-            "affected_symbols": result["affected_symbols"],
-            "affected_files": result["affected_files"],
-        }
+        return _scip_search_payload(
+            request,
+            current_user,
+            {
+                "success": True,
+                "target_symbol": result["target_symbol"],
+                "depth_analyzed": result["depth_analyzed"],
+                "total_affected": result["total_affected"],
+                "truncated": result["truncated"],
+                "affected_symbols": result["affected_symbols"],
+                "affected_files": result["affected_files"],
+            },
+            project,
+            symbol,
+            started,
+        )
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -460,6 +528,7 @@ def get_callchain(
     Returns:
         JSON response with call chain results
     """
+    started = time.monotonic()
     try:
         service = _get_scip_query_service(request)
         chains, timeout_errors = service.trace_callchain(
@@ -491,13 +560,20 @@ def get_callchain(
                 "chains": [],
             }
 
-        return {
-            "success": True,
-            "from_symbol": from_symbol,
-            "to_symbol": to_symbol,
-            "total_chains_found": len(chains),
-            "chains": chains,
-        }
+        return _scip_search_payload(
+            request,
+            current_user,
+            {
+                "success": True,
+                "from_symbol": from_symbol,
+                "to_symbol": to_symbol,
+                "total_chains_found": len(chains),
+                "chains": chains,
+            },
+            project,
+            scip_callchain_query_text(from_symbol, to_symbol),
+            started,
+        )
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -537,6 +613,7 @@ def get_context(
     Returns:
         JSON response with smart context results
     """
+    started = time.monotonic()
     try:
         service = _get_scip_query_service(request)
         result = service.get_context(
@@ -547,15 +624,22 @@ def get_context(
             username=current_user.username,
         )
 
-        return {
-            "success": True,
-            "target_symbol": result["target_symbol"],
-            "summary": result["summary"],
-            "total_files": result["total_files"],
-            "total_symbols": result["total_symbols"],
-            "avg_relevance": result["avg_relevance"],
-            "files": result["files"],
-        }
+        return _scip_search_payload(
+            request,
+            current_user,
+            {
+                "success": True,
+                "target_symbol": result["target_symbol"],
+                "summary": result["summary"],
+                "total_files": result["total_files"],
+                "total_symbols": result["total_symbols"],
+                "avg_relevance": result["avg_relevance"],
+                "files": result["files"],
+            },
+            project,
+            symbol,
+            started,
+        )
     except Exception as e:
         logger.warning(
             format_error_log(

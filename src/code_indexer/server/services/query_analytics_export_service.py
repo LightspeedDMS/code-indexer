@@ -29,6 +29,9 @@ _EXCEL_COLUMNS = [
     "repo_alias",
     "search_type",
     "query_text",
+    # Bug #2114: true when query_text was cut to its stored cap; blank for
+    # rows recorded before the column existed.
+    "query_text_truncated",
     "voyage_cache_hit",
     "voyage_cache_mode",
     "voyage_latency_ms",

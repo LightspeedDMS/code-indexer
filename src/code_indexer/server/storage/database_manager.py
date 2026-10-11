@@ -642,9 +642,12 @@ class DatabaseSchema:
             total_latency_ms    INTEGER NOT NULL,
             result_count        INTEGER NOT NULL,
             node_id             TEXT NOT NULL,
-            correlation_id      TEXT
+            correlation_id      TEXT,
+            query_text_truncated INTEGER
         )
     """
+    # Bug #2114: query_text_truncated stays LAST (an existing table gains it
+    # in place via SearchEventLogSqliteBackend, appended after correlation_id).
 
     CREATE_IDX_SEL_TIMESTAMP = """
         CREATE INDEX IF NOT EXISTS idx_sel_timestamp

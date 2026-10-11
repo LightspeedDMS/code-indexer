@@ -50,12 +50,39 @@ from ._utils import (
     _expand_wildcard_patterns,
     _format_omni_response,
     _get_access_filtering_service,
+    _lazy_module_attr_or_none,
     _mcp_response,
     _parse_json_string_array,
     cap_breach_response,
 )
+from code_indexer.server.services.search_event_recording import (
+    record_completed_search,
+    writer_from_app,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _record_git_history(
+    user: User,
+    repository_alias: str,
+    query_text: str,
+    result_count: int,
+    started: float,
+) -> None:
+    """Record one completed git history search (Story #2116): query_text is
+    the query or search term, result_count the matching commits returned.
+    An omni search records one row per repository (it runs this per repo)."""
+    record_completed_search(
+        writer_from_app(_lazy_module_attr_or_none("app")),
+        search_type="git_history",
+        username=user.username,
+        repo_alias=repository_alias,
+        query_text=query_text,
+        result_count=result_count,
+        started_monotonic=started,
+        correlation_id=get_correlation_id(),
+    )
 
 
 def _argument_rejected(
@@ -966,6 +993,7 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
         from code_indexer.global_repos.git_operations import GitOperationsService
 
         service = GitOperationsService(Path(repo_path))
+        started = time.monotonic()
         result = service.search_commits(
             query=query,
             is_regex=args.get("is_regex", False),
@@ -1003,6 +1031,7 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
             config_service=get_config_service(),
         )
 
+        _record_git_history(user, repository_alias, query, len(matches), started)
         return _mcp_response(
             {
                 "success": True,
@@ -1091,6 +1120,7 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Create service and execute search
         service = GitOperationsService(Path(repo_path))
+        started = time.monotonic()
         is_regex = args.get("is_regex", False)
         if is_regex:
             result = service.search_diffs(
@@ -1137,6 +1167,7 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             config_service=get_config_service(),
         )
 
+        _record_git_history(user, repository_alias, search_term, len(matches), started)
         return _mcp_response(
             {
                 "success": True,

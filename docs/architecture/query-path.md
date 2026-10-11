@@ -73,7 +73,7 @@ manager and records OTEL search metrics; results then pass through `_apply_reran
 **Search event log** (`server/services/search_event_recording.py`). Every search door builds its row through
 `record_search_event` and hands it to the bounded `SearchEventLogWriter` queue: fire-and-forget, it never blocks,
 raises or changes the search. `search_type` is one of `SEARCH_TYPES` (`semantic`, `fts`, `hybrid`, `temporal`,
-`regex`, `xray`); the same list feeds the Query Analytics Export page's Search Type filter, and any other value is
+`regex`, `xray`, `scip`, `git_history`, `ci_logs`); the same list feeds the Query Analytics Export page's Search Type filter, and any other value is
 refused (logged, not stored). The recorded type is the mode that ran: a REST hybrid request without a usable FTS
 index is recorded as `semantic`, and a temporal search is recorded as `temporal` whatever `search_mode` it also
 carries. MCP `search_code` rejects an unknown `search_mode` (REST answers 422). One rule for every door: a row is
@@ -96,6 +96,20 @@ A recording failure is logged at WARNING with its exception type. Rows per door:
 (`query_text` = pattern, `result_count` = matches returned); `xray_search`/`xray_explore` and `POST /api/xray/search`
 one per repository job, `xray_search_batch` and `POST /api/xray/search/batch` one per call (`query_text` = driver
 pattern(s), never evaluator source; `result_count` = matches). Regex and X-Ray rows leave the cache columns NULL.
+The Web UI query page and its results partial and wiki search write one row per call (`run_recorded_search`, which
+records nothing when the search raises); `POST /api/query/multi` and `/api/scip/multi/*` one per successfully searched
+repository (`search_event_scope` + `record_grouped_search`; failed or skipped repositories write none). SCIP search
+doors (MCP `scip_*` search tools, REST `/scip/*`, the Web page's SCIP mode) record `scip` with the symbol, or
+`from -> to` for a call chain, as `query_text`; `git_search_commits` and `git_search_diffs` record `git_history`
+(omni: one row per repository), `ci_search_logs` records `ci_logs`. Graph, dependency-map, blame/log/history and
+browsing tools are not searches and write nothing.
+
+Doors pass the full query text; only the shared module cuts it at `QUERY_TEXT_MAX_CHARS` (500) and then sets
+`query_text_truncated`. When the writer's queue is full it drops the event and counts it on the writer instance, so
+the count is per server process: `services/search_event_health.py` reports it as `search_events` in
+`/api/system/health`, MCP `check_health` and `/health`, DEGRADED for 15 minutes after the last drop and never
+UNHEALTHY. Each drop also increments the OTEL counter `cidx.search_event_log.dropped_events`, and the export page
+shows the serving process's count.
 
 ## The query-embedding chokepoint
 

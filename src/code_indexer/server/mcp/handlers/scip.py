@@ -8,9 +8,15 @@ PR history, cleanup history, cleanup workspaces, and cleanup status.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Dict, Any, Optional
 
 from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.services.search_event_recording import (
+    record_scip_search,
+    scip_callchain_query_text,
+    writer_from_app,
+)
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
@@ -261,6 +267,26 @@ def _validate_audit_pagination(limit: Any, offset: Any) -> tuple:
     return limit_int, offset_int
 
 
+def _scip_search_response(
+    payload: Dict[str, Any],
+    user: User,
+    repository_alias: Any,
+    query_text: str,
+    started: float,
+) -> Dict[str, Any]:
+    """Record a completed SCIP search (Story #2116) and return its response."""
+    record_scip_search(
+        writer_from_app(_utils._lazy_module_attr_or_none("app")),
+        payload,
+        username=user.username,
+        repo_alias=repository_alias if isinstance(repository_alias, str) else None,
+        query_text=query_text,
+        started_monotonic=started,
+        correlation_id=get_correlation_id(),
+    )
+    return _mcp_response(payload)
+
+
 # ---------------------------------------------------------------------------
 # Public SCIP query handlers
 # ---------------------------------------------------------------------------
@@ -280,6 +306,7 @@ def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with definition results
     """
+    started = time.monotonic()
     try:
         symbol = params.get("symbol")
         exact = params.get("exact", False)
@@ -335,13 +362,17 @@ def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Story #50: Truncation functions are now sync
         results_dicts = _apply_scip_payload_truncation(results_dicts)
 
-        return _mcp_response(
+        return _scip_search_response(
             {
                 "success": True,
                 "symbol": symbol,
                 "total_results": len(results_dicts),
                 "results": results_dicts,
-            }
+            },
+            user,
+            repository_alias,
+            symbol,
+            started,
         )
     except Exception as e:
         logger.exception(
@@ -368,6 +399,7 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with reference results
     """
+    started = time.monotonic()
     try:
         symbol = params.get("symbol")
         requested_limit = _coerce_int(params.get("limit"), 100)
@@ -458,7 +490,7 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "rerank_time_ms": 0,
             }
 
-        return _mcp_response(
+        return _scip_search_response(
             {
                 "success": True,
                 "symbol": symbol,
@@ -469,7 +501,11 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "reranker_provider": _rerank_meta["reranker_provider"],
                     "rerank_time_ms": _rerank_meta["rerank_time_ms"],
                 },
-            }
+            },
+            user,
+            repository_alias,
+            symbol,
+            started,
         )
     except Exception as e:
         logger.exception(
@@ -494,6 +530,7 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with dependency results
     """
+    started = time.monotonic()
     try:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 1)
@@ -580,13 +617,17 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Story #50: Truncation functions are now sync
         results_dicts = _apply_scip_payload_truncation(results_dicts)
 
-        return _mcp_response(
+        return _scip_search_response(
             {
                 "success": True,
                 "symbol": symbol,
                 "total_results": len(results_dicts),
                 "results": results_dicts,
-            }
+            },
+            user,
+            repository_alias,
+            symbol,
+            started,
         )
     except Exception as e:
         logger.exception(
@@ -611,6 +652,7 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with dependent results
     """
+    started = time.monotonic()
     try:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 1)
@@ -697,13 +739,17 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Story #50: Truncation functions are now sync
         results_dicts = _apply_scip_payload_truncation(results_dicts)
 
-        return _mcp_response(
+        return _scip_search_response(
             {
                 "success": True,
                 "symbol": symbol,
                 "total_results": len(results_dicts),
                 "results": results_dicts,
-            }
+            },
+            user,
+            repository_alias,
+            symbol,
+            started,
         )
     except Exception as e:
         logger.exception(
@@ -731,6 +777,7 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     if not _admission.allowed:
         return _mcp_response(memory_pressure_mcp_payload(_admission))
 
+    started = time.monotonic()
     try:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 3)
@@ -803,11 +850,15 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             username=user.username,
         )
 
-        return _mcp_response(
+        return _scip_search_response(
             {
                 "success": True,
                 **result,
-            }
+            },
+            user,
+            repository_alias,
+            symbol,
+            started,
         )
     except Exception as e:
         logger.exception(
@@ -838,6 +889,7 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with call chain results
     """
+    started = time.monotonic()
     try:
         from_symbol = params.get("from_symbol")
         to_symbol = params.get("to_symbol")
@@ -966,7 +1018,7 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
         )
 
-        return _mcp_response(
+        return _scip_search_response(
             {
                 "success": True,
                 "from_symbol": from_symbol,
@@ -978,7 +1030,11 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "repository_filter": repository_alias if repository_alias else "all",
                 "chains": returned_chains,
                 "diagnostic": diagnostic,
-            }
+            },
+            user,
+            repository_alias,
+            scip_callchain_query_text(from_symbol, to_symbol),
+            started,
         )
     except Exception as e:
         logger.exception(
@@ -1004,6 +1060,7 @@ def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     from code_indexer.scip.database.queries import QueryTimeoutError
 
+    started = time.monotonic()
     try:
         symbol = params.get("symbol")
         limit = _coerce_int(params.get("limit"), 20)
@@ -1051,11 +1108,15 @@ def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             timeout_seconds=_SCIP_CONTEXT_TIMEOUT_SECONDS,
         )
 
-        return _mcp_response(
+        return _scip_search_response(
             {
                 "success": True,
                 **result,
-            }
+            },
+            user,
+            repository_alias,
+            symbol,
+            started,
         )
     except QueryTimeoutError as e:
         logger.warning(

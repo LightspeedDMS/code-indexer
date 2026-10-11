@@ -14,7 +14,9 @@ from ...global_repos.alias_manager import AliasManager
 from ...utils.path_confinement import is_readable_within_root
 from ..auth.dependencies import get_current_user_hybrid
 from ..auth.user_manager import User
+from ..middleware.correlation import get_correlation_id
 from ..routers import repo_access_http
+from ..services import search_event_recording
 from ..services.deactivation_query_drain import track_activated_repo_query
 from ..utils.registry_factory import resolve_backend_registry_attr
 from .wiki_cache import WikiCache
@@ -256,13 +258,22 @@ def user_wiki_search(
             username,
             alias,
         ):
-            result = semantic_query_manager.query_user_repositories(
-                username=username,
+            # Story #2115: a completed search is recorded as the caller.
+            result = search_event_recording.run_recorded_search(
+                search_event_recording.writer_from_app(request.app),
+                lambda: semantic_query_manager.query_user_repositories(
+                    username=username,
+                    query_text=q.strip(),
+                    repository_alias=alias,
+                    search_mode=mode,
+                    file_extensions=[".md"],
+                    limit=50,
+                ),
+                username=current_user.username,
+                repo_alias=alias,
+                search_type=mode,
                 query_text=q.strip(),
-                repository_alias=alias,
-                search_mode=mode,
-                file_extensions=[".md"],
-                limit=50,
+                correlation_id=get_correlation_id(),
             )
     except Exception:
         logger.warning(
@@ -691,13 +702,22 @@ def wiki_search(
     semantic_query_manager = request.app.state.semantic_query_manager
 
     try:
-        result = semantic_query_manager.query_user_repositories(
+        # Story #2115: a completed search is recorded as the caller.
+        result = search_event_recording.run_recorded_search(
+            search_event_recording.writer_from_app(request.app),
+            lambda: semantic_query_manager.query_user_repositories(
+                username=current_user.username,
+                query_text=q.strip(),
+                repository_alias=f"{repo_alias}-global",
+                search_mode=mode,
+                file_extensions=[".md"],
+                limit=50,
+            ),
             username=current_user.username,
+            repo_alias=f"{repo_alias}-global",
+            search_type=mode,
             query_text=q.strip(),
-            repository_alias=f"{repo_alias}-global",
-            search_mode=mode,
-            file_extensions=[".md"],
-            limit=50,
+            correlation_id=get_correlation_id(),
         )
     except Exception as exc:
         logger.warning(
