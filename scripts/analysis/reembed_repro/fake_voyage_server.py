@@ -216,6 +216,19 @@ class EmbeddingLedger:
                 lambda: self._held() >= threshold, timeout=timeout
             )
 
+    def wait_settled(self, label: str, timeout: float) -> bool:
+        """Block (at most ``timeout`` s) until every request of ``label`` has
+        its outcome recorded: response written, or aborted. A handler thread
+        records it only AFTER the bytes reach the client, so a client can be
+        done before its last request settles. Raises KeyError for an
+        unknown label."""
+        with self._cond:
+            run = self._runs[label]
+            return self._cond.wait_for(
+                lambda: all(r.written_at is not None or r.aborted for r in run.records),
+                timeout=timeout,
+            )
+
     def mark_kill(self, label: str) -> Set[int]:
         """Record the kill instant of ``label``; return its unanswered request ids."""
         with self._cond:

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Server (cluster): the dashboard job list now shows every running and pending job in the cluster, not only those of the node serving the page, so it always agrees with the Running card.
 - Server: a refresh of a repository that is refreshed only by triggers (for example trace repositories) is now retried automatically, with an escalating interval, when it fails or when some files could not be indexed; previously it stayed stale until new data arrived. A refresh that published but left files unindexed is now reported as partial (`partial`, `failed_files` in the job result, job status `completed_partial`). Owed work never delays new-data refreshes or scheduled refreshes.
+- Indexing: embedding requests (Voyage text, contextualized and multimodal; Cohere text and multimodal) now wait 4x the configured provider timeout (120 s by default), so a provider slow period no longer abandons and resends each batch up to four times. Query requests keep the configured timeout and now always apply it per request, so a query can no longer inherit a longer timeout from a shared client another call created.
 
 ## [12.84.0] - 2026-10-08
 

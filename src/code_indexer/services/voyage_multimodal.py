@@ -8,6 +8,7 @@ from rich.console import Console
 
 from ..config import VoyageAIConfig
 from .multimodal_utils import encode_image_to_base64
+from .provider_request_timeout import embedding_request_timeout
 from .voyage_ai import SyncClientFactory
 
 
@@ -110,14 +111,25 @@ class VoyageMultimodalClient:
             """The smallest unit including BOTH the network call and its
             status validation -- a vendor 4xx/5xx here must be recorded as
             success=False, never success=True (Story #1418)."""
+            # Bug #2127: an indexing request waits longer than a query, so a
+            # slow-period response is received, not abandoned (and paid for).
+            _timeout: Union[float, httpx.Timeout] = (
+                embedding_request_timeout(
+                    self.config.timeout, self.config.connect_timeout, indexing=True
+                )
+                if input_type != "query"
+                else self.config.timeout
+            )
             with self._http_client_factory.create_sync_client(
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
-                timeout=self.config.timeout,
+                timeout=_timeout,
             ) as client:
-                _response = client.post(self.config.api_endpoint, json=payload)
+                _response = client.post(
+                    self.config.api_endpoint, json=payload, timeout=_timeout
+                )
                 _response.raise_for_status()
             return cast(httpx.Response, _response)
 
@@ -325,14 +337,25 @@ class VoyageMultimodalClient:
             """The smallest unit including BOTH the network call and its
             status validation -- a vendor 4xx/5xx here must be recorded as
             success=False, never success=True (Story #1418)."""
+            # Bug #2127: an indexing request waits longer than a query, so a
+            # slow-period response is received, not abandoned (and paid for).
+            _timeout: Union[float, httpx.Timeout] = (
+                embedding_request_timeout(
+                    self.config.timeout, self.config.connect_timeout, indexing=True
+                )
+                if input_type != "query"
+                else self.config.timeout
+            )
             with self._http_client_factory.create_sync_client(
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
-                timeout=self.config.timeout,
+                timeout=_timeout,
             ) as client:
-                _response = client.post(self.config.api_endpoint, json=payload)
+                _response = client.post(
+                    self.config.api_endpoint, json=payload, timeout=_timeout
+                )
                 _response.raise_for_status()
             return cast(httpx.Response, _response)
 

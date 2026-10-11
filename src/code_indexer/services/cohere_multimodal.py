@@ -229,6 +229,17 @@ class CohereMultimodalClient:
         from code_indexer.server.services.embedding_call_instrumentation import (
             instrument_call,
         )
+        from code_indexer.services.provider_request_timeout import (
+            embedding_request_timeout,
+        )
+
+        # Bug #2127: an indexing (document) request waits longer than a
+        # query, so a slow-period response is received, not abandoned (and
+        # paid for) then resent. The client is built per call, so its
+        # constructor timeout applies.
+        _timeout = embedding_request_timeout(
+            timeout, connect_timeout, indexing=input_type != "search_query"
+        )
 
         def _do_post_and_validate() -> httpx.Response:
             """The smallest unit including BOTH the network call and its
@@ -239,14 +250,7 @@ class CohereMultimodalClient:
             other 4xx) raises uniformly -- the retry-loop branching below
             recovers the exact same per-status behavior by inspecting the
             caught exception's status code instead."""
-            with httpx.Client(
-                timeout=httpx.Timeout(
-                    connect=connect_timeout,
-                    read=timeout,
-                    write=timeout,
-                    pool=timeout,
-                )
-            ) as client:
+            with httpx.Client(timeout=_timeout) as client:
                 _response = client.post(
                     api_endpoint,
                     headers=headers,
