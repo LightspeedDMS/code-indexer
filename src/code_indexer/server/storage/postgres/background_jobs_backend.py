@@ -849,12 +849,36 @@ class BackgroundJobsPostgresBackend:
             logger.info("Cleaned up %d old background jobs", count)
         return count
 
-    def count_jobs_by_status(self) -> Dict[str, int]:
-        """Return a dict mapping status -> count for all jobs."""
+    def count_jobs_by_status(
+        self, statuses: Optional[List[str]] = None
+    ) -> Dict[str, int]:
+        """Return a dict mapping status -> count, for all jobs or only the
+        given statuses (Bug #2123: index-backed, not a full-table scan)."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                if statuses:
+                    cur.execute(
+                        "SELECT status, COUNT(*) FROM background_jobs "
+                        "WHERE status = ANY(%s) GROUP BY status",
+                        (list(statuses),),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT status, COUNT(*) FROM background_jobs GROUP BY status"
+                    )
+                rows = cur.fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    def get_job_statuses(self, job_ids: List[str]) -> Dict[str, str]:
+        """Bug #2123: status of each given job that exists, in ONE query.
+        Callers bound the id list."""
+        if not job_ids:
+            return {}
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT status, COUNT(*) FROM background_jobs GROUP BY status"
+                    "SELECT job_id, status FROM background_jobs WHERE job_id = ANY(%s)",
+                    (list(job_ids),),
                 )
                 rows = cur.fetchall()
         return {row[0]: row[1] for row in rows}

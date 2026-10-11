@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - CLI: interrupted `cidx index` runs no longer resume from a stored file list. The next run reconciles the index against disk and indexes only the missing or changed files, including files added while the run was interrupted. The incremental watermark is now the time a run started listing files, so files written during a run are picked up next time.
 
+### Fixed
+
+- Server (cluster): the dashboard job list now shows every running and pending job in the cluster, not only those of the node serving the page, so it always agrees with the Running card.
+
 ## [12.84.0] - 2026-10-08
 
 ### Upgrade notes

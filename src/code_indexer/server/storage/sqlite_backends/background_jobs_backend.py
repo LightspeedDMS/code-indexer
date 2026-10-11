@@ -751,11 +751,36 @@ class BackgroundJobsSqliteBackend:
             logger.info(f"Cleaned up {count} old background jobs")
         return count
 
-    def count_jobs_by_status(self) -> Dict[str, int]:
-        """Get count of jobs grouped by status."""
+    def count_jobs_by_status(
+        self, statuses: Optional[List[str]] = None
+    ) -> Dict[str, int]:
+        """Get count of jobs grouped by status, optionally only for the given
+        statuses (Bug #2123: an index-backed count, not a full-table scan)."""
         conn = self._conn_manager.get_connection()
+        if statuses:
+            placeholders = ", ".join("?" * len(statuses))
+            cursor = conn.execute(
+                "SELECT status, COUNT(*) FROM background_jobs "
+                f"WHERE status IN ({placeholders}) GROUP BY status",
+                list(statuses),
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT status, COUNT(*) FROM background_jobs GROUP BY status"
+            )
+        return {row[0]: row[1] for row in cursor.fetchall()}
+
+    def get_job_statuses(self, job_ids: List[str]) -> Dict[str, str]:
+        """Bug #2123: status of each given job that exists, in ONE query.
+        Callers bound the id list (below SQLite's bound-parameter limit)."""
+        if not job_ids:
+            return {}
+        conn = self._conn_manager.get_connection()
+        placeholders = ", ".join("?" * len(job_ids))
         cursor = conn.execute(
-            "SELECT status, COUNT(*) FROM background_jobs GROUP BY status"
+            "SELECT job_id, status FROM background_jobs "
+            f"WHERE job_id IN ({placeholders})",
+            list(job_ids),
         )
         return {row[0]: row[1] for row in cursor.fetchall()}
 
