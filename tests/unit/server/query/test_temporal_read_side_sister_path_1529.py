@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import numpy as np
+import pytest
 
 from code_indexer.backends.filesystem_backend import FilesystemBackend
 from code_indexer.services.temporal.temporal_server_paths import (
@@ -44,6 +45,10 @@ SHARD_NAME = f"code-indexer-temporal-{EMBEDDER_SLUG}-{QUARTER}"
 REPO_ALIAS = "example-repo"
 USERNAME = "someuser"
 VECTOR_SIZE = 8
+
+# Each test indexes through the real store, whose commit is mostly os.fsync
+# (~0.4 s alone); under the gate's parallel I/O that has reached 15 s.
+pytestmark = pytest.mark.timeout(45)
 
 OLD_COMMIT = "a" * 8
 NEW_COMMIT = "b" * 8

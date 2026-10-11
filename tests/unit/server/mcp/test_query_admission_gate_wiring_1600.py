@@ -176,6 +176,11 @@ def _admission_gate_seams():
     """Install the real check_query_admission()'s two lazy-import
     dependencies as controlled test doubles; restore process-level
     singletons on teardown so no state leaks to other test modules."""
+    # app.py's module attributes are lazy (PEP 562): the first access runs
+    # create_app(), which calls initialize_runtime_db() on the config service.
+    # Build it here, BEFORE the stub (which has no such method) is installed,
+    # so this file passes alone and not only after another file built the app.
+    _handlers_utils.app_module.app
     cfg_service_module.set_config_service(_StubConfigService())  # type: ignore[arg-type]
     yield
     mg.clear_memory_governor()

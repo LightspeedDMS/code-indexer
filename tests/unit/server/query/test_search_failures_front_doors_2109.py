@@ -51,6 +51,10 @@ MISSING_KEY = ValueError(f"VOYAGE_API_KEY is required ({SENTINEL})")
 LOGGER_NAME = "code_indexer.server"
 CORRELATION_ID = "corr-2109-example"
 
+# The module fixture indexes the #2047 corpus repository and starts a real app
+# (~7-8 s alone); whichever test runs first pays it, slower under load.
+pytestmark = pytest.mark.timeout(45)
+
 
 def _timeout() -> MultiIndexQueryTimeoutError:
     return MultiIndexQueryTimeoutError([SENTINEL], 5.0)

@@ -32,6 +32,7 @@ _SRC = _REPO_ROOT / "src" / "code_indexer"
 # (Phase B consumers + Phase A cleanup gates, all relative to src/code_indexer.)
 _DECISION_PATH_FILES = [
     "server/mcp/handlers/repos.py",
+    "server/mcp/handlers/_provider_job_paths.py",
     "server/services/scip_query_service.py",
     "server/services/dependency_map_service.py",
     "server/services/query_path_cache.py",
