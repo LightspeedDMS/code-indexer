@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Server (cluster): the dashboard job list now shows every running and pending job in the cluster, not only those of the node serving the page, so it always agrees with the Running card.
+- Server: a refresh of a repository that is refreshed only by triggers (for example trace repositories) is now retried automatically, with an escalating interval, when it fails or when some files could not be indexed; previously it stayed stale until new data arrived. A refresh that published but left files unindexed is now reported as partial (`partial`, `failed_files` in the job result, job status `completed_partial`). Owed work never delays new-data refreshes or scheduled refreshes.
 
 ## [12.84.0] - 2026-10-08
 

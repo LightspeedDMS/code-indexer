@@ -7,6 +7,11 @@ re-submitted every cycle. The consecutive-failure count and the wall-clock
 time of the last failure are persisted here -- never in per-node memory --
 so every submission path on every node sees the same backoff.
 
+Bug #2125: the same row also carries an OWED retry (files still owed after a
+partial publish, or a trigger-only refresh that failed on an ordinary
+error), escalated by its own ``owed_retry_count``; an owed retry is not a
+failure and never defers a system submission.
+
 Split into its own module because the backend's main module and its other
 mixin are already near the project's 1,000-line-per-file limit.
 """
@@ -14,7 +19,9 @@ mixin are already near the project's 1,000-line-per-file limit.
 import sqlite3
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+
+from ..shared.owed_refresh_retry import plan_owed_retry
 
 if TYPE_CHECKING:
     from ..database_manager import DatabaseConnectionManager
@@ -26,6 +33,7 @@ _ADDED_COLUMNS = (
     ("pending_due_at", "REAL"),
     ("pending_marked_at", "REAL"),
     ("trigger_generation", "INTEGER NOT NULL DEFAULT 0"),
+    ("owed_retry_count", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -36,7 +44,8 @@ def create_refresh_failure_backoff_table(conn: sqlite3.Connection) -> None:
     system refresh, due at ``pending_due_at``. ``trigger_generation`` is a
     store-ordered counter every deferral advances: a publish resolves only
     the generation its cycle captured (never a wall-clock comparison across
-    nodes). ``pending_marked_at`` is informational only. Idempotent;
+    nodes). ``pending_marked_at`` is informational only.
+    ``owed_retry_count`` (Bug #2125) escalates an owed retry. Idempotent;
     upgrades a table created earlier."""
     conn.execute(
         """
@@ -49,7 +58,8 @@ def create_refresh_failure_backoff_table(conn: sqlite3.Connection) -> None:
             pending_trigger INTEGER NOT NULL DEFAULT 0,
             pending_due_at REAL,
             pending_marked_at REAL,
-            trigger_generation INTEGER NOT NULL DEFAULT 0
+            trigger_generation INTEGER NOT NULL DEFAULT 0,
+            owed_retry_count INTEGER NOT NULL DEFAULT 0
         )
     """
     )
@@ -99,7 +109,8 @@ def delete_refresh_failure_backoff_for_repo(
 
 _STATE_COLUMNS = (
     "golden_alias, consecutive_failure_count, last_detail, last_failed_at, "
-    "pending_trigger, pending_due_at, pending_marked_at, trigger_generation"
+    "pending_trigger, pending_due_at, pending_marked_at, trigger_generation, "
+    "owed_retry_count"
 )
 
 #: Deferred triggers that are due (index idx_refresh_failure_backoff_due).
@@ -123,6 +134,7 @@ def _state_from_row(row: Any) -> Dict[str, Any]:
         "pending_due_at": _optional_float(row[5]),
         "pending_marked_at": _optional_float(row[6]),
         "trigger_generation": int(row[7]),
+        "owed_retry_count": int(row[8]),
     }
 
 
@@ -249,23 +261,15 @@ class _RefreshFailureBackoffSqliteMixin:
         still equals *covered_generation* (captured from the store before
         the cycle read its source). A trigger deferred after that advanced
         the generation, whatever any node's clock says: its row survives
-        re-armed (no failure left, due now). One atomic operation."""
+        re-armed (no failure and no owed retry left, due now). One atomic
+        operation."""
         if not golden_alias:
             raise ValueError("golden_alias must be a non-empty string")
         now = time.time()
+        updated_at = datetime.now(timezone.utc).isoformat()
 
         def operation(conn: sqlite3.Connection) -> None:
-            conn.execute(
-                "DELETE FROM refresh_failure_backoff_state "
-                "WHERE golden_alias = ? AND trigger_generation = ?",
-                (golden_alias, covered_generation),
-            )
-            conn.execute(
-                "UPDATE refresh_failure_backoff_state SET "
-                "consecutive_failure_count = 0, pending_due_at = ?, updated_at = ? "
-                "WHERE golden_alias = ?",
-                (now, datetime.now(timezone.utc).isoformat(), golden_alias),
-            )
+            _resolve_covered_in(conn, golden_alias, covered_generation, now, updated_at)
 
         self._conn_manager.execute_atomic(operation)
 
@@ -291,21 +295,29 @@ class _RefreshFailureBackoffSqliteMixin:
     def escalate_refresh_trigger(
         self, golden_alias: str, covered_generation: int
     ) -> Optional[int]:
-        """A recoverable skip of a deferred trigger: one more failure, so its
-        retry interval escalates -- only while that trigger (generation
-        *covered_generation*) is still pending. One conditional statement:
-        a row a publish deleted meanwhile is never recreated, and the
-        original failure reason (last_detail) is kept. Returns the new
-        failure count, or None when nothing matched."""
+        """A recoverable skip of a deferred trigger: its retry interval
+        escalates -- only while that trigger (generation
+        *covered_generation*) is still pending. An owed retry (no failure,
+        an owed count) raises its owed count (Bug #2125); any other row one
+        more failure. One conditional statement: a row a publish deleted
+        meanwhile is never recreated, and the original failure reason
+        (last_detail) is kept. Returns the escalated count, or None when
+        nothing matched."""
         if not golden_alias:
             raise ValueError("golden_alias must be a non-empty string")
         failed_at = time.time()
         updated_at = datetime.now(timezone.utc).isoformat()
 
         def operation(conn: sqlite3.Connection) -> Optional[int]:
+            # Right-hand sides read the row's values before the update.
             cursor = conn.execute(
                 "UPDATE refresh_failure_backoff_state SET "
-                "consecutive_failure_count = consecutive_failure_count + 1, "
+                "owed_retry_count = CASE WHEN consecutive_failure_count = 0 "
+                "AND owed_retry_count > 0 THEN owed_retry_count + 1 "
+                "ELSE owed_retry_count END, "
+                "consecutive_failure_count = CASE WHEN consecutive_failure_count = 0 "
+                "AND owed_retry_count > 0 THEN 0 "
+                "ELSE consecutive_failure_count + 1 END, "
                 "last_failed_at = ?, updated_at = ? "
                 "WHERE golden_alias = ? AND pending_trigger = 1 "
                 "AND trigger_generation = ?",
@@ -314,8 +326,8 @@ class _RefreshFailureBackoffSqliteMixin:
             if cursor.rowcount != 1:
                 return None
             row = conn.execute(
-                "SELECT consecutive_failure_count FROM refresh_failure_backoff_state "
-                "WHERE golden_alias = ?",
+                "SELECT MAX(consecutive_failure_count, owed_retry_count) "
+                "FROM refresh_failure_backoff_state WHERE golden_alias = ?",
                 (golden_alias,),
             ).fetchone()
             return int(row[0])
@@ -357,3 +369,164 @@ class _RefreshFailureBackoffSqliteMixin:
             )
 
         self._conn_manager.execute_atomic(operation)
+
+    def record_owed_refresh_retry(
+        self,
+        golden_alias: str,
+        detail: str,
+        covered_generation: Optional[int],
+        min_count: int,
+        retry_seconds: Callable[[int], float],
+    ) -> Tuple[int, float]:
+        """Bug #2125: persist one more OWED retry of *golden_alias* -- a
+        pending trigger with a fresh generation, escalated by its own
+        ``owed_retry_count`` (see plan_owed_retry); never a failure, so
+        ``consecutive_failure_count`` and the failure detail stay as they
+        are. *covered_generation* is the trigger generation the finishing
+        cycle captured (None: unknown). One exclusive transaction. Returns
+        (owed count, due time)."""
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        if not detail:
+            raise ValueError("detail must be a non-empty string")
+        now = time.time()
+        updated_at = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn: sqlite3.Connection) -> Tuple[int, float]:
+            return _owe_retry_in(
+                conn,
+                golden_alias,
+                detail,
+                covered_generation,
+                min_count,
+                retry_seconds,
+                now,
+                updated_at,
+            )
+
+        planned: Tuple[int, float] = self._conn_manager.execute_atomic(operation)
+        return planned
+
+    def resolve_and_record_owed_retry(
+        self,
+        golden_alias: str,
+        covered_generation: int,
+        detail: str,
+        retry_seconds: Callable[[int], float],
+    ) -> Tuple[int, float]:
+        """Bug #2125: a verified publish that still owes files. In ONE
+        exclusive transaction: resolve exactly as resolve_refresh_failure_
+        backoff does (a trigger newer than *covered_generation* survives,
+        re-armed), then owe a retry escalated from the owed count the row
+        had before (record_owed_refresh_retry). A failure anywhere rolls the
+        whole publish bookkeeping back, so the covered pending trigger is
+        never lost: its lease fires it again. Returns (owed count, due
+        time)."""
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        if not detail:
+            raise ValueError("detail must be a non-empty string")
+        now = time.time()
+        updated_at = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn: sqlite3.Connection) -> Tuple[int, float]:
+            row = conn.execute(
+                "SELECT owed_retry_count FROM refresh_failure_backoff_state "
+                "WHERE golden_alias = ?",
+                (golden_alias,),
+            ).fetchone()
+            prior = 0 if row is None else int(row[0])
+            _resolve_covered_in(conn, golden_alias, covered_generation, now, updated_at)
+            return _owe_retry_in(
+                conn,
+                golden_alias,
+                detail,
+                covered_generation,
+                prior + 1,
+                retry_seconds,
+                now,
+                updated_at,
+            )
+
+        planned: Tuple[int, float] = self._conn_manager.execute_atomic(operation)
+        return planned
+
+
+def _resolve_covered_in(
+    conn: sqlite3.Connection,
+    golden_alias: str,
+    covered_generation: int,
+    now: float,
+    updated_at: str,
+) -> None:
+    """The resolution of a verified publish, inside the caller's
+    transaction: delete the row while its generation is the covered one;
+    a row a newer trigger kept is re-armed (due now) with no failure and no
+    owed retry left."""
+    conn.execute(
+        "DELETE FROM refresh_failure_backoff_state "
+        "WHERE golden_alias = ? AND trigger_generation = ?",
+        (golden_alias, covered_generation),
+    )
+    conn.execute(
+        "UPDATE refresh_failure_backoff_state SET "
+        "consecutive_failure_count = 0, owed_retry_count = 0, "
+        "pending_due_at = ?, updated_at = ? "
+        "WHERE golden_alias = ?",
+        (now, updated_at, golden_alias),
+    )
+
+
+def _owe_retry_in(
+    conn: sqlite3.Connection,
+    golden_alias: str,
+    detail: str,
+    covered_generation: Optional[int],
+    min_count: int,
+    retry_seconds: Callable[[int], float],
+    now: float,
+    updated_at: str,
+) -> Tuple[int, float]:
+    """One more owed retry (see plan_owed_retry) inside the caller's
+    transaction: a fresh trigger generation, the failure count untouched."""
+    conn.execute(
+        "UPDATE refresh_trigger_generation_counter SET value = value + 1 WHERE id = 1"
+    )
+    generation = int(
+        conn.execute(
+            "SELECT value FROM refresh_trigger_generation_counter WHERE id = 1"
+        ).fetchone()[0]
+    )
+    row = conn.execute(
+        "SELECT owed_retry_count, pending_trigger, pending_due_at, "
+        "trigger_generation FROM refresh_failure_backoff_state "
+        "WHERE golden_alias = ?",
+        (golden_alias,),
+    ).fetchone()
+    count, due_at = plan_owed_retry(
+        None if row is None else int(row[0]),
+        _optional_float(row[2]) if row is not None and row[1] else None,
+        None if row is None else int(row[3]),
+        covered_generation,
+        min_count,
+        now,
+        retry_seconds,
+    )
+    if row is None:
+        conn.execute(
+            "INSERT INTO refresh_failure_backoff_state "
+            "(golden_alias, consecutive_failure_count, last_detail, "
+            "last_failed_at, updated_at, pending_trigger, pending_due_at, "
+            "pending_marked_at, trigger_generation, owed_retry_count) "
+            "VALUES (?, 0, ?, ?, ?, 1, ?, ?, ?, ?)",
+            (golden_alias, detail, now, updated_at, due_at, now, generation, count),
+        )
+    else:
+        conn.execute(
+            "UPDATE refresh_failure_backoff_state SET pending_trigger = 1, "
+            "pending_due_at = ?, pending_marked_at = ?, "
+            "trigger_generation = ?, owed_retry_count = ?, updated_at = ? "
+            "WHERE golden_alias = ?",
+            (due_at, now, generation, count, updated_at, golden_alias),
+        )
+    return count, due_at

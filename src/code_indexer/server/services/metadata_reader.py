@@ -3,7 +3,9 @@
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Union
+
+from code_indexer.services.resume_path_anchor import reanchor_resume_path
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,78 @@ def read_index_states(clone_path: Union[str, Path]) -> List[IndexState]:
         )
         for path in _metadata_paths(clone_path)
     ]
+
+
+class RecordedFailures(NamedTuple):
+    """Bug #2125: what the last indexing run recorded as failed."""
+
+    known: bool
+    failed_files: int
+    retryable_paths: int
+
+
+_UNKNOWN_FAILURES = RecordedFailures(known=False, failed_files=0, retryable_paths=0)
+
+
+def read_recorded_failures(clone_path: Union[str, Path]) -> RecordedFailures:
+    """Bug #2125: what the last indexing run recorded as failed, across
+    every provider metadata file (a child exits 0 when only SOME files
+    fail).
+
+    - ``failed_files``: the union of the recorded ``failed_file_paths``, or
+      a provider's ``failed_files`` counter when it is larger (reported
+      only: the child does not always keep that counter current);
+    - ``retryable_paths``: recorded paths that, re-anchored onto the clone
+      (the stored strings are absolute and may carry another mount
+      prefix), still exist as files inside it -- the only files the next
+      run can retry, so the only reason to schedule a retry;
+    - ``known``: False when a metadata file is unreadable or not an object,
+      or one of the two fields is present but malformed (logged); never
+      read as "no failure".
+
+    Missing fields count as no failure. Never raises."""
+    paths: Set[str] = set()
+    largest_count = 0
+    for metadata_path in _metadata_paths(clone_path):
+        data = _load_metadata_object(metadata_path)
+        if data is None:
+            return _UNKNOWN_FAILURES
+        recorded = data.get("failed_file_paths", [])
+        count = data.get("failed_files", 0)
+        if (
+            not isinstance(recorded, list)
+            or not isinstance(count, int)
+            or isinstance(count, bool)
+        ):
+            logger.warning(
+                "metadata_reader: malformed failed-file fields in %s", metadata_path
+            )
+            return _UNKNOWN_FAILURES
+        paths.update(str(p) for p in recorded)
+        largest_count = max(largest_count, count)
+    return RecordedFailures(
+        known=True,
+        failed_files=max(len(paths), largest_count),
+        retryable_paths=_count_retryable(paths, Path(clone_path)),
+    )
+
+
+def _count_retryable(stored_paths: Set[str], clone_path: Path) -> int:
+    """Recorded paths that exist as files inside *clone_path*, re-anchored
+    exactly as the indexer's own retry re-anchors them."""
+    if not stored_paths:
+        return 0
+    root = clone_path.resolve()
+    retryable = 0
+    for stored in stored_paths:
+        candidate = reanchor_resume_path(stored, clone_path)
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved.is_relative_to(root) and resolved.is_file():
+            retryable += 1
+    return retryable
 
 
 def snapshot_index_metadata(clone_path: Union[str, Path]) -> Dict[str, bytes]:
@@ -101,6 +175,18 @@ def _read_key_from_file(metadata_path: Path, key: str) -> Optional[str]:
     Returns None on read error, parse error, wrong JSON type, missing key,
     empty value, or non-string value — never raises.
     """
+    data = _load_metadata_object(metadata_path)
+    if data is None:
+        return None
+    value = data.get(key)
+    if not isinstance(value, str) or not value:
+        return None
+    return value
+
+
+def _load_metadata_object(metadata_path: Path) -> Optional[Dict[str, Any]]:
+    """The metadata file's JSON object, or None (logged at WARNING) on a
+    read, decode or parse error or a non-object document; never raises."""
     try:
         data = json.loads(metadata_path.read_text())
     except OSError as exc:
@@ -119,10 +205,7 @@ def _read_key_from_file(metadata_path: Path, key: str) -> Optional[str]:
             type(data).__name__,
         )
         return None
-    value = data.get(key)
-    if not isinstance(value, str) or not value:
-        return None
-    return value
+    return data
 
 
 def read_current_commit(clone_path: Union[str, Path]) -> Optional[str]:

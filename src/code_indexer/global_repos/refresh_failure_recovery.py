@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 import time
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
@@ -36,6 +35,7 @@ from code_indexer.services.index_failure_exit_codes import (
 )
 
 if TYPE_CHECKING:
+    from code_indexer.server.services.metadata_reader import RecordedFailures
     from code_indexer.server.storage.protocols.golden_repo_metadata_backend import (
         GoldenRepoMetadataBackend,
     )
@@ -160,8 +160,12 @@ def fire_expired_deferred_triggers(
         return
     for state in due:
         alias_name = state["golden_alias"]
+        # Bug #2125: an owed retry's lease follows its own count.
         lease_until = now + failure_backoff_seconds(
-            int(state["consecutive_failure_count"])
+            max(
+                int(state["consecutive_failure_count"]),
+                int(state.get("owed_retry_count", 0)),
+            )
         )
         try:
             if not metadata.lease_pending_refresh_trigger(alias_name, now, lease_until):
@@ -196,6 +200,136 @@ def record_failure_backoff(metadata: Any, alias_name: str, detail: str) -> None:
         f"without repair -- system refreshes back off "
         f"{failure_backoff_seconds(count)}s"
     )
+
+
+def schedule_owed_retry(
+    metadata: "GoldenRepoMetadataBackend",
+    alias_name: str,
+    detail: str,
+    covered_generation: Optional[int],
+    *,
+    min_count: int = 0,
+) -> Optional[float]:
+    """Bug #2125: persist an OWED retry of *alias_name* -- work a refresh
+    still owes, retried without waiting for new data. It is NOT a failure:
+    ``consecutive_failure_count`` (what defers new-data triggers and the git
+    schedule) is untouched; ``owed_retry_count`` escalates the interval
+    instead (FAILURE_BACKOFF_BASE_SECONDS doubling to
+    FAILURE_BACKOFF_CAP_SECONDS; never gives up). A trigger that arrived
+    while the finishing cycle ran (generation newer than
+    *covered_generation*) keeps its earlier due time. The pending trigger
+    fires through fire_expired_deferred_triggers and the system gate
+    (failure backoff, then the volume alarm); a clean verified publish
+    resolves it. Returns the due time, or None when the store failed
+    (logged at ERROR, never raised)."""
+    try:
+        count, due_at = metadata.record_owed_refresh_retry(
+            alias_name, detail, covered_generation, min_count, failure_backoff_seconds
+        )
+    except Exception as exc:
+        logger.error(
+            f"Bug #2125: failed to persist the owed retry of {alias_name}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return None
+    logger.info(
+        f"Bug #2125: owed retry {count} of {alias_name} due at {due_at:.0f} "
+        f"(in {max(0.0, due_at - time.time()):.0f}s): {detail}"
+    )
+    return float(due_at)
+
+
+def retry_failed_trigger_only_refresh(
+    metadata: "GoldenRepoMetadataBackend",
+    alias_name: str,
+    detail: str,
+    covered_generation: Optional[int],
+    *,
+    fatal_failure_recorded: bool,
+) -> Optional[float]:
+    """Bug #2125 (A): a trigger-only repo's refresh failed and nothing else
+    would ever re-trigger it. *fatal_failure_recorded*: the failure was a
+    fatal chunk-store failure, whose self-heal may have recorded a Bug #2022
+    failure backoff (it does not when it repaired the store); when that
+    backoff is active, the retry is a pending trigger at its end. In every
+    other case -- an ordinary failure (a provider error costs nothing to
+    retry, and must recover promptly once fixed) or a repaired store -- it
+    is an owed retry, never a new failure. Returns the due time, or None
+    when nothing was scheduled (logged)."""
+    if fatal_failure_recorded:
+        try:
+            state = metadata.get_refresh_failure_backoff_state(alias_name)
+            if state is not None and int(state["consecutive_failure_count"]) > 0:
+                due_at = _backoff_end(state)
+                if metadata.mark_refresh_trigger_pending(alias_name, due_at):
+                    logger.warning(
+                        f"Bug #2125: failed refresh of {alias_name} retried "
+                        f"at {due_at:.0f}, the end of its failure backoff"
+                    )
+                    return due_at
+        except Exception as exc:
+            logger.error(
+                f"Bug #2125: failed to schedule the retry of the failed "
+                f"refresh of {alias_name}: {type(exc).__name__}: {exc}"
+            )
+            return None
+    due = schedule_owed_retry(metadata, alias_name, detail, covered_generation)
+    if due is not None:
+        logger.warning(
+            f"Bug #2125: failed refresh of {alias_name} retried at {due:.0f}"
+        )
+    return due
+
+
+def settle_publish(
+    metadata: "GoldenRepoMetadataBackend",
+    alias_name: str,
+    covered_generation: int,
+    failures: "RecordedFailures",
+    *,
+    schedule_retry: bool,
+) -> Optional[float]:
+    """Bookkeeping of every verified publish (replaces a bare
+    resolve_after_publish). The publish always resolves what its cycle
+    covered, exactly as before (Bug #2022 failure state included; a trigger
+    that arrived mid-cycle stays, re-armed to fire at once). Bug #2125 (B):
+    when *schedule_retry* and work is still owed -- the child recorded files
+    that still exist (``failures.retryable_paths``), or its recorded
+    failures are unknown (unreadable or malformed metadata, logged at
+    WARNING) -- the resolution and an owed retry escalated from the alias's
+    owed count are ONE store transaction (resolve_and_record_owed_retry): a
+    store failure commits nothing, so the covered pending trigger survives
+    and its lease fires it again. A stale counter or vanished files owe
+    nothing. Returns the owed retry's due time, or None."""
+    if not failures.known:
+        logger.warning(
+            f"Bug #2125: recorded indexing failures of {alias_name} are "
+            f"unknown (unreadable metadata); retried as owed work"
+        )
+    owes = not failures.known or failures.retryable_paths > 0
+    if not (owes and schedule_retry):
+        resolve_after_publish(metadata, alias_name, covered_generation)
+        return None
+    detail = (
+        f"{failures.retryable_paths} file(s) still owed"
+        if failures.known
+        else "recorded indexing failures unknown"
+    )
+    try:
+        count, due_at = metadata.resolve_and_record_owed_retry(
+            alias_name, covered_generation, detail, failure_backoff_seconds
+        )
+    except Exception as exc:
+        logger.error(
+            f"Bug #2125: failed to record the publish of {alias_name} with its "
+            f"owed retry (nothing committed; its pending trigger fires again "
+            f"at its lease end): {type(exc).__name__}: {exc}"
+        )
+        return None
+    logger.info(
+        f"Bug #2125: owed retry {count} of {alias_name} due at {due_at:.0f}: {detail}"
+    )
+    return float(due_at)
 
 
 #: Trigger generation of an alias with no backoff row (the column default).
@@ -268,25 +402,22 @@ SELF_SETTLED_MESSAGES = frozenset(
 )
 
 
-def skip_settler(
+def current_trigger_generation(
     metadata: "GoldenRepoMetadataBackend", alias_name: str
-) -> Callable[[Dict[str, Any]], None]:
-    """Called before a refresh runs, so before it can decide to skip: binds
-    settle_skip to the trigger generation that exists now. A trigger
-    deferred after this point has a newer generation and survives the
-    skip. A store read failure is logged; that skip then drops nothing."""
-    covered: Optional[int] = None
+) -> Optional[int]:
+    """The alias's trigger generation now (NO_TRIGGER_GENERATION: no row),
+    read before a refresh runs so the cycle knows which trigger it covers.
+    None when the store read failed (logged): a skip then drops nothing, and
+    an owed retry keeps any earlier pending trigger's due time."""
     try:
         state = metadata.get_refresh_failure_backoff_state(alias_name)
-        covered = (
-            NO_TRIGGER_GENERATION if state is None else int(state["trigger_generation"])
-        )
     except Exception as exc:
         logger.error(
             f"Bug #2022: failed to read the trigger generation of {alias_name}; "
             f"a skip of this refresh drops no trigger: {type(exc).__name__}: {exc}"
         )
-    return partial(settle_skip, metadata, alias_name, covered)
+        return None
+    return NO_TRIGGER_GENERATION if state is None else int(state["trigger_generation"])
 
 
 def settle_skip(

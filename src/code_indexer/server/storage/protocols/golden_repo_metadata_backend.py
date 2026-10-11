@@ -6,6 +6,8 @@ pure typing-construct relocation, zero behaviour change.
 
 from __future__ import annotations
 
+from typing import Callable, Tuple
+
 from ._shared import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 
@@ -171,6 +173,28 @@ class GoldenRepoMetadataBackend(Protocol):
     # pending trigger WITHOUT a strike; published_points (bare alias) is the
     # alarm's reference size, NULL until a verified publish records it.
     def mark_volume_alarm_deferral(self, golden_alias: str, due_at: float) -> None: ...
+
+    # Bug #2125: an OWED retry (files still owed after a partial publish, or
+    # a trigger-only refresh that failed on an ordinary error) is a pending
+    # trigger escalated by its own owed_retry_count, never a failure.
+    def record_owed_refresh_retry(
+        self,
+        golden_alias: str,
+        detail: str,
+        covered_generation: Optional[int],
+        min_count: int,
+        retry_seconds: Callable[[int], float],
+    ) -> Tuple[int, float]: ...
+
+    # Bug #2125: a publish that still owes work resolves its covered
+    # generation AND owes a retry in ONE transaction.
+    def resolve_and_record_owed_retry(
+        self,
+        golden_alias: str,
+        covered_generation: int,
+        detail: str,
+        retry_seconds: Callable[[int], float],
+    ) -> Tuple[int, float]: ...
 
     def set_published_points(self, alias: str, points: int) -> bool: ...
 

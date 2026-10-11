@@ -19,6 +19,9 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+#: Terminal success variants complete_job may record (Bug #679, Bug #2125).
+_COMPLETION_STATUSES = frozenset({"completed", "completed_partial"})
+
 # ---------------------------------------------------------------------------
 # Column list (must match background_jobs table schema)
 # ---------------------------------------------------------------------------
@@ -289,7 +292,10 @@ class DistributedJobClaimer:
         return released
 
     def complete_job(
-        self, job_id: str, result: Optional[Dict[str, Any]] = None
+        self,
+        job_id: str,
+        result: Optional[Dict[str, Any]] = None,
+        status: str = "completed",
     ) -> bool:
         """
         Mark a job as completed with an optional result payload.
@@ -299,11 +305,16 @@ class DistributedJobClaimer:
         Args:
             job_id: The job to complete.
             result: Optional result dictionary (serialised as JSON).
+            status: The completion variant: "completed", or
+                "completed_partial" for work that finished with part of it
+                still owed (Bug #679; a partial refresh, Bug #2125).
 
         Returns:
             True if the row was updated, False if not found or not owned
             by this node.
         """
+        if status not in _COMPLETION_STATUSES:
+            raise ValueError(f"not a completion status: {status!r}")
         result_json = json.dumps(result) if result is not None else None
 
         with self._pool.connection() as conn:
@@ -311,14 +322,14 @@ class DistributedJobClaimer:
                 cur.execute(
                     """
                     UPDATE background_jobs
-                    SET status       = 'completed',
+                    SET result       = %s,
+                        status       = %s,
                         completed_at = NOW(),
-                        result       = %s,
                         progress     = 100
                     WHERE job_id = %s
                       AND executing_node = %s
                     """,
-                    (result_json, job_id, self._node_id),
+                    (result_json, status, job_id, self._node_id),
                 )
                 completed: bool = cur.rowcount > 0
             conn.commit()

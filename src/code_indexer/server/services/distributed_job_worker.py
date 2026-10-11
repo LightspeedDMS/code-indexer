@@ -104,7 +104,14 @@ class DistributedJobWorkerService:
         submitter = job.get("username") or "system"
         try:
             result = self._execute_retryable_job(job_id, op_type, repo_alias, submitter)
-            self._claimer.complete_job(job_id, result=result)
+            # Bug #2125: like BackgroundJobManager (Bug #679), a result with
+            # partial exactly True ends the job completed_partial.
+            if isinstance(result, dict) and result.get("partial") is True:
+                self._claimer.complete_job(
+                    job_id, result=result, status="completed_partial"
+                )
+            else:
+                self._claimer.complete_job(job_id, result=result)
             logger.info("DistributedJobWorkerService: completed job %s", job_id)
         except Exception as exc:
             logger.error(

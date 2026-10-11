@@ -66,6 +66,8 @@ from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
 from code_indexer.server.services.metadata_reader import (
     index_unchanged_since,
     read_index_states,
+    RecordedFailures,
+    read_recorded_failures,
     snapshot_index_metadata,
 )
 from code_indexer.global_repos.stale_index_signal import (
@@ -159,6 +161,37 @@ _REFRESH_INTEGRITY_QUARANTINE_THRESHOLD = (
 # cycle, forever (observed: 1,151 recurring occurrences over 3+ days on
 # staging, zero progress).
 _LOCAL_REPO_REPAIR_QUARANTINE_THRESHOLD = 3
+
+# Bug #2125: bound of the exception cause-chain walk, and of the failure
+# detail persisted with an automatic retry of a failed refresh.
+_MAX_CAUSE_CHAIN_DEPTH = 32
+_RETRY_DETAIL_MAX_CHARS = 500
+
+
+class PublishedRefreshBackupError(RuntimeError):
+    """The refresh published a verified snapshot, then its cidx-meta backup
+    sync failed. The job still fails (the operator must see the backup
+    problem), but the index is current: no refresh retry is owed."""
+
+
+def _partial_publish_warning(
+    alias_name: str, failures: RecordedFailures, retry_due: Optional[float]
+) -> str:
+    """Bug #2125 (B): the WARNING of a publish whose child recorded failed
+    files, worded from what actually happened to their retry."""
+    head = (
+        f"Refresh of {alias_name} published PARTIALLY: "
+        f"{failures.failed_files} file(s) could not be indexed"
+    )
+    if retry_due is not None:
+        return f"{head}; {failures.retryable_paths} retried at {retry_due:.0f}"
+    if failures.retryable_paths == 0:
+        return f"{head}; not retried: no recorded failed file still exists"
+    return (
+        f"{head}; not retried automatically (externally managed, or the "
+        f"retry could not be persisted)"
+    )
+
 
 # Bug #1539's cidx-meta-conflict quarantine mechanism (a per-repo
 # consecutive-failure counter keyed on the upstream target SHA) is
@@ -2297,7 +2330,15 @@ class RefreshScheduler:
         """
         _refresh_start_monotonic = time.monotonic()
         _status = "error"
-        settle = failure_recovery.skip_settler(self.golden_repo_metadata, alias_name)
+        # The trigger generation this cycle covers, read before it runs: for
+        # settle_skip and for a Bug #2125 retry of a failed trigger-only
+        # refresh (a trigger that arrives mid-cycle keeps its due time).
+        covered = failure_recovery.current_trigger_generation(
+            self.golden_repo_metadata, alias_name
+        )
+        settle = partial(
+            failure_recovery.settle_skip, self.golden_repo_metadata, alias_name, covered
+        )
         try:
             result = self._execute_refresh_impl(
                 alias_name,
@@ -2313,12 +2354,56 @@ class RefreshScheduler:
         except Exception as exc:
             if _is_refresh_cancellation(exc):
                 _status = "cancelled"  # Bug #2012: a cancel is not an error
+            else:
+                self._schedule_retry_after_failed_refresh(alias_name, exc, covered)
             raise
         finally:
             _record_refresh_duration_metric(
                 alias_name,
                 time.monotonic() - _refresh_start_monotonic,
                 _status,
+            )
+
+    def _schedule_retry_after_failed_refresh(
+        self, alias_name: str, exc: BaseException, covered: Optional[int]
+    ) -> None:
+        """Bug #2125 (A): a trigger-only repo (one the scheduler loop never
+        schedules: ``local://`` and every other non-git URL) whose refresh
+        failed is retried automatically through the system gate
+        (retry_failed_trigger_only_refresh: an owed retry, never a new
+        failure, so new-data triggers still run promptly). *covered* is the
+        trigger generation this cycle covered. A git repo is retried by its
+        own schedule; externally managed mode runs no loop to fire the
+        trigger. A fatal chunk-store failure is handed over as such (its
+        self-heal may have recorded a failure backoff). A refresh that
+        published and then failed only its backup sync owes no retry. Never
+        raises: the refresh is already failing with its own error."""
+        try:
+            if self._is_externally_managed():
+                return
+            repo_info = self.registry.get_global_repo(alias_name)
+            if repo_info is None or _is_git_repo_url(repo_info.get("repo_url") or ""):
+                return
+            chain: List[BaseException] = []
+            cause: Optional[BaseException] = exc
+            while cause is not None and len(chain) < _MAX_CAUSE_CHAIN_DEPTH:
+                chain.append(cause)
+                cause = cause.__cause__ or cause.__context__
+            if any(isinstance(e, PublishedRefreshBackupError) for e in chain):
+                return
+            failure_recovery.retry_failed_trigger_only_refresh(
+                self.golden_repo_metadata,
+                alias_name,
+                f"refresh failed: {str(exc)[:_RETRY_DETAIL_MAX_CHARS]}",
+                covered,
+                fatal_failure_recorded=any(
+                    isinstance(e, FatalChunkStoreIndexError) for e in chain
+                ),
+            )
+        except Exception as schedule_exc:
+            logger.error(
+                f"Bug #2125: could not schedule a retry of the failed refresh "
+                f"of {alias_name}: {type(schedule_exc).__name__}: {schedule_exc}"
             )
 
     def _execute_refresh_impl(
@@ -3155,6 +3240,12 @@ class RefreshScheduler:
                                 verify_ownership=self._ownership_check(repo_name),
                             )
                             raise
+                        # Bug #2125 (B): the child exits 0 when only SOME
+                        # files fail; its metadata records them. Such a run
+                        # publishes what it indexed, reports itself partial
+                        # and schedules the retry of the recorded files that
+                        # still exist (settle_publish).
+                        recorded_failures = read_recorded_failures(source_path)
                         if forced_signal is not None:
                             # Counted only now that the reconcile completed:
                             # a failed, cancelled or skipped one never
@@ -3167,8 +3258,11 @@ class RefreshScheduler:
                                     source_path, alias_name, cancel_check
                                 ),
                             )
-                        if _metadata_before is not None and index_unchanged_since(
-                            source_path, _metadata_before
+                        if (
+                            _metadata_before is not None
+                            and recorded_failures.known
+                            and recorded_failures.retryable_paths == 0
+                            and index_unchanged_since(source_path, _metadata_before)
                         ):
                             logger.info(
                                 "Forced reconcile for %s changed nothing in the "
@@ -3331,8 +3425,15 @@ class RefreshScheduler:
                     )
 
                     self.registry.update_refresh_timestamp(alias_name)
-                    failure_recovery.resolve_after_publish(  # Bug #2022: published
-                        self.golden_repo_metadata, alias_name, covered_generation
+                    # Bug #2022 resolution + Bug #2125 (B): files still owed
+                    # get an owed retry (not a failure); externally managed
+                    # mode runs no loop to fire one.
+                    retry_due = failure_recovery.settle_publish(
+                        self.golden_repo_metadata,
+                        alias_name,
+                        covered_generation,
+                        recorded_failures,
+                        schedule_retry=not self._is_externally_managed(),
                     )
                     # Story #2118: the volume alarm's reference size, counted
                     # read-only from the snapshot just verified and published.
@@ -3358,17 +3459,29 @@ class RefreshScheduler:
                     )
 
                     if sync_failure:
-                        raise RuntimeError(
+                        raise PublishedRefreshBackupError(
                             "refresh complete, indexing succeeded, but backup "
                             + sync_failure
                         )
 
                     logger.info(f"Refresh complete for {alias_name}")
-                    return {
+                    result: Dict[str, Any] = {
                         "success": True,
                         "alias": alias_name,
                         "message": "Refresh complete",
                     }
+                    if recorded_failures.failed_files:
+                        # Bug #2125 (B): success stays True (a verified
+                        # snapshot was published); partial tells the job,
+                        # dashboard and API that files are still owed.
+                        logger.warning(
+                            _partial_publish_warning(
+                                alias_name, recorded_failures, retry_due
+                            )
+                        )
+                        result["partial"] = True
+                        result["failed_files"] = recorded_failures.failed_files
+                    return result
 
                 except Exception as e:
                     if _is_refresh_cancellation(e):
