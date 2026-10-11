@@ -809,7 +809,27 @@ def handle_xray_search_batch(
     captured_timeout = timeout_seconds
     captured_cidx_meta = cidx_meta
 
-    def _job_fn(progress_callback) -> Dict[str, Any]:  # type: ignore[no-untyped-def]
+    # Story #2107: one search event per batch call, recorded by the job when
+    # its result is known. A multi-repo batch has no single alias.
+    from code_indexer.server.services.search_event_recording import (
+        bind_xray_recorder,
+        writer_from_app,
+    )
+    from code_indexer.server.telemetry.correlation_bridge import (
+        get_current_correlation_id,
+    )
+
+    record_event = bind_xray_recorder(
+        writer_from_app(_lazy_singleton_app_or_none()),
+        username=user.username,
+        repo_alias=captured_repos[0]["alias"] if len(captured_repos) == 1 else None,
+        pattern=" | ".join(scan["driver_regex"] for scan in captured_scans),
+        correlation_id=get_current_correlation_id(),
+    )
+
+    # cancel_check: injected by BackgroundJobManager (declared parameter); a
+    # batch cancelled after its last between-cell check records no event.
+    def _job_fn(progress_callback, cancel_check=None) -> Dict[str, Any]:  # type: ignore[no-untyped-def]
         raw_result = _run_xray_batch_job(
             resolved_repos=captured_repos,
             scans=captured_scans,
@@ -821,6 +841,7 @@ def handle_xray_search_batch(
             bjm=bjm,
             progress_callback=progress_callback,
         )
+        record_event(raw_result, cancel_check)
         # Bug #1709: probes via _lazy_singleton_app_or_none() instead of a
         # bare getattr(_utils.app_module, "app", None), which would
         # otherwise permanently construct the process-wide app singleton

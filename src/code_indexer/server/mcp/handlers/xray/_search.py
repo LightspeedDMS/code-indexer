@@ -10,6 +10,7 @@ callbacks) kept nested exactly as HEAD had them.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -18,6 +19,14 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
+)
+from code_indexer.server.services.search_event_recording import (
+    record_xray_search,
+    tracked_job_cancelled,
+    writer_from_app,
+)
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
 )
 from code_indexer.xray.sandbox import validate_rust_evaluator
 
@@ -32,6 +41,7 @@ from ._infra import (
     _get_job_tracker,
     _get_xray_cell_limiter,
     _get_xray_executor,
+    _lazy_singleton_app_or_none,
     _pattern_scope_alias,
     _resolve_effective_timeout,
     _resolve_evaluator_code_off_loop,
@@ -301,9 +311,13 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         loop_multi = asyncio.get_running_loop()
         job_ids: list = []
         errors: list = []
+        # Story #2107: each alias job records its own search event.
+        event_writer_multi = writer_from_app(_lazy_singleton_app_or_none())
+        event_correlation_id_multi = get_correlation_id()
+        event_started_multi = time.monotonic()
 
         def _make_search_job_fn(  # type: ignore[no-untyped-def]
-            rp: Path, t: int, jid: str, bjm: Any
+            rp: Path, t: int, jid: str, bjm: Any, alias: str
         ):
             def _job() -> Dict[str, Any]:  # type: ignore[no-untyped-def]
                 from code_indexer.xray.search_engine import XRaySearchEngine as _E
@@ -352,6 +366,18 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
                         max_files=max_results,
                         on_process_spawned=_on_spawned,
                     )
+                    record_xray_search(
+                        event_writer_multi,
+                        username=user.username,
+                        repo_alias=alias,
+                        pattern=driver_regex,
+                        result=result,
+                        started_monotonic=event_started_multi,
+                        correlation_id=event_correlation_id_multi,
+                        cancelled=lambda: tracked_job_cancelled(
+                            _get_job_tracker(), jid
+                        ),
+                    )
                 finally:
                     bjm.unregister_child_processes(jid)
                     if _slot and _limiter is not None:
@@ -383,7 +409,7 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
             )
 
             _job_fn = _make_search_job_fn(
-                single_repo_path, effective_timeout_multi, jid, bjm_multi
+                single_repo_path, effective_timeout_multi, jid, bjm_multi, single_alias
             )
             _future = loop_multi.run_in_executor(xray_executor_multi, _job_fn)
 
@@ -495,6 +521,12 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         metadata={"repo_alias": repo_alias_parsed},
     )
 
+    # Story #2107: the search event is recorded by the job itself when its
+    # result is known; everything it needs is captured here, at request time.
+    event_writer = writer_from_app(_lazy_singleton_app_or_none())
+    event_correlation_id = get_correlation_id()
+    event_started = time.monotonic()
+
     def job_fn() -> Dict[str, Any]:  # type: ignore[no-untyped-def]
         from code_indexer.xray.search_engine import XRaySearchEngine as _Engine
 
@@ -540,6 +572,16 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
                 progress_callback=None,
                 max_files=max_results,
                 on_process_spawned=_on_spawned,
+            )
+            record_xray_search(
+                event_writer,
+                username=user.username,
+                repo_alias=repo_alias_parsed,
+                pattern=driver_regex,
+                result=result,
+                started_monotonic=event_started,
+                correlation_id=event_correlation_id,
+                cancelled=lambda: tracked_job_cancelled(_get_job_tracker(), job_id),
             )
         finally:
             bjm.unregister_child_processes(job_id)

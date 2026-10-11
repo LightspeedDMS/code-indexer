@@ -264,6 +264,40 @@ class TestBoundedExport:
         assert exported == ["before"]
 
 
+class TestKeysetWithIdsOutOfTimestampOrder:
+    """Review P4-A of #2106: ids need not grow with timestamps.
+
+    The later-timestamp rows are inserted FIRST, so they get the LOWEST ids.
+    A batch boundary inside the same-timestamp block leaves a keyset whose id
+    is above every later row's id, so a keyset of `timestamp >= ? AND id > ?`
+    would skip all the later rows.
+    """
+
+    def test_lower_id_later_rows_survive_batch_boundary(
+        self, real_store, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(qae, "_EXPORT_BATCH_SIZE", 5, raising=False)
+        real_store.bulk_insert(
+            [
+                make_record(timestamp=_BASE_TS + 1 + i, correlation_id=f"late{i}")
+                for i in range(4)
+            ]
+        )
+        real_store.bulk_insert(
+            [
+                make_record(timestamp=_BASE_TS, correlation_id=f"same{i}")
+                for i in range(23)
+            ]
+        )
+
+        _, _, exported_record = _run(real_store, tmp_path, {})
+
+        order = [r[_CORRELATION_COL] for r in _data_rows(exported_record["file_path"])]
+        want = [f"same{i}" for i in range(23)] + [f"late{i}" for i in range(4)]
+        assert order == want
+        assert exported_record["row_count"] == len(want)
+
+
 class _DropsTableAfterFirstBatch:
     """Real store wrapper: the second export read finds the table gone."""
 

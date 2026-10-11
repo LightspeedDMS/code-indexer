@@ -19,6 +19,15 @@ from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
 )
+from code_indexer.server.services.search_event_recording import (
+    XRayRecorder,
+    bind_xray_recorder,
+    tracked_job_cancelled,
+    writer_from_app,
+)
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 from code_indexer.xray.sandbox import validate_rust_evaluator
 
 from ._infra import (
@@ -32,6 +41,7 @@ from ._infra import (
     _get_job_tracker,
     _get_xray_cell_limiter,
     _get_xray_executor,
+    _lazy_singleton_app_or_none,
     _pattern_scope_alias,
     _resolve_effective_timeout,
     _resolve_evaluator_code_off_loop,
@@ -47,6 +57,17 @@ from .._utils import _mcp_response, _parse_and_collapse_repo_alias
 _MAX_DEBUG_NODES_DEFAULT = 50
 _MAX_DEBUG_NODES_MIN = 1
 _MAX_DEBUG_NODES_MAX = 500
+
+
+def _explore_event_recorder(user: User, alias: str, pattern: str) -> XRayRecorder:
+    """Story #2107: bind this request's search-event fields for one explore job."""
+    return bind_xray_recorder(
+        writer_from_app(_lazy_singleton_app_or_none()),
+        username=user.username,
+        repo_alias=alias,
+        pattern=pattern,
+        correlation_id=get_correlation_id(),
+    )
 
 
 def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
@@ -66,6 +87,7 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
     max_debug_nodes: int,
     job_id_holder: "Optional[list]" = None,
     bjm: "Optional[Any]" = None,
+    record_event: "Optional[XRayRecorder]" = None,
 ):
     """Return a job function closure for xray_explore.
 
@@ -126,6 +148,14 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
                 max_debug_nodes=max_debug_nodes,
                 on_process_spawned=_on_spawned,
             )
+            if record_event is not None:
+                jid = job_id_holder[0] if job_id_holder else None
+                record_event(
+                    result,
+                    (lambda: tracked_job_cancelled(_get_job_tracker(), jid))
+                    if jid is not None
+                    else None,
+                )
         finally:
             if bjm is not None and job_id_holder:
                 bjm.unregister_child_processes(job_id_holder[0])
@@ -185,6 +215,9 @@ def _submit_one_explore_omni(
         repo_path=Path(single_path_str),
         job_id_holder=[jid],
         bjm=bjm,
+        record_event=_explore_event_recorder(
+            user, single_alias, explore_fn_kwargs["driver_regex"]
+        ),
         **explore_fn_kwargs,
     )
 
@@ -599,6 +632,7 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
         repo_path=Path(repo_path_str),
         job_id_holder=[job_id],
         bjm=bjm,
+        record_event=_explore_event_recorder(user, repo_alias_parsed, driver_regex),
         **explore_kwargs,
     )
 

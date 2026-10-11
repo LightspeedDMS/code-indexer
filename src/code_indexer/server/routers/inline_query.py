@@ -419,13 +419,9 @@ def register_query_routes(
 
         import time
         from pathlib import Path as PathLib
-        from code_indexer.server.utils.runtime_node_id import resolve_runtime_node_id
         from code_indexer.server.services.search_event_context import (
             SearchEventContext,
             _search_event_ctx,
-        )
-        from code_indexer.server.services.search_event_log_writer import (
-            SearchEventRecord,
         )
         from code_indexer.server.services.config_service import get_config_service
         from ..services.shard_router import FORWARD_HEADER
@@ -489,6 +485,13 @@ def register_query_routes(
                         detail="Async query only supported for semantic search mode",
                     )
 
+                from code_indexer.server.services.search_event_recording import (
+                    PendingSearchEvent,
+                    writer_from_app,
+                )
+
+                # Bug #2113: the job records this search when it completes,
+                # with the real result count; the submission records nothing.
                 job_id = semantic_query_manager.submit_query_job(
                     username=current_user.username,
                     query_text=request.query_text,
@@ -496,10 +499,14 @@ def register_query_routes(
                     limit=request.limit,
                     min_score=request.min_score,
                     file_extensions=request.file_extensions,
+                    search_event=PendingSearchEvent(
+                        writer=writer_from_app(app),
+                        context=_event_ctx,
+                        correlation_id=get_correlation_id(),
+                    ),
                 )
                 from fastapi.responses import JSONResponse
 
-                _search_succeeded = True
                 return JSONResponse(
                     status_code=status.HTTP_202_ACCEPTED,
                     content={
@@ -514,6 +521,9 @@ def register_query_routes(
             # entirely via the async-hybrid worker/dedup/poll machinery
             # shared with the MCP door (execute_live_temporal_search).
             if _is_temporal_query_request(request):
+                # Bug #2109: a temporal search is recorded as "temporal",
+                # whatever search_mode the request also carries.
+                _event_ctx.search_type = "temporal"
                 _temporal_response = _execute_temporal_via_live_dispatch_rest(
                     request, current_user, app, activated_repo_manager
                 )
@@ -539,6 +549,33 @@ def register_query_routes(
                             "inline_query: could not parse temporal response "
                             "body for telemetry result_count: %s",
                             _parse_exc,
+                        )
+                elif _temporal_response.status_code == status.HTTP_202_ACCEPTED:
+                    # Bug #2109: a deferred handoff leaves a pending record;
+                    # GET /api/query/result/{job_id} records the search when
+                    # it delivers the completed result.
+                    import json as _json_mod
+
+                    from code_indexer.server.services.search_event_recording import (
+                        remember_deferred_search,
+                    )
+
+                    try:
+                        _handoff = _json_mod.loads(bytes(_temporal_response.body))
+                    except (ValueError, TypeError) as _parse_exc:
+                        logger.warning(
+                            "inline_query: deferred temporal search not "
+                            "recorded, handoff body unreadable: %s: %s",
+                            type(_parse_exc).__name__,
+                            _parse_exc,
+                        )
+                    else:
+                        remember_deferred_search(
+                            getattr(app.state, "payload_cache", None),
+                            _handoff,
+                            context=_event_ctx,
+                            correlation_id=get_correlation_id(),
+                            started_at=start_time,
                         )
                 return _temporal_response
 
@@ -940,6 +977,9 @@ def register_query_routes(
                 # Return as JSONResponse to support truncated fields
                 from fastapi.responses import JSONResponse
 
+                # Bug #2110: record the mode that ran (a hybrid request without
+                # a usable FTS index runs, and is recorded, as semantic).
+                _event_ctx.search_type = search_mode_actual
                 _result_count = len(truncated_fts) + len(truncated_semantic)
                 _search_succeeded = True
                 return JSONResponse(
@@ -1159,39 +1199,26 @@ def register_query_routes(
                 detail=_outcome.message,
             )
         finally:
-            # Issue #1159: reset ctx and enqueue search event record.
-            # Bug #1173: only enqueue on success (H11 — failed searches must NOT log).
+            # Issue #1159: reset ctx and record the search event through the
+            # shared builder. Bug #2113: only a successful search is recorded.
             _search_event_ctx.reset(_ctx_token)
-            _writer = getattr(
-                getattr(app, "state", None), "search_event_log_writer", None
-            )
-            if _writer is not None and _search_succeeded:
-                try:
-                    _total_ms = int((time.time() - start_time) * 1000)
-                    _node_id = resolve_runtime_node_id()
-                    _record = SearchEventRecord(
-                        timestamp=time.time(),
-                        username=current_user.username,
-                        repo_alias=_event_ctx.repo_alias,
-                        search_type=_event_ctx.search_type,
-                        query_text=_event_ctx.query_text,
-                        voyage_cache_hit=_event_ctx.voyage_cache_hit,
-                        voyage_cache_mode=_event_ctx.voyage_cache_mode,
-                        voyage_latency_ms=_event_ctx.voyage_latency_ms,
-                        cohere_cache_hit=_event_ctx.cohere_cache_hit,
-                        cohere_cache_mode=_event_ctx.cohere_cache_mode,
-                        cohere_latency_ms=_event_ctx.cohere_latency_ms,
-                        total_latency_ms=_total_ms,
-                        result_count=_result_count,
-                        node_id=_node_id,
-                        correlation_id=get_correlation_id(),
-                    )
-                    _writer.enqueue(_record)
-                except Exception as _enq_exc:  # noqa: BLE001
-                    logger.debug(
-                        "inline_query: failed to enqueue search event record: %s",
-                        _enq_exc,
-                    )
+            if _search_succeeded:
+                from code_indexer.server.services.search_event_recording import (
+                    record_search_event,
+                    writer_from_app,
+                )
+
+                record_search_event(
+                    writer_from_app(app),
+                    username=current_user.username,
+                    repo_alias=_event_ctx.repo_alias,
+                    search_type=_event_ctx.search_type,
+                    query_text=_event_ctx.query_text,
+                    result_count=_result_count,
+                    total_latency_ms=int((time.time() - start_time) * 1000),
+                    correlation_id=get_correlation_id(),
+                    context=_event_ctx,
+                )
 
     @app.get("/api/query/result/{job_id}")
     def get_query_result(
@@ -1243,4 +1270,19 @@ def register_query_routes(
         )
         if result["status"] == "not_found":
             return JSONResponse(result, status_code=404)
+        if result["status"] == "completed":
+            # Bug #2109: the caller's deferred temporal search is recorded
+            # when its completed result is delivered (once).
+            from code_indexer.server.services.search_event_recording import (
+                record_deferred_search,
+                writer_from_app,
+            )
+
+            record_deferred_search(
+                getattr(raw_request.app.state, "payload_cache", None),
+                writer_from_app(raw_request.app),
+                job_id=job_id,
+                username=current_user.username,
+                result_count=len(result.get("results") or []),
+            )
         return result

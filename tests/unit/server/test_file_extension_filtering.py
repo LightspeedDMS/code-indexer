@@ -18,7 +18,6 @@ from code_indexer.server.app import create_app
 from code_indexer.server.auth.user_manager import User, UserRole
 
 
-@pytest.mark.e2e
 class TestFileExtensionFiltering:
     """Test file extension filtering in semantic queries."""
 
@@ -377,6 +376,13 @@ class TestFileExtensionFiltering:
         assert response.status_code == 202
         data = response.json()
         assert data["job_id"] == "job-456"
+
+        from unittest.mock import ANY
+
+        from code_indexer.server.services.search_event_recording import (
+            PendingSearchEvent,
+        )
+
         mock_submit.assert_called_once_with(
             username="testuser",
             query_text="async test",
@@ -384,4 +390,9 @@ class TestFileExtensionFiltering:
             limit=15,
             min_score=None,
             file_extensions=[".py", ".ts"],
+            search_event=ANY,
+        )
+        # Bug #2113: the job records the search when it completes.
+        assert isinstance(
+            mock_submit.call_args.kwargs["search_event"], PendingSearchEvent
         )

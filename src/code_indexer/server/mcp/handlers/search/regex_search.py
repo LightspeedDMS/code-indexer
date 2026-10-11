@@ -27,6 +27,10 @@ from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.mcp import reranking as _mcp_reranking
 from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.search_event_recording import (
+    record_regex_search,
+    writer_from_app,
+)
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
@@ -456,6 +460,8 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
     _admission = check_query_admission()
     if not _admission.allowed:
         return _mcp_response(memory_pressure_mcp_payload(_admission))
+    # Story #2108: the recorded search event's total latency starts here.
+    regex_started = time.monotonic()
 
     from code_indexer.server.services.search_error_formatter import SearchErrorFormatter
 
@@ -564,6 +570,15 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             len(matches)
             if rerank_meta.get("cidx_meta_access_filtered")
             else sr.total_matches
+        )
+        record_regex_search(
+            writer_from_app(_utils._lazy_module_attr_or_none("app")),
+            username=user.username,
+            repo_alias=repository_alias,
+            pattern=args["pattern"],
+            result_count=len(matches),
+            started_monotonic=regex_started,
+            correlation_id=get_correlation_id(),
         )
         return _mcp_response(
             {

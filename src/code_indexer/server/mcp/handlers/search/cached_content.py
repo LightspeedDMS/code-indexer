@@ -159,5 +159,21 @@ def handle_poll_search_job(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         is_admin=is_admin,
         config_service=get_config_service(),
     )
+    if result["status"] == "completed":
+        # Bug #2109: the caller's deferred temporal search is recorded when
+        # its completed result is delivered (once; nothing for other jobs).
+        from code_indexer.server.services.search_event_recording import (
+            record_deferred_search,
+            writer_from_app,
+        )
+
+        _app = _utils.app_module.app
+        record_deferred_search(
+            getattr(_app.state, "payload_cache", None),
+            writer_from_app(_app),
+            job_id=job_id,
+            username=user.username,
+            result_count=len(result.get("results") or []),
+        )
     result["success"] = result["status"] != "not_found"
     return _mcp_response(result)

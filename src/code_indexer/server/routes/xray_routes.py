@@ -318,10 +318,29 @@ def xray_search(
     exclude_patterns = list(body.exclude_patterns)
     max_files = body.max_files
 
-    def job_fn(progress_callback):  # type: ignore[no-untyped-def]
+    # Story #2107: the job records its search event when its result is known.
+    from code_indexer.server.services.search_event_recording import (
+        bind_xray_recorder,
+        writer_from_app,
+    )
+    from code_indexer.server.telemetry.correlation_bridge import (
+        get_current_correlation_id,
+    )
+
+    record_event = bind_xray_recorder(
+        writer_from_app(http_request.app),
+        username=user.username,
+        repo_alias=body.repository_alias,
+        pattern=body.driver_regex,
+        correlation_id=get_current_correlation_id(),
+    )
+
+    # cancel_check: BackgroundJobManager injects its cancellation check into
+    # any job that declares it; a cancelled job records no search event.
+    def job_fn(progress_callback, cancel_check=None):  # type: ignore[no-untyped-def]
         from code_indexer.xray.search_engine import XRaySearchEngine as _Engine
 
-        return _Engine().run(
+        result = _Engine().run(
             repo_path=repo_path,
             driver_regex=body.driver_regex,
             evaluator_code=evaluator_code,
@@ -332,6 +351,8 @@ def xray_search(
             progress_callback=progress_callback,
             max_files=max_files,
         )
+        record_event(result, cancel_check)
+        return result
 
     bjm = _get_background_job_manager()
     job_id: str = bjm.submit_job(

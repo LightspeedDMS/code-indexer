@@ -28,6 +28,15 @@ from code_indexer.server.services.repo_access_guard import (
     require_repo_access,
 )
 
+from code_indexer.server.services.search_event_log_writer import SearchEventLogWriter
+from code_indexer.server.services.search_event_recording import (
+    record_regex_search,
+    writer_from_app,
+)
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id,
+)
+
 # Module-level import so test patches against
 # code_indexer.server.routes.regex_routes.RegexSearchService work correctly.
 from code_indexer.global_repos.regex_search import RegexSearchService
@@ -160,14 +169,23 @@ async def _execute_single_search(
     repo_path_str: str,
     timeout_seconds: Optional[int] = None,
     user: Optional[User] = None,
+    *,
+    alias: Optional[str] = None,
+    event_writer: Any = None,
 ) -> Dict[str, Any]:
     """Execute a single-repo regex search.
 
     Returns a dict with matches + metadata.
     Raises ValueError, TimeoutError, or RipgrepExecutionError on failure.
+
+    Story #2108: when `user` and `alias` are given, a completed search records
+    one regex search event for `alias` through `event_writer` (a failed
+    search raises before recording).
     """
+    import time
     from pathlib import Path
 
+    started = time.monotonic()
     if user is not None:
         api_metrics_service.increment_regex_search(username=user.username)
 
@@ -207,7 +225,7 @@ async def _execute_single_search(
         for m in result.matches
     ]
 
-    return {
+    response = {
         "matches": matches,
         "total_matches": result.total_matches,
         "truncated": result.truncated,
@@ -215,6 +233,17 @@ async def _execute_single_search(
         "search_engine": result.search_engine,
         "search_time_ms": result.search_time_ms,
     }
+    if user is not None and alias is not None:
+        record_regex_search(
+            event_writer,
+            username=user.username,
+            repo_alias=alias,
+            pattern=body.pattern,
+            result_count=len(matches),
+            started_monotonic=started,
+            correlation_id=get_current_correlation_id(),
+        )
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +256,12 @@ async def _execute_omni_search(
     aliases: List[str],
     user: User,
     timeout_seconds: Optional[int] = None,
+    event_writer: Optional[SearchEventLogWriter] = None,
 ) -> Dict[str, Any]:
-    """Fan out search across multiple repos, collecting results and errors."""
+    """Fan out search across multiple repos, collecting results and errors.
+
+    Story #2108: each repository searched records its own regex search event.
+    """
     import time
 
     start_time = time.time()
@@ -254,7 +287,12 @@ async def _execute_omni_search(
 
         try:
             result = await _execute_single_search(
-                body, repo_path_str, timeout_seconds=timeout_seconds, user=user
+                body,
+                repo_path_str,
+                timeout_seconds=timeout_seconds,
+                user=user,
+                alias=alias,
+                event_writer=event_writer,
             )
             repos_searched += 1
             search_engine = result.get("search_engine", search_engine)
@@ -394,7 +432,11 @@ async def regex_search(
                 },
             )
         result = await _execute_omni_search(
-            body, aliases, user, timeout_seconds=effective_timeout
+            body,
+            aliases,
+            user,
+            timeout_seconds=effective_timeout,
+            event_writer=writer_from_app(request.app),
         )
         return result
 
@@ -413,7 +455,12 @@ async def regex_search(
 
     try:
         result = await _execute_single_search(
-            body, repo_path_str, timeout_seconds=effective_timeout, user=user
+            body,
+            repo_path_str,
+            timeout_seconds=effective_timeout,
+            user=user,
+            alias=body.repository_alias,
+            event_writer=writer_from_app(request.app),
         )
         return result
     except ValueError as e:

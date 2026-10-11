@@ -70,6 +70,33 @@ active (`try_global_fallback`). Searches run through `_execute_tracked_search`, 
 manager and records OTEL search metrics; results then pass through `_apply_rerank_and_filter`
 (`search/_shared.py`).
 
+**Search event log** (`server/services/search_event_recording.py`). Every search door builds its row through
+`record_search_event` and hands it to the bounded `SearchEventLogWriter` queue: fire-and-forget, it never blocks,
+raises or changes the search. `search_type` is one of `SEARCH_TYPES` (`semantic`, `fts`, `hybrid`, `temporal`,
+`regex`, `xray`); the same list feeds the Query Analytics Export page's Search Type filter, and any other value is
+refused (logged, not stored). The recorded type is the mode that ran: a REST hybrid request without a usable FTS
+index is recorded as `semantic`, and a temporal search is recorded as `temporal` whatever `search_mode` it also
+carries. MCP `search_code` rejects an unknown `search_mode` (REST answers 422). One rule for every door: a row is
+written only for a search whose result is known and successful, decided once per result shape in the shared module
+(`search_payload_is_known`, `xray_result_is_known`). A failed, rejected or handled-error search writes nothing, and
+so does a search that answers success without having run: `search_code` when every embedding provider was
+unavailable (`completeness: providers_unavailable`) or an omni search that searched no repository; an X-Ray search
+whose ripgrep driver failed (`phase1_failed`), that timed out with no matches, or a batch in which no cell ran. An
+asynchronous search writes its row when its job completes, with the real result count (REST `async_query`; X-Ray
+jobs); a job cancelled while it ran writes nothing (BackgroundJobManager jobs check the injected `cancel_check`,
+MCP X-Ray jobs their JobTracker status). A deferred temporal handoff (MCP `TEMPORAL_QUERY_DEFERRED`, REST 202)
+writes no row then; it stores a pending record in `app.state.payload_cache` (cluster-shared, keyed by job id and
+caller, 24 h TTL), and the result door that delivers the completed result to that caller (`poll_search_job`,
+`GET /api/query/result/{job_id}`) claims it with one atomic consume and records `temporal` with the delivered count
+and the latency from the search's start -- one row per user per deferred job. The temporal dedup signature includes
+the username, so different users never share a job; a same-user repeat of an identical deferred search reuses the
+job and overwrites its one pending record, so those repeats collapse into one row.
+A recording failure is logged at WARNING with its exception type. Rows per door: `search_code` and
+`POST /api/query` one per call; `regex_search` and `POST /api/regex/search` one per searched repository
+(`query_text` = pattern, `result_count` = matches returned); `xray_search`/`xray_explore` and `POST /api/xray/search`
+one per repository job, `xray_search_batch` and `POST /api/xray/search/batch` one per call (`query_text` = driver
+pattern(s), never evaluator source; `result_count` = matches). Regex and X-Ray rows leave the cache columns NULL.
+
 ## The query-embedding chokepoint
 
 Every server query embedding goes through `coalesced_query_embedding(provider, text, ...)`

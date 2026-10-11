@@ -8553,6 +8553,9 @@ def analytics_export_page(request: Request):
     if not session:
         return _create_login_redirect(request)
 
+    # Bug #2110: the Search Type options are the one list writers record.
+    from code_indexer.server.services import search_event_recording
+
     csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
     response = templates.TemplateResponse(
         request,
@@ -8562,6 +8565,7 @@ def analytics_export_page(request: Request):
             "current_page": "analytics-export",
             "show_nav": True,
             "csrf_token": csrf_token,
+            "search_types": search_event_recording.SEARCH_TYPES,
         },
     )
     set_csrf_cookie(response, csrf_token)

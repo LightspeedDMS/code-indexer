@@ -39,12 +39,9 @@
                     Search Type
                     <select id="search_type" name="search_type">
                         <option value="all">All types</option>
-                        <option value="semantic">semantic</option>
-                        <option value="fts">fts</option>
-                        <option value="hybrid">hybrid</option>
-                        <option value="temporal">temporal</option>
-                        <option value="regex">regex</option>
-                        <option value="xray">xray</option>
+                        {% for search_type in search_types %}
+                        <option value="{{ search_type }}">{{ search_type }}</option>
+                        {% endfor %}
                     </select>
                 </label>
                 <label>

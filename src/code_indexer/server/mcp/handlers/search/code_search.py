@@ -13,12 +13,17 @@ preserved intentionally to avoid behavioral changes during extraction.
 Refactoring is tracked separately.
 """
 
+import json
 import logging
 import time
 from typing import Any, Dict, Optional
 
 from code_indexer.server.auth.user_manager import User
-from code_indexer.server.utils.runtime_node_id import resolve_runtime_node_id
+from code_indexer.server.services.search_event_recording import (
+    elapsed_ms,
+    record_search_payload,
+    remember_deferred_search,
+)
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
@@ -27,7 +32,6 @@ from code_indexer.server.services.search_event_context import (
     SearchEventContext,
     _search_event_ctx,
 )
-from code_indexer.server.services.search_event_log_writer import SearchEventRecord
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
@@ -51,6 +55,38 @@ from .temporal_search import _execute_temporal_via_live_dispatch
 logger = logging.getLogger("code_indexer.server.mcp.handlers.search")
 
 
+def _mcp_payload(result: Any) -> Dict[str, Any]:
+    """The JSON body of an MCP-wrapped response (content[0].text), or {}."""
+    content = result.get("content") if isinstance(result, dict) else None
+    if not isinstance(content, list) or not content:
+        return {}
+    first = content[0]
+    text = first.get("text") if isinstance(first, dict) else None
+    if not isinstance(text, str):
+        return {}
+    try:
+        inner = json.loads(text)
+    except json.JSONDecodeError as exc:
+        logger.debug("search_code: could not parse MCP response text: %s", exc)
+        return {}
+    return inner if isinstance(inner, dict) else {}
+
+
+def _invalid_search_mode_response(search_mode: str) -> Optional[Dict[str, Any]]:
+    """Bug #2110: the rejection of a search_mode REST would answer 422 for.
+
+    None when `search_mode` is valid. An unknown mode is never searched or
+    recorded under a value no Search Type filter can select.
+    """
+    from code_indexer.server.models.query import SEARCH_MODES
+
+    if search_mode in SEARCH_MODES:
+        return None
+    allowed = ", ".join(SEARCH_MODES)
+    message = f"Invalid search_mode {search_mode!r}: must be one of {allowed}"
+    return _mcp_response({"success": False, "error": message, "results": []})
+
+
 def search_code(
     params: Dict[str, Any],
     user: User,
@@ -64,16 +100,19 @@ def search_code(
     - str (other): _search_activated_repo
 
     Issue #1159: installs SearchEventContext ContextVar before routing so that
-    embedding call sites can write cache metadata into it.  Enqueues a
-    SearchEventRecord on success only (spec H11).  Resets ContextVar in finally.
+    embedding call sites can write cache metadata into it. Resets ContextVar
+    in finally. Bug #2113 recording rule: one search event per successful
+    search (response payload success true; a temporal search is recorded as
+    "temporal"); a failure, handled error, rejected request or deferred
+    temporal handoff records nothing.
     """
     _admission = check_query_admission()
     if not _admission.allowed:
         return _mcp_response(memory_pressure_mcp_payload(_admission))
 
-    import json as _json_mod
-
     _search_start = time.monotonic()
+    # Bug #2109: wall-clock start, for a deferred search recorded on any node.
+    _search_started_at = time.time()
 
     # Issue #1159: capture context fields before any param mutation below.
     _query_text_raw = str(params.get("query_text", "") or "")
@@ -120,6 +159,11 @@ def search_code(
                 }
             )
 
+        # Bug #2110: reject an unknown search_mode before any search runs.
+        _mode_rejection = _invalid_search_mode_response(_search_mode)
+        if _mode_rejection is not None:
+            return _mode_rejection
+
         # Story #1039: bare-to-global alias fallback for read-only handlers.
         # Applied BEFORE routing so the if/elif/else below sees the promoted alias.
         if (
@@ -153,9 +197,34 @@ def search_code(
         # validation (missing/list-typed) is handled inside the dispatch
         # function itself via the shared adapter.
         if _is_temporal_query(params):
-            return _execute_temporal_via_live_dispatch(
+            _temporal_result = _execute_temporal_via_live_dispatch(
                 params, user, repository_alias, handler_deadline_monotonic
             )
+            # Bug #2109: a completed temporal search is recorded as
+            # "temporal". A deferred handoff (job still running) records
+            # nothing now; it leaves a pending record that poll_search_job
+            # records when it delivers the completed result.
+            _temporal_payload = _mcp_payload(_temporal_result)
+            record_search_payload(
+                _get_search_event_writer(),
+                _temporal_payload,
+                search_type="temporal",
+                context=_event_ctx,
+                total_latency_ms=elapsed_ms(_search_start),
+                correlation_id=get_correlation_id(),
+            )
+            remember_deferred_search(
+                getattr(
+                    getattr(getattr(_utils.app_module, "app", None), "state", None),
+                    "payload_cache",
+                    None,
+                ),
+                _temporal_payload,
+                context=_event_ctx,
+                correlation_id=get_correlation_id(),
+                started_at=_search_started_at,
+            )
+            return _temporal_result
 
         # Bug #1119: a wildcard string like "*" or "fastapi-?" must be routed to the
         # omni/expansion path, not to _search_activated_repo. Wrap the single wildcard
@@ -187,57 +256,19 @@ def search_code(
             extra={"correlation_id": get_correlation_id()},
         )
 
-        # Issue #1159: enqueue SearchEventRecord on success only (spec H11).
-        _writer = _get_search_event_writer()
-        if _writer is not None:
-            # Extract result count from the MCP-wrapped response (content[0].text JSON).
-            # Uses narrow type checks and logs on parse failure — no broad exception swallow.
-            _result_count = 0
-            _content_list = (
-                _result.get("content") if isinstance(_result, dict) else None
-            )
-            if isinstance(_content_list, list) and _content_list:
-                _first = _content_list[0]
-                _text = _first.get("text") if isinstance(_first, dict) else None
-                if isinstance(_text, str):
-                    try:
-                        _inner = _json_mod.loads(_text)
-                    except _json_mod.JSONDecodeError as _jde:
-                        logger.debug(
-                            "search_code: could not parse MCP response text for telemetry: %s",
-                            _jde,
-                        )
-                        _inner = {}
-                    _results_payload = (
-                        _inner.get("results") if isinstance(_inner, dict) else None
-                    )
-                    # _results_payload may be a dict (activated-repo wraps results in outer
-                    # dict) or a list (omni / global paths).
-                    if isinstance(_results_payload, dict):
-                        _results_payload = _results_payload.get("results")
-                    if isinstance(_results_payload, list):
-                        _result_count = len(_results_payload)
-
-            _node_id = resolve_runtime_node_id()
-
-            _record = SearchEventRecord(
-                timestamp=time.time(),
-                username=user.username,
-                repo_alias=_event_ctx.repo_alias,
-                search_type=_event_ctx.search_type,
-                query_text=_event_ctx.query_text,
-                voyage_cache_hit=_event_ctx.voyage_cache_hit,
-                voyage_cache_mode=_event_ctx.voyage_cache_mode,
-                voyage_latency_ms=_event_ctx.voyage_latency_ms,
-                cohere_cache_hit=_event_ctx.cohere_cache_hit,
-                cohere_cache_mode=_event_ctx.cohere_cache_mode,
-                cohere_latency_ms=_event_ctx.cohere_latency_ms,
-                total_latency_ms=_elapsed_ms,
-                result_count=_result_count,
-                node_id=_node_id,
-                correlation_id=get_correlation_id(),
-            )
-            _writer.enqueue(_record)
+        # Bug #2113: only a search whose result is known is recorded
+        # (search_payload_is_known): a handled error, a search no provider
+        # could run and an omni search where every repository failed record
+        # nothing (exceptions, a missing query_text, an unknown search_mode
+        # and admission refusals return before this point).
+        record_search_payload(
+            _get_search_event_writer(),
+            _mcp_payload(_result),
+            search_type=_event_ctx.search_type,
+            context=_event_ctx,
+            total_latency_ms=_elapsed_ms,
+            correlation_id=get_correlation_id(),
+        )
 
         return _result
     except Exception as e:

@@ -23,7 +23,12 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.search_event_recording import (
+        PendingSearchEvent,
+    )
 from dataclasses import dataclass
 
 import concurrent.futures
@@ -1134,6 +1139,7 @@ class SemanticQueryManager:
         limit: int = 10,
         min_score: Optional[float] = None,
         file_extensions: Optional[List[str]] = None,
+        search_event: Optional["PendingSearchEvent"] = None,
     ) -> str:
         """
         Submit a semantic query as a background job.
@@ -1145,6 +1151,8 @@ class SemanticQueryManager:
             limit: Maximum results to return
             min_score: Minimum similarity score threshold
             file_extensions: List of file extensions to filter results (e.g., ['.py', '.js'])
+            search_event: Bug #2113 -- recorded by the job when it completes,
+                with the real result count (nothing is recorded at submission)
 
         Returns:
             Job ID for tracking query progress
@@ -1157,14 +1165,34 @@ class SemanticQueryManager:
         # it later on a worker thread with NO tracking wrapper at all --
         # invisible to deactivation's bounded refcount drain. Wrap here so
         # the SAME tracking mechanism covers this path too.
-        def _tracked_query_user_repositories(**kwargs: Any) -> Dict[str, Any]:
+        # cancel_check: BackgroundJobManager injects its cancellation check
+        # into any job that declares it; it is passed to record_result below
+        # (Bug #2113: a job cancelled while it ran records no search event).
+        def _tracked_query_user_repositories(
+            cancel_check: Optional[Callable[[], bool]] = None, **kwargs: Any
+        ) -> Dict[str, Any]:
             with track_activated_repo_query(
                 self.query_tracker,
                 self.activated_repo_manager,
                 kwargs.get("username", ""),
                 kwargs.get("repository_alias"),
             ):
-                return self.query_user_repositories(**kwargs)
+                if search_event is None:
+                    return self.query_user_repositories(**kwargs)
+                from code_indexer.server.services.search_event_context import (
+                    _search_event_ctx,
+                )
+
+                # Bug #2113: the job runs on a worker thread -- install the
+                # request's event context so embedding cache fields are
+                # captured, then record the result unless it was cancelled.
+                token = _search_event_ctx.set(search_event.context)
+                try:
+                    result = self.query_user_repositories(**kwargs)
+                finally:
+                    _search_event_ctx.reset(token)
+                search_event.record_result(result, cancel_check)
+                return result
 
         # Submit background job
         job_id = self.background_job_manager.submit_job(
