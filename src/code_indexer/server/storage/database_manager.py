@@ -643,11 +643,15 @@ class DatabaseSchema:
             result_count        INTEGER NOT NULL,
             node_id             TEXT NOT NULL,
             correlation_id      TEXT,
-            query_text_truncated INTEGER
+            query_text_truncated INTEGER,
+            tool                TEXT,
+            door                TEXT,
+            outcome             TEXT,
+            error_class         TEXT
         )
     """
-    # Bug #2114: query_text_truncated stays LAST (an existing table gains it
-    # in place via SearchEventLogSqliteBackend, appended after correlation_id).
+    # Bug #2114 / Story #2117: the columns after correlation_id are the ones an
+    # existing table gains in place (SearchEventLogSqliteBackend, same order).
 
     CREATE_IDX_SEL_TIMESTAMP = """
         CREATE INDEX IF NOT EXISTS idx_sel_timestamp

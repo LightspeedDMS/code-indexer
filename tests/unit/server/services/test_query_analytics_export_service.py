@@ -205,24 +205,37 @@ class TestQueryAnalyticsExportServiceFiltering:
         assert len(rows) == 1
 
     def test_cache_hit_filter_hits_only(self, export_service, search_backend):
-        self._insert_search_event(search_backend, voyage_cache_hit=True)
-        self._insert_search_event(search_backend, voyage_cache_hit=False)
-        self._insert_search_event(search_backend, cohere_cache_hit=True)
+        # Bug #2112: a hit counts only for a consulted cache (a mode is set).
+        self._insert_search_event(
+            search_backend, voyage_cache_hit=True, voyage_cache_mode="on"
+        )
+        self._insert_search_event(
+            search_backend, voyage_cache_hit=False, voyage_cache_mode="on"
+        )
+        self._insert_search_event(
+            search_backend, cohere_cache_hit=True, cohere_cache_mode="on"
+        )
         rows = _rows(export_service, search_backend, {"cache_hit_filter": "hits_only"})
         assert len(rows) == 2
         for r in rows:
             assert r.get("voyage_cache_hit") or r.get("cohere_cache_hit")
 
     def test_cache_hit_filter_misses_only(self, export_service, search_backend):
-        self._insert_search_event(search_backend, voyage_cache_hit=True)
         self._insert_search_event(
-            search_backend, voyage_cache_hit=False, cohere_cache_hit=False
+            search_backend, voyage_cache_hit=True, voyage_cache_mode="on"
         )
+        self._insert_search_event(
+            search_backend,
+            voyage_cache_hit=False,
+            voyage_cache_mode="on",
+            cohere_cache_hit=False,
+        )
+        # Bug #2112: no cache consulted -- not a miss.
         self._insert_search_event(search_backend)  # None/None
         rows = _rows(
             export_service, search_backend, {"cache_hit_filter": "misses_only"}
         )
-        assert len(rows) == 2
+        assert len(rows) == 1
 
     def test_cache_hit_filter_all_returns_all(self, export_service, search_backend):
         self._insert_search_event(search_backend, voyage_cache_hit=True)
@@ -293,6 +306,11 @@ class TestQueryAnalyticsExportServiceExcel:
             "result_count",
             "node_id",
             "correlation_id",
+            # Story #2117
+            "tool",
+            "door",
+            "outcome",
+            "error_class",
         ]
         assert headers == expected
         # Data row

@@ -133,6 +133,34 @@ class TestMcpRegexSearch:
         assert env.rec.rows(search_type="regex") == []
 
 
+class TestRegexOutcomes2117:
+    """Story #2117: tool/door/outcome; a search that ran and failed on a
+    resolved repository is a failure row (an unresolved repository, above,
+    still writes nothing)."""
+
+    def test_success_row_carries_tool_door_and_outcome(self, env):
+        _mcp_regex({"repository_alias": "example-repo", "pattern": r"def "}, "alice")
+
+        [row] = env.rec.rows(search_type="regex")
+        assert (row["tool"], row["door"], row["outcome"], row["error_class"]) == (
+            "regex_search",
+            "mcp",
+            "success",
+            None,
+        )
+
+    def test_invalid_pattern_on_a_resolved_repository_is_a_failure(self, env):
+        body = _mcp_regex(
+            {"repository_alias": "example-repo", "pattern": "(unclosed"}, "alice"
+        )
+
+        assert body["success"] is False, body
+        [row] = env.rec.rows(search_type="regex")
+        assert (row["repo_alias"], row["outcome"]) == ("example-repo", "failure")
+        assert row["error_class"] and " " not in row["error_class"]
+        assert row["query_text"] == "(unclosed"
+
+
 def _register_aliases(env: RegexEnv, *aliases: str) -> None:
     """Register real golden-repo aliases pointing at the test repository."""
     from code_indexer.global_repos.alias_manager import AliasManager
@@ -155,6 +183,42 @@ def _rest_regex(env: RegexEnv, payload: Dict[str, Any], username: str) -> Any:
     app.state.access_filtering_service = env.state.access_filtering_service
     app.dependency_overrides[get_current_user] = lambda: make_user(username)
     return TestClient(app).post("/api/regex/search", json=payload)
+
+
+class TestRestRegexOutcomes2117:
+    def test_rest_success_row_carries_tool_door_and_outcome(self, env):
+        _register_aliases(env, "example-repo-global")
+
+        _rest_regex(
+            env, {"repository_alias": "example-repo-global", "pattern": r"def "}, "c"
+        )
+
+        [row] = env.rec.rows(search_type="regex")
+        assert (row["tool"], row["door"], row["outcome"]) == (
+            "POST /api/regex/search",
+            "rest",
+            "success",
+        )
+
+    def test_rest_omni_search_that_fails_per_repository_records_failures(self, env):
+        _register_aliases(env, "first-repo-global", "second-repo-global")
+
+        response = _rest_regex(
+            env,
+            {
+                "repository_alias": ["first-repo-global", "second-repo-global"],
+                "pattern": "(unclosed",
+            },
+            "dave",
+        )
+        assert response.status_code == 200, response.text
+
+        rows = env.rec.rows(search_type="regex")
+        assert sorted((r["repo_alias"], r["outcome"]) for r in rows) == [
+            ("first-repo-global", "failure"),
+            ("second-repo-global", "failure"),
+        ]
+        assert all(r["error_class"] and " " not in r["error_class"] for r in rows)
 
 
 class TestRestRegexSearch:

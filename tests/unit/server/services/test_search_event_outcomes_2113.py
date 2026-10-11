@@ -1,9 +1,11 @@
 """Bug #2113: a search event records what really happened.
 
-Rule (one rule for every door): a row is written only for a search whose
-result is known and successful. A failed or rejected search writes no row;
-an asynchronous search writes its row when its job completes, with the real
-result count -- never a "success with 0 results" at submission.
+Rule (Story #2117 replaced the success-only rule): a search whose result is
+known and successful is a success row; a failed search, or one that answered
+without having run, is a failure row with a neutral error class. A cancelled
+job writes nothing; an asynchronous search writes its row when its job
+completes, with the real result count -- never a "success with 0 results"
+at submission.
 
 Each test drives a real front door and reads the REAL store (SQLite and
 PostgreSQL) through the REAL SearchEventLogWriter. The REST async test runs
@@ -133,7 +135,7 @@ class TestRestAsyncQueryThatDidNotComplete:
         assert len(jobs.cancelled) == 1
         assert env.rec.rows() == []
 
-    def test_async_query_that_raises_records_no_row(self, env, monkeypatch):
+    def test_async_query_that_raises_records_a_failure_row(self, env, monkeypatch):
         from code_indexer.server.query.semantic_query_manager import (
             SemanticQueryError,
         )
@@ -147,7 +149,12 @@ class TestRestAsyncQueryThatDidNotComplete:
         with pytest.raises(SemanticQueryError):
             jobs.run_pending()
 
-        assert env.rec.rows() == []
+        [row] = env.rec.rows()
+        assert (row["tool"], row["outcome"], row["error_class"]) == (
+            "POST /api/query",
+            "failure",
+            "SemanticQueryError",
+        )
 
 
 class TestRestAsyncQuery:
@@ -207,7 +214,7 @@ def _mcp_app_module(env: "Env", **extra: Any) -> SimpleNamespace:
 class TestMcpSearchThatNeverRan:
     """Bug #2113: success true without a search result records nothing."""
 
-    def test_providers_unavailable_records_no_row(self, env, monkeypatch):
+    def test_providers_unavailable_records_a_failure_row(self, env, monkeypatch):
         from code_indexer.server.mcp.handlers.search import search_code
         from code_indexer.server.services.config_service import get_config_service
 
@@ -229,9 +236,14 @@ class TestMcpSearchThatNeverRan:
         assert body["success"] is True, body
         completeness = body["results"]["query_metadata"]["completeness"]
         assert completeness == "providers_unavailable"
-        assert env.rec.rows() == []
+        [row] = env.rec.rows()
+        assert (row["outcome"], row["error_class"], row["result_count"]) == (
+            "failure",
+            "providers_unavailable",
+            0,
+        )
 
-    def test_omni_search_where_every_repository_failed_records_no_row(self, env):
+    def test_omni_search_where_every_repository_failed_records_a_failure_row(self, env):
         from code_indexer.server.mcp.handlers._utils import (
             _format_omni_response,
             _mcp_response,
@@ -273,7 +285,12 @@ class TestMcpSearchThatNeverRan:
         assert body["success"] is True, body
         assert body["results"]["total_repos_searched"] == 0, body
         assert body["results"]["errors"], body
-        assert env.rec.rows() == []
+        [row] = env.rec.rows()
+        assert (row["repo_alias"], row["outcome"], row["error_class"]) == (
+            None,
+            "failure",
+            "no_repository_searched",
+        )
 
 
 class TestMcpOmniResultCount:
@@ -320,7 +337,9 @@ class TestMcpOmniResultCount:
 
 
 class TestMcpHandledError:
-    def test_handled_error_records_no_row(self, env):
+    def test_unknown_repository_is_a_rejection_with_no_row(self, env):
+        """Story #2117 (owner ruling): an unknown repository is rejected
+        before it resolves, so nothing is recorded."""
         from code_indexer.server.mcp.handlers.search import search_code
 
         app_module = SimpleNamespace(
@@ -349,4 +368,5 @@ class TestMcpHandledError:
 
         assert body["success"] is False, body
         assert "not found" in body["error"]
+        assert body["error_code"] == "REPOSITORY_NOT_FOUND"
         assert env.rec.rows() == []

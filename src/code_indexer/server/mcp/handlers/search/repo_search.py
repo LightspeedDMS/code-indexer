@@ -68,6 +68,12 @@ def _repo_lookup_error(
         available_values=available_repos,
     )
     error_envelope["results"] = []
+    # Story #2117: a rejection before the repository resolved (not recorded).
+    from code_indexer.server.services.search_event_outcomes import (
+        REPOSITORY_NOT_FOUND_CODE,
+    )
+
+    error_envelope["error_code"] = REPOSITORY_NOT_FOUND_CODE
     return _mcp_response(error_envelope)
 
 

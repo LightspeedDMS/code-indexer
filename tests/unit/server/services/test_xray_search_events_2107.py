@@ -17,7 +17,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, List
 from unittest.mock import patch
 
 import pytest
@@ -244,6 +244,77 @@ def _rest_client(env: XRayEnv, username: str) -> Any:
     return TestClient(app)
 
 
+class TestXRayJobThatRaises:
+    """Story #2117: an X-Ray job that raises before producing a result is a
+    failure row (its exception's class). The engine is the stand-in."""
+
+    def test_rest_xray_job_that_raises_records_a_failure_row(self, env):
+        from code_indexer.xray.search_engine import XRaySearchEngine
+
+        def _boom(self: Any, **_: Any) -> Any:
+            raise RuntimeError("engine crashed")
+
+        response = _rest_client(env, "dave").post(
+            "/api/xray/search",
+            json={
+                "repository_alias": "example-repo-global",
+                "driver_regex": r"def example_",
+                "evaluator_code": ALWAYS_MATCH_EVALUATOR,
+                "search_target": "content",
+            },
+        )
+        assert response.status_code == 202, response.text
+        with patch.object(XRaySearchEngine, "run", _boom):
+            with pytest.raises(RuntimeError):
+                env.bjm.run_pending()
+
+        assert _failure(env.rec.rows(search_type="xray")) == (
+            "POST /api/xray/search",
+            "failure",
+            "RuntimeError",
+        )
+
+    def test_batch_job_that_raises_records_a_failure_row(self, env):
+        from code_indexer.server.mcp.handlers import xray_batch
+
+        def _boom(**_: Any) -> Any:
+            raise RuntimeError("batch crashed")
+
+        xray_batch.handle_xray_search_batch(
+            {"repository_alias": "example-repo-global", "scans": _BATCH_SCANS},
+            make_user("erin"),
+        )
+        with patch.object(xray_batch, "_run_xray_batch_job", _boom):
+            with pytest.raises(RuntimeError):
+                env.bjm.run_pending()
+
+        assert _failure(env.rec.rows(search_type="xray")) == (
+            "xray_search_batch",
+            "failure",
+            "RuntimeError",
+        )
+
+    def test_mcp_xray_job_that_raises_records_a_failure_row(self, env):
+        """MCP xray_search runs its job on the X-Ray executor and awaits it
+        inside the handler (no BackgroundJobManager); the job's exception
+        propagates out of the handler to the MCP dispatcher."""
+        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from code_indexer.xray.search_engine import XRaySearchEngine
+
+        def _boom(self: Any, **_: Any) -> Any:
+            raise RuntimeError("engine crashed")
+
+        with patch.object(XRaySearchEngine, "run", _boom):
+            with pytest.raises(RuntimeError):
+                _run_async(handle_xray_search(dict(_SINGLE_SEARCH), make_user()))
+
+        assert _failure(env.rec.rows(search_type="xray")) == (
+            "xray_search",
+            "failure",
+            "RuntimeError",
+        )
+
+
 class TestRestXraySearch:
     def test_rest_xray_search_records_one_row_when_job_completes(self, env):
         response = _rest_client(env, "dave").post(
@@ -325,6 +396,54 @@ class TestXrayBatch:
         )
 
 
+_TWO_REPOS = ["first-repo-global", "second-repo-global"]
+
+
+class TestXrayBatchPerRepository:
+    """Bug #2111: a batch over several repositories writes one row per
+    repository, with that repository's own match count and outcome."""
+
+    def test_two_repository_batch_writes_one_row_per_repository(self, env):
+        from code_indexer.server.mcp.handlers.xray_batch import (
+            handle_xray_search_batch,
+        )
+
+        handle_xray_search_batch(
+            {"repository_alias": list(_TWO_REPOS), "scans": _BATCH_SCANS},
+            make_user("erin"),
+        )
+        env.bjm.run_pending()
+
+        rows = env.rec.rows(search_type="xray")
+        assert {r["repo_alias"]: (r["result_count"], r["outcome"]) for r in rows} == {
+            "first-repo-global": (6, "success"),
+            "second-repo-global": (6, "success"),
+        }
+        assert len({r["correlation_id"] for r in rows}) == 1
+
+    def test_two_repository_batch_that_raises_writes_a_failure_row_each(self, env):
+        from code_indexer.server.mcp.handlers import xray_batch
+
+        def _boom(**_: Any) -> Any:
+            raise RuntimeError("batch crashed")
+
+        xray_batch.handle_xray_search_batch(
+            {"repository_alias": list(_TWO_REPOS), "scans": _BATCH_SCANS},
+            make_user("erin"),
+        )
+        with patch.object(xray_batch, "_run_xray_batch_job", _boom):
+            with pytest.raises(RuntimeError):
+                env.bjm.run_pending()
+
+        rows = env.rec.rows(search_type="xray")
+        assert sorted(
+            (r["repo_alias"], r["outcome"], r["error_class"]) for r in rows
+        ) == [
+            ("first-repo-global", "failure", "RuntimeError"),
+            ("second-repo-global", "failure", "RuntimeError"),
+        ]
+
+
 _SINGLE_SEARCH = {
     "repository_alias": "example-repo-global",
     "pattern": r"def example_",
@@ -378,10 +497,17 @@ class TestExportFilter:
 _RIPGREP_REJECTED = r"def example_(?=\d)"
 
 
-class TestFailedSearchesRecordNothing:
-    """Bug #2113: a row only for a successful search whose result is known."""
+def _failure(rows: List[Dict[str, Any]]) -> tuple:
+    """(tool, outcome, error_class) of the one row recorded."""
+    [row] = rows
+    return (row["tool"], row["outcome"], row["error_class"])
 
-    def test_mcp_xray_search_whose_driver_failed_records_no_row(self, env):
+
+class TestFailedSearchesRecordAFailureRow:
+    """Story #2117 (replacing Bug #2113's success-only rule): a search that
+    ran and failed is a failure row with its error class."""
+
+    def test_mcp_xray_search_whose_driver_failed_records_a_failure_row(self, env):
         from code_indexer.server.mcp.handlers.xray import handle_xray_search
 
         body = _mcp_body(
@@ -393,9 +519,13 @@ class TestFailedSearchesRecordNothing:
         )
 
         assert body.get("phase1_failed") is True, body
-        assert env.rec.rows(search_type="xray") == []
+        assert _failure(env.rec.rows(search_type="xray")) == (
+            "xray_search",
+            "failure",
+            "phase1_failed",
+        )
 
-    def test_mcp_xray_explore_whose_driver_failed_records_no_row(self, env):
+    def test_mcp_xray_explore_whose_driver_failed_records_a_failure_row(self, env):
         from code_indexer.server.mcp.handlers.xray import handle_xray_explore
 
         body = _mcp_body(
@@ -407,9 +537,13 @@ class TestFailedSearchesRecordNothing:
         )
 
         assert body.get("phase1_failed") is True, body
-        assert env.rec.rows(search_type="xray") == []
+        assert _failure(env.rec.rows(search_type="xray")) == (
+            "xray_explore",
+            "failure",
+            "phase1_failed",
+        )
 
-    def test_rest_xray_search_whose_driver_failed_records_no_row(self, env):
+    def test_rest_xray_search_whose_driver_failed_records_a_failure_row(self, env):
         response = _rest_client(env, "dave").post(
             "/api/xray/search",
             json={
@@ -425,9 +559,13 @@ class TestFailedSearchesRecordNothing:
 
         [job_result] = env.bjm.results.values()
         assert job_result.get("phase1_failed") is True, job_result
-        assert env.rec.rows(search_type="xray") == []
+        assert _failure(env.rec.rows(search_type="xray")) == (
+            "POST /api/xray/search",
+            "failure",
+            "phase1_failed",
+        )
 
-    def test_batch_whose_every_cell_failed_records_no_row(self, env):
+    def test_batch_whose_every_cell_failed_records_a_failure_row(self, env):
         from code_indexer.server.mcp.handlers.xray_batch import (
             handle_xray_search_batch,
         )
@@ -442,7 +580,11 @@ class TestFailedSearchesRecordNothing:
 
         [job_result] = env.bjm.results.values()
         assert [e["error"] for e in job_result["errors"]] == ["phase1_failed"] * 2
-        assert env.rec.rows(search_type="xray") == []
+        assert _failure(env.rec.rows(search_type="xray")) == (
+            "xray_search_batch",
+            "failure",
+            "no_cell_ran",
+        )
 
     def test_batch_with_one_failed_cell_records_the_cells_that_ran(self, env):
         from code_indexer.server.mcp.handlers.xray_batch import (
@@ -472,22 +614,26 @@ _TIMEOUT_ERROR = {
 }
 
 
-class TestXrayResultIsKnown:
+class TestXrayResultOutcome:
     """The engine's timeout shapes (xray/search_engine.py), which a test
-    cannot produce quickly end to end, decided by the shared predicate."""
+    cannot produce quickly end to end, classified by the shared outcome
+    classifier (None = success, else the error class)."""
 
-    def test_phase1_timeout_is_not_known(self):
-        from code_indexer.server.services.search_event_recording import (
-            xray_result_is_known,
+    def test_phase1_timeout_is_a_timeout(self):
+        from code_indexer.server.services.search_event_outcomes import (
+            xray_result_outcome,
         )
 
-        assert not xray_result_is_known(
-            {"matches": [], "files_total": 2, "partial": True, "timeout": True}
+        assert (
+            xray_result_outcome(
+                {"matches": [], "files_total": 2, "partial": True, "timeout": True}
+            )
+            == "timeout"
         )
 
-    def test_phase2_timeout_without_matches_is_not_known(self):
-        from code_indexer.server.services.search_event_recording import (
-            xray_result_is_known,
+    def test_phase2_timeout_without_matches_is_a_timeout(self):
+        from code_indexer.server.services.search_event_outcomes import (
+            xray_result_outcome,
         )
 
         result = {
@@ -496,12 +642,12 @@ class TestXrayResultIsKnown:
             "partial": True,
             "timeout": True,
         }
-        assert not xray_result_is_known(result)
-        assert xray_result_is_known({**result, "matches": [{"line_number": 1}]})
+        assert xray_result_outcome(result) == "timeout"
+        assert xray_result_outcome({**result, "matches": [{"line_number": 1}]}) is None
 
-    def test_batch_whose_only_cell_timed_out_is_not_known(self):
-        from code_indexer.server.services.search_event_recording import (
-            xray_result_is_known,
+    def test_batch_whose_only_cell_timed_out_ran_no_cell(self):
+        from code_indexer.server.services.search_event_outcomes import (
+            xray_result_outcome,
         )
 
         cell_error = {**_TIMEOUT_ERROR, "repository_alias": "a", "scan_index": 0}
@@ -513,18 +659,20 @@ class TestXrayResultIsKnown:
             "timeout": False,
             "cancelled": False,
         }
-        assert not xray_result_is_known(batch)
-        assert xray_result_is_known({**batch, "total_cells": 2})
+        assert xray_result_outcome(batch) == "no_cell_ran"
+        assert xray_result_outcome({**batch, "total_cells": 2}) is None
 
     def test_malformed_result_never_raises_and_records_nothing(self, env):
         import time
 
         from code_indexer.server.services.search_event_recording import (
+            SearchOrigin,
             record_xray_search,
         )
 
         record_xray_search(
             env.rec.writer,
+            origin=SearchOrigin(tool="xray_search", door="mcp"),
             username="alice",
             repo_alias="example-repo-global",
             pattern=r"def example_",
@@ -537,9 +685,9 @@ class TestXrayResultIsKnown:
 
     def test_batch_cell_with_a_per_file_timeout_still_completed(self):
         """A per-file EvaluatorTimeout (5 s sandbox) names its file: the cell
-        ran over the other files, so the batch result is known."""
-        from code_indexer.server.services.search_event_recording import (
-            xray_result_is_known,
+        ran over the other files, so the batch is a success."""
+        from code_indexer.server.services.search_event_outcomes import (
+            xray_result_outcome,
         )
 
         per_file = {
@@ -556,7 +704,7 @@ class TestXrayResultIsKnown:
             "timeout": False,
             "cancelled": False,
         }
-        assert xray_result_is_known(batch)
+        assert xray_result_outcome(batch) is None
 
 
 # validate_rust_evaluator accepts it (the whitelist is lexical); rustc rejects
@@ -571,11 +719,11 @@ _COMPILE_ERROR_EVALUATOR = (
 )
 
 
-class TestEvaluatorThatFailsRecordsNothing:
-    """Bug #2113: an evaluator that never ran (compile or xray-cli failure)
-    is not a 0-result search."""
+class TestEvaluatorThatFailsRecordsAFailureRow:
+    """An evaluator that never ran (compile or xray-cli failure) is not a
+    0-result search: Story #2117 records it as a failure."""
 
-    def test_mcp_xray_search_whose_evaluator_failed_to_compile_records_no_row(
+    def test_mcp_xray_search_whose_evaluator_failed_to_compile_records_a_failure(
         self, env
     ):
         from code_indexer.server.mcp.handlers.xray import handle_xray_search
@@ -593,9 +741,13 @@ class TestEvaluatorThatFailsRecordsNothing:
         assert [
             (e["file_path"], e["error_type"]) for e in body["evaluation_errors"]
         ] == [("", "CompileError")], body
-        assert env.rec.rows(search_type="xray") == []
+        assert _failure(env.rec.rows(search_type="xray")) == (
+            "xray_search",
+            "failure",
+            "compile_error",
+        )
 
-    def test_batch_whose_every_cell_failed_to_compile_records_no_row(self, env):
+    def test_batch_whose_every_cell_failed_to_compile_records_a_failure(self, env):
         from code_indexer.server.mcp.handlers.xray_batch import (
             handle_xray_search_batch,
         )
@@ -615,7 +767,11 @@ class TestEvaluatorThatFailsRecordsNothing:
         assert {e["error_type"] for e in job_result["evaluation_errors"]} == {
             "CompileError"
         }, job_result
-        assert env.rec.rows(search_type="xray") == []
+        assert _failure(env.rec.rows(search_type="xray")) == (
+            "xray_search_batch",
+            "failure",
+            "no_cell_ran",
+        )
 
 
 class TestCancelledMcpJobsRecordNothing:
@@ -627,11 +783,36 @@ class TestCancelledMcpJobsRecordNothing:
     def test_job_cancelled_while_running_records_no_row(self, env, handler_name):
         from code_indexer.server.mcp.handlers import xray
 
-        env.tracker.cancel_on_start = True
+        env.tracker.start_error = "cancelled"
 
         _run_async(getattr(xray, handler_name)(dict(_SINGLE_SEARCH), make_user()))
 
         assert list(env.tracker.failed.values()) == ["cancelled"]
+        assert env.rec.rows(search_type="xray") == []
+
+    def test_job_failed_for_another_reason_still_records_its_row(self, env):
+        """Only a cancellation (BackgroundJobManager.cancel_job fails the job
+        with "cancelled") suppresses the row; a job the tracker failed for
+        any other reason is not a cancellation."""
+        from code_indexer.server.mcp.handlers import xray
+
+        env.tracker.start_error = "Orphaned by server restart"
+
+        _run_async(xray.handle_xray_search(dict(_SINGLE_SEARCH), make_user()))
+
+        [row] = env.rec.rows(search_type="xray")
+        assert (row["outcome"], row["result_count"]) == ("success", 3)
+
+    def test_status_update_that_raises_before_the_search_records_nothing(self, env):
+        from code_indexer.server.mcp.handlers import xray
+
+        def _unwritable(job_id: str, status: str, **_: Any) -> None:
+            raise RuntimeError("job store unwritable")
+
+        with patch.object(env.tracker, "update_status", _unwritable):
+            with pytest.raises(RuntimeError):
+                _run_async(xray.handle_xray_search(dict(_SINGLE_SEARCH), make_user()))
+
         assert env.rec.rows(search_type="xray") == []
 
 

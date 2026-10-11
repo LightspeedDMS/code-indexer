@@ -17,6 +17,10 @@ from typing import Any, Dict, Optional, Tuple
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.search_event_outcomes import (
+    REPOSITORY_NOT_FOUND_CODE,
+    SERVICE_UNAVAILABLE_CODE,
+)
 from code_indexer.server.services.temporal_live_dispatch import (
     execute_live_temporal_search,
 )
@@ -55,13 +59,21 @@ def _resolve_temporal_repo_path(
             {
                 "success": False,
                 "error": "Repository service not available",
+                "error_code": SERVICE_UNAVAILABLE_CODE,
                 "results": [],
             }
         )
     try:
         repo_path = _arm.get_activated_repo_path(user.username, repository_alias)
     except Exception as exc:
-        return None, _mcp_response({"success": False, "error": str(exc), "results": []})
+        return None, _mcp_response(
+            {
+                "success": False,
+                "error": str(exc),
+                "error_code": REPOSITORY_NOT_FOUND_CODE,
+                "results": [],
+            }
+        )
     return str(repo_path), None
 
 
@@ -141,6 +153,7 @@ def _execute_temporal_via_live_dispatch(
             {
                 "success": False,
                 "error": "Background job/payload cache service not available",
+                "error_code": SERVICE_UNAVAILABLE_CODE,
                 "results": [],
             }
         )

@@ -234,7 +234,7 @@ class TestWebQueryPage:
         assert row["search_type"] == "temporal"
 
     @pytest.mark.parametrize("handler", [PARTIAL, FULL_PAGE])
-    def test_failed_web_query_records_no_row(self, env, monkeypatch, handler):
+    def test_failed_web_query_records_a_failure_row(self, env, monkeypatch, handler):
         html = _web_query(
             env,
             handler,
@@ -245,14 +245,21 @@ class TestWebQueryPage:
         )
 
         assert "Query failed" in html
-        assert env.rec.rows() == []
+        # Story #2117: a query that raised is a failure row (its class).
+        [row] = env.rec.rows()
+        assert (row["tool"], row["door"], row["outcome"], row["error_class"]) == (
+            "web:query",
+            "web",
+            "failure",
+            "SemanticQueryError",
+        )
 
     def test_scip_mode_web_query_records_one_scip_row(self, env, monkeypatch):
         from code_indexer.server.web import routes as web_routes
 
         rows = [{"file_path": "src/a.py", "scip_symbol": "Calculator"}] * 3
         monkeypatch.setattr(
-            web_routes, "_execute_scip_query", lambda *a, **k: (rows, None)
+            web_routes, "_execute_scip_query", lambda *a, **k: (rows, None, None)
         )
         _web_query(
             env,
@@ -322,13 +329,72 @@ class TestWebQueryPage:
         )
         assert row["query_text"] == "Foo -> Bar"
 
+    @pytest.mark.parametrize("handler", [PARTIAL, FULL_PAGE])
+    def test_scip_query_that_raises_records_a_failure_row(
+        self, env, monkeypatch, handler
+    ):
+        """Story #2117: a SCIP query that ran on a resolved repository and
+        raised is a failure row (its exception's class)."""
+        from code_indexer.scip.query import primitives
+
+        class _BrokenEngine:
+            def __init__(self, *_: Any, **__: Any) -> None:
+                pass
+
+            def find_definition(self, *_: Any, **__: Any) -> List[Any]:
+                raise RuntimeError("SCIP database unreadable")
+
+        monkeypatch.setattr(primitives, "SCIPQueryEngine", _BrokenEngine)
+        _web_query(
+            env,
+            handler,
+            _QueryManager(),
+            monkeypatch,
+            repos=[_scip_repo_with_index(env.tmp)],
+            query_text="Calculator",
+            search_mode="scip",
+            scip_query_type="definition",
+        )
+
+        [row] = env.rec.rows()
+        assert (row["search_type"], row["outcome"], row["error_class"]) == (
+            "scip",
+            "failure",
+            "RuntimeError",
+        )
+        assert (row["tool"], row["door"], row["repo_alias"]) == (
+            "web:query",
+            "web",
+            "example-repo",
+        )
+
+    @pytest.mark.parametrize("handler", [PARTIAL, FULL_PAGE])
+    def test_scip_callchain_with_one_symbol_records_no_row(
+        self, env, monkeypatch, handler
+    ):
+        """A call chain needs two symbols: the request is refused before any
+        search runs, so nothing is recorded."""
+        _use_scip_engine(monkeypatch)
+        _web_query(
+            env,
+            handler,
+            _QueryManager(),
+            monkeypatch,
+            repos=[_scip_repo_with_index(env.tmp)],
+            query_text="OnlyOne",
+            search_mode="scip",
+            scip_query_type="callchain",
+        )
+
+        assert env.rec.rows() == []
+
     def test_failed_scip_mode_web_query_records_no_row(self, env, monkeypatch):
         from code_indexer.server.web import routes as web_routes
 
         monkeypatch.setattr(
             web_routes,
             "_execute_scip_query",
-            lambda *a, **k: ([], "No SCIP index found for repository"),
+            lambda *a, **k: ([], "No SCIP index found for repository", None),
         )
         _web_query(
             env,
@@ -395,13 +461,20 @@ class TestWikiSearch:
         )
         assert (row["query_text"], row["result_count"]) == ("token refresh", 2)
 
-    def test_failed_wiki_search_records_no_row(self, env):
+    def test_failed_wiki_search_records_a_failure_row(self, env):
         response = _wiki_get(
             env, "/wiki/example-repo/_search?q=token", _QueryManager(fail=True)
         )
 
         assert "error" in response.json()
-        assert env.rec.rows() == []
+        # Story #2117: a search that raised is a failure row (its class).
+        [row] = env.rec.rows()
+        assert (row["tool"], row["door"], row["outcome"], row["error_class"]) == (
+            "web:wiki_search",
+            "web",
+            "failure",
+            "SemanticQueryError",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +504,10 @@ class _MultiSearchService:
         if context is not None:
             context.record_provider_cache_fields(
                 "voyage-ai", cache_hit=False, cache_mode="active", latency_ms=9
+            )
+            # Like the real service: the repositories it resolved.
+            context.note_repositories(
+                searched=["first-repo", "second-repo"], failed=["third-repo"]
             )
         hit = {"file_path": "src/a.py", "score": 0.9, "content": "def a(): pass"}
         return MultiSearchResponse(
@@ -469,9 +546,13 @@ class TestRestMultiQuery:
         assert response.status_code == 200, response.text
 
         rows = env.rec.rows(search_type="semantic")
-        assert sorted((r["repo_alias"], r["result_count"]) for r in rows) == [
-            ("first-repo", 2),
-            ("second-repo", 0),
+        # Story #2117: the repository that failed gets a failure row.
+        assert sorted(
+            (r["repo_alias"], r["result_count"], r["outcome"]) for r in rows
+        ) == [
+            ("first-repo", 2, "success"),
+            ("second-repo", 0, "success"),
+            ("third-repo", 0, "failure"),
         ]
         assert {(r["username"], r["query_text"]) for r in rows} == {
             ("gina", "token refresh")

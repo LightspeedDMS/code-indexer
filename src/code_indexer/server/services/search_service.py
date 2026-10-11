@@ -705,8 +705,8 @@ class SemanticSearchService:
                     # a torn triple.
                     _event_ctx.record_provider_cache_fields(
                         embedding_service.get_provider_name(),
-                        cache_hit=_embed_meta.key_found,
-                        cache_mode=_embed_meta.cache_mode,
+                        cache_hit=_embed_meta.search_event_cache_hit,
+                        cache_mode=_embed_meta.search_event_cache_mode,
                         latency_ms=_embed_meta.provider_latency_ms,
                     )
                 # Story #1293: emit the durable search_embed_event row for this

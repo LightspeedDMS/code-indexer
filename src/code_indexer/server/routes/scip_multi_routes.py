@@ -18,13 +18,16 @@ All endpoints require JWT authentication and support:
 import logging
 import time
 from fastapi import APIRouter, Depends, HTTPException, Request
-from typing import Optional, Dict, Any, List
+from typing import Callable, Optional, Dict, Any, List
 
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.search_event_recording import (
-    record_grouped_search,
+    record_multi_repository_search,
+    recording_multi_repository_failure,
+    rest_origin,
     scip_callchain_query_text,
+    search_event_scope,
     writer_from_app,
 )
 
@@ -161,23 +164,41 @@ def _apply_multi_scip_truncation(
 def _recorded_multi_scip(
     http_request: Request,
     user: User,
-    response: SCIPMultiResponse,
     query_text: str,
-    started: float,
-) -> Dict[str, Any]:
-    """Record a completed multi-repository SCIP search (Story #2116): one
-    scip row per searched repository (failed or skipped repositories are not
-    in `results`), then return the truncated response."""
-    record_grouped_search(
-        writer_from_app(http_request.app),
-        response.results,
-        search_type="scip",
+    run: Callable[[], SCIPMultiResponse],
+) -> SCIPMultiResponse:
+    """Run one multi-repository SCIP search (`run`, the service call) and
+    record it (Story #2116/#2117): one scip row per repository the service
+    resolved -- searched with its own count, failed after resolving with
+    `repository_failed`; a skipped repository (no SCIP index) or an alias
+    that never resolved writes none. A whole-call failure is a failure row
+    per resolved repository; the exception propagates."""
+    started = time.monotonic()
+    writer = writer_from_app(http_request.app)
+    origin = rest_origin(http_request)
+    with search_event_scope(
         username=user.username,
+        repo_alias=None,
+        search_type="scip",
         query_text=query_text,
-        started_monotonic=started,
-        correlation_id=get_correlation_id(),
-    )
-    return _apply_multi_scip_truncation(response)
+    ) as context:
+        with recording_multi_repository_failure(
+            writer,
+            origin=origin,
+            context=context,
+            started_monotonic=started,
+            correlation_id=get_correlation_id(),
+        ):
+            response = run()
+            record_multi_repository_search(
+                writer,
+                response.results,
+                origin=origin,
+                context=context,
+                started_monotonic=started,
+                correlation_id=get_correlation_id(),
+            )
+    return response
 
 
 @router.post("/definition", response_model=SCIPMultiResponse)
@@ -287,8 +308,9 @@ def multi_repository_definition(
         service = get_scip_multi_service()
 
         # Execute definition lookup
-        started = time.monotonic()
-        response = service.definition(request)
+        response = _recorded_multi_scip(
+            http_request, user, request.symbol, lambda: service.definition(request)
+        )
 
         # Log response summary
         logger.info(
@@ -298,9 +320,7 @@ def multi_repository_definition(
         )
 
         # Story #685: Apply SCIP payload truncation to context fields (sync call)
-        return _recorded_multi_scip(
-            http_request, user, response, request.symbol, started
-        )
+        return _apply_multi_scip_truncation(response)
 
     except ValueError as e:
         # Validation error from service
@@ -395,8 +415,9 @@ def multi_repository_references(
         service = get_scip_multi_service()
 
         # Execute references lookup
-        started = time.monotonic()
-        response = service.references(request)
+        response = _recorded_multi_scip(
+            http_request, user, request.symbol, lambda: service.references(request)
+        )
 
         # Log response summary
         logger.info(
@@ -406,9 +427,7 @@ def multi_repository_references(
         )
 
         # Story #685: Apply SCIP payload truncation to context fields (sync call)
-        return _recorded_multi_scip(
-            http_request, user, response, request.symbol, started
-        )
+        return _apply_multi_scip_truncation(response)
 
     except ValueError as e:
         # Validation error from service
@@ -503,8 +522,9 @@ def multi_repository_dependencies(
         service = get_scip_multi_service()
 
         # Execute dependencies analysis
-        started = time.monotonic()
-        response = service.dependencies(request)
+        response = _recorded_multi_scip(
+            http_request, user, request.symbol, lambda: service.dependencies(request)
+        )
 
         # Log response summary
         logger.info(
@@ -514,9 +534,7 @@ def multi_repository_dependencies(
         )
 
         # Story #685: Apply SCIP payload truncation to context fields (sync call)
-        return _recorded_multi_scip(
-            http_request, user, response, request.symbol, started
-        )
+        return _apply_multi_scip_truncation(response)
 
     except ValueError as e:
         # Validation error from service
@@ -611,8 +629,9 @@ def multi_repository_dependents(
         service = get_scip_multi_service()
 
         # Execute dependents analysis
-        started = time.monotonic()
-        response = service.dependents(request)
+        response = _recorded_multi_scip(
+            http_request, user, request.symbol, lambda: service.dependents(request)
+        )
 
         # Log response summary
         logger.info(
@@ -622,9 +641,7 @@ def multi_repository_dependents(
         )
 
         # Story #685: Apply SCIP payload truncation to context fields (sync call)
-        return _recorded_multi_scip(
-            http_request, user, response, request.symbol, started
-        )
+        return _apply_multi_scip_truncation(response)
 
     except ValueError as e:
         # Validation error from service
@@ -721,9 +738,13 @@ def multi_repository_callchain(
         # Get service instance
         service = get_scip_multi_service()
 
-        # Execute callchain tracing
-        started = time.monotonic()
-        response = service.callchain(request)
+        # Execute callchain tracing (recorded per resolved repository)
+        response = _recorded_multi_scip(
+            http_request,
+            user,
+            scip_callchain_query_text(request.from_symbol, request.to_symbol),
+            lambda: service.callchain(request),
+        )
 
         # Log response summary
         logger.info(
@@ -733,13 +754,7 @@ def multi_repository_callchain(
         )
 
         # Story #685: Apply SCIP payload truncation to context fields (sync call)
-        return _recorded_multi_scip(
-            http_request,
-            user,
-            response,
-            scip_callchain_query_text(request.from_symbol, request.to_symbol),
-            started,
-        )
+        return _apply_multi_scip_truncation(response)
 
     except ValueError as e:
         # Validation error from service

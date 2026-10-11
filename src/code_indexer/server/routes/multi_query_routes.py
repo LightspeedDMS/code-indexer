@@ -285,26 +285,40 @@ def multi_repository_query(
         service = get_multi_search_service()
 
         # Execute search. Story #2115: inside a search event context (the
-        # embedding call sites record their cache fields into it), then one
-        # row per searched repository; a search that raises records nothing.
+        # embedding call sites record their cache fields into it, and the
+        # service notes the repositories it resolved). Bug #2111 / Story
+        # #2117: one row per resolved repository (repository_failed for one
+        # that failed after resolving, none for an alias that never
+        # resolved); a whole-call failure is a failure row per resolved
+        # repository with the exception's class (the context manager records
+        # it and re-raises).
         started = time.monotonic()
+        writer = search_event_recording.writer_from_app(http_request.app)
+        origin = search_event_recording.SearchOrigin(
+            tool="POST /api/query/multi", door="rest"
+        )
         with search_event_recording.search_event_scope(
             username=user.username,
             repo_alias=None,
             search_type=request.search_type,
             query_text=request.query,
         ) as event_context:
-            response = service.search(request)
-        search_event_recording.record_grouped_search(
-            search_event_recording.writer_from_app(http_request.app),
-            response.results,
-            search_type=request.search_type,
-            username=user.username,
-            query_text=request.query,
-            started_monotonic=started,
-            correlation_id=get_correlation_id(),
-            context=event_context,
-        )
+            with search_event_recording.recording_multi_repository_failure(
+                writer,
+                origin=origin,
+                context=event_context,
+                started_monotonic=started,
+                correlation_id=get_correlation_id(),
+            ):
+                response = service.search(request)
+                search_event_recording.record_multi_repository_search(
+                    writer,
+                    response.results,
+                    origin=origin,
+                    context=event_context,
+                    started_monotonic=started,
+                    correlation_id=get_correlation_id(),
+                )
 
         # Story #683: Apply payload truncation to results
         # Story #50: Now sync call (underlying handlers are sync)

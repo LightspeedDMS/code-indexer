@@ -325,11 +325,12 @@ class TestQueryForExport:
         assert len(rows) == 1
 
     def test_cache_hit_filter_hits_only(self, search_backend):
+        # Bug #2112: a hit counts only for a consulted cache (a mode is set).
         search_backend.insert_batch(
             [
-                _make_search_event(voyage_cache_hit=True),
-                _make_search_event(voyage_cache_hit=False),
-                _make_search_event(cohere_cache_hit=True),
+                _make_search_event(voyage_cache_hit=True, voyage_cache_mode="on"),
+                _make_search_event(voyage_cache_hit=False, voyage_cache_mode="on"),
+                _make_search_event(cohere_cache_hit=True, cohere_cache_mode="on"),
             ]
         )
         rows = _read_export(search_backend, {"cache_hit_filter": "hits_only"})
@@ -340,13 +341,19 @@ class TestQueryForExport:
     def test_cache_hit_filter_misses_only(self, search_backend):
         search_backend.insert_batch(
             [
-                _make_search_event(voyage_cache_hit=True),
-                _make_search_event(voyage_cache_hit=False, cohere_cache_hit=False),
+                _make_search_event(voyage_cache_hit=True, voyage_cache_mode="on"),
+                _make_search_event(
+                    voyage_cache_hit=False,
+                    voyage_cache_mode="on",
+                    cohere_cache_hit=False,
+                    cohere_cache_mode="on",
+                ),
+                # Bug #2112: no cache consulted -- not a miss.
                 _make_search_event(voyage_cache_hit=None, cohere_cache_hit=None),
             ]
         )
         rows = _read_export(search_backend, {"cache_hit_filter": "misses_only"})
-        assert len(rows) == 2
+        assert len(rows) == 1
 
     def test_cache_hit_filter_all_returns_all(self, search_backend):
         search_backend.insert_batch(

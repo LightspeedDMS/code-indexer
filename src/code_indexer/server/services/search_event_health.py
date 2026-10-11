@@ -6,7 +6,8 @@ DEGRADED reason. Pure in-memory reads: safe on the health hot path.
 """
 
 import logging
-from typing import Any, List, Optional
+import time
+from typing import Any, Dict, List, Optional
 
 from code_indexer.server.models.api_models import SearchEventLogHealthInfo
 from code_indexer.server.utils.runtime_node_id import resolve_runtime_node_id
@@ -68,3 +69,54 @@ def search_event_drop_reasons(info: Optional[SearchEventLogHealthInfo]) -> List[
         f"{int(info.seconds_since_last_drop)}s ago): its recording queue was "
         "full; Query Analytics exports are missing those searches"
     ]
+
+
+def search_event_log_window(writer: Any) -> Dict[str, Any]:
+    """Story #2117: what the Query Analytics Export page states about the
+    data an export can contain.
+
+    `retention_days` is the live setting (rows older are pruned), read from
+    the COMMITTED runtime configuration -- a SQLite worker never reloads
+    another worker's save, so the process's cached copy can be stale;
+    `retention_unavailable` is True (and `retention_days` None) when that
+    read failed or held no whole number of days (logged at WARNING).
+    `oldest_timestamp` is the oldest stored row as "YYYY-MM-DD HH:MM:SS UTC"
+    (one indexed MIN read; None when the log is empty or not wired);
+    `oldest_unavailable` is True when that read failed (logged at WARNING).
+    """
+    from code_indexer.server.services.config_service import get_config_service
+
+    window: Dict[str, Any] = {
+        "retention_days": None,
+        "retention_unavailable": False,
+        "oldest_timestamp": None,
+        "oldest_unavailable": False,
+    }
+    try:
+        _version, retention = get_config_service().read_committed_setting(
+            "search_event_log_retention_days"
+        )
+        if isinstance(retention, bool) or not isinstance(retention, int):
+            raise TypeError("retention is not a whole number of days")
+        window["retention_days"] = retention
+    except Exception as exc:  # noqa: BLE001 -- the page still renders
+        logger.warning(
+            "search event log: committed retention setting not read: %s",
+            type(exc).__name__,
+        )
+        window["retention_unavailable"] = True
+    if writer is None:
+        return window
+    try:
+        oldest = writer.backend.oldest_timestamp()
+    except Exception as exc:  # noqa: BLE001 -- the page still renders
+        logger.warning(
+            "search event log: oldest timestamp not read: %s", type(exc).__name__
+        )
+        window["oldest_unavailable"] = True
+        return window
+    if oldest is not None:
+        window["oldest_timestamp"] = time.strftime(
+            "%Y-%m-%d %H:%M:%S UTC", time.gmtime(oldest)
+        )
+    return window

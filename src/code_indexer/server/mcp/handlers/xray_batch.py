@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.search_event_recording import SearchOrigin
 from code_indexer.xray.rust_backend import SharedIdentityCache
 from code_indexer.xray.sandbox import validate_rust_evaluator
 from code_indexer.xray.search_engine import XRaySearchEngine
@@ -526,7 +527,9 @@ def _run_xray_batch_job(
 
 
 def handle_xray_search_batch(
-    params: Dict[str, Any], user: Optional[User]
+    params: Dict[str, Any],
+    user: Optional[User],
+    origin: Optional[SearchOrigin] = None,
 ) -> Dict[str, Any]:
     """MCP handler for the xray_search_batch tool.
 
@@ -809,10 +812,12 @@ def handle_xray_search_batch(
     captured_timeout = timeout_seconds
     captured_cidx_meta = cidx_meta
 
-    # Story #2107: one search event per batch call, recorded by the job when
-    # its result is known. A multi-repo batch has no single alias.
+    # Story #2107 / Bug #2111: the job records the batch when its result is
+    # known -- one row per repository it resolved (an alias it could not
+    # resolve was rejected and gets no row).
     from code_indexer.server.services.search_event_recording import (
         bind_xray_recorder,
+        run_recorded_xray,
         writer_from_app,
     )
     from code_indexer.server.telemetry.correlation_bridge import (
@@ -821,27 +826,32 @@ def handle_xray_search_batch(
 
     record_event = bind_xray_recorder(
         writer_from_app(_lazy_singleton_app_or_none()),
+        origin=origin or SearchOrigin(tool="xray_search_batch", door="mcp"),
         username=user.username,
-        repo_alias=captured_repos[0]["alias"] if len(captured_repos) == 1 else None,
+        repo_alias=None,
         pattern=" | ".join(scan["driver_regex"] for scan in captured_scans),
         correlation_id=get_current_correlation_id(),
+        batch_repositories=[repo["alias"] for repo in captured_repos],
     )
 
     # cancel_check: injected by BackgroundJobManager (declared parameter); a
     # batch cancelled after its last between-cell check records no event.
     def _job_fn(progress_callback, cancel_check=None) -> Dict[str, Any]:  # type: ignore[no-untyped-def]
-        raw_result = _run_xray_batch_job(
-            resolved_repos=captured_repos,
-            scans=captured_scans,
-            repo_errors=captured_repo_errors,
-            cidx_meta_path=captured_cidx_meta,
-            max_results=captured_max_results,
-            timeout_seconds=captured_timeout,
-            job_id=_jid[0] if _jid else "",
-            bjm=bjm,
-            progress_callback=progress_callback,
+        raw_result = run_recorded_xray(
+            record_event,
+            lambda: _run_xray_batch_job(
+                resolved_repos=captured_repos,
+                scans=captured_scans,
+                repo_errors=captured_repo_errors,
+                cidx_meta_path=captured_cidx_meta,
+                max_results=captured_max_results,
+                timeout_seconds=captured_timeout,
+                job_id=_jid[0] if _jid else "",
+                bjm=bjm,
+                progress_callback=progress_callback,
+            ),
+            cancel_check,
         )
-        record_event(raw_result, cancel_check)
         # Bug #1709: probes via _lazy_singleton_app_or_none() instead of a
         # bare getattr(_utils.app_module, "app", None), which would
         # otherwise permanently construct the process-wide app singleton

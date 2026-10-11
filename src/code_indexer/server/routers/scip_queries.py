@@ -18,8 +18,11 @@ from pydantic import BaseModel, Field
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.services.search_event_context import get_search_event_ctx
 from code_indexer.server.services.search_event_recording import (
+    in_scip_search_scope,
     record_scip_search,
+    rest_origin,
     scip_callchain_query_text,
     writer_from_app,
 )
@@ -169,21 +172,31 @@ def _scip_search_payload(
     project: Optional[str],
     query_text: str,
     started: float,
+    error: Optional[BaseException] = None,
 ) -> Dict[str, Any]:
-    """Record a completed SCIP search (Story #2116) and return its payload."""
+    """Record one SCIP search (Story #2116) and return its payload. `error`
+    is the exception a search that raised failed with (Story #2117: its
+    class is the row's error class; a rejection records nothing)."""
     record_scip_search(
         writer_from_app(request.app),
         payload,
+        origin=rest_origin(request),
         username=user.username,
         repo_alias=project,
         query_text=query_text,
         started_monotonic=started,
         correlation_id=get_correlation_id(),
+        error=error,
+        # Bug #2111: a search without a project -- the SCIP service noted on
+        # this endpoint's context (in_scip_search_scope) each repository it
+        # searched and that repository's count.
+        context=get_search_event_ctx(),
     )
     return payload
 
 
 @router.get("/definition")
+@in_scip_search_scope
 def get_definition(
     request: Request,
     symbol: str = Query(..., description="Symbol name to search for"),
@@ -239,10 +252,19 @@ def get_definition(
                 f"Definition query failed: {e}",
             )
         )
-        return {"success": False, "error": str(e)}
+        return _scip_search_payload(
+            request,
+            current_user,
+            {"success": False, "error": str(e)},
+            project,
+            symbol,
+            started,
+            error=e,
+        )
 
 
 @router.get("/references")
+@in_scip_search_scope
 def get_references(
     request: Request,
     symbol: str = Query(..., description="Symbol name to search for"),
@@ -306,10 +328,19 @@ def get_references(
                 f"References query failed: {e}",
             )
         )
-        return {"success": False, "error": str(e)}
+        return _scip_search_payload(
+            request,
+            current_user,
+            {"success": False, "error": str(e)},
+            project,
+            symbol,
+            started,
+            error=e,
+        )
 
 
 @router.get("/dependencies")
+@in_scip_search_scope
 def get_dependencies(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
@@ -373,10 +404,19 @@ def get_dependencies(
                 f"Dependencies query failed: {e}",
             )
         )
-        return {"success": False, "error": str(e)}
+        return _scip_search_payload(
+            request,
+            current_user,
+            {"success": False, "error": str(e)},
+            project,
+            symbol,
+            started,
+            error=e,
+        )
 
 
 @router.get("/dependents")
+@in_scip_search_scope
 def get_dependents(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
@@ -440,10 +480,19 @@ def get_dependents(
                 f"Dependents query failed: {e}",
             )
         )
-        return {"success": False, "error": str(e)}
+        return _scip_search_payload(
+            request,
+            current_user,
+            {"success": False, "error": str(e)},
+            project,
+            symbol,
+            started,
+            error=e,
+        )
 
 
 @router.get("/impact")
+@in_scip_search_scope
 def get_impact(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
@@ -498,10 +547,19 @@ def get_impact(
                 f"Impact analysis failed: {e}",
             )
         )
-        return {"success": False, "error": str(e)}
+        return _scip_search_payload(
+            request,
+            current_user,
+            {"success": False, "error": str(e)},
+            project,
+            symbol,
+            started,
+            error=e,
+        )
 
 
 @router.get("/callchain")
+@in_scip_search_scope
 def get_callchain(
     request: Request,
     from_symbol: str = Query(..., description="Starting symbol"),
@@ -549,16 +607,26 @@ def get_callchain(
                     f"{to_symbol!r}: {timeout_errors}",
                 )
             )
-            return {
-                "success": False,
-                "error": (
-                    "Query timeout exceeded while tracing call chain: "
-                    f"{timeout_errors[0]}"
-                ),
-                "from_symbol": from_symbol,
-                "to_symbol": to_symbol,
-                "chains": [],
-            }
+            from code_indexer.scip.database.queries import QueryTimeoutError
+
+            return _scip_search_payload(
+                request,
+                current_user,
+                {
+                    "success": False,
+                    "error": (
+                        "Query timeout exceeded while tracing call chain: "
+                        f"{timeout_errors[0]}"
+                    ),
+                    "from_symbol": from_symbol,
+                    "to_symbol": to_symbol,
+                    "chains": [],
+                },
+                project,
+                scip_callchain_query_text(from_symbol, to_symbol),
+                started,
+                error=QueryTimeoutError(str(timeout_errors[0])),
+            )
 
         return _scip_search_payload(
             request,
@@ -581,10 +649,19 @@ def get_callchain(
                 f"Call chain tracing failed: {e}",
             )
         )
-        return {"success": False, "error": str(e)}
+        return _scip_search_payload(
+            request,
+            current_user,
+            {"success": False, "error": str(e)},
+            project,
+            scip_callchain_query_text(from_symbol, to_symbol),
+            started,
+            error=e,
+        )
 
 
 @router.get("/context")
+@in_scip_search_scope
 def get_context(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
@@ -647,4 +724,12 @@ def get_context(
                 f"Smart context query failed: {e}",
             )
         )
-        return {"success": False, "error": str(e)}
+        return _scip_search_payload(
+            request,
+            current_user,
+            {"success": False, "error": str(e)},
+            project,
+            symbol,
+            started,
+            error=e,
+        )

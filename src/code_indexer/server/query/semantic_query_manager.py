@@ -970,6 +970,16 @@ class SemanticQueryManager:
         # that hard-failed during a partial multi-repo fan-out failure, so
         # it can be surfaced in query_metadata below.
         _degraded_repos_out: List[str] = []
+        if not repository_alias:
+            # Bug #2111 / Story #2117: a search over several repositories is
+            # recorded one row per repository; each is noted as it resolves
+            # (_perform_search), so a failure of the whole call still writes
+            # a failure row for every repository that resolved.
+            from code_indexer.server.services.search_event_context import (
+                begin_repository_rows,
+            )
+
+            begin_repository_rows()
         try:
             # AC7 (Bug #1202): _perform_search returns (results, effective_strategy).
             # Routing decision is per-request; no singleton state.
@@ -1032,6 +1042,16 @@ class SemanticQueryManager:
                 results = _raw
             execution_time_ms = int((time.time() - start_time) * 1000)
             timeout_occurred = False
+            if not repository_alias:
+                # Bug #2111 / Story #2117: a search over several repositories
+                # is recorded one row per repository the loop resolved and
+                # searched (a degraded one fails); an alias that never
+                # resolved, or one the time budget never reached, gets none.
+                from code_indexer.server.services.search_event_context import (
+                    finish_repository_rows,
+                )
+
+                finish_repository_rows(failed=_degraded_repos_out)
         except MultiIndexQueryTimeoutError:
             # #2109: keep the type so the front doors answer a timeout.
             raise
@@ -1189,6 +1209,10 @@ class SemanticQueryManager:
                 token = _search_event_ctx.set(search_event.context)
                 try:
                     result = self.query_user_repositories(**kwargs)
+                except Exception as exc:
+                    # Story #2117: a job that failed is recorded as a failure.
+                    search_event.record_failure(exc, cancel_check)
+                    raise
                 finally:
                     _search_event_ctx.reset(token)
                 search_event.record_result(result, cancel_check)
@@ -1504,12 +1528,21 @@ class SemanticQueryManager:
                 # searched here, keyed by the per-repository identity
                 # resolved during execution (never the possibly-absent
                 # request-level repository_alias).
-                with track_activated_repo_query(
+                # Bug #2111 / Story #2117: a search over several repositories
+                # notes this repository as resolved before searching it (a
+                # whole-call failure still writes its failure row) and keeps
+                # its embedding cache lookup for its own row.
+                from code_indexer.server.services.search_event_context import (
+                    searching_resolved_repository,
+                )
+
+                _tracking = track_activated_repo_query(
                     getattr(self, "query_tracker", None),
                     self.activated_repo_manager,
                     username,
                     _tracking_alias,
-                ):
+                )
+                with searching_resolved_repository(str(repo_alias)), _tracking:
                     results = self._search_single_repository(
                         repo_path,
                         repo_alias,

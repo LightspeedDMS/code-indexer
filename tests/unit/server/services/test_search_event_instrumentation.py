@@ -173,8 +173,11 @@ class TestEnqueueContract:
         assert rec.total_latency_ms >= 0
         assert rec.node_id != ""
 
-    def test_no_enqueue_on_exception(self, writer, monkeypatch, wire_app_module):
-        """Spec H11: exception in sub-handler -> no record enqueued."""
+    def test_exception_enqueues_one_failure_record(
+        self, writer, monkeypatch, wire_app_module
+    ):
+        """Story #2117 (replacing spec H11): an exception in the sub-handler
+        enqueues one failure record carrying the exception's class."""
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
@@ -188,7 +191,12 @@ class TestEnqueueContract:
         result = _parse_mcp(raw)
 
         assert result.get("success") is False
-        assert len(writer.enqueued) == 0
+        [record] = writer.enqueued
+        assert (record.tool, record.outcome, record.error_class) == (
+            "search_code",
+            "failure",
+            "RuntimeError",
+        )
 
     def test_query_text_capped_at_500(self, writer, monkeypatch):
         """Spec A8: query_text stored in record is at most 500 code points."""

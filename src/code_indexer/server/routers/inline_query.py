@@ -8,8 +8,9 @@ Zero behavior change: same path, method, response models, and handler logic.
 """
 
 import logging
+import sys
 import time
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from fastapi import (
     FastAPI,
@@ -68,12 +69,71 @@ from code_indexer.server.telemetry.manager import peek_telemetry_manager
 from code_indexer.server.telemetry.metrics_instrumentation import (
     get_application_metrics,
 )
+from code_indexer.server.services.search_event_recording import SearchOrigin
 
 # Bug #1209: default overfetch multiplier when rerank config is unavailable.
 _REST_DEFAULT_OVERFETCH_MULTIPLIER = 5
 
 # Module-level logger
 logger = logging.getLogger(__name__)
+
+# Story #2117: the tool and door every POST /api/query search event carries.
+REST_QUERY_ORIGIN = SearchOrigin(tool="POST /api/query", door="rest")
+
+
+def _rest_failure_class(exc: Optional[BaseException]) -> Optional[str]:
+    """Story #2117: the error class of the exception leaving the query route.
+
+    None when nothing failed, and for a request rejected before its
+    repository resolved (search_event_outcomes.failure_error_class: an
+    unknown repository, a refused parameter, an HTTPException the door
+    raised itself): nothing is recorded.
+    """
+    from code_indexer.server.services.search_event_outcomes import (
+        failure_error_class,
+    )
+
+    return None if exc is None else failure_error_class(exc)
+
+
+def _record_rest_query_event(
+    app: Any,
+    context: Any,
+    delivered: Optional[list],
+    failure_class: Optional[str],
+    start_time: float,
+) -> None:
+    """Record one POST /api/query search (`context` is its
+    SearchEventContext): its delivered results (Bug #2111: one row per
+    repository it searched), or a failure. Never raises."""
+    from code_indexer.server.services.search_event_recording import (
+        record_query_failure,
+        record_query_results,
+        writer_from_app,
+    )
+
+    latency_ms = int((time.time() - start_time) * 1000)
+    # get_correlation_id: this module's alias of
+    # correlation_bridge.get_current_correlation_id (imports above).
+    if delivered is not None:
+        record_query_results(
+            writer_from_app(app),
+            origin=REST_QUERY_ORIGIN,
+            context=context,
+            results=delivered,
+            total_latency_ms=latency_ms,
+            correlation_id=get_correlation_id(),
+        )
+    elif failure_class is not None:
+        record_query_failure(
+            writer_from_app(app),
+            origin=REST_QUERY_ORIGIN,
+            context=context,
+            error_class=failure_class,
+            total_latency_ms=latency_ms,
+            correlation_id=get_correlation_id(),
+        )
+
 
 # Story #1400: temporal-query detector for the REST SemanticQueryRequest
 # shape -- mirrors mcp/handlers/_utils.py's _is_temporal_query exactly
@@ -174,6 +234,13 @@ def _resolve_temporal_repo_path_rest(
     if repository_alias.endswith("-global"):
         from code_indexer.global_repos.alias_manager import AliasManager
 
+        # Story #2117: refusals before the repository resolved carry a
+        # rejection code, so they are not recorded as searches.
+        from code_indexer.server.services.search_event_outcomes import (
+            REPOSITORY_NOT_FOUND_CODE,
+            SERVICE_UNAVAILABLE_CODE,
+        )
+
         golden_repos_dir = getattr(app.state, "golden_repos_dir", None)
         if not golden_repos_dir:
             return None, JSONResponse(
@@ -181,6 +248,7 @@ def _resolve_temporal_repo_path_rest(
                 content={
                     "success": False,
                     "error": "golden_repos_dir not configured",
+                    "error_code": SERVICE_UNAVAILABLE_CODE,
                 },
             )
         alias_manager = AliasManager(str(PathLib(golden_repos_dir) / "aliases"))
@@ -191,6 +259,7 @@ def _resolve_temporal_repo_path_rest(
                 content={
                     "success": False,
                     "error": f"Alias for '{repository_alias}' not found",
+                    "error_code": REPOSITORY_NOT_FOUND_CODE,
                 },
             )
         return str(resolved_path), None
@@ -272,11 +341,17 @@ def _execute_temporal_via_live_dispatch_rest(
     bjm = getattr(app.state, "background_job_manager", None)
     payload_cache = getattr(app.state, "payload_cache", None)
     if bjm is None or payload_cache is None:
+        from code_indexer.server.services.search_event_outcomes import (
+            SERVICE_UNAVAILABLE_CODE,
+        )
+
+        # Story #2117: a refusal before the search started (not recorded).
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={
                 "success": False,
                 "error": "Background job/payload cache service not available",
+                "error_code": SERVICE_UNAVAILABLE_CODE,
             },
         )
 
@@ -474,8 +549,12 @@ def register_query_routes(
             query_text=request.query_text or "",
         )
         _ctx_token = _search_event_ctx.set(_event_ctx)
-        _result_count = 0
-        _search_succeeded = False
+        # Story #2117: what the `finally` below records -- the delivered
+        # results of a completed search, a failure known without an
+        # exception, or nothing when a job or a deferred handoff records later.
+        _delivered: Optional[list] = None
+        _failure_class: Optional[str] = None
+        _record_on_exit = True
 
         try:
             # Handle background job submission (semantic mode only)
@@ -493,6 +572,7 @@ def register_query_routes(
 
                 # Bug #2113: the job records this search when it completes,
                 # with the real result count; the submission records nothing.
+                _record_on_exit = False
                 job_id = semantic_query_manager.submit_query_job(
                     username=current_user.username,
                     query_text=request.query_text,
@@ -504,6 +584,7 @@ def register_query_routes(
                         writer=writer_from_app(app),
                         context=_event_ctx,
                         correlation_id=get_correlation_id(),
+                        origin=REST_QUERY_ORIGIN,
                     ),
                 )
                 from fastapi.responses import JSONResponse
@@ -528,33 +609,29 @@ def register_query_routes(
                 _temporal_response = _execute_temporal_via_live_dispatch_rest(
                     request, current_user, app, activated_repo_manager
                 )
-                # Bug #1173: only enqueue telemetry on real success -- a
-                # deferred handoff (202, not yet a real result) must NOT be
-                # logged as success; a genuinely completed query (200) must.
-                # Exact equality (not "< 400"): 202 is < 400 but is NOT a
-                # completed result and must never be logged as success.
-                # The finally block below genuinely runs on this early
-                # return (Python finally semantics), so _result_count must
-                # reflect the REAL result count, not the stale default --
-                # a hardcoded 0 would silently corrupt the search-event log
-                # for every temporal query, including genuine successes.
-                _search_succeeded = _temporal_response.status_code == 200
-                if _search_succeeded:
+                # Bug #1173 / Story #2117: a completed query (exactly 200)
+                # records its delivered results -- the finally block below
+                # runs on this early return, so _delivered must hold the REAL
+                # results. A deferred handoff (202, not yet a result) records
+                # nothing now; any other answer is a failed search.
+                if _temporal_response.status_code == status.HTTP_200_OK:
                     import json as _json_mod
 
+                    _delivered = []
                     try:
                         _body = _json_mod.loads(bytes(_temporal_response.body))
-                        _result_count = len(_body.get("results") or [])
+                        _delivered = list(_body.get("results") or [])
                     except (ValueError, TypeError) as _parse_exc:
                         logger.debug(
                             "inline_query: could not parse temporal response "
-                            "body for telemetry result_count: %s",
+                            "body for the search event's results: %s",
                             _parse_exc,
                         )
                 elif _temporal_response.status_code == status.HTTP_202_ACCEPTED:
                     # Bug #2109: a deferred handoff leaves a pending record;
                     # GET /api/query/result/{job_id} records the search when
                     # it delivers the completed result.
+                    _record_on_exit = False
                     import json as _json_mod
 
                     from code_indexer.server.services.search_event_recording import (
@@ -574,10 +651,30 @@ def register_query_routes(
                         remember_deferred_search(
                             getattr(app.state, "payload_cache", None),
                             _handoff,
+                            origin=REST_QUERY_ORIGIN,
                             context=_event_ctx,
                             correlation_id=get_correlation_id(),
                             started_at=start_time,
                         )
+                else:
+                    # Story #2117: a rejection (4xx, 503) records nothing; a
+                    # failure after resolution records its error code's class.
+                    import json as _json_mod
+
+                    from code_indexer.server.services.search_event_outcomes import (
+                        http_response_failure_class,
+                    )
+
+                    try:
+                        _error_body = dict(
+                            _json_mod.loads(bytes(_temporal_response.body))
+                        )
+                    except (ValueError, TypeError):
+                        _error_body = {}
+                    _failure_class = http_response_failure_class(
+                        _temporal_response.status_code, _error_body
+                    )
+                    _record_on_exit = _failure_class is not None
                 return _temporal_response
 
             # Story 5: Handle FTS and Hybrid modes
@@ -739,6 +836,15 @@ def register_query_routes(
                     api_metrics_service.increment_other_index_search(
                         username=current_user.username
                     )
+
+                    # Bug #2111 / Story #2117: without an alias, the FTS
+                    # search reads fts_repo_alias's index -- noted before it
+                    # runs, so a failed FTS search is recorded for it too.
+                    if (
+                        not request.repository_alias
+                        and _event_ctx.searched_repositories is None
+                    ):
+                        _event_ctx.repo_alias = fts_repo_alias
 
                     # Codex HIGH finding (round 2): this branch reads the
                     # Tantivy FTS index directly (never calls
@@ -934,6 +1040,20 @@ def register_query_routes(
                         )
                         if search_mode_actual == "semantic":
                             raise
+                        # Story #2117: the answer carries the FTS hits only;
+                        # every repository the semantic half resolved failed
+                        # (the FTS repository is recorded as searched below).
+                        _resolved = _event_ctx.searched_repositories
+                        if _resolved is not None:
+                            _event_ctx.note_repositories(
+                                searched=[],
+                                failed=[
+                                    alias
+                                    for alias in _resolved
+                                    + (_event_ctx.failed_repositories or [])
+                                    if alias != fts_repo_alias
+                                ],
+                            )
                     finally:
                         _record_rest_search_metric(
                             search_type="hybrid",
@@ -981,8 +1101,23 @@ def register_query_routes(
                 # Bug #2110: record the mode that ran (a hybrid request without
                 # a usable FTS index runs, and is recorded, as semantic).
                 _event_ctx.search_type = search_mode_actual
-                _result_count = len(truncated_fts) + len(truncated_semantic)
-                _search_succeeded = True
+                # Bug #2111: without an alias, the FTS half searched
+                # fts_repo_alias -- an FTS-only search is recorded for it, and
+                # in a hybrid search its FTS hits count toward its row.
+                if (
+                    not request.repository_alias
+                    and fts_repo_alias
+                    and search_mode_actual in ("fts", "hybrid")
+                ):
+                    _searched = _event_ctx.searched_repositories
+                    _failed = _event_ctx.failed_repositories or []
+                    if _searched is None:
+                        _event_ctx.repo_alias = fts_repo_alias
+                    elif fts_repo_alias not in _searched + _failed:
+                        _event_ctx.note_repositories(
+                            searched=_searched + [fts_repo_alias], failed=_failed
+                        )
+                _delivered = list(truncated_fts) + list(truncated_semantic)
                 return JSONResponse(
                     content={
                         "search_mode": search_mode_actual,
@@ -1108,8 +1243,7 @@ def register_query_routes(
             # Return as JSONResponse to support truncated fields
             from fastapi.responses import JSONResponse
 
-            _result_count = len(truncated_results)
-            _search_succeeded = True
+            _delivered = list(truncated_results)
             return JSONResponse(
                 content={
                     "results": truncated_results,
@@ -1201,24 +1335,18 @@ def register_query_routes(
             )
         finally:
             # Issue #1159: reset ctx and record the search event through the
-            # shared builder. Bug #2113: only a successful search is recorded.
+            # shared builder. Story #2117: a completed search records its
+            # delivered results (one row per repository it searched, Bug
+            # #2111); a failed one records a failure; a job or a deferred
+            # handoff records later (_record_on_exit False).
             _search_event_ctx.reset(_ctx_token)
-            if _search_succeeded:
-                from code_indexer.server.services.search_event_recording import (
-                    record_search_event,
-                    writer_from_app,
-                )
-
-                record_search_event(
-                    writer_from_app(app),
-                    username=current_user.username,
-                    repo_alias=_event_ctx.repo_alias,
-                    search_type=_event_ctx.search_type,
-                    query_text=_event_ctx.query_text,
-                    result_count=_result_count,
-                    total_latency_ms=int((time.time() - start_time) * 1000),
-                    correlation_id=get_correlation_id(),
-                    context=_event_ctx,
+            if _record_on_exit:
+                _record_rest_query_event(
+                    app,
+                    _event_ctx,
+                    _delivered,
+                    _failure_class or _rest_failure_class(sys.exc_info()[1]),
+                    start_time,
                 )
 
     @app.get("/api/query/result/{job_id}")

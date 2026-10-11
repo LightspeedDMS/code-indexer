@@ -8,6 +8,16 @@ from typing import Dict, List, Optional, Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 
+class UnresolvedRepositoryError(FileNotFoundError):
+    """A requested repository alias does not resolve to a repository.
+
+    Raised by the multi-repository services' repository path lookup. It is a
+    rejection of that alias, not a failed search: the search event log
+    records nothing for it (Story #2117). A FileNotFoundError, so existing
+    handling and error messages are unchanged.
+    """
+
+
 class MultiSearchRequest(BaseModel):
     """
     Request model for multi-repository search.

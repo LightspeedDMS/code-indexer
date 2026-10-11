@@ -19,8 +19,11 @@ import time
 from typing import Any, Dict, Optional
 
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.search_event_outcomes import failure_error_class
 from code_indexer.server.services.search_event_recording import (
+    SearchOrigin,
     elapsed_ms,
+    record_query_failure,
     record_search_payload,
     remember_deferred_search,
 )
@@ -52,6 +55,9 @@ from .repo_search import _search_activated_repo, _search_global_repo
 from .temporal_search import _execute_temporal_via_live_dispatch
 
 logger = logging.getLogger("code_indexer.server.mcp.handlers.search")
+
+# Story #2117: the tool and door every search_code event is recorded with.
+SEARCH_CODE_ORIGIN = SearchOrigin(tool="search_code", door="mcp")
 
 
 def _mcp_payload(result: Any) -> Dict[str, Any]:
@@ -86,6 +92,17 @@ def _invalid_search_mode_response(search_mode: str) -> Optional[Dict[str, Any]]:
     return _mcp_response({"success": False, "error": message, "results": []})
 
 
+def _single_alias(repository_alias: Any) -> Optional[str]:
+    """Bug #2111: the alias a single-repository row carries. A list, a
+    JSON-array string or a wildcard searches several repositories, which the
+    omni path reports one by one (note_repositories), so it carries none."""
+    if not isinstance(repository_alias, str) or not repository_alias:
+        return None
+    if _has_wildcard(repository_alias):
+        return None
+    return repository_alias
+
+
 def search_code(
     params: Dict[str, Any],
     user: User,
@@ -100,10 +117,14 @@ def search_code(
 
     Issue #1159: installs SearchEventContext ContextVar before routing so that
     embedding call sites can write cache metadata into it. Resets ContextVar
-    in finally. Bug #2113 recording rule: one search event per successful
-    search (response payload success true; a temporal search is recorded as
-    "temporal"); a failure, handled error, rejected request or deferred
-    temporal handoff records nothing.
+    in finally. Story #2117 recording rule: every routed search is recorded
+    (tool search_code, door mcp) with its outcome -- a handled error, a search
+    no provider could run, an omni search that searched nothing and an
+    exception are failures; a temporal search is recorded as "temporal"; a
+    deferred temporal handoff is recorded when its result is delivered.
+    Requests rejected before routing (admission, missing query_text, unknown
+    search_mode) record nothing. Bug #2111: the row carries the resolved
+    alias; an omni search records one row per repository.
     """
     _admission = check_query_admission()
     if not _admission.allowed:
@@ -115,22 +136,23 @@ def search_code(
 
     # Issue #1159: capture context fields before any param mutation below.
     _query_text_raw = str(params.get("query_text", "") or "")
-    _repo_alias_raw = params.get("repository_alias")
-    _repo_alias_str = str(_repo_alias_raw) if isinstance(_repo_alias_raw, str) else None
     _search_mode = str(params.get("search_mode", "semantic") or "semantic")
     _event_ctx = SearchEventContext(
         username=user.username,
-        repo_alias=_repo_alias_str,
+        repo_alias=None,
         # Full text: the shared recording module caps and marks it (#2114).
         query_text=_query_text_raw,
         search_type=_search_mode,
     )
     _ctx_token = _search_event_ctx.set(_event_ctx)
+    # Set once routing starts: from then on an exception is a failed search.
+    _routed = False
 
     try:
         repository_alias = params.get("repository_alias")
         repository_alias = _parse_json_string_array(repository_alias)
         params["repository_alias"] = repository_alias
+        _event_ctx.repo_alias = _single_alias(repository_alias)
 
         # Bug #881 Phase 1 entry log: operators can audit every search_code call.
         # py-spy logging-lock fix (follow-up to Bug #1078): demoted INFO -> DEBUG
@@ -164,6 +186,7 @@ def search_code(
         if _mode_rejection is not None:
             return _mode_rejection
 
+        _routed = True
         # Story #1039: bare-to-global alias fallback for read-only handlers.
         # Applied BEFORE routing so the if/elif/else below sees the promoted alias.
         if (
@@ -187,6 +210,8 @@ def search_code(
                         )
                         params["repository_alias"] = _promoted
                         repository_alias = _promoted
+                        # Bug #2111: the row carries the resolved alias.
+                        _event_ctx.repo_alias = _single_alias(_promoted)
 
         # Story #1400: async-hybrid temporal query execution. Intercept
         # AFTER the Story #1039 alias promotion above (so a bare alias that
@@ -208,6 +233,7 @@ def search_code(
             record_search_payload(
                 _get_search_event_writer(),
                 _temporal_payload,
+                origin=SEARCH_CODE_ORIGIN,
                 search_type="temporal",
                 context=_event_ctx,
                 total_latency_ms=elapsed_ms(_search_start),
@@ -220,6 +246,7 @@ def search_code(
                     None,
                 ),
                 _temporal_payload,
+                origin=SEARCH_CODE_ORIGIN,
                 context=_event_ctx,
                 correlation_id=get_correlation_id(),
                 started_at=_search_started_at,
@@ -256,14 +283,13 @@ def search_code(
             extra={"correlation_id": get_correlation_id()},
         )
 
-        # Bug #2113: only a search whose result is known is recorded
-        # (search_payload_is_known): a handled error, a search no provider
-        # could run and an omni search where every repository failed record
-        # nothing (exceptions, a missing query_text, an unknown search_mode
-        # and admission refusals return before this point).
+        # Story #2117: the outcome is decided from the payload in the shared
+        # module (search_payload_outcome); an omni search that noted its
+        # repositories is one row per repository (Bug #2111).
         record_search_payload(
             _get_search_event_writer(),
             _mcp_payload(_result),
+            origin=SEARCH_CODE_ORIGIN,
             search_type=_event_ctx.search_type,
             context=_event_ctx,
             total_latency_ms=_elapsed_ms,
@@ -285,6 +311,17 @@ def search_code(
             exc_info=outcome.log_as_internal,
             extra={"correlation_id": get_correlation_id()},
         )
+        if _routed:
+            # Story #2117: a search that raised is a failure (its class); a
+            # rejection (e.g. an unknown repository) records nothing.
+            record_query_failure(
+                _get_search_event_writer(),
+                origin=SEARCH_CODE_ORIGIN,
+                context=_event_ctx,
+                error_class=failure_error_class(e),
+                total_latency_ms=elapsed_ms(_search_start),
+                correlation_id=get_correlation_id(),
+            )
         return _mcp_response(
             {"success": False, "error": outcome.message, "results": []}
         )

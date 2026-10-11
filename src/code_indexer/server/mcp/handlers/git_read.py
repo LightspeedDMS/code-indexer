@@ -56,7 +56,9 @@ from ._utils import (
     cap_breach_response,
 )
 from code_indexer.server.services.search_event_recording import (
+    SearchOrigin,
     record_completed_search,
+    recording_failure,
     writer_from_app,
 )
 
@@ -64,6 +66,7 @@ logger = logging.getLogger(__name__)
 
 
 def _record_git_history(
+    tool: str,
     user: User,
     repository_alias: str,
     query_text: str,
@@ -72,9 +75,11 @@ def _record_git_history(
 ) -> None:
     """Record one completed git history search (Story #2116): query_text is
     the query or search term, result_count the matching commits returned.
-    An omni search records one row per repository (it runs this per repo)."""
+    An omni search records one row per repository (it runs this per repo).
+    `tool` is the MCP tool that ran it (Story #2117)."""
     record_completed_search(
         writer_from_app(_lazy_module_attr_or_none("app")),
+        origin=SearchOrigin(tool=tool, door="mcp"),
         search_type="git_history",
         username=user.username,
         repo_alias=repository_alias,
@@ -994,44 +999,58 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
 
         service = GitOperationsService(Path(repo_path))
         started = time.monotonic()
-        result = service.search_commits(
-            query=query,
-            is_regex=args.get("is_regex", False),
-            author=args.get("author"),
-            since=args.get("since"),
-            until=args.get("until"),
-            limit=_coerce_int(args.get("limit"), 50),
+        # Story #2117: the repository resolved; a search that raises from
+        # here is one failure row.
+        with recording_failure(
+            writer_from_app(_lazy_module_attr_or_none("app")),
+            origin=SearchOrigin(tool="git_search_commits", door="mcp"),
+            search_type="git_history",
+            username=user.username,
+            repo_alias=repository_alias,
+            query_text=query,
+            started_monotonic=started,
+            correlation_id=get_correlation_id(),
+        ):
+            result = service.search_commits(
+                query=query,
+                is_regex=args.get("is_regex", False),
+                author=args.get("author"),
+                since=args.get("since"),
+                until=args.get("until"),
+                limit=_coerce_int(args.get("limit"), 50),
+            )
+
+            # Convert dataclasses to dicts for JSON serialization
+            matches = [
+                {
+                    "hash": m.hash,
+                    "short_hash": m.short_hash,
+                    "author_name": m.author_name,
+                    "author_email": m.author_email,
+                    "author_date": m.author_date,
+                    "subject": m.subject,
+                    "body": m.body,
+                    "match_highlights": m.match_highlights,
+                }
+                for m in result.matches
+            ]
+
+            # Story #653/#654: Apply cross-encoder reranking after retrieval
+            _commit_limit = _coerce_int(args.get("limit"), len(matches))
+            matches, _rerank_meta = _mcp_reranking._apply_reranking_sync(
+                results=matches,
+                rerank_query=args.get("rerank_query"),
+                rerank_instruction=args.get("rerank_instruction"),
+                content_extractor=lambda r: (
+                    ((r.get("subject") or "") + " " + (r.get("body") or "")).strip()
+                ),
+                requested_limit=_commit_limit,
+                config_service=get_config_service(),
+            )
+
+        _record_git_history(
+            "git_search_commits", user, repository_alias, query, len(matches), started
         )
-
-        # Convert dataclasses to dicts for JSON serialization
-        matches = [
-            {
-                "hash": m.hash,
-                "short_hash": m.short_hash,
-                "author_name": m.author_name,
-                "author_email": m.author_email,
-                "author_date": m.author_date,
-                "subject": m.subject,
-                "body": m.body,
-                "match_highlights": m.match_highlights,
-            }
-            for m in result.matches
-        ]
-
-        # Story #653/#654: Apply cross-encoder reranking after retrieval, before return
-        _commit_limit = _coerce_int(args.get("limit"), len(matches))
-        matches, _rerank_meta = _mcp_reranking._apply_reranking_sync(
-            results=matches,
-            rerank_query=args.get("rerank_query"),
-            rerank_instruction=args.get("rerank_instruction"),
-            content_extractor=lambda r: (
-                ((r.get("subject") or "") + " " + (r.get("body") or "")).strip()
-            ),
-            requested_limit=_commit_limit,
-            config_service=get_config_service(),
-        )
-
-        _record_git_history(user, repository_alias, query, len(matches), started)
         return _mcp_response(
             {
                 "success": True,
@@ -1121,53 +1140,71 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Create service and execute search
         service = GitOperationsService(Path(repo_path))
         started = time.monotonic()
-        is_regex = args.get("is_regex", False)
-        if is_regex:
-            result = service.search_diffs(
-                search_pattern=search_term,
-                is_regex=True,
-                path=args.get("path"),
-                since=args.get("since"),
-                until=args.get("until"),
-                limit=_coerce_int(args.get("limit"), 50),
-            )
-        else:
-            result = service.search_diffs(
-                search_string=search_term,
-                is_regex=False,
-                path=args.get("path"),
-                since=args.get("since"),
-                until=args.get("until"),
-                limit=_coerce_int(args.get("limit"), 50),
+        # Story #2117: the repository resolved; a search that raises from
+        # here is one failure row.
+        with recording_failure(
+            writer_from_app(_lazy_module_attr_or_none("app")),
+            origin=SearchOrigin(tool="git_search_diffs", door="mcp"),
+            search_type="git_history",
+            username=user.username,
+            repo_alias=repository_alias,
+            query_text=search_term,
+            started_monotonic=started,
+            correlation_id=get_correlation_id(),
+        ):
+            if args.get("is_regex", False):
+                result = service.search_diffs(
+                    search_pattern=search_term,
+                    is_regex=True,
+                    path=args.get("path"),
+                    since=args.get("since"),
+                    until=args.get("until"),
+                    limit=_coerce_int(args.get("limit"), 50),
+                )
+            else:
+                result = service.search_diffs(
+                    search_string=search_term,
+                    is_regex=False,
+                    path=args.get("path"),
+                    since=args.get("since"),
+                    until=args.get("until"),
+                    limit=_coerce_int(args.get("limit"), 50),
+                )
+
+            # Convert dataclasses to dicts for JSON serialization
+            matches = [
+                {
+                    "hash": m.hash,
+                    "short_hash": m.short_hash,
+                    "author_name": m.author_name,
+                    "author_date": m.author_date,
+                    "subject": m.subject,
+                    "files_changed": m.files_changed,
+                    "diff_snippet": m.diff_snippet,
+                }
+                for m in result.matches
+            ]
+
+            # Story #653/#654: Apply cross-encoder reranking after retrieval
+            matches, _rerank_meta = _mcp_reranking._apply_reranking_sync(
+                results=matches,
+                rerank_query=args.get("rerank_query"),
+                rerank_instruction=args.get("rerank_instruction"),
+                content_extractor=lambda r: (
+                    r.get("diff_snippet") or r.get("subject") or ""
+                ),
+                requested_limit=_coerce_int(args.get("limit"), 50),
+                config_service=get_config_service(),
             )
 
-        # Convert dataclasses to dicts for JSON serialization
-        matches = [
-            {
-                "hash": m.hash,
-                "short_hash": m.short_hash,
-                "author_name": m.author_name,
-                "author_date": m.author_date,
-                "subject": m.subject,
-                "files_changed": m.files_changed,
-                "diff_snippet": m.diff_snippet,
-            }
-            for m in result.matches
-        ]
-
-        # Story #653/#654: Apply cross-encoder reranking after retrieval, before return
-        matches, _rerank_meta = _mcp_reranking._apply_reranking_sync(
-            results=matches,
-            rerank_query=args.get("rerank_query"),
-            rerank_instruction=args.get("rerank_instruction"),
-            content_extractor=lambda r: (
-                r.get("diff_snippet") or r.get("subject") or ""
-            ),
-            requested_limit=_coerce_int(args.get("limit"), 50),
-            config_service=get_config_service(),
+        _record_git_history(
+            "git_search_diffs",
+            user,
+            repository_alias,
+            search_term,
+            len(matches),
+            started,
         )
-
-        _record_git_history(user, repository_alias, search_term, len(matches), started)
         return _mcp_response(
             {
                 "success": True,

@@ -64,6 +64,8 @@ class _ActivatedRepos:
         return True
 
     def get_activated_repo_path(self, username: str, alias: str) -> str:
+        if alias == "missing-repo":
+            raise ValueError(f"Repository '{alias}' not found")
         path = Path(self.activated_repos_dir) / username / alias
         path.mkdir(parents=True, exist_ok=True)
         return str(path)
@@ -186,3 +188,69 @@ class TestRestTemporal:
         assert response.status_code == 202, response.text
 
         assert env.rec.rows() == []
+
+
+class TestTemporalRejectionsRecordNothing:
+    """Story #2117: a temporal request rejected before its repository
+    resolved (alias refused, unknown repository, a required service not
+    wired) writes no row at either door."""
+
+    def test_mcp_list_alias(self, env):
+        with _dispatching(_COMPLETED):
+            body = _mcp_temporal("alice", repository_alias=["a-repo", "b-repo"])
+        assert body["error_code"] == "TEMPORAL_SINGLE_REPO_REQUIRED", body
+        assert env.rec.rows() == []
+
+    def test_mcp_unknown_activated_repository(self, env):
+        with _dispatching(_COMPLETED):
+            body = _mcp_temporal("alice", repository_alias="missing-repo")
+        assert body["success"] is False, body
+        assert env.rec.rows() == []
+
+    def test_mcp_background_services_missing(self, env):
+        from code_indexer.server.mcp.handlers import _utils
+
+        with patch.object(_utils.app_module, "background_job_manager", None):
+            with _dispatching(_COMPLETED):
+                body = _mcp_temporal("alice")
+        assert body["success"] is False, body
+        assert env.rec.rows() == []
+
+    def test_rest_missing_alias(self, env):
+        with _dispatching(_COMPLETED):
+            response = _rest_temporal(env, "bob", repository_alias=None)
+        assert response.status_code == 400, response.text
+        assert env.rec.rows() == []
+
+    def test_rest_unknown_global_alias(self, env, tmp_path):
+        env.state.golden_repos_dir = str(tmp_path / "golden")
+        with _dispatching(_COMPLETED):
+            response = _rest_temporal(env, "bob", repository_alias="nope-global")
+        assert response.status_code == 404, response.text
+        assert env.rec.rows() == []
+
+    def test_rest_golden_repos_dir_not_configured(self, env):
+        with _dispatching(_COMPLETED):
+            response = _rest_temporal(env, "bob", repository_alias="nope-global")
+        assert response.status_code == 503, response.text
+        assert env.rec.rows() == []
+
+
+class TestTemporalFailures:
+    def test_rest_dispatch_failure_records_its_error_code(self, env):
+        failed = {
+            "status": "failed",
+            "job_id": "job-3",
+            "error": "capacity exhausted",
+            "error_code": "TEMPORAL_DEDUP_CAPACITY_EXHAUSTED",
+        }
+        with _dispatching(failed):
+            response = _rest_temporal(env, "bob")
+        assert response.status_code == 502, response.text
+
+        [row] = env.rec.rows()
+        assert (row["outcome"], row["error_class"], row["repo_alias"]) == (
+            "failure",
+            "temporal_dedup_capacity_exhausted",
+            "example-repo",
+        )

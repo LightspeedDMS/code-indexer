@@ -191,11 +191,13 @@ class TestMcpRejectsUnknownMode:
 class TestRecordBuilderRefusesUnknownType:
     def test_unknown_search_type_is_not_stored(self, env, caplog):
         from code_indexer.server.services.search_event_recording import (
+            SearchOrigin,
             record_search_event,
         )
 
         record_search_event(
             env.rec.writer,
+            origin=SearchOrigin(tool="search_code", door="mcp"),
             username="alice",
             repo_alias="example-repo",
             search_type="semantik",

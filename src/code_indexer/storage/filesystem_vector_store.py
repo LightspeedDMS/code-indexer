@@ -356,8 +356,9 @@ def _write_embed_meta_to_event_ctx(embed_meta: "Any", provider_name: str = "") -
             # with a concurrent repo's write and produce a torn triple.
             event_ctx.record_provider_cache_fields(
                 provider_name,
-                cache_hit=embed_meta.key_found,
-                cache_mode=embed_meta.cache_mode,
+                # Bug #2112: both None when the cache was not consulted.
+                cache_hit=embed_meta.search_event_cache_hit,
+                cache_mode=embed_meta.search_event_cache_mode,
                 latency_ms=embed_meta.provider_latency_ms,
             )
     except Exception as _exc:  # noqa: BLE001

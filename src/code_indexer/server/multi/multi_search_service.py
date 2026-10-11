@@ -29,6 +29,7 @@ from .models import (
     MultiSearchMetadata,
     MultiSearchRequest,
     MultiSearchResponse,
+    UnresolvedRepositoryError,
 )
 from ..models.api_models import MAX_CANDIDATE_LIMIT
 from ..query.filtered_search import (
@@ -284,6 +285,13 @@ class MultiSearchService:
             )
             future_to_repo[future] = repo_id
 
+        from ..services.search_event_context import note_current_repositories
+        from ..services.search_event_outcomes import repository_resolved
+
+        # Story #2117: repositories that resolved and then failed (an alias
+        # that never resolved is a rejection and is not counted).
+        failed: List[str] = []
+
         # Collect results as they complete
         for future in as_completed(future_to_repo):
             repo_id = future_to_repo[future]
@@ -297,10 +305,12 @@ class MultiSearchService:
             except SearchBudgetExhausted as e:
                 # #2047: reported per repository, never silently dropped.
                 errors[repo_id] = str(e)
+                failed.append(repo_id)
                 logger.info("multi_search: %s", e)
             except TimeoutError:
                 error_msg = self._format_timeout_error(request, [repo_id])
                 errors[repo_id] = error_msg
+                failed.append(repo_id)
                 logger.warning(
                     format_error_log(
                         "REPO-GENERAL-023",
@@ -318,12 +328,18 @@ class MultiSearchService:
                     if isinstance(e, FileNotFoundError)
                     else classify_search_error(e).message
                 )
+                if repository_resolved(e):
+                    failed.append(repo_id)
                 logger.error(
                     format_error_log(
                         "REPO-GENERAL-024", f"Search error for repo {repo_id}: {e}"
                     ),
                     exc_info=True,
                 )
+
+        # Bug #2111 / Story #2117: the request's search event rows are one
+        # per repository that resolved (searched, or failed after resolving).
+        note_current_repositories(searched=list(repo_results), failed=failed)
 
         # Aggregate results with optional score filtering
         aggregator = MultiResultAggregator(
@@ -362,7 +378,12 @@ class MultiSearchService:
                 "Not searched: the request's search time budget ran out "
                 f"before repository {repo_id} could start"
             )
-        return search_func(repo_id, request)
+        from ..services.search_event_context import searching_repository
+
+        # Bug #2111: this worker runs in its own copied context; the cache
+        # lookups its search makes are kept for repo_id's row.
+        with searching_repository(repo_id):
+            return search_func(repo_id, request)
 
     def _search_single_repo_sync(
         self, repo_id: str, request: MultiSearchRequest
@@ -917,8 +938,10 @@ class MultiSearchService:
             raise RuntimeError("backend_registry not initialized on app.state")
         repo_entry = backend_registry.global_repos.get_repo(repo_id)
 
+        # Story #2117: an alias that does not resolve is a rejection, not a
+        # failed search (UnresolvedRepositoryError is a FileNotFoundError).
         if not repo_entry:
-            raise FileNotFoundError(
+            raise UnresolvedRepositoryError(
                 f"Repository '{repo_id}' not found in global repositories"
             )
 
@@ -931,13 +954,13 @@ class MultiSearchService:
         )
 
         if not target_path:
-            raise FileNotFoundError(
+            raise UnresolvedRepositoryError(
                 f"Alias for global repository '{repo_id}' not found"
             )
 
         # Verify the path exists
         if not Path(target_path).exists():
-            raise FileNotFoundError(
+            raise UnresolvedRepositoryError(
                 f"Repository path for '{repo_id}' does not exist: {target_path}"
             )
 

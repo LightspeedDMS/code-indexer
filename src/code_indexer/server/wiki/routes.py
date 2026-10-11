@@ -269,6 +269,9 @@ def user_wiki_search(
                     file_extensions=[".md"],
                     limit=50,
                 ),
+                origin=search_event_recording.SearchOrigin(
+                    tool="web:wiki_search", door="web"
+                ),
                 username=current_user.username,
                 repo_alias=alias,
                 search_type=mode,
@@ -712,6 +715,9 @@ def wiki_search(
                 search_mode=mode,
                 file_extensions=[".md"],
                 limit=50,
+            ),
+            origin=search_event_recording.SearchOrigin(
+                tool="web:wiki_search", door="web"
             ),
             username=current_user.username,
             repo_alias=f"{repo_alias}-global",

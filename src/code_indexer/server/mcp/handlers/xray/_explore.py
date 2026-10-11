@@ -20,8 +20,10 @@ from code_indexer.server.services.query_admission_gate import (
     memory_pressure_mcp_payload,
 )
 from code_indexer.server.services.search_event_recording import (
+    SearchOrigin,
     XRayRecorder,
     bind_xray_recorder,
+    run_recorded_xray,
     tracked_job_cancelled,
     writer_from_app,
 )
@@ -63,6 +65,7 @@ def _explore_event_recorder(user: User, alias: str, pattern: str) -> XRayRecorde
     """Story #2107: bind this request's search-event fields for one explore job."""
     return bind_xray_recorder(
         writer_from_app(_lazy_singleton_app_or_none()),
+        origin=SearchOrigin(tool="xray_explore", door="mcp"),
         username=user.username,
         repo_alias=alias,
         pattern=pattern,
@@ -129,33 +132,42 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
             # forever.
             if job_id_holder:
                 _get_job_tracker().update_status(job_id_holder[0], status="running")
-            result = _Engine().run(
-                repo_path=repo_path,
-                driver_regex=driver_regex,
-                evaluator_code=evaluator_code,
-                search_target=search_target,
-                include_patterns=list(include_patterns),
-                exclude_patterns=list(exclude_patterns),
-                case_sensitive=case_sensitive,
-                context_lines=context_lines,
-                multiline=multiline,
-                pcre2=pcre2,
-                path=path,
-                timeout_seconds=effective_timeout,
-                progress_callback=progress_callback,
-                max_files=max_results,
-                include_ast_debug=True,
-                max_debug_nodes=max_debug_nodes,
-                on_process_spawned=_on_spawned,
-            )
-            if record_event is not None:
-                jid = job_id_holder[0] if job_id_holder else None
-                record_event(
-                    result,
-                    (lambda: tracked_job_cancelled(_get_job_tracker(), jid))
-                    if jid is not None
-                    else None,
+
+            def _run() -> Dict[str, Any]:
+                return _Engine().run(  # type: ignore[no-any-return]
+                    repo_path=repo_path,
+                    driver_regex=driver_regex,
+                    evaluator_code=evaluator_code,
+                    search_target=search_target,
+                    include_patterns=list(include_patterns),
+                    exclude_patterns=list(exclude_patterns),
+                    case_sensitive=case_sensitive,
+                    context_lines=context_lines,
+                    multiline=multiline,
+                    pcre2=pcre2,
+                    path=path,
+                    timeout_seconds=effective_timeout,
+                    progress_callback=progress_callback,
+                    max_files=max_results,
+                    include_ast_debug=True,
+                    max_debug_nodes=max_debug_nodes,
+                    on_process_spawned=_on_spawned,
                 )
+
+            # Story #2107/#2117: only the engine run is recorded (its result,
+            # or a failure row when it raises); a cancelled job records
+            # nothing.
+            jid = job_id_holder[0] if job_id_holder else None
+            cancelled = (
+                (lambda: tracked_job_cancelled(_get_job_tracker(), jid))
+                if jid is not None
+                else None
+            )
+            result = (
+                _run()
+                if record_event is None
+                else run_recorded_xray(record_event, _run, cancelled)
+            )
         finally:
             if bjm is not None and job_id_holder:
                 bjm.unregister_child_processes(job_id_holder[0])

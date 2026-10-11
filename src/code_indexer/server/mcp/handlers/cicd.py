@@ -2320,32 +2320,47 @@ async def handle_ci_search_logs(args: Dict[str, Any], user: Any) -> Dict[str, An
     import time
 
     from code_indexer.server.services.search_event_recording import (
+        SearchOrigin,
         record_completed_search,
+        recording_failure,
         writer_from_app,
     )
 
     try:
         started = time.monotonic()
-        if forge_type == "github":
-            client = GitHubActionsClient(token)
-            matches = await client.search_logs(
-                repository=project_identifier, run_id=run_id, pattern=pattern
-            )
-        else:
-            case_sensitive = args.get("case_sensitive", True)
-            client = GitLabCIClient(token, base_url=base_url)
-            matches = await client.search_logs(
-                project_id=project_identifier,
-                pipeline_id=run_id,
-                pattern=pattern,
-                case_sensitive=case_sensitive,
-            )
+        # Story #2117: the CI target resolved, so a search that raises is a
+        # failure row (its exception's class).
+        with recording_failure(
+            writer_from_app(_lazy_module_attr_or_none("app")),
+            origin=SearchOrigin(tool="ci_search_logs", door="mcp"),
+            search_type="ci_logs",
+            username=user.username,
+            repo_alias=repository_alias,
+            query_text=str(pattern),
+            started_monotonic=started,
+            correlation_id=get_correlation_id(),
+        ):
+            if forge_type == "github":
+                client = GitHubActionsClient(token)
+                matches = await client.search_logs(
+                    repository=project_identifier, run_id=run_id, pattern=pattern
+                )
+            else:
+                case_sensitive = args.get("case_sensitive", True)
+                client = GitLabCIClient(token, base_url=base_url)
+                matches = await client.search_logs(
+                    project_id=project_identifier,
+                    pipeline_id=run_id,
+                    pattern=pattern,
+                    case_sensitive=case_sensitive,
+                )
 
         # Story #2116: a completed CI log search is recorded (enqueue only:
         # never blocks this coroutine). query_text is the pattern,
         # result_count the matching log lines returned.
         record_completed_search(
             writer_from_app(_lazy_module_attr_or_none("app")),
+            origin=SearchOrigin(tool="ci_search_logs", door="mcp"),
             search_type="ci_logs",
             username=user.username,
             repo_alias=repository_alias,

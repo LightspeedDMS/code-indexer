@@ -30,7 +30,9 @@ from code_indexer.server.services.repo_access_guard import (
 
 from code_indexer.server.services.search_event_log_writer import SearchEventLogWriter
 from code_indexer.server.services.search_event_recording import (
+    SearchOrigin,
     record_regex_search,
+    recording_failure,
     writer_from_app,
 )
 from code_indexer.server.telemetry.correlation_bridge import (
@@ -42,6 +44,9 @@ from code_indexer.server.telemetry.correlation_bridge import (
 from code_indexer.global_repos.regex_search import RegexSearchService
 
 logger = logging.getLogger(__name__)
+
+# Story #2117: the tool and door every REST regex search event carries.
+REST_REGEX_ORIGIN = SearchOrigin(tool="POST /api/regex/search", door="rest")
 
 router = APIRouter(prefix="/api/regex", tags=["regex"])
 
@@ -200,18 +205,30 @@ async def _execute_single_search(
     service = await anyio.to_thread.run_sync(
         functools.partial(RegexSearchService, repo_path)
     )
-    result = await service.search(
-        pattern=body.pattern,
-        path=body.path,
-        include_patterns=body.include_patterns,
-        exclude_patterns=body.exclude_patterns,
-        case_sensitive=body.case_sensitive,
-        context_lines=body.context_lines,
-        max_results=body.max_results,
-        multiline=body.multiline,
-        pcre2=body.pcre2,
-        timeout_seconds=timeout_seconds,
-    )
+    # Story #2117: a search that ran on a resolved repository and failed is a
+    # failure row (its exception's class); the error propagates.
+    with recording_failure(
+        event_writer if user is not None and alias is not None else None,
+        origin=REST_REGEX_ORIGIN,
+        search_type="regex",
+        username=user.username if user is not None else "",
+        repo_alias=alias,
+        query_text=body.pattern,
+        started_monotonic=started,
+        correlation_id=get_current_correlation_id(),
+    ):
+        result = await service.search(
+            pattern=body.pattern,
+            path=body.path,
+            include_patterns=body.include_patterns,
+            exclude_patterns=body.exclude_patterns,
+            case_sensitive=body.case_sensitive,
+            context_lines=body.context_lines,
+            max_results=body.max_results,
+            multiline=body.multiline,
+            pcre2=body.pcre2,
+            timeout_seconds=timeout_seconds,
+        )
 
     matches = [
         {
@@ -236,6 +253,7 @@ async def _execute_single_search(
     if user is not None and alias is not None:
         record_regex_search(
             event_writer,
+            origin=REST_REGEX_ORIGIN,
             username=user.username,
             repo_alias=alias,
             pattern=body.pattern,

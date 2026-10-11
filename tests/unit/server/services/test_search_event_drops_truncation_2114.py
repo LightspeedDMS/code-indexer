@@ -168,6 +168,7 @@ class TestQueryTextTruncationIsMarked:
             SearchEventContext,
         )
         from code_indexer.server.services.search_event_recording import (
+            SearchOrigin,
             _deferred_key,
             record_deferred_search,
             remember_deferred_search,
@@ -186,6 +187,7 @@ class TestQueryTextTruncationIsMarked:
             remember_deferred_search(
                 cache,
                 {"error_code": "TEMPORAL_QUERY_DEFERRED", "job_id": "job-1"},
+                origin=SearchOrigin(tool="search_code", door="mcp"),
                 context=context,
                 correlation_id=None,
                 started_at=time.time(),
@@ -386,8 +388,9 @@ class TestExistingTablesGainTheColumn:
             info = list(conn.execute("PRAGMA table_info(search_event_log)"))
         finally:
             conn.close()
-        name, col_type, not_null = info[-1][1], info[-1][2], info[-1][3]
-        assert (name, col_type, not_null) == ("query_text_truncated", "INTEGER", 0)
+        # Story #2117 appends further columns after it.
+        [column] = [c for c in info if c[1] == "query_text_truncated"]
+        assert (column[2], column[3]) == ("INTEGER", 0)
 
     def test_alter_failure_with_the_column_still_absent_is_reported(
         self, tmp_path, caplog

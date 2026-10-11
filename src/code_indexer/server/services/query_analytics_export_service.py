@@ -42,6 +42,11 @@ _EXCEL_COLUMNS = [
     "result_count",
     "node_id",
     "correlation_id",
+    # Story #2117: blank for rows recorded before the columns existed.
+    "tool",
+    "door",
+    "outcome",
+    "error_class",
 ]
 
 # Rows per store read (Bug #2106). An export reads every matching row in
@@ -524,6 +529,10 @@ class QueryAnalyticsExportService:
             parts.append(f"search_type={filters['search_type']}")
         if filters.get("cache_hit_filter") and filters["cache_hit_filter"] != "all":
             parts.append(f"cache_hit={filters['cache_hit_filter']}")
+        # Story #2117 dimensions.
+        for name in ("door", "outcome", "tool", "correlation_id"):
+            if filters.get(name):
+                parts.append(f"{name}={filters[name]}")
 
         from_ts = filters.get("from_timestamp")
         to_ts = filters.get("to_timestamp")

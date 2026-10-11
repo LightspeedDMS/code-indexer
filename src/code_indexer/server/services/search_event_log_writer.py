@@ -69,13 +69,38 @@ class SearchEventRecord:
     # Bug #2114: whether query_text was cut to the stored cap. None only for
     # rows written before the column existed.
     query_text_truncated: Optional[bool] = None
+    # Story #2117: the MCP tool or REST/Web endpoint that ran the search, the
+    # entry point it came through (SEARCH_EVENT_DOORS), whether it succeeded
+    # (SEARCH_EVENT_OUTCOMES) and, for a failure, a short neutral error class
+    # (never a message, path, query or user data). None only for rows written
+    # before the columns existed.
+    tool: Optional[str] = None
+    door: Optional[str] = None
+    outcome: Optional[str] = None
+    error_class: Optional[str] = None
 
 
-# Bug #2114: added after the original DDL, so it is the LAST column of
-# `SELECT *` on every table (an existing table gains it by ADD COLUMN).
+# Story #2117: the values the door and outcome columns can carry.
+SEARCH_EVENT_DOORS = ("mcp", "rest", "web")
+SEARCH_EVENT_OUTCOMES = ("success", "failure")
+
+# Bug #2114: added after the original DDL (an existing table gains it by ADD
+# COLUMN).
 _ADDED_COLUMN_TRUNCATED = "query_text_truncated"
 
-# Column order of `SELECT * FROM search_event_log` (both backends' DDL).
+# Columns added after the original DDL, in the order an existing table gains
+# them: (name, SQLite type, PostgreSQL type). Bug #2114 then Story #2117
+# (PG migrations 073 and 074).
+_ADDED_COLUMNS = (
+    (_ADDED_COLUMN_TRUNCATED, "INTEGER", "BOOLEAN"),
+    ("tool", "TEXT", "TEXT"),
+    ("door", "TEXT", "TEXT"),
+    ("outcome", "TEXT", "TEXT"),
+    ("error_class", "TEXT", "TEXT"),
+)
+
+# Every column a read returns, by name (both backends select this list, so
+# a row maps by name whatever the physical column order).
 _EVENT_COLUMNS = (
     "id",
     "timestamp",
@@ -93,8 +118,12 @@ _EVENT_COLUMNS = (
     "result_count",
     "node_id",
     "correlation_id",
-    _ADDED_COLUMN_TRUNCATED,
-)
+) + tuple(name for name, _sqlite_type, _pg_type in _ADDED_COLUMNS)
+
+_SELECT_COLUMNS = ", ".join(_EVENT_COLUMNS)
+
+# Columns an insert writes (every column but the generated id).
+_INSERT_COLUMNS = _EVENT_COLUMNS[1:]
 
 
 def _sqlite_event_columns(conn: sqlite3.Connection) -> Set[str]:
@@ -102,9 +131,127 @@ def _sqlite_event_columns(conn: sqlite3.Connection) -> Set[str]:
     return {row[1] for row in conn.execute("PRAGMA table_info(search_event_log)")}
 
 
+def _sqlite_add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Add every _ADDED_COLUMNS column an existing table lacks; old rows NULL.
+
+    The read-then-add is not atomic: another worker process may add a column
+    between our read and our ALTER. That ALTER failure is tolerated only when
+    the column now exists -- decided by the schema itself, never the message.
+    """
+    for name, sqlite_type, _pg_type in _ADDED_COLUMNS:
+        if name in _sqlite_event_columns(conn):
+            continue
+        try:
+            conn.execute(
+                f"ALTER TABLE search_event_log ADD COLUMN {name} {sqlite_type}"
+            )
+        except sqlite3.OperationalError:
+            if name not in _sqlite_event_columns(conn):
+                raise
+
+
+def _pg_add_missing_columns(conn: Any) -> None:
+    """Add every _ADDED_COLUMNS column an existing table lacks (also PG
+    migrations 073/074). Checked first, so a node whose table already has a
+    column never takes ALTER TABLE's exclusive lock for it."""
+    for name, _sqlite_type, pg_type in _ADDED_COLUMNS:
+        has_column = conn.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = current_schema() "
+            "AND table_name = 'search_event_log' AND column_name = %s",
+            (name,),
+        ).fetchone()
+        if has_column is None:
+            conn.execute(
+                f"ALTER TABLE search_event_log ADD COLUMN IF NOT EXISTS {name} {pg_type}"
+            )
+
+
 def _pg_row_to_event(row: Any) -> Dict[str, Any]:
-    """Map a positional PostgreSQL search_event_log row to an event dict."""
+    """Map a PostgreSQL row read with _SELECT_COLUMNS to an event dict."""
     return dict(zip(_EVENT_COLUMNS, row))
+
+
+def _flag(value: Optional[bool]) -> Optional[int]:
+    """A nullable boolean as SQLite stores it."""
+    return None if value is None else int(value)
+
+
+def _insert_values(r: SearchEventRecord, sqlite: bool) -> tuple:
+    """One record's values in _INSERT_COLUMNS order."""
+    to_db = _flag if sqlite else (lambda v: v)
+    return (
+        r.timestamp,
+        r.username,
+        r.repo_alias,
+        r.search_type,
+        r.query_text,
+        to_db(r.voyage_cache_hit),
+        r.voyage_cache_mode,
+        r.voyage_latency_ms,
+        to_db(r.cohere_cache_hit),
+        r.cohere_cache_mode,
+        r.cohere_latency_ms,
+        r.total_latency_ms,
+        r.result_count,
+        r.node_id,
+        r.correlation_id,
+        to_db(r.query_text_truncated),
+        r.tool,
+        r.door,
+        r.outcome,
+        r.error_class,
+    )
+
+
+def _insert_sql(ph: str) -> str:
+    return (
+        f"INSERT INTO search_event_log ({', '.join(_INSERT_COLUMNS)}) "
+        f"VALUES ({', '.join([ph] * len(_INSERT_COLUMNS))})"
+    )
+
+
+def _validated_choice(value: Any, allowed: Tuple[str, ...], name: str) -> None:
+    if value not in allowed:
+        raise ValueError(f"{name} must be one of {', '.join(allowed)}, got {value!r}")
+
+
+# Longest tool identifier a row carries, and longest correlation id a filter
+# accepts (Story #2117).
+TOOL_MAX_CHARS = 100
+CORRELATION_ID_MAX_CHARS = 128
+
+
+def _dimension_conditions(
+    filters: dict, ph: str, conditions: List[str], params: List[Any]
+) -> None:
+    """Story #2117 exact-match filters: door, outcome, tool, correlation id.
+    A row recorded before the columns existed (NULL) matches none of them.
+    Raises ValueError for an unknown door/outcome or an over-long tool or
+    correlation id."""
+    door = filters.get("door") or None
+    if door:
+        _validated_choice(door, SEARCH_EVENT_DOORS, "door")
+    outcome = filters.get("outcome") or None
+    if outcome:
+        _validated_choice(outcome, SEARCH_EVENT_OUTCOMES, "outcome")
+    tool = filters.get("tool") or None
+    if tool and len(tool) > TOOL_MAX_CHARS:
+        raise ValueError(f"tool filter must be at most {TOOL_MAX_CHARS} characters")
+    correlation_id = filters.get("correlation_id") or None
+    if correlation_id and len(correlation_id) > CORRELATION_ID_MAX_CHARS:
+        raise ValueError(
+            f"correlation_id filter must be at most {CORRELATION_ID_MAX_CHARS} characters"
+        )
+    for column, value in (
+        ("door", door),
+        ("outcome", outcome),
+        ("tool", tool),
+        ("correlation_id", correlation_id),
+    ):
+        if value:
+            conditions.append(f"{column} = {ph}")
+            params.append(value)
 
 
 def _export_where(
@@ -150,14 +297,22 @@ def _export_where(
         conditions.append(f"timestamp < {ph}")
         params.append(to_ts)
 
+    _dimension_conditions(filters, ph, conditions, params)
+
+    # Bug #2112: a cache mode is recorded only when the embedding cache was
+    # consulted; it is NULL when no cache applies (fts, regex, xray, ...),
+    # when the cache is absent, disabled or off, and when it was bypassed.
+    # Such rows are in neither hits_only nor misses_only.
     cache_hit_filter = filters.get("cache_hit_filter", "all")
     if cache_hit_filter == "hits_only":
         conditions.append(
-            f"(voyage_cache_hit = {true_lit} OR cohere_cache_hit = {true_lit})"
+            f"((voyage_cache_mode IS NOT NULL AND voyage_cache_hit = {true_lit})"
+            f" OR (cohere_cache_mode IS NOT NULL AND cohere_cache_hit = {true_lit}))"
         )
     elif cache_hit_filter == "misses_only":
         conditions.append(
-            f"(voyage_cache_hit IS NULL OR voyage_cache_hit = {false_lit})"
+            "(voyage_cache_mode IS NOT NULL OR cohere_cache_mode IS NOT NULL)"
+            f" AND (voyage_cache_hit IS NULL OR voyage_cache_hit = {false_lit})"
             f" AND (cohere_cache_hit IS NULL OR cohere_cache_hit = {false_lit})"
         )
 
@@ -190,10 +345,84 @@ def _export_select(
     """Return the (sql, params) of one bounded export read, for either backend."""
     where_clause, params = _export_where(filters, after, ph, true_lit, false_lit)
     sql = (
-        f"SELECT * FROM search_event_log {where_clause} "
+        f"SELECT {_SELECT_COLUMNS} FROM search_event_log {where_clause} "
         f"ORDER BY timestamp ASC, id ASC LIMIT {ph}"
     )
     return sql, params + [limit]
+
+
+def _list_where(
+    ph: str,
+    username: Optional[str],
+    search_type: Optional[str],
+    repo_alias: Optional[str],
+    from_ts: Optional[float],
+    to_ts: Optional[float],
+    dimensions: Dict[str, Optional[str]],
+) -> Tuple[str, List[Any]]:
+    """WHERE clause of the admin event list (`query`), for either backend.
+
+    Time range is half-open: [from_ts, to_ts). `dimensions` holds the
+    Story #2117 exact-match filters (door, outcome, tool, correlation_id).
+    """
+    conditions: List[str] = []
+    params: List[Any] = []
+    for column, value in (
+        ("username", username),
+        ("search_type", search_type),
+        ("repo_alias", repo_alias),
+    ):
+        if value is not None:
+            conditions.append(f"{column} = {ph}")
+            params.append(value)
+    if from_ts is not None:
+        conditions.append(f"timestamp >= {ph}")
+        params.append(from_ts)
+    if to_ts is not None:
+        conditions.append(f"timestamp < {ph}")
+        params.append(to_ts)
+    _dimension_conditions(dimensions, ph, conditions, params)
+    return ("WHERE " + " AND ".join(conditions) if conditions else ""), params
+
+
+# Story #2117: the oldest row still stored (retention prunes older ones).
+# MIN over the indexed timestamp column: an index read on both backends.
+OLDEST_TIMESTAMP_SQL = "SELECT MIN(timestamp) FROM search_event_log"
+
+
+def _oldest_from_row(row: Any) -> Optional[float]:
+    """The OLDEST_TIMESTAMP_SQL result: None for an empty table."""
+    if row is None:
+        raise RuntimeError("MIN(timestamp) returned no row")
+    return None if row[0] is None else float(row[0])
+
+
+def _hit_rate_sql(ph: str, true_lit: str, windowed: bool) -> str:
+    """SQL of get_hit_rate_counts for either backend (Issue #1257).
+
+    Parameters: mode x4, then [from_ts, to_ts) when `windowed`. Story #2117:
+    a failed search is not a search for the hit rate, so outcome 'failure'
+    rows are excluded; rows from before the outcome column existed (NULL)
+    are counted as they always were.
+
+    The counts are of ROWS: each row is one searched repository's own cache
+    lookup (Bug #2111 writes one row per searched repository, each carrying
+    that repository's lookup), so the row count is the lookup count. Rows
+    are never merged by correlation id: it comes from a client header and
+    can be reused across separate searches.
+    """
+    window = f" AND timestamp >= {ph} AND timestamp < {ph}" if windowed else ""
+    return (
+        "SELECT "
+        f"SUM(CASE WHEN voyage_cache_mode = {ph} OR cohere_cache_mode = {ph} "
+        "THEN 1 ELSE 0 END), "
+        "SUM(CASE WHEN "
+        f"(voyage_cache_mode = {ph} AND voyage_cache_hit = {true_lit}) "
+        f"OR (cohere_cache_mode = {ph} AND cohere_cache_hit = {true_lit}) "
+        "THEN 1 ELSE 0 END) "
+        "FROM search_event_log "
+        f"WHERE (outcome IS NULL OR outcome <> 'failure'){window}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -233,24 +462,18 @@ class SearchEventLogSqliteBackend:
                         result_count INTEGER NOT NULL,
                         node_id TEXT NOT NULL,
                         correlation_id TEXT,
-                        query_text_truncated INTEGER
+                        query_text_truncated INTEGER,
+                        tool TEXT,
+                        door TEXT,
+                        outcome TEXT,
+                        error_class TEXT
                     )
                     """
                 )
-                # Bug #2114: a table created before the column existed (here
-                # or by DatabaseSchema) gains it in place; old rows read NULL.
-                if _ADDED_COLUMN_TRUNCATED not in _sqlite_event_columns(conn):
-                    try:
-                        conn.execute(
-                            "ALTER TABLE search_event_log "
-                            f"ADD COLUMN {_ADDED_COLUMN_TRUNCATED} INTEGER"
-                        )
-                    except sqlite3.OperationalError:
-                        # Another worker process added it between our read
-                        # and our ALTER (the read-then-add is not atomic).
-                        # Decided by the schema itself, never the message.
-                        if _ADDED_COLUMN_TRUNCATED not in _sqlite_event_columns(conn):
-                            raise
+                # Bug #2114 / Story #2117: a table created before a column
+                # existed (here or by DatabaseSchema) gains it in place; old
+                # rows read NULL.
+                _sqlite_add_missing_columns(conn)
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_sel_timestamp
@@ -278,48 +501,8 @@ class SearchEventLogSqliteBackend:
             conn = sqlite3.connect(self._db_path, timeout=30)
             try:
                 conn.executemany(
-                    """
-                    INSERT OR IGNORE INTO search_event_log
-                        (timestamp, username, repo_alias, search_type, query_text,
-                         voyage_cache_hit, voyage_cache_mode, voyage_latency_ms,
-                         cohere_cache_hit, cohere_cache_mode, cohere_latency_ms,
-                         total_latency_ms, result_count, node_id, correlation_id,
-                         query_text_truncated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            r.timestamp,
-                            r.username,
-                            r.repo_alias,
-                            r.search_type,
-                            r.query_text,
-                            (
-                                int(r.voyage_cache_hit)
-                                if r.voyage_cache_hit is not None
-                                else None
-                            ),
-                            r.voyage_cache_mode,
-                            r.voyage_latency_ms,
-                            (
-                                int(r.cohere_cache_hit)
-                                if r.cohere_cache_hit is not None
-                                else None
-                            ),
-                            r.cohere_cache_mode,
-                            r.cohere_latency_ms,
-                            r.total_latency_ms,
-                            r.result_count,
-                            r.node_id,
-                            r.correlation_id,
-                            (
-                                int(r.query_text_truncated)
-                                if r.query_text_truncated is not None
-                                else None
-                            ),
-                        )
-                        for r in records
-                    ],
+                    _insert_sql("?"),
+                    [_insert_values(r, sqlite=True) for r in records],
                 )
                 conn.commit()
             finally:
@@ -354,6 +537,10 @@ class SearchEventLogSqliteBackend:
         to_ts: Optional[float] = None,
         limit: int = 100,
         offset: int = 0,
+        door: Optional[str] = None,
+        outcome: Optional[str] = None,
+        tool: Optional[str] = None,
+        correlation_id: Optional[str] = None,
     ):
         """Query events with optional filters.
 
@@ -365,26 +552,20 @@ class SearchEventLogSqliteBackend:
         means the store was read successfully and nothing matched; it never
         stands in for a failed read.
         """
-        conditions = []
-        params: list = []
-
-        if username is not None:
-            conditions.append("username = ?")
-            params.append(username)
-        if search_type is not None:
-            conditions.append("search_type = ?")
-            params.append(search_type)
-        if repo_alias is not None:
-            conditions.append("repo_alias = ?")
-            params.append(repo_alias)
-        if from_ts is not None:
-            conditions.append("timestamp >= ?")
-            params.append(from_ts)
-        if to_ts is not None:
-            conditions.append("timestamp < ?")
-            params.append(to_ts)
-
-        where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+        where_clause, params = _list_where(
+            "?",
+            username,
+            search_type,
+            repo_alias,
+            from_ts,
+            to_ts,
+            {
+                "door": door,
+                "outcome": outcome,
+                "tool": tool,
+                "correlation_id": correlation_id,
+            },
+        )
 
         conn = sqlite3.connect(self._db_path, timeout=30)
         conn.row_factory = sqlite3.Row
@@ -395,7 +576,7 @@ class SearchEventLogSqliteBackend:
 
             # Fetch page
             data_sql = (
-                f"SELECT * FROM search_event_log {where_clause} "
+                f"SELECT {_SELECT_COLUMNS} FROM search_event_log {where_clause} "
                 f"ORDER BY timestamp DESC LIMIT ? OFFSET ?"
             )
             rows = conn.execute(data_sql, params + [limit, offset]).fetchall()
@@ -427,6 +608,15 @@ class SearchEventLogSqliteBackend:
         finally:
             conn.close()
 
+    def oldest_timestamp(self) -> Optional[float]:
+        """Timestamp of the oldest stored row, None when there is none
+        (Story #2117). One index read; read failures propagate."""
+        conn = sqlite3.connect(self._db_path, timeout=30)
+        try:
+            return _oldest_from_row(conn.execute(OLDEST_TIMESTAMP_SQL).fetchone())
+        finally:
+            conn.close()
+
     def get_hit_rate_counts(
         self,
         mode: str,
@@ -448,7 +638,9 @@ class SearchEventLogSqliteBackend:
         for that request (voyage_cache_mode == mode OR cohere_cache_mode ==
         mode). A row counts toward "hits" when a provider recorded BOTH this
         mode AND a hit for that SAME provider on that SAME request. This is
-        REQUEST-denominated (one row = one user request), matching the
+        ROW-denominated (each row is one searched repository's own cache
+        lookup, Bug #2111; rows are never merged by the client-supplied
+        correlation id), matching the
         cache_hit_filter="hits_only" OR-combination semantics already used by
         query_for_export -- unlike the in-process QueryEmbeddingCacheMetrics
         tallies, which increment once per cache OPERATION and can therefore
@@ -461,24 +653,11 @@ class SearchEventLogSqliteBackend:
             conn = sqlite3.connect(self._db_path, timeout=30)
             try:
                 params: List[Any] = [mode, mode, mode, mode]
-                where_clause = ""
-                if from_ts is not None and to_ts is not None:
-                    where_clause = "WHERE timestamp >= ? AND timestamp < ?"
+                windowed = from_ts is not None and to_ts is not None
+                if windowed:
                     params.append(from_ts)
                     params.append(to_ts)
-                row = conn.execute(
-                    f"""
-                    SELECT
-                        SUM(CASE WHEN voyage_cache_mode = ? OR cohere_cache_mode = ?
-                            THEN 1 ELSE 0 END),
-                        SUM(CASE WHEN (voyage_cache_mode = ? AND voyage_cache_hit = 1)
-                                 OR (cohere_cache_mode = ? AND cohere_cache_hit = 1)
-                            THEN 1 ELSE 0 END)
-                    FROM search_event_log
-                    {where_clause}
-                    """,
-                    params,
-                ).fetchone()
+                row = conn.execute(_hit_rate_sql("?", "1", windowed), params).fetchone()
                 requests_count = row[0] or 0
                 hits_count = row[1] or 0
                 return {"hits": int(hits_count), "requests": int(requests_count)}
@@ -526,24 +705,17 @@ class SearchEventLogPostgresBackend:
                         result_count        INTEGER NOT NULL,
                         node_id             TEXT NOT NULL,
                         correlation_id      TEXT,
-                        query_text_truncated BOOLEAN
+                        query_text_truncated BOOLEAN,
+                        tool                TEXT,
+                        door                TEXT,
+                        outcome             TEXT,
+                        error_class         TEXT
                     )
                     """
                 )
-                # Bug #2114 (also PG migration 073): a table created before the
-                # column existed gains it. Checked first, so a node whose table
-                # already has it never takes ALTER TABLE's exclusive lock.
-                has_column = conn.execute(
-                    "SELECT 1 FROM information_schema.columns "
-                    "WHERE table_schema = current_schema() "
-                    "AND table_name = 'search_event_log' AND column_name = %s",
-                    (_ADDED_COLUMN_TRUNCATED,),
-                ).fetchone()
-                if has_column is None:
-                    conn.execute(
-                        "ALTER TABLE search_event_log ADD COLUMN IF NOT EXISTS "
-                        f"{_ADDED_COLUMN_TRUNCATED} BOOLEAN"
-                    )
+                # Bug #2114 / Story #2117 (also PG migrations 073/074): a
+                # table created before a column existed gains it.
+                _pg_add_missing_columns(conn)
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_sel_timestamp
@@ -570,36 +742,7 @@ class SearchEventLogPostgresBackend:
         try:
             with self._pool.connection() as conn:
                 for r in records:
-                    conn.execute(
-                        """
-                        INSERT INTO search_event_log
-                            (timestamp, username, repo_alias, search_type, query_text,
-                             voyage_cache_hit, voyage_cache_mode, voyage_latency_ms,
-                             cohere_cache_hit, cohere_cache_mode, cohere_latency_ms,
-                             total_latency_ms, result_count, node_id, correlation_id,
-                             query_text_truncated)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                                %s, %s)
-                        """,
-                        (
-                            r.timestamp,
-                            r.username,
-                            r.repo_alias,
-                            r.search_type,
-                            r.query_text,
-                            r.voyage_cache_hit,
-                            r.voyage_cache_mode,
-                            r.voyage_latency_ms,
-                            r.cohere_cache_hit,
-                            r.cohere_cache_mode,
-                            r.cohere_latency_ms,
-                            r.total_latency_ms,
-                            r.result_count,
-                            r.node_id,
-                            r.correlation_id,
-                            r.query_text_truncated,
-                        ),
-                    )
+                    conn.execute(_insert_sql("%s"), _insert_values(r, sqlite=False))
                 conn.commit()
         except Exception as exc:
             logger.warning(
@@ -630,6 +773,10 @@ class SearchEventLogPostgresBackend:
         to_ts: Optional[float] = None,
         limit: int = 100,
         offset: int = 0,
+        door: Optional[str] = None,
+        outcome: Optional[str] = None,
+        tool: Optional[str] = None,
+        correlation_id: Optional[str] = None,
     ):
         """Query events with optional filters.
 
@@ -640,33 +787,27 @@ class SearchEventLogPostgresBackend:
         Bug #2105: any read failure propagates to the caller (see the SQLite
         backend's query()).
         """
-        conditions = []
-        params: list = []
-
-        if username is not None:
-            conditions.append("username = %s")
-            params.append(username)
-        if search_type is not None:
-            conditions.append("search_type = %s")
-            params.append(search_type)
-        if repo_alias is not None:
-            conditions.append("repo_alias = %s")
-            params.append(repo_alias)
-        if from_ts is not None:
-            conditions.append("timestamp >= %s")
-            params.append(from_ts)
-        if to_ts is not None:
-            conditions.append("timestamp < %s")
-            params.append(to_ts)
-
-        where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+        where_clause, params = _list_where(
+            "%s",
+            username,
+            search_type,
+            repo_alias,
+            from_ts,
+            to_ts,
+            {
+                "door": door,
+                "outcome": outcome,
+                "tool": tool,
+                "correlation_id": correlation_id,
+            },
+        )
 
         with self._pool.connection() as conn:
             count_sql = f"SELECT COUNT(*) FROM search_event_log {where_clause}"
             total_count = conn.execute(count_sql, params).fetchone()[0]
 
             data_sql = (
-                f"SELECT * FROM search_event_log {where_clause} "
+                f"SELECT {_SELECT_COLUMNS} FROM search_event_log {where_clause} "
                 f"ORDER BY timestamp DESC LIMIT %s OFFSET %s"
             )
             rows = conn.execute(data_sql, params + [limit, offset]).fetchall()
@@ -691,6 +832,12 @@ class SearchEventLogPostgresBackend:
             rows = conn.execute(sql, params).fetchall()
             return [_pg_row_to_event(row) for row in rows]
 
+    def oldest_timestamp(self) -> Optional[float]:
+        """Timestamp of the oldest stored row, None when there is none
+        (Story #2117). One index read; read failures propagate."""
+        with self._pool.connection() as conn:
+            return _oldest_from_row(conn.execute(OLDEST_TIMESTAMP_SQL).fetchone())
+
     def get_hit_rate_counts(
         self,
         mode: str,
@@ -711,23 +858,12 @@ class SearchEventLogPostgresBackend:
         try:
             with self._pool.connection() as conn:
                 params: List[Any] = [mode, mode, mode, mode]
-                where_clause = ""
-                if from_ts is not None and to_ts is not None:
-                    where_clause = "WHERE timestamp >= %s AND timestamp < %s"
+                windowed = from_ts is not None and to_ts is not None
+                if windowed:
                     params.append(from_ts)
                     params.append(to_ts)
                 row = conn.execute(
-                    f"""
-                    SELECT
-                        SUM(CASE WHEN voyage_cache_mode = %s OR cohere_cache_mode = %s
-                            THEN 1 ELSE 0 END),
-                        SUM(CASE WHEN (voyage_cache_mode = %s AND voyage_cache_hit = TRUE)
-                                 OR (cohere_cache_mode = %s AND cohere_cache_hit = TRUE)
-                            THEN 1 ELSE 0 END)
-                    FROM search_event_log
-                    {where_clause}
-                    """,
-                    params,
+                    _hit_rate_sql("%s", "TRUE", windowed), params
                 ).fetchone()
                 requests_count = row[0] or 0
                 hits_count = row[1] or 0

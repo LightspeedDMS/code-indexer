@@ -116,10 +116,12 @@ class TestMcpScipSearches:
         assert body["success"] is True, body
 
         [row] = env.rec.rows()
+        # The bare alias is recorded as the global repository the SCIP
+        # service resolved it to.
         assert (row["search_type"], row["username"], row["repo_alias"]) == (
             "scip",
             "alice",
-            "example-repo",
+            "example-repo-global",
         )
         assert row["query_text"] == query_text
         assert row["result_count"] == len(body[result_list])
@@ -141,6 +143,38 @@ class TestMcpScipSearches:
 
         assert body["success"] is False
         assert env.rec.rows() == []
+
+    @pytest.mark.parametrize("name,args,query_text,result_list", _MCP_SCIP_CALLS)
+    def test_mcp_scip_search_that_fails_records_a_failure_row(
+        self, env, name, args, query_text, result_list
+    ):
+        """Story #2117: a SCIP search that ran and failed is a failure row
+        (its exception's class); argument rejections above write nothing."""
+        from code_indexer.server.mcp.handlers import scip
+
+        class _FailingService:
+            def __getattr__(self, method: str) -> Any:
+                def _fail(*_a: Any, **_k: Any) -> Any:
+                    raise RuntimeError("SCIP database unreadable")
+
+                return _fail
+
+        with patch.object(scip, "_get_scip_query_service", lambda: _FailingService()):
+            body = _body(
+                getattr(scip, name)(
+                    {**args, "repository_alias": "example-repo"}, make_user("alice")
+                )
+            )
+
+        assert body["success"] is False, body
+        [row] = env.rec.rows()
+        assert (row["tool"], row["door"], row["outcome"], row["error_class"]) == (
+            name,
+            "mcp",
+            "failure",
+            "RuntimeError",
+        )
+        assert (row["repo_alias"], row["query_text"]) == ("example-repo", query_text)
 
 
 def _rest_scip(
@@ -187,10 +221,12 @@ class TestRestScipSearches:
         assert response.status_code == 200 and body["success"] is True, body
 
         [row] = env.rec.rows()
+        # Finding 6: the bare project is recorded as the global repository
+        # the SCIP service resolved it to.
         assert (row["search_type"], row["username"], row["repo_alias"]) == (
             "scip",
             "bob",
-            "example-repo",
+            "example-repo-global",
         )
         assert row["query_text"] == query_text
         assert row["result_count"] == len(body[result_list])
@@ -200,6 +236,119 @@ class TestRestScipSearches:
 
         assert response.status_code == 500, response.text
         assert env.rec.rows() == []
+
+    @pytest.mark.parametrize("path,params,query_text,result_list", _REST_SCIP_CALLS)
+    def test_rest_scip_search_that_fails_records_a_failure_row(
+        self, env, path, params, query_text, result_list
+    ):
+        """Story #2117: a REST SCIP search that ran and failed is a failure
+        row (its exception's class)."""
+        from code_indexer.server.routers import scip_queries
+
+        class _FailingService:
+            def __getattr__(self, method: str) -> Any:
+                def _fail(*_a: Any, **_k: Any) -> Any:
+                    raise RuntimeError("SCIP database unreadable")
+
+                return _fail
+
+        with patch.object(
+            scip_queries, "_get_scip_query_service", lambda request: _FailingService()
+        ):
+            response = _rest_scip(env, path, {**params, "project": "example-repo"})
+        assert response.json()["success"] is False, response.text
+
+        [row] = env.rec.rows()
+        assert (row["tool"], row["door"], row["outcome"], row["error_class"]) == (
+            f"GET /scip/{path}",
+            "rest",
+            "failure",
+            "RuntimeError",
+        )
+        assert (row["repo_alias"], row["query_text"]) == ("example-repo", query_text)
+
+    def test_rest_callchain_timeout_records_a_failure_row(self, env):
+        from code_indexer.server.routers import scip_queries
+
+        class _TimingOutService:
+            def trace_callchain(self, *_a: Any, **_k: Any) -> Any:
+                return [], ["query timed out"]
+
+        with patch.object(
+            scip_queries, "_get_scip_query_service", lambda request: _TimingOutService()
+        ):
+            response = _rest_scip(
+                env,
+                "callchain",
+                {
+                    "from_symbol": "Calculator",
+                    "to_symbol": "add",
+                    "project": "example-repo",
+                },
+            )
+        assert response.json()["success"] is False, response.text
+
+        [row] = env.rec.rows()
+        assert (row["outcome"], row["error_class"], row["query_text"]) == (
+            "failure",
+            "QueryTimeoutError",
+            "Calculator -> add",
+        )
+
+
+def _second_scip_repo(env: Env) -> None:
+    """A second golden repository holding the same real SCIP index."""
+    scip_dir = env.golden_repos_dir / "second-repo" / ".code-indexer" / "scip"
+    scip_dir.mkdir(parents=True)
+    shutil.copy(_SCIP_FIXTURE, scip_dir / "index.scip.db")
+
+
+def _assert_one_row_per_repository(
+    env: Env, body: Dict[str, Any], result_list: str
+) -> None:
+    """Both repositories hold the same index, so each contributed half of
+    the results; each gets its own row with its own count."""
+    total = len(body[result_list])
+    assert total > 0 and total % 2 == 0, body
+    rows = {r["repo_alias"]: (r["result_count"], r["outcome"]) for r in env.rec.rows()}
+    assert rows == {
+        "example-repo-global": (total // 2, "success"),
+        "second-repo-global": (total // 2, "success"),
+    }
+
+
+# (MCP handler, REST path, arguments, list the results are in)
+_NO_ALIAS_CALLS = [
+    ("scip_definition", "definition", {"symbol": "Calculator"}, "results"),
+    ("scip_references", "references", {"symbol": "Calculator"}, "results"),
+]
+
+
+class TestScipWithoutAlias:
+    """D: a SCIP search without an alias searches every SCIP-indexed
+    repository the caller may access: one row per repository searched, each
+    with that repository's own result count (tallied where the service's
+    per-repository loop knows the repository)."""
+
+    @pytest.mark.parametrize("handler,path,args,result_list", _NO_ALIAS_CALLS)
+    def test_mcp_records_one_row_per_repository(
+        self, env, handler, path, args, result_list
+    ):
+        from code_indexer.server.mcp.handlers import scip
+
+        _second_scip_repo(env)
+        body = _body(getattr(scip, handler)(dict(args), make_user("alice")))
+        assert body["success"] is True, body
+        _assert_one_row_per_repository(env, body, result_list)
+
+    @pytest.mark.parametrize("handler,path,args,result_list", _NO_ALIAS_CALLS)
+    def test_rest_records_one_row_per_repository(
+        self, env, handler, path, args, result_list
+    ):
+        _second_scip_repo(env)
+        body = _rest_scip(env, path, dict(args)).json()
+        assert body["success"] is True, body
+        _assert_one_row_per_repository(env, body, result_list)
 
 
 class _ScipMultiService:
@@ -212,6 +361,14 @@ class _ScipMultiService:
             SCIPMultiMetadata,
             SCIPMultiResponse,
             SCIPResult,
+        )
+        from code_indexer.server.services.search_event_context import (
+            note_current_repositories,
+        )
+
+        # Like the real service: the repositories it resolved.
+        note_current_repositories(
+            searched=["first-repo", "second-repo"], failed=["third-repo"]
         )
 
         return SCIPMultiResponse(
@@ -282,9 +439,13 @@ class TestRestScipMultiSearches:
         assert response.status_code == 200, response.text
 
         rows = env.rec.rows(search_type="scip")
-        assert sorted((r["repo_alias"], r["result_count"]) for r in rows) == [
-            ("first-repo", 2),
-            ("second-repo", 0),
+        # Story #2117: the repository that failed gets a failure row.
+        assert sorted(
+            (r["repo_alias"], r["result_count"], r["outcome"]) for r in rows
+        ) == [
+            ("first-repo", 2, "success"),
+            ("second-repo", 0, "success"),
+            ("third-repo", 0, "failure"),
         ]
         assert {(r["username"], r["query_text"]) for r in rows} == {
             ("carol", query_text)
@@ -398,6 +559,46 @@ class TestGitHistorySearches:
         )
         assert row["result_count"] == len(body["matches"]) > 0
 
+    @pytest.mark.parametrize(
+        "handler_name, method, args",
+        [
+            ("git_search_commits", "search_commits", {"query": "token"}),
+            ("git_search_diffs", "search_diffs", {"search_string": "example_value"}),
+        ],
+    )
+    def test_git_search_that_fails_records_a_failure_row(
+        self, env, git_aliases, handler_name, method, args
+    ):
+        """Story #2117: the repository resolved, then the git search failed
+        (the git operations layer is the stand-in)."""
+        from code_indexer.global_repos.git_operations import GitOperationsService
+        from code_indexer.server.mcp.handlers import git_read
+
+        def _fail(self: Any, **_: Any) -> Any:
+            raise RuntimeError("git failed")
+
+        handler = getattr(git_read, f"handle_{handler_name}")
+        with patch.object(GitOperationsService, method, _fail):
+            body = _body(
+                handler(
+                    {"repository_alias": "first-repo-global", **args},
+                    make_user("dana"),
+                )
+            )
+
+        assert body["success"] is False, body
+        [row] = env.rec.rows()
+        assert (row["tool"], row["door"], row["outcome"], row["error_class"]) == (
+            handler_name,
+            "mcp",
+            "failure",
+            "RuntimeError",
+        )
+        assert (row["search_type"], row["repo_alias"]) == (
+            "git_history",
+            "first-repo-global",
+        )
+
     def test_failed_git_search_records_no_row(self, env, git_aliases):
         from code_indexer.server.mcp.handlers.git_read import (
             handle_git_search_commits,
@@ -467,8 +668,96 @@ class TestCiLogSearches:
         )
         assert (row["query_text"], row["result_count"]) == ("error", 2)
 
-    def test_failed_ci_search_logs_records_no_row(self, env):
+    def test_failed_ci_search_logs_records_a_failure_row(self, env):
+        """Story #2117: the CI target resolved, then the forge search failed."""
         body = _ci_search(env, fail=True)
 
         assert body["success"] is False
+        [row] = env.rec.rows()
+        assert (row["tool"], row["door"], row["outcome"], row["error_class"]) == (
+            "ci_search_logs",
+            "mcp",
+            "failure",
+            "RuntimeError",
+        )
+        assert (row["search_type"], row["repo_alias"]) == (
+            "ci_logs",
+            "example-repo-global",
+        )
+
+
+_EMPTY_DEFINITION = {
+    "success": True,
+    "symbol": "Calculator",
+    "total_results": 0,
+    "results": [],
+}
+
+
+class TestScipUnresolvedSearchesRecordNothing:
+    """Finding 5: a SCIP search that resolved no repository with a SCIP index
+    -- an unknown or inaccessible alias, or no SCIP index anywhere -- searched
+    nothing: no row. The answer is unchanged (an empty success)."""
+
+    def test_mcp_unknown_alias(self, env):
+        from code_indexer.server.mcp.handlers import scip
+
+        body = _body(
+            scip.scip_definition(
+                {"symbol": "Calculator", "repository_alias": "unknown-global"},
+                make_user("alice"),
+            )
+        )
+
+        assert body == _EMPTY_DEFINITION
+        assert env.rec.rows() == []
+
+    @pytest.mark.parametrize("name,args,query_text,result_list", _MCP_SCIP_CALLS)
+    def test_every_mcp_scip_tool_with_an_unknown_alias(
+        self, env, name, args, query_text, result_list
+    ):
+        from code_indexer.server.mcp.handlers import scip
+
+        body = _body(
+            getattr(scip, name)(
+                {**args, "repository_alias": "unknown-global"}, make_user("alice")
+            )
+        )
+
+        assert body["success"] is True and body[result_list] == [], body
+        assert env.rec.rows() == []
+
+    @pytest.mark.parametrize("path,params,query_text,result_list", _REST_SCIP_CALLS)
+    def test_every_rest_scip_endpoint_with_an_unknown_alias(
+        self, env, path, params, query_text, result_list
+    ):
+        response = _rest_scip(env, path, {**params, "project": "unknown-global"})
+
+        body = response.json()
+        assert response.status_code == 200 and body["success"] is True, body
+        assert body[result_list] == []
+        assert env.rec.rows() == []
+
+    def test_rest_unknown_alias(self, env):
+        response = _rest_scip(
+            env, "definition", {"symbol": "Calculator", "project": "unknown-global"}
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json() == _EMPTY_DEFINITION
+        assert env.rec.rows() == []
+
+    def test_alias_free_without_any_scip_index(self, env):
+        from code_indexer.server.mcp.handlers import scip
+
+        shutil.rmtree(env.golden_repos_dir / "example-repo" / ".code-indexer")
+
+        mcp_body = _body(
+            scip.scip_definition({"symbol": "Calculator"}, make_user("alice"))
+        )
+        rest = _rest_scip(env, "definition", {"symbol": "Calculator"})
+
+        assert mcp_body == _EMPTY_DEFINITION
+        assert rest.status_code == 200, rest.text
+        assert rest.json() == _EMPTY_DEFINITION
         assert env.rec.rows() == []

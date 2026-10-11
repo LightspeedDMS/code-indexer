@@ -59,6 +59,8 @@ def _large_records() -> List[Any]:
             make_record(
                 timestamp=_BASE_TS + i,
                 voyage_cache_hit=_is_hit(i),
+                # Bug #2112: the cache was consulted (a hit or a miss).
+                voyage_cache_mode="on",
                 correlation_id=f"old-{i}",
             )
         )
@@ -67,6 +69,7 @@ def _large_records() -> List[Any]:
             make_record(
                 timestamp=_BASE_TS + 10_000 + j,
                 voyage_cache_hit=_is_hit(j),
+                voyage_cache_mode="on",
                 correlation_id=f"new-{j}",
             )
         )

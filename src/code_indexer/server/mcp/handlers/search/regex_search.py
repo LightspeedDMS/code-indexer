@@ -28,7 +28,9 @@ from code_indexer.server.mcp import reranking as _mcp_reranking
 from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.search_event_recording import (
+    SearchOrigin,
     record_regex_search,
+    recording_failure,
     writer_from_app,
 )
 from code_indexer.server.services.query_admission_gate import (
@@ -70,6 +72,9 @@ from ._shared import (
 )
 
 logger = logging.getLogger("code_indexer.server.mcp.handlers.search")
+
+# Story #2117: the tool and door every MCP regex search event carries.
+REGEX_SEARCH_ORIGIN = SearchOrigin(tool="regex_search", door="mcp")
 
 
 async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -550,9 +555,21 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
                 }
             )
 
-        matches, rerank_meta, sr = await _execute_regex_search(
-            args, Path(resolved), repository_alias, user
-        )
+        # Story #2117: the repository resolved; a search that raises from
+        # here is one failure row.
+        with recording_failure(
+            writer_from_app(_utils._lazy_module_attr_or_none("app")),
+            origin=REGEX_SEARCH_ORIGIN,
+            search_type="regex",
+            username=user.username,
+            repo_alias=repository_alias,
+            query_text=str(args["pattern"]),
+            started_monotonic=regex_started,
+            correlation_id=get_correlation_id(),
+        ):
+            matches, rerank_meta, sr = await _execute_regex_search(
+                args, Path(resolved), repository_alias, user
+            )
         # Bug #337 regression fix: when cidx-meta access filtering actually
         # ran (rerank_meta["cidx_meta_access_filtered"], set in
         # _rerank_truncate_and_filter_regex_matches), sr.total_matches is
@@ -573,6 +590,7 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
         )
         record_regex_search(
             writer_from_app(_utils._lazy_module_attr_or_none("app")),
+            origin=REGEX_SEARCH_ORIGIN,
             username=user.username,
             repo_alias=repository_alias,
             pattern=args["pattern"],

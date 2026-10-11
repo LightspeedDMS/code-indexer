@@ -1,33 +1,67 @@
 """One record builder for search events, shared by every search door (#2104).
 
-`record_search_event` builds a SearchEventRecord and hands it to the existing
-bounded SearchEventLogWriter queue. It is fire-and-forget: it never blocks,
-never raises and never changes the search it records -- a recording failure
-is logged and the search result is returned as usual.
+`record_search_event` and its siblings build SearchEventRecords and hand them
+to the existing bounded SearchEventLogWriter queue. Recording is
+fire-and-forget: it never blocks, never raises and never changes the search
+it records -- a recording failure is logged and the search result is
+returned as usual.
 
-Recording rule (Bug #2113): a row is written for a search whose result is
-known and successful. Searches that fail, are rejected, answer success
-without having run, or only submit a job whose result is not yet known write
-no row. Whether a result is known is decided here, once per result shape
-(`search_payload_is_known`, `xray_result_is_known`). Asynchronous paths
-record when their job completes, with the real result count, unless the job
-was cancelled. A deferred temporal handoff leaves a pending record in the
-cluster-shared PayloadCache (`remember_deferred_search`); the result door
-that delivers the completed result records it once per caller
-(`record_deferred_search`).
+Recording rule (Story #2117, replacing Bug #2113's success-only rule): every
+search a door ran is recorded with its `tool` and `door` (SearchOrigin) and
+an `outcome`. A search that ran and succeeded is `success`; one that failed,
+raised, or answered without having run is `failure` with a neutral
+`error_class` (search_event_outcomes; never a message). Outcomes are decided
+here, once per result shape, never per door. Not recorded: a job cancelled
+by the user, a deferred temporal handoff (recorded when its result is
+delivered), and requests rejected before the door resolved a repository
+(input validation, admission refusal).
+
+Bug #2111: a search over several repositories writes one row per repository
+it searched (`note_repositories` on the request's SearchEventContext), each
+with that repository's own result count; a repository that failed gets a
+failure row (`repository_failed`). Rows of one call share its latency and
+correlation id.
+
+Asynchronous paths record when their job completes. A deferred temporal
+handoff leaves a pending record in the cluster-shared PayloadCache
+(`remember_deferred_search`); the result door that delivers the completed
+result records it once per caller (`record_deferred_search`).
 """
 
+import functools
 import hashlib
 import json
 import logging
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Sized
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Sized,
+    Tuple,
+    TypeVar,
+    Union,
+    cast,
+)
 
 from code_indexer.server.models.query import SEARCH_MODES
-from code_indexer.server.services.search_event_context import SearchEventContext
-from code_indexer.server.services.search_event_log_writer import SearchEventRecord
+from code_indexer.server.services import search_event_outcomes as outcomes
+from code_indexer.server.services.search_event_context import (
+    ProviderCacheFields,
+    SearchEventContext,
+)
+from code_indexer.server.services.search_event_log_writer import (
+    SEARCH_EVENT_DOORS,
+    TOOL_MAX_CHARS,
+    SearchEventRecord,
+)
 from code_indexer.server.utils.runtime_node_id import resolve_runtime_node_id
 
 logger = logging.getLogger(__name__)
@@ -55,52 +89,34 @@ SEARCH_TYPES = SEARCH_MODES + (
 # query_text is capped at this many characters before it is stored.
 QUERY_TEXT_MAX_CHARS = 500
 
-# The file_path the X-Ray engine gives an evaluation error about the whole
-# run rather than one file (compile error, xray-cli failure, the synthetic
-# EvaluatorTimeout of a run that timed out with no matches).
-_WHOLE_RUN_FILE_PATH = ""
+_SUCCESS = "success"
+_FAILURE = "failure"
 
-# Bug #1804's completeness marker: every embedding provider was unavailable,
-# so the search answered success with no results without ever running.
-_PROVIDERS_UNAVAILABLE = "providers_unavailable"
+
+@dataclass(frozen=True)
+class SearchOrigin:
+    """Which tool or endpoint ran a search, and through which door.
+
+    `tool` is the MCP tool name (e.g. "search_code"), the REST endpoint
+    ("POST /api/query") or the Web page ("web:query"); `door` is one of
+    SEARCH_EVENT_DOORS ("mcp", "rest", "web").
+    """
+
+    tool: str
+    door: str
+
+
+def rest_origin(request: Any) -> SearchOrigin:
+    """The REST endpoint serving `request` (a route handler's Request): its
+    method and matched route template, e.g. "GET /scip/definition"."""
+    return SearchOrigin(
+        tool=f"{request.method} {request.scope['route'].path}", door="rest"
+    )
 
 
 def writer_from_app(app: Any) -> Any:
     """The app's SearchEventLogWriter, or None when it is not wired."""
     return getattr(getattr(app, "state", None), "search_event_log_writer", None)
-
-
-def record_search_event(
-    writer: Any,
-    *,
-    username: str,
-    repo_alias: Optional[str],
-    search_type: str,
-    query_text: str,
-    result_count: int,
-    total_latency_ms: int,
-    correlation_id: Optional[str],
-    context: Optional[SearchEventContext] = None,
-) -> None:
-    """Enqueue one search event. Never raises; a None writer records nothing.
-
-    `context` carries the embedding cache fields collected during the search;
-    without it those columns stay NULL (searches that never embed).
-    """
-    if writer is None:
-        return
-    with _never_raise(search_type):
-        _enqueue(
-            writer,
-            username=username,
-            repo_alias=repo_alias,
-            search_type=search_type,
-            query_text=query_text,
-            result_count=result_count,
-            total_latency_ms=total_latency_ms,
-            correlation_id=correlation_id,
-            context=context,
-        )
 
 
 @contextmanager
@@ -120,6 +136,7 @@ def _never_raise(search_type: str) -> Iterator[None]:
 def _enqueue(
     writer: Any,
     *,
+    origin: Optional[SearchOrigin],
     username: str,
     repo_alias: Optional[str],
     search_type: str,
@@ -127,11 +144,26 @@ def _enqueue(
     result_count: int,
     total_latency_ms: int,
     correlation_id: Optional[str],
-    context: Optional[SearchEventContext],
+    context: Optional[Union[SearchEventContext, ProviderCacheFields]],
+    error_class: Optional[str] = None,
 ) -> None:
-    """Build one SearchEventRecord and enqueue it. Raises on any error."""
+    """Build one SearchEventRecord and enqueue it. Raises on any error.
+
+    `context` carries the row's embedding cache fields (None: NULL); a
+    multi-repository row passes its repository's own lookup (Bug #2111).
+
+    `origin` is None only for a deferred temporal search handed off by a node
+    that predates Story #2117 (its pending record names no tool or door):
+    the row is still written, with tool and door NULL like legacy rows.
+    """
     if search_type not in SEARCH_TYPES:
         raise ValueError(f"unknown search_type {search_type!r}")
+    if origin is not None and origin.door not in SEARCH_EVENT_DOORS:
+        raise ValueError(f"unknown door {origin.door!r}")
+    if origin is not None and (not origin.tool or len(origin.tool) > TOOL_MAX_CHARS):
+        raise ValueError(f"tool must be 1..{TOOL_MAX_CHARS} characters")
+    if error_class is not None and not outcomes.is_valid_error_class(error_class):
+        raise ValueError("error_class must be a short neutral token")
     writer.enqueue(
         SearchEventRecord(
             timestamp=time.time(),
@@ -152,8 +184,178 @@ def _enqueue(
             result_count=result_count,
             node_id=resolve_runtime_node_id(),
             correlation_id=correlation_id,
+            tool=origin.tool if origin is not None else None,
+            door=origin.door if origin is not None else None,
+            outcome=_SUCCESS if error_class is None else _FAILURE,
+            error_class=error_class,
         )
     )
+
+
+def _enqueue_context_rows(
+    writer: Any,
+    *,
+    origin: SearchOrigin,
+    context: SearchEventContext,
+    search_type: str,
+    result_count: int,
+    repository_counts: Callable[[], Dict[str, int]],
+    total_latency_ms: int,
+    correlation_id: Optional[str],
+    error_class: Optional[str] = None,
+    username: Optional[str] = None,
+    query_text: Optional[str] = None,
+) -> None:
+    """Rows of one search described by its request context.
+
+    A search that noted no repositories is one row for `context.repo_alias`.
+    A multi-repository search that noted the repositories it resolved
+    (Bug #2111) is one row per resolved repository: a searched one with its
+    own count (the counts the service tallied on the context, else
+    `repository_counts()`), a failed one with `repository_failed`. When the
+    whole call failed (`error_class`), every resolved repository gets a
+    failure row with that class (Story #2117). `username` and `query_text`
+    replace the context's when the door's context was opened only to collect
+    the repositories (e.g. SCIP).
+    """
+    row_username = context.username if username is None else username
+    row_query_text = context.query_text if query_text is None else query_text
+    searched = context.searched_repositories
+    if searched is None:
+        _enqueue(
+            writer,
+            origin=origin,
+            username=row_username,
+            repo_alias=context.repo_alias,
+            search_type=search_type,
+            query_text=row_query_text,
+            result_count=result_count,
+            total_latency_ms=total_latency_ms,
+            correlation_id=correlation_id,
+            context=context,
+            error_class=error_class,
+        )
+        return
+    counts: Dict[str, int] = {}
+    if error_class is None:
+        tallied = context.repository_result_counts
+        counts = tallied if tallied is not None else repository_counts()
+    rows = [(alias, counts.get(alias, 0), error_class) for alias in searched] + [
+        (alias, 0, error_class or outcomes.REPOSITORY_FAILED)
+        for alias in context.failed_repositories or []
+    ]
+    for repo_alias, count, row_error in rows:
+        _enqueue(
+            writer,
+            origin=origin,
+            username=row_username,
+            repo_alias=repo_alias,
+            search_type=search_type,
+            query_text=row_query_text,
+            result_count=count,
+            total_latency_ms=total_latency_ms,
+            correlation_id=correlation_id,
+            # Bug #2111: the repository's own cache lookup, never another
+            # repository's.
+            context=context.cache_fields_for(repo_alias),
+            error_class=row_error,
+        )
+
+
+def record_search_event(
+    writer: Any,
+    *,
+    origin: SearchOrigin,
+    username: str,
+    repo_alias: Optional[str],
+    search_type: str,
+    query_text: str,
+    result_count: int,
+    total_latency_ms: int,
+    correlation_id: Optional[str],
+    context: Optional[SearchEventContext] = None,
+    error_class: Optional[str] = None,
+) -> None:
+    """Enqueue one search event (a failure when `error_class` is given).
+    Never raises; a None writer records nothing.
+
+    `context` carries the embedding cache fields collected during the search;
+    without it those columns stay NULL (searches that never embed).
+    """
+    if writer is None:
+        return
+    with _never_raise(search_type):
+        _enqueue(
+            writer,
+            origin=origin,
+            username=username,
+            repo_alias=repo_alias,
+            search_type=search_type,
+            query_text=query_text,
+            result_count=result_count,
+            total_latency_ms=total_latency_ms,
+            correlation_id=correlation_id,
+            context=context,
+            error_class=error_class,
+        )
+
+
+def record_query_results(
+    writer: Any,
+    *,
+    origin: SearchOrigin,
+    context: SearchEventContext,
+    results: Any,
+    total_latency_ms: int,
+    correlation_id: Optional[str],
+) -> None:
+    """Record a completed query whose delivered results are `results` (a list
+    of result dicts carrying `repository_alias`). A multi-repository query
+    (Bug #2111) is one row per repository it searched. Never raises."""
+    if writer is None:
+        return
+    delivered = results if isinstance(results, list) else []
+    with _never_raise(context.search_type):
+        _enqueue_context_rows(
+            writer,
+            origin=origin,
+            context=context,
+            search_type=context.search_type,
+            result_count=len(delivered),
+            repository_counts=lambda: outcomes.results_repository_counts(
+                delivered, "repository_alias"
+            ),
+            total_latency_ms=total_latency_ms,
+            correlation_id=correlation_id,
+        )
+
+
+def record_query_failure(
+    writer: Any,
+    *,
+    origin: SearchOrigin,
+    context: SearchEventContext,
+    error_class: Optional[str],
+    total_latency_ms: int,
+    correlation_id: Optional[str],
+) -> None:
+    """Record a query that failed (one failure row). `error_class` None is a
+    request rejected before its repository resolved
+    (outcomes.failure_error_class): nothing is recorded. Never raises."""
+    if writer is None or error_class is None:
+        return
+    with _never_raise(context.search_type):
+        _enqueue_context_rows(
+            writer,
+            origin=origin,
+            context=context,
+            search_type=context.search_type,
+            result_count=0,
+            repository_counts=dict,
+            total_latency_ms=total_latency_ms,
+            correlation_id=correlation_id,
+            error_class=error_class,
+        )
 
 
 @contextmanager
@@ -185,10 +387,34 @@ def search_event_scope(
         _search_event_ctx.reset(token)
 
 
+_Door = TypeVar("_Door", bound=Callable[..., Any])
+
+
+def in_scip_search_scope(door: _Door) -> _Door:
+    """Run a SCIP search door inside a fresh search event context (Bug #2111).
+
+    A SCIP search without an alias searches every SCIP-indexed repository;
+    the SCIP service notes on this context the repositories it searched and
+    each one's result count, and the door records from it
+    (search_event_context.get_search_event_ctx). The context names no user
+    or query: the door records those itself.
+    """
+
+    @functools.wraps(door)
+    def _scoped(*args: Any, **kwargs: Any) -> Any:
+        with search_event_scope(
+            username="", repo_alias=None, search_type="scip", query_text=""
+        ):
+            return door(*args, **kwargs)
+
+    return cast(_Door, _scoped)
+
+
 def run_recorded_search(
     writer: Any,
     search: Callable[[], Dict[str, Any]],
     *,
+    origin: SearchOrigin,
     username: str,
     repo_alias: Optional[str],
     search_type: str,
@@ -197,10 +423,10 @@ def run_recorded_search(
 ) -> Dict[str, Any]:
     """Run one synchronous query_user_repositories search and record it.
 
-    `search` runs inside `search_event_scope`; when it returns, one row is
-    recorded with the number of results it returned and the embedding cache
-    fields it collected. A search that raises records nothing (the exception
-    propagates unchanged). Recording never raises.
+    `search` runs inside `search_event_scope`. When it returns, its rows are
+    recorded with the results it returned and the embedding cache fields it
+    collected; when it raises, a failure row (the exception's class) is
+    recorded and the exception propagates unchanged. Recording never raises.
     """
     started = time.monotonic()
     with search_event_scope(
@@ -209,17 +435,25 @@ def run_recorded_search(
         search_type=search_type,
         query_text=query_text,
     ) as context:
-        result = search()
-    record_search_event(
+        try:
+            result = search()
+        except Exception as exc:
+            record_query_failure(
+                writer,
+                origin=origin,
+                context=context,
+                error_class=outcomes.failure_error_class(exc),
+                total_latency_ms=elapsed_ms(started),
+                correlation_id=correlation_id,
+            )
+            raise
+    record_query_results(
         writer,
-        username=username,
-        repo_alias=repo_alias,
-        search_type=search_type,
-        query_text=query_text,
-        result_count=len(result.get("results") or []),
+        origin=origin,
+        context=context,
+        results=result.get("results") or [],
         total_latency_ms=elapsed_ms(started),
         correlation_id=correlation_id,
-        context=context,
     )
     return result
 
@@ -235,107 +469,100 @@ class PendingSearchEvent:
 
     Built at submission from the request's event context; the job installs
     `context` while it searches (so embedding cache fields are captured) and
-    calls `record_result` with its result when it completes. The latency
-    clock starts at submission.
+    calls `record_result` with its result when it completes, or
+    `record_failure` when it raised. The latency clock starts at submission.
     """
 
     writer: Any
     context: SearchEventContext
     correlation_id: Optional[str]
+    origin: SearchOrigin
     started_monotonic: float = field(default_factory=time.monotonic)
 
     def record_result(
         self, result: Dict[str, Any], cancelled: Optional[Callable[[], bool]] = None
     ) -> None:
-        """Record the job's query_user_repositories result (its `results`
-        list is counted). A job cancelled while it ran records nothing; a job
-        that raised never calls this."""
-        if self.writer is None:
+        """Record the job's query_user_repositories result. A job cancelled
+        while it ran records nothing."""
+        if cancelled is not None and cancelled():
             return
-        with _never_raise(self.context.search_type):
-            if cancelled is not None and cancelled():
-                return
-            _enqueue(
-                self.writer,
-                username=self.context.username,
-                repo_alias=self.context.repo_alias,
-                search_type=self.context.search_type,
-                query_text=self.context.query_text,
-                result_count=len(result.get("results") or []),
-                total_latency_ms=elapsed_ms(self.started_monotonic),
-                correlation_id=self.correlation_id,
-                context=self.context,
-            )
+        record_query_results(
+            self.writer,
+            origin=self.origin,
+            context=self.context,
+            results=result.get("results") or [],
+            total_latency_ms=elapsed_ms(self.started_monotonic),
+            correlation_id=self.correlation_id,
+        )
+
+    def record_failure(
+        self, exc: BaseException, cancelled: Optional[Callable[[], bool]] = None
+    ) -> None:
+        """Record a job that raised as a failure (its exception's class),
+        unless it was cancelled or rejected the request."""
+        if cancelled is not None and cancelled():
+            return
+        record_query_failure(
+            self.writer,
+            origin=self.origin,
+            context=self.context,
+            error_class=outcomes.failure_error_class(exc),
+            total_latency_ms=elapsed_ms(self.started_monotonic),
+            correlation_id=self.correlation_id,
+        )
 
 
-def search_payload_is_known(payload: Dict[str, Any]) -> bool:
-    """Whether a search_code response payload is a search that really ran.
-
-    Not known: `success` is not true (a handled error or a deferred
-    handoff), every embedding provider was unavailable (Bug #1804:
-    success true with completeness "providers_unavailable", the search never
-    ran), and an omni search that searched no repository successfully
-    (success true, total_repos_searched 0, only an errors map).
-    """
-    if payload.get("success") is not True:
-        return False
-    results = payload.get("results")
-    if not isinstance(results, dict):
-        return True
-    metadata = results.get("query_metadata")
-    if isinstance(metadata, dict) and (
-        metadata.get("completeness") == _PROVIDERS_UNAVAILABLE
-    ):
-        return False
-    return "total_repos_searched" not in results or bool(
-        results["total_repos_searched"]
-    )
-
-
-def search_payload_result_count(payload: Dict[str, Any]) -> int:
-    """Number of results in a search_code response payload.
-
-    `results` is a list (global path), a dict wrapping a `results` list
-    (activated-repo and temporal paths, flat omni), or a grouped omni dict
-    carrying `total_results`.
-    """
-    results = payload.get("results")
-    if isinstance(results, dict):
-        if "results_by_repo" in results:
-            return int(results.get("total_results") or 0)
-        results = results.get("results")
-    return len(results) if isinstance(results, list) else 0
+# A deferred temporal handoff's error code: the search is still running and
+# is recorded when its result is delivered.
+_DEFERRED_ERROR_CODE = "TEMPORAL_QUERY_DEFERRED"
 
 
 def record_search_payload(
     writer: Any,
     payload: Dict[str, Any],
     *,
+    origin: SearchOrigin,
     search_type: str,
     context: SearchEventContext,
     total_latency_ms: int,
     correlation_id: Optional[str],
 ) -> None:
-    """Record one search_code search from its response payload (Bug #2113).
+    """Record one search_code search from its response payload.
 
-    Records only when `search_payload_is_known`; the result count is the
-    payload's. User, alias and query text come from `context`.
+    The outcome is `search_payload_outcome`'s; a deferred temporal handoff
+    records nothing now, and a rejection (outcomes.is_rejected_payload)
+    nothing at all. User, alias and query text come from `context`; an omni
+    search that noted its repositories is one row per repository.
     """
-    if writer is None:
+    if (
+        writer is None
+        or payload.get("error_code") == _DEFERRED_ERROR_CODE
+        or outcomes.is_rejected_payload(payload)
+    ):
         return
     with _never_raise(search_type):
-        if not search_payload_is_known(payload):
-            return
-        _enqueue(
+        error_class = outcomes.search_payload_outcome(payload)
+        if (
+            error_class == outcomes.NO_REPOSITORY_SEARCHED
+            and context.searched_repositories is not None
+        ):
+            # The repositories that resolved are known: each failed one gets
+            # its own repository_failed row (an unresolved alias none).
+            error_class = None
+        _enqueue_context_rows(
             writer,
-            username=context.username,
-            repo_alias=context.repo_alias,
+            origin=origin,
+            context=context,
             search_type=search_type,
-            query_text=context.query_text,
-            result_count=search_payload_result_count(payload),
+            result_count=(
+                0
+                if error_class is not None
+                else outcomes.search_payload_result_count(payload)
+            ),
+            repository_counts=lambda: outcomes.payload_repository_counts(payload),
             total_latency_ms=total_latency_ms,
             correlation_id=correlation_id,
-            context=context,
+            error_class=error_class,
         )
 
 
@@ -344,7 +571,6 @@ def record_search_payload(
 # record whose job failed, was cancelled or was never polled expires.
 DEFERRED_SEARCH_TTL_SECONDS = 24 * 60 * 60
 _DEFERRED_KEY_PREFIX = "search-event-deferred:"
-_DEFERRED_ERROR_CODE = "TEMPORAL_QUERY_DEFERRED"
 _DEFERRED_CONTEXT_FIELDS = (
     "username",
     "repo_alias",
@@ -371,6 +597,7 @@ def remember_deferred_search(
     payload_cache: Any,
     payload: Dict[str, Any],
     *,
+    origin: SearchOrigin,
     context: SearchEventContext,
     correlation_id: Optional[str],
     started_at: float,
@@ -380,8 +607,9 @@ def remember_deferred_search(
     `payload` is the handoff response body; anything but a
     TEMPORAL_QUERY_DEFERRED handoff with a job_id is ignored. The record is
     stored in the cluster-shared PayloadCache (never process memory), so the
-    result door on any node can record the search. `started_at` is the
-    search's start (time.time()). Never raises.
+    result door on any node can record the search with the `origin` that
+    submitted it. `started_at` is the search's start (time.time()). Never
+    raises.
     """
     if payload.get("error_code") != _DEFERRED_ERROR_CODE or not payload.get("job_id"):
         return
@@ -392,7 +620,12 @@ def remember_deferred_search(
         # Bounded in the shared store, one character past the cap so the
         # recorded row is still marked truncated (Bug #2114).
         pending["query_text"] = context.query_text[: QUERY_TEXT_MAX_CHARS + 1]
-        pending.update(started_at=started_at, correlation_id=correlation_id)
+        pending.update(
+            started_at=started_at,
+            correlation_id=correlation_id,
+            tool=origin.tool,
+            door=origin.door,
+        )
         payload_cache.store_expiring_key(
             _deferred_key(str(payload["job_id"]), context.username),
             json.dumps(pending),
@@ -415,7 +648,8 @@ def record_deferred_search(
     shared store: only the claimer records, so repeated or concurrent polls
     (any node) write one row. No pending record (not a deferred temporal
     search, already recorded, or expired) records nothing. Latency runs from
-    the search's start. Never raises.
+    the search's start; tool and door are the submitting door's. Never
+    raises.
     """
     if payload_cache is None or writer is None:
         return
@@ -434,8 +668,17 @@ def record_deferred_search(
             search_type="temporal",
             **{name: pending[name] for name in _DEFERRED_CONTEXT_FIELDS},
         )
+        # A record from a node predating Story #2117 names no tool or door:
+        # it is still recorded, with tool and door NULL.
+        tool, door = pending.get("tool"), pending.get("door")
+        origin = (
+            SearchOrigin(tool=tool, door=door)
+            if tool is not None and door is not None
+            else None
+        )
         _enqueue(
             writer,
+            origin=origin,
             username=context.username,
             repo_alias=context.repo_alias,
             search_type="temporal",
@@ -447,88 +690,80 @@ def record_deferred_search(
         )
 
 
-def _whole_run_failed(error: Dict[str, Any]) -> bool:
-    """An evaluation error that names no file is about the whole run: the
-    engine's marker for a compile error, an xray-cli or output failure, and
-    its synthetic EvaluatorTimeout (search_engine.py, Bug #1827). A per-file
-    error (e.g. one file's 5 s sandbox timeout) names its file."""
-    return error.get("file_path") == _WHOLE_RUN_FILE_PATH
-
-
-def xray_result_is_known(result: Dict[str, Any]) -> bool:
-    """Whether an X-Ray engine or batch result is a search that really ran.
-
-    Not known: a Phase 1 (ripgrep) failure, a timeout with no matches, a
-    cancelled batch, a single run with no matches whose evaluator never ran
-    (a whole-run evaluation error: compile, xray-cli, timeout), and a batch
-    in which no cell ran (each cell has a cell-level error or a whole-run
-    evaluation error). A partial result with matches (timeout, file cap,
-    some failed cells, per-file errors) is known.
-    """
-    if result.get("phase1_failed") or result.get("cancelled"):
-        return False
-    if result.get("matches"):
-        return True
-    if result.get("timeout"):
-        return False
-    evaluation_errors = result.get("evaluation_errors") or []
-    if "total_cells" not in result:
-        return not any(_whole_run_failed(e) for e in evaluation_errors)
-    failed_cells = {
-        (e.get("repository_alias"), e.get("scan_index"))
-        for e in result.get("errors") or []
-        if e.get("error_level") == "cell"
-    } | {
-        (e.get("repository_alias"), e.get("scan_index"))
-        for e in evaluation_errors
-        if _whole_run_failed(e)
-    }
-    return len(failed_cells) < int(result["total_cells"])
-
-
 def record_xray_search(
     writer: Any,
     *,
+    origin: SearchOrigin,
     username: str,
     repo_alias: Optional[str],
     pattern: str,
-    result: Dict[str, Any],
+    result: Optional[Dict[str, Any]],
     started_monotonic: float,
     correlation_id: Optional[str],
     cancelled: Optional[Callable[[], bool]] = None,
+    error: Optional[BaseException] = None,
+    batch_repositories: Optional[Sequence[str]] = None,
 ) -> None:
-    """Record one completed X-Ray search (Story #2107).
+    """Record one X-Ray search (Story #2107).
 
     Called on the worker thread with the engine's result once the search has
-    run; a job that fails or never gets a worker slot does not call it. A
-    result that is not known (`xray_result_is_known`) and a job that was
-    cancelled (`cancelled()` true -- its killed children leave a partial
-    result) record nothing. query_text is the driver pattern -- never
+    run, or with `error` when the job raised before producing a result
+    (Story #2117: a failure row with the exception's class; a rejection
+    records nothing). A cancelled search (`result["cancelled"]`, or
+    `cancelled()` true -- its killed children leave a partial result)
+    records nothing. A single search is one row (`xray_result_outcome`); a
+    batch over `batch_repositories` is one row per repository (Bug #2111,
+    `xray_batch_repository_rows`). query_text is the driver pattern -- never
     evaluator source; result_count is the number of matches.
     """
     if writer is None:
         return
     with _never_raise("xray"):
-        if not xray_result_is_known(result):
+        if (cancelled is not None and cancelled()) or (
+            result is not None and result.get("cancelled")
+        ):
             return
-        if cancelled is not None and cancelled():
-            return
-        _enqueue(
-            writer,
-            username=username,
-            repo_alias=repo_alias,
-            search_type="xray",
-            query_text=pattern,
-            result_count=len(result.get("matches") or []),
-            total_latency_ms=elapsed_ms(started_monotonic),
-            correlation_id=correlation_id,
-            context=None,
+        repositories: List[Optional[str]] = (
+            list(batch_repositories) if batch_repositories else [repo_alias]
         )
+        rows: List[Tuple[Optional[str], int, Optional[str]]]
+        if error is not None:
+            error_class = outcomes.failure_error_class(error)
+            if error_class is None:
+                return
+            rows = [(alias, 0, error_class) for alias in repositories]
+        elif result is None:
+            raise ValueError("record_xray_search needs a result or an error")
+        elif batch_repositories:
+            rows = list(outcomes.xray_batch_repository_rows(result, batch_repositories))
+        else:
+            rows = [
+                (
+                    repo_alias,
+                    len(result.get("matches") or []),
+                    outcomes.xray_result_outcome(result),
+                )
+            ]
+        for row_alias, count, error_class in rows:
+            _enqueue(
+                writer,
+                origin=origin,
+                username=username,
+                repo_alias=row_alias,
+                search_type="xray",
+                query_text=pattern,
+                result_count=count,
+                total_latency_ms=elapsed_ms(started_monotonic),
+                correlation_id=correlation_id,
+                context=None,
+                error_class=error_class,
+            )
 
 
 def record_regex_search(
     writer: Any,
     *,
+    origin: SearchOrigin,
     username: str,
     repo_alias: Optional[str],
     pattern: str,
@@ -544,6 +779,7 @@ def record_regex_search(
     """
     record_completed_search(
         writer,
+        origin=origin,
         search_type="regex",
         username=username,
         repo_alias=repo_alias,
@@ -557,6 +793,7 @@ def record_regex_search(
 def record_completed_search(
     writer: Any,
     *,
+    origin: SearchOrigin,
     search_type: str,
     username: str,
     repo_alias: Optional[str],
@@ -573,6 +810,7 @@ def record_completed_search(
     """
     record_search_event(
         writer,
+        origin=origin,
         username=username,
         repo_alias=repo_alias,
         search_type=search_type,
@@ -583,46 +821,110 @@ def record_completed_search(
     )
 
 
-def record_grouped_search(
+@contextmanager
+def recording_failure(
     writer: Any,
-    grouped: Mapping[str, Sized],
     *,
+    origin: SearchOrigin,
     search_type: str,
     username: str,
+    repo_alias: Optional[str],
     query_text: str,
     started_monotonic: float,
     correlation_id: Optional[str],
-    context: Optional[SearchEventContext] = None,
-) -> None:
-    """Record a multi-repository search: one row per searched repository.
+) -> Iterator[None]:
+    """Wrap the part of a door that runs one search (Story #2117).
 
-    `grouped` maps each repository that was searched to the results it
-    returned (a repository that failed or was skipped is not a key, so it
-    writes no row). `context` carries the request's embedding cache fields
-    for searches that embed. Never raises.
+    When the block raises, one failure row is recorded -- the exception's
+    class (outcomes.failure_error_class; a rejection records nothing) -- and
+    the exception propagates unchanged. Recording never raises. A block that
+    completes records nothing here: the door records its result.
+    """
+    try:
+        yield
+    except Exception as exc:
+        error_class = outcomes.failure_error_class(exc)
+        if writer is not None and error_class is not None:
+            with _never_raise(search_type):
+                _enqueue(
+                    writer,
+                    origin=origin,
+                    username=username,
+                    repo_alias=repo_alias,
+                    search_type=search_type,
+                    query_text=query_text,
+                    result_count=0,
+                    total_latency_ms=elapsed_ms(started_monotonic),
+                    correlation_id=correlation_id,
+                    context=None,
+                    error_class=error_class,
+                )
+        raise
+
+
+def record_multi_repository_search(
+    writer: Any,
+    grouped: Mapping[str, Sized],
+    *,
+    origin: SearchOrigin,
+    context: SearchEventContext,
+    started_monotonic: float,
+    correlation_id: Optional[str],
+) -> None:
+    """Record a completed multi-repository search (Bug #2111, Story #2117).
+
+    The rows are the repositories the service noted on `context` (the
+    request's search event context): each searched one with its own count
+    (`grouped` maps it to the results it returned), each that resolved and
+    failed with `repository_failed`. An alias that never resolved was not
+    noted and gets no row. Never raises.
     """
     if writer is None:
         return
-    with _never_raise(search_type):
-        total_latency_ms = elapsed_ms(started_monotonic)
-        for repo_alias, results in grouped.items():
-            _enqueue(
+    with _never_raise(context.search_type):
+        _enqueue_context_rows(
+            writer,
+            origin=origin,
+            context=context,
+            search_type=context.search_type,
+            result_count=sum(len(results) for results in grouped.values()),
+            repository_counts=lambda: {
+                alias: len(results) for alias, results in grouped.items()
+            },
+            total_latency_ms=elapsed_ms(started_monotonic),
+            correlation_id=correlation_id,
+        )
+
+
+@contextmanager
+def recording_multi_repository_failure(
+    writer: Any,
+    *,
+    origin: SearchOrigin,
+    context: SearchEventContext,
+    started_monotonic: float,
+    correlation_id: Optional[str],
+) -> Iterator[None]:
+    """Wrap a multi-repository door's whole call (Story #2117).
+
+    When it raises after the service noted the repositories it resolved, one
+    failure row per resolved repository (the exception's class); a failure
+    before any repository resolved, or a rejection, records nothing. The
+    exception propagates unchanged.
+    """
+    try:
+        yield
+    except Exception as exc:
+        if context.searched_repositories is not None:
+            record_query_failure(
                 writer,
-                username=username,
-                repo_alias=repo_alias,
-                search_type=search_type,
-                query_text=query_text,
-                result_count=len(results),
-                total_latency_ms=total_latency_ms,
-                correlation_id=correlation_id,
+                origin=origin,
                 context=context,
+                error_class=outcomes.failure_error_class(exc),
+                total_latency_ms=elapsed_ms(started_monotonic),
+                correlation_id=correlation_id,
             )
-
-
-# The list a SCIP response carries its results in, by operation:
-# definition/references/dependencies/dependents "results", impact
-# "affected_symbols", callchain "chains", context "files".
-_SCIP_RESULT_LISTS = ("results", "affected_symbols", "chains", "files")
+        raise
 
 
 def scip_callchain_query_text(from_symbol: Any, to_symbol: Any) -> str:
@@ -630,75 +932,109 @@ def scip_callchain_query_text(from_symbol: Any, to_symbol: Any) -> str:
     return f"{from_symbol} -> {to_symbol}"
 
 
-def scip_payload_is_known(payload: Dict[str, Any]) -> bool:
-    """Whether a SCIP response payload (MCP or REST) is a search that ran:
-    `success` true and its result list present. A handled error, a timeout
-    and a rejected parameter answer success false."""
-    return payload.get("success") is True and any(
-        isinstance(payload.get(key), list) for key in _SCIP_RESULT_LISTS
-    )
-
-
-def scip_payload_result_count(payload: Dict[str, Any]) -> int:
-    """Number of results a SCIP response payload returned."""
-    for key in _SCIP_RESULT_LISTS:
-        if isinstance(payload.get(key), list):
-            return len(payload[key])
-    return 0
-
-
 def record_scip_search(
     writer: Any,
     payload: Dict[str, Any],
     *,
+    origin: SearchOrigin,
     username: str,
     repo_alias: Optional[str],
     query_text: str,
     started_monotonic: float,
     correlation_id: Optional[str],
+    error: Optional[BaseException] = None,
+    context: Optional[SearchEventContext] = None,
 ) -> None:
     """Record one SCIP search from its response payload (Story #2116).
 
-    Records only when `scip_payload_is_known`; result_count is the number
-    of results the payload returns. query_text is the symbol
-    (`scip_callchain_query_text` for a call chain). Never raises.
+    A search without an alias searches every SCIP-indexed repository the
+    caller may access; when the service noted them on `context` (the door's
+    search event context) it is one row per repository searched, each with
+    the count the service tallied (Bug #2111).
+
+    The outcome is `scip_payload_outcome`'s, or -- when the search raised
+    (`error`, Story #2117) -- a failure with the exception's class
+    (outcomes.failure_error_class; a rejection records nothing).
+    result_count is the number of results the payload returns. query_text
+    is the symbol (`scip_callchain_query_text` for a call chain). A rejected
+    payload (outcomes.is_rejected_payload) records nothing. Never raises.
+
+    Story #2117: the SCIP service reports on `context` the repositories the
+    search resolved (`resolved_repositories`). None resolved -- an unknown
+    or inaccessible alias, or no SCIP index anywhere -- means it searched
+    nothing: no row. A search for one alias records the repository the
+    service resolved it to ("<name>-global"), not the caller's spelling.
     """
-    if writer is None:
+    if writer is None or outcomes.is_rejected_payload(payload):
         return
+    resolved = context.resolved_repositories if context is not None else None
+    if resolved is not None and not resolved:
+        return
+    if resolved is not None and repo_alias is not None and len(resolved) == 1:
+        repo_alias = resolved[0]
     with _never_raise("scip"):
-        if not scip_payload_is_known(payload):
+        if error is not None:
+            error_class = outcomes.failure_error_class(error)
+            if error_class is None:
+                return
+        else:
+            error_class = outcomes.scip_payload_outcome(payload)
+        if context is not None and context.searched_repositories is not None:
+            _enqueue_context_rows(
+                writer,
+                origin=origin,
+                context=context,
+                search_type="scip",
+                result_count=outcomes.scip_payload_result_count(payload),
+                repository_counts=dict,
+                total_latency_ms=elapsed_ms(started_monotonic),
+                correlation_id=correlation_id,
+                error_class=error_class,
+                username=username,
+                query_text=query_text,
+            )
             return
         _enqueue(
             writer,
+            origin=origin,
             username=username,
             repo_alias=repo_alias,
             search_type="scip",
             query_text=query_text,
-            result_count=scip_payload_result_count(payload),
+            result_count=(
+                0 if error is not None else outcomes.scip_payload_result_count(payload)
+            ),
             total_latency_ms=elapsed_ms(started_monotonic),
             correlation_id=correlation_id,
             context=None,
+            error_class=error_class,
         )
 
 
 def bind_xray_recorder(
     writer: Any,
     *,
+    origin: SearchOrigin,
     username: str,
     repo_alias: Optional[str],
     pattern: str,
     correlation_id: Optional[str],
+    batch_repositories: Optional[Sequence[str]] = None,
 ) -> "XRayRecorder":
     """Bind an X-Ray search's request-time fields; call the result with the
     job's result (and its cancellation check) when it completes. The latency
-    clock starts now."""
+    clock starts now. A batch passes the repositories it resolved
+    (`batch_repositories`): one row per repository."""
     started = time.monotonic()
 
     def _record(
-        result: Dict[str, Any], cancelled: Optional[Callable[[], bool]] = None
+        result: Optional[Dict[str, Any]],
+        cancelled: Optional[Callable[[], bool]] = None,
+        error: Optional[BaseException] = None,
     ) -> None:
         record_xray_search(
             writer,
+            origin=origin,
             username=username,
             repo_alias=repo_alias,
             pattern=pattern,
@@ -706,24 +1042,54 @@ def bind_xray_recorder(
             started_monotonic=started,
             correlation_id=correlation_id,
             cancelled=cancelled,
+            error=error,
+            batch_repositories=batch_repositories,
         )
 
     return _record
 
 
-# What bind_xray_recorder returns: call with (result, cancelled check).
-XRayRecorder = Callable[[Dict[str, Any], Optional[Callable[[], bool]]], None]
+# What bind_xray_recorder returns: call with (result, cancelled check), or
+# with (None, cancelled check, error=exc) when the job raised (Story #2117).
+XRayRecorder = Callable[..., None]
 
-# JobTracker statuses of a job that will never report a result.
-_ENDED_WITHOUT_RESULT = ("failed", "cancelled")
+
+def run_recorded_xray(
+    record_event: XRayRecorder,
+    run: Callable[[], Dict[str, Any]],
+    cancelled: Optional[Callable[[], bool]],
+) -> Dict[str, Any]:
+    """Run one X-Ray search (`run`, the engine or batch call only) and record
+    it: its result when it returns, a failure row when it raises -- the
+    exception propagates unchanged. Work before the search starts (status
+    updates, slot waits) stays outside `run`, so it never records."""
+    try:
+        result = run()
+    except Exception as exc:
+        record_event(None, cancelled, error=exc)
+        raise
+    record_event(result, cancelled)
+    return result
+
+
+# A cancelled job's JobTracker status, and the error BackgroundJobManager
+# .cancel_job fails a local X-Ray job with.
+_CANCELLED = "cancelled"
 
 
 def tracked_job_cancelled(tracker: Any, job_id: str) -> bool:
     """Whether a JobTracker-tracked job was cancelled while it ran.
 
     MCP X-Ray jobs bypass BackgroundJobManager.submit_job: a cancel fails
-    them in the JobTracker (BackgroundJobManager.cancel_job) and kills their
-    child processes, so the engine returns a partial result as if normal.
+    them in the JobTracker with the error "cancelled"
+    (BackgroundJobManager.cancel_job) and kills their child processes, so the
+    engine returns a partial result as if normal. A job failed for any other
+    reason is not a cancellation.
     """
     job = tracker.get_job(job_id) if tracker is not None else None
-    return job is not None and job.status in _ENDED_WITHOUT_RESULT
+    if job is None:
+        return False
+    return bool(
+        job.status == _CANCELLED
+        or (job.status == "failed" and getattr(job, "error", None) == _CANCELLED)
+    )

@@ -29,9 +29,15 @@ from fastapi import (
     Response,
     Request,
     Body,
+    Query,
 )
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from ..services.search_event_log_writer import (
+    CORRELATION_ID_MAX_CHARS,
+    TOOL_MAX_CHARS,
+)
 
 from ..models.repos import (
     AddGoldenRepoRequest,
@@ -80,6 +86,13 @@ class ExportFiltersRequest(BaseModel):
     to_timestamp: Optional[float] = None
     # Any other value is rejected with 422 instead of silently meaning "all".
     cache_hit_filter: Optional[Literal["all", "hits_only", "misses_only"]] = None
+    # Story #2117: exact-match filters on the search's entry point, outcome,
+    # tool/endpoint and correlation id (rows from before these columns
+    # existed match none of them).
+    door: Optional[Literal["mcp", "rest", "web"]] = None
+    outcome: Optional[Literal["success", "failure"]] = None
+    tool: Optional[str] = Field(None, max_length=TOOL_MAX_CHARS)
+    correlation_id: Optional[str] = Field(None, max_length=CORRELATION_ID_MAX_CHARS)
 
 
 def register_admin_ops_routes(
@@ -992,6 +1005,10 @@ def register_admin_ops_routes(
             "from_timestamp": body.from_timestamp,
             "to_timestamp": body.to_timestamp,
             "cache_hit_filter": body.cache_hit_filter or "all",
+            "door": body.door,
+            "outcome": body.outcome,
+            "tool": body.tool,
+            "correlation_id": body.correlation_id,
         }
 
         # Bug #1174A fix: use the BGM job_id as the export row id so that
@@ -1140,6 +1157,12 @@ def register_admin_ops_routes(
         to_ts: Optional[float] = None,
         limit: int = 100,
         offset: int = 0,
+        door: Optional[Literal["mcp", "rest", "web"]] = None,
+        outcome: Optional[Literal["success", "failure"]] = None,
+        tool: Optional[str] = Query(None, max_length=TOOL_MAX_CHARS),
+        correlation_id: Optional[str] = Query(
+            None, max_length=CORRELATION_ID_MAX_CHARS
+        ),
         current_user: dependencies.User = Depends(
             dependencies.get_current_admin_user_hybrid
         ),
@@ -1191,6 +1214,10 @@ def register_admin_ops_routes(
                 to_ts=to_ts,
                 limit=limit,
                 offset=offset,
+                door=door,
+                outcome=outcome,
+                tool=tool,
+                correlation_id=correlation_id,
             )
             return {"events": events, "total": total}
 

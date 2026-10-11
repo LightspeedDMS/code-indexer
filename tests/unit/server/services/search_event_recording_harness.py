@@ -122,26 +122,29 @@ class FakeJobTracker:
     With `cancel_on_start`, a job is cancelled the moment it reports
     "running": BackgroundJobManager.cancel_job fails a local X-Ray job in the
     tracker with the error "cancelled" (and kills its child processes, which
-    makes the engine return early with whatever it has).
+    makes the engine return early with whatever it has). `start_error` fails
+    a job the moment it reports "running" with any other error.
     """
 
     def __init__(self, cancel_on_start: bool = False) -> None:
         self.completed: Dict[str, Any] = {}
         self.failed: Dict[str, Any] = {}
         self.statuses: Dict[str, str] = {}
-        self.cancel_on_start = cancel_on_start
+        self.start_error: Optional[str] = "cancelled" if cancel_on_start else None
 
     def register_job(self, job_id: str, **_: Any) -> None:
         self.statuses[job_id] = "pending"
 
     def update_status(self, job_id: str, status: str, **_: Any) -> None:
         self.statuses[job_id] = status
-        if self.cancel_on_start and status == "running":
-            self.fail_job(job_id, "cancelled")
+        if self.start_error is not None and status == "running":
+            self.fail_job(job_id, self.start_error)
 
     def get_job(self, job_id: str) -> Optional[SimpleNamespace]:
         status = self.statuses.get(job_id)
-        return None if status is None else SimpleNamespace(status=status)
+        if status is None:
+            return None
+        return SimpleNamespace(status=status, error=self.failed.get(job_id))
 
     def complete_job(self, job_id: str, result: Any) -> None:
         self.completed[job_id] = result
