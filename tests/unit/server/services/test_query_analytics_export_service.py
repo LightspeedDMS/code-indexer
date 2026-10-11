@@ -132,6 +132,11 @@ class TestQueryAnalyticsExportSqliteBackend:
         assert count == 1
 
 
+def _rows(service, search_backend, filters):
+    """Every exported row for filters (Bug #2106: the export read is streamed)."""
+    return list(service._iter_export_rows(search_backend, filters))
+
+
 class TestQueryAnalyticsExportServiceFiltering:
     def _insert_search_event(self, backend, **kwargs):
         """Helper to insert a search event with defaults."""
@@ -161,27 +166,27 @@ class TestQueryAnalyticsExportServiceFiltering:
     def test_filter_by_user(self, export_service, search_backend):
         self._insert_search_event(search_backend, username="alice")
         self._insert_search_event(search_backend, username="bob")
-        rows = export_service._fetch_rows(search_backend, {"user": "alice"})
+        rows = _rows(export_service, search_backend, {"user": "alice"})
         assert all(r["username"] == "alice" for r in rows)
         assert len(rows) == 1
 
     def test_filter_by_search_type(self, export_service, search_backend):
         self._insert_search_event(search_backend, search_type="semantic")
         self._insert_search_event(search_backend, search_type="fts")
-        rows = export_service._fetch_rows(search_backend, {"search_type": "semantic"})
+        rows = _rows(export_service, search_backend, {"search_type": "semantic"})
         assert len(rows) == 1
         assert rows[0]["search_type"] == "semantic"
 
     def test_filter_search_type_all_returns_all(self, export_service, search_backend):
         self._insert_search_event(search_backend, search_type="semantic")
         self._insert_search_event(search_backend, search_type="fts")
-        rows = export_service._fetch_rows(search_backend, {"search_type": "all"})
+        rows = _rows(export_service, search_backend, {"search_type": "all"})
         assert len(rows) == 2
 
     def test_filter_by_repo_alias(self, export_service, search_backend):
         self._insert_search_event(search_backend, repo_alias="repo-a")
         self._insert_search_event(search_backend, repo_alias="repo-b")
-        rows = export_service._fetch_rows(search_backend, {"repo_alias": "repo-a"})
+        rows = _rows(export_service, search_backend, {"repo_alias": "repo-a"})
         assert len(rows) == 1
 
     def test_filter_by_timestamp_range(self, export_service, search_backend):
@@ -189,7 +194,8 @@ class TestQueryAnalyticsExportServiceFiltering:
         self._insert_search_event(search_backend, timestamp=now - 200)
         self._insert_search_event(search_backend, timestamp=now - 100)
         self._insert_search_event(search_backend, timestamp=now)
-        rows = export_service._fetch_rows(
+        rows = _rows(
+            export_service,
             search_backend,
             {
                 "from_timestamp": now - 150,
@@ -202,9 +208,7 @@ class TestQueryAnalyticsExportServiceFiltering:
         self._insert_search_event(search_backend, voyage_cache_hit=True)
         self._insert_search_event(search_backend, voyage_cache_hit=False)
         self._insert_search_event(search_backend, cohere_cache_hit=True)
-        rows = export_service._fetch_rows(
-            search_backend, {"cache_hit_filter": "hits_only"}
-        )
+        rows = _rows(export_service, search_backend, {"cache_hit_filter": "hits_only"})
         assert len(rows) == 2
         for r in rows:
             assert r.get("voyage_cache_hit") or r.get("cohere_cache_hit")
@@ -215,15 +219,15 @@ class TestQueryAnalyticsExportServiceFiltering:
             search_backend, voyage_cache_hit=False, cohere_cache_hit=False
         )
         self._insert_search_event(search_backend)  # None/None
-        rows = export_service._fetch_rows(
-            search_backend, {"cache_hit_filter": "misses_only"}
+        rows = _rows(
+            export_service, search_backend, {"cache_hit_filter": "misses_only"}
         )
         assert len(rows) == 2
 
     def test_cache_hit_filter_all_returns_all(self, export_service, search_backend):
         self._insert_search_event(search_backend, voyage_cache_hit=True)
         self._insert_search_event(search_backend, voyage_cache_hit=False)
-        rows = export_service._fetch_rows(search_backend, {"cache_hit_filter": "all"})
+        rows = _rows(export_service, search_backend, {"cache_hit_filter": "all"})
         assert len(rows) == 2
 
 
@@ -316,20 +320,22 @@ class TestQueryAnalyticsExportServiceExcel:
         """Pass a broken backend to trigger failure path."""
 
         class BrokenBackend:
-            def query(self, **kwargs):
+            def query_for_export(self, *args, **kwargs):
                 raise RuntimeError("DB is broken")
 
         export_id = str(uuid.uuid4())
-        export_service.run_export(
-            export_id=export_id,
-            filters={},
-            initiated_by="admin",
-            export_retention_days=30,
-            search_event_log_backend=BrokenBackend(),
-        )
+        # Bug #2105: the failure is recorded AND re-raised so the job fails too.
+        with pytest.raises(RuntimeError, match="DB is broken"):
+            export_service.run_export(
+                export_id=export_id,
+                filters={},
+                initiated_by="admin",
+                export_retention_days=30,
+                search_event_log_backend=BrokenBackend(),
+            )
         exports = export_service._backend.list_exports(export_id=export_id)
         assert exports[0]["status"] == "failed"
-        assert exports[0]["error_message"] is not None
+        assert exports[0]["error_message"] == "DB is broken"
 
 
 class TestServiceListExports:

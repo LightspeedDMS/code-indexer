@@ -235,10 +235,15 @@ class TestExportBackendEviction:
 # ---------------------------------------------------------------------------
 
 
+def _read_export(backend, filters):
+    """One bounded export read (Bug #2106: query_for_export requires a limit)."""
+    return backend.query_for_export(filters, limit=1000)
+
+
 class TestQueryForExport:
     def test_returns_all_rows_no_filter(self, search_backend):
         search_backend.insert_batch([_make_search_event(), _make_search_event()])
-        rows = search_backend.query_for_export({})
+        rows = _read_export(search_backend, {})
         assert len(rows) == 2
 
     def test_ordered_asc_by_timestamp(self, search_backend):
@@ -250,7 +255,7 @@ class TestQueryForExport:
                 _make_search_event(timestamp=now),
             ]
         )
-        rows = search_backend.query_for_export({})
+        rows = _read_export(search_backend, {})
         ts_vals = [r["timestamp"] for r in rows]
         assert ts_vals == sorted(ts_vals)
 
@@ -261,7 +266,7 @@ class TestQueryForExport:
                 _make_search_event(username="bob"),
             ]
         )
-        rows = search_backend.query_for_export({"user": "alice"})
+        rows = _read_export(search_backend, {"user": "alice"})
         assert all(r["username"] == "alice" for r in rows)
         assert len(rows) == 1
 
@@ -272,7 +277,7 @@ class TestQueryForExport:
                 _make_search_event(repo_alias="repo-b"),
             ]
         )
-        rows = search_backend.query_for_export({"repo_alias": "repo-a"})
+        rows = _read_export(search_backend, {"repo_alias": "repo-a"})
         assert len(rows) == 1
         assert rows[0]["repo_alias"] == "repo-a"
 
@@ -283,7 +288,7 @@ class TestQueryForExport:
                 _make_search_event(search_type="fts"),
             ]
         )
-        rows = search_backend.query_for_export({"search_type": "semantic"})
+        rows = _read_export(search_backend, {"search_type": "semantic"})
         assert len(rows) == 1
         assert rows[0]["search_type"] == "semantic"
 
@@ -294,7 +299,7 @@ class TestQueryForExport:
                 _make_search_event(search_type="fts"),
             ]
         )
-        rows = search_backend.query_for_export({"search_type": "all"})
+        rows = _read_export(search_backend, {"search_type": "all"})
         assert len(rows) == 2
 
     def test_filter_from_timestamp(self, search_backend):
@@ -305,7 +310,7 @@ class TestQueryForExport:
                 _make_search_event(timestamp=now - 50),
             ]
         )
-        rows = search_backend.query_for_export({"from_timestamp": now - 100})
+        rows = _read_export(search_backend, {"from_timestamp": now - 100})
         assert len(rows) == 1
 
     def test_filter_to_timestamp(self, search_backend):
@@ -316,7 +321,7 @@ class TestQueryForExport:
                 _make_search_event(timestamp=now - 50),
             ]
         )
-        rows = search_backend.query_for_export({"to_timestamp": now - 100})
+        rows = _read_export(search_backend, {"to_timestamp": now - 100})
         assert len(rows) == 1
 
     def test_cache_hit_filter_hits_only(self, search_backend):
@@ -327,7 +332,7 @@ class TestQueryForExport:
                 _make_search_event(cohere_cache_hit=True),
             ]
         )
-        rows = search_backend.query_for_export({"cache_hit_filter": "hits_only"})
+        rows = _read_export(search_backend, {"cache_hit_filter": "hits_only"})
         assert len(rows) == 2
         for r in rows:
             assert r.get("voyage_cache_hit") or r.get("cohere_cache_hit")
@@ -340,7 +345,7 @@ class TestQueryForExport:
                 _make_search_event(voyage_cache_hit=None, cohere_cache_hit=None),
             ]
         )
-        rows = search_backend.query_for_export({"cache_hit_filter": "misses_only"})
+        rows = _read_export(search_backend, {"cache_hit_filter": "misses_only"})
         assert len(rows) == 2
 
     def test_cache_hit_filter_all_returns_all(self, search_backend):
@@ -350,9 +355,9 @@ class TestQueryForExport:
                 _make_search_event(voyage_cache_hit=False),
             ]
         )
-        rows = search_backend.query_for_export({"cache_hit_filter": "all"})
+        rows = _read_export(search_backend, {"cache_hit_filter": "all"})
         assert len(rows) == 2
 
     def test_empty_db_returns_empty_list(self, search_backend):
-        rows = search_backend.query_for_export({})
+        rows = _read_export(search_backend, {})
         assert rows == []

@@ -133,7 +133,7 @@ function renderHistory(exports) {
             <td style="font-size:0.8rem;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.filter_summary)}">${esc(e.filter_summary)}</td>
             <td>${e.row_count != null ? e.row_count : '—'}</td>
             <td>${fmtBytes(e.file_size_bytes)}</td>
-            <td>${statusBadge(e.status)}</td>
+            <td>${statusBadge(e.status)}${e.error_message ? `<br><small>${esc(e.error_message)}</small>` : ''}</td>
             <td>${dl}</td>
         </tr>`;
     }).join('');

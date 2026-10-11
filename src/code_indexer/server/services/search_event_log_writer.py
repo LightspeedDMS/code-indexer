@@ -12,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass
 from queue import Empty, Full, Queue
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from code_indexer.server.services.config_service import (
     get_config_service as get_config_service_for_eviction,
@@ -32,6 +32,14 @@ DEFAULT_RETENTION_DAYS = 90
 
 # Seconds per day (used for cutoff calculation).
 SECONDS_PER_DAY = 86400
+
+# Bug #2106: user-filtered export batches seek (username, timestamp). Needed
+# without ANALYZE statistics (solo SQLite never collects them); valid on both
+# backends. Also in DatabaseSchema (SQLite) and PG migration 071.
+_CREATE_IDX_SEL_USER_TS = (
+    "CREATE INDEX IF NOT EXISTS idx_sel_user_ts "
+    "ON search_event_log (username, timestamp)"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +66,121 @@ class SearchEventRecord:
     result_count: int
     node_id: str
     correlation_id: Optional[str]
+
+
+# Column order of `SELECT * FROM search_event_log` (both backends' DDL).
+_EVENT_COLUMNS = (
+    "id",
+    "timestamp",
+    "username",
+    "repo_alias",
+    "search_type",
+    "query_text",
+    "voyage_cache_hit",
+    "voyage_cache_mode",
+    "voyage_latency_ms",
+    "cohere_cache_hit",
+    "cohere_cache_mode",
+    "cohere_latency_ms",
+    "total_latency_ms",
+    "result_count",
+    "node_id",
+    "correlation_id",
+)
+
+
+def _pg_row_to_event(row: Any) -> Dict[str, Any]:
+    """Map a positional PostgreSQL search_event_log row to an event dict."""
+    return dict(zip(_EVENT_COLUMNS, row))
+
+
+def _export_where(
+    filters: dict,
+    after: Optional[Tuple[float, int]],
+    ph: str,
+    true_lit: str,
+    false_lit: str,
+) -> Tuple[str, List[Any]]:
+    """Build the WHERE clause of one export read (Bug #2106).
+
+    Every filter -- including cache_hit_filter -- is evaluated in the store,
+    before the LIMIT. `after` is the (timestamp, id) keyset of the last row
+    already read; only rows strictly after it in (timestamp, id) order match.
+    `ph` is the parameter placeholder, `true_lit`/`false_lit` the boolean
+    literals of the backend's cache-hit columns.
+    """
+    conditions: List[str] = []
+    params: List[Any] = []
+
+    username = filters.get("user") or None
+    if username:
+        conditions.append(f"username = {ph}")
+        params.append(username)
+
+    repo_alias = filters.get("repo_alias") or None
+    if repo_alias:
+        conditions.append(f"repo_alias = {ph}")
+        params.append(repo_alias)
+
+    search_type = filters.get("search_type")
+    if search_type and search_type != "all":
+        conditions.append(f"search_type = {ph}")
+        params.append(search_type)
+
+    from_ts = filters.get("from_timestamp")
+    if from_ts is not None:
+        conditions.append(f"timestamp >= {ph}")
+        params.append(from_ts)
+
+    to_ts = filters.get("to_timestamp")
+    if to_ts is not None:
+        conditions.append(f"timestamp < {ph}")
+        params.append(to_ts)
+
+    cache_hit_filter = filters.get("cache_hit_filter", "all")
+    if cache_hit_filter == "hits_only":
+        conditions.append(
+            f"(voyage_cache_hit = {true_lit} OR cohere_cache_hit = {true_lit})"
+        )
+    elif cache_hit_filter == "misses_only":
+        conditions.append(
+            f"(voyage_cache_hit IS NULL OR voyage_cache_hit = {false_lit})"
+            f" AND (cohere_cache_hit IS NULL OR cohere_cache_hit = {false_lit})"
+        )
+
+    if cache_hit_filter not in ("all", "hits_only", "misses_only"):
+        raise ValueError(
+            "cache_hit_filter must be 'all', 'hits_only' or 'misses_only', "
+            f"got {cache_hit_filter!r}"
+        )
+
+    if after is not None:
+        # Equivalent to (timestamp, id) > after, written so the leading
+        # `timestamp >=` is an index range seek on both backends (an OR at the
+        # top level makes the timestamp index a full scan, and a full export
+        # quadratic).
+        conditions.append(f"timestamp >= {ph} AND (timestamp > {ph} OR id > {ph})")
+        params.extend([after[0], after[0], after[1]])
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    return where_clause, params
+
+
+def _export_select(
+    filters: dict,
+    after: Optional[Tuple[float, int]],
+    limit: int,
+    ph: str,
+    true_lit: str,
+    false_lit: str,
+) -> Tuple[str, List[Any]]:
+    """Return the (sql, params) of one bounded export read, for either backend."""
+    where_clause, params = _export_where(filters, after, ph, true_lit, false_lit)
+    sql = (
+        f"SELECT * FROM search_event_log {where_clause} "
+        f"ORDER BY timestamp ASC, id ASC LIMIT {ph}"
+    )
+    return sql, params + [limit]
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +235,7 @@ class SearchEventLogSqliteBackend:
                         ON search_event_log (username)
                     """
                 )
+                conn.execute(_CREATE_IDX_SEL_USER_TS)
                 conn.commit()
             finally:
                 conn.close()
@@ -202,6 +326,10 @@ class SearchEventLogSqliteBackend:
         Time range is half-open: [from_ts, to_ts).
         Results ordered by timestamp DESC.
         Returns (events: list[dict], total_count: int).
+
+        Bug #2105: any read failure propagates to the caller. An empty result
+        means the store was read successfully and nothing matched; it never
+        stands in for a failed read.
         """
         conditions = []
         params: list = []
@@ -224,86 +352,46 @@ class SearchEventLogSqliteBackend:
 
         where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
+        conn = sqlite3.connect(self._db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
         try:
-            conn = sqlite3.connect(self._db_path, timeout=30)
-            conn.row_factory = sqlite3.Row
-            try:
-                # Count total
-                count_sql = f"SELECT COUNT(*) FROM search_event_log {where_clause}"
-                total_count = conn.execute(count_sql, params).fetchone()[0]
+            # Count total
+            count_sql = f"SELECT COUNT(*) FROM search_event_log {where_clause}"
+            total_count = conn.execute(count_sql, params).fetchone()[0]
 
-                # Fetch page
-                data_sql = (
-                    f"SELECT * FROM search_event_log {where_clause} "
-                    f"ORDER BY timestamp DESC LIMIT ? OFFSET ?"
-                )
-                rows = conn.execute(data_sql, params + [limit, offset]).fetchall()
-                events = [dict(row) for row in rows]
-                return events, total_count
-            finally:
-                conn.close()
-        except Exception as exc:
-            logger.warning("SearchEventLogSqliteBackend: query failed: %s", exc)
-            return [], 0
+            # Fetch page
+            data_sql = (
+                f"SELECT * FROM search_event_log {where_clause} "
+                f"ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+            )
+            rows = conn.execute(data_sql, params + [limit, offset]).fetchall()
+            events = [dict(row) for row in rows]
+            return events, total_count
+        finally:
+            conn.close()
 
-    def query_for_export(self, filters: dict) -> List[dict]:
-        """Return all matching rows for export, ordered by timestamp ASC.
+    def query_for_export(
+        self,
+        filters: dict,
+        *,
+        limit: int,
+        after: Optional[Tuple[float, int]] = None,
+    ) -> List[dict]:
+        """Return one bounded batch of matching rows for an export (Bug #2106).
 
-        Unlike query(), this has no pagination and applies cache_hit_filter
-        directly in SQL. Intended for use by QueryAnalyticsExportService.
+        Rows are ordered by (timestamp, id) ASC; at most `limit` rows strictly
+        after the `after` keyset are returned. Every filter, including
+        cache_hit_filter, is applied in SQL before the LIMIT. Any read failure
+        propagates (Bug #2105). Used by QueryAnalyticsExportService.
         """
-        conditions: List[str] = []
-        params: List[Any] = []
-
-        username = filters.get("user") or None
-        if username:
-            conditions.append("username = ?")
-            params.append(username)
-
-        repo_alias = filters.get("repo_alias") or None
-        if repo_alias:
-            conditions.append("repo_alias = ?")
-            params.append(repo_alias)
-
-        search_type = filters.get("search_type")
-        if search_type and search_type != "all":
-            conditions.append("search_type = ?")
-            params.append(search_type)
-
-        from_ts = filters.get("from_timestamp")
-        if from_ts is not None:
-            conditions.append("timestamp >= ?")
-            params.append(from_ts)
-
-        to_ts = filters.get("to_timestamp")
-        if to_ts is not None:
-            conditions.append("timestamp < ?")
-            params.append(to_ts)
-
-        cache_hit_filter = filters.get("cache_hit_filter", "all")
-        if cache_hit_filter == "hits_only":
-            conditions.append("(voyage_cache_hit = 1 OR cohere_cache_hit = 1)")
-        elif cache_hit_filter == "misses_only":
-            conditions.append(
-                "(voyage_cache_hit IS NULL OR voyage_cache_hit = 0)"
-                " AND (cohere_cache_hit IS NULL OR cohere_cache_hit = 0)"
-            )
-
-        where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
-        sql = f"SELECT * FROM search_event_log {where_clause} ORDER BY timestamp ASC"
+        sql, params = _export_select(filters, after, limit, "?", "1", "0")
+        conn = sqlite3.connect(self._db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
         try:
-            conn = sqlite3.connect(self._db_path, timeout=30)
-            conn.row_factory = sqlite3.Row
-            try:
-                rows = conn.execute(sql, params).fetchall()
-                return [dict(row) for row in rows]
-            finally:
-                conn.close()
-        except Exception as exc:
-            logger.warning(
-                "SearchEventLogSqliteBackend: query_for_export failed: %s", exc
-            )
-            return []
+            rows = conn.execute(sql, params).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
 
     def get_hit_rate_counts(
         self,
@@ -419,6 +507,7 @@ class SearchEventLogPostgresBackend:
                         ON search_event_log (username)
                     """
                 )
+                conn.execute(_CREATE_IDX_SEL_USER_TS)
                 conn.commit()
         except Exception as exc:
             logger.warning(
@@ -495,6 +584,9 @@ class SearchEventLogPostgresBackend:
         Time range is half-open: [from_ts, to_ts).
         Results ordered by timestamp DESC.
         Returns (events: list[dict], total_count: int).
+
+        Bug #2105: any read failure propagates to the caller (see the SQLite
+        backend's query()).
         """
         conditions = []
         params: list = []
@@ -517,116 +609,35 @@ class SearchEventLogPostgresBackend:
 
         where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
-        try:
-            with self._pool.connection() as conn:
-                count_sql = f"SELECT COUNT(*) FROM search_event_log {where_clause}"
-                total_count = conn.execute(count_sql, params).fetchone()[0]
+        with self._pool.connection() as conn:
+            count_sql = f"SELECT COUNT(*) FROM search_event_log {where_clause}"
+            total_count = conn.execute(count_sql, params).fetchone()[0]
 
-                data_sql = (
-                    f"SELECT * FROM search_event_log {where_clause} "
-                    f"ORDER BY timestamp DESC LIMIT %s OFFSET %s"
-                )
-                rows = conn.execute(data_sql, params + [limit, offset]).fetchall()
-                events = [
-                    {
-                        "id": row[0],
-                        "timestamp": row[1],
-                        "username": row[2],
-                        "repo_alias": row[3],
-                        "search_type": row[4],
-                        "query_text": row[5],
-                        "voyage_cache_hit": row[6],
-                        "voyage_cache_mode": row[7],
-                        "voyage_latency_ms": row[8],
-                        "cohere_cache_hit": row[9],
-                        "cohere_cache_mode": row[10],
-                        "cohere_latency_ms": row[11],
-                        "total_latency_ms": row[12],
-                        "result_count": row[13],
-                        "node_id": row[14],
-                        "correlation_id": row[15],
-                    }
-                    for row in rows
-                ]
-                return events, total_count
-        except Exception as exc:
-            logger.warning("SearchEventLogPostgresBackend: query failed: %s", exc)
-            return [], 0
+            data_sql = (
+                f"SELECT * FROM search_event_log {where_clause} "
+                f"ORDER BY timestamp DESC LIMIT %s OFFSET %s"
+            )
+            rows = conn.execute(data_sql, params + [limit, offset]).fetchall()
+            events = [_pg_row_to_event(row) for row in rows]
+            return events, total_count
 
-    def query_for_export(self, filters: dict) -> List[dict]:
-        """Return all matching rows for export, ordered by timestamp ASC.
+    def query_for_export(
+        self,
+        filters: dict,
+        *,
+        limit: int,
+        after: Optional[Tuple[float, int]] = None,
+    ) -> List[dict]:
+        """Return one bounded batch of matching rows for an export (Bug #2106).
 
-        Unlike query(), this has no pagination and applies cache_hit_filter
-        directly in SQL. Intended for use by QueryAnalyticsExportService.
+        Same contract as SearchEventLogSqliteBackend.query_for_export: ordered
+        by (timestamp, id) ASC, at most `limit` rows strictly after `after`,
+        every filter applied in SQL before the LIMIT, read failures propagate.
         """
-        conditions: List[str] = []
-        params: List[Any] = []
-
-        username = filters.get("user") or None
-        if username:
-            conditions.append("username = %s")
-            params.append(username)
-
-        repo_alias = filters.get("repo_alias") or None
-        if repo_alias:
-            conditions.append("repo_alias = %s")
-            params.append(repo_alias)
-
-        search_type = filters.get("search_type")
-        if search_type and search_type != "all":
-            conditions.append("search_type = %s")
-            params.append(search_type)
-
-        from_ts = filters.get("from_timestamp")
-        if from_ts is not None:
-            conditions.append("timestamp >= %s")
-            params.append(from_ts)
-
-        to_ts = filters.get("to_timestamp")
-        if to_ts is not None:
-            conditions.append("timestamp < %s")
-            params.append(to_ts)
-
-        cache_hit_filter = filters.get("cache_hit_filter", "all")
-        if cache_hit_filter == "hits_only":
-            conditions.append("(voyage_cache_hit = TRUE OR cohere_cache_hit = TRUE)")
-        elif cache_hit_filter == "misses_only":
-            conditions.append(
-                "(voyage_cache_hit IS NULL OR voyage_cache_hit = FALSE)"
-                " AND (cohere_cache_hit IS NULL OR cohere_cache_hit = FALSE)"
-            )
-
-        where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
-        sql = f"SELECT * FROM search_event_log {where_clause} ORDER BY timestamp ASC"
-        try:
-            with self._pool.connection() as conn:
-                rows = conn.execute(sql, params).fetchall()
-                return [
-                    {
-                        "id": row[0],
-                        "timestamp": row[1],
-                        "username": row[2],
-                        "repo_alias": row[3],
-                        "search_type": row[4],
-                        "query_text": row[5],
-                        "voyage_cache_hit": row[6],
-                        "voyage_cache_mode": row[7],
-                        "voyage_latency_ms": row[8],
-                        "cohere_cache_hit": row[9],
-                        "cohere_cache_mode": row[10],
-                        "cohere_latency_ms": row[11],
-                        "total_latency_ms": row[12],
-                        "result_count": row[13],
-                        "node_id": row[14],
-                        "correlation_id": row[15],
-                    }
-                    for row in rows
-                ]
-        except Exception as exc:
-            logger.warning(
-                "SearchEventLogPostgresBackend: query_for_export failed: %s", exc
-            )
-            return []
+        sql, params = _export_select(filters, after, limit, "%s", "TRUE", "FALSE")
+        with self._pool.connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [_pg_row_to_event(row) for row in rows]
 
     def get_hit_rate_counts(
         self,

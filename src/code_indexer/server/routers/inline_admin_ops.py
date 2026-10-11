@@ -19,7 +19,7 @@ Zero behavior change: same paths, methods, response models, and handler logic.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Literal, Optional
 
 from fastapi import (
     FastAPI,
@@ -78,7 +78,8 @@ class ExportFiltersRequest(BaseModel):
     repo_alias: Optional[str] = None
     from_timestamp: Optional[float] = None
     to_timestamp: Optional[float] = None
-    cache_hit_filter: Optional[str] = None
+    # Any other value is rejected with 422 instead of silently meaning "all".
+    cache_hit_filter: Optional[Literal["all", "hits_only", "misses_only"]] = None
 
 
 def register_admin_ops_routes(

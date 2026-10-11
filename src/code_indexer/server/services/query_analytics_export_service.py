@@ -14,7 +14,7 @@ import time
 import uuid as _uuid_module
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, cast
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +41,14 @@ _EXCEL_COLUMNS = [
     "correlation_id",
 ]
 
-# Max rows per export (anti-unbounded-loop -- Messi #14)
-_EXPORT_LIMIT = 50_000
+# Rows per store read (Bug #2106). An export reads every matching row in
+# batches of this size and streams them into the workbook, so memory stays
+# bounded by one batch however many rows match.
+_EXPORT_BATCH_SIZE = 5_000
+
+# A worksheet holds at most 1,048,576 rows; one is the header. Beyond this an
+# export continues on a new worksheet (with its own header) -- never truncated.
+_EXCEL_MAX_DATA_ROWS_PER_SHEET = 1_048_575
 
 # Number of seconds in one day
 _SECONDS_PER_DAY = 86_400
@@ -64,9 +70,11 @@ _UPDATE_ALLOWED = frozenset(
 
 # Staleness threshold for orphan reconciliation (Bug #1228).
 # Exports still in pending/running after this many seconds are considered orphaned.
-# A real export (50k-row DB query + Excel write) completes in seconds to ~2 minutes.
-# 300 seconds (5 min) gives ample margin for legitimate in-flight exports on other
-# cluster nodes while definitively catching hours-old stuck exports from node deaths.
+# Exports are no longer capped (Bug #2106), so a very large one can run longer
+# than this; reconciliation runs only at server startup, and a running export a
+# peer's startup marked failed is overwritten by its own final status update.
+# 300 seconds (5 min) still definitively catches hours-old stuck exports from
+# node deaths.
 _DEFAULT_ORPHAN_THRESHOLD_SECONDS = 300.0
 
 # ---------------------------------------------------------------------------
@@ -104,6 +112,69 @@ def _build_record_tuple(record: Dict[str, Any]) -> tuple:
         record.get("error_message"),
         record.get("retention_until"),
     )
+
+
+def _bounded_by_start(filters: Dict[str, Any], start_ts: float) -> Dict[str, Any]:
+    """Return filters whose to_timestamp is at most the export start time.
+
+    Bug #2106: an export covers the rows recorded before it started. This
+    bounds the matching set so the batched read terminates even while new
+    searches keep being recorded.
+    """
+    bounded = dict(filters)
+    to_ts = bounded.get("to_timestamp")
+    bounded["to_timestamp"] = start_ts if to_ts is None else min(to_ts, start_ts)
+    return bounded
+
+
+# Workbook/worksheet parameters below are typed Any: openpyxl is imported
+# lazily and ships no type stubs.
+def _new_sheet(wb: Any, number: int) -> Any:
+    ws = wb.create_sheet(title=f"Searches {number}")
+    ws.append(_EXCEL_COLUMNS)
+    return ws
+
+
+def _append_rows(wb: Any, rows: Iterable[Dict[str, Any]]) -> int:
+    """Append rows to write-only workbook sheets; return the number written.
+
+    Each sheet takes at most _EXCEL_MAX_DATA_ROWS_PER_SHEET data rows; the
+    first sheet exists even when there are no rows (header-only export).
+    "user" in Excel maps to "username" in the store.
+    """
+    keys = ["username" if c == "user" else c for c in _EXCEL_COLUMNS]
+    sheet_number = 1
+    ws = _new_sheet(wb, sheet_number)
+    in_sheet = 0
+    written = 0
+    for row in rows:
+        if in_sheet == _EXCEL_MAX_DATA_ROWS_PER_SHEET:
+            sheet_number += 1
+            ws = _new_sheet(wb, sheet_number)
+            in_sheet = 0
+        ws.append([row.get(k) for k in keys])
+        in_sheet += 1
+        written += 1
+    return written
+
+
+def _discard_workbook(wb: Any, file_path: Path) -> None:
+    """Release an abandoned write-only workbook's temp files, leaving no file.
+
+    openpyxl removes a write-only sheet's temp file only when the workbook is
+    saved (otherwise at process exit), so save it and delete the result.
+    """
+    try:
+        wb.save(str(file_path))
+    except Exception as exc:
+        logger.warning(
+            "QueryAnalyticsExportService: could not release temp files of the "
+            "abandoned export workbook %s: %s",
+            file_path,
+            exc,
+        )
+    finally:
+        file_path.unlink(missing_ok=True)
 
 
 def _validate_update_fields(fields: Dict[str, Any]) -> None:
@@ -464,47 +535,34 @@ class QueryAnalyticsExportService:
             return "All searches"
         return ", ".join(parts)
 
-    def _fetch_rows(
+    def _iter_export_rows(
         self, search_backend: Any, filters: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        """Fetch rows from search_event_log applying the given filters.
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield every row matching `filters`, oldest first (Bug #2106).
 
-        Filters supported by the backend are passed directly. cache_hit_filter
-        is applied post-query in Python (the backend has no such predicate).
+        Reads bounded batches of _EXPORT_BATCH_SIZE rows with keyset paging on
+        (timestamp, id); every filter, including cache_hit_filter, is applied
+        by the store before its LIMIT. Read failures propagate (Bug #2105).
+
+        Termination: run_export bounds `to_timestamp` by the export start time,
+        so the matching set is finite; each full batch strictly advances the
+        keyset (checked below), and the first short batch ends the loop.
         """
-        username = filters.get("user") or None
-        search_type = filters.get("search_type")
-        if search_type == "all":
-            search_type = None
-        repo_alias = filters.get("repo_alias") or None
-        from_ts = filters.get("from_timestamp")
-        to_ts = filters.get("to_timestamp")
-
-        events, _ = search_backend.query(
-            username=username,
-            search_type=search_type,
-            repo_alias=repo_alias,
-            from_ts=from_ts,
-            to_ts=to_ts,
-            limit=_EXPORT_LIMIT,
-            offset=0,
-        )
-
-        cache_hit_filter = filters.get("cache_hit_filter", "all")
-        if cache_hit_filter == "hits_only":
-            events = [
-                e
-                for e in events
-                if e.get("voyage_cache_hit") or e.get("cohere_cache_hit")
-            ]
-        elif cache_hit_filter == "misses_only":
-            events = [
-                e
-                for e in events
-                if not e.get("voyage_cache_hit") and not e.get("cohere_cache_hit")
-            ]
-
-        return cast(List[Dict[str, Any]], events)
+        after: Optional[Tuple[float, int]] = None
+        while True:
+            batch = search_backend.query_for_export(
+                filters, limit=_EXPORT_BATCH_SIZE, after=after
+            )
+            yield from batch
+            if len(batch) < _EXPORT_BATCH_SIZE:
+                return
+            last = batch[-1]
+            keyset = (last["timestamp"], last["id"])
+            if after is not None and keyset <= after:
+                raise RuntimeError(
+                    f"export read did not advance past {after!r} (got {keyset!r})"
+                )
+            after = keyset
 
     def run_export(
         self,
@@ -518,6 +576,10 @@ class QueryAnalyticsExportService:
 
         Creates the DB record as 'pending', writes Excel, then updates to
         'completed' or 'failed'. Intended to be called by the BGM worker thread.
+
+        Bug #2105: a failure (including a failed store read) is recorded as
+        'failed' with its reason in the export history AND re-raised, so the
+        background job fails too instead of reporting success.
         """
         now = time.time()
         filter_summary = self.build_filter_summary(filters)
@@ -530,11 +592,16 @@ class QueryAnalyticsExportService:
         }
         self._backend.create_export(record)
 
+        file_path: Optional[Path] = None
         try:
-            rows = self._fetch_rows(search_event_log_backend, filters)
+            if search_event_log_backend is None:
+                raise RuntimeError("search event log is not initialized")
             self.ensure_export_dir()
             file_path = self.export_path(export_id)
-            self._write_excel(rows, file_path)
+            rows = self._iter_export_rows(
+                search_event_log_backend, _bounded_by_start(filters, now)
+            )
+            row_count = self._write_excel(rows, file_path)
 
             file_size = file_path.stat().st_size
             retention_until = now + export_retention_days * _SECONDS_PER_DAY
@@ -543,13 +610,18 @@ class QueryAnalyticsExportService:
                 status="completed",
                 file_path=str(file_path),
                 file_size_bytes=file_size,
-                row_count=len(rows),
+                row_count=row_count,
                 retention_until=retention_until,
+                # A peer's startup reconcile may have marked this running
+                # export failed with a reason; completion supersedes it.
+                error_message=None,
             )
         except Exception as exc:
             logger.error(
                 "QueryAnalyticsExportService: export %s failed: %s", export_id, exc
             )
+            if file_path is not None:
+                file_path.unlink(missing_ok=True)
             error_retention_until = now + export_retention_days * _SECONDS_PER_DAY
             self._backend.update_export(
                 export_id,
@@ -557,25 +629,26 @@ class QueryAnalyticsExportService:
                 error_message=str(exc),
                 retention_until=error_retention_until,
             )
+            raise
 
-    def _write_excel(self, rows: List[Dict[str, Any]], file_path: Path) -> None:
-        """Write rows to an Excel file at file_path with the canonical column order."""
+    def _write_excel(self, rows: Iterable[Dict[str, Any]], file_path: Path) -> int:
+        """Stream rows into an Excel file at file_path; return rows written.
+
+        Bug #2106: a write-only workbook keeps memory bounded however many rows
+        are streamed. Each worksheet holds at most _EXCEL_MAX_DATA_ROWS_PER_SHEET
+        data rows under the canonical header; further rows continue on a new
+        worksheet, so nothing is truncated.
+        """
         import openpyxl
 
-        wb = openpyxl.Workbook()
-        ws = wb.active
-
-        # Write header row
-        for col_idx, col_name in enumerate(_EXCEL_COLUMNS, start=1):
-            ws.cell(row=1, column=col_idx, value=col_name)
-
-        # Write data rows -- "user" in Excel maps to "username" in DB
-        for row_idx, row in enumerate(rows, start=2):
-            for col_idx, col_name in enumerate(_EXCEL_COLUMNS, start=1):
-                db_key = "username" if col_name == "user" else col_name
-                ws.cell(row=row_idx, column=col_idx, value=row.get(db_key))
-
+        wb = openpyxl.Workbook(write_only=True)
+        try:
+            written = _append_rows(wb, rows)
+        except BaseException:
+            _discard_workbook(wb, file_path)
+            raise
         wb.save(str(file_path))
+        return written
 
     def list_exports(self, export_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Return export records, adding a computed 'download_link' field.

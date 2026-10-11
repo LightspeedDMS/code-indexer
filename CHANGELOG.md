@@ -10,11 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Upgrade notes
 
 - CLI: interrupted `cidx index` runs no longer resume from a stored file list. The next run reconciles the index against disk and indexes only the missing or changed files, including files added while the run was interrupted. The incremental watermark is now the time a run started listing files, so files written during a run are picked up next time.
+- Server: the first start after upgrading builds one new index on the search event log table (`idx_sel_user_ts`; about 1-2 s per million rows, once). Later starts are unaffected.
 
 ### Fixed
 
 - Server (cluster): the dashboard job list now shows every running and pending job in the cluster, not only those of the node serving the page, so it always agrees with the Running card.
 - Server: a refresh of a repository that is refreshed only by triggers (for example trace repositories) is now retried automatically, with an escalating interval, when it fails or when some files could not be indexed; previously it stayed stale until new data arrived. A refresh that published but left files unindexed is now reported as partial (`partial`, `failed_files` in the job result, job status `completed_partial`). Owed work never delays new-data refreshes or scheduled refreshes.
+- Query Analytics Export: a failed database read now marks the export "failed" and shows the reason in Export History; "completed with 0 rows" now always means a successful empty read. `GET /api/admin/search-events` answers 500 on a read failure instead of an empty page. A completed export no longer shows a stale "interrupted" message. (LightspeedDMS/code-indexer#2105)
+- Query Analytics Export: exports now contain every matching row instead of stopping at the newest 50,000. Rows are written oldest first and read in bounded batches; the cache-hit filter is applied in the database before any limit, and an unrecognised cache-hit filter value is rejected (HTTP 422). Results larger than one Excel sheet continue on further sheets ("Searches 1", "Searches 2", ...). An export covers the searches recorded before it started. (LightspeedDMS/code-indexer#2106)
 - Indexing: embedding requests (Voyage text, contextualized and multimodal; Cohere text and multimodal) now wait 4x the configured provider timeout (120 s by default), so a provider slow period no longer abandons and resends each batch up to four times. Query requests keep the configured timeout and now always apply it per request, so a query can no longer inherit a longer timeout from a shared client another call created.
 
 ## [12.84.0] - 2026-10-08

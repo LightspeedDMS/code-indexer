@@ -656,6 +656,13 @@ class DatabaseSchema:
             ON search_event_log (username)
     """
 
+    # Bug #2106: user-filtered export batches seek (username, timestamp);
+    # needed without ANALYZE statistics (solo SQLite never collects them).
+    CREATE_IDX_SEL_USER_TS = """
+        CREATE INDEX IF NOT EXISTS idx_sel_user_ts
+            ON search_event_log (username, timestamp)
+    """
+
     # Issue #1160: Query analytics exports table
     CREATE_QUERY_ANALYTICS_EXPORTS_TABLE = """
         CREATE TABLE IF NOT EXISTS query_analytics_exports (
@@ -890,6 +897,7 @@ class DatabaseSchema:
             conn.execute(self.CREATE_SEARCH_EVENT_LOG_TABLE)
             conn.execute(self.CREATE_IDX_SEL_TIMESTAMP)
             conn.execute(self.CREATE_IDX_SEL_USER)
+            conn.execute(self.CREATE_IDX_SEL_USER_TS)
             # Issue #1160: Query analytics exports
             conn.execute(self.CREATE_QUERY_ANALYTICS_EXPORTS_TABLE)
             conn.execute(self.CREATE_IDX_QAE_CREATED_AT)
