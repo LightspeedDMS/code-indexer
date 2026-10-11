@@ -61,6 +61,7 @@
 - [Description scheduler](feedback_description_refresh_scheduler_requires_staging_validation.md) - scheduler changes need staging validation (cost risk)
 - [X-Ray not in dashboard](feedback_xray_queries_not_in_dashboard.md) - xray_search jobs stay out of the dashboard
 - [Test timeouts](feedback_run_tests_with_timeout_and_monitor.md) - never launch tests without a timeout
+- [Gate on pytest exit](feedback_test_gate_must_check_pytest_exit.md) - `pytest | tail && commit` gates on tail; capture pytest's own rc
 - [Faithful DB mocks](feedback_faithful_db_mocks.md) - DB mocks mirror the real driver; verify on real PG
 - [Audit logs after testing](feedback_review_local_and_staging_logs_after_testing.md) - audit local and staging logs; file AND fix
 - [Holistic anomaly scan](feedback_holistic_anomaly_scan_every_loop.md) - scan jobs/logs/health/artifacts each loop

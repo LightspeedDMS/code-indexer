@@ -19,7 +19,7 @@ Only phases in the requested index_types list are included (plus cow always).
 
 import json
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 # ---------------------------------------------------------------------------
 # Cost constants (as specified in Story #480)
@@ -301,3 +301,34 @@ def emit_run_spend_json(inputs_sent: int, attempts: int) -> None:
         "attempts": attempts,
     }
     print(json.dumps(payload), flush=True)
+
+
+def parse_run_spend_record(lines: Iterable[str]) -> Optional[Dict[str, int]]:
+    """The child's run-spend record (Story #2122) among its stdout ``lines``:
+    ``{"inputs_sent": N, "attempts": M}`` of the LAST ``run_spend`` record.
+
+    None when there is none: an older child or a signal-killed one prints
+    no record, which means "not metered", never "sent nothing". A malformed
+    record (a field missing, or not an int) is a child defect and raises
+    ``ValueError``; it is never skipped."""
+    found: Optional[Dict[str, int]] = None
+    for line in lines:
+        try:
+            data = json.loads(line.strip())
+        except ValueError:
+            continue
+        if not isinstance(data, dict) or data.get("record") != RUN_SPEND_RECORD:
+            continue
+        inputs_sent = data.get("inputs_sent")
+        attempts = data.get("attempts")
+        if (
+            not isinstance(inputs_sent, int)
+            or isinstance(inputs_sent, bool)
+            or not isinstance(attempts, int)
+            or isinstance(attempts, bool)
+            or inputs_sent < 0
+            or attempts < 0
+        ):
+            raise ValueError(f"malformed run_spend record: {line.strip()!r}")
+        found = {"inputs_sent": inputs_sent, "attempts": attempts}
+    return found

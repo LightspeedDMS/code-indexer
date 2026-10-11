@@ -91,6 +91,7 @@ from code_indexer.server.utils.cancellable_subprocess import (
 from functools import partial
 
 from code_indexer.services.index_failure_exit_codes import (
+    EXIT_CODE_RUN_SPEND_DEFECT,
     FatalChunkStoreIndexError,
     chunk_store_failure_kind_for_exit_code,
 )
@@ -172,6 +173,43 @@ class PublishedRefreshBackupError(RuntimeError):
     """The refresh published a verified snapshot, then its cidx-meta backup
     sync failed. The job still fails (the operator must see the backup
     problem), but the index is current: no refresh retry is owed."""
+
+
+def _with_run_spend(result: Dict[str, Any], run_spend: object) -> Dict[str, Any]:
+    """Story #2122: add the indexing child's metered provider spend
+    (``inputs_sent``, ``attempts``) to a refresh result returned after
+    indexing, so the job result shows it. Only a parsed run-spend record
+    adds them; a child that printed none (an older child) leaves them out:
+    "not metered" is never reported as "sent nothing"."""
+    if isinstance(run_spend, dict):
+        result["inputs_sent"] = run_spend["inputs_sent"]
+        result["attempts"] = run_spend["attempts"]
+    return result
+
+
+def _run_spend_note(run_spend: object) -> str:
+    """Story #2122: the spend suffix of a failed refresh's error message,
+    "" when no record was read."""
+    if isinstance(run_spend, dict):
+        return (
+            f" (run spend: inputs_sent={run_spend['inputs_sent']} "
+            f"attempts={run_spend['attempts']})"
+        )
+    return ""
+
+
+def _failed_child_run_spend_note(stdout_lines: List[str]) -> str:
+    """Story #2122: the spend a FAILED child reported in its captured
+    stdout, as an error suffix. A malformed record is reported beside the
+    child's own error, never instead of it."""
+    from code_indexer.services.progress_phase_allocator import (
+        parse_run_spend_record,
+    )
+
+    try:
+        return _run_spend_note(parse_run_spend_record(stdout_lines))
+    except ValueError as malformed:
+        return f" (run spend unknown: {malformed})"
 
 
 def _partial_publish_warning(
@@ -2477,6 +2515,9 @@ class RefreshScheduler:
         # Bug #935: track whether the refresh raised so the finally block can
         # call fail_job (raised) vs complete_job (all normal exits incl. early returns).
         _tracker_raised = False
+        # Story #2122: the indexing child's metered spend, once indexing
+        # returned; carried on a later failure's error.
+        run_spend: Optional[Dict[str, int]] = None
         try:
             with repo_lock:
                 try:
@@ -3217,7 +3258,7 @@ class RefreshScheduler:
                             else None
                         )
                         try:
-                            self._index_source(
+                            run_spend = self._index_source(
                                 alias_name=alias_name,
                                 source_path=source_path,
                                 progress_callback=progress_callback,
@@ -3269,11 +3310,14 @@ class RefreshScheduler:
                                 "index; no new snapshot published",
                                 alias_name,
                             )
-                            return {
-                                "success": True,
-                                "alias": alias_name,
-                                "message": "No changes detected",
-                            }
+                            return _with_run_spend(
+                                {
+                                    "success": True,
+                                    "alias": alias_name,
+                                    "message": "No changes detected",
+                                },
+                                run_spend,
+                            )
 
                         # Bug #1506: run-boundary durability-flush +
                         # integrity gate (still under the write lock
@@ -3304,12 +3348,15 @@ class RefreshScheduler:
                                 f"{f.collection_dir}: {f.detail}"
                                 for f in gate_result.failures
                             )
-                            return {
-                                "success": False,
-                                "alias": alias_name,
-                                "message": "Refresh integrity gate failed; publish skipped",
-                                "integrity_gate_detail": detail_summary,
-                            }
+                            return _with_run_spend(
+                                {
+                                    "success": False,
+                                    "alias": alias_name,
+                                    "message": "Refresh integrity gate failed; publish skipped",
+                                    "integrity_gate_detail": detail_summary,
+                                },
+                                run_spend,
+                            )
 
                         # Issue #1546 Fix 3 (Codex round review):
                         # ownership-loss checkpoint immediately before the
@@ -3465,11 +3512,14 @@ class RefreshScheduler:
                         )
 
                     logger.info(f"Refresh complete for {alias_name}")
-                    result: Dict[str, Any] = {
-                        "success": True,
-                        "alias": alias_name,
-                        "message": "Refresh complete",
-                    }
+                    result: Dict[str, Any] = _with_run_spend(
+                        {
+                            "success": True,
+                            "alias": alias_name,
+                            "message": "Refresh complete",
+                        },
+                        run_spend,
+                    )
                     if recorded_failures.failed_files:
                         # Bug #2125 (B): success stays True (a verified
                         # snapshot was published); partial tells the job,
@@ -3498,8 +3548,12 @@ class RefreshScheduler:
                         )
                         _tracker_raised = True
                         raise
+                    # Story #2122: a failure after indexing returned keeps the
+                    # spend (a failed child's own error already carries it).
+                    spend_note = _run_spend_note(run_spend)
                     logger.error(
-                        f"Refresh failed for {alias_name}: {type(e).__name__}: {e}",
+                        f"Refresh failed for {alias_name}: {type(e).__name__}: {e}"
+                        f"{spend_note}",
                         exc_info=True,
                     )
                     # Bug #84 fix: Raise exception instead of returning error dict
@@ -3507,6 +3561,7 @@ class RefreshScheduler:
                     _tracker_raised = True
                     raise RuntimeError(
                         f"Refresh failed for {alias_name}: {type(e).__name__}: {e}"
+                        f"{spend_note}"
                     ) from e
 
         finally:
@@ -3756,9 +3811,15 @@ class RefreshScheduler:
         orphan_event_callback: Optional[Any] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
         job_id: Optional[str] = None,
-    ) -> None:
+    ) -> Optional[Dict[str, int]]:
         """
         Index the golden repo source in place (Story #229: index-source-first).
+
+        Returns the semantic child's metered provider spend (Story #2122):
+        ``{"inputs_sent": N, "attempts": M}`` from its final
+        ``--progress-json`` record, or None when it printed none (an older
+        child): "not metered", never "sent nothing". A malformed record
+        raises ValueError (the refresh fails loudly).
 
         Runs all indexing (semantic+FTS, temporal, SCIP) directly on the source
         repository, before any CoW clone is performed.  The versioned snapshot
@@ -4085,6 +4146,8 @@ class RefreshScheduler:
                 run_with_popen_progress(**_popen_kwargs)
             except IndexingSubprocessError as e:
                 error_msg = str(e)
+                # Story #2122: what the failed child spent, from its stdout.
+                spend_note = _failed_child_run_spend_note(_popen_stdout)
                 # SIGTERM check — returncode -15 is in the error message from popen
                 if "Exit code -15" in error_msg or "returncode=-15" in error_msg:
                     logger.warning(
@@ -4092,6 +4155,7 @@ class RefreshScheduler:
                     )
                     raise RuntimeError(
                         f"Indexing interrupted by server shutdown for {alias_name}"
+                        f"{spend_note}"
                     )
                 # Bug #2022: the child's reserved exit code names a fatal
                 # chunk-store failure kind; surface it typed for self-heal.
@@ -4100,19 +4164,27 @@ class RefreshScheduler:
                     logger.error(
                         f"{phase_name} indexing on source failed for {alias_name} "
                         f"with a fatal chunk-store {fatal_kind.value} failure: "
-                        f"{error_msg}"
+                        f"{error_msg}{spend_note}"
                     )
                     raise FatalChunkStoreIndexError(
                         f"{phase_name} indexing on source failed for {alias_name}: "
-                        f"fatal chunk-store {fatal_kind.value} failure: {error_msg}",
+                        f"fatal chunk-store {fatal_kind.value} failure: {error_msg}"
+                        f"{spend_note}",
                         fatal_kind,
                     ) from e
+                if e.returncode == EXIT_CODE_RUN_SPEND_DEFECT:
+                    # Story #2122: the child's run-spend meter refused a send.
+                    error_msg = (
+                        f"run-spend meter defect (exit {e.returncode}): {error_msg}"
+                    )
                 logger.error(
-                    f"{phase_name} indexing on source failed for {alias_name}: {error_msg}",
+                    f"{phase_name} indexing on source failed for {alias_name}: "
+                    f"{error_msg}{spend_note}",
                     exc_info=True,
                 )
                 raise RuntimeError(
-                    f"{phase_name} indexing on source failed for {alias_name}: {error_msg}"
+                    f"{phase_name} indexing on source failed for {alias_name}: "
+                    f"{error_msg}{spend_note}"
                 )
 
         # Bug #678: Wrapper that seeds config before and drains health events after
@@ -4177,6 +4249,20 @@ class RefreshScheduler:
             env=_semantic_env,
         )
         logger.info(f"cidx index on source completed successfully for {alias_name}")
+        # Story #2122: the semantic child's final run-spend record, read
+        # before the temporal phase clears _popen_stdout.
+        from code_indexer.services.progress_phase_allocator import (
+            parse_run_spend_record,
+        )
+
+        run_spend = parse_run_spend_record(_popen_stdout)
+        if run_spend is None:
+            logger.warning(
+                "Story #2122: the indexing child for %s exited 0 without a "
+                "run-spend record; its provider spend is unknown (an older "
+                "child, or a lost or corrupted record)",
+                alias_name,
+            )
 
         # Step 1b: build the trigram index for index-assisted regex search.
         _build_source_trigram_index(alias_name, source_path)
@@ -4278,6 +4364,7 @@ class RefreshScheduler:
                 raise RuntimeError(
                     f"SCIP indexing on source failed for {alias_name}: {diagnostic}"
                 )
+        return run_spend
 
     def _run_subprocess(
         self,
