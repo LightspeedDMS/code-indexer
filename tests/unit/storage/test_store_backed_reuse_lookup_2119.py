@@ -241,10 +241,11 @@ def test_absent_store_holds_nothing_and_is_not_created(tmp_path: Path) -> None:
 
 def test_missing_store_of_an_established_collection_is_fatal(tmp_path: Path) -> None:
     """Codex P2-3: once the CHUNKS_DB discriminator is committed, a missing
-    chunks.db is an environment failure (exit 87, never the corruption code
-    that triggers a restore) -- not an empty cache -- and is not recreated."""
+    chunks.db is its own fatal kind (Story #2126: missing store, exit 89,
+    never the corruption code) -- not an empty cache -- and is not
+    recreated."""
     from code_indexer.services.index_failure_exit_codes import (
-        EXIT_CODE_CHUNK_STORE_ENVIRONMENT,
+        EXIT_CODE_CHUNK_STORE_MISSING,
         index_failure_exit_code,
     )
     from code_indexer.storage.sqlite_chunk_store import ChunkStoreUnavailableError
@@ -256,7 +257,7 @@ def test_missing_store_of_an_established_collection_is_fatal(tmp_path: Path) -> 
     with pytest.raises(ChunkStoreUnavailableError) as raised:
         _lookup(FilesystemVectorStore(base_path=tmp_path), "src/base.py", "sha256:x", 1)
 
-    assert index_failure_exit_code(raised.value) == EXIT_CODE_CHUNK_STORE_ENVIRONMENT
+    assert index_failure_exit_code(raised.value) == EXIT_CODE_CHUNK_STORE_MISSING
     assert not chunks_db.exists()
 
 
@@ -265,7 +266,7 @@ def test_read_write_open_never_recreates_an_established_store(
 ) -> None:
     """Codex round 2, P2-A: the central guard at the read-write open point."""
     from code_indexer.services.index_failure_exit_codes import (
-        EXIT_CODE_CHUNK_STORE_ENVIRONMENT,
+        EXIT_CODE_CHUNK_STORE_MISSING,
         index_failure_exit_code,
     )
     from code_indexer.storage.sqlite_chunk_store import ChunkStoreUnavailableError
@@ -276,7 +277,7 @@ def test_read_write_open_never_recreates_an_established_store(
 
     with pytest.raises(ChunkStoreUnavailableError) as raised:
         ChunkStore(chunks_db)
-    assert index_failure_exit_code(raised.value) == EXIT_CODE_CHUNK_STORE_ENVIRONMENT
+    assert index_failure_exit_code(raised.value) == EXIT_CODE_CHUNK_STORE_MISSING
     assert not chunks_db.exists()
 
     fresh = tmp_path / "fresh-collection" / "chunks.db"

@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Tuple
 
 import code_indexer
 
@@ -64,6 +64,21 @@ sys.addaudithook(_cidx_test_network_guard)
 """
 
 
+def install_network_guard(
+    root: Path, extra_sitecustomize: str = ""
+) -> Tuple[Path, Path]:
+    """Write the test ``sitecustomize`` (any non-loopback connect or DNS
+    lookup is refused and logged) under ``root``. Returns the site dir to
+    put first on a child's PYTHONPATH and the log of refused attempts."""
+    blocked_log = root / "blocked-network.log"
+    site_dir = root / "test-site"
+    site_dir.mkdir()
+    (site_dir / "sitecustomize.py").write_text(
+        f"_BLOCKED_LOG = {str(blocked_log)!r}\n" + _NETWORK_GUARD + extra_sitecustomize
+    )
+    return site_dir, blocked_log
+
+
 class FakeProviderRepo:
     """A non-git repository initialised for cidx, pointed at the fake.
 
@@ -83,13 +98,8 @@ class FakeProviderRepo:
         (self.repo / "src").mkdir(parents=True)
         home = root / "home"
         home.mkdir()
-        self.blocked_network_log = root / "blocked-network.log"
-        site_dir = root / "test-site"
-        site_dir.mkdir()
-        (site_dir / "sitecustomize.py").write_text(
-            f"_BLOCKED_LOG = {str(self.blocked_network_log)!r}\n"
-            + _NETWORK_GUARD
-            + extra_sitecustomize
+        site_dir, self.blocked_network_log = install_network_guard(
+            root, extra_sitecustomize
         )
         self.env: Dict[str, str] = {
             "PATH": os.environ["PATH"],

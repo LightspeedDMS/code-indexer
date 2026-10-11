@@ -35,10 +35,17 @@ class _RefreshFailureBackoffPostgresMixin:
     # Supplied at runtime by GoldenRepoMetadataPostgresBackend.__init__.
     _pool: "ConnectionPool"
 
-    def record_refresh_failure_backoff(self, golden_alias: str, detail: str) -> int:
+    def record_refresh_failure_backoff(
+        self,
+        golden_alias: str,
+        detail: str,
+        unrepairable_reason: Optional[str] = None,
+    ) -> int:
         """Record one non-repairable refresh failure; return the
         consecutive-failure count after recording it. One atomic upsert, so
-        concurrent recorders on different nodes never lose an increment."""
+        concurrent recorders on different nodes never lose an increment.
+        *unrepairable_reason* (Story #2126, migration 072): why it cannot
+        self-heal without an operator; every failure replaces it."""
         if not golden_alias:
             raise ValueError("golden_alias must be a non-empty string")
         if not detail:
@@ -48,15 +55,23 @@ class _RefreshFailureBackoffPostgresMixin:
                 cur.execute(
                     "INSERT INTO refresh_failure_backoff_state "
                     "(golden_alias, consecutive_failure_count, last_detail, "
-                    "last_failed_at, updated_at) VALUES (%s, 1, %s, %s, %s) "
+                    "last_failed_at, updated_at, unrepairable_reason) "
+                    "VALUES (%s, 1, %s, %s, %s, %s) "
                     "ON CONFLICT (golden_alias) DO UPDATE SET "
                     "consecutive_failure_count = "
                     "refresh_failure_backoff_state.consecutive_failure_count + 1, "
                     "last_detail = EXCLUDED.last_detail, "
                     "last_failed_at = EXCLUDED.last_failed_at, "
-                    "updated_at = EXCLUDED.updated_at "
+                    "updated_at = EXCLUDED.updated_at, "
+                    "unrepairable_reason = EXCLUDED.unrepairable_reason "
                     "RETURNING consecutive_failure_count",
-                    (golden_alias, detail, time.time(), datetime.now(timezone.utc)),
+                    (
+                        golden_alias,
+                        detail,
+                        time.time(),
+                        datetime.now(timezone.utc),
+                        unrepairable_reason,
+                    ),
                 )
                 row = cur.fetchone()
             conn.commit()
@@ -81,6 +96,21 @@ class _RefreshFailureBackoffPostgresMixin:
                 )
                 row = cur.fetchone()
         return None if row is None else self._state_from_row(row)
+
+    def list_unrepairable_refresh_failures(self) -> List[Dict[str, str]]:
+        """Story #2126: every alias whose current refresh failure cannot
+        self-heal without an operator, with the reason. Only failing aliases
+        have a row, never the whole fleet."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT golden_alias, unrepairable_reason "
+                    "FROM refresh_failure_backoff_state "
+                    "WHERE unrepairable_reason IS NOT NULL "
+                    "AND consecutive_failure_count > 0 ORDER BY golden_alias"
+                )
+                rows = cur.fetchall()
+        return [{"golden_alias": row[0], "reason": row[1]} for row in rows]
 
     _STATE_COLUMNS = (
         "golden_alias, consecutive_failure_count, last_detail, last_failed_at, "
@@ -371,6 +401,7 @@ def _resolve_covered_with(
     cur.execute(
         "UPDATE refresh_failure_backoff_state SET "
         "consecutive_failure_count = 0, owed_retry_count = 0, "
+        "unrepairable_reason = NULL, "
         "pending_due_at = %s, updated_at = %s WHERE golden_alias = %s",
         (now, updated_at, golden_alias),
     )

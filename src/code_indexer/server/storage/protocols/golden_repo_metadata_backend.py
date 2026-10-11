@@ -138,11 +138,20 @@ class GoldenRepoMetadataBackend(Protocol):
 
     # Bug #2022: per-repo refresh failure backoff for repeated failures the
     # self-heal cannot repair (refresh_scheduler.py).
-    def record_refresh_failure_backoff(self, golden_alias: str, detail: str) -> int: ...
+    # Story #2126: unrepairable_reason says why the failure cannot self-heal
+    # (an operator is needed); every recorded failure replaces it.
+    def record_refresh_failure_backoff(
+        self,
+        golden_alias: str,
+        detail: str,
+        unrepairable_reason: Optional[str] = None,
+    ) -> int: ...
 
     def get_refresh_failure_backoff_state(
         self, golden_alias: str
     ) -> Optional[Dict[str, Any]]: ...
+
+    def list_unrepairable_refresh_failures(self) -> List[Dict[str, str]]: ...
 
     # Durable marker for a system trigger deferred by that backoff. A
     # scheduler leases a due trigger (it stays pending until a verified

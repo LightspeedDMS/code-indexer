@@ -141,6 +141,14 @@ class ChunkStoreUnavailableError(ChunkStoreError):
     """
 
 
+class MissingEstablishedChunkStoreError(ChunkStoreUnavailableError):
+    """Story #2126: the ``chunks.db`` of an ESTABLISHED collection is missing
+    (raised only by ``refuse_missing_established_store``). Its own fatal kind
+    (exit 89): neither corruption nor an environment failure, because its
+    repair -- restoring the store from the published snapshot -- differs
+    from both."""
+
+
 _LOCK_CONTENTION_SUBSTRINGS = (
     "database is locked",
     "database table is locked",
@@ -211,10 +219,11 @@ def refuse_missing_established_store(db_path: Union[str, Path]) -> None:
     lost, never pending. A read-write open would silently recreate it empty,
     and every later reuse lookup would read "nothing stored" and pay again.
 
-    Raises ``ChunkStoreUnavailableError`` chained from ``FileNotFoundError``:
-    an environment failure (exit 87), never corruption (86), so no restore
-    is triggered. Returns quietly when the store exists or the collection is
-    not established (a fresh build)."""
+    Raises ``MissingEstablishedChunkStoreError`` (a
+    ``ChunkStoreUnavailableError``) chained from ``FileNotFoundError``: its
+    own kind (exit 89, Story #2126), never corruption (86), whose repair is
+    a restore from the published snapshot. Returns quietly when the store
+    exists or the collection is not established (a fresh build)."""
     path = Path(db_path)
     if path.exists():
         return
@@ -226,7 +235,7 @@ def refuse_missing_established_store(db_path: Union[str, Path]) -> None:
     if resolve_chunk_layout(path.parent) != ChunkLayout.CHUNKS_DB:
         return
     missing = FileNotFoundError(errno.ENOENT, "chunk store missing", str(path))
-    raise ChunkStoreUnavailableError(
+    raise MissingEstablishedChunkStoreError(
         f"Chunk store {path} of an established CHUNKS_DB collection is "
         f"missing; refusing to recreate it empty"
     ) from missing

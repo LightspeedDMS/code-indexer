@@ -22,9 +22,10 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from code_indexer.global_repos.refresh_integrity_gate import (
+    CollectionIntegrityFailure,
     RefreshIntegrityGateResult,
     run_refresh_integrity_gate,
 )
@@ -184,11 +185,27 @@ def fire_expired_deferred_triggers(
             )
 
 
-def record_failure_backoff(metadata: Any, alias_name: str, detail: str) -> None:
+def record_failure_backoff(
+    metadata: Any,
+    alias_name: str,
+    detail: str,
+    unrepairable_reason: Optional[str] = None,
+) -> None:
     """Persist one unrepaired failure; a persistence error is logged, never
-    raised (the refresh is already failing with its own error)."""
+    raised (the refresh is already failing with its own error).
+    *unrepairable_reason* (Story #2126): why no automatic repair can fix it;
+    health reports it naming the repository until a verified publish."""
     try:
-        count = metadata.record_refresh_failure_backoff(alias_name, detail)
+        if unrepairable_reason is None:
+            count = metadata.record_refresh_failure_backoff(alias_name, detail)
+        else:
+            count = metadata.record_refresh_failure_backoff(
+                alias_name, detail, unrepairable_reason=unrepairable_reason
+            )
+            logger.error(
+                f"Story #2126: refresh of {alias_name} needs an operator: "
+                f"{unrepairable_reason}"
+            )
     except Exception as exc:
         logger.error(
             f"Bug #2022: failed to persist refresh failure backoff for "
@@ -538,11 +555,14 @@ def run_integrity_gate_against_published(
     source_path: str,
     current_target: Optional[str],
     before_restore: Optional[Callable[[], None]] = None,
+    restore_missing_stores: bool = False,
 ) -> RefreshIntegrityGateResult:
     """Run the Bug #1506 gate on *source_path*'s index, self-healing a
-    corrupt collection from the published snapshot at *current_target*
-    (read only). No published snapshot yet (first refresh: the alias still
-    points at the source) means nothing to restore from."""
+    corrupt collection -- and, with *restore_missing_stores* (Story #2126),
+    an established collection whose store is missing -- from the published
+    snapshot at *current_target* (read only). No published snapshot yet
+    (first refresh: the alias still points at the source) means nothing to
+    restore from."""
     healthy_index_dir = (
         Path(current_target) / ".code-indexer" / "index"
         if current_target and current_target != source_path
@@ -558,6 +578,7 @@ def run_integrity_gate_against_published(
         healthy_index_dir=healthy_index_dir,
         clone_backend=clone_backend,
         before_restore=before_restore,
+        restore_missing_stores=restore_missing_stores,
     )
 
 
@@ -576,6 +597,17 @@ def self_heal_after_fatal_chunk_store_failure(
     re-raises *error*). *verify_ownership* raises when the lock is lost; it
     runs first and again immediately before every restore copy."""
     verify_ownership()
+    if error.kind is ChunkStoreFailureKind.MISSING_STORE:
+        _restore_missing_stores(
+            metadata=metadata,
+            snapshot_manager=snapshot_manager,
+            alias_name=alias_name,
+            source_path=source_path,
+            current_target=current_target,
+            error=error,
+            verify_ownership=verify_ownership,
+        )
+        return
     if error.kind is not ChunkStoreFailureKind.CORRUPTION:
         logger.error(
             f"Bug #2022: refresh of {alias_name} failed with a chunk-store "
@@ -603,3 +635,126 @@ def self_heal_after_fatal_chunk_store_failure(
     )
     if not repaired:
         record_failure_backoff(metadata, alias_name, str(error))
+
+
+def _restore_missing_stores(
+    *,
+    metadata: "GoldenRepoMetadataBackend",
+    snapshot_manager: Any,
+    alias_name: str,
+    source_path: str,
+    current_target: Optional[str],
+    error: FatalChunkStoreIndexError,
+    verify_ownership: Callable[[], None],
+) -> None:
+    """Story #2126: an established collection's store is missing. Restore it
+    -- with its metadata, so the next run resumes from the snapshot's commit
+    and reuses every stored embedding -- from the published snapshot through
+    the Bug #2022 path: the snapshot copy is integrity-checked read-only
+    first, and *verify_ownership* runs immediately before every copy. One
+    strike per cycle bounds repeated loss (3 without a verified publish
+    quarantine the alias); anything left unrepaired backs off."""
+    gate = run_integrity_gate_against_published(
+        snapshot_manager,
+        source_path,
+        current_target,
+        before_restore=verify_ownership,
+        restore_missing_stores=True,
+    )
+    missing = [f for f in gate.failures if f.store_missing]
+    corrupt = [
+        f for f in gate.failures if not f.store_missing and not f.check_inconclusive
+    ]
+    restored = [f for f in missing if f.self_heal_succeeded]
+    if corrupt:
+        record_integrity_strike(metadata, alias_name, gate)
+    elif restored:
+        _record_missing_store_strike(metadata, alias_name, restored)
+    repaired = bool(missing) and all(
+        f.self_heal_succeeded and f.metadata_restore_error is None
+        for f in gate.failures
+    )
+    if not repaired:
+        record_failure_backoff(
+            metadata,
+            alias_name,
+            str(error),
+            unrepairable_reason=_unrestorable_reason(
+                source_path, current_target, missing
+            ),
+        )
+
+
+def _unrestorable_reason(
+    source_path: str,
+    current_target: Optional[str],
+    missing: List[CollectionIntegrityFailure],
+) -> Optional[str]:
+    """Why a missing store cannot be restored without an operator, or None
+    when every missing store was restored (whatever else failed is an
+    ordinary, retried failure)."""
+    if not missing:
+        return (
+            "cidx index reported a missing chunk store, but no collection "
+            "under the repository index is missing one (nothing to restore "
+            "from the published snapshot)"
+        )
+    unrestored = [f for f in missing if not f.self_heal_succeeded]
+    if not unrestored:
+        return None
+    no_snapshot = not current_target or current_target == source_path
+    causes = []
+    for failure in unrestored:
+        if no_snapshot:
+            why = "no published snapshot to restore it from"
+        elif failure.source_snapshot_also_corrupt:
+            why = "its copy in the published snapshot failed its integrity check"
+        elif not failure.self_heal_attempted:
+            why = "the published snapshot has no copy of it"
+        else:
+            why = f"the restore failed: {failure.self_heal_error}"
+        causes.append(f"{failure.collection_dir.name}: {why}")
+    return (
+        f"chunk store missing and not restorable ({'; '.join(causes)}); the "
+        f"refresh stays failed -- no paid rebuild without an operator"
+    )
+
+
+def _record_missing_store_strike(
+    metadata: "GoldenRepoMetadataBackend",
+    alias_name: str,
+    restored: List[CollectionIntegrityFailure],
+) -> None:
+    """One strike for a cycle that restored a missing store: a verified
+    publish clears it, while a store lost again and again quarantines the
+    alias after REFRESH_INTEGRITY_QUARANTINE_THRESHOLD restores. A
+    persistence error is logged, never raised."""
+    detail = "; ".join(
+        f"{f.collection_dir}: chunks.db missing, restored from the published snapshot"
+        for f in restored
+    )
+    try:
+        count = metadata.record_refresh_integrity_failure(alias_name, detail)
+    except Exception as exc:
+        logger.error(
+            f"Story #2126: failed to record the missing-store restore of "
+            f"{alias_name}: {type(exc).__name__}: {exc}"
+        )
+        return
+    logger.warning(
+        f"Story #2126: restored the missing chunk store of {alias_name} from "
+        f"its published snapshot (restore {count} without a verified publish); "
+        f"the next refresh reuses every stored embedding: {detail}"
+    )
+    if count >= REFRESH_INTEGRITY_QUARANTINE_THRESHOLD:
+        record_failure_backoff(
+            metadata,
+            alias_name,
+            detail,
+            unrepairable_reason=(
+                f"lost its chunk store {count} consecutive times without a "
+                f"verified publish (each restored from the published "
+                f"snapshot); refreshes are quarantined until an operator "
+                f"finds what removes it"
+            ),
+        )

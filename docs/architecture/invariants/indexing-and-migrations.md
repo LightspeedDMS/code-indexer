@@ -25,7 +25,8 @@ Index of all invariant groups: [README](README.md).
   `run_with_popen_progress` raises `IndexingSubprocessError` on a non-zero exit, so a registration whose indexing all
   fails fails the registration. A failed registration removes its own fresh clone (`_cleanup_failed_clone`) so a retry
   is not blocked.
-- `cidx index` exits 86 or 87 on a fatal chunk-store failure; see [Refresh Recovery](../refresh-recovery.md).
+- `cidx index` exits 86, 87 or 89 (missing established store) on a fatal chunk-store failure; see
+  [Refresh Recovery](../refresh-recovery.md).
 
 ## Temporal indexing
 

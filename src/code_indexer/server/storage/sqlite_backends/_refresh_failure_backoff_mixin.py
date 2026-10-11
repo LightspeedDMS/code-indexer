@@ -34,6 +34,7 @@ _ADDED_COLUMNS = (
     ("pending_marked_at", "REAL"),
     ("trigger_generation", "INTEGER NOT NULL DEFAULT 0"),
     ("owed_retry_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("unrepairable_reason", "TEXT"),
 )
 
 
@@ -45,7 +46,9 @@ def create_refresh_failure_backoff_table(conn: sqlite3.Connection) -> None:
     store-ordered counter every deferral advances: a publish resolves only
     the generation its cycle captured (never a wall-clock comparison across
     nodes). ``pending_marked_at`` is informational only.
-    ``owed_retry_count`` (Bug #2125) escalates an owed retry. Idempotent;
+    ``owed_retry_count`` (Bug #2125) escalates an owed retry.
+    ``unrepairable_reason`` (Story #2126) says why the last failure cannot
+    self-heal (an operator is needed); health reports it. Idempotent;
     upgrades a table created earlier."""
     conn.execute(
         """
@@ -59,7 +62,8 @@ def create_refresh_failure_backoff_table(conn: sqlite3.Connection) -> None:
             pending_due_at REAL,
             pending_marked_at REAL,
             trigger_generation INTEGER NOT NULL DEFAULT 0,
-            owed_retry_count INTEGER NOT NULL DEFAULT 0
+            owed_retry_count INTEGER NOT NULL DEFAULT 0,
+            unrepairable_reason TEXT
         )
     """
     )
@@ -144,9 +148,16 @@ class _RefreshFailureBackoffSqliteMixin:
     # Supplied at runtime by GoldenRepoMetadataSqliteBackend.__init__.
     _conn_manager: "DatabaseConnectionManager"
 
-    def record_refresh_failure_backoff(self, golden_alias: str, detail: str) -> int:
+    def record_refresh_failure_backoff(
+        self,
+        golden_alias: str,
+        detail: str,
+        unrepairable_reason: Optional[str] = None,
+    ) -> int:
         """Record one non-repairable refresh failure; return the
-        consecutive-failure count after recording it."""
+        consecutive-failure count after recording it. *unrepairable_reason*
+        (Story #2126): why it cannot self-heal without an operator; every
+        recorded failure replaces it (None clears it)."""
         if not golden_alias:
             raise ValueError("golden_alias must be a non-empty string")
         if not detail:
@@ -159,13 +170,15 @@ class _RefreshFailureBackoffSqliteMixin:
             conn.execute(
                 "INSERT INTO refresh_failure_backoff_state "
                 "(golden_alias, consecutive_failure_count, last_detail, "
-                "last_failed_at, updated_at) VALUES (?, 1, ?, ?, ?) "
+                "last_failed_at, updated_at, unrepairable_reason) "
+                "VALUES (?, 1, ?, ?, ?, ?) "
                 "ON CONFLICT(golden_alias) DO UPDATE SET "
                 "consecutive_failure_count = consecutive_failure_count + 1, "
                 "last_detail = excluded.last_detail, "
                 "last_failed_at = excluded.last_failed_at, "
-                "updated_at = excluded.updated_at",
-                (golden_alias, detail, failed_at, updated_at),
+                "updated_at = excluded.updated_at, "
+                "unrepairable_reason = excluded.unrepairable_reason",
+                (golden_alias, detail, failed_at, updated_at, unrepairable_reason),
             )
             row = conn.execute(
                 "SELECT consecutive_failure_count FROM refresh_failure_backoff_state "
@@ -192,6 +205,22 @@ class _RefreshFailureBackoffSqliteMixin:
             .fetchone()
         )
         return None if row is None else _state_from_row(row)
+
+    def list_unrepairable_refresh_failures(self) -> List[Dict[str, str]]:
+        """Story #2126: every alias whose current refresh failure cannot
+        self-heal without an operator, with the reason. Only failing aliases
+        have a row, never the whole fleet."""
+        rows = (
+            self._conn_manager.get_connection()
+            .execute(
+                "SELECT golden_alias, unrepairable_reason "
+                "FROM refresh_failure_backoff_state "
+                "WHERE unrepairable_reason IS NOT NULL "
+                "AND consecutive_failure_count > 0 ORDER BY golden_alias"
+            )
+            .fetchall()
+        )
+        return [{"golden_alias": row[0], "reason": row[1]} for row in rows]
 
     def mark_refresh_trigger_pending(self, golden_alias: str, due_at: float) -> bool:
         """Remember a system refresh trigger deferred by the backoff, due at
@@ -471,7 +500,7 @@ def _resolve_covered_in(
     conn.execute(
         "UPDATE refresh_failure_backoff_state SET "
         "consecutive_failure_count = 0, owed_retry_count = 0, "
-        "pending_due_at = ?, updated_at = ? "
+        "unrepairable_reason = NULL, pending_due_at = ?, updated_at = ? "
         "WHERE golden_alias = ?",
         (now, updated_at, golden_alias),
     )

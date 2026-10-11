@@ -3449,8 +3449,14 @@ class FilesystemVectorStore:
         build counts; a legacy SHARDED_JSON collection asks its id index
         (which scans the vector files when ``id_index.bin`` is absent).
         Every read error propagates: a populated collection must never be
-        mistaken for an empty one."""
-        from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
+        mistaken for an empty one. Story #2126: nor is an ESTABLISHED
+        collection whose ``chunks.db`` is missing -- it raises
+        ``MissingEstablishedChunkStoreError`` (exit 89) instead of answering
+        "empty", which would route the run to a paid full rebuild."""
+        from code_indexer.storage.sqlite_chunk_store import (
+            chunk_store_has_real_data,
+            refuse_missing_established_store,
+        )
 
         subdirectory = self._active_subdirectories.get(collection_name)
         collection_path = self._get_collection_path(collection_name, subdirectory)
@@ -3459,6 +3465,7 @@ class FilesystemVectorStore:
         chunks_db_path = collection_path / "chunks.db"
         if chunks_db_path.exists():
             return chunk_store_has_real_data(chunks_db_path, on_error="raise")
+        refuse_missing_established_store(chunks_db_path)
         return len(self._load_id_index(collection_name, subdirectory)) > 0
 
     def delete_points(

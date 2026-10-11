@@ -176,12 +176,12 @@ def test_missing_store_of_an_established_collection_aborts(
     tmp_path: Path, fake_provider
 ) -> None:
     """Codex P2-3: an established CHUNKS_DB collection whose chunks.db went
-    missing is not an empty cache. The run fails closed (environment, never
-    corruption: a restore must not be triggered), pays nothing and does not
-    silently recreate the store. A fresh collection (the initial run here)
-    indexes normally."""
+    missing is not an empty cache. The run fails closed with its own kind
+    (Story #2126: missing store, exit 89 -- never corruption), pays nothing
+    and does not silently recreate the store. A fresh collection (the
+    initial run here) indexes normally."""
     from code_indexer.services.index_failure_exit_codes import (
-        EXIT_CODE_CHUNK_STORE_ENVIRONMENT,
+        EXIT_CODE_CHUNK_STORE_MISSING,
     )
 
     repo = _Repo(tmp_path, fake_provider)
@@ -201,7 +201,7 @@ def test_missing_store_of_an_established_collection_aborts(
     assert fake_provider.ledger.run_stats("store-missing")["inputs"] == 0, (
         "a missing store was read as an empty cache and the provider was paid"
     )
-    assert proc.returncode == EXIT_CODE_CHUNK_STORE_ENVIRONMENT, (
+    assert proc.returncode == EXIT_CODE_CHUNK_STORE_MISSING, (
         proc.returncode,
         proc.stderr[-3000:],
     )
@@ -217,7 +217,7 @@ def test_missing_store_is_not_recreated_by_the_reconcile_pre_delete(
     must not recreate the missing store of an established collection (an
     empty store would then be read as "nothing stored" and paid again)."""
     from code_indexer.services.index_failure_exit_codes import (
-        EXIT_CODE_CHUNK_STORE_ENVIRONMENT,
+        EXIT_CODE_CHUNK_STORE_MISSING,
     )
 
     repo = _Repo(tmp_path, fake_provider)
@@ -239,7 +239,7 @@ def test_missing_store_is_not_recreated_by_the_reconcile_pre_delete(
     assert fake_provider.ledger.run_stats("reconcile")["inputs"] == 0, (
         "the missing store was recreated empty and the provider was paid"
     )
-    assert proc.returncode == EXIT_CODE_CHUNK_STORE_ENVIRONMENT, (
+    assert proc.returncode == EXIT_CODE_CHUNK_STORE_MISSING, (
         proc.returncode,
         proc.stderr[-3000:],
     )
