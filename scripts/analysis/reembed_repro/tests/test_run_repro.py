@@ -9,6 +9,7 @@ from run_repro import (
     REPO_ROOT,
     archive_tree,
     index_command,
+    meter_summary,
     node_for_run,
     parse_node_sequence,
 )
@@ -364,3 +365,20 @@ def test_content_bound_owes_only_disk_keys_not_durable():
 def test_parse_node_sequence_rejects_bad_entries(bad):
     with pytest.raises(ValueError):
         parse_node_sequence(bad)
+
+
+def test_meter_summary_compares_metered_runs_only():
+    rows = [
+        {"label": "a", "meter_inputs_sent": 5, "chunks_sent": 5},
+        {"label": "b", "meter_inputs_sent": None, "chunks_sent": 9},
+        {"label": "c", "meter_inputs_sent": 3, "chunks_sent": 4},
+    ]
+    line = meter_summary(rows)
+    assert "2 of 3 runs reported inputs_sent" in line
+    assert "c: meter 3 != fake 4" in line
+    assert "a:" not in line
+
+
+def test_meter_summary_all_equal():
+    rows = [{"label": "a", "meter_inputs_sent": 0, "chunks_sent": 0}]
+    assert meter_summary(rows).endswith("all equal the fake's per-run count")

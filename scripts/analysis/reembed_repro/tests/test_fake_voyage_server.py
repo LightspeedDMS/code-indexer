@@ -31,6 +31,28 @@ def server():
         srv.stop()
 
 
+def test_retry_fault_answers_500_then_embeds(server):
+    """Story #2122: an armed fault answers the next request with 500 and
+    counts it apart from the embedded requests; the retry then embeds."""
+    server.ledger.begin_run("r")
+    server.ledger.fail_next_requests(1, status=500)
+
+    first = _post(server, ["a", "b"])
+    second = _post(server, ["a", "b"])
+
+    assert first.status_code == 500
+    assert second.status_code == 200
+    assert server.ledger.failed_stats("r") == {"failed_requests": 1, "failed_inputs": 2}
+    assert server.ledger.run_stats("r")["requests"] == 1
+    assert server.ledger.run_stats("r")["inputs"] == 2
+    assert server.ledger.violations() == []
+
+
+def test_negative_fault_count_rejected():
+    with pytest.raises(ValueError):
+        EmbeddingLedger().fail_next_requests(-1)
+
+
 def _post(
     server, texts, key=SENTINEL_KEY, model="voyage-code-3", path="/v1/embeddings"
 ):

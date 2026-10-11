@@ -106,6 +106,9 @@ class FakeEmbeddingProvider(EmbeddingProvider):
     def supports_batch_processing(self) -> bool:
         return True
 
+    def request_max_retries(self) -> int:
+        return 0
+
 
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(

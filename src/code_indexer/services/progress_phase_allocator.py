@@ -285,3 +285,19 @@ def emit_empty_plan_json() -> None:
     """Emit the ``--progress-json`` plan line of a run that planned no file,
     so its (empty) plan is observable like any other plan (Story #2121)."""
     emit_progress_json(current=0, total=0, info=EMPTY_PLAN_INFO)
+
+
+#: Story #2122: ``record`` value of the final ``--progress-json`` line.
+RUN_SPEND_RECORD = "run_spend"
+
+
+def emit_run_spend_json(inputs_sent: int, attempts: int) -> None:
+    """Emit the final ``--progress-json`` record of a ``cidx index`` run:
+    provider inputs sent and attempts made (retries included). It carries
+    no ``current``/``total``, so ``parse_progress_line`` ignores it."""
+    payload = {
+        "record": RUN_SPEND_RECORD,
+        "inputs_sent": inputs_sent,
+        "attempts": attempts,
+    }
+    print(json.dumps(payload), flush=True)

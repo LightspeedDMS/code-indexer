@@ -175,6 +175,11 @@ class CohereMultimodalClient:
 
         return content
 
+    def request_max_retries(self) -> int:
+        """Retries one request may make after its first attempt (the retry
+        loop of _make_request; also the run-spend allowance, Story #2122)."""
+        return int(getattr(self.config, "max_retries", 3))
+
     def _make_request(
         self,
         inputs: List[Dict[str, Any]],
@@ -208,7 +213,7 @@ class CohereMultimodalClient:
             "output_dimension": self.config.default_dimension,
         }
 
-        max_retries = getattr(self.config, "max_retries", 3)
+        max_retries = self.request_max_retries()
         retry_delay = getattr(self.config, "retry_delay", 1.0)
         exponential_backoff = getattr(self.config, "exponential_backoff", True)
         timeout = getattr(self.config, "timeout", 30)
@@ -292,6 +297,13 @@ class CohereMultimodalClient:
                     batch_size=len(inputs),
                     purpose="index",
                     fn=_do_post_and_validate,
+                    # Story #2122: _build_content_blocks puts the text block
+                    # first; an input without one can never match a
+                    # registered key, so an armed meter refuses it.
+                    inputs=[
+                        (inp.get("content") or [{}])[0].get("text", "")
+                        for inp in inputs
+                    ],
                 )
                 record_embedding_provider_call(
                     model=self.config.model,

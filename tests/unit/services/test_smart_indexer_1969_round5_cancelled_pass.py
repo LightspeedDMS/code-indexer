@@ -71,6 +71,9 @@ class _NoOpEmbeddingProvider(EmbeddingProvider):
     def supports_batch_processing(self) -> bool:
         return True
 
+    def request_max_retries(self) -> int:
+        return 0
+
 
 def _make_indexer(tmp_path: Path) -> SmartIndexer:
     repo = tmp_path / "repo"

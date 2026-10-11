@@ -68,6 +68,9 @@ _VOYAGE_MODEL_DIMENSIONS: Dict[str, int] = {
 # unaffected — only the outbound HTTP call changes).
 _CONTEXTUAL_QUERY_MODELS = frozenset({"voyage-context-4"})
 
+#: The single input of health_check(test_api=True).
+_HEALTH_PROBE_TEXT = "test"
+
 # Story #1290: contextualized embeddings endpoint used by the per-commit
 # contextual temporal embedder (voyage-context-4). Distinct from
 # VoyageAIConfig.api_endpoint (the ordinary /v1/embeddings endpoint used by
@@ -273,6 +276,12 @@ class VoyageAIClient(EmbeddingProvider):
             logger.debug("VoyageAI health probe failed: %s", exc, exc_info=True)
             return False
 
+    def request_max_retries(self) -> int:
+        """Retries one indexing request may make after its first attempt
+        (the retry loops of _make_sync_request and
+        _make_sync_contextualized_request)."""
+        return int(self.config.max_retries)
+
     def health_check(self, *, test_api: bool = False) -> bool:
         """Check if VoyageAI service is configured correctly.
 
@@ -294,8 +303,16 @@ class VoyageAIClient(EmbeddingProvider):
             # If API testing is requested, make a simple API call
             if test_api:
                 try:
+                    # Story #2122: the probe is a planned send of its own;
+                    # register it so an armed run-spend meter allows it.
+                    from .run_spend_meter import get_run_spend_meter, input_key
+
+                    get_run_spend_meter().register_misses(
+                        [input_key(_HEALTH_PROBE_TEXT)],
+                        max_retries=self.request_max_retries(),
+                    )
                     # Make a minimal API call with a single character
-                    self._make_sync_request(["test"])
+                    self._make_sync_request([_HEALTH_PROBE_TEXT])
                     return True
                 except Exception:
                     return False
@@ -400,6 +417,7 @@ class VoyageAIClient(EmbeddingProvider):
                     batch_size=len(texts),
                     purpose="query" if not retry else "index",
                     fn=_do_post_and_validate,
+                    inputs=texts,
                 )
             except Exception:
                 record_embedding_provider_call(
@@ -609,6 +627,7 @@ class VoyageAIClient(EmbeddingProvider):
                     # (voyage-context-4) -- purpose is always "temporal".
                     purpose="temporal",
                     fn=_do_post_and_validate,
+                    inputs=[chunk for doc in documents for chunk in doc],
                 )
             except Exception:
                 record_embedding_provider_call(

@@ -55,6 +55,7 @@ from index_inspector import (  # noqa: E402
     index_snapshot,
     metadata_summary,
     parse_progress_json,
+    parse_run_spend,
     pending_keys,
 )
 from invariant import FinalState, RunRecord, evaluate  # noqa: E402
@@ -376,9 +377,9 @@ class Harness:
             self.meta_path.exists()
             and self.meta_path.stat().st_mtime_ns != pre.meta_mtime
         )
-        progress = parse_progress_json(
-            (self.logs / f"{label}.out").read_text(errors="replace")
-        )
+        stdout_text = (self.logs / f"{label}.out").read_text(errors="replace")
+        progress = parse_progress_json(stdout_text)
+        run_spend = parse_run_spend(stdout_text)  # Story #2122; None: not printed
         stats = self.fake.ledger.run_stats(label)
         stderr = (self.logs / f"{label}.err").read_text(errors="replace").splitlines()
         return {
@@ -418,6 +419,8 @@ class Harness:
             "metadata_rewritten": rewritten,
             "chunks_sent": stats["inputs"],
             "requests": stats["requests"],
+            "meter_inputs_sent": run_spend["inputs_sent"] if run_spend else None,
+            "meter_attempts": run_spend["attempts"] if run_spend else None,
             "dup_prior_runs": stats["dup_prior_runs"],
             "dup_same_run": stats["dup_same_run"],
             "new_unique": stats["new_unique"],
@@ -671,6 +674,7 @@ class Harness:
             f"{not a.no_cluster_mode}, node sequence: {a.node_sequence}",
             f"cycles: {','.join(build_cycles(a))}",
             f"fake provider totals: {self.fake.ledger.totals()}; introduced keys: {len(self.introduced)}",
+            meter_summary(self.rows),
         ]
         extra = {
             "args": vars(a),
@@ -687,6 +691,28 @@ class Harness:
         if problems:
             return EXIT_HARNESS_FAILURE
         return verdict.exit_code  # 0 NOT REPRODUCED, 1 REPRODUCED, 3 INCOMPLETE
+
+
+def meter_summary(rows: List[Dict[str, Any]]) -> str:
+    """Story #2122: compare every run's metered ``inputs_sent`` (its final
+    ``--progress-json`` record) with the fake's per-run input count. Runs
+    without a record (a tree without the meter, a SIGKILLed child) are
+    counted as unmetered, never compared."""
+    metered = [r for r in rows if r["meter_inputs_sent"] is not None]
+    mismatches = [
+        f"{r['label']}: meter {r['meter_inputs_sent']} != fake {r['chunks_sent']}"
+        for r in metered
+        if r["meter_inputs_sent"] != r["chunks_sent"]
+    ]
+    return (
+        f"meter (Story #2122): {len(metered)} of {len(rows)} runs reported "
+        f"inputs_sent; "
+        + (
+            "; ".join(mismatches)
+            if mismatches
+            else "all equal the fake's per-run count"
+        )
+    )
 
 
 def inner_main(args: argparse.Namespace) -> int:

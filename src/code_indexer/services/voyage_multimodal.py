@@ -147,6 +147,7 @@ class VoyageMultimodalClient:
                 batch_size=1,
                 purpose="query" if input_type == "query" else "index",
                 fn=_do_post_and_validate,
+                inputs=[text],
             ),
         )
 
@@ -358,6 +359,7 @@ class VoyageMultimodalClient:
                 batch_size=len(items),
                 purpose="query" if input_type == "query" else "index",
                 fn=_do_post_and_validate,
+                inputs=[item["text"] for item in items],
             ),
         )
 
@@ -404,6 +406,11 @@ class VoyageMultimodalClient:
         return self.get_multimodal_embedding(
             text=text, image_paths=[], input_type="query"
         )
+
+    def request_max_retries(self) -> int:
+        """Retries one request may make after its first attempt: none, both
+        request paths here make exactly one attempt (Story #2122)."""
+        return 0
 
     def get_provider_name(self) -> str:
         """Get the name of this embedding provider.

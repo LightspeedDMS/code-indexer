@@ -106,6 +106,9 @@ _MAX_RETRY_SLEEP_SECONDS = 300.0
 # Timeout (seconds) used by the lightweight health probe (Story #619 HIGH-2)
 _PROBE_TIMEOUT_S: float = 5.0
 
+#: The single input of health_check(test_api=True).
+_HEALTH_PROBE_TEXT = "health check"
+
 
 class CohereEmbeddingProvider(EmbeddingProvider):
     """Cohere Embed v4 embedding provider."""
@@ -319,6 +322,7 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                     batch_size=len(texts),
                     purpose="query" if not retry else "index",
                     fn=_do_post_and_validate,
+                    inputs=texts,
                 )
             except Exception:
                 record_embedding_provider_call(
@@ -636,6 +640,11 @@ class CohereEmbeddingProvider(EmbeddingProvider):
             provider="cohere",
         )
 
+    def request_max_retries(self) -> int:
+        """Retries one indexing request may make after its first attempt
+        (the retry loop of _make_sync_request)."""
+        return int(self.config.max_retries)
+
     def health_check(self, *, test_api: bool = False) -> bool:
         """Check provider health.
 
@@ -651,7 +660,15 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         if not test_api:
             return True
         try:
-            self._make_sync_request(["health check"], "search_document")
+            # Story #2122: the probe is a planned send of its own; register
+            # it so an armed run-spend meter allows it.
+            from .run_spend_meter import get_run_spend_meter, input_key
+
+            get_run_spend_meter().register_misses(
+                [input_key(_HEALTH_PROBE_TEXT)],
+                max_retries=self.request_max_retries(),
+            )
+            self._make_sync_request([_HEALTH_PROBE_TEXT], "search_document")
             return True
         except Exception as exc:
             logger.warning("Cohere health check failed: %s", exc)

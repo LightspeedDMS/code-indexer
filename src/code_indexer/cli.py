@@ -4460,6 +4460,13 @@ def index(
         console.print(f"❌ {_idx_lock_exc}", style="red")
         sys.exit(1)
 
+    # Story #2122: meter every provider input of this semantic run. Only
+    # misses the reuse resolver registered may be sent; a refusal raises
+    # RunSpendDefect (a BaseException) and the run exits 88.
+    from .services.run_spend_meter import RunSpendDefect, get_run_spend_meter
+
+    get_run_spend_meter().arm()
+
     try:
         config = _load_config_for_index()
         # Bug #1979: captured before any provider is touched, so the
@@ -4860,6 +4867,9 @@ def index(
                     enable_fts=fts,
                     trust_resume_state=not ignore_resume_state,
                 )
+                # Story #2122: a defect the indexer swallowed still ends the
+                # run here, before any other exit decision.
+                get_run_spend_meter().raise_if_tripped()
 
                 # Story #2121: a run that planned no file prints its empty
                 # plan on --progress-json (machine channel only).
@@ -4883,7 +4893,7 @@ def index(
                     rich_live_manager.stop_display()
                     console.print("\n✅ Completed")
 
-        except Exception as e:
+        except (Exception, RunSpendDefect) as e:
             # Clean up progress manager and Rich Live display before error message
             if display_initialized:
                 progress_manager.stop_progress()
@@ -5004,6 +5014,9 @@ def index(
                     f"{_extra_stats.chunks_created} chunks",
                     style="green",
                 )
+        # Story #2122: an additional provider's pass (or its health probe)
+        # may have swallowed a defect; it still ends the run with exit 88.
+        get_run_spend_meter().raise_if_tripped()
 
         # Bug #1979: clear=true is "index from scratch" -- a configured
         # provider skipped for ANY reason (missing key, a failed health
@@ -5033,16 +5046,28 @@ def index(
                 )
                 sys.exit(1)
 
-    except Exception as e:
+    except (Exception, RunSpendDefect) as e:
         console.print(f"❌ Indexing failed: {e}", style="red")
         from .services.index_failure_exit_codes import index_failure_exit_code
 
         sys.exit(index_failure_exit_code(e))
     finally:
-        # Codex Finding 1a: release the foreground index-mutation lock on
-        # EVERY exit path (normal return, sys.exit -> SystemExit, or any
-        # exception) so it is never leaked past the mutation lifecycle.
-        _index_mutation_lock_ctx.__exit__(None, None, None)
+        try:
+            # Story #2122: the run's final --progress-json record, on every
+            # exit path (success, failure, exit 88).
+            if progress_json:
+                from .services.progress_phase_allocator import emit_run_spend_json
+
+                _spend = get_run_spend_meter().snapshot()
+                emit_run_spend_json(_spend.inputs_sent, _spend.attempts)
+        finally:
+            # Story #2122: the run is over (its exit code is decided): leave
+            # no armed or tripped meter behind in this process.
+            get_run_spend_meter().disarm()
+            # Codex Finding 1a: release the foreground index-mutation lock on
+            # EVERY exit path (normal return, sys.exit -> SystemExit, or any
+            # exception) so it is never leaked past the mutation lifecycle.
+            _index_mutation_lock_ctx.__exit__(None, None, None)
 
 
 @cli.command()

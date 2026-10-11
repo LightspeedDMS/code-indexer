@@ -28,9 +28,13 @@ import logging
 import threading
 import time
 from contextlib import contextmanager
-from typing import Awaitable, Callable, Iterator, Optional, TypeVar
+from typing import Awaitable, Callable, Iterator, Optional, Sequence, TypeVar
 
 from code_indexer.server.services.embedding_call_stats import EmbeddingCallRecord
+
+# Child-side module (src/code_indexer/services/run_spend_meter.py): the meter
+# belongs to the `cidx index` child process, not to a server service.
+from code_indexer.services.run_spend_meter import get_run_spend_meter
 from code_indexer.server.services.embedding_stats_attribution import StatsAttribution
 from code_indexer.server.services.embedding_stats_writer import EmbeddingStatsWriter
 
@@ -179,6 +183,7 @@ def instrument_call(
     golden_repo_alias: Optional[str] = None,
     job_id: Optional[str] = None,
     node_id: Optional[str] = None,
+    inputs: Optional[Sequence[str]] = None,
 ) -> T:
     """Execute ``fn`` and record exactly one EmbeddingCallRecord for it.
 
@@ -197,14 +202,24 @@ def instrument_call(
         golden_repo_alias: Optional correlation field.
         job_id: Optional correlation field.
         node_id: Optional correlation field (cluster node id).
+        inputs: The exact texts this attempt sends (Story #2122). An armed
+            ``cidx index`` child's run-spend meter checks them BEFORE fn();
+            a non-query call without them is refused there.
 
     Returns:
         Whatever ``fn()`` returns, unchanged.
 
     Raises:
+        RunSpendDefect: before fn(), when the armed run-spend meter refuses
+            the attempt (Story #2122); fn() is never called.
         Whatever ``fn()`` raises, unchanged -- instrument_call never
         swallows or replaces the wrapped call's own exception.
     """
+    # Story #2122: the indexing child's run-spend meter is charged BEFORE
+    # fn(), so a refused input never reaches HTTP. Outside an armed child,
+    # and for purpose "query", this is a no-op. Not fail-open: a refusal
+    # raises RunSpendDefect and no stats record is written (no attempt).
+    get_run_spend_meter().charge(purpose=purpose, inputs=inputs)
     start = time.time()
     success = False
     try:
@@ -242,10 +257,12 @@ async def instrument_call_async(
     golden_repo_alias: Optional[str] = None,
     job_id: Optional[str] = None,
     node_id: Optional[str] = None,
+    inputs: Optional[Sequence[str]] = None,
 ) -> T:
     """Async twin of instrument_call() -- awaits ``fn()`` instead of calling
     it synchronously. Identical contract otherwise (see instrument_call).
     """
+    get_run_spend_meter().charge(purpose=purpose, inputs=inputs)
     start = time.time()
     success = False
     try:

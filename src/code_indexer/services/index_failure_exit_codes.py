@@ -31,6 +31,7 @@ import sqlite3
 from enum import Enum
 from typing import Iterator, Optional
 
+from code_indexer.services.run_spend_meter import RunSpendDefect, get_run_spend_meter
 from code_indexer.storage.sqlite_chunk_store import (
     ChunkStoreUnavailableError,
     message_reports_sqlite_corruption,
@@ -107,8 +108,24 @@ def _kind(reports_corruption: bool) -> ChunkStoreFailureKind:
     return ChunkStoreFailureKind.ENVIRONMENT
 
 
+#: Story #2122: the run-spend meter refused a provider send (an input the
+#: reuse resolver never registered as a miss, or attempts beyond the run's
+#: allowance). Deliberately NOT a chunk-store kind: the parent maps it to no
+#: ``ChunkStoreFailureKind`` and fails the refresh loudly (no restore, no
+#: backoff-as-environment).
+EXIT_CODE_RUN_SPEND_DEFECT = 88
+
+
 def index_failure_exit_code(exc: BaseException) -> int:
-    """Exit code for a ``cidx index`` run that failed with ``exc``."""
+    """Exit code for a ``cidx index`` run that failed with ``exc``.
+
+    A run whose run-spend meter tripped exits ``EXIT_CODE_RUN_SPEND_DEFECT``
+    whatever exception surfaced: the defect may have been swallowed and
+    re-surfaced as an ordinary failure (Story #2122)."""
+    if get_run_spend_meter().tripped is not None or any(
+        isinstance(e, RunSpendDefect) for e in _iter_chain(exc)
+    ):
+        return EXIT_CODE_RUN_SPEND_DEFECT
     kind = classify_fatal_chunk_store_failure(exc)
     if kind is None:
         return GENERIC_INDEX_FAILURE_EXIT_CODE

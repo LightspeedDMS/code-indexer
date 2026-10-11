@@ -174,6 +174,26 @@ def parse_progress_json(text: str) -> ProgressSummary:
     return summary
 
 
+def parse_run_spend(text: str) -> Optional[Dict[str, int]]:
+    """The child's final ``{"record": "run_spend", ...}`` line (Story #2122):
+    ``inputs_sent`` and ``attempts``, or None when the run printed none (a
+    tree without the meter, or a SIGKILLed child). A malformed record is a
+    child defect: it raises, never silently skipped."""
+    found: Optional[Dict[str, int]] = None
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("record") != "run_spend":
+            continue
+        values = (event.get("inputs_sent"), event.get("attempts"))
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in values):
+            raise ValueError(f"malformed run_spend record: {line!r}")
+        found = {"inputs_sent": values[0], "attempts": values[1]}
+    return found
+
+
 def inflight_bound(repo: Path) -> int:
     """Chunks an interruption may legitimately lose: parallel requests x batch size."""
     config = json.loads((repo / ".code-indexer" / "config.json").read_text())

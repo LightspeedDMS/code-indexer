@@ -115,6 +115,9 @@ class _DeterministicHashEmbeddingProvider(EmbeddingProvider):
     def supports_batch_processing(self) -> bool:
         return True
 
+    def request_max_retries(self) -> int:
+        return 0
+
     def _get_model_token_limit(self) -> int:
         return _FAKE_MAX_TOKENS
 

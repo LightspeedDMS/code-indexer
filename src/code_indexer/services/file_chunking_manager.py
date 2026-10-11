@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 from .vector_calculation_manager import VectorCalculationManager
 from ..indexing.fixed_size_chunker import FixedSizeChunker
 from .clean_slot_tracker import CleanSlotTracker, FileData, FileStatus
+from .run_spend_meter import get_run_spend_meter
 from ..storage.sqlite_chunk_store import (
     ChunkStoreUnavailableError,
     is_fatal_chunk_store_write_error,
@@ -675,6 +676,9 @@ class FileChunkingManager:
                         f"aborting before any provider call: {e}"
                     ) from e
 
+            # Story #2122: content_hash (sha256 hex) of every miss, the only
+            # regular inputs this run may send.
+            missed_keys: List[str] = []
             for chunk in regular_chunks:
                 chunk_text = chunk["text"]
                 new_hash = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
@@ -699,6 +703,16 @@ class FileChunkingManager:
                 else:
                     # Cache miss: needs embedding
                     uncached_regular_chunks.append(chunk)
+                    missed_keys.append(new_hash)
+
+            run_spend_meter = get_run_spend_meter()
+            if missed_keys and run_spend_meter.is_armed():
+                run_spend_meter.register_misses(
+                    missed_keys,
+                    max_retries=(
+                        self.vector_manager.embedding_provider.request_max_retries()
+                    ),
+                )
 
             if chunks_skipped > 0:
                 logger.info(
@@ -871,6 +885,13 @@ class FileChunkingManager:
                         )
                         continue
 
+                    # Story #2122: the multimodal path has no reuse; it
+                    # registers exactly the input it is about to send.
+                    if run_spend_meter.is_armed():
+                        run_spend_meter.register_misses(
+                            [hashlib.sha256(chunk["text"].encode("utf-8")).hexdigest()],
+                            max_retries=self.multimodal_client.request_max_retries(),
+                        )
                     try:
                         # Get multimodal embedding (client handles base64 encoding)
                         embedding = self.multimodal_client.get_multimodal_embedding(
