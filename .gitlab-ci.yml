@@ -190,6 +190,7 @@ smoke:
       tests/unit/server/repositories/test_golden_repo_delegated_content.py
       tests/unit/services/test_index_git_seam.py
       tests/unit/services/test_reconcile_git_seam_mountless.py
+      tests/unit/services/test_delegated_max_file_size.py
       tests/unit/global_repos/test_refresh_git_seam_mountless.py
       tests/unit/global_repos/test_refresh_scheduler_indexing_types.py
       tests/unit/global_repos/test_reclone_mountless.py

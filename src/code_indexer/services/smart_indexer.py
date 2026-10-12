@@ -197,11 +197,12 @@ class SmartIndexer(HighThroughputProcessor):
                 f"({type(e).__name__}: {e}); falling back to a full index"
             )
             return None
-        modified = sorted(
-            p for p in touched if p in tracked and self._should_index_file(p)
-        )
+        kept = {p for p in touched if p in tracked and self._should_index_file(p)}
+        oversized = {p for p in kept if self._exceeds_max_file_size(p)}
+        modified = sorted(kept - oversized)
         deleted = sorted(
-            p for p in touched if p not in tracked and self._should_index_file(p)
+            {p for p in touched if p not in tracked and self._should_index_file(p)}
+            | oversized
         )
         logger.info(f"Git delta (git backend): ~{len(modified)} -{len(deleted)}")
         return GitDelta(added=[], modified=modified, deleted=deleted, renamed=[])
@@ -268,7 +269,10 @@ class SmartIndexer(HighThroughputProcessor):
                         if self._should_index_file(old_path):
                             deleted.append(old_path)
                         if self._should_index_file(new_path):
-                            added.append(new_path)
+                            if self._exceeds_max_file_size(new_path):
+                                deleted.append(new_path)
+                            else:
+                                added.append(new_path)
                     continue
 
                 file_path = parts[1]
@@ -277,7 +281,9 @@ class SmartIndexer(HighThroughputProcessor):
                 if not self._should_index_file(file_path):
                     continue
 
-                if status == "A":
+                if status in ("A", "M") and self._exceeds_max_file_size(file_path):
+                    deleted.append(file_path)
+                elif status == "A":
                     added.append(file_path)
                 elif status == "M":
                     modified.append(file_path)
@@ -294,6 +300,23 @@ class SmartIndexer(HighThroughputProcessor):
         except Exception as e:
             logger.error(f"Failed to get git deltas: {e}")
             return GitDelta(added=[], modified=[], deleted=[], renamed=[])
+
+    def _exceeds_max_file_size(self, file_path: str) -> bool:
+        """The full walk's max_file_size gate, for a path present at HEAD.
+
+        ``_should_index_file`` is string-only (it also classifies deleted
+        paths), so a git delta never applied the walk's size limit: a commit
+        touching an over-limit file (a 1.19 MB package-lock.json, measured on
+        EKS) indexed it on refresh although the first index excluded it. Such
+        a path is routed to ``deleted`` -- what the walk's index holds for it
+        is nothing, including when it grew past the limit in this commit.
+        Asks FileFinder, so the manifest's size answers on a delegated pass.
+        """
+        return bool(
+            self.file_finder.exceeds_max_file_size(
+                Path(self.config.codebase_dir) / file_path
+            )
+        )
 
     def _should_index_file(self, file_path: str) -> bool:
         """Check if a file should be indexed based on configuration."""
