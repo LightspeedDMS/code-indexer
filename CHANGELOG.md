@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Upgrade notes
+
+- Indexing: documents with images that a multimodal provider embedded under 12.85.0 are sent to that provider once more, the next time a run plans them (for example a forced re-sync), because their stored key now covers the image bytes as well as the text. After that they are reused like any other content.
+- Server: a golden repository that has no metadata row now logs one WARNING per refresh, because its registered branch cannot be checked.
+
+### Fixed
+
+- Server: Cohere multimodal embeddings made for searches are recorded as query spend instead of indexing spend, so searches no longer make the refresh volume alarm report itself blind (DEGRADED).
+- Indexing: documents with images reuse their stored multimodal embeddings before any provider call, as text already did, so a forced re-sync or reconcile no longer pays for unchanged documents again. A changed image under unchanged text is sent once.
+- Server: a repository whose chunk store went missing now recovers even when a refresh has nothing new to index. The integrity check before publishing restores the store from the published snapshot, as the indexing step already did for refreshes with changes; that refresh still ends failed, and the next one publishes, embedding only content changed since the snapshot. A store that cannot be restored is reported on `/health` as needing an operator. A refresh that fails this check names the reason in its job error, on a single server and in a cluster.
+- Server (cluster): a refresh keeps a golden repository's base clone on its registered branch, which was previously read only from single-server storage. If the shared metadata store is not available, the refresh stops before pulling instead of guessing a branch. A repository registered from a source with no branch checked out is left as it is.
+
 ## [12.85.0] - 2026-10-12
 
 ### Upgrade notes
