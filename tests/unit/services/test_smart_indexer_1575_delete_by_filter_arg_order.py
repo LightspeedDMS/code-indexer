@@ -7,7 +7,8 @@ The real ``FilesystemVectorStore.delete_by_filter`` signature is::
 
     def delete_by_filter(self, collection_name: str, filter_conditions: Dict[str, Any]) -> bool:
 
-Both ``_process_files_with_metadata`` and ``delete_file_branch_aware`` called
+Both ``_process_files_with_metadata`` (since deleted: it had no callers) and
+``delete_file_branch_aware`` called
 it as ``delete_by_filter(filter_dict, collection_name)`` -- the WRONG order.
 Reproduced against the real ``FilesystemVectorStore``: the swapped call
 raises ``TypeError: unhashable type: 'dict'`` deep inside ``scroll_points``
@@ -76,22 +77,6 @@ def _assert_first_positional_arg_is_collection_name(
         f"FilesystemVectorStore.delete_by_filter(self, collection_name, "
         f"filter_conditions) signature"
     )
-
-
-def test_process_files_with_metadata_delete_by_filter_call_passes_collection_name_first():
-    """`_process_files_with_metadata`'s per-modified-file cleanup loop must
-    call delete_by_filter(collection_name, filter_dict) -- never the swapped
-    (filter_dict, collection_name) order."""
-    method_name = "_process_files_with_metadata"
-    func_def = _parse_method(method_name)
-    delete_calls = _find_calls_to_attribute(func_def, _DELETE_METHOD_NAME)
-
-    assert len(delete_calls) == 1, (
-        f"expected exactly ONE delete_by_filter() call site in {method_name}, "
-        f"found {len(delete_calls)} -- if this method's structure changed, "
-        f"update this test to target the correct call site explicitly"
-    )
-    _assert_first_positional_arg_is_collection_name(method_name, delete_calls[0])
 
 
 def test_delete_file_branch_aware_delete_by_filter_call_passes_collection_name_first():

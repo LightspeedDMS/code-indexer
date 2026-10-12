@@ -68,6 +68,28 @@ def parse_date_range(date_range: str) -> Tuple[str, str]:
     return start_date, end_date
 
 
+def _history_is_elsewhere() -> bool:
+    """True in a server whose repositories are not on this pod.
+
+    Temporal queries read git history with LOCAL git (``rev-parse``, ``show``)
+    and do not go through the git seam yet. Where the content backend is
+    delegated there is no history here: local git would answer "not a git
+    repository" -- read as "no such commit" or shown as a git error in place
+    of content. Those paths refuse instead. Outside a server (CLI) this is
+    False and nothing changes.
+    """
+    from ...server.startup.content_backend_wiring import is_content_seam_delegated
+
+    return is_content_seam_delegated()
+
+
+#: What a temporal query says instead of running local git it cannot run.
+HISTORY_ELSEWHERE = (
+    "the repository's git history is not on this server pod (delegated "
+    "content), and temporal queries do not run through the git seam yet"
+)
+
+
 def resolve_commit_timestamp(project_root: Path, ref: str) -> int:
     """Resolve a git ref/commit hash to its commit's UNIX timestamp (Bug #1301).
 
@@ -90,8 +112,11 @@ def resolve_commit_timestamp(project_root: Path, ref: str) -> int:
 
     Raises:
         ValueError: If `ref` cannot be resolved to a commit in this
-            repository (non-existent hash/ref, git failure, timeout).
+            repository (non-existent hash/ref, git failure, timeout), or the
+            history is not on this pod (``_history_is_elsewhere``).
     """
+    if _history_is_elsewhere():
+        raise ValueError(f"at_commit '{ref}' cannot be resolved: {HISTORY_ELSEWHERE}")
     try:
         rev_parse = subprocess.run(
             ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
@@ -308,6 +333,8 @@ class TemporalSearchService:
         # Check if reconstruction needed
         if not metadata.get("reconstruct_from_git"):
             return ""
+        if _history_is_elsewhere():
+            return f"[Content unavailable - {HISTORY_ELSEWHERE}]"
 
         diff_type = metadata.get("diff_type")
         # Handle both 'path' and 'file_path' keys (different parts of the system use different names)

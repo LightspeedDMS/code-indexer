@@ -147,12 +147,23 @@ class FileIdentifier:
 
         if self.git_available:
             try:
-                # Try to get git remote origin URL
-                result = run_git_command(
-                    ["git", "remote", "get-url", "origin"],
-                    cwd=self.project_dir,
-                )
-                origin_url = result.stdout.strip()
+                # The origin URL, from the git seam when one is configured: on a
+                # pod without the repository local git has nothing to ask, and
+                # the directory-name fallback below would re-identify every
+                # chunk (the project id seeds each point id). Only git's own
+                # answer (CalledProcessError, e.g. no such remote) falls back; a
+                # transport failure propagates rather than silently do that.
+                if self._git_backend is not None:
+                    origin_url = str(
+                        self._git_backend.remote_get_url(
+                            str(self.project_dir), "origin"
+                        )
+                    ).strip()
+                else:
+                    origin_url = run_git_command(
+                        ["git", "remote", "get-url", "origin"],
+                        cwd=self.project_dir,
+                    ).stdout.strip()
 
                 # Extract repository name from URL
                 if origin_url:
@@ -163,8 +174,13 @@ class FileIdentifier:
                     self._project_id = repo_name.lower().replace("_", "-")
                     assert self._project_id is not None
                     return self._project_id
-            except (subprocess.CalledProcessError, OSError):
+            except subprocess.CalledProcessError:
                 pass
+            except OSError:
+                # Locally: git missing or the cwd gone, as before. Through the
+                # seam an OSError is the transport (ConnectionError is one).
+                if self._git_backend is not None:
+                    raise
 
         # Fallback to directory name
         self._project_id = self.project_dir.name.lower().replace("_", "-")
@@ -398,69 +414,6 @@ class FileIdentifier:
             return {"file_mtime": int(stat.st_mtime), "file_size": stat.st_size}
         except (OSError, IOError):
             return {"file_mtime": 0, "file_size": 0}
-
-    def get_current_files(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Get all files that should be indexed in the current context.
-
-        For git repositories, this returns files tracked by git in the current branch.
-        For non-git projects, this returns all eligible files in the directory tree.
-
-        Returns:
-            Dictionary mapping file paths to their metadata
-        """
-        if self.git_available:
-            return self._get_git_tracked_files()
-        else:
-            return self._get_filesystem_files()
-
-    def _get_git_tracked_files(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Get files tracked by git in the current HEAD.
-
-        Returns:
-            Dictionary mapping file paths to their metadata
-        """
-        files = {}
-
-        try:
-            result = run_git_command(
-                ["git", "ls-tree", "-r", "--name-only", "--full-tree", "HEAD"],
-                cwd=self.project_dir,
-            )
-
-            for file_path_str in result.stdout.strip().split("\n"):
-                if file_path_str and self._should_index_file(file_path_str):
-                    file_path = self.project_dir / file_path_str
-                    if file_path.exists():
-                        files[file_path_str] = self.get_file_metadata(file_path)
-
-        except (subprocess.CalledProcessError, OSError):
-            # Fallback to filesystem if git command fails
-            return self._get_filesystem_files()
-
-        return files
-
-    def _get_filesystem_files(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Get all indexable files from the filesystem recursively.
-
-        Returns:
-            Dictionary mapping file paths to their metadata
-        """
-        files = {}
-
-        for file_path in self.project_dir.rglob("*"):
-            if file_path.is_file():
-                try:
-                    rel_path = str(file_path.relative_to(self.project_dir))
-                    if self._should_index_file(rel_path):
-                        files[rel_path] = self.get_file_metadata(file_path)
-                except (ValueError, OSError):
-                    # Skip files that can't be processed
-                    continue
-
-        return files
 
     def get_file_signature(self, metadata: Dict[str, Any]) -> str:
         """

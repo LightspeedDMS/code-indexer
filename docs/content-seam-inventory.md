@@ -8,11 +8,11 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | Class | Rows |
 |---|---|
 | unclassified | 0 |
-| repo-read | 490 |
+| repo-read | 452 |
 | repo-write | 93 |
 | cidx-state-in-repo | 1325 |
-| migrated | 137 |
-| local-only | 173 |
+| migrated | 142 |
+| local-only | 179 |
 | cidx-state | 526 |
 | not-repo | 414 |
 
@@ -51,7 +51,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `indexing/file_finder.py` | 0 | 2 | 0 | 0 |
 | `indexing/fixed_size_chunker.py` | 0 | 1 | 0 | 0 |
 | `indexing/image_extractor.py` | 0 | 5 | 0 | 0 |
-| `indexing/processor.py` | 0 | 3 | 0 | 0 |
+| `indexing/processor.py` | 0 | 1 | 0 | 0 |
 | `mode_detection/command_mode_detector.py` | 0 | 0 | 0 | 6 |
 | `mode_specific_handlers.py` | 0 | 0 | 0 | 1 |
 | `proxy/config_manager.py` | 0 | 3 | 0 | 1 |
@@ -194,15 +194,11 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `services/chunk_migration_cli.py` | 0 | 0 | 0 | 14 |
 | `services/cohere_multimodal.py` | 0 | 1 | 0 | 0 |
 | `services/config_fixer.py` | 0 | 5 | 0 | 13 |
-| `services/embedding_factory.py` | 0 | 1 | 0 | 0 |
 | `services/file_chunking_manager.py` | 0 | 2 | 0 | 0 |
-| `services/file_identifier.py` | 0 | 6 | 0 | 0 |
+| `services/file_identifier.py` | 0 | 1 | 0 | 0 |
 | `services/generic_query_service.py` | 0 | 4 | 0 | 0 |
-| `services/git_aware_processor.py` | 0 | 2 | 0 | 0 |
 | `services/git_detection.py` | 0 | 0 | 0 | 6 |
 | `services/git_hook_manager.py` | 0 | 8 | 5 | 0 |
-| `services/git_topology_service.py` | 0 | 2 | 0 | 0 |
-| `services/high_throughput_processor.py` | 0 | 5 | 0 | 0 |
 | `services/hnsw_health_service.py` | 0 | 0 | 0 | 8 |
 | `services/indexing_lock.py` | 0 | 0 | 0 | 9 |
 | `services/indexing_progress_log.py` | 0 | 0 | 0 | 8 |
@@ -214,25 +210,23 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `services/progressive_metadata.py` | 0 | 0 | 0 | 11 |
 | `services/provider_health_bridge.py` | 0 | 0 | 0 | 13 |
 | `services/provider_rebuild_check.py` | 0 | 0 | 0 | 2 |
-| `services/smart_indexer.py` | 0 | 15 | 0 | 2 |
+| `services/smart_indexer.py` | 0 | 8 | 0 | 2 |
 | `services/tantivy_index_manager.py` | 0 | 0 | 0 | 17 |
-| `services/temporal/commit_aggregator.py` | 0 | 1 | 0 | 0 |
 | `services/temporal/temporal_blank_out.py` | 0 | 0 | 0 | 4 |
 | `services/temporal/temporal_collection_naming.py` | 0 | 0 | 0 | 12 |
-| `services/temporal/temporal_indexer.py` | 0 | 2 | 0 | 5 |
+| `services/temporal/temporal_indexer.py` | 0 | 0 | 0 | 5 |
 | `services/temporal/temporal_migration.py` | 0 | 0 | 0 | 24 |
 | `services/temporal/temporal_progressive_metadata.py` | 0 | 0 | 0 | 10 |
 | `services/temporal/temporal_projection_matrix.py` | 0 | 0 | 0 | 10 |
 | `services/temporal/temporal_reconciliation.py` | 0 | 0 | 0 | 1 |
 | `services/temporal/temporal_row_existence.py` | 0 | 0 | 0 | 2 |
-| `services/temporal/temporal_search_service.py` | 0 | 3 | 0 | 0 |
 | `services/temporal/temporal_server_paths.py` | 0 | 0 | 0 | 1 |
 | `services/temporal/temporal_status.py` | 0 | 0 | 0 | 5 |
 | `services/temporal/temporal_structure_marker.py` | 0 | 0 | 0 | 5 |
 | `services/vector_calculation_manager.py` | 0 | 0 | 0 | 1 |
-| `services/watch_metadata.py` | 0 | 2 | 0 | 4 |
+| `services/watch_metadata.py` | 0 | 0 | 0 | 4 |
 | `storage/background_index_rebuilder.py` | 0 | 0 | 0 | 12 |
-| `storage/filesystem_vector_store.py` | 0 | 9 | 0 | 74 |
+| `storage/filesystem_vector_store.py` | 0 | 3 | 0 | 74 |
 | `storage/hnsw_index_manager.py` | 0 | 0 | 0 | 47 |
 | `storage/id_index_manager.py` | 0 | 0 | 0 | 9 |
 | `storage/projection_matrix_manager.py` | 0 | 0 | 0 | 2 |
@@ -262,34 +256,17 @@ Ratcheted (see the test's docstring): this list may only shrink.
 
 | Module | Function | Op | Note |
 |---|---|---|---|
-| `services/config_fixer.py` | `GitStateDetector.detect_git_state` | `git branch` | SEAM GAP: server-spawned `cidx fix-config --force` reads branch/commit with local git |
-| `services/config_fixer.py` | `GitStateDetector.detect_git_state` | `git rev-parse` | SEAM GAP: server-spawned `cidx fix-config --force` reads branch/commit with local git |
-| `services/config_fixer.py` | `GitStateDetector.detect_git_state` | `git status` | SEAM GAP: server-spawned `cidx fix-config --force` reads branch/commit with local git |
-| `services/file_identifier.py` | `FileIdentifier._get_git_tracked_files` | `run_git_command ls-tree` | local ls-tree; get_current_files has no live callers |
-| `services/file_identifier.py` | `FileIdentifier.get_project_id` | `run_git_command remote` | SEAM GAP: git remote get-url runs locally even when git_available came from the git backend |
-| `services/generic_query_service.py` | `GenericQueryService._get_current_branch_context` | `run_git_command ls-tree` | SEAM GAP: cidx query branch filter runs local git; no git backend path |
-| `services/generic_query_service.py` | `GenericQueryService._get_current_branch_context` | `run_git_command rev-parse` | SEAM GAP: cidx query branch filter runs local git; no git backend path |
-| `services/generic_query_service.py` | `GenericQueryService._is_commit_reachable` | `run_git_command merge-base` | SEAM GAP: cidx query commit reachability runs local merge-base; no git backend path |
+| `services/config_fixer.py` | `GitStateDetector.detect_git_state` | `git branch` | OPEN: snapshot fix-config writes git_available=False/unknown into the SNAPSHOT metadata (drift check reads the source); follow-up: give fix-config the git seam |
+| `services/config_fixer.py` | `GitStateDetector.detect_git_state` | `git rev-parse` | OPEN: snapshot fix-config writes git_available=False/unknown into the SNAPSHOT metadata (drift check reads the source); follow-up: give fix-config the git seam |
+| `services/config_fixer.py` | `GitStateDetector.detect_git_state` | `git status` | OPEN: snapshot fix-config writes git_available=False/unknown into the SNAPSHOT metadata (drift check reads the source); follow-up: give fix-config the git seam |
+| `services/generic_query_service.py` | `GenericQueryService._get_current_branch_context` | `run_git_command ls-tree` | OPEN, CLI query only (server reaches it via composite cidx query children); without .git FileIdentifier.git_available is False so results pass unfiltered, never dropped; follow-up: give cidx query the git seam |
+| `services/generic_query_service.py` | `GenericQueryService._get_current_branch_context` | `run_git_command rev-parse` | OPEN, CLI query only (server reaches it via composite cidx query children); without .git FileIdentifier.git_available is False so results pass unfiltered, never dropped; follow-up: give cidx query the git seam |
+| `services/generic_query_service.py` | `GenericQueryService._is_commit_reachable` | `run_git_command merge-base` | OPEN, CLI query only; reached only when git_available, which is False without .git; follow-up: give cidx query the git seam |
 | `services/git_hook_manager.py` | `GitHookManager.is_git_repository` | `.exists .git` | checks <repo>/.git exists |
-| `services/git_topology_service.py` | `GitTopologyService._batch_git_log_analysis` | `git log` | local git log; only caller batch_file_analysis has no callers (dead) |
-| `services/git_topology_service.py` | `GitTopologyService._batch_git_status_analysis` | `git status` | local git status; only caller batch_file_analysis has no callers (dead) |
-| `services/high_throughput_processor.py` | `HighThroughputProcessor._file_differs_from_committed_version_thread_safe` | `git diff` | local git diff; only caller _get_file_commit_thread_safe has no callers (dead) |
-| `services/high_throughput_processor.py` | `HighThroughputProcessor._get_file_commit_thread_safe` | `git log` | local git log; no callers (dead) |
-| `services/high_throughput_processor.py` | `HighThroughputProcessor._is_git_repository_thread_safe` | `git rev-parse` | local rev-parse; only caller _get_file_commit_thread_safe has no callers (dead) |
-| `services/progress_subprocess_runner.py` | `gather_repo_metrics` | `.exists .git` | checks <repo>/.git exists before git file/commit counts (git-mcp territory) |
-| `services/progress_subprocess_runner.py` | `gather_repo_metrics` | `git ls-files` | SEAM GAP: refresh/MCP repo metrics count files and commits with local git |
-| `services/progress_subprocess_runner.py` | `gather_repo_metrics` | `git rev-list` | SEAM GAP: refresh/MCP repo metrics count files and commits with local git |
-| `services/smart_indexer.py` | `SmartIndexer._get_file_commit` | `git log` | per-file git log fallback; a delegated reconcile reaches it for a file missing from the manifest blob map |
-| `services/smart_indexer.py` | `SmartIndexer.cleanup_branch_data` | `git ls-tree` | local ls-tree; no callers in src (dead) |
-| `services/temporal/commit_aggregator.py` | `get_file_changes` | `git diff` | SEAM GAP: temporal indexing diffs commits with local git; no git backend path |
-| `services/temporal/temporal_indexer.py` | `TemporalIndexer._get_commit_history` | `git log` | SEAM GAP: temporal indexing walks history with local git log |
-| `services/temporal/temporal_indexer.py` | `TemporalIndexer._get_current_branch` | `git branch` | SEAM GAP: temporal indexing reads branch with local git |
-| `services/temporal/temporal_search_service.py` | `TemporalSearchService._reconstruct_temporal_content` | `git show` | SEAM GAP: temporal query reconstructs content with local git show |
-| `services/temporal/temporal_search_service.py` | `resolve_commit_timestamp` | `git rev-parse` | SEAM GAP: temporal query resolves at_commit with local git |
-| `services/temporal/temporal_search_service.py` | `resolve_commit_timestamp` | `git show` | SEAM GAP: temporal query resolves at_commit with local git |
-| `storage/filesystem_vector_store.py` | `FilesystemVectorStore._check_uncommitted_batch` | `git status` | SEAM GAP: upsert uncommitted check via local git status |
-| `storage/filesystem_vector_store.py` | `FilesystemVectorStore._file_has_uncommitted_changes` | `git status` | SEAM GAP: per-file uncommitted check via local git status |
-| `storage/filesystem_vector_store.py` | `FilesystemVectorStore._get_blob_hashes_batch` | `git ls-tree` | SEAM GAP: upsert blob hashes via local ls-tree (skipped when _get_repo_root is None) |
-| `storage/filesystem_vector_store.py` | `FilesystemVectorStore._get_git_blob_hash` | `git ls-tree` | SEAM GAP: per-file blob hash via local ls-tree (legacy upsert path) |
-| `storage/filesystem_vector_store.py` | `FilesystemVectorStore._get_repo_root` | `git rev-parse` | SEAM GAP: index write path finds the repo root with local git; None on a mountless pod, so no blob hashes |
-| `storage/filesystem_vector_store.py` | `FilesystemVectorStore._retrieve_from_git_blob` | `git cat-file` | SEAM GAP: query-time chunk text fallback from the local git object store |
+| `services/progress_subprocess_runner.py` | `gather_repo_metrics` | `.exists .git` | OPEN: progress-phase weights only (0,0 without .git), no index effect; follow-up: ls_files/rev_list_count via the git backend |
+| `services/progress_subprocess_runner.py` | `gather_repo_metrics` | `git ls-files` | OPEN: progress-phase weights only (0,0 without .git), no index effect; follow-up: ls_files/rev_list_count via the git backend |
+| `services/progress_subprocess_runner.py` | `gather_repo_metrics` | `git rev-list` | OPEN: progress-phase weights only (0,0 without .git), no index effect; follow-up: ls_files/rev_list_count via the git backend |
+| `services/smart_indexer.py` | `SmartIndexer._get_file_commit` | `git log` | OPEN: under a manifest reached only for paths it cannot hash (symlink/unreadable); answers "unknown" -> re-index, never a skip; follow-up |
+| `storage/filesystem_vector_store.py` | `FilesystemVectorStore._check_uncommitted_batch` | `git status` | OPEN, fail-safe: only reached when _get_repo_root found a local repo; follow-up with _get_repo_root |
+| `storage/filesystem_vector_store.py` | `FilesystemVectorStore._get_blob_hashes_batch` | `git ls-tree` | OPEN, fail-safe: only reached when _get_repo_root found a local repo; follow-up with _get_repo_root |
+| `storage/filesystem_vector_store.py` | `FilesystemVectorStore._get_repo_root` | `git rev-parse` | OPEN, fail-safe: no .git on a mountless pod -> None -> chunk_text stored inline, which is what a query there needs; follow-up: decide it from the seam explicitly |

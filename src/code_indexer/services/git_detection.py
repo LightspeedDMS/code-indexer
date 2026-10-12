@@ -230,40 +230,6 @@ class GitDetectionService:
             # Fail silently if we can't save state
             pass
 
-    def get_branch_files_summary(self) -> Dict[str, Any]:
-        """
-        Get a summary of files in the current branch/context.
-
-        Returns:
-            Dictionary containing file count and other summary information
-        """
-        identifier = FileIdentifier(
-            self.project_dir, self.config, git_backend=self._git_backend
-        )
-        current_files = identifier.get_current_files()
-
-        summary = {
-            "total_files": len(current_files),
-            "git_available": identifier.git_available,
-            "project_id": identifier.get_project_id(),
-        }
-
-        if identifier.git_available:
-            state = self._get_current_git_state()
-            summary.update(
-                {
-                    "branch": state.get("branch"),
-                    "commit_hash": (
-                        state.get("commit_hash", "")[:8]
-                        if state.get("commit_hash")
-                        else None
-                    ),
-                    "has_uncommitted_changes": state.get("has_uncommitted_changes"),
-                }
-            )
-
-        return summary
-
     def clear_git_state(self) -> None:
         """
         Clear saved git state. Useful for testing or manual reset.

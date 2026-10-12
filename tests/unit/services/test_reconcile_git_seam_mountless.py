@@ -467,3 +467,76 @@ def test_a_branch_change_upstream_is_indexed_through_the_seams(
     _index(pod)
 
     assert _search(pod) == sorted([*FILES, "src/mod4.py"])
+
+
+def test_reconcile_keeps_a_file_that_exists_but_is_no_longer_discovered(
+    pod: Dict[str, Any],
+) -> None:
+    """Reconcile deletes an undiscovered file's chunks only when it is GONE.
+
+    A git project's file that still exists but is now filtered out (here: over
+    a lowered max_file_size) is left for branch isolation. "Still exists" was a
+    local ``exists()``, False for every file on a pod without the checkout, so
+    reconcile deleted such a file's chunks here and kept them everywhere else.
+    """
+    import json
+
+    big = pod["held"] / "src/big.py"
+    big.write_text(f'"""{QUERY} in a big module."""\n' + "# padding\n" * 300)
+    _git(pod["held"], "add", ".")
+    _git(pod["held"], "commit", "-qm", "big")
+    _cidx(pod, "init", "--embedding-provider", "voyage-ai")
+    _index(pod)
+    assert "src/big.py" in _search(pod)
+
+    config_path = pod["here"] / ".code-indexer" / "config.json"
+    config = json.loads(config_path.read_text())
+    config.setdefault("indexing", {})["max_file_size"] = 1000
+    config_path.write_text(json.dumps(config))
+
+    output = _refresh(pod)
+
+    assert _hidden_branches(pod, "src/big.py") == [[]], (
+        "a present file was hidden from the branch it is on"
+    )
+    assert "Cleaned up" not in output, output
+
+
+def _hidden_branches(pod: Dict[str, Any], rel: str) -> List[Any]:
+    """Each of *rel*'s chunks' ``hidden_branches`` (what branch visibility reads)."""
+    from code_indexer.config import ConfigManager
+    from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+
+    config = ConfigManager.create_with_backtrack(pod["here"]).get_config()
+    store = FilesystemVectorStore(
+        pod["here"] / ".code-indexer" / "index", project_root=pod["here"]
+    )
+    points, _ = store.scroll_points(
+        collection_name=store.resolve_collection_name(config, _Embedder()),
+        limit=1000,
+        with_payload=True,
+    )
+    return [
+        p["payload"].get("hidden_branches", [])
+        for p in points
+        if p["payload"].get("path") == rel
+    ]
+
+
+def test_temporal_indexing_through_the_seams_is_refused(pod: Dict[str, Any]) -> None:
+    """Temporal indexing reads history with LOCAL git; there is none here.
+
+    Refresh skips it on such a pod, but add, add-index, reindex and the MCP
+    rebuild spawn ``cidx index --index-commits`` with both seams stamped. The
+    child refuses, before ``--clear`` can wipe anything.
+    """
+    _cidx(pod, "init", "--embedding-provider", "voyage-ai")
+    result = CliRunner().invoke(
+        pod["cli"],
+        ["index", "--index-commits", _LAYOUT, *_SEAMS],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1, result.output
+    output = " ".join(result.output.split())
+    assert "does not run through the content or git seam" in output, output
+    assert "Starting temporal git history indexing" not in output
