@@ -277,7 +277,42 @@ def _release_compile_slot() -> None:
 # invocation -- the legacy scan path compiles AND then runs the evaluator
 # across the repository inside the same process, and that scan's memory
 # profile scales with the repository, not with the evaluator.
-_COMPILE_RLIMIT_DATA_BYTES = 1024 * 1024 * 1024
+_DEFAULT_COMPILE_RLIMIT_DATA_BYTES = 1024 * 1024 * 1024
+
+# Operator override for the compile heap bound, in bytes -- the same
+# env-var escape hatch CIDX_XRAY_MAX_CONCURRENT_COMPILES uses (no new config
+# surface to gate a fix). It governs BOTH places a compile is bounded:
+#   * the `--compile-only` spawn, through _apply_compile_resource_limits;
+#   * the scan path's compile, which shares its process with the scan. Python
+#     cannot cap only part of a process, so the value is handed to xray-cli in
+#     its environment and xray-cli sets RLIMIT_DATA on the rustc child it
+#     spawns (rust/xray-core/src/compiler/rustc_driver.rs). The scan itself
+#     stays uncapped -- its memory scales with the repository and was never
+#     measured against this number.
+_COMPILE_RLIMIT_DATA_ENV = "CIDX_XRAY_COMPILE_RLIMIT_DATA_BYTES"
+
+
+def _resolve_compile_rlimit_data_bytes() -> int:
+    """The compile heap bound: the env override when it is a positive integer,
+    otherwise the measured default. Never raises."""
+    raw = os.environ.get(_COMPILE_RLIMIT_DATA_ENV, "").strip()
+    if raw:
+        try:
+            override = int(raw)
+        except ValueError:
+            override = 0
+        if override >= 1:
+            return override
+        logger.warning(
+            "RustNativeBackend: ignoring %s -- not a positive integer",
+            _COMPILE_RLIMIT_DATA_ENV,
+        )
+    return _DEFAULT_COMPILE_RLIMIT_DATA_BYTES
+
+
+# Resolved once at import: _apply_compile_resource_limits runs between fork and
+# exec, where it must not parse or allocate.
+_COMPILE_RLIMIT_DATA_BYTES = _resolve_compile_rlimit_data_bytes()
 
 # 128 MiB per FILE (not per compile): 30x the 4.28 MiB a compiled evaluator
 # occupies, which is the largest file this path legitimately writes. Its job
@@ -355,6 +390,72 @@ def _apply_compile_resource_limits() -> None:
             _resource.setrlimit(which, (_clamp_to_hard_limit(requested, hard), hard))
         except (ValueError, OSError):
             continue
+
+
+# ---------------------------------------------------------------------------
+# The environment every xray-cli spawn runs with
+#
+# xray-cli compiles CALLER-SUPPLIED Rust and loads it into its own process, so
+# anything in its environment is readable by that code. Inheriting the server's
+# environment handed it every secret the server holds (embedding-provider API
+# keys, database URLs, tokens). The source-level validator was the only
+# barrier. Every xray-cli spawn therefore gets an explicit allowlist instead.
+#
+# Scope: this removes the INHERITED environment (std::env::vars(), a child's
+# own /proc/self/environ). It does not stop a validator bypass from reading
+# the server's /proc/<ppid>/environ: the child runs as the server's uid, and
+# Linux lets a same-uid process read that file (verified: a child spawned with
+# a scrubbed env reads a variable from its parent's environ). Closing that
+# needs a separate uid, PID namespace or hidepid /proc for xray-cli -- the
+# long-term fix is moving X-Ray into sandbox-mcp.
+#
+# What xray-cli and the toolchain it drives actually read
+# (rust/xray-cli/src/main.rs, rust/xray-core/src/{cache.rs,compiler/}):
+#   PATH            -- xray-cli runs `rustc` by name; rustc runs the `cc` linker.
+#   HOME            -- cache dir fallback (~/.cidx-server/xray-cache, cache.rs)
+#                      and rustup's default RUSTUP_HOME/CARGO_HOME.
+#   TMPDIR/TMP/TEMP -- scratch files for rustc, cc and ld.
+#   LANG/LANGUAGE/LC_* -- locale for the toolchain's diagnostics.
+#   CIDX_DATA_DIR   -- the compile cache root; must match _get_cache_dir() or a
+#                      pre-filled artifact is never seen.
+#   RUSTUP_HOME/CARGO_HOME -- where a rustup-managed toolchain lives when it is
+#                      not under HOME (the rustup proxy fails without them).
+#                      The image ships a bare rustc on PATH and sets neither.
+# Not passed: RUSTUP_TOOLCHAIN (xray-cli pins it for every rustc it spawns),
+# XRAY_TARGET (only read without --files/--files-from, which cidx always
+# passes), CIDX_XRAY_CLI_PATH (read by Python, not by the binary).
+# ---------------------------------------------------------------------------
+_XRAY_ENV_PASSTHROUGH_KEYS = (
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "LANG",
+    "LANGUAGE",
+    _XRAY_CACHE_DIR_ENV,
+    "RUSTUP_HOME",
+    "CARGO_HOME",
+)
+_XRAY_ENV_PASSTHROUGH_PREFIXES = ("LC_",)
+
+
+def xray_subprocess_env() -> Dict[str, str]:
+    """The minimal, explicit environment for an xray-cli subprocess.
+
+    Copies only the allowlisted keys that are present in this process, plus
+    the compile heap bound xray-cli applies to its rustc child. Nothing else
+    from the server's environment reaches the child. Callers must not log the
+    values; key names are safe.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key in _XRAY_ENV_PASSTHROUGH_KEYS
+        or key.startswith(_XRAY_ENV_PASSTHROUGH_PREFIXES)
+    }
+    env[_COMPILE_RLIMIT_DATA_ENV] = str(_COMPILE_RLIMIT_DATA_BYTES)
+    return env
 
 
 def _sanitize_error_message(msg: str) -> str:
@@ -963,6 +1064,7 @@ def get_graph_extractor_extensions(
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            env=xray_subprocess_env(),
         )
     except Exception as exc:  # noqa: BLE001 -- never raise, always report
         return None, f"failed to invoke --print-graph-extractor-extensions: {exc}"
@@ -1309,6 +1411,7 @@ class RustNativeBackend:
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            env=xray_subprocess_env(),
         )
 
     @staticmethod
@@ -1781,6 +1884,7 @@ class RustNativeBackend:
                 stderr=subprocess.PIPE,
                 text=True,
                 start_new_session=True,
+                env=xray_subprocess_env(),
                 # Same gate as the compile slot, deliberately: only an
                 # invocation that can trigger a rustc compile gets the
                 # per-compile resource bounds. --build-graph/--analyze-graph
@@ -1902,16 +2006,15 @@ class RustNativeBackend:
                 # still be SIGKILLed. RLIMIT_DATA was likewise measured against
                 # rustc, never against a scan's ASTs and findings.
                 #
-                # Residual, stated rather than papered over: a compile reached
-                # through THIS path is therefore unbounded in memory, and that
-                # is the path xray_search uses. Time is still bounded by the
-                # 120s wall timeout and the process-group kill. Closing it
-                # properly means compiling in its own limited process, which
-                # needs `--dylib <path.so>` on xray-cli's default scan
-                # subcommand (it exists only on the graph subcommands today) so
-                # the scan can consume a prebuilt artifact. Capping the user's
-                # scan with a number measured for the compiler is the worse
-                # trade: it converts a hypothetical into a certain regression.
+                # The compile reached through THIS path is still heap-bounded:
+                # xray_subprocess_env() hands xray-cli the compile limit
+                # (_COMPILE_RLIMIT_DATA_ENV) and xray-cli sets RLIMIT_DATA on
+                # the rustc child it spawns, never on itself -- so the scan
+                # keeps its unmeasured, repository-sized memory profile.
+                # Capping the user's scan with a number measured for the
+                # compiler would convert a hypothetical into a certain
+                # regression. Time is bounded by the 120s wall timeout and the
+                # process-group kill.
                 apply_compile_limits=False,
             )
         except OSError as exc:
