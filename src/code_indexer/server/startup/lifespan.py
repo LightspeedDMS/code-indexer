@@ -1490,6 +1490,22 @@ def make_lifespan(
                 getattr(configured_content_backend, "is_local", "unknown"),
             )
 
+            # Content seam, write side: the same content_backend selection.
+            # None under local (no plugin is loaded, writes stay on this disk);
+            # delegated requires the code_indexer.content_writer plugin and
+            # raises here without one, so golden-repo write tools never write
+            # a pod that holds no repository.
+            from code_indexer.server.startup.content_writer_wiring import (
+                build_configured_content_writer,
+            )
+
+            configured_content_writer = build_configured_content_writer(server_config)
+            app.state.content_writer = configured_content_writer
+            logger.info(
+                "ContentWriter parked on app.state: %s",
+                type(configured_content_writer).__name__,
+            )
+
             # Ripgrep seam, same shape: one selection, parked so regex search
             # reads it rather than constructing its own. Local by default, so
             # this is inert until an operator sets ripgrep_backend='delegated'.

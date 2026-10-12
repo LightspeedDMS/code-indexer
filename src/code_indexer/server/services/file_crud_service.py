@@ -19,8 +19,9 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Optional, TYPE_CHECKING
+from typing import Dict, Any, Optional, Tuple, TYPE_CHECKING
 
+from code_indexer.utils.blob_hash import git_blob_hash_bytes
 from code_indexer.utils.file_locking import nfs_safe_fsync
 from code_indexer.utils.path_confinement import (
     reject_if_within_git_directory,
@@ -31,6 +32,15 @@ if TYPE_CHECKING:
     from code_indexer.server.repositories.activated_repo_manager import (
         ActivatedRepoManager,
     )
+    from code_indexer.server.services.golden_repo_writer import (
+        Expected,
+        GoldenRepoWriteTarget,
+    )
+
+_UTF8_BOM = b"\xef\xbb\xbf"
+#: Why a content hash may not match, as each tool has always worded it.
+_EDIT_STALE_REASON = "File may have been modified by another process."
+_DELETE_STALE_REASON = "File may have been modified since hash was computed."
 
 
 def _get_activated_repo_manager() -> "ActivatedRepoManager":
@@ -326,6 +336,12 @@ class FileCRUDService:
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
 
+        # Content seam: a golden repo that is not on this pod is written
+        # through the content writer. None (the local disk) by default.
+        target = self._golden_write_target(repo_alias, repo_path)
+        if target is not None:
+            return self._create_through_writer(target, file_path, content)
+
         # Bug #1891: resolve + confine BEFORE any exists()/open() call.
         # _validate_crud_path() above only rejects literal ".." components
         # and absolute paths -- it does not catch a symlink already
@@ -351,19 +367,7 @@ class FileCRUDService:
         # Atomic write
         self._atomic_write_file(full_path, content)
 
-        # Compute hash and metadata
-        content_bytes = content.encode("utf-8")
-        content_hash = self._compute_hash(content_bytes)
-        size_bytes = len(content_bytes)
-        created_at = datetime.now(timezone.utc).isoformat()
-
-        return {
-            "success": True,
-            "file_path": file_path,
-            "content_hash": content_hash,
-            "size_bytes": size_bytes,
-            "created_at": created_at,
-        }
+        return self._created_result(file_path, content)
 
     def edit_file(
         self,
@@ -414,6 +418,13 @@ class FileCRUDService:
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
 
+        # Content seam (see create_file).
+        target = self._golden_write_target(repo_alias, repo_path)
+        if target is not None:
+            return self._edit_through_writer(
+                target, file_path, old_string, new_string, content_hash, replace_all
+            )
+
         # Bug #1891: resolve + confine BEFORE any exists()/open() call.
         # _validate_crud_path() above only rejects literal ".." components
         # and absolute paths -- it does not catch a symlink already
@@ -439,39 +450,18 @@ class FileCRUDService:
             ) from e
 
         # Validate hash (optimistic locking)
-        current_hash = self._compute_hash(current_content_bytes)
-        if current_hash != content_hash:
-            raise HashMismatchError(
-                f"Content hash mismatch for '{file_path}'. "
-                f"Expected {content_hash}, got {current_hash}. "
-                "File may have been modified by another process."
-            )
+        self._verify_hash(
+            current_content_bytes, content_hash, file_path, _EDIT_STALE_REASON
+        )
 
-        # Decode current content
-        # Bug #570: Use utf-8-sig to strip BOM if present; track for write-back
-        has_bom = current_content_bytes[:3] == b"\xef\xbb\xbf"
-        current_content_str = current_content_bytes.decode("utf-8-sig")
-
-        # Perform string replacement
-        new_content, changes_made = self._perform_replacement(
-            current_content_str, old_string, new_string, replace_all, file_path
+        new_content, changes_made, has_bom = self._apply_edit(
+            current_content_bytes, old_string, new_string, replace_all, file_path
         )
 
         # Atomic write (Bug #570: preserve BOM if original had one)
         self._atomic_write_file(full_path, new_content, has_bom=has_bom)
 
-        # Compute new hash and metadata
-        new_content_bytes = new_content.encode("utf-8")
-        new_hash = self._compute_hash(new_content_bytes)
-        modified_at = datetime.now(timezone.utc).isoformat()
-
-        return {
-            "success": True,
-            "file_path": file_path,
-            "content_hash": new_hash,
-            "modified_at": modified_at,
-            "changes_made": changes_made,
-        }
+        return self._edited_result(file_path, new_content, changes_made)
 
     def delete_file(
         self,
@@ -511,6 +501,11 @@ class FileCRUDService:
 
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
+
+        # Content seam (see create_file).
+        target = self._golden_write_target(repo_alias, repo_path)
+        if target is not None:
+            return self._delete_through_writer(target, file_path, content_hash)
 
         # Bug #1891: resolve + confine BEFORE any exists()/open() call.
         # _validate_crud_path() above only rejects literal ".." components
@@ -581,13 +576,9 @@ class FileCRUDService:
                     f"Failed to read file '{file_path}' for hash validation: {str(e)}"
                 ) from e
 
-            current_hash = self._compute_hash(current_content_bytes)
-            if current_hash != content_hash:
-                raise HashMismatchError(
-                    f"Content hash mismatch for '{file_path}'. "
-                    f"Expected {content_hash}, got {current_hash}. "
-                    "File may have been modified since hash was computed."
-                )
+            self._verify_hash(
+                current_content_bytes, content_hash, file_path, _DELETE_STALE_REASON
+            )
 
         # Delete file (the symlink/file node the caller named -- see the
         # lexical_path comment above)
@@ -598,9 +589,150 @@ class FileCRUDService:
                 f"Failed to delete file '{file_path}': {str(e)}"
             ) from e
 
-        deleted_at = datetime.now(timezone.utc).isoformat()
+        return self._deleted_result(file_path)
 
-        return {"success": True, "file_path": file_path, "deleted_at": deleted_at}
+    # ── golden repos behind the content seam ───────────────────────────────
+
+    def _golden_write_target(
+        self, repo_alias: str, repo_path: Path
+    ) -> Optional["GoldenRepoWriteTarget"]:
+        """Where a write-exception (golden) repo is written when it is not on
+        this pod, or None to write the local disk -- always None for an
+        activated repo and under the local content backend."""
+        if not self.is_write_exception(repo_alias):
+            return None
+        from code_indexer.server.services.golden_repo_writer import (
+            golden_repo_write_target,
+        )
+
+        return golden_repo_write_target(repo_path)
+
+    def _create_through_writer(
+        self, target: "GoldenRepoWriteTarget", file_path: str, content: str
+    ) -> Dict[str, Any]:
+        """create_file behind the seam: "must not exist" is the writer's CAS."""
+        rel = target.confine(file_path)
+        data = self._encode_for_write(target.absolute(rel), content, has_bom=False)
+        target.put(rel, data, None, file_path=file_path, operation="create_file")
+        return self._created_result(file_path, content)
+
+    def _edit_through_writer(
+        self,
+        target: "GoldenRepoWriteTarget",
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        content_hash: str,
+        replace_all: bool,
+    ) -> Dict[str, Any]:
+        """edit_file behind the seam: the write is conditional on the blob read."""
+        rel = target.confine(file_path)
+        current = target.read(rel, file_path)
+        self._verify_hash(current, content_hash, file_path, _EDIT_STALE_REASON)
+        new_content, changes_made, has_bom = self._apply_edit(
+            current, old_string, new_string, replace_all, file_path
+        )
+        data = self._encode_for_write(
+            target.absolute(rel), new_content, has_bom=has_bom
+        )
+        target.put(
+            rel,
+            data,
+            git_blob_hash_bytes(current),
+            file_path=file_path,
+            operation="edit_file",
+        )
+        return self._edited_result(file_path, new_content, changes_made)
+
+    def _delete_through_writer(
+        self,
+        target: "GoldenRepoWriteTarget",
+        file_path: str,
+        content_hash: Optional[str],
+    ) -> Dict[str, Any]:
+        """delete_file behind the seam: conditional exactly when a hash is given."""
+        from code_indexer.server.services.golden_repo_writer import UNCONDITIONAL
+
+        rel = target.confine(file_path)
+        expected: "Expected" = UNCONDITIONAL
+        if content_hash is not None:
+            current = target.read(rel, file_path)
+            self._verify_hash(current, content_hash, file_path, _DELETE_STALE_REASON)
+            expected = git_blob_hash_bytes(current)
+        if not target.delete(
+            rel, expected, file_path=file_path, operation="delete_file"
+        ):
+            raise FileNotFoundError(f"File not found: {file_path}")
+        return self._deleted_result(file_path)
+
+    # ── shared by the local and seam paths ─────────────────────────────────
+
+    def _verify_hash(
+        self, current: bytes, content_hash: str, file_path: str, reason: str
+    ) -> None:
+        """Optimistic locking: HashMismatchError unless *current* is *content_hash*."""
+        current_hash = self._compute_hash(current)
+        if current_hash != content_hash:
+            raise HashMismatchError(
+                f"Content hash mismatch for '{file_path}'. "
+                f"Expected {content_hash}, got {current_hash}. "
+                f"{reason}"
+            )
+
+    def _apply_edit(
+        self,
+        current: bytes,
+        old_string: str,
+        new_string: str,
+        replace_all: bool,
+        file_path: str,
+    ) -> Tuple[str, int, bool]:
+        """(new_content, changes_made, has_bom) for an edit of *current*."""
+        # Bug #570: Use utf-8-sig to strip BOM if present; track for write-back
+        has_bom = current[:3] == _UTF8_BOM
+        current_content_str = current.decode("utf-8-sig")
+        new_content, changes_made = self._perform_replacement(
+            current_content_str, old_string, new_string, replace_all, file_path
+        )
+        return new_content, changes_made, has_bom
+
+    def _encode_for_write(self, full_path: str, content: str, has_bom: bool) -> bytes:
+        """The bytes ``_atomic_write_file`` would put on disk for *content*."""
+        try:
+            data = content.encode("utf-8")
+        except UnicodeEncodeError as e:
+            raise CRUDOperationError(
+                f"Failed to write file '{full_path}': {str(e)}"
+            ) from e
+        return _UTF8_BOM + data if has_bom else data
+
+    def _created_result(self, file_path: str, content: str) -> Dict[str, Any]:
+        content_bytes = content.encode("utf-8")
+        return {
+            "success": True,
+            "file_path": file_path,
+            "content_hash": self._compute_hash(content_bytes),
+            "size_bytes": len(content_bytes),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _edited_result(
+        self, file_path: str, new_content: str, changes_made: int
+    ) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "file_path": file_path,
+            "content_hash": self._compute_hash(new_content.encode("utf-8")),
+            "modified_at": datetime.now(timezone.utc).isoformat(),
+            "changes_made": changes_made,
+        }
+
+    def _deleted_result(self, file_path: str) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "file_path": file_path,
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     def _validate_crud_path(self, file_path: str, operation: str) -> None:
         """
