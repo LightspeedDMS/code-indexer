@@ -8432,11 +8432,24 @@ def _validate_config_section(
 
     # Content seam step 5a: where aliases and write-mode markers are read from
     elif section == "control_plane_metadata":
-        from code_indexer.server.utils.config_manager import METADATA_READ_SOURCES
+        from code_indexer.server.utils.config_manager import (
+            METADATA_OUTBOX_SINKS,
+            METADATA_READ_SOURCES,
+        )
 
         read_source = data.get("metadata_read_source")
         if read_source is not None and str(read_source) not in METADATA_READ_SOURCES:
             return f"metadata_read_source must be one of {list(METADATA_READ_SOURCES)}"
+        sink = data.get("metadata_outbox_sink")
+        if sink is not None and str(sink) not in METADATA_OUTBOX_SINKS:
+            return f"metadata_outbox_sink must be one of {list(METADATA_OUTBOX_SINKS)}"
+        drain_timeout = data.get("metadata_outbox_drain_timeout_s")
+        if drain_timeout is not None:
+            try:
+                if int(drain_timeout) < 1:
+                    return "metadata_outbox_drain_timeout_s must be at least 1"
+            except (ValueError, TypeError):
+                return "metadata_outbox_drain_timeout_s must be a valid integer"
 
     return None
 

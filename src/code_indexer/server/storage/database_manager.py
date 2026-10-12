@@ -466,6 +466,41 @@ class DatabaseSchema:
         )
     """
 
+    # Content seam step 5a: the dual-write outbox. A row names a KEY (kind +
+    # name), never a payload -- the sweeper replays the registry's CURRENT
+    # value. claim_token/claimed_until are the SQLite claim (a lease, since
+    # SQLite has no row locks and solo mode may run several worker processes);
+    # PostgreSQL claims with FOR UPDATE SKIP LOCKED instead. Mirrors
+    # PostgreSQL migration 055.
+    CREATE_METADATA_OUTBOX_TABLE = """
+        CREATE TABLE IF NOT EXISTS metadata_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            claim_token TEXT,
+            claimed_until REAL
+        )
+    """
+
+    CREATE_IDX_METADATA_OUTBOX_KEY = """
+        CREATE INDEX IF NOT EXISTS idx_metadata_outbox_key
+        ON metadata_outbox (kind, name, id)
+    """
+
+    # Singleton (id=1): the drain clock and the stop flag, shared by every
+    # process so an abandon on one node stops the leader's sweeper.
+    CREATE_METADATA_OUTBOX_STATE_TABLE = """
+        CREATE TABLE IF NOT EXISTS metadata_outbox_state (
+            id INTEGER PRIMARY KEY,
+            drain_started_epoch REAL,
+            drain_sink TEXT,
+            stopped_at TEXT,
+            stopped_reason TEXT,
+            stopped_sink TEXT
+        )
+    """
+
     # Story #283: Wiki render cache tables
     CREATE_WIKI_CACHE_TABLE = """
         CREATE TABLE IF NOT EXISTS wiki_cache (
@@ -864,6 +899,9 @@ class DatabaseSchema:
             conn.execute(self.CREATE_GOLDEN_REPO_ALIASES_TABLE)
             conn.execute(self.CREATE_WRITE_MODE_MARKERS_TABLE)
             conn.execute(self.CREATE_CONTROL_PLANE_METADATA_TOMBSTONES_TABLE)
+            conn.execute(self.CREATE_METADATA_OUTBOX_TABLE)
+            conn.execute(self.CREATE_IDX_METADATA_OUTBOX_KEY)
+            conn.execute(self.CREATE_METADATA_OUTBOX_STATE_TABLE)
             # Story #283: Wiki render cache tables
             conn.execute(self.CREATE_WIKI_CACHE_TABLE)
             conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)

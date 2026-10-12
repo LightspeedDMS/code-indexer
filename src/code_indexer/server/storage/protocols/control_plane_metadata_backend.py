@@ -5,13 +5,19 @@ they live in the server's registry (SQLite solo, PostgreSQL cluster), one row
 per key, instead of in per-pod JSON files on the repository volume. Both kinds
 share one shape -- a key, its JSON document, and when it was last written --
 so one Protocol serves both, selected by ``kind``.
+
+The dual-write outbox lives here too: a change written with ``enqueue=True``
+commits its outbox row in the SAME transaction, and ``claim_outbox`` hands a
+sweeper the rows it alone may replay.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import ContextManager, Sequence, Tuple
 
-from ._shared import Any, Dict, Optional, Protocol, runtime_checkable
+from ._shared import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 #: An alias pointer (the document golden-repos/aliases/<name>.json held).
 KIND_ALIAS = "alias"
@@ -60,6 +66,16 @@ def decode_payload(raw: Any, name: str) -> Dict[str, Any]:
     return decoded
 
 
+def group_claimed_rows(rows: Sequence[Any]) -> List[Tuple[str, str, int]]:
+    """``(kind, name, highest id)`` per key from claimed ``(id, kind, name)``
+    rows, keys in the order their oldest row was claimed."""
+    highest: Dict[Tuple[str, str], int] = {}
+    for row_id, kind, name in rows:
+        key = (str(kind), str(name))
+        highest[key] = max(int(row_id), highest.get(key, int(row_id)))
+    return [(kind, name, up_to) for (kind, name), up_to in highest.items()]
+
+
 def metadata_table(kind: str) -> str:
     """Return the table for *kind*; ValueError for an unknown kind.
 
@@ -75,6 +91,48 @@ def metadata_table(kind: str) -> str:
         ) from None
 
 
+#: Seconds a SQLite outbox claim lasts before another sweeper may take it over
+#: (a crashed sweeper's rows are not stranded). PostgreSQL row locks need none.
+OUTBOX_CLAIM_LEASE_SECONDS = 300.0
+
+
+@dataclass(frozen=True)
+class OutboxRow:
+    """One outbox row: which key changed. Never a payload."""
+
+    id: int
+    kind: str
+    name: str
+
+
+@dataclass
+class OutboxState:
+    """The singleton drain/stop state every node shares."""
+
+    drain_started_epoch: Optional[float] = None
+    drain_sink: Optional[str] = None
+    stopped_at: Optional[str] = None
+    stopped_reason: Optional[str] = None
+    stopped_sink: Optional[str] = None
+
+
+class OutboxClaim(Protocol):
+    """Rows one sweeper claimed; no other sweeper replays them meanwhile."""
+
+    def keys(self) -> List[Tuple[str, str, int]]:
+        """``(kind, name, highest claimed id)`` per key, oldest key first."""
+        ...
+
+    def current(self, kind: str, name: str) -> Optional[Dict[str, Any]]:
+        """The registry's CURRENT document for the key (None: key is gone)."""
+        ...
+
+    def complete(self, kind: str, name: str, up_to_id: int) -> None:
+        """Drop every claimed row for the key up to *up_to_id* -- called only
+        after the key's file write succeeded."""
+        ...
+
+
 @runtime_checkable
 class ControlPlaneMetadataBackend(Protocol):
     """Registry storage for alias pointers and write-mode markers."""
@@ -87,13 +145,22 @@ class ControlPlaneMetadataBackend(Protocol):
         """Every stored document whose name starts with *prefix*."""
         ...
 
-    def put(self, kind: str, name: str, payload: Dict[str, Any]) -> None:
-        """Insert or replace the document for *name*; stamps updated_at now."""
+    def put(
+        self,
+        kind: str,
+        name: str,
+        payload: Dict[str, Any],
+        *,
+        enqueue: bool = False,
+    ) -> None:
+        """Insert or replace the document for *name*; stamps updated_at now.
+        With *enqueue*, an outbox row for the key commits in the same
+        transaction -- both or neither."""
         ...
 
-    def delete(self, kind: str, name: str) -> None:
+    def delete(self, kind: str, name: str, *, enqueue: bool = False) -> None:
         """Remove *name*; a missing key is not an error. Records a tombstone
-        stamped now in the same transaction."""
+        stamped now in the same transaction. *enqueue* as put."""
         ...
 
     def import_if_newer(
@@ -108,5 +175,25 @@ class ControlPlaneMetadataBackend(Protocol):
         brings the key back.
         """
         ...
+
+    def outbox_depth(self) -> int:
+        """Rows waiting in the outbox (the rollback gate wants 0)."""
+        ...
+
+    def outbox_rows(self) -> List[OutboxRow]:
+        """Every outbox row, oldest first."""
+        ...
+
+    def delete_outbox_rows(self, ids: Sequence[int]) -> int:
+        """Delete exactly these rows; returns how many were deleted."""
+        ...
+
+    def claim_outbox(self, limit: int) -> ContextManager[OutboxClaim]:
+        """Claim up to *limit* of the oldest unclaimed rows for one sweep."""
+        ...
+
+    def get_outbox_state(self) -> OutboxState: ...
+
+    def save_outbox_state(self, state: OutboxState) -> None: ...
 
     def close(self) -> None: ...

@@ -10,7 +10,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | unclassified | 0 |
 | repo-read | 461 |
 | repo-write | 93 |
-| cidx-state-in-repo | 1295 |
+| cidx-state-in-repo | 1297 |
 | migrated | 139 |
 | local-only | 173 |
 | cidx-state | 526 |
@@ -160,6 +160,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/services/memory_io.py` | 0 | 0 | 0 | 8 |
 | `server/services/memory_store_service.py` | 0 | 0 | 0 | 1 |
 | `server/services/memory_store_service_factory.py` | 0 | 0 | 0 | 1 |
+| `server/services/metadata_outbox/sinks.py` | 0 | 0 | 0 | 2 |
 | `server/services/metadata_reader.py` | 0 | 0 | 0 | 3 |
 | `server/services/provider_index_service.py` | 0 | 0 | 0 | 6 |
 | `server/services/query_analytics_export_service.py` | 0 | 0 | 0 | 3 |

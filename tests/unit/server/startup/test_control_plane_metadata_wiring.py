@@ -158,6 +158,10 @@ class TestConfigCategory:
         assert settings["control_plane_metadata"] == {
             "metadata_read_source": "registry",
             "metadata_file_dual_write": True,
+            # Deviation from the design's workspace-mcp default until the
+            # workspace-mcp file-write path exists (see sinks.py).
+            "metadata_outbox_sink": "local-files",
+            "metadata_outbox_drain_timeout_s": 600,
         }
 
     def test_read_source_and_dual_write_persist(self, tmp_path):
@@ -173,6 +177,33 @@ class TestConfigCategory:
         assert cpm is not None
         assert cpm.metadata_read_source == "files"
         assert cpm.metadata_file_dual_write is False
+
+    def test_sink_and_drain_timeout_persist(self, tmp_path):
+        service = ConfigService(server_dir_path=str(tmp_path))
+        service.load_config()
+        service.update_setting(
+            "control_plane_metadata", "metadata_outbox_sink", "workspace-mcp"
+        )
+        service.update_setting(
+            "control_plane_metadata", "metadata_outbox_drain_timeout_s", "120"
+        )
+        cpm = service.get_config().control_plane_metadata_config
+        assert cpm is not None
+        assert cpm.metadata_outbox_sink == "workspace-mcp"
+        assert cpm.metadata_outbox_drain_timeout_s == 120
+
+    @pytest.mark.parametrize(
+        "key,value",
+        [
+            ("metadata_outbox_sink", "nfs"),
+            ("metadata_outbox_drain_timeout_s", "0"),
+        ],
+    )
+    def test_invalid_outbox_settings_are_rejected(self, tmp_path, key, value):
+        service = ConfigService(server_dir_path=str(tmp_path))
+        service.load_config()
+        with pytest.raises(ValueError):
+            service.update_setting("control_plane_metadata", key, value)
 
     def test_unknown_read_source_is_rejected(self, tmp_path):
         service = ConfigService(server_dir_path=str(tmp_path))
@@ -218,6 +249,19 @@ class TestWebUiSection:
             config = routes._get_current_config()
         assert config["control_plane_metadata"]["metadata_read_source"] == "registry"
 
+    @pytest.mark.parametrize(
+        "data",
+        [
+            {"metadata_outbox_sink": "nfs"},
+            {"metadata_outbox_drain_timeout_s": "0"},
+            {"metadata_outbox_drain_timeout_s": "soon"},
+        ],
+    )
+    def test_validation_rejects_bad_outbox_settings(self, data):
+        from code_indexer.server.web.routes import _validate_config_section
+
+        assert _validate_config_section("control_plane_metadata", data) is not None
+
     def test_validation_rejects_unknown_read_source(self):
         from code_indexer.server.web.routes import _validate_config_section
 
@@ -250,3 +294,86 @@ class TestWebUiSection:
         assert 'action="/admin/config/control_plane_metadata"' in section
         assert 'name="metadata_read_source"' in section
         assert 'name="metadata_file_dual_write"' in section
+        assert 'name="metadata_outbox_sink"' in section
+        assert 'name="metadata_outbox_drain_timeout_s"' in section
+
+
+class TestOutboxSweeperWiring:
+    def test_outbox_settings_provider_reads_runtime_config(self):
+        from code_indexer.server.services.metadata_outbox.sweeper import (
+            OutboxSettings,
+        )
+        from code_indexer.server.startup.control_plane_metadata_wiring import (
+            outbox_settings_from_config_service,
+        )
+
+        config = SimpleNamespace(
+            control_plane_metadata_config=SimpleNamespace(
+                metadata_outbox_sink="workspace-mcp",
+                metadata_outbox_drain_timeout_s=30,
+            )
+        )
+        provider = outbox_settings_from_config_service(lambda: config)
+        assert provider() == OutboxSettings(sink="workspace-mcp", drain_timeout_s=30)
+
+    def test_started_with_registry_and_gauge_registered(self, tmp_path):
+        from code_indexer.global_repos.control_plane_metadata import (
+            ControlPlaneMetadata,
+        )
+        from code_indexer.server.startup.control_plane_metadata_wiring import (
+            start_metadata_outbox_sweeper,
+            stop_metadata_outbox_sweeper,
+        )
+        from tests.utils.control_plane_metadata_fixtures import (
+            scoped_install,
+            sqlite_backend_from_template,
+        )
+
+        template = build_schema_template(tmp_path)
+        backend_dir = tmp_path / "copy"
+        backend_dir.mkdir()
+        backend = sqlite_backend_from_template(template, backend_dir)
+        gauges = []
+
+        class _Meter:
+            def create_observable_gauge(self, **kwargs):
+                gauges.append(kwargs["name"])
+
+        telemetry = SimpleNamespace(get_meter=lambda name: _Meter())
+        app = SimpleNamespace(state=SimpleNamespace())
+        with scoped_install(
+            ControlPlaneMetadata(tmp_path / "golden-repos", backend=backend)
+        ):
+            sweeper = start_metadata_outbox_sweeper(app, telemetry)
+            try:
+                assert sweeper is app.state.metadata_outbox_sweeper
+                assert sweeper is not None
+                assert gauges == ["cidx_metadata_outbox_depth"]
+            finally:
+                stop_metadata_outbox_sweeper(app)
+
+    def test_not_started_without_registry(self):
+        from code_indexer.global_repos.control_plane_metadata import (
+            install_control_plane_metadata,
+            uninstall_control_plane_metadata,
+        )
+        from code_indexer.server.startup.control_plane_metadata_wiring import (
+            start_metadata_outbox_sweeper,
+        )
+
+        previous = installed_control_plane_metadata()
+        uninstall_control_plane_metadata()
+        try:
+            app = SimpleNamespace(state=SimpleNamespace())
+            assert start_metadata_outbox_sweeper(app) is None
+            assert app.state.metadata_outbox_sweeper is None
+        finally:
+            if previous is not None:
+                install_control_plane_metadata(previous)
+
+    def test_lifespan_starts_and_stops_the_sweeper(self):
+        source = (
+            Path(_SRC) / "code_indexer" / "server" / "startup" / "lifespan.py"
+        ).read_text()
+        assert "start_metadata_outbox_sweeper(app, telemetry_manager)" in source
+        assert "stop_metadata_outbox_sweeper(app)" in source

@@ -1339,6 +1339,15 @@ METADATA_READ_SOURCE_REGISTRY = "registry"
 METADATA_READ_SOURCE_FILES = "files"
 METADATA_READ_SOURCES = (METADATA_READ_SOURCE_REGISTRY, METADATA_READ_SOURCE_FILES)
 
+#: metadata_outbox_sink values: how the outbox sweeper writes the files.
+METADATA_OUTBOX_SINK_WORKSPACE_MCP = "workspace-mcp"
+METADATA_OUTBOX_SINK_LOCAL_FILES = "local-files"
+METADATA_OUTBOX_SINKS = (
+    METADATA_OUTBOX_SINK_WORKSPACE_MCP,
+    METADATA_OUTBOX_SINK_LOCAL_FILES,
+)
+DEFAULT_METADATA_OUTBOX_DRAIN_TIMEOUT_S = 600
+
 
 @dataclass
 class ControlPlaneMetadataConfig:
@@ -1358,10 +1367,21 @@ class ControlPlaneMetadataConfig:
       registry second, synchronously, so the server reads its own writes.
     - ``metadata_file_dual_write``: also write the files (default on). Turned
       off, and the files removed, by the release that retires the canary.
+      A change commits with an outbox row; the sweeper on the leader replays
+      it to the file.
+    - ``metadata_outbox_sink``: how the sweeper writes the files.
+      ``workspace-mcp`` (the mount-less fleet) or ``local-files`` (this pod's
+      own disk). The design's default is ``workspace-mcp``; it is
+      ``local-files`` until workspace-mcp's file-write path exists -- the
+      workspace-mcp sink fails loud and keeps every row until then.
+    - ``metadata_outbox_drain_timeout_s``: with ``local-files``, how long the
+      leader drains before it stops and logs every undrained key (default 600).
     """
 
     metadata_read_source: str = METADATA_READ_SOURCE_REGISTRY
     metadata_file_dual_write: bool = True
+    metadata_outbox_sink: str = METADATA_OUTBOX_SINK_LOCAL_FILES
+    metadata_outbox_drain_timeout_s: int = DEFAULT_METADATA_OUTBOX_DRAIN_TIMEOUT_S
 
 
 @dataclass

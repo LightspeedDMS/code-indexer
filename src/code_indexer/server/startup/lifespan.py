@@ -5727,6 +5727,28 @@ def make_lifespan(
                 exc_info=True,
             )
 
+        # Content seam step 5a: the control-plane metadata outbox sweeper.
+        # Leader-gated (one sweeper per fleet); replays alias / write-mode
+        # changes to the old files during the rollback window, and exports
+        # cidx_metadata_outbox_depth. Non-fatal: a failure here leaves rows in
+        # the outbox (visible, never dropped), it must not abort startup.
+        try:
+            from code_indexer.server.startup.control_plane_metadata_wiring import (
+                start_metadata_outbox_sweeper,
+            )
+
+            start_metadata_outbox_sweeper(app, telemetry_manager)
+        except Exception as e:
+            app.state.metadata_outbox_sweeper = None
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-5A01",
+                    f"Metadata outbox sweeper failed to start (rows stay in the "
+                    f"outbox): {e}",
+                ),
+                exc_info=True,
+            )
+
         # Story #1290: startup blank-out sweep — hard-delete legacy/version<2
         # temporal collections (AC19/AC20) for every golden repo. Replaces the
         # old Story #1172 background HNSW-extraction migration (deleted along
@@ -6147,6 +6169,16 @@ def make_lifespan(
                     ),
                     exc_info=True,
                 )
+
+        # Shutdown: Stop the metadata outbox sweeper (content seam step 5a).
+        try:
+            from code_indexer.server.startup.control_plane_metadata_wiring import (
+                stop_metadata_outbox_sweeper,
+            )
+
+            stop_metadata_outbox_sweeper(app)
+        except Exception as e:
+            logger.error("Error stopping metadata outbox sweeper: %s", e, exc_info=True)
 
         # Shutdown: Stop global repos background services BEFORE other cleanup
         logger.info(

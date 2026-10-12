@@ -14,8 +14,10 @@ comes from and where a write goes:
 * No registry installed (the CLI, unit tests, a process that never ran
   ``service_init``): the files, exactly as before.
 * ``metadata_read_source=registry`` (default): reads come from the registry;
-  writes go to the registry, and -- while ``metadata_file_dual_write`` is on --
-  to the old files too, so a rollback can read them.
+  writes go to the registry. While ``metadata_file_dual_write`` is on, each
+  change commits an outbox row in the same transaction and the leader's
+  ``MetadataOutboxSweeper`` replays it to the old file, so a rollback can read
+  it there.
 * ``metadata_read_source=files`` (rollback): reads come from the files; a write
   goes to the file FIRST and the registry second, synchronously, so a
   rolled-back server reads its own writes.
@@ -326,12 +328,14 @@ class ControlPlaneMetadata:
             return
         settings = self.current_settings()
         if settings.read_source == READ_SOURCE_FILES:
+            # File FIRST, registry second, synchronously: a rolled-back server
+            # reads its own writes. No outbox row -- the file is already there.
             self.files.write(kind, name, document)
             self.backend.put(kind, name, document)
             return
-        self.backend.put(kind, name, document)
-        if settings.file_dual_write:
-            self._dual_write(kind, name)
+        # The registry change and its outbox row commit together; the sweeper
+        # brings the file in line later.
+        self.backend.put(kind, name, document, enqueue=settings.file_dual_write)
 
     def delete(self, kind: str, name: str) -> None:
         if self.backend is None:
@@ -342,33 +346,7 @@ class ControlPlaneMetadata:
             self.files.delete(kind, name)
             self.backend.delete(kind, name)
             return
-        self.backend.delete(kind, name)
-        if settings.file_dual_write:
-            self._dual_write(kind, name)
-
-    def _dual_write(self, kind: str, name: str) -> None:
-        """Bring the file for *name* in line with the registry's CURRENT
-        value -- write it, or delete it when the key is gone.
-
-        Best-effort: the registry change has already committed and is what
-        every reader sees, so a failed file write is logged, never raised.
-        """
-        assert self.backend is not None
-        try:
-            current = self.backend.get(kind, name)
-            if current is None:
-                self.files.delete(kind, name)
-            else:
-                self.files.write(kind, name, current)
-        except Exception as exc:
-            logger.warning(
-                "Control-plane metadata: dual-write of %s %r to %s failed "
-                "(registry is current; the rollback file is stale): %s",
-                kind,
-                name,
-                self.files.path_for(kind, name),
-                exc,
-            )
+        self.backend.delete(kind, name, enqueue=settings.file_dual_write)
 
     # ------------------------------------------------------------------
     # Startup import

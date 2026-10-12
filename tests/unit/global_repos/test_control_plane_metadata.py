@@ -180,19 +180,6 @@ class TestRegistryIsTheSourceOfTruth:
         assert not manager.alias_exists(ALIAS)
 
 
-class TestDualWriteKeepsTheFileInStep:
-    def test_create_swap_delete_follow_the_registry(self, metadata, golden_repos_dir):
-        manager = AliasManager(golden_repos_dir / "aliases")
-        manager.create_alias(ALIAS, "/s/v_1")
-        manager.swap_alias(ALIAS, "/s/v_2", "/s/v_1")
-
-        on_disk = json.loads(_alias_file(golden_repos_dir).read_text())
-        assert on_disk == manager.read_record(ALIAS)
-
-        manager.delete_alias(ALIAS)
-        assert not _alias_file(golden_repos_dir).exists()
-
-
 # ---------------------------------------------------------------------------
 # metadata_read_source switch
 # ---------------------------------------------------------------------------
@@ -302,15 +289,6 @@ class TestStartupImport:
         ControlPlaneMetadata(golden_repos_dir, backend=backend).import_files()
 
         assert backend.get(KIND_ALIAS, ALIAS)["target_path"] == "/s/file-newer"
-
-    def test_dual_written_file_is_not_reimported(
-        self, metadata, backend, golden_repos_dir
-    ):
-        """The dual-written file is a copy of the registry row, dated before
-        it was stored, so a later boot's import leaves the row alone."""
-        AliasManager(golden_repos_dir / "aliases").create_alias(ALIAS, "/s/v_1")
-
-        assert metadata.import_files()["imported"] == 0
 
     def test_undated_file_fills_an_empty_slot_only(self, golden_repos_dir, backend):
         _write_file(_alias_file(golden_repos_dir), {"target_path": "/s/undated"})

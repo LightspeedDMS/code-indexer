@@ -111,6 +111,10 @@ ROUTE_EXEMPT: Dict[str, str] = {
     "POST /api/admin/diagnostics/dedup-warnings/clear-all": (
         "clears the active storage-migration duplicate warnings"
     ),
+    "POST /api/admin/metadata-outbox/abandon": (
+        "drops undrained rollback-window file replays of alias/write-mode "
+        "metadata (registry unchanged; each dropped key is logged by name)"
+    ),
     "POST /api/admin/reaper/trigger": (
         "starts one cycle of the idle activated-repository reaper, which "
         "applies the configured idle policy (same as its scheduled run)"

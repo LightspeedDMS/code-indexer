@@ -84,3 +84,75 @@ def install_registry_metadata(
     if start_import:
         metadata.start_import()
     return metadata
+
+
+# ----------------------------------------------------------------------
+# Outbox sweeper (dual-write to the files during the rollback window)
+# ----------------------------------------------------------------------
+
+
+def outbox_settings_from_config_service(
+    get_config: Optional[Callable[[], Any]] = None,
+) -> Callable[[], Any]:
+    """An OutboxSettings provider over the runtime (DB-backed) config."""
+    from code_indexer.server.services.metadata_outbox.sweeper import OutboxSettings
+
+    def _get_config() -> Any:
+        if get_config is not None:
+            return get_config()
+        from code_indexer.server.services.config_service import get_config_service
+
+        return get_config_service().get_config()
+
+    def _provider() -> OutboxSettings:
+        cpm = _get_config().control_plane_metadata_config
+        return OutboxSettings(
+            sink=cpm.metadata_outbox_sink,
+            drain_timeout_s=int(cpm.metadata_outbox_drain_timeout_s),
+        )
+
+    return _provider
+
+
+def start_metadata_outbox_sweeper(app: Any, telemetry_manager: Any = None) -> Any:
+    """Build and start the leader-gated outbox sweeper; park it on
+    ``app.state.metadata_outbox_sweeper`` and register the depth gauge.
+
+    Returns the sweeper, or None when no registry-backed component is
+    installed (files are the store; there is no outbox).
+    """
+    from code_indexer.global_repos.control_plane_metadata import (
+        installed_control_plane_metadata,
+    )
+    from code_indexer.server.services.metadata_outbox.depth_gauge import (
+        register_outbox_depth_gauge,
+    )
+    from code_indexer.server.services.metadata_outbox.sweeper import (
+        MetadataOutboxSweeper,
+    )
+    from code_indexer.server.startup.leader_gate import resolve_sweep_leader
+
+    metadata = installed_control_plane_metadata()
+    app.state.metadata_outbox_sweeper = None
+    if metadata is None or metadata.backend is None:
+        logger.info("Metadata outbox sweeper not started: no registry installed")
+        return None
+    sweeper = MetadataOutboxSweeper(
+        metadata=metadata,
+        backend=metadata.backend,
+        settings=outbox_settings_from_config_service(),
+        leader_check=lambda: resolve_sweep_leader(app.state),
+    )
+    sweeper.start()
+    app.state.metadata_outbox_sweeper = sweeper
+    if telemetry_manager is not None:
+        register_outbox_depth_gauge(
+            telemetry_manager.get_meter("cidx.metadata"), sweeper.depth
+        )
+    return sweeper
+
+
+def stop_metadata_outbox_sweeper(app: Any) -> None:
+    sweeper = getattr(app.state, "metadata_outbox_sweeper", None)
+    if sweeper is not None:
+        sweeper.stop()

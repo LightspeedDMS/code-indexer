@@ -1070,7 +1070,8 @@ function saveLlmCredsConfig() {
         Golden-repo alias pointers and write-mode markers live in the server's registry
         (PostgreSQL in cluster mode, SQLite in solo mode) instead of in files on the
         repository volume. Until the canary is released fleet-wide they are also written to
-        the old files, so a rollback can read them. Set the read source to
+        the old files (through an outbox the leader drains; its depth is the
+        <code>cidx_metadata_outbox_depth</code> gauge), so a rollback can read them. Set the read source to
         <code>files</code> only to roll back: a rolled-back server then reads the
         dual-written files, and its own writes go to the file first and the registry second.
     </p>
@@ -1087,6 +1088,16 @@ function saveLlmCredsConfig() {
                     <td class="config-label">File Dual-Write</td>
                     <td class="config-value">{{ 'Yes' if config.control_plane_metadata.metadata_file_dual_write else 'No' }}</td>
                     <td class="config-description">Also write the old alias/marker files for the rollback window (default: Yes)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Outbox Sink</td>
+                    <td class="config-value">{{ config.control_plane_metadata.metadata_outbox_sink }}</td>
+                    <td class="config-description">How the outbox sweeper writes the files: workspace-mcp (mount-less fleet; no write path yet, rows are kept) or local-files (this pod's disk)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Outbox Drain Timeout (s)</td>
+                    <td class="config-value">{{ config.control_plane_metadata.metadata_outbox_drain_timeout_s }}</td>
+                    <td class="config-description">With local-files, how long the leader drains before it stops and logs every undrained key (default: 600)</td>
                 </tr>
             </table>
             <div class="form-actions">
@@ -1115,6 +1126,18 @@ function saveLlmCredsConfig() {
                         <option value="false" {% if not config.control_plane_metadata.metadata_file_dual_write %}selected{% endif %}>No</option>
                     </select>
                     <small>Turned off by the release that retires the canary.</small>
+                </label>
+                <label for="cpm-metadata-outbox-sink">
+                    Outbox Sink
+                    <select id="cpm-metadata-outbox-sink" name="metadata_outbox_sink">
+                        <option value="local-files" {% if config.control_plane_metadata.metadata_outbox_sink == 'local-files' %}selected{% endif %}>local-files</option>
+                        <option value="workspace-mcp" {% if config.control_plane_metadata.metadata_outbox_sink == 'workspace-mcp' %}selected{% endif %}>workspace-mcp</option>
+                    </select>
+                    <small>workspace-mcp has no file-write path yet: with it selected the outbox is kept, not drained.</small>
+                </label>
+                <label for="cpm-metadata-outbox-drain-timeout">
+                    Outbox Drain Timeout (s)
+                    <input type="number" id="cpm-metadata-outbox-drain-timeout" name="metadata_outbox_drain_timeout_s" min="1" value="{{ config.control_plane_metadata.metadata_outbox_drain_timeout_s }}">
                 </label>
             </div>
             <div class="form-actions">

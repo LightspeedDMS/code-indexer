@@ -30,6 +30,7 @@ from typing import (
 from ..utils.config_manager import (
     CidxMetaBackupConfig,
     LifecycleAnalysisConfig,
+    METADATA_OUTBOX_SINKS,
     METADATA_READ_SOURCES,
     RerankConfig,
     ServerConfig,
@@ -2967,6 +2968,19 @@ class ConfigService:
             cpm.metadata_read_source = source
         elif key == "metadata_file_dual_write":
             cpm.metadata_file_dual_write = _parse_bool(value)
+        elif key == "metadata_outbox_sink":
+            sink = str(value).strip().lower()
+            if sink not in METADATA_OUTBOX_SINKS:
+                raise ValueError(
+                    f"metadata_outbox_sink must be one of "
+                    f"{list(METADATA_OUTBOX_SINKS)}, got {value!r}"
+                )
+            cpm.metadata_outbox_sink = sink
+        elif key == "metadata_outbox_drain_timeout_s":
+            timeout = int(value)
+            if timeout < 1:
+                raise ValueError("metadata_outbox_drain_timeout_s must be >= 1")
+            cpm.metadata_outbox_drain_timeout_s = timeout
         else:
             raise ValueError(f"Unknown control_plane_metadata setting: {key}")
 
