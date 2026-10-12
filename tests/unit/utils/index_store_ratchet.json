@@ -13,7 +13,7 @@
  "daemon/socket_helper.py": 1,
  "daemon/watch_manager.py": 1,
  "global_repos/directory_explorer.py": 2,
- "global_repos/refresh_scheduler.py": 11,
+ "global_repos/refresh_scheduler.py": 10,
  "mode_specific_handlers.py": 4,
  "proxy/config_manager.py": 3,
  "proxy/proxy_initializer.py": 5,

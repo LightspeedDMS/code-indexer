@@ -1505,6 +1505,21 @@ def make_lifespan(
                 getattr(configured_ripgrep_backend, "is_local", "unknown"),
             )
 
+            # IndexStore step 2, same shape: local by default, so inert until
+            # an operator sets index_store_backend='delegated'; then each
+            # refresh publishes its built index and snapshots a checked-out one.
+            from code_indexer.server.startup.index_store_wiring import (
+                build_configured_index_store,
+            )
+
+            configured_index_store = build_configured_index_store(server_config)
+            app.state.index_store = configured_index_store
+            logger.info(
+                "IndexStore parked on app.state: %s (is_local=%s)",
+                type(configured_index_store).__name__,
+                configured_index_store.is_local,
+            )
+
             global_lifecycle_manager = GlobalReposLifecycleManager(
                 str(golden_repos_dir),
                 background_job_manager=background_job_manager,
@@ -1512,6 +1527,7 @@ def make_lifespan(
                 job_tracker=job_tracker,
                 snapshot_manager=snapshot_manager,
                 git_backend=configured_git_backend,
+                index_store=configured_index_store,
                 # Bug #1390: RefreshScheduler's filesystem reconciliation needs
                 # to update golden_repos_metadata (bare-alias-keyed) alongside
                 # global_repos -- without this, cluster mode would silently
