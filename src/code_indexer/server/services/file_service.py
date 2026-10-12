@@ -137,13 +137,16 @@ class ContentSeamSource:
     root: str
 
 
-def content_seam_source(repo_path: str) -> Optional[ContentSeamSource]:
+def content_seam_source(
+    repo_path: str, *, consumer: str = _SEAM_CONSUMER
+) -> Optional[ContentSeamSource]:
     """The seam to read *repo_path* through, or None to read the local disk.
 
     None -- today's behaviour, unchanged -- unless the running server's content
     backend is NOT local. Then the repository is not on this pod: an alias
     target that is a pod-local versioned snapshot (index state only) maps to
-    the golden repo's base clone, which the backend serves.
+    the golden repo's base clone, which the backend serves. ``consumer`` names
+    the caller in the warning logged when that mapping fails.
     """
     from code_indexer.server.startup.content_backend_wiring import (
         golden_repo_content_root,
@@ -153,7 +156,7 @@ def content_seam_source(repo_path: str) -> Optional[ContentSeamSource]:
     backend = server_content_backend()
     if backend is None or backend.is_local:
         return None
-    root = golden_repo_content_root(repo_path, consumer=_SEAM_CONSUMER)
+    root = golden_repo_content_root(repo_path, consumer=consumer)
     return ContentSeamSource(backend=backend, root=str(root))
 
 

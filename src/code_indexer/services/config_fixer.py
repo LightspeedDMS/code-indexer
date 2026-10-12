@@ -204,39 +204,6 @@ class CollectionAnalyzer:
             return []
 
 
-class FileSystemAnalyzer:
-    """Analyzes project file system to determine indexable files."""
-
-    @staticmethod
-    def analyze_project_files(codebase_dir: Path, config: Config) -> Dict[str, Any]:
-        """Analyze actual project files to determine what should be indexed."""
-        try:
-            from code_indexer.services.file_identifier import FileIdentifier
-
-            file_identifier = FileIdentifier(codebase_dir, config)
-            actual_files = file_identifier.get_current_files()
-
-            return {
-                "total_files_to_index": len(actual_files),
-                "discovered_files": list(actual_files.keys()),
-                "file_extensions_found": list(
-                    set(
-                        Path(f).suffix.lstrip(".")
-                        for f in actual_files.keys()
-                        if Path(f).suffix
-                    )
-                ),
-            }
-
-        except Exception as e:
-            print(f"Warning: Could not analyze project files: {e}")
-            return {
-                "total_files_to_index": 0,
-                "discovered_files": [],
-                "file_extensions_found": [],
-            }
-
-
 class ConfigurationValidator:
     """Validates configuration for correctness and consistency."""
 

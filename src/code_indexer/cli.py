@@ -3484,6 +3484,21 @@ def index(
         console.print(f"❌ {exc}", style="red")
         sys.exit(1)
 
+    # Temporal indexing walks history with LOCAL git (log, diff, show). A
+    # server stamps --content-backend/--git-backend delegated on every child
+    # spawned on a pod without the repository -- refresh skips temporal there,
+    # but add, add-index, reindex and the MCP rebuild still spawn it. Refused
+    # here, before --clear can wipe anything, rather than index a history this
+    # machine cannot read.
+    if index_commits and "delegated" in (content_backend, git_backend):
+        console.print(
+            "❌ Temporal indexing (--index-commits) does not run through the "
+            "content or git seam yet: the repository's history is not on this "
+            "machine. Refusing instead of indexing an empty history.",
+            style="red",
+        )
+        sys.exit(1)
+
     # Validate --diff-context flag (must happen before daemon delegation)
     if diff_context is not None and not index_commits:
         console.print(

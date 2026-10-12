@@ -121,14 +121,6 @@ class WatchMetadata:
         self.processing_interrupted = True
         self.last_error = error
 
-    def should_reprocess_file(self, file_path: Path) -> bool:
-        """Check if file should be reprocessed based on timestamps."""
-        if not file_path.exists():
-            return False
-
-        file_mtime = file_path.stat().st_mtime
-        return file_mtime > self.last_sync_timestamp
-
     def get_recovery_files(self) -> List[str]:
         """Get list of files that need recovery processing."""
         if not self.processing_interrupted:

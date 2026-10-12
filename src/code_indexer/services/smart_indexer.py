@@ -15,7 +15,18 @@ import time
 import datetime
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Any, FrozenSet, Optional, Callable, Tuple, TYPE_CHECKING
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+)
 from dataclasses import dataclass
 
 from ..config import Config, VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL
@@ -1138,7 +1149,7 @@ class SmartIndexer(HighThroughputProcessor):
             abs_path = codebase / rel_path
             if str(abs_path) in covered:
                 continue
-            if not abs_path.exists():
+            if not self._exists_in_this_pass(abs_path):
                 continue
             merged.append(abs_path)
             covered.add(str(abs_path))
@@ -1186,7 +1197,7 @@ class SmartIndexer(HighThroughputProcessor):
         reprocess_files: List[Path] = []
         for rel_path in pending:
             abs_path = codebase / rel_path
-            if str(abs_path) in covered or not abs_path.exists():
+            if str(abs_path) in covered or not self._exists_in_this_pass(abs_path):
                 continue
             reprocess_files.append(abs_path)
 
@@ -2383,33 +2394,9 @@ class SmartIndexer(HighThroughputProcessor):
         )
 
         # NEW: Detect files that exist in database but were deleted from filesystem
-        deleted_files = []
-        disk_files_set = {
-            str(f.relative_to(self.config.codebase_dir)) for f in all_files_to_index
-        }
-
-        for indexed_file_path in indexed_files_with_timestamps:
-            # Convert to string for comparison
-            indexed_file_str = (
-                str(indexed_file_path.relative_to(self.config.codebase_dir))
-                if hasattr(indexed_file_path, "relative_to")
-                else str(indexed_file_path)
-            )
-
-            if indexed_file_str not in disk_files_set:
-                # CRITICAL: Check if file genuinely deleted from filesystem vs just branch switch
-                if self.is_git_aware():
-                    # For git projects, check if file exists in current working directory
-                    # If it doesn't exist on disk at all, it was genuinely deleted
-                    file_path = self.config.codebase_dir / indexed_file_str
-                    if not file_path.exists():
-                        # File was genuinely deleted from filesystem - safe to remove from database
-                        deleted_files.append(indexed_file_str)
-                    # If file exists on disk but not in our scan, it might be excluded by filters
-                    # In that case, branch isolation will handle visibility
-                else:
-                    # File exists in database but not on disk - was deleted (non-git projects)
-                    deleted_files.append(indexed_file_str)
+        deleted_files = self._files_deleted_since_indexed(
+            indexed_files_with_timestamps, all_files_to_index
+        )
 
         # Handle deleted files using branch-aware strategy
         if deleted_files:
@@ -2843,7 +2830,7 @@ class SmartIndexer(HighThroughputProcessor):
         retried: List[Path] = []
         for stored in recorded:
             candidate = self._reanchor_resume_path(stored, codebase)
-            if candidate.exists() and self._resume_candidate_is_safe(
+            if self._exists_in_this_pass(candidate) and self._resume_candidate_is_safe(
                 candidate, resolved_codebase
             ):
                 retried.append(candidate)
@@ -3049,7 +3036,7 @@ class SmartIndexer(HighThroughputProcessor):
             )
 
         # Filter out files that no longer exist
-        existing_files = [f for f in safe_files if f.exists()]
+        existing_files = [f for f in safe_files if self._exists_in_this_pass(f)]
 
         # Bug #1969 Round 5 (R4-F1): fold in any durably pending self-heal
         # reprocess paths BEFORE the "nothing to do" check below -- a
@@ -3205,153 +3192,6 @@ class SmartIndexer(HighThroughputProcessor):
 
         return stats
 
-    def _process_files_with_metadata(
-        self,
-        files: List[Path],
-        batch_size: int,
-        progress_callback: Optional[Callable],
-        resumable: bool = False,
-        vector_thread_count: Optional[int] = None,
-    ) -> ProcessingStats:
-        """Process files with progressive metadata updates and throughput monitoring.
-
-        Bug #1746 Change 3 (extended, code review finding B2): this method
-        is confirmed DEAD/ORPHAN code -- zero production call sites
-        (verified by exhaustive grep across src/), exercised only by a
-        unit test that invokes it directly. It calls
-        process_files_high_throughput() below with NO surrounding
-        try/except and never calls begin_indexing()/end_indexing()/
-        abort_indexing() itself -- unlike every real session-managing
-        entry point (_do_full_index, _do_incremental_index,
-        _do_resume_interrupted, _do_reconcile_with_database,
-        process_files_incrementally), which all own an indexing session
-        lifecycle and were fixed to abort instead of finalize on a fatal
-        ChunkStoreUnavailableError. Because this method never begins a
-        session, there is no incorrect finalize to prevent here: a fatal
-        error already propagates uncaught to whatever future caller
-        invokes it. If this method is ever wired into a real call site,
-        that caller becomes responsible for the same abort-vs-finalize
-        decision the other five entry points make (see
-        _finalize_or_abort_indexing_session()).
-        """
-
-        stats = ProcessingStats()
-        stats.start_time = time.time()
-
-        def update_metadata(file_path: Path, chunks_count=0, failed=False):
-            """Update metadata after each file."""
-            if resumable:
-                # Use resumable tracking
-                if failed:
-                    self.progressive_metadata.mark_file_failed(str(file_path))
-                else:
-                    self.progressive_metadata.mark_file_completed(
-                        str(file_path), chunks_count
-                    )
-            else:
-                # Use legacy tracking
-                self.progressive_metadata.update_progress(
-                    files_processed=1,
-                    chunks_added=chunks_count,
-                    failed_files=1 if failed else 0,
-                )
-
-        # CRITICAL: Delete old chunks for files being re-indexed during reconcile
-        # This prevents old content from remaining in the database when files are modified
-        collection_name = self.vector_store_client.resolve_collection_name(
-            self.config, self.embedding_provider
-        )
-
-        if progress_callback:
-            progress_callback(
-                0,
-                0,
-                Path(""),
-                info=f"🧹 Cleaning old chunks for {len(files)} files before re-indexing...",
-            )
-
-        files_cleaned = 0
-        for file_path in files:
-            # Convert to relative path for database lookup
-            try:
-                if file_path.is_absolute():
-                    relative_path = str(file_path.relative_to(self.config.codebase_dir))
-                else:
-                    relative_path = str(file_path)
-            except ValueError:
-                # File outside codebase_dir, use as-is
-                relative_path = str(file_path)
-
-            # Delete all existing chunks for this file
-            # Bug #1575 follow-up: was previously called as
-            # (filter_dict, collection_name) -- the WRONG order against the
-            # real FilesystemVectorStore.delete_by_filter(self,
-            # collection_name, filter_conditions) signature. The swapped
-            # call raised TypeError inside scroll_points, caught by
-            # delete_by_filter's own broad except-Exception and silently
-            # turned into `return False` -- this cleanup had never actually
-            # deleted anything. Fixed to the correct order.
-            success = self.vector_store_client.delete_by_filter(
-                collection_name,
-                {"must": [{"key": "path", "match": {"value": relative_path}}]},
-            )
-            if success:
-                files_cleaned += 1
-                logger.debug(f"Deleted old chunks for file: {relative_path}")
-
-        if progress_callback:
-            progress_callback(
-                0,
-                0,
-                Path(""),
-                info=f"✅ Cleaned old chunks for {files_cleaned}/{len(files)} files",
-            )
-
-        # Use queue-based high-throughput processing for all code paths
-        # Use config.json setting directly
-        if vector_thread_count is None:
-            vector_thread_count = self.config.voyage_ai.parallel_requests
-            logger.info(
-                f"Using vector thread count: {vector_thread_count} (from config.json)"
-            )
-
-        # Process all files using queue-based high-throughput approach
-        high_throughput_stats = self.process_files_high_throughput(
-            files,
-            vector_thread_count=vector_thread_count,
-            batch_size=batch_size,
-            progress_callback=progress_callback,
-            fts_manager=fts_manager,  # type: ignore[name-defined]  # noqa: F821 (lazy-loaded FTS manager)
-        )
-
-        # Update metadata for all files based on success/failure
-        successful_files = high_throughput_stats.files_processed
-
-        # For successful files, estimate chunks per file
-        chunks_per_file = (
-            high_throughput_stats.chunks_created // successful_files
-            if successful_files > 0
-            else 0
-        )
-
-        for i, file_path in enumerate(files):
-            if i < successful_files:
-                # File was processed successfully
-                update_metadata(file_path, chunks_count=chunks_per_file, failed=False)
-                stats.total_size += file_path.stat().st_size
-            else:
-                # File was not processed successfully
-                update_metadata(file_path, chunks_count=0, failed=True)
-
-        # Convert high-throughput stats to processing stats format
-        stats.files_processed = high_throughput_stats.files_processed
-        stats.chunks_created = high_throughput_stats.chunks_created
-        stats.failed_files = high_throughput_stats.failed_files
-        stats.cancelled = high_throughput_stats.cancelled
-
-        stats.end_time = time.time()
-        return stats
-
     def get_indexing_status(self) -> Dict[str, Any]:
         """Get current indexing status and statistics."""
         return self.progressive_metadata.get_stats()
@@ -3370,75 +3210,6 @@ class SmartIndexer(HighThroughputProcessor):
     def clear_progress(self):
         """Clear progress metadata (for fresh start)."""
         self.progressive_metadata.clear()
-
-    def cleanup_branch_data(self, branch: str) -> Dict[str, int]:
-        """
-        Clean up branch data by hiding content points that don't exist in the branch.
-
-        Returns a dictionary with cleanup statistics.
-        """
-        try:
-            collection_name = self.vector_store_client.resolve_collection_name(
-                self.config, self.embedding_provider
-            )
-
-            # Get all content points for this branch
-            content_points, _ = self.vector_store_client.scroll_points(
-                collection_name=collection_name,
-                filter_conditions={
-                    "must": [{"key": "visible_branches", "match": {"value": branch}}]
-                },
-                limit=10000,  # Process in batches if needed
-                self_heal=True,
-            )
-
-            content_points_hidden = 0
-            content_points_preserved = 0
-
-            # Get current files in branch from git
-            try:
-                result = subprocess.run(
-                    ["git", "ls-tree", "-r", "--name-only", branch],
-                    cwd=self.config.root_path,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                current_files_in_branch = set(result.stdout.strip().split("\n"))
-            except subprocess.CalledProcessError:
-                logger.warning(
-                    f"Could not get files for branch {branch}, skipping cleanup"
-                )
-                return {"content_points_hidden": 0, "content_points_preserved": 0}
-
-            # Check each content point
-            for point in content_points:
-                file_path = point.get("payload", {}).get("file_path", "")
-                if file_path and file_path not in current_files_in_branch:
-                    # Hide this file from the branch
-                    self._hide_file_in_branch_thread_safe(
-                        file_path, branch, collection_name
-                    )
-                    content_points_hidden += 1
-                else:
-                    content_points_preserved += 1
-
-            cleanup_result = {
-                "content_points_hidden": content_points_hidden,
-                "content_points_preserved": content_points_preserved,
-            }
-
-            logger.info(
-                f"Branch cleanup completed for {branch}: "
-                f"{cleanup_result['content_points_hidden']} content points hidden, "
-                f"{cleanup_result['content_points_preserved']} preserved"
-            )
-
-            return cleanup_result
-
-        except Exception as e:
-            logger.error(f"Failed to cleanup branch {branch}: {e}")
-            return {"content_points_hidden": 0, "content_points_preserved": 0}
 
     def process_files_incrementally(
         self,
@@ -3783,7 +3554,7 @@ class SmartIndexer(HighThroughputProcessor):
         contain a "working_dir" substring -- a previous string-match check
         on the point id was dead code against real persisted data. The
         authoritative signal is the payload shape itself:
-        `high_throughput_processor.py`'s `_create_vector_point` writes
+        `file_chunking_manager.py`'s `_create_vector_point` writes
         `filesystem_mtime`/`filesystem_size` payload fields ONLY for a
         non-git-available (mtime/size-identified) file, and never alongside
         `git_blob_hash`/`git_commit_hash`.
@@ -4342,6 +4113,38 @@ class SmartIndexer(HighThroughputProcessor):
                 progress_callback(
                     0, 0, Path(""), info=f"Deletion detection failed: {e}"
                 )
+
+    def _files_deleted_since_indexed(
+        self, indexed_files: Iterable[Any], discovered_files: Sequence[Path]
+    ) -> List[str]:
+        """Indexed paths (repo-relative) whose chunks reconcile must delete.
+
+        A file in the index but not in this pass's discovery is deleted when it
+        is gone from the repository. For a git project a file that still exists
+        but was not discovered (filtered out) is left for branch isolation, so
+        "still exists" must be asked of the repository AS THIS PASS SEES IT: on
+        a pod without the checkout a local ``exists()`` is False for every file,
+        and every filtered-out file's chunks were deleted.
+        """
+        codebase = Path(self.config.codebase_dir)
+        discovered = {str(f.relative_to(codebase)) for f in discovered_files}
+        git_aware = None
+        deleted: List[str] = []
+        for indexed_file_path in indexed_files:
+            indexed_file_str = (
+                str(indexed_file_path.relative_to(codebase))
+                if hasattr(indexed_file_path, "relative_to")
+                else str(indexed_file_path)
+            )
+            if indexed_file_str in discovered:
+                continue
+            if git_aware is None:
+                git_aware = self.is_git_aware()
+            if not git_aware or not self._exists_in_this_pass(
+                codebase / indexed_file_str
+            ):
+                deleted.append(indexed_file_str)
+        return deleted
 
     def _get_effective_content_id_for_reconcile(self, file_path: str) -> str:
         """Get content ID that represents current working directory state.

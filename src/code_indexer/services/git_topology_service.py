@@ -493,39 +493,6 @@ class GitTopologyService:
             logger.warning(f"Failed to get branch ancestry for {branch}: {e}")
             return []
 
-    def batch_file_analysis(self, files: List[str]) -> Dict[str, FileAnalysis]:
-        """Analyze multiple files in batched git operations for performance."""
-        if not self.is_git_available() or not files:
-            return {}
-
-        start_time = time.time()
-        analysis = {}
-
-        # Blob-hash all files (in-process; see utils/blob_hash)
-        hashes = self._batch_git_hash_object(files)
-
-        # Batch git log for last modified info
-        modifications = self._batch_git_log_analysis(files)
-
-        # Batch file status checks
-        statuses = self._batch_git_status_analysis(files)
-
-        # Combine results
-        for file_path in files:
-            analysis[file_path] = FileAnalysis(
-                content_hash=hashes.get(file_path),
-                last_modified=modifications.get(file_path),
-                git_status=statuses.get(file_path),
-                working_directory_status=self._determine_working_dir_status(file_path),
-            )
-
-        analysis_time = time.time() - start_time
-        logger.debug(
-            f"Batch file analysis for {len(files)} files completed in {analysis_time:.3f}s"
-        )
-
-        return analysis
-
     def _batch_git_hash_object(self, files: List[str]) -> Dict[str, str]:
         """Blob-hash every file in the batch, in-process.
 
@@ -540,72 +507,6 @@ class GitTopologyService:
         if not files:
             return {}
         return git_blob_hashes(files, root=self.codebase_dir)
-
-    def _batch_git_log_analysis(self, files: List[str]) -> Dict[str, str]:
-        """Batch git log analysis for last modification times."""
-        if not files:
-            return {}
-
-        try:
-            # Get last commit for each file in batch
-            result = subprocess.run(
-                ["git", "log", "--format=%H %ct", "--name-only", "-n", "1", "--"]
-                + files,
-                cwd=self.codebase_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            modifications = {}
-            if result.returncode == 0:
-                lines = result.stdout.strip().split("\n")
-                current_commit_time = None
-
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    # Check if this is a commit line (hash + timestamp)
-                    parts = line.split()
-                    if len(parts) == 2 and all(
-                        c in "0123456789abcdef" for c in parts[0]
-                    ):
-                        current_commit_time = parts[1]
-                    elif current_commit_time and line in files:
-                        modifications[line] = current_commit_time
-
-            return modifications
-
-        except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-            logger.warning(f"Batch git log analysis failed: {e}")
-            return {}
-
-    def _batch_git_status_analysis(self, files: List[str]) -> Dict[str, str]:
-        """Batch git status analysis for file states."""
-        try:
-            result = subprocess.run(
-                ["git", "status", "--porcelain"] + files,
-                cwd=self.codebase_dir,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-
-            statuses = {}
-            if result.returncode == 0:
-                for line in result.stdout.strip().split("\n"):
-                    if line and len(line) > 3:
-                        status_code = line[:2]
-                        file_path = line[3:]
-                        statuses[file_path] = status_code.strip()
-
-            return statuses
-
-        except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-            logger.warning(f"Batch git status analysis failed: {e}")
-            return {}
 
     def _determine_working_dir_status(self, file_path: str) -> Optional[str]:
         """Determine working directory status for a file."""

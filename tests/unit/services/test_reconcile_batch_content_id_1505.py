@@ -624,7 +624,7 @@ class TestReconcileEdgeCaseGracefulFallback:
 # `"working_dir" in str(point.get("id", ""))` check was dead code against
 # real persisted data. These tests use a REALISTIC persisted point shape
 # (a real uuid5 id, and the exact payload keys
-# `high_throughput_processor.py`'s `_create_vector_point` actually writes
+# `file_chunking_manager.py`'s `_create_vector_point` actually writes
 # for a non-git-available file: `filesystem_mtime`/`filesystem_size`, no
 # `git_blob_hash`/`git_commit_hash`), never the synthetic
 # `a.py:working_dir:0` id shape the earlier tests in this file used.
