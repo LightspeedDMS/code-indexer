@@ -15,10 +15,13 @@ fleet, on the elected leader -- replays the outbox to the old files:
 * **Claimed.** Rows are claimed for the sweep (``FOR UPDATE SKIP LOCKED`` on
   PostgreSQL, a lease on SQLite), so two sweepers never write one key twice.
 * **Drain bound.** With ``metadata_outbox_sink=local-files`` (the rollback
-  sink) the clock starts on the leader's first such sweep; at
+  sink) the clock measures how long replay has been failing CONTINUOUSLY: it
+  starts on the first sweep with a failed key and is cleared by any sweep
+  with none (including one that finds the outbox empty). Once it reaches
   ``metadata_outbox_drain_timeout_s`` the sweeper stops, logs every key still
   in the outbox by name, and does NOT keep retrying -- the rollback gate
-  (depth 0) stays red.
+  (depth 0) stays red. A healthy server therefore never reaches the bound,
+  however long it runs.
 * **Abandon.** :meth:`abandon` (``POST /api/admin/metadata-outbox/abandon``)
   logs the remaining keys by name, deletes exactly those rows and stops the
   sweeper; depth is then 0.
@@ -164,32 +167,47 @@ class MetadataOutboxSweeper:
         if bound_report is not None:
             return bound_report
 
-        return self._replay(self._sink(settings.sink))
+        report = self._replay(self._sink(settings.sink))
+        self._advance_drain_clock(settings, state, report)
+        return report
+
+    def _clear_drain_clock(self, state: OutboxState) -> None:
+        if state.drain_started_epoch is None and state.drain_sink is None:
+            return
+        state.drain_started_epoch = None
+        state.drain_sink = None
+        self._backend.save_outbox_state(state)
+
+    def _advance_drain_clock(
+        self, settings: OutboxSettings, state: OutboxState, report: SweepReport
+    ) -> None:
+        """After a local-files replay: a sweep with no failed key clears the
+        clock; the first failing sweep of a run starts it."""
+        if settings.sink != METADATA_OUTBOX_SINK_LOCAL_FILES or not report.failed:
+            self._clear_drain_clock(state)
+            return
+        if state.drain_started_epoch is not None and state.drain_sink == settings.sink:
+            return
+        state.drain_started_epoch = self._now_fn()
+        state.drain_sink = settings.sink
+        self._backend.save_outbox_state(state)
+        logger.warning(
+            "metadata outbox: replay to local files is failing; the sweeper "
+            "stops if it keeps failing for %ss",
+            settings.drain_timeout_s,
+        )
 
     def _apply_drain_bound(
         self, settings: OutboxSettings, state: OutboxState
     ) -> Optional[SweepReport]:
-        """Start, keep, or end the local-files drain clock. Returns a report
-        when the sweeper stopped at the bound."""
+        """Stop the sweeper when local-files replay has been failing for the
+        whole bound. Returns a report when it stopped."""
         if settings.sink != METADATA_OUTBOX_SINK_LOCAL_FILES:
-            if state.drain_started_epoch is not None:
-                state.drain_started_epoch = None
-                state.drain_sink = None
-                self._backend.save_outbox_state(state)
+            self._clear_drain_clock(state)
             return None
-
-        now = self._now_fn()
         if state.drain_started_epoch is None or state.drain_sink != settings.sink:
-            state.drain_started_epoch = now
-            state.drain_sink = settings.sink
-            self._backend.save_outbox_state(state)
-            logger.info(
-                "metadata outbox: drain to local files started (bound %ss)",
-                settings.drain_timeout_s,
-            )
             return None
-
-        if now - state.drain_started_epoch < settings.drain_timeout_s:
+        if self._now_fn() - state.drain_started_epoch < settings.drain_timeout_s:
             return None
 
         undrained = _unique_keys(self._backend.outbox_rows())

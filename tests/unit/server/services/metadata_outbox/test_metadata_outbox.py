@@ -461,6 +461,59 @@ def test_10_drain_stopped_at_its_bound_logs_exactly_the_undrained_keys_and_stops
     assert backend.outbox_depth() == 1  # rollback gate stays red
 
 
+def test_healthy_sweeper_never_reaches_the_drain_bound(
+    metadata, backend, switches, golden_repos_dir
+):
+    """The default local-files sink on a healthy server: a change made long
+    after the leader's first sweep is replayed, not counted as undrained.
+    Mutation: start the clock on the first sweep and never reset it (the
+    change is reported undrained and the sweeper stops)."""
+    clock = Clock()
+    switches.drain_timeout_s = 600
+    sweeper = make_sweeper(metadata, backend, switches, clock=clock)
+    sweeper.sweep_once()  # empty outbox
+    assert backend.outbox_depth() == 0
+
+    clock.now += 601
+    sweeper.sweep_once()
+    manager_for(golden_repos_dir).create_alias(ALIAS, "/snapshots/v_1")
+    report = sweeper.sweep_once()
+
+    assert report.stopped is None
+    assert report.replayed == [(KIND_ALIAS, ALIAS)]
+    assert alias_file(golden_repos_dir).exists()
+    assert backend.get_outbox_state().stopped_at is None
+
+
+def test_a_successful_sweep_restarts_the_drain_bound(
+    metadata, backend, switches, golden_repos_dir
+):
+    """The bound measures CONTINUOUS failure: a sweep that drains everything
+    in between resets it. Mutation: do not clear the clock on a clean sweep
+    (the second, short run of failures stops the sweeper)."""
+    manager = manager_for(golden_repos_dir)
+    sink = _FailsForName("stuck-global")
+    clock = Clock()
+    switches.drain_timeout_s = 600
+    sweeper = make_sweeper(metadata, backend, switches, {LOCAL_FILES: sink}, clock)
+    manager.create_alias("stuck-global", "/snapshots/s")
+    sweeper.sweep_once()  # fails: the clock starts
+
+    clock.now += 300
+    sink.stuck_name = "nothing-is-stuck"
+    assert sweeper.sweep_once().failed == []  # drained: the clock clears
+
+    clock.now += 200
+    sink.stuck_name = "stuck-global"
+    manager.create_alias("stuck-global", "/snapshots/s2")
+    sweeper.sweep_once()  # fails again: a new clock starts here
+    clock.now += 400  # 900 s after the first failure, 400 s into this run
+    report = sweeper.sweep_once()
+
+    assert report.stopped is None
+    assert report.failed == [(KIND_ALIAS, "stuck-global")]
+
+
 def test_11_override_logs_and_deletes_exactly_the_undrained_rows_and_stops(
     metadata, backend, switches, golden_repos_dir, caplog
 ):
