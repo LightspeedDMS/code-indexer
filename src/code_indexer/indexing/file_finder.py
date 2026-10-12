@@ -339,6 +339,31 @@ class FileFinder:
         need to reach into a private method."""
         return self._should_include_file(file_path)
 
+    def file_size(self, file_path: Path) -> Optional[int]:
+        """The size discovery judges ``file_path`` by, or None when unknown.
+
+        The manifest's under a delegated pass (nothing touches the disk), a
+        ``stat()`` otherwise.
+        """
+        if self._manifest is not None:
+            return self._manifest.size(file_path)
+        try:
+            return file_path.stat().st_size
+        except OSError:
+            return None
+
+    def _over_size_limit(self, size: Optional[int]) -> bool:
+        return size is not None and size > self.config.indexing.max_file_size
+
+    def exceeds_max_file_size(self, file_path: Path) -> bool:
+        """True when ``file_path``'s size is known and over ``max_file_size``.
+
+        The walk's own size gate, for callers that select files without the
+        walk (the git-delta incremental path). An unknown size answers False:
+        such a caller decides what an unreadable file means, not this gate.
+        """
+        return self._over_size_limit(self.file_size(file_path))
+
     def _should_include_file(self, file_path: Path) -> bool:
         """Check if a file should be included in indexing."""
         try:
@@ -378,22 +403,18 @@ class FileFinder:
                 # the pass began -- not eligible, never a stat.
                 if self._manifest.is_symlink(file_path) is not False:
                     return False
-                size = self._manifest.size(file_path)
-                if size is None or size > self.config.indexing.max_file_size:
-                    return False
-            else:
-                if (
-                    self.config.confined_to_codebase_root
-                    and file_path.is_symlink()
-                    and not is_resolved_within_root(
-                        file_path, self.resolved_codebase_dir
-                    )
-                ):
-                    return False
+            elif (
+                self.config.confined_to_codebase_root
+                and file_path.is_symlink()
+                and not is_resolved_within_root(file_path, self.resolved_codebase_dir)
+            ):
+                return False
 
-                # Check file size
-                if file_path.stat().st_size > self.config.indexing.max_file_size:
-                    return False
+            # Check file size: unknown (absent from the manifest, or no stat)
+            # is not eligible.
+            size = self.file_size(file_path)
+            if size is None or self._over_size_limit(size):
+                return False
 
             # Apply override filtering if available
             if self.override_filter_service:
