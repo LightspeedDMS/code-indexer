@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Set, Tuple
 from unittest.mock import patch
@@ -483,3 +484,175 @@ class TestRestoreThenRefreshPaysOnlyNewContent:
         assert _stored_rows_of(harness.source_db, "base_000.py"), (
             "content restored from the snapshot is gone"
         )
+
+
+_QUIET_AGE_SECONDS = 86400
+
+
+def _make_quiet(repo: Path) -> None:
+    """Age every working-tree file past the last run's watermark, as in a
+    repository nothing has touched for a day: the next ``cidx index`` then
+    plans nothing and never opens the store (Bug #2150)."""
+    old = time.time() - _QUIET_AGE_SECONDS
+    for path in repo.rglob("*"):
+        if {".git", ".code-indexer"} & set(path.parts) or not path.is_file():
+            continue
+        os.utime(path, (old, old))
+
+
+def _metadata_files(repo: Path) -> Dict[str, bytes]:
+    return {
+        p.name: p.read_bytes()
+        for p in sorted((repo / ".code-indexer").glob("metadata*.json"))
+    }
+
+
+def _unrepairable_reasons(metadata: Any) -> Dict[str, str]:
+    return {
+        row["golden_alias"]: row["reason"]
+        for row in metadata.list_unrepairable_refresh_failures()
+    }
+
+
+class TestQuietRepositoryMissingStore2150:
+    """Bug #2150: with nothing to index the child exits 0 without opening the
+    store, so the PUBLISH gate must classify an established collection's
+    missing chunks.db as a missing store and run the #2126 restore."""
+
+    def _quiet_harness(
+        self,
+        tmp_path: Path,
+        metadata: Any,
+        env_fixture: Tuple[Any, Dict[str, str], Path],
+        snapshot_mode: str,
+    ) -> Tuple[Any, Harness]:
+        fake, env, _ = env_fixture
+        harness = build_harness(
+            tmp_path,
+            metadata,
+            snapshot_mode=snapshot_mode,
+            source_builder=_real_indexed_source(fake, env),
+        )
+        _make_quiet(harness.source)
+        harness.source_db.unlink()
+        return fake, harness
+
+    def test_restored_at_publish_gate_then_next_refresh_publishes_free(
+        self, tmp_path: Path, metadata: Any, fake_provider_env
+    ) -> None:
+        fake, harness = self._quiet_harness(
+            tmp_path, metadata, fake_provider_env, "clean"
+        )
+        snapshot_sha = sha256_of(harness.snapshot_db())
+        assert harness.snapshot is not None
+        snapshot_metadata = _metadata_files(harness.snapshot)
+        assert snapshot_metadata, "the snapshot carries no indexing metadata"
+
+        fake.ledger.begin_run("restoring-refresh")
+        result = harness.scheduler._execute_refresh(ALIAS)
+
+        assert result["success"] is False, result
+        assert fake.ledger.run_stats("restoring-refresh")["inputs"] == 0
+        assert harness.source_db.exists(), "missing store not restored"
+        assert sha256_of(harness.source_db) == snapshot_sha
+        assert sha256_of(harness.snapshot_db()) == snapshot_sha
+        assert _metadata_files(harness.source) == snapshot_metadata
+        assert harness.scheduler.alias_manager.read_alias(ALIAS) == str(
+            harness.snapshot
+        )
+        assert harness.strikes() == 1
+        assert ALIAS not in _unrepairable_reasons(metadata)
+        # The job error names the missing store (never a generic failure).
+        assert "chunks.db" in result.get("error", ""), result
+        assert "missing" in result["error"], result
+
+        fake.ledger.begin_run("next-refresh")
+        result = harness.scheduler._execute_refresh(ALIAS)
+
+        assert result["success"] is True, result
+        assert harness.scheduler.alias_manager.read_alias(ALIAS) != str(
+            harness.snapshot
+        ), "the next refresh did not publish"
+        assert fake.ledger.run_stats("next-refresh")["inputs"] == 0
+        assert harness.strikes() == 0
+        assert metadata.get_refresh_failure_backoff_state(ALIAS) is None
+
+    @pytest.mark.parametrize(
+        "snapshot_mode, cause",
+        [
+            ("none", "no published snapshot"),
+            ("corrupt", "failed its integrity check"),
+        ],
+    )
+    def test_unrestorable_stays_failed_with_operator_health_reason(
+        self,
+        tmp_path: Path,
+        metadata: Any,
+        fake_provider_env,
+        snapshot_mode: str,
+        cause: str,
+    ) -> None:
+        from types import SimpleNamespace
+
+        from code_indexer.server.services.refresh_repair_health import (
+            unrepairable_refresh_health_reasons,
+        )
+
+        fake, harness = self._quiet_harness(
+            tmp_path, metadata, fake_provider_env, snapshot_mode
+        )
+        snapshot_sha = (
+            sha256_of(harness.snapshot_db()) if harness.snapshot is not None else None
+        )
+
+        fake.ledger.begin_run("failing-refresh")
+        result = harness.scheduler._execute_refresh(ALIAS)
+
+        assert result["success"] is False, result
+        assert fake.ledger.run_stats("failing-refresh")["inputs"] == 0
+        assert not harness.source_db.exists(), "the missing store was recreated"
+        if snapshot_sha is not None:
+            assert sha256_of(harness.snapshot_db()) == snapshot_sha
+        assert harness.strikes() == 0
+        state = metadata.get_refresh_failure_backoff_state(ALIAS)
+        assert state is not None and state["consecutive_failure_count"] == 1
+        assert cause in _unrepairable_reasons(metadata).get(ALIAS, ""), (
+            _unrepairable_reasons(metadata)
+        )
+        health = unrepairable_refresh_health_reasons(
+            SimpleNamespace(golden_repo_metadata=metadata)
+        )
+        assert any(
+            f"Refresh of {ALIAS} needs an operator" in r and cause in r for r in health
+        ), health
+
+    def test_writer_taking_the_lock_at_the_gate_vetoes_the_restore(
+        self, tmp_path: Path, metadata: Any, fake_provider_env
+    ) -> None:
+        from code_indexer.global_repos import refresh_failure_recovery
+        from code_indexer.server.services.alias_lock_store.base import (
+            AliasLockOwnershipLostError,
+        )
+        from tests.utils.refresh_fatal_store_harness import REPO
+
+        _, harness = self._quiet_harness(tmp_path, metadata, fake_provider_env, "clean")
+        lock = harness.scheduler.write_lock_manager
+        real_gate = refresh_failure_recovery.run_integrity_gate_against_published
+
+        def rival_takes_the_lock_then_gate(*args: Any, **kwargs: Any) -> Any:
+            assert lock.release(REPO, owner_name="refresh_scheduler")
+            assert lock.acquire(REPO, owner_name="rival-writer")
+            return real_gate(*args, **kwargs)
+
+        with patch.object(
+            refresh_failure_recovery,
+            "run_integrity_gate_against_published",
+            side_effect=rival_takes_the_lock_then_gate,
+        ):
+            error = _refresh_expecting_failure(harness)
+
+        assert any(
+            isinstance(e, AliasLockOwnershipLostError) for e in iter_chain(error)
+        ), repr(error)
+        assert not harness.source_db.exists(), "restored without the write lock"
+        assert harness.strikes() == 0

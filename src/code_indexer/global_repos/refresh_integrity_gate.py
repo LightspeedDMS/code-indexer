@@ -299,7 +299,9 @@ def run_refresh_integrity_gate(
     Story #2126: with *restore_missing_stores*, an established collection
     whose ``chunks.db`` is missing is reported ``store_missing`` and restored
     from the published snapshot through the same verified path as a corrupt
-    one. Without it (the publish gate), a missing store stays INCONCLUSIVE.
+    one. The missing-store self-heal and the publish gate (Bug #2150: a child
+    with nothing to write exits 0 without opening the store) pass it; without
+    it (the corruption self-heal), a missing store stays INCONCLUSIVE.
 
     Bug #2022: a restore is attempted only for a CORRUPT verdict (never for
     an INCONCLUSIVE one), and *before_restore* (e.g. a write-lock ownership

@@ -337,6 +337,43 @@ class TestRefreshResultInterpretation:
         assert "integrity gate quarantined" in claimer.failed_jobs[0][1]
         assert len(claimer.completed_jobs) == 0
 
+    def test_failure_error_detail_is_the_job_error(self):
+        """Bug #2150: the job error names the cause (e.g. the missing store),
+        never only the generic gate message."""
+        claimer = FakeClaimer()
+        claimer.jobs_to_return.append(
+            {
+                "job_id": "job-gate",
+                "operation_type": "global_repo_refresh",
+                "repo_alias": "example-repo-global",
+            }
+        )
+        detail = "voyage-code-3: chunks.db of an established collection is missing"
+
+        class GateFailedScheduler:
+            def execute_refresh_for_claimed_job(
+                self,
+                alias,
+                progress_callback=None,
+                job_id=None,
+                submitter_username="system",
+            ):
+                return {
+                    "success": False,
+                    "message": "Refresh integrity gate failed; publish skipped",
+                    "error": f"Refresh integrity gate failed; publish skipped: {detail}",
+                }
+
+        worker = DistributedJobWorkerService(
+            claimer=claimer,
+            refresh_scheduler=GateFailedScheduler(),
+        )
+
+        worker._process_one_job()
+
+        assert len(claimer.failed_jobs) == 1
+        assert detail in claimer.failed_jobs[0][1]
+
     def test_progress_callback_forwards_to_claimer_update_progress(self):
         """When the claimer supports update_progress, the callback passed to
         execute_refresh_for_claimed_job must forward into it."""

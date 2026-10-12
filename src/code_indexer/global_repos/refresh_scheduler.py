@@ -3354,6 +3354,11 @@ class RefreshScheduler:
                                     "alias": alias_name,
                                     "message": "Refresh integrity gate failed; publish skipped",
                                     "integrity_gate_detail": detail_summary,
+                                    # Bug #2150: the job error names the cause.
+                                    "error": (
+                                        "Refresh integrity gate failed; publish "
+                                        f"skipped: {detail_summary}"
+                                    ),
                                 },
                                 run_spend,
                             )
@@ -3792,10 +3797,17 @@ class RefreshScheduler:
             source_path,
             current_target,
             before_restore=self._ownership_check(alias_name.removesuffix("-global")),
+            # Bug #2150: a child with nothing to write never opens a missing
+            # established store, so the publish gate restores it (#2126).
+            restore_missing_stores=True,
         )
         if not gate_result.passed:
             failure_recovery.record_publish_gate_failure(
-                self.golden_repo_metadata, alias_name, gate_result
+                self.golden_repo_metadata,
+                alias_name,
+                gate_result,
+                source_path=source_path,
+                current_target=current_target,
             )
             return gate_result
 

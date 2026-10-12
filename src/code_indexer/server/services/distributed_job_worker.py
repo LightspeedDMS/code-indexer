@@ -151,7 +151,8 @@ class DistributedJobWorkerService:
             # (e.g. an integrity-gate skip). Raise here so _process_one_job's
             # existing except block marks the job failed exactly once.
             if isinstance(result, dict) and result.get("success") is False:
-                failure_detail = result.get("message") or result.get("error")
+                # Bug #2150: "error" names the cause; "message" is generic.
+                failure_detail = result.get("error") or result.get("message")
                 raise RuntimeError(failure_detail or f"Refresh failed for {repo_alias}")
             return result
         raise ValueError(f"Unknown retryable job type: {op_type}")

@@ -533,18 +533,56 @@ def reset_integrity_strikes(
         )
 
 
+def _record_restore_strike(
+    metadata: "GoldenRepoMetadataBackend",
+    alias_name: str,
+    gate: RefreshIntegrityGateResult,
+) -> None:
+    """One strike per cycle that found damage: confirmed corruption, else an
+    established collection's missing store that was restored (Story #2126).
+    An inconclusive check, or a missing store nothing could restore, is no
+    strike (it backs off instead)."""
+    corrupt = [
+        f for f in gate.failures if not f.store_missing and not f.check_inconclusive
+    ]
+    restored = [f for f in gate.failures if f.store_missing and f.self_heal_succeeded]
+    if corrupt:
+        record_integrity_strike(metadata, alias_name, gate)
+    elif restored:
+        _record_missing_store_strike(metadata, alias_name, restored)
+
+
 def record_publish_gate_failure(
     metadata: "GoldenRepoMetadataBackend",
     alias_name: str,
     gate_result: RefreshIntegrityGateResult,
+    *,
+    source_path: str,
+    current_target: Optional[str],
 ) -> None:
-    """Bookkeeping for a failed publish-time gate: a strike only for confirmed
-    corruption; an inconclusive check (it could not run) backs off instead,
-    so transient I/O never quarantines a healthy repo."""
-    confirmed = [f for f in gate_result.failures if not f.check_inconclusive]
-    if confirmed:
-        record_integrity_strike(metadata, alias_name, gate_result)
-    if len(confirmed) < len(gate_result.failures):
+    """Bookkeeping for a failed publish-time gate (run with
+    restore_missing_stores: Bug #2150, a child with nothing to write exits 0
+    without ever opening a missing store). A strike for confirmed corruption
+    or a restored missing store; a missing store nothing could restore backs
+    off with its Story #2126 operator reason; an inconclusive check (it could
+    not run) backs off, so transient I/O never quarantines a healthy repo."""
+    _record_restore_strike(metadata, alias_name, gate_result)
+    missing = [f for f in gate_result.failures if f.store_missing]
+    unrestored = [
+        f
+        for f in missing
+        if not (f.self_heal_succeeded and f.metadata_restore_error is None)
+    ]
+    if unrestored:
+        record_failure_backoff(
+            metadata,
+            alias_name,
+            "; ".join(f"{f.collection_dir}: {f.detail}" for f in unrestored),
+            unrepairable_reason=_unrestorable_reason(
+                source_path, current_target, missing
+            ),
+        )
+    elif any(f.check_inconclusive for f in gate_result.failures):
         record_failure_backoff(
             metadata, alias_name, "publish integrity check inconclusive"
         )
@@ -662,14 +700,7 @@ def _restore_missing_stores(
         restore_missing_stores=True,
     )
     missing = [f for f in gate.failures if f.store_missing]
-    corrupt = [
-        f for f in gate.failures if not f.store_missing and not f.check_inconclusive
-    ]
-    restored = [f for f in missing if f.self_heal_succeeded]
-    if corrupt:
-        record_integrity_strike(metadata, alias_name, gate)
-    elif restored:
-        _record_missing_store_strike(metadata, alias_name, restored)
+    _record_restore_strike(metadata, alias_name, gate)
     repaired = bool(missing) and all(
         f.self_heal_succeeded and f.metadata_restore_error is None
         for f in gate.failures
