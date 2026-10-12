@@ -377,11 +377,7 @@ def _repository_is_elsewhere() -> bool:
     Fails toward "elsewhere" when the setting cannot be read: every caller uses
     it to skip local-disk work, and skipping is the safe side of not knowing.
     """
-    try:
-        return configured_content_backend_name() == "delegated"
-    except Exception as exc:  # the server config, whatever its state
-        logger.warning("content backend unknown (%s); treating as delegated", exc)
-        return True
+    return content_backend_name_or_none() in (None, "delegated")
 
 
 def _build_source_trigram_index(alias_name: str, source_path: str) -> None:

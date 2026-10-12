@@ -154,3 +154,24 @@ def test_regex_search_does_not_consult_a_populated_index(
     )
 
     assert candidates is None
+
+
+def test_refresh_treats_an_unknown_backend_as_elsewhere(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Refresh skips local-disk work (temporal indexing) on the same answer, and
+    an unreadable setting is logged once, not on every repository's refresh."""
+    from code_indexer.global_repos.refresh_scheduler import _repository_is_elsewhere
+
+    monkeypatch.setattr(wiring, "configured_content_backend_name", lambda: "local")
+    assert _repository_is_elsewhere() is False
+    monkeypatch.setattr(wiring, "configured_content_backend_name", lambda: "delegated")
+    assert _repository_is_elsewhere() is True
+
+    def unreadable() -> str:
+        raise RuntimeError("config service not initialised")
+
+    monkeypatch.setattr(wiring, "configured_content_backend_name", unreadable)
+    monkeypatch.setattr(wiring, "_unknown_backend_logged", False)
+    assert all(_repository_is_elsewhere() for _ in range(5))
+    assert sum("unreadable" in r.getMessage() for r in caplog.records) == 1
