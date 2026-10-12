@@ -213,5 +213,31 @@ class RepoManifest:
         """Repo-relative paths, in the manifest's own order."""
         return iter(self._entries)
 
+    def blob_hashes(self) -> Dict[str, str]:
+        """Repo-relative path -> blob hash, for every entry that can vouch for one.
+
+        The shape ``git ls-tree -r HEAD`` gives reconcile, for a repository not on
+        this machine. Entries ``blob_sha`` would refuse (symlinks, no hash) are
+        left out, so a caller falls back for them exactly as for an untracked file.
+        """
+        hashes: Dict[str, str] = {}
+        for path in self._entries:
+            sha = self.blob_sha(path)
+            if sha:
+                hashes[path] = sha
+        return hashes
+
+    def __contains__(self, file_path: object) -> bool:
+        """Whether the repository held this path when the manifest was built.
+
+        The delegated stand-in for ``Path.exists()``: on a pod without the
+        repository nothing exists locally, and that must not read as "deleted".
+        Accepts the same absolute-or-relative paths as every other lookup.
+        """
+        if not isinstance(file_path, (str, Path)):
+            return False
+        key = self._relative(file_path)
+        return key is not None and key in self._entries
+
     def __len__(self) -> int:
         return len(self._entries)

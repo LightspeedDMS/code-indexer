@@ -8,10 +8,10 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | Class | Rows |
 |---|---|
 | unclassified | 0 |
-| repo-read | 392 |
+| repo-read | 391 |
 | repo-write | 93 |
 | cidx-state-in-repo | 1322 |
-| migrated | 79 |
+| migrated | 80 |
 | local-only | 146 |
 | cidx-state | 525 |
 | not-repo | 364 |
@@ -195,7 +195,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `services/git_aware_processor.py` | 0 | 2 | 0 | 0 |
 | `services/git_detection.py` | 0 | 0 | 0 | 6 |
 | `services/git_hook_manager.py` | 0 | 8 | 5 | 0 |
-| `services/high_throughput_processor.py` | 0 | 3 | 0 | 0 |
+| `services/high_throughput_processor.py` | 0 | 2 | 0 | 0 |
 | `services/hnsw_health_service.py` | 0 | 0 | 0 | 8 |
 | `services/indexing_lock.py` | 0 | 0 | 0 | 9 |
 | `services/indexing_progress_log.py` | 0 | 0 | 0 | 8 |
