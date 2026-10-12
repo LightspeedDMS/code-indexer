@@ -511,3 +511,73 @@ if __name__ == "__main__":
         print(f"wrote {_BASELINE}")
     else:
         print(__doc__)
+
+
+# ── step 2: publish and checkout ────────────────────────────────────────────
+
+
+def _tree(root: Path) -> List[str]:
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+
+
+def test_the_local_store_publishes_and_checks_out_nothing(tmp_path: Path) -> None:
+    """Row 12: with the local backend, publish/checkout change nothing on disk."""
+    repo = tmp_path / "repo"
+    (repo / INDEX_DIRNAME / "index").mkdir(parents=True)
+    into = tmp_path / "snapshot"
+    before = _tree(tmp_path)
+
+    store = LocalIndexStore()
+    assert store.is_local is True
+    assert store.publish(repo, repo / INDEX_DIRNAME) is None
+    assert store.checkout(repo, into) == repo / INDEX_DIRNAME
+
+    assert _tree(tmp_path) == before
+
+
+class _RecordingArtifacts:
+    def __init__(self, current: Any = None) -> None:
+        self.current = current
+        self.calls: List[tuple] = []
+
+    def current_version(self, alias: str) -> Any:
+        self.calls.append(("current_version", alias))
+        return self.current
+
+    def publish(self, alias: str, base_version: Any, source_dir: str) -> str:
+        self.calls.append(("publish", alias, base_version, source_dir))
+        return "f" * 32
+
+    def checkout(self, alias: str, dest_dir: str, version: Any = None) -> str:
+        self.calls.append(("checkout", alias, dest_dir, version))
+        return version or "f" * 32
+
+
+def test_the_delegated_store_publishes_on_the_current_version(tmp_path: Path) -> None:
+    artifacts = _RecordingArtifacts(current="e" * 32)
+    store = index_store.DelegatedIndexStore(artifacts)
+    repo = tmp_path / "golden-repos" / "MyRepo"
+
+    assert store.is_local is False
+    assert store.index_root(repo) == repo / INDEX_DIRNAME
+    assert store.publish(repo, repo / INDEX_DIRNAME) == "f" * 32
+
+    alias = index_store.index_store_alias("MyRepo")
+    assert artifacts.calls == [
+        ("current_version", alias),
+        ("publish", alias, "e" * 32, str(repo / INDEX_DIRNAME)),
+    ]
+
+
+def test_the_delegated_store_checks_out_a_version_under_into(tmp_path: Path) -> None:
+    artifacts = _RecordingArtifacts()
+    store = index_store.DelegatedIndexStore(artifacts)
+    into = tmp_path / "snap"
+
+    assert (
+        store.checkout(tmp_path / "agent-router", into, "a" * 32)
+        == into / INDEX_DIRNAME
+    )
+    assert artifacts.calls == [
+        ("checkout", "agent-router", str(into / INDEX_DIRNAME), "a" * 32)
+    ]

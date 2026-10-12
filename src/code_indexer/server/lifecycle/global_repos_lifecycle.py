@@ -56,6 +56,7 @@ class GlobalReposLifecycleManager:
         snapshot_manager: Optional["VersionedSnapshotManager"] = None,
         golden_repo_metadata_backend: Optional[Any] = None,
         git_backend: Optional[Any] = None,
+        index_store: Optional[Any] = None,
     ):
         """
         Initialize the lifecycle manager.
@@ -77,6 +78,10 @@ class GlobalReposLifecycleManager:
                 git runs through the configured backend (LocalGitBackend by
                 default; the git-mcp-backed backend when git_backend='delegated').
                 None lets RefreshScheduler default to LocalGitBackend.
+            index_store: IndexStore step 2 — forwarded to RefreshScheduler so a
+                refresh publishes its built index and snapshots a checked-out
+                version when index_store_backend='delegated'. None keeps the
+                local store.
         """
         self.golden_repos_dir = Path(golden_repos_dir)
 
@@ -160,6 +165,7 @@ class GlobalReposLifecycleManager:
             snapshot_manager=snapshot_manager,
             golden_repo_metadata_backend=golden_repo_metadata_backend,
             git_backend=git_backend,
+            index_store=index_store,
             alias_lock_db_backed_enabled_getter=self._alias_lock_db_backed_enabled,
             alias_lock_store_resolver=self._resolve_alias_lock_store,
         )

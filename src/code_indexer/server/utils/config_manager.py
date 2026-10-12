@@ -1988,6 +1988,11 @@ class ServerConfig:
     # the repositories, so cidx needs neither the mount nor the binary. No
     # fallback -- see server/startup/ripgrep_backend_wiring.py.
     ripgrep_backend: str = "local"
+    # Where a built index is read from. "local" reads it where it was built
+    # (the default); "delegated" publishes each refresh's index to the
+    # artifact service and reads a checked-out, verified version. No fallback
+    # -- see server/startup/index_store_wiring.py.
+    index_store_backend: str = "local"
     cow_daemon: Optional[CowDaemonConfig] = None  # Story #510: CoW daemon settings
     workspace_mcp: Optional[WorkspaceMcpConfig] = (
         None  # EVO-64616: workspace-mcp delegated clone backend settings

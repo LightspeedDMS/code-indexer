@@ -17,8 +17,12 @@ is versioned:
    ``LocalIndexStore``, which answers exactly that join -- no behaviour change.
    tests/unit/utils/test_index_store.py fails the build on any new
    direct derivation, so the remaining ones can only migrate behind this seam.
-2. indexes as versioned artifacts: built in local scratch, published as an
-   immutable snapshot, checked out to a node-local cache by readers.
+2. (also this module) indexes as versioned artifacts: ``DelegatedIndexStore``
+   publishes a built index to an artifact service (workspace-mcp's index store,
+   via the ``code_indexer.index_artifacts`` plugin) as an immutable version,
+   and ``checkout`` fetches a version, verified, for readers. Selected by the
+   server's ``index_store_backend``; ``LocalIndexStore`` publishes and checks
+   out nothing, so the CLI and default server are unchanged.
 3. an object-store backend, with the alias -> version pointer in Postgres.
 
 Kept free of server imports: plain CLI indexing uses it too.
@@ -26,8 +30,10 @@ Kept free of server imports: plain CLI indexing uses it too.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from pathlib import Path
-from typing import Protocol, Union
+from typing import Any, Optional, Protocol, Union
 
 #: The index directory's name inside a repository under the local backend.
 #: Exported for the code that must SKIP it while walking or searching a
@@ -37,25 +43,122 @@ INDEX_DIRNAME = ".code-indexer"
 
 
 class IndexStore(Protocol):
-    """Answers where a repository's cidx state is, for this process to use."""
+    """Answers where a repository's cidx state is, for this process to use.
+
+    Step 2 adds the artifact lifecycle: an index built under ``index_root`` is
+    ``publish``ed as an immutable version, and ``checkout`` puts a version
+    where a reader can open it.
+    """
+
+    @property
+    def is_local(self) -> bool:
+        """True when indexes are read where they are built (no artifacts)."""
+        ...
 
     def index_root(self, repo_path: Union[str, Path]) -> Path:
         """The directory holding ``repo_path``'s indexes, config and metadata."""
+        ...
+
+    def publish(self, repo_path: Union[str, Path], built_dir: Path) -> Optional[str]:
+        """Publish the index built in ``built_dir``; the new version, or None."""
+        ...
+
+    def checkout(
+        self, repo_path: Union[str, Path], into: Path, version: Optional[str] = None
+    ) -> Path:
+        """Make a version readable under ``into``; the index root to read."""
         ...
 
 
 class LocalIndexStore:
     """Today's layout: the index lives inside the repository it describes."""
 
+    is_local = True
+
     def index_root(self, repo_path: Union[str, Path]) -> Path:
         return Path(repo_path) / INDEX_DIRNAME
+
+    def publish(self, repo_path: Union[str, Path], built_dir: Path) -> Optional[str]:
+        """Nothing to publish: readers read the index where it was built."""
+        return None
+
+    def checkout(
+        self, repo_path: Union[str, Path], into: Path, version: Optional[str] = None
+    ) -> Path:
+        """Nothing to fetch: the built index IS the readable one."""
+        return self.index_root(repo_path)
+
+
+#: What the artifact service accepts as an alias (workspace-mcp's index store).
+_STORE_ALIAS_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+_STORE_ALIAS_MAX = 128
+_ALIAS_HASH_CHARS = 8
+
+
+def index_store_alias(repo_name: str) -> str:
+    """The artifact-store alias for a golden repo.
+
+    cidx aliases allow upper case; the store's do not. Lower-casing alone
+    would let ``MyRepo`` and ``myrepo`` share one version history, so any
+    name the store would not accept as-is gets a short hash of the ORIGINAL
+    name appended: deterministic, and distinct per cidx alias.
+    """
+    if _STORE_ALIAS_RE.match(repo_name) and ".." not in repo_name:
+        return repo_name
+    base = re.sub(r"[^a-z0-9._-]+", "-", repo_name.lower())
+    base = re.sub(r"\.{2,}", ".", base)
+    base = re.sub(r"^[^a-z0-9]+", "", base) or "repo"
+    digest = hashlib.sha256(repo_name.encode("utf-8")).hexdigest()[:_ALIAS_HASH_CHARS]
+    return f"{base[: _STORE_ALIAS_MAX - _ALIAS_HASH_CHARS - 1]}-{digest}"
+
+
+class DelegatedIndexStore:
+    """Indexes as versioned artifacts held by another service (step 2).
+
+    Indexes are still BUILT here, under ``index_root`` (local scratch on a pod
+    without the repository). ``publish`` hands the built tree to the artifact
+    service as an immutable version; ``checkout`` fetches a version, verified,
+    into a directory a reader opens. ``artifacts`` is the plugin's client
+    (``code_indexer.index_artifacts``): ``current_version``, ``publish``,
+    ``checkout``.
+    """
+
+    is_local = False
+
+    def __init__(self, artifacts: Any) -> None:
+        self._artifacts = artifacts
+
+    def index_root(self, repo_path: Union[str, Path]) -> Path:
+        return Path(repo_path) / INDEX_DIRNAME
+
+    def publish(self, repo_path: Union[str, Path], built_dir: Path) -> Optional[str]:
+        """Publish on top of the store's current version (its compare-and-swap
+        base): a concurrent publish in between is refused, not overwritten."""
+        alias = index_store_alias(Path(repo_path).name)
+        base = self._artifacts.current_version(alias)
+        return str(self._artifacts.publish(alias, base, str(built_dir)))
+
+    def checkout(
+        self, repo_path: Union[str, Path], into: Path, version: Optional[str] = None
+    ) -> Path:
+        """Check ``version`` (default: current) out to ``into/<index dir>``."""
+        dest = Path(into) / INDEX_DIRNAME
+        self._artifacts.checkout(
+            index_store_alias(Path(repo_path).name), str(dest), version
+        )
+        return dest
 
 
 _DEFAULT: IndexStore = LocalIndexStore()
 
 
 def get_index_store() -> IndexStore:
-    """The index store this process uses. Only the local backend exists yet."""
+    """The index store for path questions (``index_root``) in this process.
+
+    Always local: where an index lives on disk is the same under either
+    backend. The server builds the publishing store it hands to refresh
+    (``server/startup/index_store_wiring.py``).
+    """
     return _DEFAULT
 
 

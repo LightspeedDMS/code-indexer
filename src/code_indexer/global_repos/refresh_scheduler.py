@@ -69,6 +69,7 @@ from code_indexer.server.services.metadata_reader import (
     read_status,
 )
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
+from code_indexer.utils.index_store import IndexStore, LocalIndexStore
 from code_indexer.server.storage.shared.git_backend import (
     GitBackend,
     LocalGitBackend,
@@ -477,6 +478,7 @@ class RefreshScheduler:
         git_backend: Optional[GitBackend] = None,
         alias_lock_db_backed_enabled_getter: Optional[Callable[[], bool]] = None,
         alias_lock_store_resolver: Optional[Callable[[], Any]] = None,
+        index_store: Optional[IndexStore] = None,
     ):
         """
         Initialize the refresh scheduler.
@@ -520,6 +522,10 @@ class RefreshScheduler:
                 dispatching PostgreSQL/SQLite via is_postgres_storage_mode()).
                 Only ever consulted when alias_lock_db_backed_enabled_getter()
                 returns True.
+            index_store: IndexStore step 2. Defaults to LocalIndexStore (the
+                snapshot is a copy of the built index, as before); under a
+                delegated store each refresh publishes the built index and the
+                snapshot is a checked-out, verified version of it.
         """
         self.golden_repos_dir = Path(golden_repos_dir)
         self.config_source = config_source
@@ -531,6 +537,9 @@ class RefreshScheduler:
         self._snapshot_manager = snapshot_manager
         self._git_backend: GitBackend = (
             git_backend if git_backend is not None else LocalGitBackend()
+        )
+        self._index_store: IndexStore = (
+            index_store if index_store is not None else LocalIndexStore()
         )
         self._alias_lock_db_backed_enabled_getter = alias_lock_db_backed_enabled_getter
         self._alias_lock_store_resolver = alias_lock_store_resolver
@@ -4116,6 +4125,11 @@ class RefreshScheduler:
 
         repo_name = alias_name.removesuffix("-global")
 
+        if not self._index_store.is_local:
+            return self._snapshot_from_index_store(
+                alias_name, repo_name, source_path, cidx_fix_timeout
+            )
+
         # versioned_path is set inside the try block by snapshot_manager.create_snapshot().
         # Initialize to None so the cleanup except block can guard against None safely.
         versioned_path: Optional[Path] = None
@@ -4195,43 +4209,10 @@ class RefreshScheduler:
                     )
 
             # Step 4: Run cidx fix-config --force on CLONE only (never on source)
-            logger.info("Running cidx fix-config --force on clone to update paths")
-            try:
-                self._run_subprocess(
-                    ["cidx", "fix-config", "--force"],
-                    cwd=str(versioned_path),
-                    capture_output=True,
-                    text=True,
-                    env=build_cidx_subprocess_env(),
-                    timeout=cidx_fix_timeout,
-                    check=True,
-                )
-                logger.info("cidx fix-config on clone completed successfully")
-            except subprocess.CalledProcessError as e:
-                diagnostic = _format_called_process_error_diagnostic(e)
-                logger.error(
-                    f"cidx fix-config failed for {alias_name}: {diagnostic}",
-                    exc_info=True,
-                )
-                raise RuntimeError(
-                    f"cidx fix-config failed for {alias_name}: {diagnostic}"
-                )
-            except subprocess.TimeoutExpired as e:
-                logger.error(
-                    f"cidx fix-config timed out for {alias_name} after {cidx_fix_timeout} seconds: {type(e).__name__}",
-                    exc_info=True,
-                )
-                raise RuntimeError(
-                    f"cidx fix-config timed out for {alias_name} after {cidx_fix_timeout} seconds: {type(e).__name__}"
-                )
+            self._fix_snapshot_config(alias_name, versioned_path, cidx_fix_timeout)
 
             # Step 5: Validate index exists
-            index_dir = versioned_path / ".code-indexer" / "index"
-            if not index_dir.exists():
-                logger.error(f"Index validation failed: {index_dir} does not exist")
-                raise RuntimeError(
-                    "Index validation failed: index directory not created"
-                )
+            self._require_snapshot_index(versioned_path)
 
             logger.info(f"Versioned snapshot created successfully at: {versioned_path}")
             return str(versioned_path)
@@ -4255,6 +4236,106 @@ class RefreshScheduler:
             raise RuntimeError(
                 f"Failed to create snapshot for {alias_name}: {type(e).__name__}: {e}"
             )
+
+    def _fix_snapshot_config(
+        self, alias_name: str, versioned_path: Path, timeout: int
+    ) -> None:
+        """``cidx fix-config --force`` on a snapshot (never on the source), so
+        its config's paths name the snapshot. Raises RuntimeError on failure."""
+        logger.info("Running cidx fix-config --force on clone to update paths")
+        try:
+            self._run_subprocess(
+                ["cidx", "fix-config", "--force"],
+                cwd=str(versioned_path),
+                capture_output=True,
+                text=True,
+                env=build_cidx_subprocess_env(),
+                timeout=timeout,
+                check=True,
+            )
+            logger.info("cidx fix-config on clone completed successfully")
+        except subprocess.CalledProcessError as e:
+            diagnostic = _format_called_process_error_diagnostic(e)
+            logger.error(
+                f"cidx fix-config failed for {alias_name}: {diagnostic}",
+                exc_info=True,
+            )
+            raise RuntimeError(f"cidx fix-config failed for {alias_name}: {diagnostic}")
+        except subprocess.TimeoutExpired as e:
+            logger.error(
+                f"cidx fix-config timed out for {alias_name} after {timeout} seconds: {type(e).__name__}",
+                exc_info=True,
+            )
+            raise RuntimeError(
+                f"cidx fix-config timed out for {alias_name} after {timeout} seconds: {type(e).__name__}"
+            )
+
+    def _require_snapshot_index(self, versioned_path: Path) -> None:
+        """Raise unless the snapshot holds an index directory."""
+        index_dir = self._index_store.index_root(versioned_path) / "index"
+        if not index_dir.exists():
+            logger.error(f"Index validation failed: {index_dir} does not exist")
+            raise RuntimeError("Index validation failed: index directory not created")
+
+    def _snapshot_from_index_store(
+        self, alias_name: str, repo_name: str, source_path: str, fix_timeout: int
+    ) -> str:
+        """IndexStore step 2: publish the built index, then snapshot a checked-out version.
+
+        Under a delegated store the index built on this pod is scratch and the
+        published version is the source of truth, so the snapshot readers are
+        pointed at is THAT version -- fetched back and digest-verified by the
+        store -- not a copy of the scratch. The snapshot keeps the canonical
+        ``.versioned/<repo>/v_<ts>`` layout, so alias swap, retention and
+        cleanup treat it as any other.
+
+        Raises RuntimeError on any failure, leaving no partial snapshot.
+        """
+        if self._snapshot_manager is None:
+            raise RuntimeError(
+                "RefreshScheduler invoked without snapshot_manager — wiring bug in lifespan.py."
+            )
+        if self._snapshot_manager.uses_flexclone:
+            raise RuntimeError(
+                f"Cannot snapshot {alias_name}: index_store_backend='delegated' "
+                "checks a version out into a directory, which a FlexClone snapshot "
+                "manager cannot hold. Use the local clone backend with it."
+            )
+        try:
+            version = self._index_store.publish(
+                source_path, self._index_store.index_root(source_path)
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to publish the index for {alias_name}: {type(e).__name__}: {e}"
+            ) from e
+        logger.info(f"Published the index for {alias_name} as version {version}")
+
+        versioned_path = self._new_snapshot_path(repo_name)
+        try:
+            versioned_path.mkdir(parents=True)
+            self._index_store.checkout(source_path, versioned_path, version)
+            self._fix_snapshot_config(alias_name, versioned_path, fix_timeout)
+            self._require_snapshot_index(versioned_path)
+        except Exception as e:
+            shutil.rmtree(versioned_path, ignore_errors=True)
+            raise RuntimeError(
+                f"Failed to create snapshot for {alias_name}: {type(e).__name__}: {e}"
+            ) from e
+        logger.info(
+            f"Versioned snapshot of {alias_name} version {version} at: {versioned_path}"
+        )
+        return str(versioned_path)
+
+    def _new_snapshot_path(self, repo_name: str) -> Path:
+        """A ``v_<unix ts>`` snapshot path for ``repo_name`` that does not exist yet."""
+        assert self._snapshot_manager is not None
+        ts = int(time.time())
+        while True:
+            path = Path(self._snapshot_manager.get_snapshot_path(repo_name, str(ts)))
+            if not path.exists():
+                return path
+            ts += 1
 
     def _create_new_index(self, alias_name: str, source_path: str) -> str:
         """
