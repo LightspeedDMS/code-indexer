@@ -54,7 +54,8 @@ def test_failed_checkout_stderr_is_redacted(
     )
 
     with caplog.at_level(logging.ERROR):
-        scheduler._execute_refresh(ALIAS)
+        with pytest.raises(RuntimeError, match="git checkout failed"):
+            scheduler._execute_refresh(ALIAS)
 
     reset_errors = [
         r.getMessage() for r in caplog.records if "Failed to reset" in r.getMessage()

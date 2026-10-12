@@ -76,7 +76,6 @@ from code_indexer.global_repos.stale_index_signal import (
     record_forced_reconcile_outcome,
     stale_signal_from_states,
 )
-from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 from code_indexer.server.storage.shared.nfs_visibility import (
     _configured_visibility_timeout,
     wait_for_nfs_visibility,
@@ -840,6 +839,181 @@ class RefreshScheduler:
         """Allow explicit (re-)injection, e.g. by tests that set `.golden_repo_metadata` post-construction."""
         with self._get_golden_repo_metadata_lock():
             self._golden_repo_metadata_backend = value
+
+    def _registered_branch(
+        self, alias_name: str, branch_read_failure: Optional[str] = None
+    ) -> Optional[str]:
+        """Bug #2148: the branch *alias_name* was registered on, read ONLY
+        from the store the registration wrote (golden_repos_metadata via the
+        backend registry: PostgreSQL in cluster, cidx_server.db in solo).
+
+        Never guessed (origin/HEAD) and never read from a store the backend
+        registry did not supply in cluster mode, or while the storage mode is
+        undetermined: before ``backend_registry`` is wired the property falls
+        back to a per-node file whose row may be stale -- those cases raise
+        RuntimeError naming the alias and the reason, stopping the refresh.
+
+        With the store wired, an UNKNOWN branch (the read failed, no row --
+        Bug #469 orphan aliases --, no branch recorded, or a value that is
+        not a non-empty string) returns None after ONE WARNING naming the
+        alias and the reason (a read failure by exception type only), which
+        also carries *branch_read_failure* (the caller's failed read of the
+        clone's current branch) when given: the refresh continues on the
+        clone's current branch, switching nothing.
+        """
+        from code_indexer.server.utils.registry_factory import (
+            is_postgres_storage_mode,
+            is_storage_mode_undetermined,
+            resolve_backend_registry_attr,
+        )
+
+        def unavailable(reason: str) -> RuntimeError:
+            return RuntimeError(
+                f"Cannot establish the registered branch of {alias_name}: "
+                f"{reason}; refresh stopped before pulling or indexing"
+            )
+
+        def unknown(reason: str) -> None:
+            read_note = (
+                f"; the base clone's current branch could not be read "
+                f"({branch_read_failure})"
+                if branch_read_failure is not None
+                else ""
+            )
+            logger.warning(
+                f"Registered branch of {alias_name} unknown: {reason}"
+                f"{read_note}; branch not verified, refresh continues on the "
+                "base clone's current branch"
+            )
+            return None
+
+        if is_storage_mode_undetermined():
+            raise unavailable(
+                "storage mode not yet determined, so the shared golden repo "
+                "metadata store is not wired"
+            )
+        try:
+            store = self.golden_repo_metadata
+        except Exception as e:
+            return unknown(f"golden repo metadata read failed ({type(e).__name__})")
+        if is_postgres_storage_mode():
+            # In cluster mode only the store the backend registry itself
+            # supplies is trusted, whatever its type.
+            shared, _ = resolve_backend_registry_attr(
+                "golden_repo_metadata", caller_name="RefreshScheduler"
+            )
+            if store is not shared:
+                raise unavailable(
+                    "cluster storage mode, but the shared golden repo metadata "
+                    "store is not wired"
+                )
+        try:
+            meta = store.get_repo(alias_name.removesuffix("-global"))
+        except Exception as e:
+            return unknown(f"golden repo metadata read failed ({type(e).__name__})")
+        if not meta:
+            return unknown("no golden repo metadata row")
+        branch = meta.get("default_branch") if isinstance(meta, dict) else None
+        if not isinstance(branch, str) or not branch:
+            return unknown("no registered branch recorded")
+        return branch
+
+    def _ensure_registered_branch(
+        self,
+        alias_name: str,
+        master_path: str,
+        cancel_check: Optional[Callable[[], bool]],
+    ) -> None:
+        """Bug #469 + #2148: leave the base clone on its registered branch,
+        or raise. The clone's current branch is read first (the first
+        cancellable git step, Bug #2012). A clone on another branch (or
+        detached) is checked out to the registered branch; when a KNOWN
+        registered branch cannot be verified or checked out, RuntimeError
+        stops the refresh before it pulls or indexes the wrong branch, after
+        an ERROR naming the alias and the branch. An unknown registered
+        branch switches nothing and the refresh continues, with a failed
+        branch read folded into ``_registered_branch``'s single WARNING. A
+        cancellation is re-raised as-is."""
+        branch_cmd = ["git", "branch", "--show-current"]
+        current = ""
+        read_failure: Optional[str] = None
+        read_detail = ""
+        read_error: Optional[Exception] = None
+        try:
+            branch_result = run_with_cancel(
+                branch_cmd,
+                cancel_check,
+                cwd=master_path,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception as e:
+            if _is_refresh_cancellation(e):
+                raise
+            read_error = e
+            read_failure = type(e).__name__
+        else:
+            if branch_result.returncode != 0:
+                read_failure = f"git branch exited {branch_result.returncode}"
+                read_detail = redact_command_output(branch_result.stderr, branch_cmd)
+            else:
+                current = branch_result.stdout.strip()
+        registered = self._registered_branch(
+            alias_name, branch_read_failure=read_failure
+        )
+        if registered is None:
+            return
+        if read_failure is not None:
+            logger.error(
+                f"Failed to reset {alias_name} to {registered}: the base "
+                f"clone's current branch could not be read ({read_failure})"
+                f"{': ' + read_detail if read_detail else ''}"
+            )
+            raise RuntimeError(
+                f"Cannot verify the branch of the base clone of {alias_name}: "
+                f"its current branch could not be read ({read_failure}); "
+                "refresh stopped before pulling or indexing"
+            ) from read_error
+        if current == registered:
+            return
+        logger.warning(
+            f"Base clone for {alias_name} on '{current}' instead of "
+            f"'{registered}', resetting to registered branch"
+        )
+        checkout_cmd = ["git", "checkout", registered]
+        try:
+            checkout_result = run_with_cancel(
+                checkout_cmd,
+                cancel_check,
+                cwd=master_path,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except Exception as e:
+            if _is_refresh_cancellation(e):
+                raise
+            logger.error(
+                f"Failed to reset {alias_name} to {registered}: git checkout "
+                f"raised {type(e).__name__}"
+            )
+            raise RuntimeError(
+                f"Cannot put the base clone of {alias_name} on its registered "
+                f"branch '{registered}': git checkout failed "
+                f"({type(e).__name__}); refresh stopped before pulling or "
+                "indexing"
+            ) from e
+        if checkout_result.returncode != 0:
+            logger.error(
+                f"Failed to reset {alias_name} to {registered}: "
+                f"{redact_command_output(checkout_result.stderr, checkout_cmd)}"
+            )
+            raise RuntimeError(
+                f"Cannot put the base clone of {alias_name} on its registered "
+                f"branch '{registered}': git checkout failed; refresh stopped "
+                "before pulling or indexing"
+            )
 
     def _is_versioned_snapshot(self, path: str) -> bool:
         """Return True when *path* is a versioned snapshot (Bug #1084 Phase A4).
@@ -3026,92 +3200,17 @@ class RefreshScheduler:
                             # Bug #469 Fix 1: Verify base clone is on expected default_branch before
                             # pulling.  If the clone was switched to a wrong branch by any previous
                             # operation, reset it now so we don't perpetuate the contamination.
-                            try:
-                                branch_result = run_with_cancel(
-                                    ["git", "branch", "--show-current"],
-                                    cancel_check,
-                                    cwd=master_path,
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=10,
-                                )
-                                current_branch = branch_result.stdout.strip()
-                                default_branch = repo_info.get("default_branch")
-                                try:
-                                    db_path = str(
-                                        self.golden_repos_dir.parent / "cidx_server.db"
-                                    )
-                                    _meta_backend = GoldenRepoMetadataSqliteBackend(
-                                        db_path
-                                    )
-                                    base_alias = alias_name.removesuffix("-global")
-                                    meta = _meta_backend.get_repo(base_alias)
-                                    if meta and meta.get("default_branch"):
-                                        default_branch = meta["default_branch"]
-                                except Exception as e:
-                                    logger.debug(
-                                        "Could not read default_branch from golden_repos_metadata"
-                                        " for %s: %s",
-                                        alias_name,
-                                        e,
-                                    )
-
-                                if not default_branch:
-                                    try:
-                                        symref_result = run_with_cancel(
-                                            [
-                                                "git",
-                                                "symbolic-ref",
-                                                "--short",
-                                                "refs/remotes/origin/HEAD",
-                                            ],
-                                            cancel_check,
-                                            cwd=master_path,
-                                            capture_output=True,
-                                            text=True,
-                                            timeout=10,
-                                        )
-                                        if symref_result.returncode == 0:
-                                            ref = symref_result.stdout.strip()
-                                            if ref.startswith("origin/"):
-                                                default_branch = ref[len("origin/") :]
-                                    except Exception as e:
-                                        if _is_refresh_cancellation(e):
-                                            raise
-                                        logger.debug(
-                                            "git symbolic-ref fallback failed for %s: %s",
-                                            alias_name,
-                                            e,
-                                        )
-
-                                if (
-                                    default_branch
-                                    and current_branch
-                                    and current_branch != default_branch
-                                ):
-                                    logger.warning(
-                                        f"Base clone for {alias_name} on '{current_branch}' instead of "
-                                        f"'{default_branch}', resetting to default branch"
-                                    )
-                                    checkout_cmd = ["git", "checkout", default_branch]
-                                    checkout_result = run_with_cancel(
-                                        checkout_cmd,
-                                        cancel_check,
-                                        cwd=master_path,
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=30,
-                                    )
-                                    if checkout_result.returncode != 0:
-                                        logger.error(
-                                            f"Failed to reset {alias_name} to {default_branch}: "
-                                            f"{redact_command_output(checkout_result.stderr, checkout_cmd)}"
-                                        )
-                            except Exception as e:
-                                if _is_refresh_cancellation(e):
-                                    raise
-                                logger.warning(
-                                    f"Branch verification failed for {alias_name}: {e}"
+                            # Bug #2148: the registered branch is the only
+                            # authority (never origin/HEAD). The refresh FAILS
+                            # here, before it pulls or indexes, when the
+                            # cluster store is not wired or a known branch
+                            # cannot be verified/checked out; an unknown
+                            # branch (Bug #469 orphan alias) switches nothing,
+                            # warns and continues (a meta-directory repo has
+                            # no git branch to verify).
+                            if not is_meta_repo:
+                                self._ensure_registered_branch(
+                                    alias_name, master_path, cancel_check
                                 )
 
                             if force_reset:
