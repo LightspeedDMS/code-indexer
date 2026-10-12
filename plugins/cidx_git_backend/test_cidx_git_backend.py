@@ -418,3 +418,112 @@ class TestFactory:
         b = plugin.make_git_backend()
         assert b._url == "http://custom:9/v1/git/mcp"
         assert b._timeout == 42.0
+
+
+class TestHistoryOps:
+    """cidx temporal history: paged log, batched diffs and object reads.
+
+    git-mcp returns git's stdout base64-encoded; the plugin hands cidx those
+    exact bytes and fails as a local ``check=True`` run would.
+    """
+
+    @staticmethod
+    def _raw(stdout: bytes, exit_code: int = 0, stderr: str = "") -> dict:
+        import base64
+
+        return {
+            "exit_code": exit_code,
+            "stdout_b64": base64.b64encode(stdout).decode(),
+            "stderr": stderr,
+        }
+
+    def test_log_raw_sends_a_page_and_returns_bytes(self, backend, monkeypatch):
+        calls = _install(monkeypatch, lambda b: _rpc(_content(self._raw(b"\xff\x1e"))))
+        out = backend.log_raw(REPO, "%H", ["abc"], since="2024-01-01", max_count=5)
+        assert out == b"\xff\x1e"
+        params = calls[0]["body"]["params"]
+        assert params["name"] == "git_log_raw"
+        assert params["arguments"] == {
+            "cow_path": REPO,
+            "format": "%H",
+            "revs": ["abc"],
+            "since": "2024-01-01",
+            "max_count": 5,
+        }
+
+    def test_log_raw_git_failure_raises_with_git_stderr(self, backend, monkeypatch):
+        _install(
+            monkeypatch,
+            lambda b: _rpc(_content(self._raw(b"", 128, "fatal: bad object"))),
+        )
+        with pytest.raises(GitMcpBackendError) as exc:
+            backend.log_raw(REPO, "%H")
+        assert exc.value.returncode == 128
+        assert exc.value.stderr == "fatal: bad object"
+
+    def test_diff_commits_is_one_call_per_batch(self, backend, monkeypatch):
+        def respond(body):
+            pairs = body["params"]["arguments"]["pairs"]
+            return _rpc(
+                _content({"diffs": [self._raw(p["commit"].encode()) for p in pairs]})
+            )
+
+        calls = _install(monkeypatch, respond)
+        pairs = [(f"{i:040x}", f"{i + 1:040x}") for i in range(300)]
+        out = backend.diff_commits(REPO, pairs, 5)
+        assert out == [c.encode() for _, c in pairs]
+        assert [len(c["body"]["params"]["arguments"]["pairs"]) for c in calls] == [
+            256,
+            44,
+        ]
+        assert calls[0]["body"]["params"]["arguments"]["context_lines"] == 5
+
+    def test_diff_commits_raises_for_a_failed_item(self, backend, monkeypatch):
+        _install(
+            monkeypatch,
+            lambda b: _rpc(_content({"diffs": [self._raw(b"", 128, "bad object")]})),
+        )
+        with pytest.raises(GitMcpBackendError, match="bad object"):
+            backend.diff_commits(REPO, [("a" * 40, "b" * 40)], 5)
+
+    def test_diff_commits_rejects_a_short_answer(self, backend, monkeypatch):
+        _install(monkeypatch, lambda b: _rpc(_content({"diffs": []})))
+        with pytest.raises(GitMcpBackendError, match="results for 1 items"):
+            backend.diff_commits(REPO, [("a" * 40, "b" * 40)], 5)
+
+    def test_show_objects_returns_completed_processes(self, backend, monkeypatch):
+        calls = _install(
+            monkeypatch,
+            lambda b: _rpc(
+                _content(
+                    {
+                        "objects": [
+                            self._raw(b"\x00bin"),
+                            self._raw(b"", 128, "fatal: path 'x' does not exist"),
+                        ]
+                    }
+                )
+            ),
+        )
+        out = backend.show_objects(REPO, [("a" * 40, "bin.dat"), ("a" * 40, "x")])
+        assert calls[0]["body"]["params"]["arguments"]["specs"] == [
+            {"rev": "a" * 40, "path": "bin.dat"},
+            {"rev": "a" * 40, "path": "x"},
+        ]
+        assert (out[0].returncode, out[0].stdout) == (0, b"\x00bin")
+        assert out[1].returncode == 128 and "does not exist" in out[1].stderr
+
+    def test_a_wrong_shape_item_fails_loud(self, backend, monkeypatch):
+        _install(monkeypatch, lambda b: _rpc(_content({"objects": [{"exit_code": 0}]})))
+        with pytest.raises(GitMcpBackendError, match="stdout_b64"):
+            backend.show_objects(REPO, [("a" * 40, "x")])
+
+    def test_stdout_that_is_not_base64_fails_loud(self, backend, monkeypatch):
+        _install(
+            monkeypatch,
+            lambda b: _rpc(
+                _content({"exit_code": 0, "stdout_b64": "!!!", "stderr": ""})
+            ),
+        )
+        with pytest.raises(GitMcpBackendError, match="not base64"):
+            backend.log_raw(REPO, "%H")

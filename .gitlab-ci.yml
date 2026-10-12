@@ -195,6 +195,8 @@ smoke:
       tests/unit/services/test_smart_indexer_pass_existence.py
       tests/unit/storage/test_fvs_chunk_content_seam.py
       tests/unit/services/temporal/test_temporal_query_history_elsewhere.py
+      tests/unit/services/test_temporal_git_seam.py
+      tests/unit/server/storage/shared/test_git_backend.py
       tests/unit/global_repos/test_refresh_git_seam_mountless.py
       tests/unit/global_repos/test_refresh_scheduler_indexing_types.py
       tests/unit/global_repos/test_reclone_mountless.py

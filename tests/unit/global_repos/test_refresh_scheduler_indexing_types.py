@@ -379,13 +379,15 @@ class TestTemporalIndexingInIndexSource:
         self, scheduler, registry, source_repo, monkeypatch, caplog, backend
     ):
         """
-        Temporal indexing runs git log on this pod; on a pod that does not hold
-        the repository that fails, and the failure used to fail the WHOLE
-        refresh. It is skipped -- at ERROR, a lost feature -- and the semantic
-        index still runs. Not knowing the backend counts as not holding it.
+        With LOCAL git, temporal indexing runs git log on this pod; on a pod
+        that does not hold the repository that fails, and the failure used to
+        fail the WHOLE refresh. It is skipped -- at ERROR, a lost feature -- and
+        the semantic index still runs. Not knowing the backend counts as not
+        holding it; not knowing the git backend counts as local.
         """
         import logging
 
+        from code_indexer.global_repos import refresh_scheduler as rs
         from code_indexer.server.startup import content_backend_wiring as wiring
 
         def unreadable() -> str:
@@ -395,6 +397,11 @@ class TestTemporalIndexingInIndexSource:
             wiring,
             "configured_content_backend_name",
             (lambda: "delegated") if backend == "delegated" else unreadable,
+        )
+        monkeypatch.setattr(
+            rs,
+            "configured_git_backend_name",
+            (lambda: "local") if backend == "delegated" else unreadable,
         )
         registry.register_global_repo(
             "mountless-temporal-test",
@@ -437,6 +444,63 @@ class TestTemporalIndexingInIndexSource:
         assert any(
             "Skipping temporal indexing" in r.getMessage() for r in caplog.records
         )
+
+    def test_temporal_indexing_runs_through_the_git_seam_when_git_is_delegated(
+        self, scheduler, registry, source_repo, monkeypatch
+    ):
+        """With git delegated the temporal child reads the history through
+        git-mcp: it runs, carrying both seam flags, instead of being skipped."""
+        from code_indexer.global_repos import refresh_scheduler as rs
+        from code_indexer.server.startup import content_backend_wiring as wiring
+        from code_indexer.server.utils import index_command_layout as icl
+
+        for module in (wiring, icl):
+            monkeypatch.setattr(
+                module, "configured_content_backend_name", lambda: "delegated"
+            )
+        for module in (rs, icl):
+            monkeypatch.setattr(
+                module, "configured_git_backend_name", lambda: "delegated"
+            )
+        registry.register_global_repo(
+            "seam-temporal-test",
+            "seam-temporal-test-global",
+            "https://git.example/seam.git",
+            str(source_repo),
+            enable_temporal=True,
+        )
+        calls = []
+
+        def mock_popen_progress(**kwargs):
+            command = kwargs.get("command", [])
+            calls.append(list(command))
+            if "--fts" in command:
+                (Path(kwargs.get("cwd", "")) / ".code-indexer" / "index").mkdir(
+                    parents=True, exist_ok=True
+                )
+            return 50
+
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=mock_popen_progress,
+            ):
+                with patch(
+                    "subprocess.run",
+                    return_value=MagicMock(returncode=0, stdout="", stderr=""),
+                ):
+                    scheduler._index_source(
+                        alias_name="seam-temporal-test-global",
+                        source_path=str(source_repo),
+                    )
+
+        temporal = [c for c in calls if "--index-commits" in c]
+        assert len(temporal) == 1, calls
+        assert "--git-backend=delegated" in temporal[0]
+        assert "--content-backend=delegated" in temporal[0]
 
     @pytest.mark.parametrize(
         "repo_url, delegated_flags",

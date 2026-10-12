@@ -29,6 +29,38 @@ from .models import CommitInfo
 # commit's single-parent diff).
 EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+# The commit-history record: null-byte fields (a pipe in a message cannot break
+# parsing), %B for the full multi-paragraph body, and a record separator (%x1e)
+# after each record so multi-line messages split correctly.
+COMMIT_LOG_FORMAT = "%H%x00%at%x00%an%x00%ae%x00%B%x00%P%x1e"
+
+
+def parse_commit_log(log_output: str) -> List[CommitInfo]:
+    """Parse ``git log --format=COMMIT_LOG_FORMAT`` output, in git's order."""
+    commits = []
+    # Split by record separator (%x1e) to handle multi-line commit messages correctly
+    for record in log_output.strip().split("\x1e"):
+        if record.strip():
+            # Use null-byte delimiter to match git format (%x00)
+            # This prevents pipe characters in commit messages from breaking parsing
+            parts = record.split("\x00")
+            if len(parts) >= 6:
+                # Strip trailing newline from message body (%B includes trailing newline)
+                message = parts[4].strip()
+                commits.append(
+                    CommitInfo(
+                        # Strip newlines from commit hash (BUG #1 FIX)
+                        hash=parts[0].strip(),
+                        timestamp=int(parts[1]),
+                        author_name=parts[2],
+                        author_email=parts[3],
+                        message=message,
+                        # Strip newlines from parent hashes too
+                        parent_hashes=parts[5].strip(),
+                    )
+                )
+    return commits
+
 
 @dataclass(frozen=True)
 class FileChange:
@@ -83,7 +115,7 @@ def commit_kind(commit: CommitInfo) -> str:
     return "merge"
 
 
-def _diff_base_ref(commit: CommitInfo) -> str:
+def diff_base_ref(commit: CommitInfo) -> str:
     """Return the ref to diff against: first parent, or the empty tree for a root commit."""
     parents = commit.parent_hashes.split()
     return parents[0] if parents else EMPTY_TREE_SHA
@@ -106,7 +138,7 @@ def get_file_changes(
     Returns:
         Ordered list of FileChange, in the order git emits them.
     """
-    base_ref = _diff_base_ref(commit)
+    base_ref = diff_base_ref(commit)
     result = subprocess.run(
         [
             "git",
@@ -123,10 +155,10 @@ def get_file_changes(
         errors="replace",
         check=True,
     )
-    return _parse_diff_output(result.stdout)
+    return parse_diff_output(result.stdout)
 
 
-def _parse_diff_output(diff_output: str) -> List[FileChange]:
+def parse_diff_output(diff_output: str) -> List[FileChange]:
     """Parse `git diff` unified output into FileChange entries.
 
     Unlike the legacy TemporalDiffScanner, this preserves actual hunk content

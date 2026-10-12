@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Protocol, Sequence, runtime_checkable
+from typing import List, Optional, Protocol, Sequence, Tuple, runtime_checkable
 
 from code_indexer.utils.git_runner import (
     run_git_command,
@@ -185,6 +185,50 @@ class GitBackend(Protocol):
         """``git show-ref <args...>`` — ``check=False``; caller reads returncode."""
         ...  # pragma: no cover
 
+    # -- history (temporal indexing and queries) ------------------------------
+    # Output is git's raw stdout BYTES, so the consumer decodes it exactly as a
+    # local ``subprocess.run(text=True)`` would. Each call is one page or one
+    # batch -- never one call per commit or per file.
+    def log_raw(
+        self,
+        repo_path: str,
+        fmt: str,
+        revs: Sequence[str] = (),
+        *,
+        all_refs: bool = False,
+        since: Optional[str] = None,
+        skip: Optional[int] = None,
+        max_count: Optional[int] = None,
+        timeout: Timeout = None,
+    ) -> bytes:
+        """``git log --format=<fmt> [--all] [--since S] [--skip=N] [-n M] [<revs>]``."""
+        ...  # pragma: no cover
+
+    def diff_commits(
+        self,
+        repo_path: str,
+        pairs: Sequence[Tuple[str, str]],
+        context_lines: int,
+        timeout: Timeout = None,
+    ) -> List[bytes]:
+        """``git diff -M -U<n> --full-index <base> <commit>`` for each pair.
+
+        Raises ``CalledProcessError`` for the first pair git fails on.
+        """
+        ...  # pragma: no cover
+
+    def show_objects(
+        self,
+        repo_path: str,
+        specs: Sequence[Tuple[str, str]],
+        timeout: Timeout = None,
+    ) -> List[subprocess.CompletedProcess]:
+        """``git show <rev>:<path>`` for each ``(rev, path)`` -- ``check=False``.
+
+        Each result carries git's returncode, raw stdout bytes and stderr text.
+        """
+        ...  # pragma: no cover
+
     # -- mutation -------------------------------------------------------------
     def reset(
         self, repo_path: str, mode: str, target: str, timeout: Timeout = None
@@ -272,12 +316,38 @@ class LocalGitBackend:
         check: bool = True,
         timeout: Timeout = None,
         retry: bool = False,
+        text: bool = True,
     ) -> subprocess.CompletedProcess:
         runner = run_git_command_with_retry if retry else run_git_command
-        result: subprocess.CompletedProcess = runner(
-            list(cmd), cwd=cwd, check=check, timeout=timeout
-        )
+        if text:
+            result: subprocess.CompletedProcess = runner(
+                list(cmd), cwd=cwd, check=check, timeout=timeout
+            )
+        else:
+            result = runner(
+                list(cmd), cwd=cwd, check=check, timeout=timeout, text=False
+            )
         return result
+
+    @classmethod
+    def _run_bytes(
+        cls,
+        cmd: Sequence[str],
+        cwd: Path,
+        *,
+        check: bool = True,
+        timeout: Timeout = None,
+    ) -> subprocess.CompletedProcess:
+        """Run git keeping stdout as BYTES; stderr is decoded for messages."""
+        result = cls._run(cmd, cwd, check=False, timeout=timeout, text=False)
+        stderr = bytes(result.stderr or b"").decode("utf-8", "replace")
+        if check and result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, list(cmd), output=result.stdout, stderr=stderr
+            )
+        return subprocess.CompletedProcess(
+            list(cmd), result.returncode, stdout=result.stdout, stderr=stderr
+        )
 
     @staticmethod
     def _lines(stdout: object) -> List[str]:
@@ -446,6 +516,76 @@ class LocalGitBackend:
         return self._run(
             ["git", "show-ref", *args], Path(repo_path), check=False, timeout=timeout
         )
+
+    # -- history (temporal indexing and queries) ------------------------------
+    def log_raw(
+        self,
+        repo_path: str,
+        fmt: str,
+        revs: Sequence[str] = (),
+        *,
+        all_refs: bool = False,
+        since: Optional[str] = None,
+        skip: Optional[int] = None,
+        max_count: Optional[int] = None,
+        timeout: Timeout = None,
+    ) -> bytes:
+        # The flags in the order TemporalIndexer._get_commit_history passes them.
+        cmd = ["git", "log", f"--format={fmt}"]
+        if all_refs:
+            cmd.append("--all")
+        if since:
+            cmd.extend(["--since", since])
+        if skip:
+            cmd.append(f"--skip={skip}")
+        if max_count:
+            cmd.extend(["-n", str(max_count)])
+        cmd.extend(revs)
+        return bytes(self._run_bytes(cmd, Path(repo_path), timeout=timeout).stdout)
+
+    def diff_commits(
+        self,
+        repo_path: str,
+        pairs: Sequence[Tuple[str, str]],
+        context_lines: int,
+        timeout: Timeout = None,
+    ) -> List[bytes]:
+        # The argv commit_aggregator.get_file_changes runs for one commit.
+        return [
+            bytes(
+                self._run_bytes(
+                    [
+                        "git",
+                        "diff",
+                        "-M",
+                        f"-U{context_lines}",
+                        "--full-index",
+                        base,
+                        commit,
+                    ],
+                    Path(repo_path),
+                    timeout=timeout,
+                ).stdout
+            )
+            for base, commit in pairs
+        ]
+
+    def show_objects(
+        self,
+        repo_path: str,
+        specs: Sequence[Tuple[str, str]],
+        timeout: Timeout = None,
+    ) -> List[subprocess.CompletedProcess]:
+        # The argv TemporalSearchService._reconstruct_temporal_content runs.
+        return [
+            self._run_bytes(
+                ["git", "show", f"{rev}:{path}"],
+                Path(repo_path),
+                check=False,
+                timeout=timeout,
+            )
+            for rev, path in specs
+        ]
 
     # -- mutation -------------------------------------------------------------
     def reset(

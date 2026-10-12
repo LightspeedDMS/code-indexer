@@ -2508,19 +2508,21 @@ class GoldenRepoManager:
         return clone_path
 
     def _refuse_temporal_under_delegated_content(self) -> None:
-        """Raise when temporal indexing is asked for a repository not on this pod.
+        """Raise when temporal indexing could not read the repository's history.
 
-        Temporal indexing walks the history with ``git log`` and reads blobs,
-        run on this pod with the repository as cwd -- not through the git seam.
-        On a pod that holds only the index state it fails, and on refresh that
-        failure fails the whole job. Refused at the request instead, with the
-        reason, until temporal indexing runs through git-mcp.
+        Temporal indexing walks the history (``git log``, one diff per commit).
+        With a delegated git backend it does that through the git seam
+        (git-mcp). With LOCAL git on a pod that holds only the index state it
+        fails, and on refresh that failure fails the whole job -- refused at
+        the request instead, with the reason.
         """
-        if not self._content_backend.is_local:
+        if not self._content_backend.is_local and isinstance(
+            self._git_backend, LocalGitBackend
+        ):
             raise GitOperationError(
-                "temporal indexing is not available with content_backend="
-                "'delegated': it runs git log on this pod, which does not hold "
-                "the repository"
+                "temporal indexing with content_backend='delegated' needs "
+                "git_backend='delegated': with git run on this pod, which does "
+                "not hold the repository, there is no history to index"
             )
 
     def _refuse_local_git_under_delegated_content(self) -> None:

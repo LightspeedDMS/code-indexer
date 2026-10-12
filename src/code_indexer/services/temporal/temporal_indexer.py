@@ -28,7 +28,13 @@ from ...services.file_identifier import FileIdentifier
 from ...storage.filesystem_vector_store import FilesystemVectorStore
 
 from .models import CommitInfo
-from .commit_aggregator import build_aggregated_document, get_file_changes
+from .commit_aggregator import (
+    COMMIT_LOG_FORMAT,
+    build_aggregated_document,
+    get_file_changes,
+    parse_commit_log,
+)
+from .temporal_git_seam import CommitDiffPages, commit_history, current_branch_name
 from .embedders.base import TemporalEmbedder
 from .contextual_chunker import chunk_aggregated_document
 from .embedders import registry as _embedder_registry_module  # noqa: F401  (self-registers adapters)
@@ -137,11 +143,16 @@ class TemporalIndexer:
     MAX_RETRIES = 5
     RETRY_DELAYS = [2, 5, 10, 30, 60]  # Exponential backoff delays in seconds
 
+    #: The git seam, when this machine does not hold the repository (set in
+    #: ``__init__``); None means local git.
+    _git_backend: Optional[Any] = None
+
     def __init__(
         self,
         config_manager: ConfigManager,
         vector_store: FilesystemVectorStore,
         collection_name: str = LEGACY_TEMPORAL_COLLECTION,
+        git_backend: Optional[Any] = None,
     ):
         """Initialize temporal indexer.
 
@@ -152,6 +163,10 @@ class TemporalIndexer:
                 Must be non-empty, contain no path separators (/ or \\),
                 no parent-directory segments (. or ..), and not be an absolute path.
                 Default: 'code-indexer-temporal' (legacy backward-compat).
+            git_backend: the git seam (git-mcp) for a repository this machine
+                does not hold. History, diffs, the branch and the project id
+                are asked of it in pages and batches. None keeps local git,
+                exactly as before.
         """
         from pathlib import PurePosixPath, PureWindowsPath
 
@@ -179,8 +194,12 @@ class TemporalIndexer:
         # Use vector store's project_root as the codebase directory
         self.codebase_dir = vector_store.project_root
 
+        self._git_backend = git_backend
+
         # Initialize FileIdentifier for project_id lookup
-        self.file_identifier = FileIdentifier(self.codebase_dir, self.config)
+        self.file_identifier = FileIdentifier(
+            self.codebase_dir, self.config, git_backend=git_backend
+        )
 
         # Initialize temporal directory using collection path to consolidate all data
         # This ensures metadata and vectors are in the same location
@@ -1000,13 +1019,18 @@ class TemporalIndexer:
         entirely in temporal_incremental_gate.py's set-difference against
         each embedder's own completed_commits.
         """
-        # Use null byte delimiters to prevent pipe characters in commit messages from breaking parsing
-        # Use %B (full body) instead of %s (subject only) to capture multi-paragraph commit messages
-        # Use record separator (%x1e) at end of each record to enable correct parsing with multi-line messages
+        if self._git_backend is not None:
+            return commit_history(
+                self._git_backend,
+                str(self.codebase_dir),
+                all_branches=all_branches,
+                since_date=since_date,
+                max_commits=max_commits,
+            )
         cmd = [
             "git",
             "log",
-            "--format=%H%x00%at%x00%an%x00%ae%x00%B%x00%P%x1e",
+            f"--format={COMMIT_LOG_FORMAT}",
             "--reverse",
         ]
 
@@ -1028,35 +1052,12 @@ class TemporalIndexer:
             check=True,
         )
 
-        commits = []
-        # Split by record separator (%x1e) to handle multi-line commit messages correctly
-        for record in result.stdout.strip().split("\x1e"):
-            if record.strip():
-                # Use null-byte delimiter to match git format (%x00)
-                # This prevents pipe characters in commit messages from breaking parsing
-                parts = record.split("\x00")
-                if len(parts) >= 6:
-                    # Strip trailing newline from message body (%B includes trailing newline)
-                    message = parts[4].strip()
-                    commits.append(
-                        CommitInfo(
-                            hash=parts[
-                                0
-                            ].strip(),  # Strip newlines from commit hash (BUG #1 FIX)
-                            timestamp=int(parts[1]),
-                            author_name=parts[2],
-                            author_email=parts[3],
-                            message=message,
-                            parent_hashes=parts[
-                                5
-                            ].strip(),  # Strip newlines from parent hashes too
-                        )
-                    )
-
-        return commits
+        return parse_commit_log(result.stdout)
 
     def _get_current_branch(self) -> str:
         """Get current branch name."""
+        if self._git_backend is not None:
+            return current_branch_name(self._git_backend, str(self.codebase_dir))
         result = subprocess.run(
             ["git", "branch", "--show-current"],
             cwd=self.codebase_dir,
@@ -1137,6 +1138,15 @@ class TemporalIndexer:
         diff_context_lines = getattr(self.config.temporal, "diff_context_lines", 5)
         chunk_chars = getattr(self.config.temporal, "aggregation_chunk_chars", 4096)
         shard_progress = self._get_progress(self.collection_name)
+        # Through the git seam, a page of commits' diffs is ONE call, fetched
+        # the first time a worker needs one of them -- never a call per commit.
+        seam_diffs: Optional[CommitDiffPages] = None
+        if self._git_backend is not None:
+            seam_diffs = CommitDiffPages(
+                self._git_backend, str(self.codebase_dir), commits, diff_context_lines
+            )
+            # Resolved (and cached) once here, not by each worker at once.
+            self.file_identifier.get_project_id()
 
         def worker():
             nonlocal total_bytes_processed
@@ -1167,9 +1177,12 @@ class TemporalIndexer:
                         file_size=0,
                     )
 
-                    file_changes = get_file_changes(
-                        self.codebase_dir, commit, diff_context_lines
-                    )
+                    if seam_diffs is not None:
+                        file_changes = seam_diffs.file_changes(commit)
+                    else:
+                        file_changes = get_file_changes(
+                            self.codebase_dir, commit, diff_context_lines
+                        )
                     doc = build_aggregated_document(commit, file_changes)
                     if self._active_embedder is None:
                         raise RuntimeError(
