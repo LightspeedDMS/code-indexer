@@ -24,6 +24,11 @@ METADATA_TABLES: Dict[str, str] = {
     KIND_WRITE_MODE: "write_mode_markers",
 }
 
+#: Registry table remembering when each key was last deleted, so the startup
+#: import never resurrects a key from a file the delete failed to remove (or
+#: an old-image pod left behind). One row per (kind, name).
+TOMBSTONE_TABLE = "control_plane_metadata_tombstones"
+
 
 #: Fixed-width UTC format for ``updated_at``. Every stored value uses it, so
 #: SQL can compare two of them lexically (the import's newer-wins upsert).
@@ -87,17 +92,20 @@ class ControlPlaneMetadataBackend(Protocol):
         ...
 
     def delete(self, kind: str, name: str) -> None:
-        """Remove *name*; a missing key is not an error."""
+        """Remove *name*; a missing key is not an error. Records a tombstone
+        stamped now in the same transaction."""
         ...
 
     def import_if_newer(
         self, kind: str, name: str, payload: Dict[str, Any], updated_at: str
     ) -> bool:
-        """Store *payload* only if *name* is absent or its stored updated_at
-        is strictly older than *updated_at*. Returns True when it stored.
+        """Store *payload* only if *updated_at* is strictly newer than both
+        the stored row's updated_at (when the key exists) and the key's
+        tombstone (when it was deleted). Returns True when it stored.
 
         The startup import uses this so an older file never clobbers a newer
-        registry value.
+        registry value, and a file that outlived its key's delete never
+        brings the key back.
         """
         ...
 

@@ -74,3 +74,29 @@ def test_import_if_newer_never_older_over_newer(backend):
 
     assert (stored_old, stored_new, stored_missing) == (False, True, True)
     assert backend.get(KIND_ALIAS, "repo-global") == {"target_path": "/s/new-file"}
+
+
+def test_import_never_resurrects_a_deleted_key(backend):
+    """The delete's tombstone outranks any file dated before it; a file dated
+    after it (an old-image pod re-creating the key) still imports."""
+    now = datetime.now(timezone.utc)
+    backend.put(KIND_WRITE_MODE, "repo", {"source_path": "/live"})
+    backend.delete(KIND_WRITE_MODE, "repo")
+
+    stale = backend.import_if_newer(
+        KIND_WRITE_MODE,
+        "repo",
+        {"source_path": "/live"},
+        format_updated_at(now - timedelta(hours=1)),
+    )
+    assert stale is False
+    assert backend.get(KIND_WRITE_MODE, "repo") is None
+
+    recreated = backend.import_if_newer(
+        KIND_WRITE_MODE,
+        "repo",
+        {"source_path": "/again"},
+        format_updated_at(now + timedelta(hours=1)),
+    )
+    assert recreated is True
+    assert backend.get(KIND_WRITE_MODE, "repo") == {"source_path": "/again"}

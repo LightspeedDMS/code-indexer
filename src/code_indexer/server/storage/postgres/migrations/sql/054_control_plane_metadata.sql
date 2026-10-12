@@ -26,3 +26,14 @@ CREATE TABLE IF NOT EXISTS write_mode_markers (
     payload     TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
+
+-- When each key was last deleted. The startup import stores a file only when
+-- it is strictly newer than this, so a file that outlived its key's delete
+-- (a failed dual-write unlink, or an old-image pod during rollout) never
+-- brings the key back.
+CREATE TABLE IF NOT EXISTS control_plane_metadata_tombstones (
+    kind        TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    deleted_at  TEXT NOT NULL,
+    PRIMARY KEY (kind, name)
+);

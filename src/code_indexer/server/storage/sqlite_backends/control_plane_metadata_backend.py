@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 from ..database_manager import DatabaseConnectionManager
 from ..protocols.control_plane_metadata_backend import (
+    TOMBSTONE_TABLE,
     decode_payload,
     format_updated_at,
     metadata_table,
@@ -64,6 +65,12 @@ class ControlPlaneMetadataSqliteBackend:
 
         def operation(conn: sqlite3.Connection) -> None:
             conn.execute(f"DELETE FROM {table} WHERE name = ?", (name,))
+            conn.execute(
+                f"INSERT INTO {TOMBSTONE_TABLE} (kind, name, deleted_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(kind, name) DO UPDATE SET "
+                "deleted_at = excluded.deleted_at",
+                (kind, name, format_updated_at()),
+            )
 
         self._conn_manager.execute_atomic(operation)
 
@@ -75,11 +82,14 @@ class ControlPlaneMetadataSqliteBackend:
 
         def operation(conn: sqlite3.Connection) -> bool:
             cursor = conn.execute(
-                f"INSERT INTO {table} (name, payload, updated_at) VALUES (?, ?, ?) "
+                f"INSERT INTO {table} (name, payload, updated_at) "
+                "SELECT ?, ?, ? WHERE NOT EXISTS ("
+                f"SELECT 1 FROM {TOMBSTONE_TABLE} "
+                "WHERE kind = ? AND name = ? AND deleted_at >= ?) "
                 "ON CONFLICT(name) DO UPDATE SET "
                 "payload = excluded.payload, updated_at = excluded.updated_at "
                 f"WHERE excluded.updated_at > {table}.updated_at",
-                (name, encoded, updated_at),
+                (name, encoded, updated_at, kind, name, updated_at),
             )
             return bool(cursor.rowcount)
 

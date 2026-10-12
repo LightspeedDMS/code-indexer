@@ -22,9 +22,10 @@ comes from and where a write goes:
 
 Migration: :meth:`ControlPlaneMetadata.import_files` copies the existing files
 into the registry, idempotently, never letting an older file clobber a newer
-registry value. Until this process's import has finished, a registry miss
-falls back to the file, so a first boot on the new image serves every alias
-it served before.
+registry value, and never bringing back a key deleted after the file was
+written (the delete's tombstone). Until this process's import has finished
+WITHOUT a failure, a registry miss falls back to the file, so a first boot on
+the new image serves every alias it served before.
 """
 
 from __future__ import annotations
@@ -34,10 +35,11 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from code_indexer.server.storage.protocols.control_plane_metadata_backend import (
     KIND_ALIAS,
@@ -81,6 +83,10 @@ _TIMESTAMP_FIELDS: Dict[str, Tuple[str, ...]] = {
     KIND_ALIAS: ("created_at", "last_refresh", "swapped_at"),
     KIND_WRITE_MODE: ("entered_at",),
 }
+
+#: Seconds to wait before each retry of an import that had failures. The
+#: read-through to the files stays on until an attempt has none.
+IMPORT_RETRY_DELAYS_SECONDS: Tuple[float, ...] = (5.0, 30.0, 120.0)
 
 PathLike = Union[str, "os.PathLike[str]"]
 
@@ -371,12 +377,13 @@ class ControlPlaneMetadata:
     def import_files(self) -> Dict[str, int]:
         """Copy every existing file into the registry, idempotently.
 
-        A file is stored only when its key is absent from the registry or the
-        file's own newest timestamp is strictly newer than the stored row's
-        updated_at -- so an older file never clobbers a newer registry value,
-        and a re-run changes nothing. Never deletes: a registry row with no
-        file is kept. Marks this process's import complete when done, ending
-        the read-through fallback to the files.
+        A file is stored only when its own newest timestamp is strictly newer
+        than the stored row's updated_at and than the key's delete tombstone
+        -- so an older file never clobbers a newer registry value, a stale
+        file never resurrects a deleted key, and a re-run changes nothing.
+        Never deletes: a registry row with no file is kept. Only an import
+        with no failures marks this process's import complete and ends the
+        read-through fallback to the files.
         """
         report = {"imported": 0, "skipped": 0, "failed": 0}
         if self.backend is None:
@@ -408,7 +415,8 @@ class ControlPlaneMetadata:
                     report["failed"] += 1
                     continue
                 report["imported" if stored else "skipped"] += 1
-        self._import_complete.set()
+        if report["failed"] == 0:
+            self._import_complete.set()
         logger.info(
             "Control-plane metadata import finished: imported=%d skipped=%d failed=%d",
             report["imported"],
@@ -417,18 +425,38 @@ class ControlPlaneMetadata:
         )
         return report
 
-    def start_import(self) -> threading.Thread:
+    @property
+    def import_complete(self) -> bool:
+        """True once an import ran with no failures (read-through is off)."""
+        return self._import_complete.is_set()
+
+    def start_import(
+        self, retry_delays: Sequence[float] = IMPORT_RETRY_DELAYS_SECONDS
+    ) -> threading.Thread:
         """Run :meth:`import_files` on a daemon thread, off the startup path.
 
-        Reads fall back to the files until it finishes, so nothing waits on
-        it; a failure is logged and the fallback simply stays on.
+        Reads fall back to the files until an attempt finishes with no
+        failures, so nothing waits on it. An attempt that had failures is
+        retried after each of *retry_delays*; if every attempt fails, the
+        fallback simply stays on for this process.
         """
 
         def _run() -> None:
-            try:
-                self.import_files()
-            except Exception:
-                logger.exception("Control-plane metadata import failed")
+            for delay in (None, *retry_delays):
+                if delay is not None:
+                    time.sleep(delay)
+                try:
+                    self.import_files()
+                except Exception:
+                    logger.exception("Control-plane metadata import failed")
+                if self._import_complete.is_set():
+                    return
+            logger.error(
+                "Control-plane metadata import still has failures after %d "
+                "attempts; registry misses keep reading through to the files "
+                "until the next restart",
+                len(retry_delays) + 1,
+            )
 
         thread = threading.Thread(
             target=_run, name="control-plane-metadata-import", daemon=True

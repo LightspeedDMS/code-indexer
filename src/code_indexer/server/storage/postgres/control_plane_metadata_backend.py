@@ -12,6 +12,7 @@ import json
 from typing import Any, Dict, Optional
 
 from ..protocols.control_plane_metadata_backend import (
+    TOMBSTONE_TABLE,
     decode_payload,
     format_updated_at,
     metadata_table,
@@ -60,6 +61,12 @@ class ControlPlaneMetadataPostgresBackend:
         table = metadata_table(kind)
         with self._pool.connection() as conn:
             conn.execute(f"DELETE FROM {table} WHERE name = %s", (name,))
+            conn.execute(
+                f"INSERT INTO {TOMBSTONE_TABLE} (kind, name, deleted_at) "
+                "VALUES (%s, %s, %s) ON CONFLICT (kind, name) DO UPDATE SET "
+                "deleted_at = EXCLUDED.deleted_at",
+                (kind, name, format_updated_at()),
+            )
 
     def import_if_newer(
         self, kind: str, name: str, payload: Dict[str, Any], updated_at: str
@@ -68,10 +75,13 @@ class ControlPlaneMetadataPostgresBackend:
         with self._pool.connection() as conn:
             cursor = conn.execute(
                 f"INSERT INTO {table} (name, payload, updated_at) "
-                "VALUES (%s, %s, %s) ON CONFLICT (name) DO UPDATE SET "
+                "SELECT %s, %s, %s WHERE NOT EXISTS ("
+                f"SELECT 1 FROM {TOMBSTONE_TABLE} "
+                "WHERE kind = %s AND name = %s AND deleted_at >= %s) "
+                "ON CONFLICT (name) DO UPDATE SET "
                 "payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at "
                 f"WHERE EXCLUDED.updated_at > {table}.updated_at",
-                (name, json.dumps(payload), updated_at),
+                (name, json.dumps(payload), updated_at, kind, name, updated_at),
             )
             return bool(cursor.rowcount)
 

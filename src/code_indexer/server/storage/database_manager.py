@@ -455,6 +455,17 @@ class DatabaseSchema:
         )
     """
 
+    # When each control-plane metadata key was last deleted, so the startup
+    # import never resurrects a key from a stale file. Mirrors migration 054.
+    CREATE_CONTROL_PLANE_METADATA_TOMBSTONES_TABLE = """
+        CREATE TABLE IF NOT EXISTS control_plane_metadata_tombstones (
+            kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            deleted_at TEXT NOT NULL,
+            PRIMARY KEY (kind, name)
+        )
+    """
+
     # Story #283: Wiki render cache tables
     CREATE_WIKI_CACHE_TABLE = """
         CREATE TABLE IF NOT EXISTS wiki_cache (
@@ -852,6 +863,7 @@ class DatabaseSchema:
             # Content seam step 5a: control-plane metadata in the registry
             conn.execute(self.CREATE_GOLDEN_REPO_ALIASES_TABLE)
             conn.execute(self.CREATE_WRITE_MODE_MARKERS_TABLE)
+            conn.execute(self.CREATE_CONTROL_PLANE_METADATA_TOMBSTONES_TABLE)
             # Story #283: Wiki render cache tables
             conn.execute(self.CREATE_WIKI_CACHE_TABLE)
             conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)

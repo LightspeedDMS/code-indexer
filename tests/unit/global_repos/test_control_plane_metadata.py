@@ -365,6 +365,135 @@ class TestStartupImport:
         assert backend.get(KIND_ALIAS, ALIAS)["target_path"] == "/s/v_1"
 
 
+class _FailingImports:
+    """A registry backend whose first *failures* import_if_newer calls raise."""
+
+    def __init__(self, backend: ControlPlaneMetadataSqliteBackend, failures: int):
+        self._backend = backend
+        self.failures_left = failures
+
+    def __getattr__(self, attribute: str):
+        return getattr(self._backend, attribute)
+
+    def import_if_newer(self, *args, **kwargs) -> bool:
+        if self.failures_left > 0:
+            self.failures_left -= 1
+            raise RuntimeError("registry rejected the row")
+        return self._backend.import_if_newer(*args, **kwargs)
+
+
+class TestImportFailuresKeepTheReadThrough:
+    def test_failed_import_keeps_serving_the_file(self, golden_repos_dir, backend):
+        _write_file(
+            _alias_file(golden_repos_dir),
+            _alias_doc("/s/v_1", datetime.now(timezone.utc)),
+        )
+        component = ControlPlaneMetadata(
+            golden_repos_dir, backend=_FailingImports(backend, failures=1)
+        )
+        manager = AliasManager(golden_repos_dir / "aliases", metadata=component)
+
+        report = component.import_files()
+
+        assert report["failed"] == 1
+        assert not component.import_complete
+        assert manager.read_alias(ALIAS) == "/s/v_1"
+        assert manager.list_pointers() == {ALIAS: ("/s/v_1", None)}
+
+    def test_unlistable_directory_keeps_the_read_through(
+        self, golden_repos_dir, backend, monkeypatch
+    ):
+        component = ControlPlaneMetadata(golden_repos_dir, backend=backend)
+
+        def unlistable(kind: str, prefix: str = ""):
+            raise OSError("stale NFS handle")
+
+        monkeypatch.setattr(component.files, "list_all", unlistable)
+
+        assert component.import_files()["failed"] == 2
+        assert not component.import_complete
+
+    def test_background_import_retries_until_it_succeeds(
+        self, golden_repos_dir, backend
+    ):
+        _write_file(
+            _alias_file(golden_repos_dir),
+            _alias_doc("/s/v_1", datetime.now(timezone.utc)),
+        )
+        flaky = _FailingImports(backend, failures=1)
+        component = ControlPlaneMetadata(golden_repos_dir, backend=flaky)
+
+        component.start_import(retry_delays=(0.0,)).join(timeout=30)
+
+        assert component.import_complete
+        assert backend.get(KIND_ALIAS, ALIAS)["target_path"] == "/s/v_1"
+
+    def test_background_import_gives_up_with_the_read_through_on(
+        self, golden_repos_dir, backend
+    ):
+        _write_file(
+            _alias_file(golden_repos_dir),
+            _alias_doc("/s/v_1", datetime.now(timezone.utc)),
+        )
+        component = ControlPlaneMetadata(
+            golden_repos_dir, backend=_FailingImports(backend, failures=3)
+        )
+
+        component.start_import(retry_delays=(0.0, 0.0)).join(timeout=30)
+
+        assert not component.import_complete
+        assert component.get(KIND_ALIAS, ALIAS)["target_path"] == "/s/v_1"
+
+
+def _undeletable_files(component: ControlPlaneMetadata, monkeypatch) -> None:
+    def refuse(kind: str, name: str) -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(component.files, "delete", refuse)
+
+
+class TestDeletedKeysStayDeleted:
+    def test_alias_whose_file_survived_the_delete_is_not_reimported(
+        self, metadata, backend, golden_repos_dir, monkeypatch
+    ):
+        manager = AliasManager(golden_repos_dir / "aliases")
+        manager.create_alias(ALIAS, "/s/v_1")
+        _undeletable_files(metadata, monkeypatch)
+
+        manager.delete_alias(ALIAS)
+        assert _alias_file(golden_repos_dir).exists()  # the stale leftover
+
+        ControlPlaneMetadata(golden_repos_dir, backend=backend).import_files()
+
+        assert backend.get(KIND_ALIAS, ALIAS) is None
+
+    def test_marker_whose_file_survived_exit_is_not_reimported(
+        self, metadata, backend, golden_repos_dir, monkeypatch
+    ):
+        markers = WriteModeMarkers(golden_repos_dir)
+        markers.enter("cidx-meta", "/live")
+        _undeletable_files(metadata, monkeypatch)
+
+        markers.remove("cidx-meta")
+        assert (golden_repos_dir / ".write_mode" / "cidx-meta.json").exists()
+
+        ControlPlaneMetadata(golden_repos_dir, backend=backend).import_files()
+
+        assert backend.get(KIND_WRITE_MODE, "cidx-meta") is None
+
+    def test_file_written_after_the_delete_is_imported(self, golden_repos_dir, backend):
+        """An old-image pod re-creating the alias after the delete is a newer
+        truth than the tombstone."""
+        backend.put(KIND_ALIAS, ALIAS, {"target_path": "/s/v_1"})
+        backend.delete(KIND_ALIAS, ALIAS)
+        later = datetime.now(timezone.utc) + timedelta(seconds=5)
+        _write_file(_alias_file(golden_repos_dir), _alias_doc("/s/v_2", later))
+
+        ControlPlaneMetadata(golden_repos_dir, backend=backend).import_files()
+
+        assert backend.get(KIND_ALIAS, ALIAS)["target_path"] == "/s/v_2"
+
+
 # ---------------------------------------------------------------------------
 # Write-mode markers
 # ---------------------------------------------------------------------------
