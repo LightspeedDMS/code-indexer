@@ -26,7 +26,10 @@ module (`code_indexer.global_repos.refresh_integrity_gate`):
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 from code_indexer.storage.shared.chunk_layout import (
     ChunkLayout,
@@ -36,6 +39,7 @@ from code_indexer.storage.shared.chunk_layout import (
 from code_indexer.storage.sqlite_chunk_store import ChunkStore
 
 from code_indexer.global_repos.refresh_integrity_gate import (
+    count_collection_points,
     discover_chunks_db_collection_dirs,
     flush_and_check_chunks_db_integrity,
     restore_chunks_db_via_reflink,
@@ -498,3 +502,91 @@ class TestMetadataRestoreAfterSelfHeal:
         # stale "new commit fully indexed" claim.
         restored_metadata = json.loads(source_metadata.read_text())
         assert restored_metadata["current_commit"] == "old_sha"
+
+
+# ---------------------------------------------------------------------------
+# An emptied index is healthy SQLite: the gate must refuse it on its counts.
+# ---------------------------------------------------------------------------
+
+
+def _empty(chunks_db: Path) -> None:
+    con = sqlite3.connect(str(chunks_db))
+    con.execute("DELETE FROM chunks")
+    con.commit()
+    con.close()
+
+
+class TestCountCollectionPoints:
+    def test_counts_every_chunks_db_collection_by_name(self, tmp_path: Path) -> None:
+        index = tmp_path / "index"
+        _make_chunks_db_collection(index / "a", _real_records(7))
+        _make_chunks_db_collection(index / "b", [])
+        _make_sharded_json_collection(index / "legacy")
+        assert count_collection_points(index) == {"a": 7, "b": 0}
+
+    def test_a_missing_index_dir_has_no_counts(self, tmp_path: Path) -> None:
+        assert count_collection_points(tmp_path / "nope") == {}
+
+    def test_an_unreadable_count_is_left_out_not_zero(self, tmp_path: Path) -> None:
+        """Unknown is not zero: a zero would read as a collapse."""
+        index = tmp_path / "index"
+        chunks_db = _make_chunks_db_collection(index / "a", _real_records(3))
+        chunks_db.write_bytes(b"not a database at all " * 64)
+        assert count_collection_points(index) == {}
+
+
+class TestCollapseRefusal:
+    def test_a_collection_emptied_since_publish_fails_the_gate(
+        self, tmp_path: Path
+    ) -> None:
+        index = tmp_path / "index"
+        chunks_db = _make_chunks_db_collection(index / "coll", _real_records(20))
+        before = count_collection_points(index)
+        _empty(chunks_db)
+
+        result = run_refresh_integrity_gate(
+            source_index_dir=index, healthy_index_dir=None, previous_points=before
+        )
+
+        assert result.passed is False
+        assert [f.detail for f in result.failures] == [
+            "collection collapsed from 20 points to 0 -- refusing to publish "
+            "an emptied index"
+        ]
+
+    def test_a_collection_that_vanished_fails_the_gate(self, tmp_path: Path) -> None:
+        index = tmp_path / "index"
+        _make_chunks_db_collection(index / "keep", _real_records(2))
+        result = run_refresh_integrity_gate(
+            source_index_dir=index,
+            healthy_index_dir=None,
+            previous_points={"keep": 2, "gone": 5},
+        )
+        assert result.passed is False
+        assert [f.collection_dir.name for f in result.failures] == ["gone"]
+
+    @pytest.mark.parametrize("previous", [None, {}, {"coll": 0}])
+    def test_nothing_to_collapse_passes(self, tmp_path: Path, previous) -> None:
+        index = tmp_path / "index"
+        _make_chunks_db_collection(index / "coll", [])
+        result = run_refresh_integrity_gate(
+            source_index_dir=index, healthy_index_dir=None, previous_points=previous
+        )
+        assert result.passed is True
+
+    def test_a_large_drop_publishes_but_is_logged(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Only zero is refused: a real mass deletion would otherwise be
+        refused forever, since the previous count never changes."""
+        index = tmp_path / "index"
+        _make_chunks_db_collection(index / "coll", _real_records(3))
+        result = run_refresh_integrity_gate(
+            source_index_dir=index,
+            healthy_index_dir=None,
+            previous_points={"coll": 100},
+        )
+        assert result.passed is True
+        assert any(
+            "shrank coll from 100 to 3" in r.getMessage() for r in caplog.records
+        )

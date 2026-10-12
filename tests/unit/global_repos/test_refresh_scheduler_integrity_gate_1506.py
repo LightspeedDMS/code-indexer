@@ -33,6 +33,7 @@ test_refresh_scheduler_cleanup_guard.py.
 """
 
 import json
+import sqlite3
 import logging
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -180,7 +181,9 @@ def scheduler(
     )
 
 
-def _run_refresh(scheduler, golden_repos_dir, current_target, new_versioned_path):
+def _run_refresh(
+    scheduler, golden_repos_dir, current_target, new_versioned_path, index_effect=None
+):
     alias_name = "my-repo-global"
     master_path = str(golden_repos_dir / "my-repo")
     (golden_repos_dir / "my-repo").mkdir(parents=True, exist_ok=True)
@@ -197,7 +200,7 @@ def _run_refresh(scheduler, golden_repos_dir, current_target, new_versioned_path
         patch.object(scheduler.alias_manager, "swap_alias") as mock_swap_alias,
         patch.object(scheduler, "_detect_existing_indexes", return_value={}),
         patch.object(scheduler, "_reconcile_registry_with_filesystem"),
-        patch.object(scheduler, "_index_source"),
+        patch.object(scheduler, "_index_source", side_effect=index_effect),
         patch.object(
             scheduler, "_create_snapshot", return_value=new_versioned_path
         ) as mock_create_snapshot,
@@ -485,6 +488,8 @@ def _run_create_new_index(
     mock_golden_repo_metadata,
     alias_name,
     source_path,
+    on_index=None,
+    existing_alias_target=None,
 ):
     """Exercises the REAL, unmocked _create_new_index() -> _index_source()
     -> (gate) -> _create_snapshot() orchestration (Codex review Finding 5).
@@ -522,6 +527,13 @@ def _run_create_new_index(
         mock_golden_repo_metadata,
         snapshot_manager=mock_snapshot_manager,
     )
+    if existing_alias_target is not None:
+        scheduler.alias_manager.create_alias(alias_name, existing_alias_target)
+
+    def _index_process(*args, **kwargs):
+        if on_index is not None:
+            on_index()
+        return 50
 
     raised = None
     result_path = None
@@ -532,7 +544,7 @@ def _run_create_new_index(
         ),
         patch(
             "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
-            return_value=50,
+            side_effect=_index_process,
         ),
         patch(
             "subprocess.run",
@@ -929,3 +941,102 @@ class TestQuarantineBookkeepingFailureLogging:
             "Swallowed reset-failure bookkeeping exception must be logged "
             "at ERROR (was WARNING) with alias + exception detail"
         )
+
+
+def _empty_the_collection(chunks_db: Path):
+    """What a reconcile pass did on a pod without the repository: every chunk
+    deleted, nothing re-indexed -- a structurally healthy, empty chunks.db."""
+
+    def effect(*args, **kwargs):
+        con = sqlite3.connect(str(chunks_db))
+        con.execute("DELETE FROM chunks")
+        con.commit()
+        con.close()
+
+    return effect
+
+
+class TestAnEmptiedIndexIsNotPublished:
+    """An emptied index passes the integrity check (it is valid SQLite), and
+    publishing it serves zero results until the next good refresh."""
+
+    def test_a_collection_emptied_by_indexing_is_not_published(
+        self, scheduler, golden_repos_dir, mock_golden_repo_metadata
+    ):
+        """The incident: the alias still points at the directory being
+        re-indexed, so the previous count must be read BEFORE indexing."""
+        master_path = golden_repos_dir / "my-repo"
+        chunks_db = _make_chunks_db_collection(
+            master_path / ".code-indexer" / "index" / "coll", _real_records(20)
+        )
+
+        new_versioned = str(golden_repos_dir / ".versioned" / "my-repo" / "v_2000000")
+        result, mock_create_snapshot, mock_swap_alias = _run_refresh(
+            scheduler,
+            golden_repos_dir,
+            str(master_path),
+            new_versioned,
+            index_effect=_empty_the_collection(chunks_db),
+        )
+
+        mock_create_snapshot.assert_not_called()
+        mock_swap_alias.assert_not_called()
+        assert result["success"] is False
+        assert "collapsed from 20 points to 0" in result["integrity_gate_detail"]
+        mock_golden_repo_metadata.record_refresh_integrity_failure.assert_called_once()
+
+    def test_an_index_that_was_already_empty_still_publishes(
+        self, scheduler, golden_repos_dir
+    ):
+        """Nothing collapsed: an empty repository indexed empty again."""
+        master_path = golden_repos_dir / "my-repo"
+        chunks_db = _make_chunks_db_collection(
+            master_path / ".code-indexer" / "index" / "coll", []
+        )
+
+        new_versioned = str(golden_repos_dir / ".versioned" / "my-repo" / "v_2000000")
+        _, mock_create_snapshot, mock_swap_alias = _run_refresh(
+            scheduler,
+            golden_repos_dir,
+            str(master_path),
+            new_versioned,
+            index_effect=_empty_the_collection(chunks_db),
+        )
+
+        mock_create_snapshot.assert_called_once()
+        mock_swap_alias.assert_called_once()
+
+
+class TestCreateNewIndexRefusesAnEmptiedIndex:
+    """The legacy delegator reads the published counts before indexing too."""
+
+    def test_an_index_emptied_by_indexing_raises_instead_of_publishing(
+        self,
+        golden_repos_dir,
+        mock_config_source,
+        mock_query_tracker,
+        mock_cleanup_manager,
+        mock_registry,
+        mock_golden_repo_metadata,
+    ):
+        alias_name = "my-repo-global"
+        source_path = golden_repos_dir / "my-repo"
+        chunks_db = _make_chunks_db_collection(
+            source_path / ".code-indexer" / "index" / "coll", _real_records(20)
+        )
+
+        _, result_path, raised = _run_create_new_index(
+            golden_repos_dir,
+            mock_config_source,
+            mock_query_tracker,
+            mock_cleanup_manager,
+            mock_registry,
+            mock_golden_repo_metadata,
+            alias_name,
+            str(source_path),
+            on_index=_empty_the_collection(chunks_db),
+            existing_alias_target=str(source_path),
+        )
+
+        assert result_path is None
+        assert raised is not None and "collapsed from 20 points to 0" in str(raised)
