@@ -79,7 +79,7 @@ index is recorded as `semantic`, and a temporal search is recorded as `temporal`
 carries. MCP `search_code` rejects an unknown `search_mode` (REST answers 422).
 
 One rule for every door: every search that RAN writes a row carrying `tool` (MCP tool name, REST method plus route
-template via `rest_origin(request)`, or `web:query`/`web:wiki_search`), `door` (`mcp`, `rest`, `web`) and `outcome`
+template as a fixed per-route constant such as `GET /scip/definition`, never read from the request, or `web:query`/`web:wiki_search`), `door` (`mcp`, `rest`, `web`) and `outcome`
 (`SearchOrigin`, required by every record function). A failure is a row with `outcome = failure` and a neutral
 `error_class`: an identifier-like token from `services/search_event_outcomes.py` (`providers_unavailable`, `timeout`,
 `phase1_failed`, `repository_failed`, `no_repository_searched`, ...) or the exception's class name (a bare `Exception`

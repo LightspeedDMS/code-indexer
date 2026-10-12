@@ -20,9 +20,9 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.search_event_context import get_search_event_ctx
 from code_indexer.server.services.search_event_recording import (
+    SearchOrigin,
     in_scip_search_scope,
     record_scip_search,
-    rest_origin,
     scip_callchain_query_text,
     writer_from_app,
 )
@@ -53,6 +53,17 @@ router = APIRouter(
     tags=["SCIP Queries"],
     dependencies=[Depends(_require_access_control)],
 )
+
+# The endpoint each route's search event row names (Story #2117). Fixed
+# per route, like every other REST door's origin: recording never reads the
+# request, so it can never fail the search.
+_DEFINITION_ORIGIN = SearchOrigin(tool="GET /scip/definition", door="rest")
+_REFERENCES_ORIGIN = SearchOrigin(tool="GET /scip/references", door="rest")
+_DEPENDENCIES_ORIGIN = SearchOrigin(tool="GET /scip/dependencies", door="rest")
+_DEPENDENTS_ORIGIN = SearchOrigin(tool="GET /scip/dependents", door="rest")
+_IMPACT_ORIGIN = SearchOrigin(tool="GET /scip/impact", door="rest")
+_CALLCHAIN_ORIGIN = SearchOrigin(tool="GET /scip/callchain", door="rest")
+_CONTEXT_ORIGIN = SearchOrigin(tool="GET /scip/context", door="rest")
 
 # Depth bounds for dependency/dependent traversal queries (Bug #1604 REST
 # audit). Used as the ge/le bounds on the depth Query parameters below, so
@@ -167,6 +178,7 @@ def _apply_scip_payload_truncation(
 
 def _scip_search_payload(
     request: Request,
+    origin: SearchOrigin,
     user: User,
     payload: Dict[str, Any],
     project: Optional[str],
@@ -174,13 +186,14 @@ def _scip_search_payload(
     started: float,
     error: Optional[BaseException] = None,
 ) -> Dict[str, Any]:
-    """Record one SCIP search (Story #2116) and return its payload. `error`
-    is the exception a search that raised failed with (Story #2117: its
-    class is the row's error class; a rejection records nothing)."""
+    """Record one SCIP search (Story #2116) by the endpoint `origin` and
+    return its payload. `error` is the exception a search that raised failed
+    with (Story #2117: its class is the row's error class; a rejection
+    records nothing)."""
     record_scip_search(
         writer_from_app(request.app),
         payload,
-        origin=rest_origin(request),
+        origin=origin,
         username=user.username,
         repo_alias=project,
         query_text=query_text,
@@ -234,6 +247,7 @@ def get_definition(
 
         return _scip_search_payload(
             request,
+            _DEFINITION_ORIGIN,
             current_user,
             {
                 "success": True,
@@ -254,6 +268,7 @@ def get_definition(
         )
         return _scip_search_payload(
             request,
+            _DEFINITION_ORIGIN,
             current_user,
             {"success": False, "error": str(e)},
             project,
@@ -310,6 +325,7 @@ def get_references(
 
         return _scip_search_payload(
             request,
+            _REFERENCES_ORIGIN,
             current_user,
             {
                 "success": True,
@@ -330,6 +346,7 @@ def get_references(
         )
         return _scip_search_payload(
             request,
+            _REFERENCES_ORIGIN,
             current_user,
             {"success": False, "error": str(e)},
             project,
@@ -386,6 +403,7 @@ def get_dependencies(
 
         return _scip_search_payload(
             request,
+            _DEPENDENCIES_ORIGIN,
             current_user,
             {
                 "success": True,
@@ -406,6 +424,7 @@ def get_dependencies(
         )
         return _scip_search_payload(
             request,
+            _DEPENDENCIES_ORIGIN,
             current_user,
             {"success": False, "error": str(e)},
             project,
@@ -462,6 +481,7 @@ def get_dependents(
 
         return _scip_search_payload(
             request,
+            _DEPENDENTS_ORIGIN,
             current_user,
             {
                 "success": True,
@@ -482,6 +502,7 @@ def get_dependents(
         )
         return _scip_search_payload(
             request,
+            _DEPENDENTS_ORIGIN,
             current_user,
             {"success": False, "error": str(e)},
             project,
@@ -526,6 +547,7 @@ def get_impact(
 
         return _scip_search_payload(
             request,
+            _IMPACT_ORIGIN,
             current_user,
             {
                 "success": True,
@@ -549,6 +571,7 @@ def get_impact(
         )
         return _scip_search_payload(
             request,
+            _IMPACT_ORIGIN,
             current_user,
             {"success": False, "error": str(e)},
             project,
@@ -611,6 +634,7 @@ def get_callchain(
 
             return _scip_search_payload(
                 request,
+                _CALLCHAIN_ORIGIN,
                 current_user,
                 {
                     "success": False,
@@ -630,6 +654,7 @@ def get_callchain(
 
         return _scip_search_payload(
             request,
+            _CALLCHAIN_ORIGIN,
             current_user,
             {
                 "success": True,
@@ -651,6 +676,7 @@ def get_callchain(
         )
         return _scip_search_payload(
             request,
+            _CALLCHAIN_ORIGIN,
             current_user,
             {"success": False, "error": str(e)},
             project,
@@ -703,6 +729,7 @@ def get_context(
 
         return _scip_search_payload(
             request,
+            _CONTEXT_ORIGIN,
             current_user,
             {
                 "success": True,
@@ -726,6 +753,7 @@ def get_context(
         )
         return _scip_search_payload(
             request,
+            _CONTEXT_ORIGIN,
             current_user,
             {"success": False, "error": str(e)},
             project,

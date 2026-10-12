@@ -23,9 +23,9 @@ from typing import Callable, Optional, Dict, Any, List
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.search_event_recording import (
+    SearchOrigin,
     record_multi_repository_search,
     recording_multi_repository_failure,
-    rest_origin,
     scip_callchain_query_text,
     search_event_scope,
     writer_from_app,
@@ -46,6 +46,25 @@ logger = logging.getLogger(__name__)
 
 # Create router with /api/scip/multi prefix
 router = APIRouter(prefix="/api/scip/multi", tags=["scip-multi"])
+
+# The endpoint each route's search event rows name (Story #2117). Fixed per
+# route, like every other REST door's origin: recording never reads the
+# request, so it can never stop the search.
+_MULTI_DEFINITION_ORIGIN = SearchOrigin(
+    tool="POST /api/scip/multi/definition", door="rest"
+)
+_MULTI_REFERENCES_ORIGIN = SearchOrigin(
+    tool="POST /api/scip/multi/references", door="rest"
+)
+_MULTI_DEPENDENCIES_ORIGIN = SearchOrigin(
+    tool="POST /api/scip/multi/dependencies", door="rest"
+)
+_MULTI_DEPENDENTS_ORIGIN = SearchOrigin(
+    tool="POST /api/scip/multi/dependents", door="rest"
+)
+_MULTI_CALLCHAIN_ORIGIN = SearchOrigin(
+    tool="POST /api/scip/multi/callchain", door="rest"
+)
 
 # Initialize SCIP multi-service
 _scip_multi_service: Optional[SCIPMultiService] = None
@@ -163,19 +182,20 @@ def _apply_multi_scip_truncation(
 
 def _recorded_multi_scip(
     http_request: Request,
+    origin: SearchOrigin,
     user: User,
     query_text: str,
     run: Callable[[], SCIPMultiResponse],
 ) -> SCIPMultiResponse:
     """Run one multi-repository SCIP search (`run`, the service call) and
-    record it (Story #2116/#2117): one scip row per repository the service
-    resolved -- searched with its own count, failed after resolving with
-    `repository_failed`; a skipped repository (no SCIP index) or an alias
-    that never resolved writes none. A whole-call failure is a failure row
-    per resolved repository; the exception propagates."""
+    record it under the endpoint `origin` (Story #2116/#2117): one scip row
+    per repository the service resolved -- searched with its own count,
+    failed after resolving with `repository_failed`; a skipped repository
+    (no SCIP index) or an alias that never resolved writes none. A
+    whole-call failure is a failure row per resolved repository; the
+    exception propagates."""
     started = time.monotonic()
     writer = writer_from_app(http_request.app)
-    origin = rest_origin(http_request)
     with search_event_scope(
         username=user.username,
         repo_alias=None,
@@ -309,7 +329,11 @@ def multi_repository_definition(
 
         # Execute definition lookup
         response = _recorded_multi_scip(
-            http_request, user, request.symbol, lambda: service.definition(request)
+            http_request,
+            _MULTI_DEFINITION_ORIGIN,
+            user,
+            request.symbol,
+            lambda: service.definition(request),
         )
 
         # Log response summary
@@ -416,7 +440,11 @@ def multi_repository_references(
 
         # Execute references lookup
         response = _recorded_multi_scip(
-            http_request, user, request.symbol, lambda: service.references(request)
+            http_request,
+            _MULTI_REFERENCES_ORIGIN,
+            user,
+            request.symbol,
+            lambda: service.references(request),
         )
 
         # Log response summary
@@ -523,7 +551,11 @@ def multi_repository_dependencies(
 
         # Execute dependencies analysis
         response = _recorded_multi_scip(
-            http_request, user, request.symbol, lambda: service.dependencies(request)
+            http_request,
+            _MULTI_DEPENDENCIES_ORIGIN,
+            user,
+            request.symbol,
+            lambda: service.dependencies(request),
         )
 
         # Log response summary
@@ -630,7 +662,11 @@ def multi_repository_dependents(
 
         # Execute dependents analysis
         response = _recorded_multi_scip(
-            http_request, user, request.symbol, lambda: service.dependents(request)
+            http_request,
+            _MULTI_DEPENDENTS_ORIGIN,
+            user,
+            request.symbol,
+            lambda: service.dependents(request),
         )
 
         # Log response summary
@@ -741,6 +777,7 @@ def multi_repository_callchain(
         # Execute callchain tracing (recorded per resolved repository)
         response = _recorded_multi_scip(
             http_request,
+            _MULTI_CALLCHAIN_ORIGIN,
             user,
             scip_callchain_query_text(request.from_symbol, request.to_symbol),
             lambda: service.callchain(request),

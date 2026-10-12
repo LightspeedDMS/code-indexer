@@ -102,11 +102,11 @@ class _ClaimerJobsTable:
             r["phase_detail"] = detail
         return 1
 
-    def complete(self, job_id, node_id, result_json):
+    def complete(self, job_id, node_id, result_json, status):
         r = self._owned(job_id, node_id)
         if r is None:
             return 0
-        r["status"] = "completed"
+        r["status"] = status
         r["result"] = result_json
         r["progress"] = 100
         return 1
@@ -152,9 +152,10 @@ def _make_pool(table: _ClaimerJobsTable):
             cur.rowcount = table.update_progress(
                 job_id, node_id, progress, phase, detail
             )
-        elif "status = 'completed'" in normalized:
-            result_json, job_id, node_id = params
-            cur.rowcount = table.complete(job_id, node_id, result_json)
+        elif "SET result = %s" in normalized and "status = %s" in normalized:
+            # complete_job: the completion status is bound (Bug #2125).
+            result_json, status, job_id, node_id = params
+            cur.rowcount = table.complete(job_id, node_id, result_json, status)
         elif "status = 'failed'" in normalized:
             error, job_id, node_id = params
             cur.rowcount = table.fail(job_id, node_id, error)

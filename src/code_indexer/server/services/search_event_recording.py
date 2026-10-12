@@ -106,14 +106,6 @@ class SearchOrigin:
     door: str
 
 
-def rest_origin(request: Any) -> SearchOrigin:
-    """The REST endpoint serving `request` (a route handler's Request): its
-    method and matched route template, e.g. "GET /scip/definition"."""
-    return SearchOrigin(
-        tool=f"{request.method} {request.scope['route'].path}", door="rest"
-    )
-
-
 def writer_from_app(app: Any) -> Any:
     """The app's SearchEventLogWriter, or None when it is not wired."""
     return getattr(getattr(app, "state", None), "search_event_log_writer", None)
@@ -965,14 +957,16 @@ def record_scip_search(
     nothing: no row. A search for one alias records the repository the
     service resolved it to ("<name>-global"), not the caller's spelling.
     """
-    if writer is None or outcomes.is_rejected_payload(payload):
+    if writer is None:
         return
-    resolved = context.resolved_repositories if context is not None else None
-    if resolved is not None and not resolved:
-        return
-    if resolved is not None and repo_alias is not None and len(resolved) == 1:
-        repo_alias = resolved[0]
     with _never_raise("scip"):
+        if outcomes.is_rejected_payload(payload):
+            return
+        resolved = context.resolved_repositories if context is not None else None
+        if resolved is not None and not resolved:
+            return
+        if resolved is not None and repo_alias is not None and len(resolved) == 1:
+            repo_alias = resolved[0]
         if error is not None:
             error_class = outcomes.failure_error_class(error)
             if error_class is None:
