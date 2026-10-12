@@ -122,6 +122,9 @@ class _DeterministicHashEmbeddingProvider(EmbeddingProvider):
     def supports_batch_processing(self) -> bool:
         return True
 
+    def request_max_retries(self) -> int:
+        return 0
+
     def _get_model_token_limit(self) -> int:
         return _FAKE_MAX_TOKENS
 
@@ -247,25 +250,21 @@ def _assert_fully_indexed(repo: Path, files: List[Path]) -> None:
 
 
 class TestInterruptedServerIndexResumes:
-    def test_interrupted_server_index_resumes_without_reconcile(
+    def test_interrupted_server_index_is_reconciled_not_resumed(
         self, tmp_path: Path
     ) -> None:
+        """Story #2121: even state the server itself sealed is never replayed
+        as a stored list; the interrupted index is recovered by the
+        store-derived reconcile and completes fully indexed."""
         repo = tmp_path / "repo"
-        _build_repo(repo)
+        files = _build_repo(repo)
         _interrupted_server_run(repo)
 
         infos = _server_run_collecting_info(repo)
 
-        assert _took_resume_path(infos), (
-            "An interrupted server-context index must resume from the resume "
-            f"state the server itself wrote. Progress info: {infos}"
-        )
-        assert not _took_reconcile_path(infos), (
-            "An interrupted server-context index must not fall back to a full "
-            f"disk-vs-database reconcile. Progress info: {infos}"
-        )
-        stored = json.loads(_metadata_path(repo).read_text())
-        assert stored["status"] == "completed"
+        assert not _took_resume_path(infos), f"Progress info: {infos}"
+        assert _took_reconcile_path(infos), f"Progress info: {infos}"
+        _assert_fully_indexed(repo, files)
 
     def test_every_server_save_is_sealed(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
@@ -394,8 +393,9 @@ class TestStateWithoutValidSealIgnored:
         assert _took_reconcile_path(infos), f"Progress info: {infos}"
         _assert_fully_indexed(repo, files)
 
-    def test_local_cli_still_trusts_unsealed_state(self, tmp_path: Path) -> None:
-        """Local CLI indexing is unchanged: its own resume file is trusted."""
+    def test_local_cli_reconciles_an_interrupted_state(self, tmp_path: Path) -> None:
+        """Story #2121: local CLI indexing no longer resumes from a stored
+        list either; an interrupted state is recovered by the reconcile."""
         repo = tmp_path / "repo"
         files = _build_repo(repo)
         _write_resume_file(repo, _unsealed_resume_state(files))
@@ -410,7 +410,9 @@ class TestStateWithoutValidSealIgnored:
         _make_indexer(repo).smart_index(
             force_full=False, progress_callback=collecting_callback
         )
-        assert _took_resume_path(infos)
+        assert not _took_resume_path(infos), f"Progress info: {infos}"
+        assert _took_reconcile_path(infos), f"Progress info: {infos}"
+        _assert_fully_indexed(repo, files)
 
 
 class TestSealKey:

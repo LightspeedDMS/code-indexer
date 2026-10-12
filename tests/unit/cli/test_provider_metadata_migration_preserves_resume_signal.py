@@ -46,18 +46,21 @@ def config_dir(tmp_path: Path) -> Path:
 
 
 class TestResumeSignalSurvivesMigration:
-    """The reviewer's exact proof-of-concept: can_resume_interrupted_operation()
-    must return the SAME result on the migrated provider file as it did on
-    the legacy file before migration."""
+    """Story #2121: the recovery signal is the stored status -- an
+    in_progress/failed status routes the next run to a reconcile of the
+    store against disk. The migrated provider file must load with the SAME
+    status as the legacy file, and the retired stored-list fields are
+    dropped on load (never replayed)."""
 
-    def test_in_progress_resume_signal_survives_migration(
-        self, config_dir: Path
+    @pytest.mark.parametrize("status", ["in_progress", "failed"])
+    def test_interrupted_status_survives_migration(
+        self, config_dir: Path, status: str
     ) -> None:
         legacy = config_dir / "metadata.json"
         legacy.write_text(
             json.dumps(
                 {
-                    "status": "in_progress",
+                    "status": status,
                     "files_to_index": ["a.py", "b.py", "c.py"],
                     "current_file_index": 1,
                     "completed_files": ["a.py"],
@@ -65,40 +68,16 @@ class TestResumeSignalSurvivesMigration:
             )
         )
 
-        legacy_resume = ProgressiveMetadata(legacy).can_resume_interrupted_operation()
-        assert legacy_resume is True, "test fixture sanity check"
-
         result = _get_provider_metadata_path(config_dir, "voyage-ai")
 
-        provider_resume = ProgressiveMetadata(result).can_resume_interrupted_operation()
-        assert provider_resume is True, (
-            "Migrating a legacy file with status=in_progress and a "
-            "populated resume payload must NOT disable resume capability "
-            "-- can_resume_interrupted_operation() must return True on "
-            "the migrated provider file, matching the legacy file "
-            "(Bug #1624 revert)."
+        loaded = ProgressiveMetadata(result).metadata
+        assert loaded["status"] == status, (
+            "Migrating a legacy file with an interrupted status must NOT "
+            "normalize it: the status is what routes the next run to the "
+            "reconcile recovery (Bug #1624 revert, Story #2121)."
         )
-
-    def test_failed_resume_signal_survives_migration(self, config_dir: Path) -> None:
-        legacy = config_dir / "metadata.json"
-        legacy.write_text(
-            json.dumps(
-                {
-                    "status": "failed",
-                    "files_to_index": ["a.py", "b.py"],
-                    "current_file_index": 0,
-                    "completed_files": [],
-                }
-            )
-        )
-
-        legacy_resume = ProgressiveMetadata(legacy).can_resume_interrupted_operation()
-        assert legacy_resume is True, "test fixture sanity check"
-
-        result = _get_provider_metadata_path(config_dir, "voyage-ai")
-
-        provider_resume = ProgressiveMetadata(result).can_resume_interrupted_operation()
-        assert provider_resume is True
+        for retired in ("files_to_index", "current_file_index", "completed_files"):
+            assert retired not in loaded
 
     def test_migration_is_byte_for_byte_copy_of_interrupted_metadata(
         self, config_dir: Path

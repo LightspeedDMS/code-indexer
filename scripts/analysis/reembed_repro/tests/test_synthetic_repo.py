@@ -5,11 +5,54 @@ import time
 
 import pytest
 
-from synthetic_repo import add_files, generate_repo, list_repo_files
+from synthetic_repo import (
+    add_files,
+    delete_stored_dup_owners,
+    generate_repo,
+    list_repo_files,
+)
 
 
 def _contents(root):
     return {p: (root / p).read_bytes() for p in list_repo_files(root)}
+
+
+def _write(root, rel, text):
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def test_delete_stored_dup_owners_removes_only_stored_members_of_a_group(tmp_path):
+    root = tmp_path / "repo"
+    for rel in ("a/one.md", "b/one.md", "c/one.md"):
+        _write(root, rel, "shared one")
+    for rel in ("a/two.md", "b/two.md"):
+        _write(root, rel, "shared two")
+    _write(root, "a/unique.md", "unique")
+    stored = {"c/one.md", "b/two.md", "a/unique.md"}
+
+    deleted = delete_stored_dup_owners(root, stored, count=5)
+
+    assert deleted == ["b/two.md", "c/one.md"]
+    assert list_repo_files(root) == ["a/one.md", "a/two.md", "a/unique.md", "b/one.md"]
+
+
+def test_delete_stored_dup_owners_keeps_a_live_copy_and_honours_count(tmp_path):
+    root = tmp_path / "repo"
+    for rel in ("x/1.md", "x/2.md", "x/3.md"):
+        _write(root, rel, "same")
+    for rel in ("y/1.md", "y/2.md"):
+        _write(root, rel, "other")
+    every_path = set(list_repo_files(root))
+
+    assert delete_stored_dup_owners(root, every_path, count=0) == []
+    deleted = delete_stored_dup_owners(root, every_path, count=1)
+
+    assert deleted == ["x/1.md"]
+    deleted_all = delete_stored_dup_owners(root, every_path - set(deleted), count=10)
+    assert deleted_all == ["x/2.md", "y/1.md"]
+    assert list_repo_files(root) == ["x/3.md", "y/2.md"]
 
 
 def test_generates_exact_count_spread_over_directories(tmp_path):

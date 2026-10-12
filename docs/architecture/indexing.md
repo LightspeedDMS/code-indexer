@@ -253,11 +253,12 @@ verified (`mark_store_verified`).
 - A file that fails (chunking, embedding, write) counts as failed and is retried by the next run; other files
   continue.
 - `cidx index` exits 1 when files failed and none were processed ("All files failed to index").
-- A fatal chunk-store failure exits with a reserved code: 86 when SQLite reports the store damaged, 87 for every
-  other fatal store failure (`services/index_failure_exit_codes.py`). The server's handling of these codes is in
-  [refresh-recovery.md](refresh-recovery.md).
-- Ctrl+C leaves the run resumable: completed files stay indexed and progressive metadata keeps the remaining
-  list.
+- A fatal chunk-store failure exits with a reserved code: 86 when SQLite reports the store damaged, 89 when the
+  store of an established collection is missing, 87 for every other fatal store failure
+  (`services/index_failure_exit_codes.py`). Exit 88 is a run-spend meter defect. The server's handling of these
+  codes is in [refresh-recovery.md](refresh-recovery.md).
+- Ctrl+C leaves the run recoverable: completed files stay indexed, and the next run reconciles the index against
+  disk and indexes only the files that are missing or changed.
 
 ## Temporal indexing entry point
 

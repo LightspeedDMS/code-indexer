@@ -14,6 +14,7 @@ from index_inspector import (
     inflight_bound,
     metadata_summary,
     parse_progress_json,
+    parse_run_spend,
     pending_keys,
 )
 
@@ -271,3 +272,31 @@ def test_inflight_bound_from_config(tmp_path):
         json.dumps({"voyage_ai": {"parallel_requests": 4, "batch_size": 64}})
     )
     assert inflight_bound(tmp_path) == 256
+
+
+def test_parse_run_spend_takes_the_final_record():
+    text = "\n".join(
+        [
+            json.dumps({"current": 1, "total": 2, "info": "1/2 files"}),
+            "not json",
+            json.dumps({"record": "run_spend", "inputs_sent": 7, "attempts": 2}),
+        ]
+    )
+    assert parse_run_spend(text) == {"inputs_sent": 7, "attempts": 2}
+
+
+def test_parse_run_spend_absent_is_none():
+    assert parse_run_spend(json.dumps({"current": 0, "total": 0})) is None
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"record": "run_spend", "inputs_sent": 1},
+        {"record": "run_spend", "inputs_sent": "1", "attempts": 1},
+        {"record": "run_spend", "inputs_sent": True, "attempts": 1},
+    ],
+)
+def test_parse_run_spend_malformed_record_fails_loudly(record):
+    with pytest.raises(ValueError, match="malformed run_spend record"):
+        parse_run_spend(json.dumps(record))

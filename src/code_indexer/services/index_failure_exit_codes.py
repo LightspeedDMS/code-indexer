@@ -9,7 +9,7 @@ never did, so the integrity-gate self-heal never ran and the refresh failed
 identically forever.
 
 The child now exits with a reserved code per failure KIND, and the parent
-maps the code back to the kind. Two kinds, because they demand opposite
+maps the code back to the kind. Distinct kinds, because they demand different
 reactions:
 
 - ``CORRUPTION``: SQLite reports the store itself as damaged
@@ -20,6 +20,10 @@ reactions:
   busy, disk full, read-only, permission, any OS error. The store is not
   known to be damaged; restoring over it could destroy good data, so the
   parent only backs off.
+- ``MISSING_STORE`` (Story #2126, exit 89): the ``chunks.db`` of an
+  ESTABLISHED collection is gone (``MissingEstablishedChunkStoreError``).
+  Nothing is there to destroy, so the parent restores the store from the
+  published snapshot instead of re-embedding it.
 
 Deliberately dependency-light: imported by the CLI's failure path and by the
 refresh scheduler.
@@ -31,8 +35,10 @@ import sqlite3
 from enum import Enum
 from typing import Iterator, Optional
 
+from code_indexer.services.run_spend_meter import RunSpendDefect, get_run_spend_meter
 from code_indexer.storage.sqlite_chunk_store import (
     ChunkStoreUnavailableError,
+    MissingEstablishedChunkStoreError,
     message_reports_sqlite_corruption,
     sqlite_error_reports_corruption,
 )
@@ -41,6 +47,7 @@ from code_indexer.storage.sqlite_chunk_store import (
 class ChunkStoreFailureKind(str, Enum):
     CORRUPTION = "corruption"
     ENVIRONMENT = "environment"
+    MISSING_STORE = "missing_store"
 
 
 #: Exit code of a ``cidx index`` run that failed for any other reason.
@@ -50,10 +57,13 @@ GENERIC_INDEX_FAILURE_EXIT_CODE = 1
 #: below 128 (signal-terminated children report a negative returncode).
 EXIT_CODE_CHUNK_STORE_CORRUPTION = 86
 EXIT_CODE_CHUNK_STORE_ENVIRONMENT = 87
+#: Story #2126: 88 is the run-spend defect (below), so the next free code.
+EXIT_CODE_CHUNK_STORE_MISSING = 89
 
 _EXIT_CODE_BY_KIND = {
     ChunkStoreFailureKind.CORRUPTION: EXIT_CODE_CHUNK_STORE_CORRUPTION,
     ChunkStoreFailureKind.ENVIRONMENT: EXIT_CODE_CHUNK_STORE_ENVIRONMENT,
+    ChunkStoreFailureKind.MISSING_STORE: EXIT_CODE_CHUNK_STORE_MISSING,
 }
 _KIND_BY_EXIT_CODE = {code: kind for kind, code in _EXIT_CODE_BY_KIND.items()}
 
@@ -83,8 +93,12 @@ def classify_fatal_chunk_store_failure(
     reason (I/O, locked, busy, full, read-only, permission, unknown) is
     ENVIRONMENT. Without a typed error in the chain, a bare SQLite
     corruption report raised on a read path is still CORRUPTION; nothing
-    else is classified."""
+    else is classified. The guard's refusal to recreate the missing store
+    of an established collection is MISSING_STORE wherever it sits in the
+    chain (the reuse lookup and the writer re-wrap it)."""
     chain = list(_iter_chain(exc))
+    if any(isinstance(e, MissingEstablishedChunkStoreError) for e in chain):
+        return ChunkStoreFailureKind.MISSING_STORE
     typed_at = next(
         (i for i, e in enumerate(chain) if isinstance(e, ChunkStoreUnavailableError)),
         None,
@@ -107,8 +121,24 @@ def _kind(reports_corruption: bool) -> ChunkStoreFailureKind:
     return ChunkStoreFailureKind.ENVIRONMENT
 
 
+#: Story #2122: the run-spend meter refused a provider send (an input the
+#: reuse resolver never registered as a miss, or attempts beyond the run's
+#: allowance). Deliberately NOT a chunk-store kind: the parent maps it to no
+#: ``ChunkStoreFailureKind`` and fails the refresh loudly (no restore, no
+#: backoff-as-environment).
+EXIT_CODE_RUN_SPEND_DEFECT = 88
+
+
 def index_failure_exit_code(exc: BaseException) -> int:
-    """Exit code for a ``cidx index`` run that failed with ``exc``."""
+    """Exit code for a ``cidx index`` run that failed with ``exc``.
+
+    A run whose run-spend meter tripped exits ``EXIT_CODE_RUN_SPEND_DEFECT``
+    whatever exception surfaced: the defect may have been swallowed and
+    re-surfaced as an ordinary failure (Story #2122)."""
+    if get_run_spend_meter().tripped is not None or any(
+        isinstance(e, RunSpendDefect) for e in _iter_chain(exc)
+    ):
+        return EXIT_CODE_RUN_SPEND_DEFECT
     kind = classify_fatal_chunk_store_failure(exc)
     if kind is None:
         return GENERIC_INDEX_FAILURE_EXIT_CODE

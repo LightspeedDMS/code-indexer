@@ -119,6 +119,9 @@ class _DeterministicFakeQueryEmbeddingProvider(EmbeddingProvider):
     def supports_batch_processing(self) -> bool:
         return True
 
+    def request_max_retries(self) -> int:
+        return 0
+
 
 def _build_real_indexed_repo(tmp_path):
     """Build a real on-disk FilesystemVectorStore collection containing one

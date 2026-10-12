@@ -16,7 +16,7 @@ import random
 import subprocess
 import time
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Set
 
 _TOOLS = ["read_file", "search", "edit", "bash", "list_dir", "fetch", "plan", "review"]
 _STATUSES = ["ok", "ok", "ok", "retry", "error"]
@@ -167,6 +167,34 @@ def add_files(
     for i in range(len(added), count):
         added.append(_write_file(root, rel_dir, i, rng, f"{batch_tag}-f{i}"))
     return added
+
+
+def delete_stored_dup_owners(
+    root: Path, stored_paths: Set[str], count: int
+) -> List[str]:
+    """Delete up to ``count`` files that are a duplicate group's stored owner:
+    a path the index stores whose bytes another repository file also holds.
+    A group always keeps at least one file on disk. Deterministic (sorted
+    path order); returns the deleted relative paths."""
+    if count < 0:
+        raise ValueError("count must not be negative")
+    groups: Dict[bytes, List[str]] = {}
+    for rel in list_repo_files(root):
+        groups.setdefault((root / rel).read_bytes(), []).append(rel)
+    on_disk = {rel: len(members) for members in groups.values() for rel in members}
+    group_of = {rel: key for key, members in groups.items() for rel in members}
+    remaining = {key: len(members) for key, members in groups.items()}
+    deleted: List[str] = []
+    for rel in sorted(stored_paths & set(on_disk)):
+        if len(deleted) >= count:
+            break
+        key = group_of[rel]
+        if remaining[key] < 2:
+            continue
+        (root / rel).unlink()
+        remaining[key] -= 1
+        deleted.append(rel)
+    return deleted
 
 
 def list_repo_files(root: Path) -> List[str]:

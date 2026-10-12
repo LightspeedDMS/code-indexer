@@ -16,7 +16,7 @@ Query embedding/reranker call tracking stats for vendor cost reconciliation.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `provider` | string (one of: `voyageai`, `cohere`) | no | Filter by provider: 'voyageai' or 'cohere' |
-| `purpose` | string | no | Filter by purpose: 'index', 'refresh', 'query', 'temporal', 'key_test', or 'cache_shadow_audit' |
+| `purpose` | string | no | Filter by purpose: 'index', 'refresh', 'query', 'temporal', 'temporal_refresh' (temporal calls of a golden-repo refresh), 'key_test', or 'cache_shadow_audit' |
 | `golden_repo_alias` | string | no | Filter by golden repo alias |
 | `job_id` | string | no | Filter by job id |
 | `start_time` | number | no | Filter to records with occurred_at &gt;= this Unix timestamp |

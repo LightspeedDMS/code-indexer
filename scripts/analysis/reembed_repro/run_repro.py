@@ -55,6 +55,7 @@ from index_inspector import (  # noqa: E402
     index_snapshot,
     metadata_summary,
     parse_progress_json,
+    parse_run_spend,
     pending_keys,
 )
 from invariant import FinalState, RunRecord, evaluate  # noqa: E402
@@ -68,7 +69,12 @@ from run_facts import (  # noqa: E402,F401
     unindexed_at_start,
 )
 from scenarios import build_cycles  # noqa: E402
-from synthetic_repo import add_files, generate_repo, list_repo_files  # noqa: E402
+from synthetic_repo import (  # noqa: E402
+    add_files,
+    delete_stored_dup_owners,
+    generate_repo,
+    list_repo_files,
+)
 
 SAMPLES_DIR = SCRATCH_ROOT / "samples"
 RUN_MAX_SECONDS = 4 * 3600
@@ -89,14 +95,34 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     return _parse_args(argv, description=__doc__ or "")
 
 
-def index_command(reconcile: bool) -> List[str]:
-    """The server's ``cidx index`` refresh command (``append_server_layout_args``)."""
+def index_command(reconcile: bool, src: Path) -> List[str]:
+    """The server's ``cidx index`` refresh command (``append_server_layout_args``)
+    as the server of the tree ``src`` builds it."""
+    from code_indexer.server.services.embedding_stats_attribution import (
+        StatsAttribution,
+    )
     from code_indexer.server.utils.index_command_layout import append_server_layout_args
 
     base = ["cidx", "index", "--fts", "--progress-json"]
     if reconcile:
         base.insert(3, "--reconcile")
-    return list(append_server_layout_args(base))
+    # Story #2118: the server stamps every refresh child with an attribution
+    # (the harness has no server node or job; fixed values identify it).
+    attribution = StatsAttribution(
+        golden_repo_alias="reembed-repro-global",
+        job_id="nojob:reembed_repro",
+        node_id="reembed-repro",
+        purpose="refresh",
+    )
+    argv = list(append_server_layout_args(base, attribution=attribution))
+    if not (
+        src / "code_indexer" / "server" / "services" / "embedding_stats_attribution.py"
+    ).exists():
+        # A release older than Story #2118 (e.g. the `default` scenario's
+        # v12.82.0) never received an attribution from its server and
+        # rejects the option (click exits 2).
+        argv = [t for t in argv if not t.startswith("--stats-attribution")]
+    return argv
 
 
 def kind_for(argv: List[str]) -> str:
@@ -173,7 +199,7 @@ class Harness:
             raise HarnessFailure(f"child imports code_indexer from {out[0]}, not {src}")
         self.versions[str(src)] = out[1]
 
-    def refresh_command(self) -> List[str]:
+    def refresh_command(self, src: Path) -> List[str]:
         """As refresh_scheduler._index_source: any in_progress/failed status reconciles."""
         from code_indexer.server.services.metadata_reader import read_index_states
 
@@ -181,7 +207,8 @@ class Harness:
             any(
                 s.status in ("in_progress", "failed")
                 for s in read_index_states(self.repo)
-            )
+            ),
+            src,
         )
 
     # -- one run -----------------------------------------------------------
@@ -350,9 +377,9 @@ class Harness:
             self.meta_path.exists()
             and self.meta_path.stat().st_mtime_ns != pre.meta_mtime
         )
-        progress = parse_progress_json(
-            (self.logs / f"{label}.out").read_text(errors="replace")
-        )
+        stdout_text = (self.logs / f"{label}.out").read_text(errors="replace")
+        progress = parse_progress_json(stdout_text)
+        run_spend = parse_run_spend(stdout_text)  # Story #2122; None: not printed
         stats = self.fake.ledger.run_stats(label)
         stderr = (self.logs / f"{label}.err").read_text(errors="replace").splitlines()
         return {
@@ -392,6 +419,8 @@ class Harness:
             "metadata_rewritten": rewritten,
             "chunks_sent": stats["inputs"],
             "requests": stats["requests"],
+            "meter_inputs_sent": run_spend["inputs_sent"] if run_spend else None,
+            "meter_attempts": run_spend["attempts"] if run_spend else None,
             "dup_prior_runs": stats["dup_prior_runs"],
             "dup_same_run": stats["dup_same_run"],
             "new_unique": stats["new_unique"],
@@ -521,7 +550,11 @@ class Harness:
     def setup(self) -> None:
         self._init_repo()
         initial = self.run_step(
-            "initial", "initial", index_command(False), self.initial_src, None
+            "initial",
+            "initial",
+            index_command(False, self.initial_src),
+            self.initial_src,
+            None,
         )
         if (
             self._snap is None
@@ -547,6 +580,18 @@ class Harness:
         git_rng = random.Random(f"{self.args.seed}:git-ops")
         for i, entry in enumerate(build_cycles(self.args), start=1):
             tag = f"sync-{i:03d}"
+            note = ""
+            if self.args.delete_dup_owners:
+                # Story #2120: a duplicate group's stored owner goes away;
+                # its live copies must reuse the stored rows (send nothing).
+                gone = delete_stored_dup_owners(
+                    self.repo,
+                    index_snapshot(self.repo).paths,
+                    self.args.delete_dup_owners,
+                )
+                self.added_paths.difference_update(gone)
+                note = f"deleted {len(gone)} dup owner(s)"
+                print(f"[{tag}] {note}: {gone}", flush=True)
             added = add_files(
                 self.repo,
                 self.args.sync_files,
@@ -555,13 +600,12 @@ class Harness:
                 dup_fraction=self.args.sync_dup_fraction,
             )
             self.added_paths.update(added)
-            note = ""
             if self.args.git:
                 commit_sync(self.repo, added, tag)
                 note = apply_op(self.repo, choose_op(git_rng), i, git_rng)
-            argv = self.refresh_command()
-            spec = None if entry == "none" else InterruptSpec.parse(entry)
             src = self.initial_src if i <= self.args.old_src_runs else self.src
+            argv = self.refresh_command(src)
+            spec = None if entry == "none" else InterruptSpec.parse(entry)
             self.run_step(f"cycle-{i}", kind_for(argv), argv, src, spec, note)
         if self.args.recovery_delay_seconds > 0:
             # The recovery runs on a later scheduler cycle (see scenarios.py).
@@ -571,15 +615,23 @@ class Harness:
             )
             time.sleep(self.args.recovery_delay_seconds)
         for j in range(1, self.args.final_runs + 1):
-            argv = self.refresh_command()
+            argv = self.refresh_command(self.src)
             self.run_step(f"final-{j}", kind_for(argv), argv, self.src, None)
         self.final_state = self._final_state()
         # A5: one more reconcile and one more incremental must plan and send nothing.
         self.run_step(
-            "converge-reconcile", "converge", index_command(True), self.src, None
+            "converge-reconcile",
+            "converge",
+            index_command(True, self.src),
+            self.src,
+            None,
         )
         self.run_step(
-            "converge-incremental", "converge", index_command(False), self.src, None
+            "converge-incremental",
+            "converge",
+            index_command(False, self.src),
+            self.src,
+            None,
         )
 
     def _final_state(self) -> FinalState:
@@ -622,6 +674,7 @@ class Harness:
             f"{not a.no_cluster_mode}, node sequence: {a.node_sequence}",
             f"cycles: {','.join(build_cycles(a))}",
             f"fake provider totals: {self.fake.ledger.totals()}; introduced keys: {len(self.introduced)}",
+            meter_summary(self.rows),
         ]
         extra = {
             "args": vars(a),
@@ -638,6 +691,28 @@ class Harness:
         if problems:
             return EXIT_HARNESS_FAILURE
         return verdict.exit_code  # 0 NOT REPRODUCED, 1 REPRODUCED, 3 INCOMPLETE
+
+
+def meter_summary(rows: List[Dict[str, Any]]) -> str:
+    """Story #2122: compare every run's metered ``inputs_sent`` (its final
+    ``--progress-json`` record) with the fake's per-run input count. Runs
+    without a record (a tree without the meter, a SIGKILLed child) are
+    counted as unmetered, never compared."""
+    metered = [r for r in rows if r["meter_inputs_sent"] is not None]
+    mismatches = [
+        f"{r['label']}: meter {r['meter_inputs_sent']} != fake {r['chunks_sent']}"
+        for r in metered
+        if r["meter_inputs_sent"] != r["chunks_sent"]
+    ]
+    return (
+        f"meter (Story #2122): {len(metered)} of {len(rows)} runs reported "
+        f"inputs_sent; "
+        + (
+            "; ".join(mismatches)
+            if mismatches
+            else "all equal the fake's per-run count"
+        )
+    )
 
 
 def inner_main(args: argparse.Namespace) -> int:

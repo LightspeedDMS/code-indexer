@@ -53,6 +53,7 @@
                     <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>Pending</option>
                     <option value="running" {% if status_filter == 'running' %}selected{% endif %}>Running</option>
                     <option value="completed" {% if status_filter == 'completed' %}selected{% endif %}>Completed</option>
+                    <option value="completed_partial" {% if status_filter == 'completed_partial' %}selected{% endif %}>Completed (partial)</option>
                     <option value="failed" {% if status_filter == 'failed' %}selected{% endif %}>Failed</option>
                     <option value="cancelled" {% if status_filter == 'cancelled' %}selected{% endif %}>Cancelled</option>
                 </select>

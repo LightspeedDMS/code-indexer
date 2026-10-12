@@ -5,7 +5,46 @@ import subprocess
 
 import pytest
 
-from run_repro import REPO_ROOT, archive_tree, node_for_run, parse_node_sequence
+from run_repro import (
+    REPO_ROOT,
+    archive_tree,
+    index_command,
+    meter_summary,
+    node_for_run,
+    parse_node_sequence,
+)
+
+
+@pytest.mark.parametrize("reconcile", [False, True])
+def test_index_command_stamps_a_refresh_attribution(reconcile):
+    """Story #2118: the server's `cidx index` command requires a stats
+    attribution; the harness builds it exactly as the refresh does."""
+    from code_indexer.server.services.embedding_stats_attribution import (
+        StatsAttribution,
+    )
+
+    argv = index_command(reconcile, REPO_ROOT / "src")
+
+    prefix = "--stats-attribution="
+    [token] = [t for t in argv if t.startswith(prefix)]
+    assert StatsAttribution.from_json(token[len(prefix) :]).purpose == "refresh"
+    assert ("--reconcile" in argv) is reconcile
+
+
+@pytest.mark.parametrize("reconcile", [False, True])
+def test_index_command_omits_attribution_for_a_tree_without_it(reconcile, tmp_path):
+    """A release older than Story #2118 (the `default` scenario's v12.82.0)
+    neither accepts `--stats-attribution` (click exits 2) nor gets it from
+    its own server: its runs carry the rest of the server command only."""
+    old_src = tmp_path / "src"
+    (old_src / "code_indexer" / "server" / "services").mkdir(parents=True)
+
+    argv = index_command(reconcile, old_src)
+
+    assert not [t for t in argv if t.startswith("--stats-attribution")]
+    assert "--new-collection-layout=chunks_db" in argv
+    assert "--ignore-resume-state" in argv
+    assert ("--reconcile" in argv) is reconcile
 
 
 def _committed_version() -> str:
@@ -326,3 +365,20 @@ def test_content_bound_owes_only_disk_keys_not_durable():
 def test_parse_node_sequence_rejects_bad_entries(bad):
     with pytest.raises(ValueError):
         parse_node_sequence(bad)
+
+
+def test_meter_summary_compares_metered_runs_only():
+    rows = [
+        {"label": "a", "meter_inputs_sent": 5, "chunks_sent": 5},
+        {"label": "b", "meter_inputs_sent": None, "chunks_sent": 9},
+        {"label": "c", "meter_inputs_sent": 3, "chunks_sent": 4},
+    ]
+    line = meter_summary(rows)
+    assert "2 of 3 runs reported inputs_sent" in line
+    assert "c: meter 3 != fake 4" in line
+    assert "a:" not in line
+
+
+def test_meter_summary_all_equal():
+    rows = [{"label": "a", "meter_inputs_sent": 0, "chunks_sent": 0}]
+    assert meter_summary(rows).endswith("all equal the fake's per-run count")

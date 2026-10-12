@@ -130,17 +130,22 @@ def _per_file_loop_reads(tmp_path: Path, n_files: int, chunks_db: bool) -> int:
 
     with _MetaOpenRecorder(base) as recorder:
         for point in points:
+            # The fixture's ids are not content-addressed: CHUNKS_DB finds
+            # each chunk through the same-path read (Story #2119).
             hashes = store.get_existing_content_hashes(
-                point["payload"]["path"], COLLECTION
+                point["payload"]["path"],
+                COLLECTION,
+                project_id="example",
+                file_hash="sha256:not-stored",
+                chunk_count=1,
             )
-            seen.append(hashes.get(0))
+            seen.append(hashes.get(point["payload"]["content_hash"]))
             store.upsert_points(COLLECTION, [point])
     store.end_indexing(COLLECTION)
 
-    # Behaviour preserved: every existing file's chunk was found and reused.
-    assert [entry["content_hash"] for entry in seen if entry] == [
-        f"hash_{i}" for i in range(n_files)
-    ]
+    # Behaviour preserved: every existing file's chunk was found and reused
+    # (the lookup is keyed by content hash, Story #2119).
+    assert len(seen) == n_files and all(seen)
     return recorder.reads
 
 

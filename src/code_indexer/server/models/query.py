@@ -5,10 +5,14 @@ Extracted from app.py as part of Story #409 (app.py modularization).
 """
 
 import datetime as _datetime_module
-from typing import List, Literal, Optional, Union
+from typing import List, Literal, Optional, Union, get_args
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .api_models import QueryResultItem
+
+# The search modes a query may request (REST model and MCP search_code alike).
+SearchMode = Literal["semantic", "fts", "hybrid"]
+SEARCH_MODES = get_args(SearchMode)
 
 
 class SemanticQueryRequest(BaseModel):
@@ -39,7 +43,7 @@ class SemanticQueryRequest(BaseModel):
     )
 
     # Search mode selection (Story 5)
-    search_mode: Literal["semantic", "fts", "hybrid"] = Field(
+    search_mode: SearchMode = Field(
         default="semantic",
         description="Search mode: 'semantic' (AI-based, default), 'fts' (full-text), 'hybrid' (both in parallel)",
     )

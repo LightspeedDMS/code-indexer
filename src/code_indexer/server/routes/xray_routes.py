@@ -318,19 +318,45 @@ def xray_search(
     exclude_patterns = list(body.exclude_patterns)
     max_files = body.max_files
 
-    def job_fn(progress_callback):  # type: ignore[no-untyped-def]
+    # Story #2107: the job records its search event when its result is known.
+    from code_indexer.server.services.search_event_recording import (
+        SearchOrigin,
+        bind_xray_recorder,
+        run_recorded_xray,
+        writer_from_app,
+    )
+    from code_indexer.server.telemetry.correlation_bridge import (
+        get_current_correlation_id,
+    )
+
+    record_event = bind_xray_recorder(
+        writer_from_app(http_request.app),
+        origin=SearchOrigin(tool="POST /api/xray/search", door="rest"),
+        username=user.username,
+        repo_alias=body.repository_alias,
+        pattern=body.driver_regex,
+        correlation_id=get_current_correlation_id(),
+    )
+
+    # cancel_check: BackgroundJobManager injects its cancellation check into
+    # any job that declares it; a cancelled job records no search event.
+    def job_fn(progress_callback, cancel_check=None):  # type: ignore[no-untyped-def]
         from code_indexer.xray.search_engine import XRaySearchEngine as _Engine
 
-        return _Engine().run(
-            repo_path=repo_path,
-            driver_regex=body.driver_regex,
-            evaluator_code=evaluator_code,
-            search_target=body.search_target,
-            include_patterns=include_patterns,
-            exclude_patterns=exclude_patterns,
-            timeout_seconds=effective_timeout,
-            progress_callback=progress_callback,
-            max_files=max_files,
+        return run_recorded_xray(
+            record_event,
+            lambda: _Engine().run(
+                repo_path=repo_path,
+                driver_regex=body.driver_regex,
+                evaluator_code=evaluator_code,
+                search_target=body.search_target,
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+                timeout_seconds=effective_timeout,
+                progress_callback=progress_callback,
+                max_files=max_files,
+            ),
+            cancel_check,
         )
 
     bjm = _get_background_job_manager()
@@ -461,7 +487,13 @@ def xray_search_batch(
     if body.await_seconds is not None:
         params["await_seconds"] = body.await_seconds
 
-    mcp_resp = handle_xray_search_batch(params, user)
+    from code_indexer.server.services.search_event_recording import SearchOrigin
+
+    mcp_resp = handle_xray_search_batch(
+        params,
+        user,
+        origin=SearchOrigin(tool="POST /api/xray/search/batch", door="rest"),
+    )
 
     # Unwrap MCP envelope.
     try:

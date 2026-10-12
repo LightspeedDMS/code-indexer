@@ -66,6 +66,8 @@ from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
 from code_indexer.server.services.metadata_reader import (
     index_unchanged_since,
     read_index_states,
+    RecordedFailures,
+    read_recorded_failures,
     snapshot_index_metadata,
 )
 from code_indexer.global_repos.stale_index_signal import (
@@ -89,6 +91,7 @@ from code_indexer.server.utils.cancellable_subprocess import (
 from functools import partial
 
 from code_indexer.services.index_failure_exit_codes import (
+    EXIT_CODE_RUN_SPEND_DEFECT,
     FatalChunkStoreIndexError,
     chunk_store_failure_kind_for_exit_code,
 )
@@ -159,6 +162,74 @@ _REFRESH_INTEGRITY_QUARANTINE_THRESHOLD = (
 # cycle, forever (observed: 1,151 recurring occurrences over 3+ days on
 # staging, zero progress).
 _LOCAL_REPO_REPAIR_QUARANTINE_THRESHOLD = 3
+
+# Bug #2125: bound of the exception cause-chain walk, and of the failure
+# detail persisted with an automatic retry of a failed refresh.
+_MAX_CAUSE_CHAIN_DEPTH = 32
+_RETRY_DETAIL_MAX_CHARS = 500
+
+
+class PublishedRefreshBackupError(RuntimeError):
+    """The refresh published a verified snapshot, then its cidx-meta backup
+    sync failed. The job still fails (the operator must see the backup
+    problem), but the index is current: no refresh retry is owed."""
+
+
+def _with_run_spend(result: Dict[str, Any], run_spend: object) -> Dict[str, Any]:
+    """Story #2122: add the indexing child's metered provider spend
+    (``inputs_sent``, ``attempts``) to a refresh result returned after
+    indexing, so the job result shows it. Only a parsed run-spend record
+    adds them; a child that printed none (an older child) leaves them out:
+    "not metered" is never reported as "sent nothing"."""
+    if isinstance(run_spend, dict):
+        result["inputs_sent"] = run_spend["inputs_sent"]
+        result["attempts"] = run_spend["attempts"]
+    return result
+
+
+def _run_spend_note(run_spend: object) -> str:
+    """Story #2122: the spend suffix of a failed refresh's error message,
+    "" when no record was read."""
+    if isinstance(run_spend, dict):
+        return (
+            f" (run spend: inputs_sent={run_spend['inputs_sent']} "
+            f"attempts={run_spend['attempts']})"
+        )
+    return ""
+
+
+def _failed_child_run_spend_note(stdout_lines: List[str]) -> str:
+    """Story #2122: the spend a FAILED child reported in its captured
+    stdout, as an error suffix. A malformed record is reported beside the
+    child's own error, never instead of it."""
+    from code_indexer.services.progress_phase_allocator import (
+        parse_run_spend_record,
+    )
+
+    try:
+        return _run_spend_note(parse_run_spend_record(stdout_lines))
+    except ValueError as malformed:
+        return f" (run spend unknown: {malformed})"
+
+
+def _partial_publish_warning(
+    alias_name: str, failures: RecordedFailures, retry_due: Optional[float]
+) -> str:
+    """Bug #2125 (B): the WARNING of a publish whose child recorded failed
+    files, worded from what actually happened to their retry."""
+    head = (
+        f"Refresh of {alias_name} published PARTIALLY: "
+        f"{failures.failed_files} file(s) could not be indexed"
+    )
+    if retry_due is not None:
+        return f"{head}; {failures.retryable_paths} retried at {retry_due:.0f}"
+    if failures.retryable_paths == 0:
+        return f"{head}; not retried: no recorded failed file still exists"
+    return (
+        f"{head}; not retried automatically (externally managed, or the "
+        f"retry could not be persisted)"
+    )
+
 
 # Bug #1539's cidx-meta-conflict quarantine mechanism (a per-repo
 # consecutive-failure counter keyed on the upstream target SHA) is
@@ -475,6 +546,7 @@ class RefreshScheduler:
         golden_repo_metadata_backend: Optional[Any] = None,
         alias_lock_db_backed_enabled_getter: Optional[Callable[[], bool]] = None,
         alias_lock_store_resolver: Optional[Callable[[], Any]] = None,
+        index_spend_alarm: Optional[Any] = None,
     ):
         """
         Initialize the refresh scheduler.
@@ -514,6 +586,11 @@ class RefreshScheduler:
                 dispatching PostgreSQL/SQLite via is_postgres_storage_mode()).
                 Only ever consulted when alias_lock_db_backed_enabled_getter()
                 returns True.
+            index_spend_alarm: Story #2118 -- optional IndexSpendAlarm
+                (server/services/index_spend_alarm.py) whose gate defers
+                SYSTEM refreshes of an alias with a runaway refresh embedding
+                volume. None (CLI mode, and every caller predating it) leaves
+                submissions unchanged.
         """
         self.golden_repos_dir = Path(golden_repos_dir)
         self.config_source = config_source
@@ -525,6 +602,7 @@ class RefreshScheduler:
         self._snapshot_manager = snapshot_manager
         self._alias_lock_db_backed_enabled_getter = alias_lock_db_backed_enabled_getter
         self._alias_lock_store_resolver = alias_lock_store_resolver
+        self._index_spend_alarm = index_spend_alarm
 
         # Initialize managers
         self.alias_manager = AliasManager(str(self.golden_repos_dir / "aliases"))
@@ -1759,8 +1837,16 @@ class RefreshScheduler:
         self,
         alias_name: str,
         progress_callback: Optional[Callable[..., None]] = None,
+        job_id: Optional[str] = None,
+        submitter_username: str = "system",
     ) -> Dict[str, Any]:
         """
+        Story #2118: ``submitter_username`` is the claimed job's submitter.
+        A SYSTEM job of an alias whose refresh embedding volume alarms is not
+        run: the strike-free deferral is persisted and the returned result
+        (success, ``skipped="volume_alarm_deferred"``) ends the claimed job
+        as completed. An unknown submitter counts as system (gated).
+
         Perform the refresh WORK for a job that has ALREADY been claimed and
         is occupying the idx_active_job_per_repo dedup slot (Bug #1839).
 
@@ -1790,6 +1876,8 @@ class RefreshScheduler:
                 detail=None) forwarded into _execute_refresh() so progress is
                 visible the same way a normally-submitted refresh job's
                 progress is.
+            job_id: The claimed background job's id, recorded on the
+                embedding_call_stats rows of this refresh (Story #2118).
 
         Returns:
             The same result dict _execute_refresh() returns
@@ -1799,11 +1887,17 @@ class RefreshScheduler:
             ValueError: If alias is not found in the global registry.
         """
         global_alias = self._resolve_global_alias(alias_name)
+        deferred = self._volume_alarm_deferral_result(
+            global_alias, submitter_username, False
+        )
+        if deferred is not None:
+            return deferred
         return self._execute_refresh(
             global_alias,
             force_reset=False,
             progress_callback=progress_callback,
             tracked_by_caller=True,
+            job_id=job_id,
         )
 
     def get_refresh_interval(self) -> int:
@@ -2116,6 +2210,11 @@ class RefreshScheduler:
             force_reset or self._is_externally_managed()
         ):
             failure_recovery.defer_if_backed_off(self.golden_repo_metadata, alias_name)
+            # Story #2118: a runaway refresh embedding volume defers system
+            # triggers (persisted, re-checked when the trigger fires).
+            alarm = getattr(self, "_index_spend_alarm", None)
+            if alarm is not None:
+                alarm.defer_if_alarming(alias_name)
 
         if not self.background_job_manager:
             # Fallback to direct execution if no job manager (CLI mode)
@@ -2134,13 +2233,23 @@ class RefreshScheduler:
         # Bug #2012: declaring cancel_check makes BackgroundJobManager inject
         # its DB-backed check (sees a cancel issued on any worker or node),
         # which stops the indexing subprocesses and skips the publish.
-        def _refresh_worker(progress_callback=None, cancel_check=None):
+        # Story #2118: declaring job_id makes BackgroundJobManager inject this
+        # job's id, recorded on the embedding_call_stats rows of its children.
+        def _refresh_worker(progress_callback=None, cancel_check=None, job_id=None):
+            # Story #2118: a job queued while the alias was quiet re-checks
+            # the volume alarm when it actually starts.
+            deferred = self._volume_alarm_deferral_result(
+                alias_name, submitter_username, force_reset
+            )
+            if deferred is not None:
+                return deferred
             return self._execute_refresh(
                 alias_name,
                 force_reset=force_reset,
                 progress_callback=progress_callback,
                 tracked_by_caller=True,
                 cancel_check=cancel_check,
+                job_id=job_id,
             )
 
         job_id: str = self.background_job_manager.submit_job(
@@ -2152,6 +2261,37 @@ class RefreshScheduler:
         )
         logger.info(f"Submitted refresh job {job_id} for {alias_name}")
         return job_id
+
+    def _volume_alarm_deferral_result(
+        self, alias_name: str, submitter_username: str, force_reset: bool
+    ) -> Optional[Dict[str, Any]]:
+        """Story #2118 run-time volume gate for refresh WORK that did not
+        just pass the submit-time gate: a claimed job (cluster reclaim) or
+        a job queued before its alias began alarming. Same exceptions as the
+        submit gate (admin, force_reset, externally managed: no loop would
+        fire the trigger). When the alias alarms, the alarm has persisted
+        the strike-free deferral (the trigger fires later through the normal
+        path) and this returns the job's terminal, non-failure result: the
+        caller must not index. None: run the refresh."""
+        alarm = getattr(self, "_index_spend_alarm", None)
+        if (
+            alarm is None
+            or submitter_username != "system"
+            or force_reset
+            or self._is_externally_managed()
+        ):
+            return None
+        try:
+            alarm.defer_if_alarming(alias_name)
+        except failure_recovery.RefreshDeferredError as exc:
+            return {
+                "success": True,
+                "alias": alias_name,
+                "skipped": "volume_alarm_deferred",
+                "message": f"Refresh deferred: {exc.reason}",
+                "deferred_until": exc.backoff_until,
+            }
+        return None
 
     def _scheduled_local_repo_repair_is_quarantined(self, alias_name: str) -> bool:
         """Return whether scheduled submission must be suppressed for *alias_name*.
@@ -2206,6 +2346,7 @@ class RefreshScheduler:
         progress_callback=None,
         tracked_by_caller: bool = False,
         cancel_check: Optional[Callable[[], bool]] = None,
+        job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Thin wrapper around _execute_refresh_impl(): times the call and
         records cidx.repos.refresh.duration via _record_refresh_duration_metric()
@@ -2227,7 +2368,15 @@ class RefreshScheduler:
         """
         _refresh_start_monotonic = time.monotonic()
         _status = "error"
-        settle = failure_recovery.skip_settler(self.golden_repo_metadata, alias_name)
+        # The trigger generation this cycle covers, read before it runs: for
+        # settle_skip and for a Bug #2125 retry of a failed trigger-only
+        # refresh (a trigger that arrives mid-cycle keeps its due time).
+        covered = failure_recovery.current_trigger_generation(
+            self.golden_repo_metadata, alias_name
+        )
+        settle = partial(
+            failure_recovery.settle_skip, self.golden_repo_metadata, alias_name, covered
+        )
         try:
             result = self._execute_refresh_impl(
                 alias_name,
@@ -2235,6 +2384,7 @@ class RefreshScheduler:
                 progress_callback=progress_callback,
                 tracked_by_caller=tracked_by_caller,
                 cancel_check=cancel_check,
+                job_id=job_id,
             )
             _status = "success" if result.get("success") else "error"
             settle(result)
@@ -2242,12 +2392,56 @@ class RefreshScheduler:
         except Exception as exc:
             if _is_refresh_cancellation(exc):
                 _status = "cancelled"  # Bug #2012: a cancel is not an error
+            else:
+                self._schedule_retry_after_failed_refresh(alias_name, exc, covered)
             raise
         finally:
             _record_refresh_duration_metric(
                 alias_name,
                 time.monotonic() - _refresh_start_monotonic,
                 _status,
+            )
+
+    def _schedule_retry_after_failed_refresh(
+        self, alias_name: str, exc: BaseException, covered: Optional[int]
+    ) -> None:
+        """Bug #2125 (A): a trigger-only repo (one the scheduler loop never
+        schedules: ``local://`` and every other non-git URL) whose refresh
+        failed is retried automatically through the system gate
+        (retry_failed_trigger_only_refresh: an owed retry, never a new
+        failure, so new-data triggers still run promptly). *covered* is the
+        trigger generation this cycle covered. A git repo is retried by its
+        own schedule; externally managed mode runs no loop to fire the
+        trigger. A fatal chunk-store failure is handed over as such (its
+        self-heal may have recorded a failure backoff). A refresh that
+        published and then failed only its backup sync owes no retry. Never
+        raises: the refresh is already failing with its own error."""
+        try:
+            if self._is_externally_managed():
+                return
+            repo_info = self.registry.get_global_repo(alias_name)
+            if repo_info is None or _is_git_repo_url(repo_info.get("repo_url") or ""):
+                return
+            chain: List[BaseException] = []
+            cause: Optional[BaseException] = exc
+            while cause is not None and len(chain) < _MAX_CAUSE_CHAIN_DEPTH:
+                chain.append(cause)
+                cause = cause.__cause__ or cause.__context__
+            if any(isinstance(e, PublishedRefreshBackupError) for e in chain):
+                return
+            failure_recovery.retry_failed_trigger_only_refresh(
+                self.golden_repo_metadata,
+                alias_name,
+                f"refresh failed: {str(exc)[:_RETRY_DETAIL_MAX_CHARS]}",
+                covered,
+                fatal_failure_recorded=any(
+                    isinstance(e, FatalChunkStoreIndexError) for e in chain
+                ),
+            )
+        except Exception as schedule_exc:
+            logger.error(
+                f"Bug #2125: could not schedule a retry of the failed refresh "
+                f"of {alias_name}: {type(schedule_exc).__name__}: {schedule_exc}"
             )
 
     def _execute_refresh_impl(
@@ -2257,6 +2451,7 @@ class RefreshScheduler:
         progress_callback=None,
         tracked_by_caller: bool = False,
         cancel_check: Optional[Callable[[], bool]] = None,
+        job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute refresh for a repository (called by BackgroundJobManager).
@@ -2320,6 +2515,9 @@ class RefreshScheduler:
         # Bug #935: track whether the refresh raised so the finally block can
         # call fail_job (raised) vs complete_job (all normal exits incl. early returns).
         _tracker_raised = False
+        # Story #2122: the indexing child's metered spend, once indexing
+        # returned; carried on a later failure's error.
+        run_spend: Optional[Dict[str, int]] = None
         try:
             with repo_lock:
                 try:
@@ -3060,7 +3258,7 @@ class RefreshScheduler:
                             else None
                         )
                         try:
-                            self._index_source(
+                            run_spend = self._index_source(
                                 alias_name=alias_name,
                                 source_path=source_path,
                                 progress_callback=progress_callback,
@@ -3069,6 +3267,7 @@ class RefreshScheduler:
                                 ),
                                 force_reconcile=force_reconcile,
                                 cancel_check=cancel_check,
+                                job_id=job_id,
                             )
                         except FatalChunkStoreIndexError as fatal_exc:
                             # Bug #2022: self-heal under the lock; stay failed.
@@ -3082,6 +3281,12 @@ class RefreshScheduler:
                                 verify_ownership=self._ownership_check(repo_name),
                             )
                             raise
+                        # Bug #2125 (B): the child exits 0 when only SOME
+                        # files fail; its metadata records them. Such a run
+                        # publishes what it indexed, reports itself partial
+                        # and schedules the retry of the recorded files that
+                        # still exist (settle_publish).
+                        recorded_failures = read_recorded_failures(source_path)
                         if forced_signal is not None:
                             # Counted only now that the reconcile completed:
                             # a failed, cancelled or skipped one never
@@ -3094,19 +3299,25 @@ class RefreshScheduler:
                                     source_path, alias_name, cancel_check
                                 ),
                             )
-                        if _metadata_before is not None and index_unchanged_since(
-                            source_path, _metadata_before
+                        if (
+                            _metadata_before is not None
+                            and recorded_failures.known
+                            and recorded_failures.retryable_paths == 0
+                            and index_unchanged_since(source_path, _metadata_before)
                         ):
                             logger.info(
                                 "Forced reconcile for %s changed nothing in the "
                                 "index; no new snapshot published",
                                 alias_name,
                             )
-                            return {
-                                "success": True,
-                                "alias": alias_name,
-                                "message": "No changes detected",
-                            }
+                            return _with_run_spend(
+                                {
+                                    "success": True,
+                                    "alias": alias_name,
+                                    "message": "No changes detected",
+                                },
+                                run_spend,
+                            )
 
                         # Bug #1506: run-boundary durability-flush +
                         # integrity gate (still under the write lock
@@ -3137,12 +3348,15 @@ class RefreshScheduler:
                                 f"{f.collection_dir}: {f.detail}"
                                 for f in gate_result.failures
                             )
-                            return {
-                                "success": False,
-                                "alias": alias_name,
-                                "message": "Refresh integrity gate failed; publish skipped",
-                                "integrity_gate_detail": detail_summary,
-                            }
+                            return _with_run_spend(
+                                {
+                                    "success": False,
+                                    "alias": alias_name,
+                                    "message": "Refresh integrity gate failed; publish skipped",
+                                    "integrity_gate_detail": detail_summary,
+                                },
+                                run_spend,
+                            )
 
                         # Issue #1546 Fix 3 (Codex round review):
                         # ownership-loss checkpoint immediately before the
@@ -3258,8 +3472,24 @@ class RefreshScheduler:
                     )
 
                     self.registry.update_refresh_timestamp(alias_name)
-                    failure_recovery.resolve_after_publish(  # Bug #2022: published
-                        self.golden_repo_metadata, alias_name, covered_generation
+                    # Bug #2022 resolution + Bug #2125 (B): files still owed
+                    # get an owed retry (not a failure); externally managed
+                    # mode runs no loop to fire one.
+                    retry_due = failure_recovery.settle_publish(
+                        self.golden_repo_metadata,
+                        alias_name,
+                        covered_generation,
+                        recorded_failures,
+                        schedule_retry=not self._is_externally_managed(),
+                    )
+                    # Story #2118: the volume alarm's reference size, counted
+                    # read-only from the snapshot just verified and published.
+                    from code_indexer.server.services.index_spend_alarm import (
+                        record_published_points,
+                    )
+
+                    record_published_points(
+                        self.golden_repo_metadata, alias_name, new_index_path
                     )
 
                     # AC6: Reconcile registry with filesystem at END of refresh
@@ -3276,17 +3506,32 @@ class RefreshScheduler:
                     )
 
                     if sync_failure:
-                        raise RuntimeError(
+                        raise PublishedRefreshBackupError(
                             "refresh complete, indexing succeeded, but backup "
                             + sync_failure
                         )
 
                     logger.info(f"Refresh complete for {alias_name}")
-                    return {
-                        "success": True,
-                        "alias": alias_name,
-                        "message": "Refresh complete",
-                    }
+                    result: Dict[str, Any] = _with_run_spend(
+                        {
+                            "success": True,
+                            "alias": alias_name,
+                            "message": "Refresh complete",
+                        },
+                        run_spend,
+                    )
+                    if recorded_failures.failed_files:
+                        # Bug #2125 (B): success stays True (a verified
+                        # snapshot was published); partial tells the job,
+                        # dashboard and API that files are still owed.
+                        logger.warning(
+                            _partial_publish_warning(
+                                alias_name, recorded_failures, retry_due
+                            )
+                        )
+                        result["partial"] = True
+                        result["failed_files"] = recorded_failures.failed_files
+                    return result
 
                 except Exception as e:
                     if _is_refresh_cancellation(e):
@@ -3303,8 +3548,12 @@ class RefreshScheduler:
                         )
                         _tracker_raised = True
                         raise
+                    # Story #2122: a failure after indexing returned keeps the
+                    # spend (a failed child's own error already carries it).
+                    spend_note = _run_spend_note(run_spend)
                     logger.error(
-                        f"Refresh failed for {alias_name}: {type(e).__name__}: {e}",
+                        f"Refresh failed for {alias_name}: {type(e).__name__}: {e}"
+                        f"{spend_note}",
                         exc_info=True,
                     )
                     # Bug #84 fix: Raise exception instead of returning error dict
@@ -3312,6 +3561,7 @@ class RefreshScheduler:
                     _tracker_raised = True
                     raise RuntimeError(
                         f"Refresh failed for {alias_name}: {type(e).__name__}: {e}"
+                        f"{spend_note}"
                     ) from e
 
         finally:
@@ -3560,9 +3810,16 @@ class RefreshScheduler:
         force_reconcile: bool = False,
         orphan_event_callback: Optional[Any] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
-    ) -> None:
+        job_id: Optional[str] = None,
+    ) -> Optional[Dict[str, int]]:
         """
         Index the golden repo source in place (Story #229: index-source-first).
+
+        Returns the semantic child's metered provider spend (Story #2122):
+        ``{"inputs_sent": N, "attempts": M}`` from its final
+        ``--progress-json`` record, or None when it printed none (an older
+        child): "not metered", never "sent nothing". A malformed record
+        raises ValueError (the refresh fails loudly).
 
         Runs all indexing (semantic+FTS, temporal, SCIP) directly on the source
         repository, before any CoW clone is performed.  The versioned snapshot
@@ -3618,13 +3875,26 @@ class RefreshScheduler:
         else:
             index_command = ["cidx", "index", "--fts", "--progress-json"]
 
+        from code_indexer.server.services.embedding_stats_attribution import (
+            build_server_stats_attribution,
+        )
         from code_indexer.server.utils.index_command_layout import (
             append_server_layout_args,
         )
 
+        # Story #2118: every child's embedding rows carry this alias, the
+        # refresh job (nojob:refresh_scheduler outside a job) and node.
+        stats_attribution = build_server_stats_attribution(
+            alias=alias_name,
+            job_id=job_id,
+            site="refresh_scheduler",
+            purpose="refresh",
+        )
         # Story #1488: server states the new-collection layout explicitly
         # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
-        index_command = append_server_layout_args(index_command)
+        index_command = append_server_layout_args(
+            index_command, attribution=stats_attribution
+        )
 
         # Step 2: Temporal indexing on source (if enabled and not local://)
         repo_info = self.registry.get_global_repo(alias_name)
@@ -3682,7 +3952,8 @@ class RefreshScheduler:
             # (CHUNKS_DB); append_server_layout_args imported above in this
             # method for the semantic command.
             temporal_command = append_server_layout_args(
-                ["cidx", "index", "--index-commits", "--progress-json"]
+                ["cidx", "index", "--index-commits", "--progress-json"],
+                attribution=stats_attribution,
             )
             logger.info(f"Temporal indexing enabled for {alias_name}")
 
@@ -3875,6 +4146,8 @@ class RefreshScheduler:
                 run_with_popen_progress(**_popen_kwargs)
             except IndexingSubprocessError as e:
                 error_msg = str(e)
+                # Story #2122: what the failed child spent, from its stdout.
+                spend_note = _failed_child_run_spend_note(_popen_stdout)
                 # SIGTERM check — returncode -15 is in the error message from popen
                 if "Exit code -15" in error_msg or "returncode=-15" in error_msg:
                     logger.warning(
@@ -3882,6 +4155,7 @@ class RefreshScheduler:
                     )
                     raise RuntimeError(
                         f"Indexing interrupted by server shutdown for {alias_name}"
+                        f"{spend_note}"
                     )
                 # Bug #2022: the child's reserved exit code names a fatal
                 # chunk-store failure kind; surface it typed for self-heal.
@@ -3890,19 +4164,27 @@ class RefreshScheduler:
                     logger.error(
                         f"{phase_name} indexing on source failed for {alias_name} "
                         f"with a fatal chunk-store {fatal_kind.value} failure: "
-                        f"{error_msg}"
+                        f"{error_msg}{spend_note}"
                     )
                     raise FatalChunkStoreIndexError(
                         f"{phase_name} indexing on source failed for {alias_name}: "
-                        f"fatal chunk-store {fatal_kind.value} failure: {error_msg}",
+                        f"fatal chunk-store {fatal_kind.value} failure: {error_msg}"
+                        f"{spend_note}",
                         fatal_kind,
                     ) from e
+                if e.returncode == EXIT_CODE_RUN_SPEND_DEFECT:
+                    # Story #2122: the child's run-spend meter refused a send.
+                    error_msg = (
+                        f"run-spend meter defect (exit {e.returncode}): {error_msg}"
+                    )
                 logger.error(
-                    f"{phase_name} indexing on source failed for {alias_name}: {error_msg}",
+                    f"{phase_name} indexing on source failed for {alias_name}: "
+                    f"{error_msg}{spend_note}",
                     exc_info=True,
                 )
                 raise RuntimeError(
-                    f"{phase_name} indexing on source failed for {alias_name}: {error_msg}"
+                    f"{phase_name} indexing on source failed for {alias_name}: "
+                    f"{error_msg}{spend_note}"
                 )
 
         # Bug #678: Wrapper that seeds config before and drains health events after
@@ -3967,6 +4249,20 @@ class RefreshScheduler:
             env=_semantic_env,
         )
         logger.info(f"cidx index on source completed successfully for {alias_name}")
+        # Story #2122: the semantic child's final run-spend record, read
+        # before the temporal phase clears _popen_stdout.
+        from code_indexer.services.progress_phase_allocator import (
+            parse_run_spend_record,
+        )
+
+        run_spend = parse_run_spend_record(_popen_stdout)
+        if run_spend is None:
+            logger.warning(
+                "Story #2122: the indexing child for %s exited 0 without a "
+                "run-spend record; its provider spend is unknown (an older "
+                "child, or a lost or corrupted record)",
+                alias_name,
+            )
 
         # Step 1b: build the trigram index for index-assisted regex search.
         _build_source_trigram_index(alias_name, source_path)
@@ -4068,6 +4364,7 @@ class RefreshScheduler:
                 raise RuntimeError(
                     f"SCIP indexing on source failed for {alias_name}: {diagnostic}"
                 )
+        return run_spend
 
     def _run_subprocess(
         self,

@@ -42,6 +42,7 @@ reserved code (`index_failure_exit_code()` in the CLI's failure path):
 |-----------|------|---------|-----------------|
 | 86 | `CORRUPTION` | SQLite itself reported the store damaged (SQLITE_CORRUPT or SQLITE_NOTADB), decided by an allow-list (`sqlite_error_reports_corruption`), including a bare corruption report on a read path | integrity check, then restore only confirmed-corrupt collections |
 | 87 | `ENVIRONMENT` | any other fatal store failure: I/O error, locked, busy, disk full, read-only, permission, other OS error | nothing restored; back off |
+| 89 | `MISSING_STORE` | the `chunks.db` of an established collection (CHUNKS_DB discriminator committed) is gone | restore it from the published snapshot (see below) |
 | 1 | generic | any other failure | ordinary failed refresh |
 
 Classification is done from the exception chain in the child, never by parsing stderr in the parent. The parent maps
@@ -65,6 +66,27 @@ publishes; the caller re-raises the original error, so the cycle stays failed.
 5. If every collection passes the check despite the exit code, nothing is restored and a backoff failure is recorded.
 
 With no published snapshot yet (first refresh) there is nothing to restore from.
+
+## Self-heal after exit 89 (missing store)
+
+A missing store of an established collection is never recreated empty and never triggers a full paid rebuild:
+`refuse_missing_established_store` and `FilesystemVectorStore.has_committed_points` both refuse, so the child exits 89.
+`self_heal_after_fatal_chunk_store_failure()` then runs the integrity gate with `restore_missing_stores=True`:
+
+1. Every missing store under the base clone's index is restored from the currently published snapshot. The snapshot
+   copy is integrity-checked read-only first, ownership of the write lock is re-checked immediately before each copy,
+   and the restored file is checked again. The indexing metadata is restored with it, so the next refresh resumes
+   from the snapshot's state and pays only for content changed since the snapshot.
+2. A cycle that restored something records one strike; a verified publish clears it, and three restores without a
+   publish in between quarantine the repository.
+3. When nothing can be restored (no published snapshot, the snapshot copy fails its check or is absent, the copy
+   fails, or the missing store is not under the repository index, such as a temporal store), no strike is recorded;
+   a failure backoff spaces the retries (each retry refuses before any provider call) and the reason is stored in
+   `refresh_failure_backoff_state.unrepairable_reason`. `/health` reports it as DEGRADED: "Refresh of `<alias>` needs
+   an operator: `<reason>`". A verified publish clears it.
+
+The restoring cycle itself stays failed; the strike makes the next cycle re-gate and publish instead of reporting
+"No changes detected".
 
 ## Integrity gate before publishing
 

@@ -1,17 +1,24 @@
 ---
 name: feedback-parallel-dispatch-cap-4-on-20x
-description: "Dispatch cap is now ONE working agent + at most ONE review agent (5x subscription, 2026-10-07); Codex carries the hardest reviews. Supersedes the earlier 4-agent cap on 20x."
+description: "Dispatch cap follows the account tier: 20x = up to THREE parallel agents (workers + reviewers combined, 2026-10-10); 5x = one worker + one reviewer. On extra usage: no timer-based polling."
 metadata:
+  node_type: memory
   type: feedback
+  originSessionId: 5d72bd7f-835f-4bea-a38d-c51aea1db2c4
+  modified: 2026-10-10T21:52:43.567Z
 ---
 
-On the 5x subscription the coordinator runs at most ONE working agent (engineer, assembler, investigator) and at most ONE review agent at a time. The hardest reviews go to Codex (codex-code-reviewer relays), and Claude reviewers are used sparingly.
+The parallel-agent cap follows the subscription tier the owner is on:
 
-**Why:** 2026-10-07 the 20x account hit its weekly limit mid-session with 4-5 agents running, killing every agent mid-edit. The owner switched to a 5x account: "can't go with 4 agents at a time ... one agent doing work, and max one agent doing reviews, and rely on codex for the most complicated reviews. this is a 5x account". (Earlier, on 20x, the cap was 4.)
+- **20x account (2026-10-10):** up to THREE agents at once, counting workers and reviewers together. Owner: "we are in a 20x account. you can run up to three parallel agents".
+- **5x account (2026-10-07):** ONE working agent plus at most ONE review agent.
+
+**Why:** 2026-10-07 the 20x account hit its weekly limit mid-session with 4-5 agents running, killing every agent mid-edit; the owner then moved to 5x with a 1+1 cap. On 2026-10-10 the session went onto extra usage and the owner said: "don't launch any timer based event. we are on extra usage" -- every periodic monitor tick costs paid usage.
 
 **How to apply:**
-- Keep a single ordered work queue; dispatch the next work item only when the current worker reports.
-- Reviews: Codex first for complex or security work; a Claude (Opus) reviewer only where dual review is mandatory and Codex has already passed it, or when Codex is unavailable.
-- Do cheap mechanical steps (staging via hash-object/update-index, exporting, running targeted tests, committing) in the main context instead of spending an agent.
-- Keep briefs tight and budgeted ([[feedback-bound-every-agent-run]]); a cut-off agent leaves partial edits, so check imports and the tree before re-dispatching.
-- If the owner moves back to a larger tier, ask before raising the cap.
+- Ask which tier is active if unsure; never exceed the stated cap, never go back to 4-5.
+- Parallel workers in the one shared tree must touch DISJOINT files, and every brief forbids git checkout/restore/reset/stash/clean ([[feedback-parallel-agents-shared-tree-no-broad-git-ops]]); commit each worker's files by exact path.
+- Reviews: Codex first for complex or security work; a Claude (Opus) reviewer where dual review is mandatory or Codex is unavailable.
+- Do cheap mechanical steps (staging, targeted tests, commits) in the main context.
+- Keep briefs bounded ([[feedback-bound-every-agent-run]]); a cut-off agent leaves partial edits, so check the tree before re-dispatching.
+- On extra usage: no Monitor ticks, ScheduleWakeup or periodic sampling; rely on agent completion notifications and tell agents not to use timer-based polling.

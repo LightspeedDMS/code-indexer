@@ -8,6 +8,7 @@ from rich.console import Console
 
 from ..config import VoyageAIConfig
 from .multimodal_utils import encode_image_to_base64
+from .provider_request_timeout import embedding_request_timeout
 from .voyage_ai import SyncClientFactory
 
 
@@ -110,14 +111,25 @@ class VoyageMultimodalClient:
             """The smallest unit including BOTH the network call and its
             status validation -- a vendor 4xx/5xx here must be recorded as
             success=False, never success=True (Story #1418)."""
+            # Bug #2127: an indexing request waits longer than a query, so a
+            # slow-period response is received, not abandoned (and paid for).
+            _timeout: Union[float, httpx.Timeout] = (
+                embedding_request_timeout(
+                    self.config.timeout, self.config.connect_timeout, indexing=True
+                )
+                if input_type != "query"
+                else self.config.timeout
+            )
             with self._http_client_factory.create_sync_client(
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
-                timeout=self.config.timeout,
+                timeout=_timeout,
             ) as client:
-                _response = client.post(self.config.api_endpoint, json=payload)
+                _response = client.post(
+                    self.config.api_endpoint, json=payload, timeout=_timeout
+                )
                 _response.raise_for_status()
             return cast(httpx.Response, _response)
 
@@ -147,6 +159,7 @@ class VoyageMultimodalClient:
                 batch_size=1,
                 purpose="query" if input_type == "query" else "index",
                 fn=_do_post_and_validate,
+                inputs=[text],
             ),
         )
 
@@ -324,14 +337,25 @@ class VoyageMultimodalClient:
             """The smallest unit including BOTH the network call and its
             status validation -- a vendor 4xx/5xx here must be recorded as
             success=False, never success=True (Story #1418)."""
+            # Bug #2127: an indexing request waits longer than a query, so a
+            # slow-period response is received, not abandoned (and paid for).
+            _timeout: Union[float, httpx.Timeout] = (
+                embedding_request_timeout(
+                    self.config.timeout, self.config.connect_timeout, indexing=True
+                )
+                if input_type != "query"
+                else self.config.timeout
+            )
             with self._http_client_factory.create_sync_client(
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
-                timeout=self.config.timeout,
+                timeout=_timeout,
             ) as client:
-                _response = client.post(self.config.api_endpoint, json=payload)
+                _response = client.post(
+                    self.config.api_endpoint, json=payload, timeout=_timeout
+                )
                 _response.raise_for_status()
             return cast(httpx.Response, _response)
 
@@ -358,6 +382,7 @@ class VoyageMultimodalClient:
                 batch_size=len(items),
                 purpose="query" if input_type == "query" else "index",
                 fn=_do_post_and_validate,
+                inputs=[item["text"] for item in items],
             ),
         )
 
@@ -404,6 +429,11 @@ class VoyageMultimodalClient:
         return self.get_multimodal_embedding(
             text=text, image_paths=[], input_type="query"
         )
+
+    def request_max_retries(self) -> int:
+        """Retries one request may make after its first attempt: none, both
+        request paths here make exactly one attempt (Story #2122)."""
+        return 0
 
     def get_provider_name(self) -> str:
         """Get the name of this embedding provider.

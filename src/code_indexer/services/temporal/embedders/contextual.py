@@ -173,11 +173,14 @@ class ContextualTemporalEmbedder(TemporalEmbedder):
         return pooled
 
     def embed_query(self, text: str) -> List[float]:
+        # A query: one attempt at the query timeout, never the indexing
+        # budget or retry loop (Bug #2127).
         result = self._client.get_contextualized_embeddings(
             [[text]],
             input_type="query",
             output_dimension=self.dimensions,
             model=self.name,
+            retry=False,
         )
         return result[0][0]
 

@@ -15,7 +15,26 @@ server/mcp/handlers/repos.py::_build_temporal_index_cmd:
    no-op preserved).
 """
 
-from code_indexer.server.mcp.handlers.repos import _build_temporal_index_cmd
+import functools
+
+from code_indexer.server.mcp.handlers.repos import (
+    _build_temporal_index_cmd as _build_cmd_with_attribution,
+)
+from code_indexer.server.services.embedding_stats_attribution import (
+    StatsAttribution,
+)
+
+# Story #2118: the builder requires an attribution; these tests are about
+# the temporal flags, so one sample attribution is bound for every call.
+_build_temporal_index_cmd = functools.partial(
+    _build_cmd_with_attribution,
+    attribution=StatsAttribution(
+        golden_repo_alias="example-repo-global",
+        job_id="job-1",
+        node_id="node-a",
+        purpose="index",
+    ),
+)
 
 
 class TestBuildTemporalIndexCmdSinceDateFlagNameBugFix:

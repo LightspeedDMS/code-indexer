@@ -71,6 +71,15 @@ _healthz_cached_at: float = 0.0
 _healthz_monotonic = time.monotonic
 
 
+def _search_event_health_block() -> Optional[dict]:
+    """Bug #2114: this process's dropped search events for GET /health
+    (None when no search event log writer is running). O(1), no I/O."""
+    from ..services.search_event_health import process_search_event_health
+
+    info = process_search_event_health()
+    return None if info is None else info.model_dump()
+
+
 def _reset_healthz_cache() -> None:
     """Test-support helper: clears the /healthz TTL cache state so tests
     don't leak a cached status across test cases. Not used by production
@@ -247,6 +256,9 @@ def register_misc_routes(
                     ),
                     "node_id": audit_capture.audit_node_id(),
                 },
+                # Bug #2114: search events this process dropped on queue
+                # overflow (informational here; /api/system/health degrades).
+                "search_events": _search_event_health_block(),
             }
 
             # Add version if available

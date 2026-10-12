@@ -94,6 +94,8 @@ class _RunCounters:
     records: List[RequestRecord] = field(default_factory=list)
     hold_seconds: float = 0.0
     kill_at: Optional[float] = None
+    failed_requests: int = 0
+    failed_inputs: int = 0
 
 
 class EmbeddingLedger:
@@ -109,6 +111,35 @@ class EmbeddingLedger:
         self._aborted = 0
         self._violations: List[str] = []
         self._by_id: Dict[int, RequestRecord] = {}
+        self._pending_failures: List[int] = []
+
+    def fail_next_requests(self, count: int, status: int = 500) -> None:
+        """Provider retry fault: answer the next ``count`` embedding requests
+        with ``status`` (default 500) instead of embeddings."""
+        if count < 0:
+            raise ValueError("count must not be negative")
+        with self._cond:
+            self._pending_failures.extend([status] * count)
+
+    def take_failure(self, texts: List[str]) -> Optional[int]:
+        """Consume one armed failure for this request: its status, counted on
+        the current run as a failed request (no key is recorded), or None."""
+        with self._cond:
+            if not self._pending_failures:
+                return None
+            status = self._pending_failures.pop(0)
+            run = self._runs.setdefault(self._current or "unlabelled", _RunCounters())
+            run.failed_requests += 1
+            run.failed_inputs += len(texts)
+            return status
+
+    def failed_stats(self, label: str) -> Dict[str, int]:
+        with self._cond:
+            run = self._runs[label]
+            return {
+                "failed_requests": run.failed_requests,
+                "failed_inputs": run.failed_inputs,
+            }
 
     def begin_run(self, label: str, hold_seconds: float = 0.0) -> None:
         if hold_seconds < 0:
@@ -183,6 +214,19 @@ class EmbeddingLedger:
         with self._cond:
             return self._cond.wait_for(
                 lambda: self._held() >= threshold, timeout=timeout
+            )
+
+    def wait_settled(self, label: str, timeout: float) -> bool:
+        """Block (at most ``timeout`` s) until every request of ``label`` has
+        its outcome recorded: response written, or aborted. A handler thread
+        records it only AFTER the bytes reach the client, so a client can be
+        done before its last request settles. Raises KeyError for an
+        unknown label."""
+        with self._cond:
+            run = self._runs[label]
+            return self._cond.wait_for(
+                lambda: all(r.written_at is not None or r.aborted for r in run.records),
+                timeout=timeout,
             )
 
     def mark_kill(self, label: str) -> Set[int]:
@@ -378,6 +422,11 @@ def _make_handler(server: "FakeVoyageServer") -> type:
                 self._reply(400, {"detail": f"unknown model {model}"})
                 return
             texts = payload["input"]
+            fault_status = ledger.take_failure(texts)
+            if fault_status is not None:
+                # Armed provider retry fault: answered, never embedded.
+                self._reply(fault_status, {"detail": "injected provider fault"})
+                return
             request_id = ledger.record(texts)
             hold = ledger.hold_seconds_for(request_id)
             if hold:

@@ -22,6 +22,9 @@ import pytest
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
+from code_indexer.server.services.embedding_stats_attribution import (
+    StatsAttribution,
+)
 from code_indexer.server.utils.index_command_layout import append_server_layout_args
 from tests.utils.fatal_chunk_store_fixtures import (
     CHILD_TIMEOUT_SECONDS,
@@ -104,7 +107,15 @@ def test_ordinary_failure_keeps_generic_exit_code(tmp_path: Path) -> None:
 
 def run_server_index_child_without_key(repo: Path) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if k != "VOYAGE_API_KEY"}
-    args = append_server_layout_args(["cidx", "index", "--fts", "--progress-json"])
+    args = append_server_layout_args(
+        ["cidx", "index", "--fts", "--progress-json"],
+        attribution=StatsAttribution(
+            golden_repo_alias="ordinary-repo-global",
+            job_id="nojob:test",
+            node_id="node-a",
+            purpose="refresh",
+        ),
+    )
     return subprocess.run(
         cidx_child_command(args[1:]),
         cwd=repo,

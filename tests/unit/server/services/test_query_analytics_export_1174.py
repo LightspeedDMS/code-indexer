@@ -36,6 +36,7 @@ Tests:
 
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -110,9 +111,20 @@ def _make_minimal_app(export_svc, bgm, monkeypatch) -> FastAPI:
     """Build and return a FastAPI app with the admin export routes registered."""
     from code_indexer.server.routers.inline_admin_ops import register_admin_ops_routes
 
+    from code_indexer.server.services.search_event_log_writer import (
+        SearchEventLogSqliteBackend,
+        SearchEventLogWriter,
+    )
+
     fast_app = FastAPI()
     fast_app.state.query_analytics_export_service = export_svc
-    fast_app.state.search_event_log_writer = None
+    # Bug #2105: an export without a search event log fails its job, so wire
+    # a real (empty) store for the job-id tests.
+    fast_app.state.search_event_log_writer = SearchEventLogWriter(
+        SearchEventLogSqliteBackend(
+            str(Path(export_svc._golden_repos_dir) / "search_events_1174.db")
+        )
+    )
 
     # Patch get_config_service used inside _get_export_retention_days
     cfg_mock = MagicMock()

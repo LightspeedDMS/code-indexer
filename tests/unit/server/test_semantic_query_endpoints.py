@@ -18,7 +18,6 @@ from code_indexer.server.app import create_app
 from code_indexer.server.auth.user_manager import User, UserRole
 
 
-@pytest.mark.e2e
 class TestSemanticQueryEndpoint:
     """Test POST /api/query endpoint for semantic search."""
 
@@ -210,6 +209,12 @@ class TestSemanticQueryEndpoint:
         assert "message" in data
         assert data["job_id"] == "job-123"
 
+        from unittest.mock import ANY
+
+        from code_indexer.server.services.search_event_recording import (
+            PendingSearchEvent,
+        )
+
         mock_submit.assert_called_once_with(
             username="testuser",
             query_text="complex query",
@@ -217,7 +222,12 @@ class TestSemanticQueryEndpoint:
             limit=10,
             min_score=None,
             file_extensions=None,
+            search_event=ANY,
         )
+        # Bug #2113: the job records the search when it completes.
+        search_event = mock_submit.call_args.kwargs["search_event"]
+        assert isinstance(search_event, PendingSearchEvent)
+        assert search_event.context.query_text == "complex query"
 
     def test_semantic_query_without_authentication(self, client):
         """Test semantic query without authentication returns 401."""
@@ -282,13 +292,15 @@ class TestSemanticQueryEndpoint:
         mock_dep_user_manager.get_user.return_value = mock_normal_user
 
         from code_indexer.server.query.semantic_query_manager import (
-            SemanticQueryError,
+            SearchRequestError,
         )
 
+        # A request the caller can fix is a SearchRequestError: 400 with its
+        # own message (404 only when the message says "not found").
         with patch.object(
             client.app.state.semantic_query_manager,
             "query_user_repositories",
-            side_effect=SemanticQueryError("No activated repositories found"),
+            side_effect=SearchRequestError("No activated repositories found"),
         ) as mock_query:
             response = client.post(
                 "/api/query",
@@ -322,7 +334,7 @@ class TestSemanticQueryEndpoint:
         mock_dep_user_manager.get_user.return_value = mock_normal_user
 
         from code_indexer.server.query.semantic_query_manager import (
-            SemanticQueryError,
+            SearchRequestError,
         )
 
         # Patch the REAL semantic_query_manager instance (closure-capture
@@ -330,7 +342,7 @@ class TestSemanticQueryEndpoint:
         with patch.object(
             client.app.state.semantic_query_manager,
             "query_user_repositories",
-            side_effect=SemanticQueryError("Repository 'invalid-repo' not found"),
+            side_effect=SearchRequestError("Repository 'invalid-repo' not found"),
         ):
             response = client.post(
                 "/api/query",
@@ -352,7 +364,11 @@ class TestSemanticQueryEndpoint:
         client,
         mock_normal_user,
     ):
-        """Test semantic query timeout returns 408."""
+        """A search failure caused by a timeout returns 504 "Search timed out".
+
+        classify_search_error answers 504 only when a TimeoutError is in the
+        exception's cause chain; the body is a fixed public message.
+        """
         # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",
@@ -364,12 +380,15 @@ class TestSemanticQueryEndpoint:
             SemanticQueryError,
         )
 
+        timed_out = SemanticQueryError("Query timed out")
+        timed_out.__cause__ = TimeoutError("provider did not answer")
+
         # Patch the REAL semantic_query_manager instance (closure-capture
         # class -- see test_semantic_query_with_valid_request above).
         with patch.object(
             client.app.state.semantic_query_manager,
             "query_user_repositories",
-            side_effect=SemanticQueryError("Query timed out"),
+            side_effect=timed_out,
         ):
             response = client.post(
                 "/api/query",
@@ -377,10 +396,10 @@ class TestSemanticQueryEndpoint:
                 headers={"Authorization": "Bearer test-token"},
             )
 
-        assert response.status_code == 408
+        assert response.status_code == 504
         data = response.json()
         assert "detail" in data
-        assert "timed out" in data["detail"]
+        assert "Search timed out" in data["detail"]
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")

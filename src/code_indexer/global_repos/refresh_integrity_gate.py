@@ -104,6 +104,11 @@ class CollectionIntegrityFailure:
     # error, lock, busy, missing file). The store is NOT known to be damaged,
     # so no restore is ever attempted over it.
     check_inconclusive: bool = False
+    # Story #2126: the established collection's chunks.db is missing (only
+    # reported when the gate runs with restore_missing_stores=True). Neither
+    # corrupt nor inconclusive: nothing is there to destroy, so it is
+    # restored from the published snapshot exactly like a corrupt store.
+    store_missing: bool = False
 
 
 @dataclass
@@ -285,10 +290,16 @@ def run_refresh_integrity_gate(
     healthy_index_dir: Optional[Path],
     clone_backend: Optional[Any] = None,
     before_restore: Optional[Callable[[], None]] = None,
+    restore_missing_stores: bool = False,
 ) -> RefreshIntegrityGateResult:
     """Run the Bug #1506 durability-flush + integrity gate against every
     CHUNKS_DB collection under *source_index_dir* (the just-mutated
     ``master_path``'s ``.code-indexer/index/``).
+
+    Story #2126: with *restore_missing_stores*, an established collection
+    whose ``chunks.db`` is missing is reported ``store_missing`` and restored
+    from the published snapshot through the same verified path as a corrupt
+    one. Without it (the publish gate), a missing store stays INCONCLUSIVE.
 
     Bug #2022: a restore is attempted only for a CORRUPT verdict (never for
     an INCONCLUSIVE one), and *before_restore* (e.g. a write-lock ownership
@@ -336,16 +347,28 @@ def run_refresh_integrity_gate(
     collections = discover_chunks_db_collection_dirs(Path(source_index_dir))
     for collection_dir in collections:
         chunks_db_path = collection_dir / _CHUNKS_DB_FILENAME
-        verdict, detail = check_chunks_db_integrity(chunks_db_path)
-        if verdict is IntegrityVerdict.HEALTHY:
-            result.checked_collections.append(collection_dir)
-            continue
+        # Story #2126: discovered as CHUNKS_DB (its layout discriminator is
+        # committed) yet without a store -- lost, never pending (#2119).
+        store_missing = restore_missing_stores and not chunks_db_path.exists()
+        if store_missing:
+            detail = "chunks.db of an established collection is missing"
+        else:
+            verdict, detail = check_chunks_db_integrity(chunks_db_path)
+            if verdict is IntegrityVerdict.HEALTHY:
+                result.checked_collections.append(collection_dir)
+                continue
 
         result.passed = False
         failure = CollectionIntegrityFailure(
-            collection_dir=collection_dir, detail=detail
+            collection_dir=collection_dir, detail=detail, store_missing=store_missing
         )
-        if verdict is IntegrityVerdict.INCONCLUSIVE:
+        if store_missing:
+            logger.error(
+                "Story #2126: %s is missing from an established collection -- "
+                "refusing to publish; restoring it from the published snapshot.",
+                chunks_db_path,
+            )
+        elif verdict is IntegrityVerdict.INCONCLUSIVE:
             # Bug #2022: unverifiable is not corrupt -- never restore over it.
             failure.check_inconclusive = True
             logger.error(
@@ -356,12 +379,13 @@ def run_refresh_integrity_gate(
             )
             result.failures.append(failure)
             continue
-        logger.error(
-            "Bug #1506: chunks.db integrity check FAILED for %s (%s) -- "
-            "refusing to publish this refresh cycle.",
-            chunks_db_path,
-            detail,
-        )
+        else:
+            logger.error(
+                "Bug #1506: chunks.db integrity check FAILED for %s (%s) -- "
+                "refusing to publish this refresh cycle.",
+                chunks_db_path,
+                detail,
+            )
 
         healthy_chunks_db_path = (
             Path(healthy_index_dir) / collection_dir.name / _CHUNKS_DB_FILENAME

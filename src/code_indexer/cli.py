@@ -13,6 +13,7 @@ import time
 import threading
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Optional,
     Union,
     Callable,
@@ -24,6 +25,9 @@ from typing import (
 )
 
 import click
+
+if TYPE_CHECKING:
+    from .server.services.embedding_stats_attribution import StatsAttribution
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
@@ -2904,6 +2908,12 @@ def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
     migrated stale status self-heals on the very next index run with no
     special-casing needed here. The migration copy is therefore a plain,
     unconditional byte-for-byte copy with no status manipulation.
+
+    Story #2121: resume-from-list is retired. A stored status of
+    in_progress/failed now routes the next run to a reconcile of the store
+    against disk (the stored list fields are dropped on load), so the copy
+    must still carry the status unchanged: normalizing it would skip that
+    recovery.
     """
     provider_metadata = config_dir / f"metadata-{provider_name}.json"
     if provider_metadata.exists():
@@ -2950,11 +2960,18 @@ def _install_embedding_stats_writer_for_index() -> None:
     bootstrap_dir = os.environ.get("CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR")
     if bootstrap_dir:
         try:
+            from .server.services.embedding_stats_writer import (
+                CrossProcessBootstrapWriter,
+            )
             from .server.storage.postgres.embedding_stats_child_wiring import (
                 install_embedding_stats_writer_from_bootstrap,
             )
 
             writer = install_embedding_stats_writer_from_bootstrap(bootstrap_dir)
+            # A cancelled job SIGTERMs this child; flush its buffered stats
+            # first so the refresh volume alarm counts the spend.
+            if isinstance(writer, CrossProcessBootstrapWriter):
+                writer.install_sigterm_flush()
             # Best-effort final flush on normal process exit (sys.exit(0/1),
             # uncaught exception) -- atexit does NOT fire on SIGKILL/OOM,
             # which is the accepted fail-open tradeoff documented on
@@ -2984,6 +3001,23 @@ def _install_embedding_stats_writer_for_index() -> None:
         )
 
         EmbeddingStatsWriter.set_active(NoOpWriter())
+
+
+def _parse_stats_attribution_option(
+    ctx: click.Context, param: click.Parameter, value: Optional[str]
+) -> Optional["StatsAttribution"]:
+    """Click callback for `cidx index --stats-attribution` (Story #2118).
+
+    Parses at argument-parsing time, so a malformed value fails the run
+    (usage error, exit 2) before any provider call. No value: None."""
+    if value is None:
+        return None
+    from .server.services.embedding_stats_attribution import StatsAttribution
+
+    try:
+        return StatsAttribution.from_json(value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
 
 
 def reject_sharded_json_for_temporal(
@@ -3232,6 +3266,16 @@ def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
     "indexing delegates to a daemon. Every other provider setting (model, "
     "timeout, retries, ...) is left untouched.",
 )
+@click.option(
+    "--stats-attribution",
+    default=None,
+    hidden=True,
+    callback=_parse_stats_attribution_option,
+    help="Internal: JSON {golden_repo_alias, job_id, node_id, purpose} that "
+    "attributes every embedding call of this run in embedding_call_stats. "
+    "Stamped by the server on every `cidx index` it spawns; a malformed "
+    "value fails the run before any provider call.",
+)
 @click.pass_context
 @require_mode("local")
 def index(
@@ -3256,6 +3300,7 @@ def index(
     migrate_chunks_to_sqlite: bool = False,
     ignore_resume_state: bool = False,
     server_managed_provider_settings: bool = False,
+    stats_attribution=None,
 ):
     """Index the codebase for semantic search.
 
@@ -3372,6 +3417,15 @@ def index(
     # this covers plain semantic indexing too -- see the helper's
     # docstring).
     _install_embedding_stats_writer_for_index()
+    # Story #2118: attribute every embedding call of this run (already
+    # validated by the option callback). Process-wide, because the calls run
+    # on VectorCalculationManager pool threads.
+    if stats_attribution is not None:
+        from .server.services.embedding_call_instrumentation import (
+            set_process_default_attribution,
+        )
+
+        set_process_default_attribution(stats_attribution)
 
     # H2: When --progress-json is active, redirect the module-level console to
     # stderr so Rich human-readable output does not corrupt the JSON stream on stdout.
@@ -4413,6 +4467,13 @@ def index(
         console.print(f"❌ {_idx_lock_exc}", style="red")
         sys.exit(1)
 
+    # Story #2122: meter every provider input of this semantic run. Only
+    # misses the reuse resolver registered may be sent; a refusal raises
+    # RunSpendDefect (a BaseException) and the run exits 88.
+    from .services.run_spend_meter import RunSpendDefect, get_run_spend_meter
+
+    get_run_spend_meter().arm()
+
     try:
         config = _load_config_for_index()
         # Bug #1979: captured before any provider is touched, so the
@@ -4606,6 +4667,9 @@ def index(
                 return "INTERRUPT"
             return None
 
+        # Story #2121: set once a file-plan line was printed on --progress-json.
+        json_file_plan_emitted = False
+
         if progress_json:
             # AC6: --progress-json active — emit JSON lines, suppress Rich display
             from .services.progress_phase_allocator import (
@@ -4622,8 +4686,10 @@ def index(
                 slot_tracker=None,
             ):
                 """JSON-emitting progress callback for --progress-json mode."""
+                nonlocal json_file_plan_emitted
                 if total and total > 0 and info:
                     _emit_json(current=current, total=total, info=info or "")
+                    json_file_plan_emitted = True
 
             # M4: Attach no-op implementations so indexing code that calls these
             # attributes does not raise AttributeError in --progress-json mode.
@@ -4808,6 +4874,24 @@ def index(
                     enable_fts=fts,
                     trust_resume_state=not ignore_resume_state,
                 )
+                # Story #2122: a defect the indexer swallowed still ends the
+                # run here, before any other exit decision.
+                get_run_spend_meter().raise_if_tripped()
+
+                # Story #2121: a run that planned no file prints its empty
+                # plan on --progress-json (machine channel only).
+                if (
+                    progress_json
+                    and not json_file_plan_emitted
+                    and not stats.cancelled
+                    and stats.files_processed == 0
+                    and stats.failed_files == 0
+                ):
+                    from .services.progress_phase_allocator import (
+                        emit_empty_plan_json,
+                    )
+
+                    emit_empty_plan_json()
 
                 # Show final completion state (if not interrupted)
                 if display_initialized and not handler.interrupted:
@@ -4816,7 +4900,7 @@ def index(
                     rich_live_manager.stop_display()
                     console.print("\n✅ Completed")
 
-        except Exception as e:
+        except (Exception, RunSpendDefect) as e:
             # Clean up progress manager and Rich Live display before error message
             if display_initialized:
                 progress_manager.stop_progress()
@@ -4937,6 +5021,9 @@ def index(
                     f"{_extra_stats.chunks_created} chunks",
                     style="green",
                 )
+        # Story #2122: an additional provider's pass (or its health probe)
+        # may have swallowed a defect; it still ends the run with exit 88.
+        get_run_spend_meter().raise_if_tripped()
 
         # Bug #1979: clear=true is "index from scratch" -- a configured
         # provider skipped for ANY reason (missing key, a failed health
@@ -4966,16 +5053,28 @@ def index(
                 )
                 sys.exit(1)
 
-    except Exception as e:
+    except (Exception, RunSpendDefect) as e:
         console.print(f"❌ Indexing failed: {e}", style="red")
         from .services.index_failure_exit_codes import index_failure_exit_code
 
         sys.exit(index_failure_exit_code(e))
     finally:
-        # Codex Finding 1a: release the foreground index-mutation lock on
-        # EVERY exit path (normal return, sys.exit -> SystemExit, or any
-        # exception) so it is never leaked past the mutation lifecycle.
-        _index_mutation_lock_ctx.__exit__(None, None, None)
+        try:
+            # Story #2122: the run's final --progress-json record, on every
+            # exit path (success, failure, exit 88).
+            if progress_json:
+                from .services.progress_phase_allocator import emit_run_spend_json
+
+                _spend = get_run_spend_meter().snapshot()
+                emit_run_spend_json(_spend.inputs_sent, _spend.attempts)
+        finally:
+            # Story #2122: the run is over (its exit code is decided): leave
+            # no armed or tripped meter behind in this process.
+            get_run_spend_meter().disarm()
+            # Codex Finding 1a: release the foreground index-mutation lock on
+            # EVERY exit path (normal return, sys.exit -> SystemExit, or any
+            # exception) so it is never leaked past the mutation lifecycle.
+            _index_mutation_lock_ctx.__exit__(None, None, None)
 
 
 @cli.command()
@@ -9162,13 +9261,10 @@ def _status_impl(ctx):
                 git_available = metadata.get("git_available", False)
                 project_id = metadata.get("project_id", "unknown")
 
-                # Check if indexing is incomplete (regardless of whether it's running or stopped)
-                has_incomplete_indexing = (
-                    metadata.get("status") == "in_progress"
-                    and len(metadata.get("files_to_index", [])) > 0
-                    and metadata.get("current_file_index", 0)
-                    < len(metadata.get("files_to_index", []))
-                )
+                # Check if indexing is incomplete (regardless of whether it's running or stopped).
+                # Story #2121: no file list is stored; the interrupted status and
+                # the recorded plan size (total_files_to_index) are what remain.
+                has_incomplete_indexing = metadata.get("status") == "in_progress"
 
                 index_details = f"Last indexed: {last_indexed}"
                 if git_available:
@@ -9177,9 +9273,7 @@ def _status_impl(ctx):
                 index_details += f" | Project: {project_id}"
 
                 if has_incomplete_indexing:
-                    total_files = metadata.get(
-                        "total_files_to_index", len(metadata.get("files_to_index", []))
-                    )
+                    total_files = metadata.get("total_files_to_index", 0)
                     files_processed = metadata.get("files_processed", 0)
                     remaining = max(
                         0, total_files - files_processed

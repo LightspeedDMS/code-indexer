@@ -642,9 +642,16 @@ class DatabaseSchema:
             total_latency_ms    INTEGER NOT NULL,
             result_count        INTEGER NOT NULL,
             node_id             TEXT NOT NULL,
-            correlation_id      TEXT
+            correlation_id      TEXT,
+            query_text_truncated INTEGER,
+            tool                TEXT,
+            door                TEXT,
+            outcome             TEXT,
+            error_class         TEXT
         )
     """
+    # Bug #2114 / Story #2117: the columns after correlation_id are the ones an
+    # existing table gains in place (SearchEventLogSqliteBackend, same order).
 
     CREATE_IDX_SEL_TIMESTAMP = """
         CREATE INDEX IF NOT EXISTS idx_sel_timestamp
@@ -654,6 +661,13 @@ class DatabaseSchema:
     CREATE_IDX_SEL_USER = """
         CREATE INDEX IF NOT EXISTS idx_sel_user
             ON search_event_log (username)
+    """
+
+    # Bug #2106: user-filtered export batches seek (username, timestamp);
+    # needed without ANALYZE statistics (solo SQLite never collects them).
+    CREATE_IDX_SEL_USER_TS = """
+        CREATE INDEX IF NOT EXISTS idx_sel_user_ts
+            ON search_event_log (username, timestamp)
     """
 
     # Issue #1160: Query analytics exports table
@@ -890,6 +904,7 @@ class DatabaseSchema:
             conn.execute(self.CREATE_SEARCH_EVENT_LOG_TABLE)
             conn.execute(self.CREATE_IDX_SEL_TIMESTAMP)
             conn.execute(self.CREATE_IDX_SEL_USER)
+            conn.execute(self.CREATE_IDX_SEL_USER_TS)
             # Issue #1160: Query analytics exports
             conn.execute(self.CREATE_QUERY_ANALYTICS_EXPORTS_TABLE)
             conn.execute(self.CREATE_IDX_QAE_CREATED_AT)

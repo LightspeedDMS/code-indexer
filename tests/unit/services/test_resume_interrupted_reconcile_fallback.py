@@ -119,6 +119,9 @@ class _DeterministicHashEmbeddingProvider(EmbeddingProvider):
     def supports_batch_processing(self) -> bool:
         return True
 
+    def request_max_retries(self) -> int:
+        return 0
+
     def _get_model_token_limit(self) -> int:
         return _FAKE_MAX_TOKENS
 
@@ -171,22 +174,19 @@ def _build_repo_with_five_files(repo: Path) -> List[Path]:
 def _simulate_interrupted_run_after_two_files(
     indexer: SmartIndexer, files: List[Path]
 ) -> None:
-    """Real ProgressiveMetadata calls (not mocked) reproducing the EXACT
-    state a genuine interrupted run leaves behind: files_to_index carries
-    all 5, the first 2 are marked completed (advancing
-    last_index_timestamp to "now" via the real mark_file_completed()),
-    status stays "in_progress", current_file_index=2. Mirrors the
-    established direct-metadata-manipulation pattern in
-    tests/unit/infrastructure/test_resumability_simple.py."""
+    """Real ProgressiveMetadata calls (not mocked) reproducing the state a
+    genuine interrupted run leaves behind: status stays "in_progress" and
+    the progress of its first 2 files advanced last_index_timestamp to
+    "now" (the real update_progress()). Story #2121: no file list is
+    stored; the recovery derives its plan from the store."""
     git_status = indexer.get_git_status()
     indexer.progressive_metadata.start_indexing(
         indexer.embedding_provider.get_provider_name(),
         indexer.embedding_provider.get_current_model(),
         git_status,
     )
-    indexer.progressive_metadata.set_files_to_index(files)
-    indexer.progressive_metadata.mark_file_completed(str(files[0]), chunks_count=1)
-    indexer.progressive_metadata.mark_file_completed(str(files[1]), chunks_count=1)
+    indexer.progressive_metadata.update_progress(files_processed=2, chunks_added=2)
+    assert len(files) == 5
 
 
 def _assert_precondition_mtime_scan_would_miss_untouched_files(

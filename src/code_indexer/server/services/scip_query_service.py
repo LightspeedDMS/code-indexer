@@ -30,7 +30,17 @@ SERVER-ONLY SCOPE:
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+    TYPE_CHECKING,
+)
 from code_indexer.server.logging_utils import format_error_log
 
 if TYPE_CHECKING:
@@ -146,6 +156,44 @@ class SCIPQueryService:
         repository_alias: Optional[str] = None,
         username: Optional[str] = None,
     ) -> List[Path]:
+        """The .scip.db files of the repositories the caller may access (see
+        _repository_scip_files)."""
+        return [
+            path
+            for _, path in self._repository_scip_files(
+                repository_alias=repository_alias, username=username
+            )
+        ]
+
+    def _repository_scip_files(
+        self,
+        repository_alias: Optional[str] = None,
+        username: Optional[str] = None,
+    ) -> List[Tuple[str, Path]]:
+        """The (repository name, .scip.db path) pairs a query searches (see
+        _scan_repository_scip_files).
+
+        Story #2117: every SCIP query starts here, so this reports on the
+        request's search event context the repositories the query resolved
+        ("<name>-global", the alias its rows carry): none when an explicit
+        alias is unknown or inaccessible or no SCIP index exists -- such a
+        query searched nothing and is not recorded.
+        """
+        from code_indexer.server.services.search_event_context import (
+            note_current_resolution,
+        )
+
+        pairs = self._scan_repository_scip_files(
+            repository_alias=repository_alias, username=username
+        )
+        note_current_resolution(sorted({f"{name}-global" for name, _ in pairs}))
+        return pairs
+
+    def _scan_repository_scip_files(
+        self,
+        repository_alias: Optional[str] = None,
+        username: Optional[str] = None,
+    ) -> List[Tuple[str, Path]]:
         """
         Find all .scip.db files across golden repositories.
 
@@ -160,7 +208,7 @@ class SCIPQueryService:
                 (required)
 
         Returns:
-            List of Path objects pointing to .scip.db files
+            (repository name, .scip.db path) pairs
 
         Raises:
             AccessFilteringServiceUnavailableError: no access filtering
@@ -185,7 +233,7 @@ class SCIPQueryService:
         if not golden_repos_path.exists():
             return []
 
-        scip_files: List[Path] = []
+        scip_files: List[Tuple[str, Path]] = []
 
         # Normalize repository_alias once before the loop (loop-invariant).
         # Converts MCP alias form (e.g. "flask-large-global") or full path
@@ -209,7 +257,10 @@ class SCIPQueryService:
             if alias_root is not None:
                 scip_dir = alias_root / ".code-indexer" / "scip"
                 if scip_dir.exists():
-                    return self._contained_scip_files(alias_root, scip_dir)
+                    return [
+                        (normalized_alias, path)
+                        for path in self._contained_scip_files(alias_root, scip_dir)
+                    ]
 
         for repo_dir in golden_repos_path.iterdir():
             # Skip non-directories
@@ -242,7 +293,10 @@ class SCIPQueryService:
             # Find .scip.db files in the repository's scip directory
             scip_dir = scip_root / ".code-indexer" / "scip"
             if scip_dir.exists():
-                scip_files.extend(self._contained_scip_files(scip_root, scip_dir))
+                scip_files.extend(
+                    (repo_dir.name, path)
+                    for path in self._contained_scip_files(scip_root, scip_dir)
+                )
 
         return scip_files
 
@@ -367,6 +421,55 @@ class SCIPQueryService:
             "context": result.context,
         }
 
+    def _query_each_repository(
+        self,
+        repository_alias: Optional[str],
+        username: Optional[str],
+        query: Callable[[Path], List[Dict[str, Any]]],
+        error_code: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Run `query` on every accessible repository's SCIP index files.
+
+        With `error_code`, a file whose query raises is logged and skipped
+        (its repository counts as failed unless another of its files
+        answered); without, the error propagates. A search without an alias
+        notes on the request's search event context the repositories it
+        searched and each one's result count (Bug #2111) -- tallied here,
+        where the loop knows the repository, since SCIP results carry none.
+        """
+        pairs = self._repository_scip_files(
+            repository_alias=repository_alias, username=username
+        )
+        all_results: List[Dict[str, Any]] = []
+        counts: Dict[str, int] = {}
+        failed: Set[str] = set()
+        for repo_name, scip_file in pairs:
+            try:
+                results = query(scip_file)
+            except Exception as e:
+                if error_code is None:
+                    raise
+                logger.warning(
+                    format_error_log(
+                        error_code, f"Failed to query SCIP file {scip_file}: {e}"
+                    )
+                )
+                failed.add(repo_name)
+                continue
+            all_results.extend(results)
+            counts[repo_name] = counts.get(repo_name, 0) + len(results)
+        if repository_alias is None and pairs:
+            from code_indexer.server.services.search_event_context import (
+                note_current_repositories,
+            )
+
+            note_current_repositories(
+                searched=[f"{name}-global" for name in counts],
+                failed=[f"{name}-global" for name in sorted(failed - set(counts))],
+                counts={f"{name}-global": count for name, count in counts.items()},
+            )
+        return all_results
+
     def find_definition(
         self,
         symbol: str,
@@ -390,29 +493,15 @@ class SCIPQueryService:
         """
         from code_indexer.scip.query.primitives import SCIPQueryEngine
 
-        scip_files = self.find_scip_files(
-            repository_alias=repository_alias, username=username
+        return self._query_each_repository(
+            repository_alias,
+            username,
+            lambda scip_file: [
+                self._query_result_to_dict(r)
+                for r in SCIPQueryEngine(scip_file).find_definition(symbol, exact=exact)
+            ],
+            "MCP-GENERAL-138",
         )
-
-        if not scip_files:
-            return []
-
-        all_results: List[Dict[str, Any]] = []
-
-        for scip_file in scip_files:
-            try:
-                engine = SCIPQueryEngine(scip_file)
-                results = engine.find_definition(symbol, exact=exact)
-                all_results.extend(self._query_result_to_dict(r) for r in results)
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "MCP-GENERAL-138", f"Failed to query SCIP file {scip_file}: {e}"
-                    )
-                )
-                continue
-
-        return all_results
 
     def find_references(
         self,
@@ -439,29 +528,17 @@ class SCIPQueryService:
         """
         from code_indexer.scip.query.primitives import SCIPQueryEngine
 
-        scip_files = self.find_scip_files(
-            repository_alias=repository_alias, username=username
-        )
-
-        if not scip_files:
-            return []
-
-        all_results: List[Dict[str, Any]] = []
-
-        for scip_file in scip_files:
-            try:
-                engine = SCIPQueryEngine(scip_file)
-                results = engine.find_references(symbol, limit=limit, exact=exact)
-                all_results.extend(self._query_result_to_dict(r) for r in results)
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "MCP-GENERAL-139", f"Failed to query SCIP file {scip_file}: {e}"
-                    )
+        return self._query_each_repository(
+            repository_alias,
+            username,
+            lambda scip_file: [
+                self._query_result_to_dict(r)
+                for r in SCIPQueryEngine(scip_file).find_references(
+                    symbol, limit=limit, exact=exact
                 )
-                continue
-
-        return all_results
+            ],
+            "MCP-GENERAL-139",
+        )
 
     def get_dependencies(
         self,
@@ -488,29 +565,17 @@ class SCIPQueryService:
         """
         from code_indexer.scip.query.primitives import SCIPQueryEngine
 
-        scip_files = self.find_scip_files(
-            repository_alias=repository_alias, username=username
-        )
-
-        if not scip_files:
-            return []
-
-        all_results: List[Dict[str, Any]] = []
-
-        for scip_file in scip_files:
-            try:
-                engine = SCIPQueryEngine(scip_file)
-                results = engine.get_dependencies(symbol, depth=depth, exact=exact)
-                all_results.extend(self._query_result_to_dict(r) for r in results)
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "MCP-GENERAL-140", f"Failed to query SCIP file {scip_file}: {e}"
-                    )
+        return self._query_each_repository(
+            repository_alias,
+            username,
+            lambda scip_file: [
+                self._query_result_to_dict(r)
+                for r in SCIPQueryEngine(scip_file).get_dependencies(
+                    symbol, depth=depth, exact=exact
                 )
-                continue
-
-        return all_results
+            ],
+            "MCP-GENERAL-140",
+        )
 
     def get_dependents(
         self,
@@ -537,29 +602,17 @@ class SCIPQueryService:
         """
         from code_indexer.scip.query.primitives import SCIPQueryEngine
 
-        scip_files = self.find_scip_files(
-            repository_alias=repository_alias, username=username
-        )
-
-        if not scip_files:
-            return []
-
-        all_results: List[Dict[str, Any]] = []
-
-        for scip_file in scip_files:
-            try:
-                engine = SCIPQueryEngine(scip_file)
-                results = engine.get_dependents(symbol, depth=depth, exact=exact)
-                all_results.extend(self._query_result_to_dict(r) for r in results)
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "MCP-GENERAL-141", f"Failed to query SCIP file {scip_file}: {e}"
-                    )
+        return self._query_each_repository(
+            repository_alias,
+            username,
+            lambda scip_file: [
+                self._query_result_to_dict(r)
+                for r in SCIPQueryEngine(scip_file).get_dependents(
+                    symbol, depth=depth, exact=exact
                 )
-                continue
-
-        return all_results
+            ],
+            "MCP-GENERAL-141",
+        )
 
     def analyze_impact(
         self,
@@ -680,25 +733,20 @@ class SCIPQueryService:
         if not from_symbol or not to_symbol or max_depth < 1 or limit < 0:
             return [], []
 
-        scip_files = self.find_scip_files(
-            repository_alias=repository_alias, username=username
-        )
-        if not scip_files:
-            return [], []
-
-        all_results: List[Dict[str, Any]] = []
         timeout_errors: List[str] = []
-        for scip_file in scip_files:
-            all_results.extend(
-                _trace_callchain_in_file(
-                    scip_file,
-                    from_symbol,
-                    to_symbol,
-                    max_depth,
-                    limit,
-                    timeout_errors,
-                )
-            )
+        all_results = self._query_each_repository(
+            repository_alias,
+            username,
+            lambda scip_file: _trace_callchain_in_file(
+                scip_file,
+                from_symbol,
+                to_symbol,
+                max_depth,
+                limit,
+                timeout_errors,
+            ),
+            None,
+        )
 
         return all_results, timeout_errors
 

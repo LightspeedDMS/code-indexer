@@ -1,6 +1,7 @@
 """IndexJobClaimLoop claim -> dispatch -> complete/fail behavior.
 
-Dispatch executors take (metadata, progress_callback): PR #1424 H2 gives a
+Dispatch executors take (metadata, progress_callback, job_id); job_id is the
+claimed row's id (Story #2118 stats attribution). PR #1424 H2 gives a
 work-stolen job a real DB-backed progress path via a per-job progress_callback
 that routes to DistributedJobClaimer.update_progress.
 """
@@ -26,7 +27,7 @@ class TestClaimAndDispatch:
     def test_none_claim_is_noop(self):
         claimer = MagicMock()
         claimer.claim_next_job.return_value = None
-        loop = _loop(claimer, {"add_golden_repo": lambda md, pc: {"ok": True}})
+        loop = _loop(claimer, {"add_golden_repo": lambda md, pc, job_id: {"ok": True}})
         assert loop._process_one_job() is False
         claimer.complete_job.assert_not_called()
         claimer.fail_job.assert_not_called()
@@ -36,7 +37,7 @@ class TestClaimAndDispatch:
         claimer.claim_next_job.return_value = _job(metadata={"alias": "a"})
         seen = {}
 
-        def executor(md, progress_callback):
+        def executor(md, progress_callback, job_id):
             seen.update(md)
             return {"success": True}
 
@@ -52,8 +53,8 @@ class TestClaimAndDispatch:
         loop = _loop(
             claimer,
             {
-                "add_golden_repo": lambda md, pc: None,
-                "sync_repository": lambda md, pc: None,
+                "add_golden_repo": lambda md, pc, job_id: None,
+                "sync_repository": lambda md, pc, job_id: None,
             },
         )
         loop._process_one_job()
@@ -66,7 +67,7 @@ class TestProgressCallback:
         claimer = MagicMock()
         claimer.claim_next_job.return_value = _job()
 
-        def executor(md, progress_callback):
+        def executor(md, progress_callback, job_id):
             # The executor drives progress; it must land on the shared row via
             # the claimer, scoped to THIS job_id.
             progress_callback(60, phase="index", detail="building")
@@ -82,7 +83,7 @@ class TestProgressCallback:
         claimer = MagicMock()
         claimer.claim_next_job.return_value = _job()
 
-        def executor(md, progress_callback):
+        def executor(md, progress_callback, job_id):
             # _execute_repository_sync calls progress_callback(int) positionally.
             progress_callback(25)
             return {"success": True}
@@ -99,7 +100,7 @@ class TestFailurePaths:
         claimer = MagicMock()
         claimer.claim_next_job.return_value = _job()
 
-        def boom(md, pc):
+        def boom(md, pc, job_id):
             raise RuntimeError("kaboom")
 
         loop = _loop(claimer, {"add_golden_repo": boom})
@@ -113,7 +114,7 @@ class TestFailurePaths:
         # Claim filtered to dispatch keys, but defend anyway.
         claimer = MagicMock()
         claimer.claim_next_job.return_value = _job(op="mystery")
-        loop = _loop(claimer, {"add_golden_repo": lambda md, pc: None})
+        loop = _loop(claimer, {"add_golden_repo": lambda md, pc, job_id: None})
         assert loop._process_one_job() is True
         claimer.fail_job.assert_called_once()
 
@@ -121,14 +122,14 @@ class TestFailurePaths:
 class TestStopReleasesInflight:
     def test_stop_releases_in_flight_claim(self):
         claimer = MagicMock()
-        loop = _loop(claimer, {"add_golden_repo": lambda md, pc: None})
+        loop = _loop(claimer, {"add_golden_repo": lambda md, pc, job_id: None})
         loop._in_flight = "j-running"
         loop.stop()
         claimer.release_job.assert_called_once_with("j-running")
 
     def test_stop_no_inflight_no_release(self):
         claimer = MagicMock()
-        loop = _loop(claimer, {"add_golden_repo": lambda md, pc: None})
+        loop = _loop(claimer, {"add_golden_repo": lambda md, pc, job_id: None})
         loop.stop()
         claimer.release_job.assert_not_called()
 

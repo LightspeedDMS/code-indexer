@@ -8,6 +8,44 @@
     <p class="subtitle">Filter search event data and export to Excel for stakeholder reporting.</p>
 </div>
 
+{% if search_event_drops and search_event_drops.events_dropped_since_start > 0 %}
+<article id="search-event-drops" role="alert">
+    This server process (on node {{ search_event_drops.node_id }}) dropped
+    {{ search_event_drops.events_dropped_since_start }} search events since it started
+    because its recording queue was full. Exports do not contain those searches.
+    Other server processes and nodes report their own count in
+    <code>/api/system/health</code> (<code>search_events</code>).
+</article>
+{% endif %}
+
+<!-- Story #2117: what an export can contain (live values, no hardcoded numbers) -->
+<section>
+    <article id="export-data-limits">
+        <header><strong>What an export contains</strong></header>
+        <ul>
+            <li>{% if search_event_window.retention_unavailable %}Search event retention:
+                <span id="retention-days">unavailable (could not be read)</span>.
+                {% else %}Search events are kept for
+                <span id="retention-days">{{ search_event_window.retention_days }}</span>
+                days; older searches no longer exist.{% endif %}
+                Oldest available search:
+                {% if search_event_window.oldest_unavailable %}unavailable (could not be read)
+                {% elif search_event_window.oldest_timestamp %}{{ search_event_window.oldest_timestamp }}
+                {% else %}none recorded{% endif %}.</li>
+            <li>Exports have no row cap: a large export continues on further sheets
+                ("Searches 2", "Searches 3", ...).</li>
+            <li>Query text is stored cut at
+                <span id="query-text-cap">{{ query_text_max_chars }}</span>
+                characters (query_text_truncated marks a cut text).</li>
+            <li>The cache hit filter applies only to embedding-based searches; searches
+                that consult no embedding cache (full-text, regex, X-Ray, SCIP, git
+                history, CI logs, or a bypassed or disabled cache) are only in "All".</li>
+            <li>Searches recorded before the tool, door and outcome columns existed show
+                those columns blank and match no filter on them.</li>
+        </ul>
+    </article>
+</section>
+
 <!-- Filter Panel -->
 <section>
     <article>
@@ -39,12 +77,9 @@
                     Search Type
                     <select id="search_type" name="search_type">
                         <option value="all">All types</option>
-                        <option value="semantic">semantic</option>
-                        <option value="fts">fts</option>
-                        <option value="hybrid">hybrid</option>
-                        <option value="temporal">temporal</option>
-                        <option value="regex">regex</option>
-                        <option value="xray">xray</option>
+                        {% for search_type in search_types %}
+                        <option value="{{ search_type }}">{{ search_type }}</option>
+                        {% endfor %}
                     </select>
                 </label>
                 <label>
@@ -54,6 +89,37 @@
                         <option value="hits_only">Hits only</option>
                         <option value="misses_only">Misses only</option>
                     </select>
+                </label>
+            </div>
+            <div class="grid">
+                <label>
+                    Door
+                    <select id="door" name="door">
+                        <option value="all">All doors</option>
+                        <option value="mcp">MCP</option>
+                        <option value="rest">REST</option>
+                        <option value="web">Web</option>
+                    </select>
+                </label>
+                <label>
+                    Outcome
+                    <select id="outcome" name="outcome">
+                        <option value="all">All outcomes</option>
+                        <option value="success">Success</option>
+                        <option value="failure">Failure</option>
+                    </select>
+                </label>
+            </div>
+            <div class="grid">
+                <label>
+                    Tool or Endpoint
+                    <input type="text" id="tool" name="tool" maxlength="100"
+                           placeholder="exact, e.g. search_code or POST /api/query (optional)">
+                </label>
+                <label>
+                    Correlation ID
+                    <input type="text" id="correlation_id" name="correlation_id" maxlength="128"
+                           placeholder="exact correlation id (optional)">
                 </label>
             </div>
         </form>
@@ -133,7 +199,7 @@ function renderHistory(exports) {
             <td style="font-size:0.8rem;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.filter_summary)}">${esc(e.filter_summary)}</td>
             <td>${e.row_count != null ? e.row_count : '—'}</td>
             <td>${fmtBytes(e.file_size_bytes)}</td>
-            <td>${statusBadge(e.status)}</td>
+            <td>${statusBadge(e.status)}${e.error_message ? `<br><small>${esc(e.error_message)}</small>` : ''}</td>
             <td>${dl}</td>
         </tr>`;
     }).join('');

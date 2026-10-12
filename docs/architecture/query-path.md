@@ -70,6 +70,78 @@ active (`try_global_fallback`). Searches run through `_execute_tracked_search`, 
 manager and records OTEL search metrics; results then pass through `_apply_rerank_and_filter`
 (`search/_shared.py`).
 
+**Search event log** (`server/services/search_event_recording.py`). Every search door builds its row through
+`record_search_event` and hands it to the bounded `SearchEventLogWriter` queue: fire-and-forget, it never blocks,
+raises or changes the search. `search_type` is one of `SEARCH_TYPES` (`semantic`, `fts`, `hybrid`, `temporal`,
+`regex`, `xray`, `scip`, `git_history`, `ci_logs`); the same list feeds the Query Analytics Export page's Search Type filter, and any other value is
+refused (logged, not stored). The recorded type is the mode that ran: a REST hybrid request without a usable FTS
+index is recorded as `semantic`, and a temporal search is recorded as `temporal` whatever `search_mode` it also
+carries. MCP `search_code` rejects an unknown `search_mode` (REST answers 422).
+
+One rule for every door: every search that RAN writes a row carrying `tool` (MCP tool name, REST method plus route
+template as a fixed per-route constant such as `GET /scip/definition`, never read from the request, or `web:query`/`web:wiki_search`), `door` (`mcp`, `rest`, `web`) and `outcome`
+(`SearchOrigin`, required by every record function). A failure is a row with `outcome = failure` and a neutral
+`error_class`: an identifier-like token from `services/search_event_outcomes.py` (`providers_unavailable`, `timeout`,
+`phase1_failed`, `repository_failed`, `no_repository_searched`, ...) or the exception's class name (a bare `Exception`
+wrapper takes its cause's class; names longer than 64 characters are cut to a valid token), never a message. The
+outcome is decided once per result shape in that module (`search_payload_outcome`, `xray_result_outcome`,
+`scip_payload_outcome`). Nothing is written for a rejection before the repository resolves -- validation, admission,
+an unknown or inaccessible repository (including one alias in a list), the access service unavailable before the
+search -- which the module recognises by error type (`SearchRequestError` and subclasses such as
+`UnresolvedRepositoryError`, `TemporalAliasRejectedError`) or by the rejection error codes `REPOSITORY_NOT_FOUND` /
+`SERVICE_UNAVAILABLE` in a payload, never by an HTTP status alone; a search that started and then failed (including
+`providers_unavailable` and a 503 raised after it started) is a failure row. An
+asynchronous search writes its row when its job completes, with the real result count (REST `async_query`; X-Ray
+jobs); a job cancelled while it ran writes nothing (BackgroundJobManager jobs check the injected `cancel_check`,
+MCP X-Ray jobs their JobTracker status). A deferred temporal handoff (MCP `TEMPORAL_QUERY_DEFERRED`, REST 202)
+writes no row then; it stores a pending record in `app.state.payload_cache` (cluster-shared, keyed by job id and
+caller, 24 h TTL), and the result door that delivers the completed result to that caller (`poll_search_job`,
+`GET /api/query/result/{job_id}`) claims it with one atomic consume and records `temporal` with the delivered count
+and the latency from the search's start -- one row per user per deferred job. The temporal dedup signature includes
+the username, so different users never share a job; a same-user repeat of an identical deferred search reuses the
+job and overwrites its one pending record, so those repeats collapse into one row.
+A recording failure is logged at WARNING with its exception type.
+
+Rows per door: one row per RESOLVED repository a search ran against, with that repository's own result count and
+its own cache fields; the rows of one call share its latency and correlation id. A repository that resolved and then
+failed writes a failure row with `repository_failed`; a whole-call failure after resolution writes one failure row
+per resolved repository (`record_multi_repository_search`, `recording_multi_repository_failure`); an alias that
+never resolved writes nothing. This covers `search_code` (single repository, list, JSON array, wildcard, and
+alias-free semantic fan-out), `POST /api/query` (with or without an alias, sync and async; an alias-free FTS or
+hybrid search records the FTS repository it searched), `POST /api/query/multi`, `/api/scip/multi/*`, SCIP searches
+without an alias (`in_scip_search_scope`; the service reports what resolved), `regex_search` and
+`POST /api/regex/search` (`query_text` = pattern, `result_count` = matches returned), `xray_search`/`xray_explore`
+and `POST /api/xray/search` (one per repository job) and `xray_search_batch` / `POST /api/xray/search/batch` (one per
+repository, `xray_batch_repository_rows`; `query_text` = driver pattern(s), never evaluator source). A promoted bare
+alias is stored as its `-global` alias. Doors resolve repositories as they go (`begin_repository_rows`,
+`searching_resolved_repository`, `note_current_resolution`), so a failure keeps the repositories already resolved;
+each fan-out worker runs under `searching_repository(alias)`, so its provider cache result lands on that
+repository's row (`cache_fields_for`). Exceptions: alias-free `scip_impact`/`scip_context` (the composite engine's
+results carry no repository) and an alias-free call chain that raises partway write one row. The Web UI query page,
+its results partial and wiki search use `run_recorded_search`; X-Ray jobs `run_recorded_xray`; git history and CI
+logs `record_completed_search` with `recording_failure`. SCIP search doors (MCP `scip_*` search tools, REST
+`/scip/*`, the Web page's SCIP mode) record `scip` with the symbol, or `from -> to` for a call chain, as
+`query_text`; `git_search_commits` and `git_search_diffs` record `git_history`, `ci_search_logs` records `ci_logs`.
+Graph, dependency-map, blame/log/history and browsing tools are not searches and write nothing.
+
+Cache columns record a provider only when its embedding cache was CONSULTED: a bypassed search
+(`no_embedding_cache_shortcut`) or a query too long to have a cache key records NULL mode and NULL hit
+(`EmbeddingCacheMetadata.search_event_cache_mode` / `search_event_cache_hit`), while the embed-event table keeps the
+coalescer's own values. Non-embedding searches (regex, X-Ray, SCIP, git history, CI logs, FTS) leave them NULL. The
+export's `hits_only` and `misses_only` filters therefore both require a non-NULL mode; such searches appear only
+under "All". The dashboard hit-rate cards count rows (each one searched repository's cache lookup), excluding
+`outcome = failure`; a lookup made once before a fan-out (an omni search that embeds its query once) served every
+repository it fanned out to, so it is copied onto each of those rows and counted once per repository; rows recorded before 12.85.0 have NULL `tool`/`door`/`outcome`/`error_class` and count as
+before. Those four columns are nullable (PostgreSQL migration 074; SQLite adds them in place, tolerating a concurrent
+worker's add), and a deferred temporal record written by an older node is still recorded, with `tool`/`door` NULL.
+
+Doors pass the full query text; only the shared module cuts it at `QUERY_TEXT_MAX_CHARS` (500) and then sets
+`query_text_truncated`. When the writer's queue is full it drops the event and counts it on the writer instance, so
+the count is per server process: `services/search_event_health.py` reports it as `search_events` in
+`/api/system/health`, MCP `check_health` and `/health`, DEGRADED for 15 minutes after the last drop and never
+UNHEALTHY. Each drop also increments the OTEL counter `cidx.search_event_log.dropped_events`, and the export page
+shows the serving process's count.
+
 ## The query-embedding chokepoint
 
 Every server query embedding goes through `coalesced_query_embedding(provider, text, ...)`

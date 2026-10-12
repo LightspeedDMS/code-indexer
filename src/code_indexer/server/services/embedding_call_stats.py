@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 if TYPE_CHECKING:
     # Bug #1441: this is a type-annotation-only need (all annotations in
@@ -39,7 +39,17 @@ logger = logging.getLogger(__name__)
 VALID_PROVIDERS = frozenset({"voyageai", "cohere"})
 VALID_CALL_TYPES = frozenset({"embed", "embed_multimodal", "rerank"})
 VALID_PURPOSES = frozenset(
-    {"index", "refresh", "query", "temporal", "key_test", "cache_shadow_audit"}
+    {
+        "index",
+        "refresh",
+        "query",
+        "temporal",
+        # Story #2118: contextual temporal calls made by a golden-repo REFRESH
+        # child, kept apart from registration-time "temporal" spend.
+        "temporal_refresh",
+        "key_test",
+        "cache_shadow_audit",
+    }
 )
 
 
@@ -58,7 +68,7 @@ class EmbeddingCallRecord:
     item_count: int
     token_count: int
     batch_size: int
-    purpose: str  # "index" | "refresh" | "query" | "temporal" | "key_test" | "cache_shadow_audit"
+    purpose: str  # see VALID_PURPOSES
     success: bool
     latency_ms: int
     occurred_at: float
@@ -193,6 +203,58 @@ def _build_query_where_clause(
     return where_clause, params
 
 
+#: Story #2118: serves the per-alias refresh-spend aggregate (the volume
+#: alarm's pause gate filters on one alias; the fleet health read on the
+#: purposes and time window). Additive on both backends (PG: migration 067).
+ALIAS_PURPOSE_TIME_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_ecs_alias_purpose_time "
+    "ON embedding_call_stats (golden_repo_alias, purpose, occurred_at)"
+)
+
+#: Story #2118: the fleet health aggregate filters on purpose + time only;
+#: led by (purpose, occurred_at) it is a range search, and the trailing
+#: (golden_repo_alias, item_count) make it covering. PG: migration 069.
+PURPOSE_TIME_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_ecs_purpose_time_alias ON embedding_call_stats "
+    "(purpose, occurred_at, golden_repo_alias, item_count)"
+)
+
+
+def _build_sum_items_sql(
+    placeholder: str,
+    purposes: Iterable[str],
+    since: float,
+    golden_repo_alias: Optional[str],
+) -> "tuple[str, list]":
+    """One grouped query: SUM(item_count) per alias (NULL alias included as
+    its own group) for *purposes* at or after *since*. ``placeholder`` is
+    "?" for SQLite, "%s" for PostgreSQL. Rejects an empty or unknown purpose
+    set (a caller bug, never a silent empty result)."""
+    purpose_list = list(purposes)
+    if not purpose_list:
+        raise ValueError("purposes must name at least one purpose")
+    unknown = sorted(set(purpose_list) - VALID_PURPOSES)
+    if unknown:
+        raise ValueError(f"Invalid purpose(s) {unknown}")
+    marks = ", ".join([placeholder] * len(purpose_list))
+    sql = (
+        "SELECT golden_repo_alias, SUM(item_count) FROM embedding_call_stats "
+        f"WHERE purpose IN ({marks}) AND occurred_at >= {placeholder}"
+    )
+    params: list = [*purpose_list, since]
+    if golden_repo_alias is not None:
+        sql += f" AND golden_repo_alias = {placeholder}"
+        params.append(golden_repo_alias)
+    return sql + " GROUP BY golden_repo_alias", params
+
+
+def _sum_rows_to_dict(rows: List[tuple]) -> Dict[Optional[str], int]:
+    return {row[0]: int(row[1]) for row in rows}
+
+
+#: Wait for another writer's SQLite lock on an ordinary stats insert.
+_DEFAULT_SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
+
 # ---------------------------------------------------------------------------
 # SQLite backend (solo / development mode)
 # ---------------------------------------------------------------------------
@@ -250,6 +312,8 @@ class EmbeddingCallStatsSqliteBackend:
                     "CREATE INDEX IF NOT EXISTS idx_ecs_purpose "
                     "ON embedding_call_stats (purpose)"
                 )
+                conn.execute(ALIAS_PURPOSE_TIME_INDEX_SQL)
+                conn.execute(PURPOSE_TIME_INDEX_SQL)
                 conn.commit()
             finally:
                 conn.close()
@@ -258,12 +322,19 @@ class EmbeddingCallStatsSqliteBackend:
                 "EmbeddingCallStatsSqliteBackend: schema setup failed: %s", exc
             )
 
-    def insert_batch(self, records: List[EmbeddingCallRecord]) -> None:
-        """Insert a batch of records in ONE transaction. No-op for empty batch."""
+    def insert_batch(
+        self,
+        records: List[EmbeddingCallRecord],
+        busy_timeout_seconds: float = _DEFAULT_SQLITE_BUSY_TIMEOUT_SECONDS,
+    ) -> None:
+        """Insert a batch of records in ONE transaction. No-op for empty batch.
+
+        ``busy_timeout_seconds`` bounds the wait for another writer's lock
+        (the SIGTERM final drain passes a short one)."""
         if not records:
             return
         try:
-            conn = sqlite3.connect(self._db_path, timeout=30)
+            conn = sqlite3.connect(self._db_path, timeout=busy_timeout_seconds)
             try:
                 conn.executemany(
                     f"INSERT INTO embedding_call_stats ({_INSERT_COLUMNS}) "
@@ -315,6 +386,23 @@ class EmbeddingCallStatsSqliteBackend:
         except Exception as exc:
             logger.warning("EmbeddingCallStatsSqliteBackend: query failed: %s", exc)
             return []
+
+    def sum_items_since(
+        self,
+        purposes: Iterable[str],
+        since: float,
+        *,
+        golden_repo_alias: Optional[str] = None,
+    ) -> Dict[Optional[str], int]:
+        """Story #2118: ``{alias or None: SUM(item_count)}`` for *purposes*
+        at or after *since* (optionally one alias). RAISES on any store
+        error: the volume alarm must report "blind", never "0 spend"."""
+        sql, params = _build_sum_items_sql("?", purposes, since, golden_repo_alias)
+        conn = sqlite3.connect(self._db_path, timeout=30)
+        try:
+            return _sum_rows_to_dict(conn.execute(sql, params).fetchall())
+        finally:
+            conn.close()
 
     def delete_where(self, occurred_at_before: float) -> int:
         """Delete rows with occurred_at strictly before the cutoff. Returns count."""
@@ -391,13 +479,19 @@ class EmbeddingCallStatsPostgresBackend:
                     "CREATE INDEX IF NOT EXISTS idx_ecs_purpose "
                     "ON embedding_call_stats (purpose)"
                 )
+                conn.execute(ALIAS_PURPOSE_TIME_INDEX_SQL)
+                conn.execute(PURPOSE_TIME_INDEX_SQL)
                 conn.commit()
         except Exception as exc:
             logger.warning(
                 "EmbeddingCallStatsPostgresBackend: schema setup failed: %s", exc
             )
 
-    def insert_batch(self, records: List[EmbeddingCallRecord]) -> None:
+    def insert_batch(
+        self,
+        records: List[EmbeddingCallRecord],
+        busy_timeout_seconds: Optional[float] = None,
+    ) -> None:
         """Insert a batch of records in ONE transaction/commit (Bug #1181 pattern).
 
         SET LOCAL synchronous_commit = off relaxes WAL fsync for these
@@ -407,6 +501,9 @@ class EmbeddingCallStatsPostgresBackend:
         psycopg v3: executemany lives on the CURSOR, not the connection --
         using the cursor keeps this in the SAME transaction as the SET LOCAL
         above and the single commit() below.
+
+        ``busy_timeout_seconds`` (the SIGTERM final drain passes a short one)
+        bounds the lock wait and the statement for this transaction only.
         """
         if not records:
             return
@@ -415,6 +512,10 @@ class EmbeddingCallStatsPostgresBackend:
         try:
             with self._pool.connection() as conn:
                 conn.execute("SET LOCAL synchronous_commit = off")
+                if busy_timeout_seconds is not None:
+                    timeout_ms = max(1, int(busy_timeout_seconds * 1000))
+                    conn.execute(f"SET LOCAL lock_timeout = {timeout_ms}")
+                    conn.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
                 with conn.cursor() as cur:
                     cur.executemany(
                         f"INSERT INTO embedding_call_stats ({_INSERT_COLUMNS}) "
@@ -461,6 +562,23 @@ class EmbeddingCallStatsPostgresBackend:
         except Exception as exc:
             logger.warning("EmbeddingCallStatsPostgresBackend: query failed: %s", exc)
             return []
+
+    def sum_items_since(
+        self,
+        purposes: Iterable[str],
+        since: float,
+        *,
+        golden_repo_alias: Optional[str] = None,
+    ) -> Dict[Optional[str], int]:
+        """Story #2118: ``{alias or None: SUM(item_count)}`` for *purposes*
+        at or after *since* (optionally one alias). RAISES on any store
+        error: the volume alarm must report "blind", never "0 spend"."""
+        sql, params = _build_sum_items_sql("%s", purposes, since, golden_repo_alias)
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        return _sum_rows_to_dict([tuple(row) for row in rows])
 
     def delete_where(self, occurred_at_before: float) -> int:
         """Delete rows with occurred_at strictly before the cutoff. Returns count."""

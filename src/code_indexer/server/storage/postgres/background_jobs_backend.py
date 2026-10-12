@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 
 import psutil
 
+from ..shared.job_status_filter import statuses_for_filter
 from .connection_pool import ConnectionPool
 
 # ---------------------------------------------------------------------------
@@ -644,8 +645,9 @@ class BackgroundJobsPostgresBackend:
             conditions.append("username = %s")
             params.append(username)
         if status:
-            conditions.append("status = %s")
-            params.append(status)
+            statuses = statuses_for_filter(status)
+            conditions.append(f"status IN ({', '.join(['%s'] * len(statuses))})")
+            params.extend(statuses)
         if operation_type:
             conditions.append("operation_type = %s")
             params.append(operation_type)
@@ -705,8 +707,10 @@ class BackgroundJobsPostgresBackend:
             params.append(username)
 
         if status:
-            conditions.append("status = %s")
-            params.append(status)
+            # "completed" also selects completed_partial (job_status_filter).
+            statuses = statuses_for_filter(status)
+            conditions.append(f"status IN ({', '.join('%s' for _ in statuses)})")
+            params.extend(statuses)
         if operation_type:
             conditions.append("operation_type = %s")
             params.append(operation_type)
@@ -849,12 +853,36 @@ class BackgroundJobsPostgresBackend:
             logger.info("Cleaned up %d old background jobs", count)
         return count
 
-    def count_jobs_by_status(self) -> Dict[str, int]:
-        """Return a dict mapping status -> count for all jobs."""
+    def count_jobs_by_status(
+        self, statuses: Optional[List[str]] = None
+    ) -> Dict[str, int]:
+        """Return a dict mapping status -> count, for all jobs or only the
+        given statuses (Bug #2123: index-backed, not a full-table scan)."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                if statuses:
+                    cur.execute(
+                        "SELECT status, COUNT(*) FROM background_jobs "
+                        "WHERE status = ANY(%s) GROUP BY status",
+                        (list(statuses),),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT status, COUNT(*) FROM background_jobs GROUP BY status"
+                    )
+                rows = cur.fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    def get_job_statuses(self, job_ids: List[str]) -> Dict[str, str]:
+        """Bug #2123: status of each given job that exists, in ONE query.
+        Callers bound the id list."""
+        if not job_ids:
+            return {}
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT status, COUNT(*) FROM background_jobs GROUP BY status"
+                    "SELECT job_id, status FROM background_jobs WHERE job_id = ANY(%s)",
+                    (list(job_ids),),
                 )
                 rows = cur.fetchall()
         return {row[0]: row[1] for row in rows}
@@ -885,8 +913,10 @@ class BackgroundJobsPostgresBackend:
 
         stats = {"completed": 0, "failed": 0}
         for row in rows:
-            if row[0] in stats:
-                stats[row[0]] = row[1]
+            # A partial completion (Bug #679/#2125) is still a completion.
+            key = "completed" if row[0] == "completed_partial" else row[0]
+            if key in stats:
+                stats[key] += row[1]
         return stats
 
     def cleanup_orphaned_jobs_on_startup(self, node_id: Optional[str] = None) -> int:

@@ -573,8 +573,22 @@ class ClaudeCliManager:
                 build_embedding_stats_child_env(get_config_service().get_config())
             )
             _reindex_env.update(resolve_hnsw_sync_epoch_env_var())
+            from code_indexer.server.services.embedding_stats_attribution import (
+                build_server_stats_attribution,
+            )
+
+            # Story #2118: a catch-up re-index of the existing cidx-meta
+            # collection, run outside any background job.
             _result = subprocess.run(
-                append_server_layout_args(["cidx", "index"]),
+                append_server_layout_args(
+                    ["cidx", "index"],
+                    attribution=build_server_stats_attribution(
+                        alias="cidx-meta-global",
+                        job_id=None,
+                        site="claude_cli_meta_reindex",
+                        purpose="refresh",
+                    ),
+                ),
                 cwd=str(self._meta_dir),
                 capture_output=True,
                 env=_reindex_env,

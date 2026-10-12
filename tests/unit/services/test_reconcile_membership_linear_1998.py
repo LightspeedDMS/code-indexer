@@ -152,6 +152,20 @@ class _DeletingVectorStore(FakeVectorStoreClient):
         self.points = [p for p in self.points if p not in doomed]
         return True
 
+    def delete_points_still_at_paths(
+        self, collection_name: Any, expected: Dict[str, str]
+    ) -> int:
+        """Story #2120: as the real store, only points still stored under the
+        expected path are removed."""
+        doomed = [
+            p
+            for p in self.points
+            if p["id"] in expected and p["payload"]["path"] == expected[p["id"]]
+        ]
+        self.deleted_paths.extend(p["payload"]["path"] for p in doomed)
+        self.points = [p for p in self.points if p not in doomed]
+        return len(doomed)
+
 
 def test_non_git_reconcile_keeps_existing_foreign_path_and_removes_vanished_one(
     tmp_path: Path,
@@ -186,9 +200,9 @@ def test_non_git_reconcile_keeps_existing_foreign_path_and_removes_vanished_one(
     assert str(kept) not in store.deleted_paths
     assert vanished in store.deleted_paths
     assert vanished not in remaining
-    # (In-root entries go through the non-git "modified file: delete, then
-    # re-index" refresh, whose re-index half _run_reconcile stubs out -- so
-    # their presence afterwards is not asserted here.)
+    # (In-root entries are re-indexed as modified files, which
+    # _run_reconcile stubs out -- so their presence afterwards is not
+    # asserted here.)
 
 
 def test_non_git_reconcile_removes_existing_in_root_file_not_in_scan(

@@ -27,6 +27,7 @@ from .scip_models import (
     SCIPResult,
     SCIPMultiMetadata,
 )
+from .models import UnresolvedRepositoryError
 from ...scip.query.primitives import SCIPQueryEngine, QueryResult
 from ...scip.database.queries import MAX_DEPTH_CAP, QueryTimeoutError
 from ..services.constants import (
@@ -500,6 +501,13 @@ class SCIPMultiService:
             for repo_id in request.repositories
         }
 
+        from ..services.search_event_context import note_current_repositories
+        from ..services.search_event_outcomes import repository_resolved
+
+        # Story #2117: repositories that resolved and then failed (an alias
+        # that never resolved is a rejection and is not counted).
+        failed: List[str] = []
+
         # Collect results as they complete
         for future in as_completed(future_to_repo):
             repo_id = future_to_repo[future]
@@ -528,6 +536,7 @@ class SCIPMultiService:
                     f"Consider reducing the number of repositories or increasing timeout."
                 )
                 errors[repo_id] = error_msg
+                failed.append(repo_id)
                 logger.warning(
                     format_error_log(
                         "REPO-GENERAL-035",
@@ -536,12 +545,19 @@ class SCIPMultiService:
                 )
             except Exception as e:
                 errors[repo_id] = f"SCIP {operation_name} failed: {str(e)}"
+                if repository_resolved(e):
+                    failed.append(repo_id)
                 logger.error(
                     format_error_log(
                         "REPO-GENERAL-036",
                         f"SCIP {operation_name} error for repo {repo_id}: {e}",
                     )
                 )
+
+        # Bug #2111 / Story #2117: the request's search event rows are one
+        # per repository that resolved (searched, or failed after resolving);
+        # a skipped repository (no SCIP index) has none.
+        note_current_repositories(searched=list(repo_results), failed=failed)
 
         # Calculate metadata
         total_results = sum(len(results) for results in repo_results.values())
@@ -631,8 +647,10 @@ class SCIPMultiService:
             raise RuntimeError("backend_registry not initialized on app.state")
         repo_entry = backend_registry.global_repos.get_repo(repo_id)
 
+        # Story #2117: an alias that does not resolve is a rejection, not a
+        # failed search (UnresolvedRepositoryError is a FileNotFoundError).
         if not repo_entry:
-            raise FileNotFoundError(
+            raise UnresolvedRepositoryError(
                 f"Repository '{repo_id}' not found in global repositories"
             )
 
@@ -644,13 +662,13 @@ class SCIPMultiService:
         )
 
         if not target_path:
-            raise FileNotFoundError(
+            raise UnresolvedRepositoryError(
                 f"Alias for global repository '{repo_id}' not found"
             )
 
         # Verify the path exists
         if not Path(target_path).exists():
-            raise FileNotFoundError(
+            raise UnresolvedRepositoryError(
                 f"Repository path for '{repo_id}' does not exist: {target_path}"
             )
 

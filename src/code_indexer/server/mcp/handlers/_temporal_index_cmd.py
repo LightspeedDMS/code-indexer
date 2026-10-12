@@ -13,7 +13,12 @@ call sites and tests (which import it directly from
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.embedding_stats_attribution import (
+        StatsAttribution,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +29,8 @@ def _build_temporal_index_cmd(
     all_branches_gate_enabled: bool = False,
     alias: str = "",
     global_floor_date: Optional[str] = None,
+    *,
+    attribution: "StatsAttribution",
 ) -> list:
     """Build the cidx index --index-commits command with optional temporal flags.
 
@@ -51,8 +58,10 @@ def _build_temporal_index_cmd(
 
     # Story #1488: server states the new-collection layout explicitly
     # (CHUNKS_DB) rather than inheriting the CLI/daemon SHARDED_JSON default.
+    # Story #2118: the child's embedding rows carry this attribution.
     cmd: list[str] = append_server_layout_args(
-        ["cidx", "index", "--index-commits", "--progress-json"]
+        ["cidx", "index", "--index-commits", "--progress-json"],
+        attribution=attribution,
     )
     if clear:
         cmd.append("--clear")

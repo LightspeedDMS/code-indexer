@@ -1532,6 +1532,27 @@ def make_lifespan(
                 )
                 app.state.snapshot_manager = None
 
+            # Story #2118: refresh embedding volume alarm over the shared
+            # stats/metadata backends. None (cannot be built) is published
+            # too: health then reports the alarm blind, and the scheduler
+            # gate is inert.
+            index_spend_alarm = None
+            try:
+                from code_indexer.server.services.index_spend_alarm import (
+                    build_index_spend_alarm,
+                )
+
+                index_spend_alarm = build_index_spend_alarm(backend_registry)
+            except Exception as alarm_exc:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-2118",
+                        f"Refresh volume alarm unavailable (health reports it "
+                        f"blind; system refreshes are not gated): {alarm_exc}",
+                    )
+                )
+            app.state.index_spend_alarm = index_spend_alarm
+
             global_lifecycle_manager = GlobalReposLifecycleManager(
                 str(golden_repos_dir),
                 background_job_manager=background_job_manager,
@@ -1547,6 +1568,7 @@ def make_lifespan(
                     if backend_registry is not None
                     else None
                 ),
+                index_spend_alarm=index_spend_alarm,
             )
             global_lifecycle_manager.start()
 
@@ -3599,16 +3621,11 @@ def make_lifespan(
                 # resolver's existing f"{hostname}-cidx" fallback applies
                 # unchanged.
                 from code_indexer.server.utils.cluster_node_id import (
-                    resolve_cluster_node_id,
+                    resolve_server_config_node_id,
                 )
 
-                _telemetry_raw_cluster_cfg = (
-                    {"cluster": {"node_id": server_config.cluster.node_id}}
-                    if server_config.cluster is not None
-                    else None
-                )
-                _telemetry_cluster_node_id = resolve_cluster_node_id(
-                    _telemetry_raw_cluster_cfg
+                _telemetry_cluster_node_id = resolve_server_config_node_id(
+                    server_config
                 )
 
                 telemetry_manager = get_telemetry_manager(
@@ -4350,75 +4367,13 @@ def make_lifespan(
                     from code_indexer.server.repositories.background_jobs import (
                         POD_PULL_OPS,
                     )
-                    from code_indexer.server.app_helpers import (
-                        _execute_repository_sync,
-                        build_sync_progress_webhook_callback,
-                    )
-                    from code_indexer.server.mcp.handlers.repos import (
-                        _provider_index_job,
-                        _provider_temporal_index_job,
+                    from code_indexer.server.services.pod_pull_dispatch import (
+                        build_index_dispatch,
                     )
 
-                    # Pod-pull dispatch executors (PR #1424 H2): each takes the
-                    # row's metadata AND a per-job progress_callback that the
-                    # IndexJobClaimLoop routes to the shared background_jobs row,
-                    # so a work-stolen op reports incremental progress to the
-                    # originating node's dashboard instead of a 0 -> 100 jump.
-                    def _pp_add_golden_repo(md, progress_callback):
-                        return golden_repo_manager.execute_add_golden_repo_work(
-                            **md, progress_callback=progress_callback
-                        )
-
-                    def _pp_change_branch(md, progress_callback):
-                        return golden_repo_manager.change_branch(
-                            md["alias"],
-                            md["target_branch"],
-                            progress_callback=progress_callback,
-                        )
-
-                    def _pp_sync_repository(md, progress_callback):
-                        # Rebuild the client webhook on THIS (executing) node from
-                        # the metadata options, then fan progress out to BOTH the
-                        # DB-backed dashboard callback and the webhook.
-                        options = md.get("options") or {}
-                        webhook_cb = build_sync_progress_webhook_callback(
-                            options.get("progress_webhook"),
-                            md["repo_id"],
-                            md["username"],
-                        )
-
-                        def _combined(progress: int) -> None:
-                            progress_callback(progress)
-                            if webhook_cb is not None:
-                                webhook_cb(progress)
-
-                        return _execute_repository_sync(
-                            repo_id=md["repo_id"],
-                            username=md["username"],
-                            options=options,
-                            activated_repo_manager=getattr(
-                                golden_repo_manager, "activated_repo_manager", None
-                            ),
-                            progress_callback=_combined,
-                        )
-
-                    def _pp_provider_index(md, progress_callback):
-                        return _provider_index_job(
-                            **md, progress_callback=progress_callback
-                        )
-
-                    def _pp_provider_temporal(md, progress_callback):
-                        return _provider_temporal_index_job(
-                            **md, progress_callback=progress_callback
-                        )
-
-                    _index_dispatch = {
-                        "add_golden_repo": _pp_add_golden_repo,
-                        "change_branch": _pp_change_branch,
-                        "sync_repository": _pp_sync_repository,
-                        "provider_index_add": _pp_provider_index,
-                        "provider_temporal_index_rebuild": _pp_provider_temporal,
-                    }
+                    # Pod-pull dispatch executors (PR #1424 H2), one per
+                    # POD_PULL_OPS op: see server/services/pod_pull_dispatch.py.
+                    _index_dispatch = build_index_dispatch(golden_repo_manager)
                     # M3: fail loudly if a pod-pull op ever lacks an executor (or
                     # vice versa) instead of silently claiming an unrunnable row.
                     validate_dispatch_covers(_index_dispatch, POD_PULL_OPS)

@@ -1,29 +1,26 @@
-"""Indexer resume-state trust and containment.
+"""Indexer stored-path trust and containment (failed-file retry).
 
-Every stored ``files_to_index`` candidate on the resume
-path must be resolved (collapse ``..``, follow symlinks) and REJECTED
-unless it lands strictly inside the resolved ``codebase_dir``, applying the
-same eligibility filters (extensions, excludes) a fresh FileFinder walk
-would apply. Rejected entries are dropped (a WARNING names the COUNT, never
-the content/paths) rather than aborting the whole resume.
+Story #2121 retired resume-from-list; the one remaining stored path list is
+``failed_file_paths`` (files the previous run could not index, retried by
+the next run). Every stored candidate must be resolved (collapse ``..``,
+follow symlinks) and REJECTED unless it lands strictly inside the resolved
+``codebase_dir``, applying the same eligibility filters (extensions,
+excludes) a fresh FileFinder walk would apply. Rejected entries are dropped
+rather than aborting the run.
 
-These tests drive the REAL ``SmartIndexer._do_resume_interrupted()`` (via a
-planted ``ProgressiveMetadata`` in "in_progress" state, exactly as a
-repository-authored ``.code-indexer/metadata-<provider>.json`` would look) and
-assert the out-of-tree/ineligible candidate never reaches
-``process_files_high_throughput`` -- the boundary immediately before
-chunking/embedding/FTS. Only that boundary method is patched (to avoid
-real network calls to the embedding provider and real chunk-store I/O);
-everything upstream of it (ProgressiveMetadata, SmartIndexer's real resume
+These tests drive the REAL ``SmartIndexer._merge_recorded_failures()`` (via
+a planted ``ProgressiveMetadata``, exactly as a repository-authored
+``.code-indexer/metadata-<provider>.json`` would look) and assert the
+out-of-tree/ineligible candidate is never retried, i.e. never reaches
+processing. Everything (ProgressiveMetadata, SmartIndexer's real retry
 logic, FileFinder) is real.
 """
 
 from __future__ import annotations
 
-import logging
 import subprocess
 from pathlib import Path
-from typing import Dict, List
+from typing import List
 from unittest.mock import MagicMock, patch
 
 from code_indexer.config import Config
@@ -89,42 +86,20 @@ def _mock_vector_store() -> MagicMock:
 
 def _seed_resumable_metadata(indexer: SmartIndexer, files_to_index: List[str]) -> None:
     """Plant metadata exactly as a repository-authored
-    .code-indexer/metadata-<provider>.json would: an "in_progress" resume
-    state with repository-controlled files_to_index and no files processed
-    yet, so can_resume_interrupted_operation() is satisfied."""
+    .code-indexer/metadata-<provider>.json would: a completed run whose
+    repository-controlled failed_file_paths are retried by the next run."""
     md = indexer.progressive_metadata.metadata
-    md["status"] = "in_progress"
-    md["files_to_index"] = list(files_to_index)
-    md["total_files_to_index"] = len(files_to_index)
-    md["current_file_index"] = 0
-    md["completed_files"] = []
-    md["failed_file_paths"] = []
+    md["status"] = "completed"
+    md["failed_file_paths"] = list(files_to_index)
     md["files_processed"] = 0
     md["chunks_indexed"] = 0
 
 
 def _run_resume_and_capture(indexer: SmartIndexer) -> List[Path]:
-    """Drive the REAL resume path, capturing exactly the file list that
-    would be handed to chunking/embedding (process_files_high_throughput),
-    without invoking real chunking/embedding/FTS I/O."""
-    captured: Dict[str, List[Path]] = {}
-
-    def _capture(files, **kwargs):
-        captured["files"] = list(files)
-        from code_indexer.indexing.processor import ProcessingStats
-
-        return ProcessingStats()
-
-    with patch.object(indexer, "process_files_high_throughput", side_effect=_capture):
-        indexer._do_resume_interrupted(
-            batch_size=50,
-            progress_callback=None,
-            git_status={},
-            provider_name="voyage-ai",
-            model_name="voyage-code-3",
-        )
-
-    return captured.get("files", [])
+    """Drive the REAL failed-file retry merge and return exactly the files
+    it would hand to processing (chunking/embedding/FTS)."""
+    retried, _merged = indexer._merge_recorded_failures([])
+    return retried
 
 
 def _assert_eligible_if_it_were_in_tree(
@@ -327,20 +302,22 @@ class TestResumePathTraversalContainment:
             f"the same way a fresh walk would reject it. Processed files: {processed_files}"
         )
 
-    def test_dropped_entries_log_warning_with_count_not_content(
+    def test_dropped_failed_entries_log_warning_with_count_not_content(
         self, tmp_path: Path, caplog
     ) -> None:
-        """Rejected entries must be logged at WARNING
-        naming the COUNT of dropped entries, never the path/content. Uses
-        an ELIGIBLE (.py) out-of-tree target so the drop is attributable
-        to containment, not eligibility filtering."""
+        """Rejected recorded failed paths are logged at WARNING naming the
+        COUNT of dropped entries, never the path/content. Uses an ELIGIBLE
+        (.py) out-of-tree target so the drop is attributable to containment,
+        not eligibility filtering."""
+        import logging
+
         repo = tmp_path / "repo"
         repo.mkdir()
         _create_git_repo(repo)
 
         (repo / "legit.py").write_text("# legit\n")
         outside_marker = tmp_path / "outside_marker.py"
-        outside_marker_content = "# MARKER_RESUME_LOG_OUTSIDE_TREE\n"
+        outside_marker_content = "# MARKER_FAILED_LIST_LOG_OUTSIDE_TREE\n"
         outside_marker.write_text(outside_marker_content)
 
         indexer = _make_indexer(repo, tmp_path, _mock_vector_store())
@@ -352,23 +329,16 @@ class TestResumePathTraversalContainment:
         with caplog.at_level(logging.WARNING):
             _run_resume_and_capture(indexer)
 
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        expected_message = (
-            "Resume metadata contained 1 file path candidate(s) that are "
-            "outside the codebase root or ineligible for indexing; "
-            "dropping them and continuing the resume with the remaining "
-            "files."
+        messages = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        expected = (
+            "Recorded failed-file list contained 1 path candidate(s) that are "
+            "outside the codebase root or ineligible for indexing; dropping them."
         )
-        actual_messages = [r.getMessage() for r in warnings]
-        assert expected_message in actual_messages, (
-            "Expected the exact WARNING message naming the count (1) of "
-            f"dropped resume candidates. Got WARNING records: {actual_messages}"
-        )
-        for message in actual_messages:
-            assert "outside_marker" not in message, (
-                "The WARNING must name the count, not the path/content of "
-                f"the dropped entry. Got: {message}"
-            )
+        assert expected in messages, messages
+        for message in messages:
+            assert "outside_marker" not in message, message
 
 
 class TestResumeContainmentDiscriminationProof:

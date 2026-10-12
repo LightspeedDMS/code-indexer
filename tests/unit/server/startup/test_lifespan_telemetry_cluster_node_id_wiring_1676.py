@@ -53,7 +53,10 @@ class TestLifespanTelemetryClusterNodeIdSourceGuard:
             "must import resolve_cluster_node_id from the shared resolver "
             "module -- never a second/competing identity scheme."
         )
-        assert "resolve_cluster_node_id(" in telemetry_block
+        # Story #2118: the block resolves from the loaded ServerConfig through
+        # resolve_server_config_node_id, which delegates to
+        # resolve_cluster_node_id in the same module (one identity scheme).
+        assert "resolve_server_config_node_id(" in telemetry_block
 
     def test_get_telemetry_manager_called_with_cluster_node_id_kwarg(self):
         source = _LIFESPAN_PATH.read_text()

@@ -191,6 +191,7 @@ publication.
 | `--dup-groups G` | duplicate-content groups of 2-50 copies under `dups/` |
 | `--sync-files K` | files the sync job adds before each refresh (default 5) |
 | `--sync-dup-fraction F` | fraction of each sync's files that copy existing content |
+| `--delete-dup-owners N` | before each cycle's sync, delete up to N files that are a duplicate group's stored owner (the path the shared rows carry; a live copy always stays). Non-git only. R-b, R-a content, A1 and A2 then check that the live copies reuse the stored rows and nothing is sent for that content (Story #2120) |
 | `--git` | git variant |
 | `--cycles LIST` | one refresh per entry: `SIGTERM\|SIGKILL\|CANCEL\|RESTART@early:<s>`, `@planned:<s>`, `@chunks:<n>`, `@inflight:<n>` (fake holds responses; fires when n are held), `@final:<s>` (after every planned file is processed), or `none` |
 | `--random-cycles N`, `--cycle-seed S`, `--random-kinds LIST`, `--max-chunks-trigger K` | N seeded random cycles plus the yield probe, instead of `--cycles` |
@@ -238,8 +239,10 @@ or guard failure, 3 INCOMPLETE (nothing failed, some checks skipped).
 4. Per cycle: sync (new files, optionally copies; git: commit plus one
    operation), choose the command exactly as `RefreshScheduler._index_source`
    does (any `in_progress`/`failed` status adds `--reconcile`), built with the
-   real `append_server_layout_args`, and interrupt it as configured. The
-   harness never writes metadata.
+   real `append_server_layout_args`, and interrupt it as configured. A tree
+   older than Story #2118 (the `default` scenario's v12.82.0) gets that
+   command without `--stats-attribution`, which it would reject (exit 2),
+   as its own server never passed it. The harness never writes metadata.
 5. The recovery delay, the final uninterrupted refreshes, the final R-c
    state, the two convergence runs, then the verdict.
 

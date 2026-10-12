@@ -2100,12 +2100,18 @@ class TantivyIndexManager:
             logger.error(f"Failed to delete document {file_path}: {e}")
             raise
 
-    def delete_document_deferred(self, file_path: str) -> None:
+    def delete_document_deferred(self, file_path: str) -> bool:
         """Bug #1761 CRITICAL 1/2 fix: queue a delete-by-path on the
         writer WITHOUT committing (no _commit_inner()), and skip entirely
         on a legacy on-disk index lacking _PATH_EXACT_FIELD (see the
         module-level _PATH_EXACT_FIELD comment and delete_document()'s
         docstring for the full commit-cost and over-deletion rationale).
+
+        Returns:
+            True when the delete was queued; False when it was skipped
+            because the index cannot delete by path (legacy schema) --
+            Story #2120: a caller that must remove a document treats that
+            as an unresolved deletion, never as done.
 
         Raises:
             RuntimeError: If writer is not initialized (propagates --
@@ -2127,7 +2133,7 @@ class TantivyIndexManager:
                 file_path,
                 _PATH_EXACT_FIELD,
             )
-            return
+            return False
 
         try:
             with self._lock:
@@ -2137,6 +2143,7 @@ class TantivyIndexManager:
                 delete_query = self._build_path_delete_query(file_path)
                 self._writer.delete_documents_by_query(delete_query)
             logger.debug(f"Deferred delete queued (uncommitted) for: {file_path}")
+            return True
         except Exception as e:
             logger.error(f"Failed to queue deferred delete for {file_path}: {e}")
             raise

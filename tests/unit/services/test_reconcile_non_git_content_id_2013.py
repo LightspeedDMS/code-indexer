@@ -107,6 +107,9 @@ class _CountingEmbeddingProvider(EmbeddingProvider):
     def supports_batch_processing(self) -> bool:
         return True
 
+    def request_max_retries(self) -> int:
+        return 0
+
 
 class _DeletionRecordingStore(FilesystemVectorStore):
     """The real store; records deletion calls, then delegates to the real code."""

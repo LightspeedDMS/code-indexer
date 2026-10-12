@@ -36,11 +36,24 @@ embedding-provider request goes, or force daemon delegation.
 server-managed provider settings (the embedding-provider endpoint and
 daemon-mode selection), never a repository-authored override, stamped in
 this same helper for the same reason.
+
+Every embedding call a server-spawned child makes must be attributable to
+the golden repo, job and node that caused it (Story #2118), so the helper
+REQUIRES an ``attribution`` and stamps it as one
+``--stats-attribution=<json>`` token. The child validates it before any
+provider call and records it on every embedding_call_stats row
+(``test_index_command_attribution_guard_2118.py`` enforces that every call
+site supplies one).
 """
 
 from __future__ import annotations
 
 from typing import List
+
+from code_indexer.server.services.embedding_stats_attribution import (
+    STATS_ATTRIBUTION_OPTION,
+    StatsAttribution,
+)
 
 #: The explicit server-context layout arg. Single `--opt=value` token so it
 #: is a single, greppable list element that Click parses identically to the
@@ -56,23 +69,29 @@ SERVER_IGNORE_RESUME_STATE_ARG = "--ignore-resume-state"
 SERVER_MANAGED_PROVIDER_SETTINGS_ARG = "--server-managed-provider-settings"
 
 
-def append_server_layout_args(cmd: List[str]) -> List[str]:
+def append_server_layout_args(
+    cmd: List[str], *, attribution: StatsAttribution
+) -> List[str]:
     """Return a NEW command list with the explicit CHUNKS_DB new-collection
-    layout arg, the resume-state-distrust arg, and the
-    server-managed-provider-settings arg appended.
+    layout arg, the resume-state-distrust arg, the
+    server-managed-provider-settings arg and the stats attribution appended.
 
     Args:
         cmd: A server-context ``cidx index`` command list (e.g.
             ``["cidx", "index", "--fts", "--progress-json"]``).
+        attribution: Who this run's embedding calls are charged to
+            (golden-repo alias, job id or ``nojob:<site>``, node, purpose).
 
     Returns:
         A new list equal to ``cmd`` with ``--new-collection-layout=chunks_db``,
-        ``--ignore-resume-state``, and ``--server-managed-provider-settings``
-        appended, in that order. The input list is not mutated.
+        ``--ignore-resume-state``, ``--server-managed-provider-settings`` and
+        ``--stats-attribution=<json>`` appended, in that order. The input
+        list is not mutated.
     """
     return [
         *cmd,
         SERVER_NEW_COLLECTION_LAYOUT_ARG,
         SERVER_IGNORE_RESUME_STATE_ARG,
         SERVER_MANAGED_PROVIDER_SETTINGS_ARG,
+        f"{STATS_ATTRIBUTION_OPTION}={attribution.to_json()}",
     ]

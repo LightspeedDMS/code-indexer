@@ -3529,6 +3529,34 @@ class ConfigService:
             raise RuntimeError(f"committed section {section!r} is not a JSON object")
         return version, dict(value)
 
+    def read_committed_setting(self, name: str) -> Tuple[int, Any]:
+        """ONE read of the committed runtime row: ``(version, value)`` of the
+        top-level setting *name* (e.g. ``search_event_log_retention_days``).
+
+        The top-level sibling of :meth:`read_committed_section`: reads the
+        database directly, so a save made by ANY worker or node is visible.
+        A setting absent from the row is its ``ServerConfig`` default.
+
+        Raises:
+            KeyError: *name* is not a ``ServerConfig`` field.
+            RuntimeError: no runtime database is attached, or no row exists.
+        """
+        import dataclasses
+
+        config_field = next(
+            (f for f in dataclasses.fields(ServerConfig) if f.name == name), None
+        )
+        if config_field is None:
+            raise KeyError(name)
+        version, runtime = self._read_committed_runtime()
+        if name in runtime:
+            return version, runtime[name]
+        if config_field.default is not dataclasses.MISSING:
+            return version, config_field.default
+        if config_field.default_factory is not dataclasses.MISSING:
+            return version, config_field.default_factory()
+        raise KeyError(name)
+
     def _read_committed_runtime(self) -> Tuple[int, Dict[str, Any]]:
         """ONE read of the whole committed runtime row: ``(version, dict)``.
 

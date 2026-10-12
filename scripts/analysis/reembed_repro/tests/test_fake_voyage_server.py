@@ -7,6 +7,7 @@ Run: python3 -m pytest scripts/analysis/reembed_repro/tests -q
 import hashlib
 import math
 import socket
+import threading
 import time
 
 import httpx
@@ -29,6 +30,59 @@ def server():
         yield srv
     finally:
         srv.stop()
+
+
+def test_retry_fault_answers_500_then_embeds(server):
+    """Story #2122: an armed fault answers the next request with 500 and
+    counts it apart from the embedded requests; the retry then embeds."""
+    server.ledger.begin_run("r")
+    server.ledger.fail_next_requests(1, status=500)
+
+    first = _post(server, ["a", "b"])
+    second = _post(server, ["a", "b"])
+
+    assert first.status_code == 500
+    assert second.status_code == 200
+    assert server.ledger.failed_stats("r") == {"failed_requests": 1, "failed_inputs": 2}
+    assert server.ledger.run_stats("r")["requests"] == 1
+    assert server.ledger.run_stats("r")["inputs"] == 2
+    assert server.ledger.violations() == []
+
+
+def test_negative_fault_count_rejected():
+    with pytest.raises(ValueError):
+        EmbeddingLedger().fail_next_requests(-1)
+
+
+#: Bound of a wait that must time out, and of one that must be woken.
+_NOT_SETTLED_WAIT_S = 0.05
+_SETTLED_WAIT_S = 5
+
+
+def test_wait_settled_waits_until_every_request_is_written_or_aborted():
+    """Bug #2127: a test reads the outcome of every request only after the
+    handler threads recorded it (written_at or aborted), never racing them."""
+    ledger = EmbeddingLedger()
+    ledger.begin_run("r")
+    first = ledger.record(["a"])
+
+    assert ledger.wait_settled("r", timeout=_NOT_SETTLED_WAIT_S) is False
+
+    finisher = threading.Timer(_NOT_SETTLED_WAIT_S, ledger.finish, args=(first, True))
+    finisher.start()
+    try:
+        assert ledger.wait_settled("r", timeout=_SETTLED_WAIT_S) is True
+    finally:
+        finisher.join()
+
+    second = ledger.record(["b"])
+    assert ledger.wait_settled("r", timeout=_NOT_SETTLED_WAIT_S) is False
+    ledger.finish(second, written=False)
+    assert ledger.wait_settled("r", timeout=_NOT_SETTLED_WAIT_S) is True
+    assert [r.aborted for r in ledger.requests("r")] == [False, True]
+
+    with pytest.raises(KeyError):
+        ledger.wait_settled("unknown", timeout=_NOT_SETTLED_WAIT_S)
 
 
 def _post(

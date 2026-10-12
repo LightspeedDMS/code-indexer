@@ -21,6 +21,18 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _lookup(store, file_path, collection_name, chunk_count=3):
+    """SHARDED_JSON lookups resolve through the PathIndex; the content-id
+    arguments (Story #2119) only matter for CHUNKS_DB collections."""
+    return store.get_existing_content_hashes(
+        file_path,
+        collection_name,
+        project_id="test",
+        file_hash="sha256:not-stored",
+        chunk_count=chunk_count,
+    )
+
+
 class TestGetExistingContentHashes:
     """FilesystemVectorStore.get_existing_content_hashes must work correctly."""
 
@@ -29,9 +41,7 @@ class TestGetExistingContentHashes:
         store = FilesystemVectorStore(
             base_path=tmp_path / "index", use_chunks_db_for_new_collections=False
         )
-        result = store.get_existing_content_hashes(
-            "nonexistent/file.py", "voyage-code-3"
-        )
+        result = _lookup(store, "nonexistent/file.py", "voyage-code-3")
         assert result == {}
 
     def test_returns_hash_data_for_stored_vector(self, tmp_path):
@@ -63,12 +73,11 @@ class TestGetExistingContentHashes:
         }
         store.upsert_points(points=[point], collection_name=collection_name)
 
-        result = store.get_existing_content_hashes("src/module.py", collection_name)
+        result = _lookup(store, "src/module.py", collection_name)
 
-        assert 0 in result, "chunk_index 0 must be present in result"
-        assert result[0]["content_hash"] == content_hash
-        assert result[0]["vector"] == fake_vector
-        assert result[0]["point_id"] == "point-001"
+        assert content_hash in result, "the stored chunk's content must be a key"
+        assert result[content_hash]["vector"] == fake_vector
+        assert result[content_hash]["point_id"] == "point-001"
 
     def test_skips_vectors_without_content_hash(self, tmp_path):
         """Graceful degradation: vectors without content_hash are excluded from result."""
@@ -95,7 +104,7 @@ class TestGetExistingContentHashes:
         }
         store.upsert_points(points=[legacy_point], collection_name=collection_name)
 
-        result = store.get_existing_content_hashes("src/old.py", collection_name)
+        result = _lookup(store, "src/old.py", collection_name)
 
         assert result == {}, (
             "Vectors without content_hash must be excluded (graceful degradation for legacy)"
@@ -138,12 +147,9 @@ class TestGetExistingContentHashes:
         ]
         store.upsert_points(points=points, collection_name=collection_name)
 
-        result = store.get_existing_content_hashes(file_path, collection_name)
+        result = _lookup(store, file_path, collection_name)
 
-        assert len(result) == 3
-        for idx, text in enumerate(texts):
-            assert idx in result, f"chunk_index {idx} must be in result"
-            assert result[idx]["content_hash"] == _sha256(text)
+        assert set(result) == {_sha256(text) for text in texts}
 
     def test_returns_correct_vector_values(self, tmp_path):
         """The vector stored in the result must match what was originally upserted."""
@@ -173,7 +179,6 @@ class TestGetExistingContentHashes:
         }
         store.upsert_points(points=[point], collection_name=collection_name)
 
-        result = store.get_existing_content_hashes("src/integrity.py", collection_name)
+        result = _lookup(store, "src/integrity.py", collection_name)
 
-        assert 0 in result
-        assert result[0]["vector"] == original_vector
+        assert result[_sha256(chunk_text)]["vector"] == original_vector

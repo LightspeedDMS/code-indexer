@@ -25,11 +25,17 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import threading
 import time
 from contextlib import contextmanager
-from typing import Awaitable, Callable, Iterator, Optional, TypeVar
+from typing import Awaitable, Callable, Iterator, Optional, Sequence, TypeVar
 
 from code_indexer.server.services.embedding_call_stats import EmbeddingCallRecord
+
+# Child-side module (src/code_indexer/services/run_spend_meter.py): the meter
+# belongs to the `cidx index` child process, not to a server service.
+from code_indexer.services.run_spend_meter import get_run_spend_meter
+from code_indexer.server.services.embedding_stats_attribution import StatsAttribution
 from code_indexer.server.services.embedding_stats_writer import EmbeddingStatsWriter
 
 logger = logging.getLogger(__name__)
@@ -48,6 +54,43 @@ T = TypeVar("T")
 _stats_purpose_override: "contextvars.ContextVar[Optional[str]]" = (
     contextvars.ContextVar("_stats_purpose_override", default=None)
 )
+
+
+_process_default_attribution: Optional[StatsAttribution] = None
+_process_default_attribution_lock = threading.Lock()
+
+
+def set_process_default_attribution(attribution: StatsAttribution) -> None:
+    """Install the PROCESS-WIDE default attribution (Story #2118).
+
+    Called once by a `cidx index` child from its ``--stats-attribution``
+    argument. Process-wide rather than a contextvar because the child's
+    embedding calls run on VectorCalculationManager pool threads."""
+    global _process_default_attribution
+    with _process_default_attribution_lock:
+        _process_default_attribution = attribution
+
+
+def clear_process_default_attribution() -> None:
+    """Remove the process-wide default attribution."""
+    global _process_default_attribution
+    with _process_default_attribution_lock:
+        _process_default_attribution = None
+
+
+#: The provider call sites' label for indexing work; it takes the
+#: attribution purpose.
+_GENERIC_INDEX_PURPOSE = "index"
+#: The contextual temporal embedder's label; in a refresh child it becomes
+#: _TEMPORAL_REFRESH_PURPOSE.
+_TEMPORAL_PURPOSE = "temporal"
+_REFRESH_PURPOSE = "refresh"
+_TEMPORAL_REFRESH_PURPOSE = "temporal_refresh"
+
+
+def _current_attribution() -> Optional[StatsAttribution]:
+    with _process_default_attribution_lock:
+        return _process_default_attribution
 
 
 @contextmanager
@@ -85,6 +128,27 @@ def _record_call(
     caught and logged -- callers rely on this NEVER raising.
     """
     try:
+        attribution = _current_attribution()
+        if attribution is not None:
+            # Explicit correlation args always win; the attribution fills
+            # only what the call site left unset. The generic indexing label
+            # "index" takes the attribution purpose ("index" or "refresh");
+            # in a REFRESH child the contextual temporal label "temporal"
+            # becomes "temporal_refresh", so refresh-time temporal spend is
+            # countable apart from registration-time temporal spend. Every
+            # other label ("query", "key_test", ...) is kept.
+            if golden_repo_alias is None:
+                golden_repo_alias = attribution.golden_repo_alias
+            if job_id is None:
+                job_id = attribution.job_id
+            if node_id is None:
+                node_id = attribution.node_id
+            if purpose == _GENERIC_INDEX_PURPOSE:
+                purpose = attribution.purpose
+            elif (
+                purpose == _TEMPORAL_PURPOSE and attribution.purpose == _REFRESH_PURPOSE
+            ):
+                purpose = _TEMPORAL_REFRESH_PURPOSE
         effective_purpose = _stats_purpose_override.get() or purpose
         record = EmbeddingCallRecord(
             provider=provider,
@@ -119,6 +183,7 @@ def instrument_call(
     golden_repo_alias: Optional[str] = None,
     job_id: Optional[str] = None,
     node_id: Optional[str] = None,
+    inputs: Optional[Sequence[str]] = None,
 ) -> T:
     """Execute ``fn`` and record exactly one EmbeddingCallRecord for it.
 
@@ -137,14 +202,24 @@ def instrument_call(
         golden_repo_alias: Optional correlation field.
         job_id: Optional correlation field.
         node_id: Optional correlation field (cluster node id).
+        inputs: The exact texts this attempt sends (Story #2122). An armed
+            ``cidx index`` child's run-spend meter checks them BEFORE fn();
+            a non-query call without them is refused there.
 
     Returns:
         Whatever ``fn()`` returns, unchanged.
 
     Raises:
+        RunSpendDefect: before fn(), when the armed run-spend meter refuses
+            the attempt (Story #2122); fn() is never called.
         Whatever ``fn()`` raises, unchanged -- instrument_call never
         swallows or replaces the wrapped call's own exception.
     """
+    # Story #2122: the indexing child's run-spend meter is charged BEFORE
+    # fn(), so a refused input never reaches HTTP. Outside an armed child,
+    # and for purpose "query", this is a no-op. Not fail-open: a refusal
+    # raises RunSpendDefect and no stats record is written (no attempt).
+    get_run_spend_meter().charge(purpose=purpose, inputs=inputs)
     start = time.time()
     success = False
     try:
@@ -182,10 +257,12 @@ async def instrument_call_async(
     golden_repo_alias: Optional[str] = None,
     job_id: Optional[str] = None,
     node_id: Optional[str] = None,
+    inputs: Optional[Sequence[str]] = None,
 ) -> T:
     """Async twin of instrument_call() -- awaits ``fn()`` instead of calling
     it synchronously. Identical contract otherwise (see instrument_call).
     """
+    get_run_spend_meter().charge(purpose=purpose, inputs=inputs)
     start = time.time()
     success = False
     try:

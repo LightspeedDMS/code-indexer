@@ -140,7 +140,8 @@ def wire_config_service(monkeypatch):
     cfg.get_config.return_value.memory_retrieval_config.memory_retrieval_enabled = False
     cfg.get_config.return_value.rerank_config = None
     cfg.get_config.return_value.node_id = "test-node"
-    monkeypatch.setattr(sh.code_search, "get_config_service", lambda: cfg)
+    # code_search resolves the node id through the shared
+    # server/utils/runtime_node_id.py resolver (Story #2118).
     monkeypatch.setattr(sh.repo_search, "get_config_service", lambda: cfg)
     return cfg
 
@@ -172,8 +173,11 @@ class TestEnqueueContract:
         assert rec.total_latency_ms >= 0
         assert rec.node_id != ""
 
-    def test_no_enqueue_on_exception(self, writer, monkeypatch, wire_app_module):
-        """Spec H11: exception in sub-handler -> no record enqueued."""
+    def test_exception_enqueues_one_failure_record(
+        self, writer, monkeypatch, wire_app_module
+    ):
+        """Story #2117 (replacing spec H11): an exception in the sub-handler
+        enqueues one failure record carrying the exception's class."""
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
@@ -187,7 +191,12 @@ class TestEnqueueContract:
         result = _parse_mcp(raw)
 
         assert result.get("success") is False
-        assert len(writer.enqueued) == 0
+        [record] = writer.enqueued
+        assert (record.tool, record.outcome, record.error_class) == (
+            "search_code",
+            "failure",
+            "RuntimeError",
+        )
 
     def test_query_text_capped_at_500(self, writer, monkeypatch):
         """Spec A8: query_text stored in record is at most 500 code points."""

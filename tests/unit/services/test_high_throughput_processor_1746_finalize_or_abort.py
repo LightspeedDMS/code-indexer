@@ -4,7 +4,8 @@ _finalize_indexing_session() helper it (and process_files_incrementally)
 uses -- must call abort_indexing() instead of end_indexing() when a fatal
 ChunkStoreUnavailableError propagates from process_files_high_throughput(),
 exactly like the three SmartIndexer entry points already fixed
-(_do_full_index, _do_incremental_index, _do_resume_interrupted).
+(_do_full_index, _do_incremental_index; _do_resume_interrupted was later
+retired by Story #2121).
 
 Root cause (code review finding, confirmed): process_branch_changes_high_
 throughput's own `finally` block called self._finalize_indexing_session()

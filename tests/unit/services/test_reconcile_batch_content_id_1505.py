@@ -464,18 +464,20 @@ class TestReconcileWorkingDirDirtyUnaffected:
         # exactly like before this change (working_dir identity scheme).
         assert "a.py" in result["changed_files"]
 
-    def test_dirty_file_content_id_uses_working_dir_scheme(self, tmp_path):
+    def test_dirty_file_content_id_uses_its_working_blob(self, tmp_path):
         """Directly verify `_get_effective_content_id_for_reconcile` produces
-        the mtime/size (working_dir) id for a dirty file, never a blob-hash
-        id. Issue #2013: the format is the shared
-        `{path}:working_dir:{int mtime}:{size}` one, identical to what the
-        stored-payload side derives."""
+        the blob id of a dirty file's WORKING content. Story #2121: in a git
+        repository the indexer stores every file, an uncommitted edit
+        included, under `git hash-object` of its working content
+        (`git_blob_hash`), so the reconcile derives the same id; an mtime/size
+        id never matched it and re-planned the edit on every reconcile."""
         root = tmp_path / "repo"
         root.mkdir()
         _init_repo(root)
 
         _write_file(root, "a.py", "print('a')\n")
         _commit_all(root, "initial")
+        head_blob = _blob_hash_at_head(root, "a.py")
         _write_file(root, "a.py", "print('a dirty and longer')\n")
 
         vector_store = FakeVectorStoreClient()
@@ -485,8 +487,15 @@ class TestReconcileWorkingDirDirtyUnaffected:
 
         content_id = indexer._get_effective_content_id_for_reconcile("a.py")
 
-        stat = (root / "a.py").stat()
-        assert content_id == f"a.py:working_dir:{int(stat.st_mtime)}:{stat.st_size}"
+        working_blob = subprocess.run(
+            ["git", "hash-object", "a.py"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert content_id == f"a.py:blob:{working_blob}"
+        assert working_blob != head_blob
 
 
 # ---------------------------------------------------------------------------
@@ -525,16 +534,11 @@ class TestReconcileNonGitUnaffected:
 
         # New file, not yet in db -> should be classified as needing indexing.
         assert "a.py" in result["changed_files"]
-        # Pre-existing baseline: `_get_modified_files_set` unconditionally
-        # attempts exactly 2 `git diff` calls (unstaged + staged) regardless
-        # of git availability -- this predates and is unrelated to this fix.
-        # The NEW `_get_head_blob_hash_map` batch primitive (this fix's own
-        # addition) must never fire for a non-git repo, so the count must
-        # stay exactly at that pre-existing baseline, never grow to 3.
-        assert call_count == 2, (
-            f"Expected the pre-existing baseline of exactly 2 git subprocess "
-            f"calls for a non-git repo, got {call_count} -- the new batched "
-            f"HEAD blob-hash primitive must never run when git is unavailable."
+        # Story #2121 (Codex P1): the modified-files check (`git diff`) runs
+        # only in a git repository, and the batched HEAD blob-hash primitive
+        # never fires for a non-git repo either: no git subprocess at all.
+        assert call_count == 0, (
+            f"Expected no git subprocess call for a non-git repo, got {call_count}."
         )
 
 
@@ -1018,3 +1022,45 @@ class TestReconcileDegradedFallbackLogging:
             f"but found none. All warnings: "
             f"{[r.message for r in caplog.records if r.levelno >= logging.WARNING]}"
         )
+
+
+class TestReconcileUnknownAndUntrackedIds:
+    """Story #2121 (Codex round 2): an id nobody could determine is never
+    "current", and an untracked file whose content changed is re-planned."""
+
+    def test_unknown_legacy_id_is_never_current(self, tmp_path):
+        root = tmp_path / "repo"
+        root.mkdir()
+        _init_repo(root)
+        _write_file(root, "a.py", "print('a')\n")
+        _commit_all(root, "initial")
+        # Never committed: no HEAD blob, and `git log -- b.py` finds nothing.
+        _write_file(root, "b.py", "print('b')\n")
+
+        vector_store = FakeVectorStoreClient()
+        vector_store.add_committed_point("a.py", _blob_hash_at_head(root, "a.py"))
+        # A legacy point whose commit could not be determined either.
+        vector_store.add_committed_point("b.py", blob_hash=None, commit_hash="unknown")
+
+        result = _run_reconcile(_make_indexer(root, vector_store))
+
+        assert "b.py" in result["changed_files"], result
+        assert "a.py" not in result["changed_files"], result
+
+    def test_untracked_file_with_changed_content_is_replanned(self, tmp_path):
+        root = tmp_path / "repo"
+        root.mkdir()
+        _init_repo(root)
+        _write_file(root, "a.py", "print('a')\n")
+        _commit_all(root, "initial")
+        stored_blob = _blob_hash_at_head(root, "a.py")
+        _git(root, "rm", "--cached", "-q", "a.py")
+        _git(root, "commit", "-q", "-m", "untrack a.py")
+        _write_file(root, "a.py", "print('a changed while untracked')\n")
+
+        vector_store = FakeVectorStoreClient()
+        vector_store.add_committed_point("a.py", stored_blob)
+
+        result = _run_reconcile(_make_indexer(root, vector_store))
+
+        assert "a.py" in result["changed_files"], result

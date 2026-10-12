@@ -275,6 +275,14 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     config = MultiSearchConfig.from_config(get_config_service())
     from ....app import _server_hnsw_cache as _hnsw_cache
 
+    # Bug #2111 / Story #2117: MultiSearchService notes on the request's
+    # search event context the repositories it resolved (searched, or failed
+    # after resolving); the rows are one per resolved repository and an
+    # alias that never resolved writes none.
+    from code_indexer.server.services.search_event_context import (
+        get_search_event_ctx,
+    )
+
     service = MultiSearchService.get_instance(config, hnsw_index_cache=_hnsw_cache)
     try:
         response = service.search(request)
@@ -287,6 +295,14 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             ),
             exc_info=True,
         )
+        # The whole call failed: every repository it resolved failed.
+        _event_ctx = get_search_event_ctx()
+        if _event_ctx is not None and _event_ctx.searched_repositories is not None:
+            _event_ctx.note_repositories(
+                searched=[],
+                failed=list(_event_ctx.searched_repositories)
+                + list(_event_ctx.failed_repositories or []),
+            )
         from ....query.search_error_policy import classify_search_error
 
         return _empty_omni_response(

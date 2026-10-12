@@ -6,6 +6,7 @@ Provides admin web interface routes for CIDX server administration.
 
 from code_indexer import __version__ as _cidx_version
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.services import search_event_recording
 from code_indexer.validation.user_validation import RESERVED_ACTIVATED_REPOS_DIR_NAMES
 
 import asyncio
@@ -1190,7 +1191,8 @@ def dashboard_cache_metrics_partial(request: Request, cache_window: int = 86400)
     GROUP BY (cache_mode, provider) aggregation over the durable,
     phantom-free `search_embed_event` table (Story #1293), computed for
     `[now - cache_window, now)`. The two Hit Rate cards (Shadow and On-Mode)
-    are BOTH request-denominated (one row per user request) and windowed,
+    are BOTH row-denominated (each search_event_log row is one searched
+    repository's cache lookup, Bug #2111) and windowed,
     sourced from `search_event_log` via `get_hit_rate_counts(mode, from_ts,
     to_ts)` (Issue #1257 introduced the request-denominated semantics for
     On-Mode; Bug #1391 fixed On-Mode to respect the selected time window and
@@ -1276,7 +1278,8 @@ def dashboard_cache_metrics_partial(request: Request, cache_window: int = 86400)
     coalescer_provider_embed_calls = overall.provider_embed_calls
 
     # Issue #1257 / Bug #1391: Both Hit Rate cards are REQUEST-denominated
-    # (one row per user request in search_event_log), NOT
+    # (each search_event_log row is one searched repository's cache
+    # lookup), NOT
     # operation-denominated, and BOTH now respect the selected cache_window
     # (from_ts/to_ts) instead of one of them (On-Mode) aggregating the
     # table's entire lifetime. Each call fails open independently: a failure
@@ -5053,9 +5056,15 @@ def _apply_job_filters(
     Mirrors the filter semantics BackgroundJobManager applies internally so that
     JobTracker-only jobs are subject to the same criteria.
     """
+    from code_indexer.server.storage.shared.job_status_filter import (
+        statuses_for_filter,
+    )
+
     result = []
     for job in jobs:
-        if status_filter and job.get("status") != status_filter:
+        if status_filter and job.get("status") not in statuses_for_filter(
+            status_filter
+        ):
             continue
         if type_filter and job.get("operation_type") != type_filter:
             continue
@@ -5705,10 +5714,13 @@ def query_submit(
             pass
 
     # Execute actual query
+    query_started = time.monotonic()
     results = []
     query_executed = True
     error_message = None
     warning_message: Optional[str] = None
+    # Story #2117: the exception a SCIP query that ran failed with.
+    scip_failure: Optional[BaseException] = None
 
     backend_registry = getattr(request.app.state, "backend_registry", None)
 
@@ -5810,7 +5822,12 @@ def query_submit(
 
                                 parts = query_text.strip().split(maxsplit=1)
                                 if len(parts) != 2:
-                                    raise ValueError(
+                                    from code_indexer.server.query.semantic_query_manager import (
+                                        SearchRequestError,
+                                    )
+
+                                    # A refused request, not a failed search.
+                                    raise SearchRequestError(
                                         "Call chain requires two symbols: 'from_symbol to_symbol'"
                                     )
                                 scip_file = Path(scip_files[0])
@@ -5924,6 +5941,7 @@ def query_submit(
                                 ),
                                 extra={"correlation_id": get_correlation_id()},
                             )
+                            scip_failure = e
                             error_message = f"Callchain query timed out for repository '{user_alias}': {e}. Try a smaller max-depth or narrower symbols."
                         except FileNotFoundError as e:
                             logger.error(
@@ -5934,6 +5952,7 @@ def query_submit(
                                 exc_info=True,
                                 extra={"correlation_id": get_correlation_id()},
                             )
+                            scip_failure = e
                             error_message = f"SCIP index not found or corrupted for repository '{user_alias}'. Generate an index with: `cidx scip generate`"
                         except Exception as e:
                             logger.error(
@@ -5944,6 +5963,7 @@ def query_submit(
                                 exc_info=True,
                                 extra={"correlation_id": get_correlation_id()},
                             )
+                            scip_failure = e
                             error_message = f"SCIP query failed for repository '{user_alias}': {str(e)}. Try regenerating the index with: `cidx scip generate`"
 
         else:
@@ -5985,6 +6005,9 @@ def query_submit(
                         case_sensitive=case_sensitive,
                         fuzzy=fuzzy,
                         regex=regex,
+                        event_writer=search_event_recording.writer_from_app(
+                            request.app
+                        ),
                     )
                 except WebQueryNotCompleted as e:
                     # The query was not completed (access refused, invalid
@@ -6001,6 +6024,18 @@ def query_submit(
         )
         error_message = f"Query failed: {message}"
 
+    _record_web_scip_search(
+        request,
+        session.username,
+        repository,
+        query_text,
+        search_mode,
+        scip_query_type,
+        error_message,
+        len(results),
+        query_started,
+        scip_failure,
+    )
     return _create_query_page_response(
         request,
         session,
@@ -6071,6 +6106,77 @@ def _get_semantic_query_manager():
         return None
 
 
+# The SCIP query types the Web query page executes (both SCIP paths).
+_WEB_SCIP_QUERY_TYPES = (
+    "definition",
+    "references",
+    "dependencies",
+    "dependents",
+    "impact",
+    "callchain",
+    "context",
+)
+
+
+def _record_web_scip_search(
+    request: Request,
+    username: str,
+    repository: str,
+    query_text: str,
+    search_mode: str,
+    scip_query_type: str,
+    error_message: Optional[str],
+    result_count: int,
+    started: float,
+    failure: Optional[BaseException],
+) -> None:
+    """Story #2115: record a SCIP-mode Web query as "scip".
+
+    Nothing is recorded for other modes (recorded by _execute_text_query),
+    for an unrecognized query type (no query ran), or when the request was
+    refused before a search ran (an error message and no `failure`). A
+    query that ran and raised (`failure`, Story #2117) is a failure row,
+    classified like MCP and REST SCIP. `repository` is the form value
+    "alias (owner)".
+    """
+    if search_mode != "scip" or scip_query_type not in _WEB_SCIP_QUERY_TYPES:
+        return
+    if error_message is not None and failure is None:
+        return
+    recorded_text = query_text.strip()
+    symbols = recorded_text.split(maxsplit=1)
+    if scip_query_type == "callchain" and len(symbols) == 2:
+        # Same text as MCP and REST.
+        recorded_text = search_event_recording.scip_callchain_query_text(*symbols)
+    writer = search_event_recording.writer_from_app(request.app)
+    origin = search_event_recording.SearchOrigin(tool="web:query", door="web")
+    repo_alias = repository.split(" (")[0]
+    if failure is not None:
+        search_event_recording.record_scip_search(
+            writer,
+            {"success": False},
+            origin=origin,
+            username=username,
+            repo_alias=repo_alias,
+            query_text=recorded_text,
+            started_monotonic=started,
+            correlation_id=get_correlation_id(),
+            error=failure,
+        )
+        return
+    search_event_recording.record_completed_search(
+        writer,
+        origin=origin,
+        search_type="scip",
+        username=username,
+        repo_alias=repo_alias,
+        query_text=recorded_text,
+        result_count=result_count,
+        started_monotonic=started,
+        correlation_id=get_correlation_id(),
+    )
+
+
 def _execute_scip_query(
     target_repo: dict,
     user_alias: str,
@@ -6080,11 +6186,13 @@ def _execute_scip_query(
     limit: int,
     min_score: str,
     backend_registry=None,
-) -> tuple[list, Optional[str]]:
+) -> tuple[list, Optional[str], Optional[BaseException]]:
     """
     Execute SCIP query for repository. Supports all 7 SCIP query types.
 
-    Returns tuple of (results_list, error_message).
+    Returns tuple of (results_list, error_message, failure): `failure` is the
+    exception a query that ran failed with (Story #2117), None when it
+    completed or was refused before running.
     """
     from code_indexer.scip.query.primitives import SCIPQueryEngine, QueryResult
     from code_indexer.scip.database.queries import QueryTimeoutError
@@ -6108,7 +6216,7 @@ def _execute_scip_query(
             )
 
     if not repo_path:
-        return results, f"Repository '{user_alias}' path not found"
+        return results, f"Repository '{user_alias}' path not found", None
 
     scip_pattern = str(Path(repo_path) / ".code-indexer" / "scip" / "**" / "*.scip")
     scip_files = glob.glob(scip_pattern, recursive=True)
@@ -6116,6 +6224,7 @@ def _execute_scip_query(
         return (
             results,
             f"No SCIP index found for repository '{user_alias}'. Run 'cidx scip index' first.",
+            None,
         )
 
     try:
@@ -6144,7 +6253,12 @@ def _execute_scip_query(
         elif scip_query_type == "callchain":
             parts = query_text.strip().split(maxsplit=1)
             if len(parts) != 2:
-                raise ValueError(
+                from code_indexer.server.query.semantic_query_manager import (
+                    SearchRequestError,
+                )
+
+                # A refused request, not a failed search.
+                raise SearchRequestError(
                     "Call chain requires two symbols: 'from_symbol to_symbol'"
                 )
             engine = SCIPQueryEngine(Path(scip_files[0]))
@@ -6243,6 +6357,7 @@ def _execute_scip_query(
         return (
             results,
             f"Callchain query timed out for repository '{user_alias}': {e}. Try a smaller max-depth or narrower symbols.",
+            e,
         )
     except FileNotFoundError as e:
         logger.error(
@@ -6255,6 +6370,7 @@ def _execute_scip_query(
         return (
             results,
             f"SCIP index not found or corrupted for repository '{user_alias}'. Generate an index with: `cidx scip generate`",
+            e,
         )
     except Exception as e:
         logger.error(
@@ -6265,9 +6381,10 @@ def _execute_scip_query(
         return (
             results,
             f"SCIP query failed for repository '{user_alias}': {str(e)}. Try regenerating the index with: `cidx scip generate`",
+            e,
         )
 
-    return results, None
+    return results, None, None
 
 
 class WebQueryNotCompleted(Exception):
@@ -6334,6 +6451,9 @@ def _execute_text_query(
     case_sensitive: bool,
     fuzzy: bool,
     regex: bool,
+    # Any: the app's SearchEventLogWriter, or None when it is not running
+    # (then nothing is recorded); typed loosely like every recording door.
+    event_writer: Any,
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """Run a semantic/FTS/hybrid/temporal Web query.
 
@@ -6350,8 +6470,16 @@ def _execute_text_query(
     is classified with ``classify_search_error``, logged here once at
     WARNING, and raised as ``WebQueryNotCompleted`` carrying the message the
     user is shown.
+
+    Story #2115: a completed query is recorded in the search event log
+    (``run_recorded_search``) as the signed-in user, with the mode that ran
+    ("temporal" whenever a time range or commit scopes it); a query that
+    raises records a failure row (Story #2117). Tool "web:query", door web.
     """
     from code_indexer.server.query.semantic_query_manager import SemanticQueryError
+    from code_indexer.server.services.search_event_recording import (
+        run_recorded_search,
+    )
 
     if target_repo.get("is_global"):
         username = session_username
@@ -6359,21 +6487,36 @@ def _execute_text_query(
         username = target_repo.get("username", session_username)
 
     try:
-        query_response = query_manager.query_user_repositories(
-            username=username,
+        query_response = run_recorded_search(
+            event_writer,
+            lambda: query_manager.query_user_repositories(
+                username=username,
+                query_text=query_text.strip(),
+                repository_alias=user_alias,
+                limit=limit,
+                min_score=min_score,
+                language=language if language else None,
+                path_filter=path_filter if path_filter else None,
+                search_mode=search_mode,
+                time_range=time_range if time_range else None,
+                time_range_all=time_range_all,
+                at_commit=at_commit if at_commit else None,
+                case_sensitive=case_sensitive,
+                fuzzy=fuzzy,
+                regex=regex,
+            ),
+            # search_event_recording: the module imported at the top of
+            # this file.
+            origin=search_event_recording.SearchOrigin(tool="web:query", door="web"),
+            username=session_username,
+            repo_alias=user_alias,
+            search_type=(
+                "temporal"
+                if (time_range or time_range_all or at_commit)
+                else search_mode
+            ),
             query_text=query_text.strip(),
-            repository_alias=user_alias,
-            limit=limit,
-            min_score=min_score,
-            language=language if language else None,
-            path_filter=path_filter if path_filter else None,
-            search_mode=search_mode,
-            time_range=time_range if time_range else None,
-            time_range_all=time_range_all,
-            at_commit=at_commit if at_commit else None,
-            case_sensitive=case_sensitive,
-            fuzzy=fuzzy,
-            regex=regex,
+            correlation_id=get_correlation_id(),
         )
     except (SemanticQueryError, ValueError) as e:
         # The query layer logged the detail of a failure it raised itself.
@@ -6481,10 +6624,13 @@ def query_results_partial_post(
             pass
 
     # Execute actual query
+    query_started = time.monotonic()
     results = []
     query_executed = True
     error_message = None
     warning_message: Optional[str] = None
+    # Story #2117: the exception a SCIP query that ran failed with.
+    scip_failure: Optional[BaseException] = None
     backend_registry = getattr(request.app.state, "backend_registry", None)
 
     try:
@@ -6509,7 +6655,7 @@ def query_results_partial_post(
                 error_message = f"Repository '{user_alias}' not found"
             elif search_mode == "scip":
                 # Execute SCIP query using helper function
-                scip_results, scip_error = _execute_scip_query(
+                scip_results, scip_error, scip_failure = _execute_scip_query(
                     target_repo,
                     user_alias,
                     query_text,
@@ -6542,6 +6688,9 @@ def query_results_partial_post(
                         case_sensitive=case_sensitive,
                         fuzzy=fuzzy,
                         regex=regex,
+                        event_writer=search_event_recording.writer_from_app(
+                            request.app
+                        ),
                     )
                 except WebQueryNotCompleted as e:
                     # The query was not completed (access refused, invalid
@@ -6558,6 +6707,18 @@ def query_results_partial_post(
         )
         error_message = f"Query failed: {message}"
 
+    _record_web_scip_search(
+        request,
+        session.username,
+        repository,
+        query_text,
+        search_mode,
+        scip_query_type,
+        error_message,
+        len(results),
+        query_started,
+        scip_failure,
+    )
     csrf_token_new = generate_csrf_token()
     response = templates.TemplateResponse(
         request,
@@ -8553,7 +8714,14 @@ def analytics_export_page(request: Request):
     if not session:
         return _create_login_redirect(request)
 
+    # Bug #2110: the Search Type options are the one list writers record.
+    from code_indexer.server.services.search_event_health import (
+        search_event_health_info,
+        search_event_log_window,
+    )
+
     csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
+    event_writer = search_event_recording.writer_from_app(request.app)
     response = templates.TemplateResponse(
         request,
         "analytics_export.html",
@@ -8562,6 +8730,14 @@ def analytics_export_page(request: Request):
             "current_page": "analytics-export",
             "show_nav": True,
             "csrf_token": csrf_token,
+            "search_types": search_event_recording.SEARCH_TYPES,
+            # Bug #2114: events this server process dropped (an export can
+            # be short).
+            "search_event_drops": search_event_health_info(event_writer),
+            # Story #2117: retention (live config) and the oldest stored row
+            # (one indexed read; this route is sync, run in the threadpool).
+            "search_event_window": search_event_log_window(event_writer),
+            "query_text_max_chars": search_event_recording.QUERY_TEXT_MAX_CHARS,
         },
     )
     set_csrf_cookie(response, csrf_token)

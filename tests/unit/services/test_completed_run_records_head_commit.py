@@ -202,7 +202,7 @@ def test_unknown_commit_keeps_recorded_commit(tmp_path: Path, detected: str) -> 
     recorded = "a" * 40
     metadata = ProgressiveMetadata(path)
     metadata.metadata["current_commit"] = recorded
-    metadata.complete_indexing()
+    metadata.complete_indexing(1_700_000_000.0)
 
     metadata.record_finished_run(detected, changed_index=False)
 

@@ -19,7 +19,7 @@ Only phases in the requested index_types list are included (plus cow always).
 
 import json
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 # ---------------------------------------------------------------------------
 # Cost constants (as specified in Story #480)
@@ -274,3 +274,61 @@ def emit_progress_json(current: int, total: int, info: str = "") -> None:
     """
     payload = {"current": current, "total": total, "info": info}
     print(json.dumps(payload), flush=True)
+
+
+#: Story #2121: the plan line of a run that planned no file. It keeps the
+#: "<current>/<total> files" shape of every other file-plan line.
+EMPTY_PLAN_INFO = "0/0 files (nothing to index)"
+
+
+def emit_empty_plan_json() -> None:
+    """Emit the ``--progress-json`` plan line of a run that planned no file,
+    so its (empty) plan is observable like any other plan (Story #2121)."""
+    emit_progress_json(current=0, total=0, info=EMPTY_PLAN_INFO)
+
+
+#: Story #2122: ``record`` value of the final ``--progress-json`` line.
+RUN_SPEND_RECORD = "run_spend"
+
+
+def emit_run_spend_json(inputs_sent: int, attempts: int) -> None:
+    """Emit the final ``--progress-json`` record of a ``cidx index`` run:
+    provider inputs sent and attempts made (retries included). It carries
+    no ``current``/``total``, so ``parse_progress_line`` ignores it."""
+    payload = {
+        "record": RUN_SPEND_RECORD,
+        "inputs_sent": inputs_sent,
+        "attempts": attempts,
+    }
+    print(json.dumps(payload), flush=True)
+
+
+def parse_run_spend_record(lines: Iterable[str]) -> Optional[Dict[str, int]]:
+    """The child's run-spend record (Story #2122) among its stdout ``lines``:
+    ``{"inputs_sent": N, "attempts": M}`` of the LAST ``run_spend`` record.
+
+    None when there is none: an older child or a signal-killed one prints
+    no record, which means "not metered", never "sent nothing". A malformed
+    record (a field missing, or not an int) is a child defect and raises
+    ``ValueError``; it is never skipped."""
+    found: Optional[Dict[str, int]] = None
+    for line in lines:
+        try:
+            data = json.loads(line.strip())
+        except ValueError:
+            continue
+        if not isinstance(data, dict) or data.get("record") != RUN_SPEND_RECORD:
+            continue
+        inputs_sent = data.get("inputs_sent")
+        attempts = data.get("attempts")
+        if (
+            not isinstance(inputs_sent, int)
+            or isinstance(inputs_sent, bool)
+            or not isinstance(attempts, int)
+            or isinstance(attempts, bool)
+            or inputs_sent < 0
+            or attempts < 0
+        ):
+            raise ValueError(f"malformed run_spend record: {line.strip()!r}")
+        found = {"inputs_sent": inputs_sent, "attempts": attempts}
+    return found

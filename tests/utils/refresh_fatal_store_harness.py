@@ -15,7 +15,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Iterator, List, Optional, Set
+from typing import Any, Callable, Iterator, List, Optional, Set
 from unittest.mock import Mock
 
 from code_indexer.global_repos.cleanup_manager import CleanupManager
@@ -161,23 +161,33 @@ def _initialize_server_db(db_path: Path) -> None:
 
 
 def build_harness(
-    tmp_path: Path, metadata: Any, snapshot_mode: str, git_remote: bool = False
+    tmp_path: Path,
+    metadata: Any,
+    snapshot_mode: str,
+    git_remote: bool = False,
+    source_builder: Optional[Callable[[Path], None]] = None,
 ) -> Harness:
     """snapshot_mode: 'clean' | 'corrupt' | 'none' (first-ever refresh).
     git_remote=True registers a remote-git repo whose clone pulls from a
-    local bare origin; otherwise a ``local://`` repo."""
+    local bare origin; otherwise a ``local://`` repo. ``source_builder``
+    builds the source instead of the synthetic store (the snapshot then
+    keeps the source's real metadata)."""
     if snapshot_mode not in SNAPSHOT_MODES:
         raise ValueError(f"snapshot_mode must be one of {SNAPSHOT_MODES}")
     golden = tmp_path / "data" / "golden-repos"
     golden.mkdir(parents=True)
     source = golden / REPO
-    make_chunks_db_repo(source, metadata_marker="source-new")
+    if source_builder is None:
+        make_chunks_db_repo(source, metadata_marker="source-new")
+    else:
+        source_builder(source)
 
     snapshot: Optional[Path] = None
     if snapshot_mode != "none":
         snapshot = golden / ".versioned" / REPO / OLD_SNAPSHOT_NAME
         shutil.copytree(source, snapshot, symlinks=True)
-        write_metadata_marker(snapshot, "snapshot-good")
+        if source_builder is None:
+            write_metadata_marker(snapshot, "snapshot-good")
         if snapshot_mode == "corrupt":
             corrupt_btree_pages(
                 snapshot / ".code-indexer" / "index" / COLLECTION_NAME / "chunks.db"

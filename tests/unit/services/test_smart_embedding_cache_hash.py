@@ -110,7 +110,8 @@ class FakeFilesystemClient:
     def __init__(self):
         self.upserted_points: List[Dict] = []
         self.upsert_calls: List[Dict] = []
-        self._stored_hashes: Dict[str, Dict[int, Dict]] = {}
+        # path -> content_hash -> {vector, point_id} (Story #2119 contract)
+        self._stored_hashes: Dict[str, Dict[str, Dict]] = {}
 
     def upsert_points(
         self, points: List[Dict], collection_name: Optional[str] = None
@@ -128,8 +129,14 @@ class FakeFilesystemClient:
         return True
 
     def get_existing_content_hashes(
-        self, file_path: str, collection_name: str
-    ) -> Dict[int, Dict[str, Any]]:
+        self,
+        file_path: str,
+        collection_name: str,
+        *,
+        project_id: str,
+        file_hash: str,
+        chunk_count: int,
+    ) -> Dict[str, Dict[str, Any]]:
         return self._stored_hashes.get(file_path, {})
 
     def seed_existing_hashes(
@@ -142,8 +149,7 @@ class FakeFilesystemClient:
     ) -> None:
         if file_path not in self._stored_hashes:
             self._stored_hashes[file_path] = {}
-        self._stored_hashes[file_path][chunk_index] = {
-            "content_hash": content_hash,
+        self._stored_hashes[file_path][content_hash] = {
             "vector": vector,
             "point_id": point_id,
         }

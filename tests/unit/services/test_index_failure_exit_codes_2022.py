@@ -107,11 +107,20 @@ def test_cause_cycle_terminates() -> None:
 
 @pytest.mark.parametrize("kind", list(ChunkStoreFailureKind))
 def test_exit_code_round_trip(kind: ChunkStoreFailureKind) -> None:
-    typed = _typed_from(
-        sqlite3.DatabaseError("database disk image is malformed")
-        if kind is ChunkStoreFailureKind.CORRUPTION
-        else OSError(errno.ENOSPC, "No space left on device")
+    from code_indexer.storage.sqlite_chunk_store import (
+        MissingEstablishedChunkStoreError,
     )
+
+    typed: BaseException
+    if kind is ChunkStoreFailureKind.MISSING_STORE:
+        # Story #2126: the guard's refusal shape.
+        typed = MissingEstablishedChunkStoreError("chunks.db missing")
+    else:
+        typed = _typed_from(
+            sqlite3.DatabaseError("database disk image is malformed")
+            if kind is ChunkStoreFailureKind.CORRUPTION
+            else OSError(errno.ENOSPC, "No space left on device")
+        )
     assert (
         chunk_store_failure_kind_for_exit_code(index_failure_exit_code(typed)) is kind
     )

@@ -13,11 +13,11 @@ itself a symlink (the Bug #1087 mount-path case: ``config.py``'s
 the unresolved root and ``relative_to`` raises ``ValueError`` -- rejecting
 every legitimate, in-tree resume candidate, not just out-of-tree ones.
 
-This test drives the REAL ``SmartIndexer._do_resume_interrupted()`` against
+This test drives the REAL ``SmartIndexer._merge_recorded_failures()`` (the
+failed-file retry, the one stored path list left after Story #2121) against
 a config loaded through the REAL ``ConfigManager`` (not a hand-built
 ``Config(codebase_dir=...)``) with ``codebase_dir`` pointing at a symlink,
-over a real git repository, with a genuinely interrupted-after-2 resume
-state. It must show BOTH halves at once: the untouched in-tree files are
+over a real git repository, with recorded failed files. It must show BOTH halves at once: the untouched in-tree files are
 still indexed, and a traversal entry is still rejected. The traversal
 target uses an ELIGIBLE extension (.py) so this test discriminates on
 containment, not on eligibility filtering.
@@ -28,7 +28,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import List
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from code_indexer.config import ConfigManager
 from code_indexer.services.smart_indexer import SmartIndexer
@@ -72,28 +72,11 @@ def _mock_vector_store() -> MagicMock:
 
 
 def _run_resume_and_capture(indexer: SmartIndexer) -> List[Path]:
-    """Drive the REAL resume path, capturing exactly the file list that
-    would be handed to chunking/embedding, without invoking real
-    chunking/embedding/FTS I/O."""
-    captured: dict = {}
-
-    def _capture(files, **kwargs):
-        captured["files"] = list(files)
-        from code_indexer.indexing.processor import ProcessingStats
-
-        return ProcessingStats()
-
-    with patch.object(indexer, "process_files_high_throughput", side_effect=_capture):
-        indexer._do_resume_interrupted(
-            batch_size=50,
-            progress_callback=None,
-            git_status={},
-            provider_name="voyage-ai",
-            model_name="voyage-code-3",
-        )
-
-    files: List[Path] = captured.get("files", [])
-    return files
+    """Drive the REAL failed-file retry merge (Story #2121: the one
+    remaining stored path list) and return exactly the files it would hand
+    to processing."""
+    retried, _merged = indexer._merge_recorded_failures([])
+    return retried
 
 
 class TestSymlinkedCodebaseDirResumeParity:
@@ -149,22 +132,11 @@ class TestSymlinkedCodebaseDirResumeParity:
         finally:
             decoy.unlink()
 
-        # Interrupted-after-2 resume state: a, b already completed;
-        # c, d, e remain -- plus one traversal entry that must stay rejected.
+        # A completed run recorded c, d, e as failed (retried by the next
+        # run) -- plus one traversal entry that must stay rejected.
         md = indexer.progressive_metadata.metadata
-        md["status"] = "in_progress"
-        md["files_to_index"] = [
-            "a.py",
-            "b.py",
-            "c.py",
-            "d.py",
-            "e.py",
-            "../outside_marker.py",
-        ]
-        md["total_files_to_index"] = 6
-        md["current_file_index"] = 2
-        md["completed_files"] = ["a.py", "b.py"]
-        md["failed_file_paths"] = []
+        md["status"] = "completed"
+        md["failed_file_paths"] = ["c.py", "d.py", "e.py", "../outside_marker.py"]
         md["files_processed"] = 2
         md["chunks_indexed"] = 0
 

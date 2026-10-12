@@ -75,9 +75,6 @@ _CIDX_META_DIR_NAME = "cidx-meta"
 # logging potentially large or sensitive query strings at INFO level.
 _QUERY_LOG_TRUNCATION_LIMIT = 100
 
-# Issue #1159 spec A8: query_text stored in SearchEventRecord is capped at 500 codepoints.
-_QUERY_TEXT_MAX_CODEPOINTS = 500
-
 # Bug #881 Phase 1: max number of expanded aliases shown in the omni post-expansion log.
 _OMNI_LOG_MAX_ALIASES_SHOWN = 10
 

@@ -141,6 +141,26 @@ class AuditHealthInfo(BaseModel):
     )
 
 
+class SearchEventLogHealthInfo(BaseModel):
+    """Per-process search event log telemetry (Bug #2114)."""
+
+    events_dropped_since_start: int = Field(
+        ...,
+        description="Search events this server process dropped because its "
+        "recording queue was full, since it started. Dropped searches are "
+        "missing from Query Analytics exports. Per-process; read it together "
+        "with node_id.",
+    )
+    seconds_since_last_drop: Optional[float] = Field(
+        default=None,
+        description="Seconds since this process last dropped a search event "
+        "(null when it never has).",
+    )
+    node_id: str = Field(
+        ..., description="node_id stamped on this process's search event rows."
+    )
+
+
 class HealthCheckResponse(BaseModel):
     """Health check endpoint response."""
 
@@ -192,6 +212,12 @@ class HealthCheckResponse(BaseModel):
         "count of audit records dropped since boot and this node's id. "
         "Informational only -- it never factors into `status` or "
         "`failure_reasons`, so an audit store hiccup can never drain a node.",
+    )
+    search_events: Optional[SearchEventLogHealthInfo] = Field(
+        default=None,
+        description="Bug #2114: search events this process dropped on queue "
+        "overflow (null when the search event log is not running). A drop in "
+        "the last 15 minutes also adds a DEGRADED reason (never unhealthy).",
     )
 
 

@@ -82,6 +82,30 @@ class EmbeddingCacheMetadata:
     embed_key: Optional[str] = None
     long_key: Optional[bool] = None
     shadow_cosine: Optional[float] = None
+    # Bug #2112: this search did not consult the cache although the coalescer
+    # resolved a mode for it -- the caller bypassed the read
+    # (no_embedding_cache_shortcut) or the query had no cache key (over the
+    # normalized-length cap). Only the search event log reads it; the
+    # embed-event emitter keeps reporting cache_mode/key_found as resolved.
+    cache_not_consulted: bool = False
+
+    @property
+    def cache_consulted(self) -> bool:
+        """Whether this search consulted the query-embedding cache."""
+        return not self.cache_not_consulted and self.cache_mode is not None
+
+    @property
+    def search_event_cache_mode(self) -> Optional[str]:
+        """The cache mode a search event row records: None when the cache was
+        not consulted, exactly as the direct path reports "no cache"."""
+        return self.cache_mode if self.cache_consulted else None
+
+    @property
+    def search_event_cache_hit(self) -> Optional[bool]:
+        """The cache hit a search event row records: None when the cache was
+        not consulted (a hit or miss only means something for a consulted
+        cache)."""
+        return self.key_found if self.cache_consulted else None
 
 
 # Seconds to wait for a governor slot — shared across all 4 embedding sites.
@@ -649,6 +673,15 @@ def coalesced_query_embedding(
             no_embedding_cache_shortcut=no_embedding_cache_shortcut,
             audit_ctx=audit_ctx,
         )
+        if no_embedding_cache_shortcut or meta.embed_key is None:
+            # Bug #2112: the coalescer reports the cache mode (and, in shadow
+            # mode, key_found) it resolved even for a bypassed entry or a
+            # query with no cache key; mark "not consulted" on a copy so the
+            # search event log records neither a hit nor a miss (embed-event
+            # fields unchanged).
+            import dataclasses
+
+            meta = dataclasses.replace(meta, cache_not_consulted=True)
         return cast(List[float], vec), meta
 
     # ----------------------------------------------------------

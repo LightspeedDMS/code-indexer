@@ -52,6 +52,10 @@ from ._utils import (
 from ..auth.elevation_decorator import require_mcp_elevation
 from ._temporal_index_cmd import _build_temporal_index_cmd  # noqa: F401
 from ._provider_temporal_job import _provider_temporal_index_job  # noqa: F401
+from ._provider_job_paths import (
+    _resolve_provider_job_repo_path,  # noqa: F401
+    _resolve_versioned_to_base_clone,
+)
 
 # _GLOBAL_SUFFIX is used in _resolve_branch_repo_path to strip the alias-manager
 # suffix before passing the base alias to golden_repo_manager.get_actual_repo_path().
@@ -1658,77 +1662,6 @@ def _build_provider_api_key_env(provider_name: str) -> dict:
 # limit; no behavior change.
 
 
-def _resolve_provider_job_repo_path(repo_path: str, repo_alias: str) -> tuple:
-    """Resolve the actual indexing path for a provider background job.
-
-    When repo_path is inside a .versioned/ directory (immutable), return the
-    base clone path instead. Returns (actual_path, resolved_alias, is_versioned).
-    """
-    if not repo_path or not isinstance(repo_path, str):
-        return repo_path, repo_alias, False
-
-    # Bug #1084 B1: detect snapshots via the single canonical predicate
-    # (replaces the local-only ".versioned" in parts test).
-    is_versioned = is_versioned_snapshot(repo_path)
-    if not is_versioned:
-        return repo_path, repo_alias, False
-
-    parts = Path(repo_path).parts
-    versioned_idx = parts.index(".versioned")
-    if versioned_idx + 1 >= len(parts):
-        logger.warning("_resolve_provider_job_repo_path: malformed path %s", repo_path)
-        return repo_path, repo_alias, True
-
-    alias_name = parts[versioned_idx + 1]
-    # Reject traversal or separator segments in alias_name
-    if (
-        not alias_name
-        or alias_name in (".", "..")
-        or "/" in alias_name
-        or "\\" in alias_name
-    ):
-        logger.warning(
-            "_resolve_provider_job_repo_path: unsafe alias_name '%s'", alias_name
-        )
-        return repo_path, repo_alias, True
-
-    golden_repos_dir = Path(*parts[:versioned_idx])
-    base_clone = golden_repos_dir / alias_name
-
-    # Verify resolved path stays within golden_repos_dir
-    try:
-        base_clone.resolve().relative_to(golden_repos_dir.resolve())
-    except ValueError:
-        logger.warning(
-            "_resolve_provider_job_repo_path: path escape detected for %s", repo_path
-        )
-        return repo_path, repo_alias, True
-
-    resolved_alias = repo_alias or f"{alias_name}-global"
-
-    if not base_clone.exists():
-        # Bug #1084 B1: the base clone for a cow-daemon repo lives at
-        # golden_repos_dir/{ns}, not under the mount, so this local-shaped
-        # arithmetic cannot reach it. Return the (non-existent) base_clone path
-        # rather than the snapshot path: this is NEVER a writable snapshot, and
-        # the consumer's `actual_path == repo_path and not exists()` guard would
-        # have been DEFEATED on cow-daemon (the snapshot path DOES exist).
-        logger.warning(
-            "_resolve_provider_job_repo_path: base clone %s for versioned "
-            "snapshot %s does not exist -- refusing to index the snapshot.",
-            base_clone,
-            repo_path,
-        )
-        return str(base_clone), resolved_alias, True
-
-    logger.info(
-        "Provider job: using base clone %s instead of versioned snapshot %s",
-        base_clone,
-        repo_path,
-    )
-    return str(base_clone), resolved_alias, True
-
-
 def _post_provider_index_snapshot(
     repo_alias: str, base_clone_path: str, old_snapshot_path: str
 ) -> None:
@@ -1930,68 +1863,6 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
         raise
 
 
-def _resolve_versioned_to_base_clone(repo_path: str, repo_alias: str) -> tuple:
-    """Resolve versioned snapshot path to base clone for background jobs.
-
-    Uses direct path arithmetic (not _resolve_golden_repo_base_clone) because
-    background workers have no access to server app state.
-
-    Returns (actual_path, repo_alias, is_versioned, error_msg).
-    error_msg is None on success.
-    """
-    if not repo_path or not isinstance(repo_path, str):
-        return repo_path, repo_alias, False, "Invalid repo_path"
-    if not Path(repo_path).is_absolute():
-        return repo_path, repo_alias, False, f"repo_path must be absolute: {repo_path}"
-
-    resolved = Path(repo_path).resolve()
-    # Bug #1084 B1: detect snapshots via the single canonical predicate
-    # (replaces the local-only ".versioned" in parts test).
-    is_versioned = is_versioned_snapshot(str(resolved))
-    if not is_versioned:
-        return str(resolved), repo_alias, False, None
-
-    parts = resolved.parts
-    versioned_idx = parts.index(".versioned")
-    if versioned_idx + 1 >= len(parts):
-        return str(resolved), repo_alias, True, f"Malformed versioned path: {repo_path}"
-
-    alias_name = parts[versioned_idx + 1]
-    golden_repos_dir = Path(*parts[:versioned_idx])
-    base_clone = golden_repos_dir / alias_name
-
-    try:
-        base_clone.resolve().relative_to(golden_repos_dir.resolve())
-    except ValueError:
-        return (
-            str(resolved),
-            repo_alias,
-            True,
-            f"Path escape in versioned path: {repo_path}",
-        )
-
-    if not repo_alias:
-        repo_alias = f"{alias_name}-global"
-
-    if not base_clone.exists():
-        return (
-            str(resolved),
-            repo_alias,
-            True,
-            (
-                f"Base clone not found at {base_clone} for versioned snapshot {repo_path}. "
-                "Cannot index versioned snapshot (immutable)."
-            ),
-        )
-
-    logger.info(
-        "Provider index: using base clone %s instead of versioned snapshot %s",
-        base_clone,
-        repo_path,
-    )
-    return str(base_clone), repo_alias, True, None
-
-
 def _run_provider_subprocess(
     cmd: list,
     actual_path: str,
@@ -2093,9 +1964,13 @@ def _provider_index_job(
     provider_name: str,
     clear: bool = False,
     progress_callback=None,
+    job_id: Optional[str] = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Background job worker for provider index add/recreate."""
+    """Background job worker for provider index add/recreate.
+
+    ``job_id`` is injected by BackgroundJobManager (it declares the name) and
+    recorded on the child's embedding_call_stats rows (Story #2118)."""
     import os
 
     if not repo_path or not provider_name:
@@ -2126,7 +2001,21 @@ def _provider_index_job(
 
     # Story #1488: server states the new-collection layout explicitly
     # (CHUNKS_DB) rather than inheriting the CLI/daemon SHARDED_JSON default.
-    cmd = append_server_layout_args(["cidx", "index", "--progress-json"])
+    from code_indexer.server.services.embedding_stats_attribution import (
+        build_server_stats_attribution,
+    )
+
+    # Story #2118: the base clone is golden_repos_dir/<alias> (submit_job
+    # consumes repo_alias for tracking, so it may be empty here).
+    cmd = append_server_layout_args(
+        ["cidx", "index", "--progress-json"],
+        attribution=build_server_stats_attribution(
+            alias=f"{Path(actual_path).name}-global",
+            job_id=job_id,
+            site="provider_index",
+            purpose="index",
+        ),
+    )
     if clear:
         cmd.append("--clear")
 

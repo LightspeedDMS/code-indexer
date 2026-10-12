@@ -663,8 +663,8 @@ class TemporalSearchService:
                     # repo's write and produce a torn triple.
                     _temporal_event_ctx.record_provider_cache_fields(
                         self.embedding_provider.get_provider_name(),
-                        cache_hit=_embed_meta.key_found,
-                        cache_mode=_embed_meta.cache_mode,
+                        cache_hit=_embed_meta.search_event_cache_hit,
+                        cache_mode=_embed_meta.search_event_cache_mode,
                         latency_ms=_embed_meta.provider_latency_ms,
                     )
             except Exception as _tsc_exc:  # noqa: BLE001
