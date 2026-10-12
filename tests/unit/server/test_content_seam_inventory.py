@@ -22,10 +22,38 @@ Scope is what the server can REACH: the first-party import closure of
 plus ``cli.py``, because the server spawns ``cidx index`` as a child process on
 the same pod, which the import closure alone would never see.
 
+Local GIT is a repository access too, and the one the mount-less reconcile bug
+(MR !155) went through: ``GitTopologyService`` asked local git whether the
+directory was a repository, got "no" on a pod with no ``.git``, and reconcile
+deleted every chunk. So the scan also lists, per function:
+
+* ``git <verb>`` -- a raw spawn of git (argv read by the git seam guard's own
+  reader, ``test_git_seam_no_raw_subprocess``); ``git <unreadable argv>`` when
+  a spawn's argv cannot be read and so might be git;
+* ``run_git_command <verb>`` -- the git chokepoint. It delegates MUTATIONS to
+  git-mcp when an invoker is installed; a READ still runs local git;
+* ``git.Repo`` -- GitPython, which runs local git;
+* ``<op> .git`` -- any filesystem op on a ``.git`` path: a repository probe.
+
+Two rules then hold the indexing and query paths (``_INDEX_QUERY_PATHS``) shut:
+
+* **Ratchet.** An open row there carries a ``ceiling``: the count it had when
+  the ratchet was taken. A new open row (no ceiling) or a count above its
+  ceiling fails. The way past is the seam, not a reclassification: ask the
+  content backend, the pass manifest or the git backend, and the row becomes
+  ``migrated``. Regenerating lowers a ceiling to the current count, never
+  raises one.
+* **Evidence.** A ``migrated`` row there must show its seam: the function
+  names a backend or manifest (``_SEAM_EVIDENCE``), or the row's ``gate``
+  names the function in the same module that does and is the only way in.
+  Deleting the delegated branch of a migrated function -- reverting
+  ``GitTopologyService.is_git_available`` to local-only git -- fails here even
+  though the call count is unchanged.
+
 Regenerate after a change (classifications are kept, new rows are added
 unclassified, vanished rows are dropped):
 
-    PYTHONPATH=src python3 tests/unit/server/test_content_seam_inventory.py --write
+    PYTHONPATH=src python3 -m tests.unit.server.test_content_seam_inventory --write
 
 Classes (see the phase-5 doc in docs/content-seam-*.md for the plan):
 
@@ -42,11 +70,20 @@ Classes (see the phase-5 doc in docs/content-seam-*.md for the plan):
 from __future__ import annotations
 
 import ast
+import functools
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
+
+from tests.unit.server.test_git_seam_no_raw_subprocess import (
+    _call_kind,
+    _direct_import_aliases,
+    _git_argv,
+    _verb,
+)
 
 _ROOT = Path(__file__).resolve().parents[3]
 _SRC = _ROOT / "src" / "code_indexer"
@@ -122,6 +159,10 @@ _FUNCTIONS = frozenset(
         "tempfile.TemporaryDirectory",
         "tempfile.TemporaryFile",
         "tempfile.SpooledTemporaryFile",
+        # GitPython: opening a Repo runs local git against a local .git.
+        "git.Repo",
+        "git.Repo.init",
+        "git.Repo.clone_from",
     }
 )
 
@@ -271,7 +312,38 @@ _METHODS = frozenset(
     }
 )
 
+#: The git chokepoint (utils/git_runner.py). Mutations through it go to
+#: git-mcp when an invoker is installed; reads run local git.
+_GIT_CHOKEPOINTS = frozenset({"run_git_command", "run_git_command_with_retry"})
+#: Op prefixes that run git on this machine, and the suffix of a .git probe.
+_LOCAL_GIT_OPS = ("git ", "git.", "run_git_command")
+_GIT_DIR_SUFFIX = " .git"
+
+#: Where indexing (``cidx index``, reconcile, refresh) and query run. Open rows
+#: here are ratcheted and migrated rows must show their seam -- see the
+#: module docstring. Prefixes of paths relative to src/code_indexer.
+_INDEX_QUERY_PATHS = (
+    "indexing/",
+    "services/",
+    "storage/",
+    "search/",
+    "server/query/",
+)
+
+#: An identifier that shows a function asks a seam: a content or git backend,
+#: the pass manifest, or prefetched content.
+_SEAM_EVIDENCE = re.compile(r"backend|manifest|delegat|content_source|prefetch", re.I)
+
 Key = Tuple[str, str, str]  # (module, function, op)
+
+
+def in_index_query_path(module: str) -> bool:
+    return module.startswith(_INDEX_QUERY_PATHS)
+
+
+def is_local_git(op: str) -> bool:
+    """A row that runs git here or probes a .git directory."""
+    return op.startswith(_LOCAL_GIT_OPS) or op.endswith(_GIT_DIR_SUFFIX)
 
 
 # ── the fence ───────────────────────────────────────────────────────────────
@@ -312,8 +384,13 @@ def _module_path(module: str) -> Optional[Path]:
     return None
 
 
-def fenced_files() -> List[Path]:
-    """Every first-party module the server pod can run, seeds plus imports."""
+@functools.lru_cache(maxsize=None)
+def fenced_files() -> Tuple[Path, ...]:
+    """Every first-party module the server pod can run, seeds plus imports.
+
+    Cached: three guards walk the same fence, and the closure is a third of
+    their runtime.
+    """
     stack: List[Path] = []
     for seed in _SEEDS:
         path = _SRC / seed
@@ -335,7 +412,7 @@ def fenced_files() -> List[Path]:
             nxt = _module_path(module)
             if nxt is not None and nxt.relative_to(_SRC).as_posix() not in seen:
                 stack.append(nxt)
-    return [seen[k] for k in sorted(seen)]
+    return tuple(seen[k] for k in sorted(seen))
 
 
 # ── the scan ────────────────────────────────────────────────────────────────
@@ -400,11 +477,77 @@ def operation(
     return f".{attr}" if attr in _METHODS else None
 
 
+def _is_git_dir_literal(value: object) -> bool:
+    return isinstance(value, str) and (
+        value == ".git"
+        or value.startswith(".git/")
+        or value.endswith("/.git")
+        or "/.git/" in value
+    )
+
+
+def _git_dir_names(scope: ast.AST) -> Set[str]:
+    """Names this scope binds to a value built from a ``.git`` literal."""
+    names: Set[str] = set()
+    for node in ast.walk(scope):
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if _mentions_git_dir(value, set()):
+            names.update(t.id for t in targets if isinstance(t, ast.Name))
+    return names
+
+
+def _mentions_git_dir(node: ast.AST, git_names: Set[str]) -> bool:
+    return any(
+        (isinstance(n, ast.Constant) and _is_git_dir_literal(n.value))
+        or (isinstance(n, ast.Name) and n.id in git_names)
+        for n in ast.walk(node)
+    )
+
+
+def git_operation(
+    call: ast.Call,
+    tree: ast.Module,
+    scope: ast.AST,
+    spawn_aliases: Dict[str, str],
+) -> Optional[str]:
+    """The local-git operation a call performs, or None.
+
+    Raw spawns are read with the git seam guard's own argv reader, so the two
+    guards agree on what a git call is; a spawn whose argv it cannot read is
+    listed as possibly git rather than skipped.
+    """
+    func = call.func
+    name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+    if name in _GIT_CHOKEPOINTS:
+        argv, _ = _git_argv(call, "list", scope, tree)
+        verb = _verb(argv) if argv and argv[0] == "git" else None
+        return f"{name} {verb or '<dynamic>'}"
+    kind = _call_kind(call, spawn_aliases)
+    if kind is None:
+        return None
+    argv, builders = _git_argv(call, kind, scope, tree)
+    if argv is None:
+        return None
+    if builders is not None:
+        return "git <unreadable argv>"
+    return f"git {_verb(argv) or '<dynamic>'}"
+
+
 def scan_source(module: str, source: str) -> Counter:
     tree = ast.parse(source)
     aliases = import_aliases(tree)
+    spawn_aliases = _direct_import_aliases(tree)
     found: Counter = Counter()
     scopes: List[str] = []
+    # The innermost function (argv is resolved in it) and the names it binds
+    # to a .git path, alongside the dotted scope name.
+    functions: List[ast.AST] = [tree]
+    git_names: List[Set[str]] = [set()]
 
     class _Visitor(ast.NodeVisitor):
         def _scoped(self, node: ast.AST, name: str) -> None:
@@ -412,31 +555,49 @@ def scan_source(module: str, source: str) -> Counter:
             self.generic_visit(node)
             scopes.pop()
 
+        def _function(self, node: ast.AST, name: str) -> None:
+            functions.append(node)
+            git_names.append(_git_dir_names(node))
+            self._scoped(node, name)
+            functions.pop()
+            git_names.pop()
+
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-            self._scoped(node, node.name)
+            self._function(node, node.name)
 
         def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-            self._scoped(node, node.name)
+            self._function(node, node.name)
 
         def visit_ClassDef(self, node: ast.ClassDef) -> None:
             self._scoped(node, node.name)
 
         def visit_Call(self, node: ast.Call) -> None:
+            where = ".".join(scopes) or "<module>"
             op = operation(node, aliases)
             if op is not None:
-                found[(module, ".".join(scopes) or "<module>", op)] += 1
+                if _mentions_git_dir(node, git_names[-1]):
+                    op = f"{op}{_GIT_DIR_SUFFIX}"
+                found[(module, where, op)] += 1
+            git_op = git_operation(node, tree, functions[-1], spawn_aliases)
+            if git_op is not None:
+                found[(module, where, git_op)] += 1
             self.generic_visit(node)
 
     _Visitor().visit(tree)
     return found
 
 
-def scan() -> Counter:
+@functools.lru_cache(maxsize=None)
+def _scan_cached() -> Counter:
     found: Counter = Counter()
     for path in fenced_files():
         rel = path.relative_to(_SRC).as_posix()
         found.update(scan_source(rel, path.read_text(encoding="utf-8")))
     return found
+
+
+def scan() -> Counter:
+    return Counter(_scan_cached())
 
 
 # ── the inventory ───────────────────────────────────────────────────────────
@@ -454,17 +615,22 @@ def merged_rows(
     rows = []
     for key in sorted(found):
         old = existing.get(key, {})
-        rows.append(
-            {
-                "module": key[0],
-                "function": key[1],
-                "op": key[2],
-                "count": found[key],
-                "class": old.get("class", "unclassified"),
-                "baseline": old.get("baseline", baseline),
-                "note": old.get("note", ""),
-            }
-        )
+        row = {
+            "module": key[0],
+            "function": key[1],
+            "op": key[2],
+            "count": found[key],
+            "class": old.get("class", "unclassified"),
+            "baseline": old.get("baseline", baseline),
+            "note": old.get("note", ""),
+        }
+        # The ratchet only goes down: a smaller count lowers the ceiling, a
+        # larger one leaves it where it was, for the guard to fail on.
+        if "ceiling" in old:
+            row["ceiling"] = min(old["ceiling"], found[key])
+        if "gate" in old:
+            row["gate"] = old["gate"]
+        rows.append(row)
     return rows
 
 
@@ -480,7 +646,7 @@ def render_summary(rows: Iterable[dict]) -> str:
         "",
         "Every filesystem access the cidx server pod can reach, from",
         "`tests/unit/server/content_seam_inventory.json`. Regenerate with",
-        "`PYTHONPATH=src python3 tests/unit/server/test_content_seam_inventory.py --write`.",
+        "`PYTHONPATH=src python3 -m tests.unit.server.test_content_seam_inventory --write`.",
         "The repo mount can come off when no row is in an open class "
         f"({', '.join(OPEN_CLASSES)}).",
         "",
@@ -502,6 +668,26 @@ def render_summary(rows: Iterable[dict]) -> str:
             + " | ".join(str(counts.get(c, 0)) for c in OPEN_CLASSES)
             + " |"
         )
+    local_git = [
+        r
+        for r in rows
+        if in_index_query_path(r["module"])
+        and r["class"] in OPEN_CLASSES
+        and is_local_git(r["op"])
+    ]
+    lines += [
+        "",
+        "## Local git and .git probes still open in the indexing and query paths",
+        "",
+        "Ratcheted (see the test's docstring): this list may only shrink.",
+        "",
+        "| Module | Function | Op | Note |",
+        "|---|---|---|---|",
+    ]
+    lines += [
+        f"| `{r['module']}` | `{r['function']}` | `{r['op']}` | {r['note']} |"
+        for r in local_git
+    ]
     return "\n".join(lines) + "\n"
 
 
@@ -559,6 +745,109 @@ def test_the_summary_matches_the_inventory() -> None:
     )
     assert _SUMMARY.read_text(encoding="utf-8") == render_summary(rows), (
         "docs/content-seam-inventory.md is stale -- regenerate it"
+    )
+
+
+def test_no_new_open_rows_in_the_indexing_and_query_paths() -> None:
+    """A new local probe where indexing or query runs fails the build.
+
+    This is the !155 bug class: a local `git`, `.exists()` or `.stat()` that
+    answers "nothing here" on a pod without the repository, and an index
+    emptied on that answer. Classifying the new row repo-read is not enough
+    there; it has to go through the seam.
+    """
+    over = [
+        (k, r["class"], r["count"], r.get("ceiling"))
+        for k, r in sorted(load_inventory().items())
+        if in_index_query_path(k[0])
+        and r["class"] in OPEN_CLASSES
+        and r["count"] > r.get("ceiling", 0)
+    ]
+    assert not over, (
+        "new direct repository access in the indexing/query path -- read through "
+        "the content backend, the pass manifest or the git backend instead "
+        "(module, function, op), class, count, ceiling:\n"
+        + "\n".join(f"  {o}" for o in over)
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def _function_node(module: str, function: str) -> Optional[ast.AST]:
+    node: ast.AST = ast.parse((_SRC / module).read_text(encoding="utf-8"))
+    for part in [] if function == "<module>" else function.split("."):
+        found = next(
+            (
+                child
+                for child in ast.iter_child_nodes(node)
+                if isinstance(
+                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                )
+                and child.name == part
+            ),
+            None,
+        )
+        if found is None:
+            return None
+        node = found
+    return node
+
+
+def _identifiers(node: ast.AST) -> Iterable[str]:
+    """Names, attributes, parameters -- and the attribute a getattr() reads.
+
+    Not every string: a docstring that says "manifest" is not a branch on one.
+    """
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            yield n.id
+        elif isinstance(n, ast.Attribute):
+            yield n.attr
+        elif isinstance(n, ast.arg):
+            yield n.arg
+        elif (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id in ("getattr", "hasattr")
+            and len(n.args) >= 2
+            and isinstance(n.args[1], ast.Constant)
+            and isinstance(n.args[1].value, str)
+        ):
+            yield n.args[1].value
+
+
+def seam_evidence(module: str, function: str) -> List[str]:
+    """Identifiers in *function* that name a seam (_SEAM_EVIDENCE).
+
+    *function* may be ``other/module.py:Class.method`` for a gate that lives
+    in another module.
+    """
+    if ":" in function:
+        module, function = function.split(":", 1)
+    node = _function_node(module, function)
+    if node is None:
+        return []
+    return sorted({i for i in _identifiers(node) if _SEAM_EVIDENCE.search(i)})
+
+
+def test_migrated_rows_in_the_indexing_and_query_paths_show_their_seam() -> None:
+    """`migrated` is a claim about code: that a delegated branch exists.
+
+    Checked, not trusted: the function itself (or the `gate` the row names)
+    must ask a backend or the manifest. Removing the delegated branch from a
+    migrated function leaves every count unchanged -- this is what fails.
+    """
+    unproven = [
+        (k, r.get("gate"))
+        for k, r in sorted(load_inventory().items())
+        if in_index_query_path(k[0])
+        and r["class"] == "migrated"
+        and not seam_evidence(k[0], r.get("gate", k[1]))
+    ]
+    assert not unproven, (
+        "rows classified migrated whose function no longer asks a seam -- "
+        "restore the delegated branch, or reclassify the row as the open access "
+        "it now is ((module, function, op), gate):\n"
+        + "\n".join(f"  {u}" for u in unproven)
     )
 
 
@@ -666,6 +955,91 @@ class TestScannerSeesEveryShape:
         assert "cli.py" in fenced, "the spawned `cidx index` child is out of scope"
         assert "indexing/file_finder.py" in fenced, "the import closure is not followed"
         assert "server/app.py" in fenced
+
+    def test_local_git_is_listed_by_verb(self) -> None:
+        src = (
+            "import subprocess\nfrom git import Repo\n"
+            "from code_indexer.utils.git_runner import run_git_command\n"
+            "def f(p, argv):\n"
+            "    subprocess.run(['git', 'rev-parse', '--git-dir'], cwd=p)\n"
+            "    cmd = ['git', 'ls-tree', '-r', 'HEAD']\n"
+            "    subprocess.run(cmd, cwd=p)\n"
+            "    run_git_command(['git', 'diff', '--name-only'], cwd=p)\n"
+            "    run_git_command(argv, cwd=p)\n"
+            "    Repo(p)\n"
+        )
+        assert set(self._ops(src)) == {
+            "git rev-parse",
+            "git ls-tree",
+            "run_git_command diff",
+            "run_git_command <dynamic>",
+            "git.Repo",
+        }
+
+    def test_a_spawn_that_might_be_git_is_listed(self) -> None:
+        src = "import subprocess\ndef f(prog):\n    subprocess.run([prog, 'status'])\n"
+        assert set(self._ops(src)) == {"git <unreadable argv>"}
+
+    def test_non_git_spawns_and_asyncio_run_are_not_listed(self) -> None:
+        src = (
+            "import asyncio, subprocess\n"
+            "def f(coro):\n    subprocess.run(['cidx', 'index']); asyncio.run(coro)\n"
+        )
+        assert not self._ops(src)
+
+    def test_a_dot_git_probe_is_its_own_op(self) -> None:
+        src = (
+            "import os\n"
+            "def f(p):\n"
+            "    (p / '.git').exists()\n"
+            "    git_dir = os.path.join(p, '.git')\n"
+            "    os.path.isdir(git_dir)\n"
+            "    (p / '.gitignore').exists()\n"
+        )
+        assert self._ops(src) == Counter(
+            {".exists .git": 1, "os.path.isdir .git": 1, ".exists": 1}
+        )
+
+
+class TestTheIndexingAndQueryRules:
+    def test_a_ceiling_only_goes_down(self) -> None:
+        key = ("services/x.py", "f", ".exists")
+        old = {key: {"class": "repo-read", "baseline": True, "note": "", "ceiling": 2}}
+        assert merged_rows(Counter({key: 1}), old, baseline=False)[0]["ceiling"] == 1
+        assert merged_rows(Counter({key: 3}), old, baseline=False)[0]["ceiling"] == 2
+
+    def test_a_new_row_gets_no_ceiling(self) -> None:
+        key = ("services/x.py", "f", "git status")
+        assert "ceiling" not in merged_rows(Counter({key: 1}), {}, baseline=False)[0]
+
+    def test_the_paths_cover_indexing_and_query(self) -> None:
+        for module in (
+            "services/smart_indexer.py",
+            "services/git_topology_service.py",
+            "indexing/file_finder.py",
+            "storage/filesystem_vector_store.py",
+            "server/query/semantic_query_manager.py",
+        ):
+            assert in_index_query_path(module), module
+        assert not in_index_query_path("server/routers/git.py")
+
+    def test_evidence_is_a_branch_not_a_docstring(self) -> None:
+        tree = ast.parse(
+            "def has(self):\n    if self._git_backend is not None:\n        pass\n"
+            "def attr(self):\n    return getattr(self, 'repo_manifest', None)\n"
+            'def doc():\n    """Uses the delegated manifest."""\n'
+        )
+        found = {
+            f.name: sorted(i for i in _identifiers(f) if _SEAM_EVIDENCE.search(i))
+            for f in tree.body
+            if isinstance(f, ast.FunctionDef)
+        }
+        assert found == {"has": ["_git_backend"], "attr": ["repo_manifest"], "doc": []}
+
+    def test_a_gate_in_another_module_is_followed(self) -> None:
+        assert seam_evidence(
+            "x.py", "services/smart_indexer.py:SmartIndexer._smart_index"
+        ) == ["git_backend"]
 
 
 if __name__ == "__main__":
