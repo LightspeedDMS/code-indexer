@@ -202,6 +202,7 @@ smoke:
       tests/unit/global_repos/test_refresh_scheduler_indexing_types.py
       tests/unit/global_repos/test_reclone_mountless.py
       tests/unit/global_repos/test_trigram_mountless.py
+      tests/unit/server/routers/test_metadata_outbox_admin.py
       tests/unit/global_repos/test_index_store_snapshot.py
       tests/unit/server/startup/test_index_store_wiring.py
       tests/unit/server/startup/test_content_writer_wiring.py

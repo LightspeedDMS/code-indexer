@@ -81,7 +81,7 @@ def setup(tmp_path: Path, schema_template: Path) -> Iterator[SimpleNamespace]:
         app = FastAPI()
         app.include_router(router)
         app.state.metadata_outbox_sweeper = sweeper
-        yield SimpleNamespace(app=app, backend=backend, sweeper=sweeper)
+        yield SimpleNamespace(app=app, backend=backend, sweeper=sweeper, tmp=tmp_path)
 
 
 @pytest.fixture(autouse=True)
@@ -93,17 +93,29 @@ def _restore_auth_globals() -> Iterator[None]:
     deps.elevated_session_manager = saved_elevation
 
 
+def _elevation_manager(tmp: Path) -> ElevatedSessionManager:
+    """A manager on this test's own database. Without ``db_path`` it uses
+    ``~/.cidx-server/elevated_sessions.db``, so an elevation one test creates
+    outlives it and lets a later "without elevation" request through."""
+    return ElevatedSessionManager(
+        idle_timeout_seconds=300,
+        max_age_seconds=1800,
+        db_path=str(tmp / "elevated_sessions.db"),
+    )
+
+
 def _post_as(
-    app: FastAPI, user: User, elevation: Optional[ElevatedSessionManager]
+    app: FastAPI,
+    user: User,
+    elevation: Optional[ElevatedSessionManager],
+    tmp: Path,
 ) -> Response:
     """POST with a web-session cookie resolving to *user* (from the user
     store, as production does), elevation enforcement ON."""
     users = MagicMock()
     users.get_user.return_value = user
     deps.user_manager = users
-    deps.elevated_session_manager = elevation or ElevatedSessionManager(
-        idle_timeout_seconds=300, max_age_seconds=1800
-    )
+    deps.elevated_session_manager = elevation or _elevation_manager(tmp)
     sessions = MagicMock()
     sessions.get_session.return_value = SimpleNamespace(
         username=user.username, role=user.role.value
@@ -125,7 +137,9 @@ def _post_as(
 
 
 def test_non_admin_is_refused_and_nothing_is_abandoned(setup):
-    response = _post_as(setup.app, _user("someone", UserRole.NORMAL_USER), None)
+    response = _post_as(
+        setup.app, _user("someone", UserRole.NORMAL_USER), None, setup.tmp
+    )
 
     assert response.status_code == 403
     assert setup.backend.outbox_depth() == 1
@@ -133,7 +147,7 @@ def test_non_admin_is_refused_and_nothing_is_abandoned(setup):
 
 
 def test_admin_without_elevation_is_refused(setup):
-    response = _post_as(setup.app, _user("admin", UserRole.ADMIN), None)
+    response = _post_as(setup.app, _user("admin", UserRole.ADMIN), None, setup.tmp)
 
     assert response.status_code == 403
     assert response.json()["detail"]["error"] == "elevation_required"
@@ -141,10 +155,10 @@ def test_admin_without_elevation_is_refused(setup):
 
 
 def test_elevated_admin_abandons_and_stops_the_sweeper(setup):
-    elevation = ElevatedSessionManager(idle_timeout_seconds=300, max_age_seconds=1800)
+    elevation = _elevation_manager(setup.tmp)
     elevation.create(SESSION_KEY, "admin", "127.0.0.1")
 
-    response = _post_as(setup.app, _user("admin", UserRole.ADMIN), elevation)
+    response = _post_as(setup.app, _user("admin", UserRole.ADMIN), elevation, setup.tmp)
 
     assert response.status_code == 200, response.text
     assert response.json() == {
@@ -157,10 +171,10 @@ def test_elevated_admin_abandons_and_stops_the_sweeper(setup):
 
 def test_no_sweeper_is_503(setup):
     setup.app.state.metadata_outbox_sweeper = None
-    elevation = ElevatedSessionManager(idle_timeout_seconds=300, max_age_seconds=1800)
+    elevation = _elevation_manager(setup.tmp)
     elevation.create(SESSION_KEY, "admin", "127.0.0.1")
 
-    response = _post_as(setup.app, _user("admin", UserRole.ADMIN), elevation)
+    response = _post_as(setup.app, _user("admin", UserRole.ADMIN), elevation, setup.tmp)
 
     assert response.status_code == 503
 
