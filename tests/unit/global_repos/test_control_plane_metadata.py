@@ -445,37 +445,38 @@ class TestImportFailuresKeepTheReadThrough:
         assert component.get(KIND_ALIAS, ALIAS)["target_path"] == "/s/v_1"
 
 
-def _undeletable_files(component: ControlPlaneMetadata, monkeypatch) -> None:
-    def refuse(kind: str, name: str) -> None:
-        raise OSError("permission denied")
-
-    monkeypatch.setattr(component.files, "delete", refuse)
+def _leave_stale_file(path: Path, document: dict) -> None:
+    """What a failed unlink or an old-image pod leaves behind: the key's last
+    document, still on disk after the registry delete."""
+    _write_file(path, document)
 
 
 class TestDeletedKeysStayDeleted:
     def test_alias_whose_file_survived_the_delete_is_not_reimported(
-        self, metadata, backend, golden_repos_dir, monkeypatch
+        self, metadata, backend, golden_repos_dir
     ):
         manager = AliasManager(golden_repos_dir / "aliases")
         manager.create_alias(ALIAS, "/s/v_1")
-        _undeletable_files(metadata, monkeypatch)
+        last_document = manager.read_record(ALIAS)
 
         manager.delete_alias(ALIAS)
-        assert _alias_file(golden_repos_dir).exists()  # the stale leftover
+        _leave_stale_file(_alias_file(golden_repos_dir), last_document)
 
         ControlPlaneMetadata(golden_repos_dir, backend=backend).import_files()
 
         assert backend.get(KIND_ALIAS, ALIAS) is None
 
     def test_marker_whose_file_survived_exit_is_not_reimported(
-        self, metadata, backend, golden_repos_dir, monkeypatch
+        self, metadata, backend, golden_repos_dir
     ):
         markers = WriteModeMarkers(golden_repos_dir)
         markers.enter("cidx-meta", "/live")
-        _undeletable_files(metadata, monkeypatch)
+        last_document = markers.get("cidx-meta")
 
         markers.remove("cidx-meta")
-        assert (golden_repos_dir / ".write_mode" / "cidx-meta.json").exists()
+        _leave_stale_file(
+            golden_repos_dir / ".write_mode" / "cidx-meta.json", last_document
+        )
 
         ControlPlaneMetadata(golden_repos_dir, backend=backend).import_files()
 
