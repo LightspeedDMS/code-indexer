@@ -24,7 +24,8 @@ entirely successful. An error is the only safe failure.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from pathlib import Path, PurePosixPath
+from typing import Any, Optional, Union
 
 from code_indexer.server.storage.shared.content_backend import (
     ContentBackend,
@@ -167,3 +168,73 @@ def configured_content_backend_name() -> str:
 
     config = get_config_service().get_config()
     return getattr(config, "content_backend", "local") or "local"
+
+
+def server_content_backend() -> Optional[ContentBackend]:
+    """The backend the running server built at startup, or None.
+
+    None outside a server process (CLI, tests) or before startup has built
+    one; callers then read the local disk, as before. Read without importing
+    the app, so a CLI process never constructs it.
+    """
+    from code_indexer.server.utils.registry_factory import (
+        _running_server_app_state,
+    )
+
+    return getattr(_running_server_app_state(), "content_backend", None)
+
+
+def is_content_seam_delegated() -> bool:
+    """True when the running server reads repository files through a NON-local
+    backend -- the repositories are not on this pod's disk."""
+    backend = server_content_backend()
+    return backend is not None and not backend.is_local
+
+
+def golden_repo_content_root(repo_path: Union[str, Path], *, consumer: str) -> Path:
+    """Where a delegated backend can see the repository behind *repo_path*.
+
+    A delegated backend (regex in workspace-mcp, the content seam) sees the
+    golden repos' base clones. Refresh, though, points an alias at a versioned
+    snapshot it creates on THIS pod's disk -- holding only index state -- which
+    the backend cannot see. So a snapshot path maps to its golden repo's
+    registered base clone. That is the repository's current checkout, which can
+    be newer than the snapshot's index. Every other path is returned unchanged.
+
+    When the registry has no clone for the repo the snapshot path is kept and a
+    warning names *consumer*: the read then behaves as it did before the mapping.
+
+    Callers decide whether their backend is delegated; this only maps the path.
+    Blocking (a registry read for a snapshot path): call it off the event loop.
+    """
+    from code_indexer.server.storage.shared.snapshot_paths import (
+        is_versioned_snapshot,
+    )
+
+    if not is_versioned_snapshot(str(repo_path)):
+        return Path(repo_path)
+    repo_name = PurePosixPath(repo_path).parts[-2]
+    clone_path = _golden_repo_clone_path(repo_name)
+    if clone_path is None:
+        logger.warning(
+            "%s: no base clone registered for %s; using the snapshot path, "
+            "which the delegated backend cannot see",
+            consumer,
+            repo_name,
+        )
+        return Path(repo_path)
+    return Path(clone_path)
+
+
+def _golden_repo_clone_path(repo_name: str) -> Optional[str]:
+    """The golden repo's base clone path, or None when the registry cannot say."""
+    try:
+        from code_indexer.server.repositories.golden_repo_manager import (
+            get_golden_repo_manager,
+        )
+
+        repo = get_golden_repo_manager().get_golden_repo(repo_name)
+    except Exception as exc:  # the server's state, whatever it is
+        logger.debug("No golden repo record for %s: %s", repo_name, exc)
+        return None
+    return getattr(repo, "clone_path", None) or None

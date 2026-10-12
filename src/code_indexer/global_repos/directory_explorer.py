@@ -7,9 +7,34 @@ directory structure, similar to the 'tree' command.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, Iterable, List, Optional, Protocol, Tuple
 
-from code_indexer.utils.path_confinement import resolve_confined_path
+from code_indexer.utils.path_confinement import (
+    confine_relative_path,
+    resolve_confined_path,
+)
+
+#: Characters that make an exclude pattern a glob rather than a literal name.
+_GLOB_CHARS = frozenset("*?[")
+
+
+class _TreeEntry(Protocol):
+    """What the tree walk asks of an entry: the subset of ``pathlib.Path`` it uses.
+
+    ``Path`` satisfies it for the local walk; ``_ManifestNode`` satisfies it for
+    a repository described by a content-seam manifest, so ONE walk serves both.
+    """
+
+    @property
+    def name(self) -> str: ...
+
+    def is_file(self) -> bool: ...
+
+    def is_dir(self) -> bool: ...
+
+    def is_symlink(self) -> bool: ...
+
+    def iterdir(self) -> Iterable["_TreeEntry"]: ...
 
 
 @dataclass
@@ -93,25 +118,7 @@ class DirectoryExplorerService:
         Raises:
             ValueError: If path doesn't exist
         """
-        # Determine the starting path
-        if path:
-            # Bug #1891 round 2 (S2): confine `path` to self.repo_path
-            # BEFORE using it as the tree-walk root. The previous
-            # `self.repo_path / path` was unconfined -- a parent-directory
-            # traversal or a same-repo symlink pointing outside the repo
-            # would enumerate whatever it resolved to. A PermissionError
-            # (escape attempt) is mapped to the SAME ValueError message the
-            # pre-existing nonexistent-path check already raises, so an
-            # escape attempt cannot be distinguished from an ordinary
-            # missing path.
-            try:
-                start_path = resolve_confined_path(self.repo_path, path)
-            except PermissionError:
-                raise ValueError(f"Path does not exist: {path}")
-            if not start_path.exists():
-                raise ValueError(f"Path does not exist: {path}")
-        else:
-            start_path = self.repo_path
+        start_path, root_path = self._resolve_start(path)
 
         # Merge exclude patterns with defaults
         all_excludes = list(self.DEFAULT_EXCLUDE_PATTERNS)
@@ -166,7 +173,7 @@ class DirectoryExplorerService:
             return False
 
         def build_tree(
-            current_path: Path, relative_path: str, current_depth: int
+            current_path: _TreeEntry, relative_path: str, current_depth: int
         ) -> Optional[TreeNode]:
             """Recursively build tree structure."""
             nonlocal total_dirs, total_files, max_depth_reached
@@ -213,8 +220,8 @@ class DirectoryExplorerService:
                 )
 
             # Sort entries: directories first, then files, both alphabetically
-            dirs = []
-            files = []
+            dirs: List[_TreeEntry] = []
+            files: List[_TreeEntry] = []
 
             for entry in entries:
                 # Calculate entry's relative path
@@ -295,9 +302,7 @@ class DirectoryExplorerService:
             )
 
         # Build the tree starting from start_path
-        root_name = (
-            start_path.name if start_path != self.repo_path else self.repo_path.name
-        )
+        root_name = start_path.name
         root = build_tree(start_path, "", 0)
 
         if root is None:
@@ -321,8 +326,45 @@ class DirectoryExplorerService:
             total_directories=total_dirs,
             total_files=total_files,
             max_depth_reached=max_depth_reached,
-            root_path=str(start_path),
+            root_path=root_path,
         )
+
+    @classmethod
+    def prunable_dir_names(cls) -> Tuple[str, ...]:
+        """The default excludes that are literal NAMES, not globs.
+
+        Each excludes a directory of that name at any depth together with
+        everything under it, so a manifest may skip such directories outright
+        without changing the tree.
+        """
+        return tuple(
+            p for p in cls.DEFAULT_EXCLUDE_PATTERNS if not _GLOB_CHARS & set(p)
+        )
+
+    def _resolve_start(self, path: Optional[str]) -> Tuple[_TreeEntry, str]:
+        """The entry the tree starts at, and the root path to report for it.
+
+        Raises:
+            ValueError: if ``path`` does not exist or escapes the repository.
+        """
+        if not path:
+            return self.repo_path, str(self.repo_path)
+        # Bug #1891 round 2 (S2): confine `path` to self.repo_path
+        # BEFORE using it as the tree-walk root. The previous
+        # `self.repo_path / path` was unconfined -- a parent-directory
+        # traversal or a same-repo symlink pointing outside the repo
+        # would enumerate whatever it resolved to. A PermissionError
+        # (escape attempt) is mapped to the SAME ValueError message the
+        # pre-existing nonexistent-path check already raises, so an
+        # escape attempt cannot be distinguished from an ordinary
+        # missing path.
+        try:
+            start_path = resolve_confined_path(self.repo_path, path)
+        except PermissionError:
+            raise ValueError(f"Path does not exist: {path}")
+        if not start_path.exists():
+            raise ValueError(f"Path does not exist: {path}")
+        return start_path, str(start_path)
 
     def _format_tree_string(
         self,
@@ -388,3 +430,87 @@ class DirectoryExplorerService:
             lines.append(f"{total_dirs} directories, {total_files} files")
 
         return "\n".join(lines)
+
+
+class _ManifestNode:
+    """One entry of a manifest-described repository, shaped like a ``Path``.
+
+    A directory is implied by the file paths below it. A symlink is a leaf: the
+    manifest reports it and never follows it, so it is a file to the walk
+    whatever it points at.
+    """
+
+    def __init__(self, name: str, *, is_dir: bool, is_symlink: bool = False) -> None:
+        self._name = name
+        self._symlink = is_symlink
+        self.children: Optional[Dict[str, "_ManifestNode"]] = {} if is_dir else None
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def is_dir(self) -> bool:
+        return self.children is not None
+
+    def is_file(self) -> bool:
+        return self.children is None
+
+    def is_symlink(self) -> bool:
+        return self._symlink
+
+    def iterdir(self) -> Iterable["_ManifestNode"]:
+        if self.children is None:
+            raise NotADirectoryError(self._name)
+        return list(self.children.values())
+
+    def find(self, rel: str) -> Optional["_ManifestNode"]:
+        """The node at repo-relative *rel* (``""`` is this node), or None."""
+        node: Optional[_ManifestNode] = self
+        for part in rel.split("/") if rel else ():
+            if node is None or node.children is None:
+                return None
+            node = node.children.get(part)
+        return node
+
+
+class ManifestDirectoryExplorerService(DirectoryExplorerService):
+    """The directory tree of a repository known only by its manifest.
+
+    For a repository whose files are not on this machine (a delegated content
+    backend). The walk, the excludes, the hidden-file rule and the depth
+    semantics are :class:`DirectoryExplorerService`'s own; only the entries
+    come from ``(path, is_symlink)`` pairs instead of the disk. Two documented
+    differences follow from what a manifest is: a symlink is always a leaf
+    (locally a link to a directory is skipped), and a directory holding no
+    listed file does not exist.
+    """
+
+    def __init__(self, repo_path: Path, entries: Iterable[Tuple[str, bool]]) -> None:
+        super().__init__(repo_path)
+        self._root = _ManifestNode(repo_path.name, is_dir=True)
+        for rel, is_symlink in entries:
+            self._add(rel, is_symlink)
+
+    def _add(self, rel: str, is_symlink: bool) -> None:
+        *dirs, leaf = rel.split("/")
+        node = self._root
+        for part in dirs:
+            if node.children is None:
+                return  # a file stands where a directory would be
+            node = node.children.setdefault(part, _ManifestNode(part, is_dir=True))
+        if node.children is not None:
+            node.children[leaf] = _ManifestNode(
+                leaf, is_dir=False, is_symlink=is_symlink
+            )
+
+    def _resolve_start(self, path: Optional[str]) -> Tuple[_TreeEntry, str]:
+        if not path:
+            return self._root, str(self.repo_path)
+        try:
+            rel = confine_relative_path(path)
+        except PermissionError:
+            raise ValueError(f"Path does not exist: {path}")
+        node = self._root.find(rel)
+        if node is None:
+            raise ValueError(f"Path does not exist: {path}")
+        return node, str(self.repo_path / rel) if rel else str(self.repo_path)

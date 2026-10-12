@@ -7,12 +7,26 @@ All operations use real file system operations with proper pagination and filter
 
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
+import io
 import os
 import threading
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any, Set, cast, TYPE_CHECKING
+from typing import (
+    Callable,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Dict,
+    Any,
+    Set,
+    TypeVar,
+    cast,
+    TYPE_CHECKING,
+)
 from datetime import datetime, timezone
 import logging
 import math
@@ -27,9 +41,17 @@ from ..models.api_models import (
     FileListQueryParams,
 )
 from ..services.config_service import get_config_service
-from code_indexer.utils.path_confinement import resolve_confined_path
+from code_indexer.utils.path_confinement import (
+    confine_relative_path,
+    resolve_confined_path,
+)
+from ..storage.shared.content_backend import ContentBackend, ContentEntry, FetchedFile
 
 if TYPE_CHECKING:
+    from code_indexer.global_repos.directory_explorer import (
+        DirectoryExplorerService,
+    )
+
     # Bug #1650: type-only import for the lazily-constructed
     # activated_repo_manager property below. Kept under TYPE_CHECKING
     # (never imported at runtime here) so the real import stays local to
@@ -50,8 +72,159 @@ logger = logging.getLogger(__name__)
 # the TTL.
 _COLLECT_CACHE_TTL_SECONDS = 30.0
 _COLLECT_CACHE_MAX_REPOS = 64
-_collect_cache: "OrderedDict[str, Tuple[float, List[FileInfo]]]" = OrderedDict()
+_collect_cache: "OrderedDict[str, Tuple[float, Any]]" = OrderedDict()
 _collect_cache_lock = threading.Lock()
+
+#: Prefix of the cache keys the content-seam reads use. Never an absolute path,
+#: so a seam entry cannot collide with a local walk of the same directory.
+_SEAM_CACHE_PREFIX = "content-seam:"
+#: Shown for a file the manifest does not describe (a pruned directory, or a
+#: server that predates mtime): the same placeholder indexed_only listings use.
+_EPOCH = datetime.fromtimestamp(0, tz=timezone.utc)
+#: Named in the warning when a snapshot has no registered base clone.
+_SEAM_CONSUMER = "File tools"
+
+_T = TypeVar("_T")
+
+
+def _ttl_cached(key: str, build: Callable[[], _T]) -> _T:
+    """``build()``'s result, cached under *key* for ``_COLLECT_CACHE_TTL_SECONDS``.
+
+    The one TTL/LRU cache behind every listing, local or through the content
+    seam. Expiry is anchored to POST-build time (not a pre-build ``now``): a
+    walk that takes longer than the TTL must not be born already-expired --
+    that would deliver zero cache benefit for exactly the slow repos this
+    cache targets.
+    """
+    now = time.monotonic()
+    with _collect_cache_lock:
+        entry = _collect_cache.get(key)
+        if entry is not None and now < entry[0]:
+            _collect_cache.move_to_end(key)
+            return cast(_T, entry[1])
+
+    value = build()
+
+    expiry = time.monotonic() + _COLLECT_CACHE_TTL_SECONDS
+    with _collect_cache_lock:
+        _collect_cache[key] = (expiry, value)
+        _collect_cache.move_to_end(key)
+        while len(_collect_cache) > _COLLECT_CACHE_MAX_REPOS:
+            _collect_cache.popitem(last=False)
+    return value
+
+
+def modified_at_from_ns(mtime_ns: Optional[int]) -> datetime:
+    """A manifest ``mtime_ns`` as the ``modified_at`` a local ``stat()`` gives.
+
+    Computed exactly as CPython derives ``st_mtime`` from the same nanoseconds
+    (seconds plus nanoseconds times 1e-9, in floating point), so a file listed
+    through the seam carries the very timestamp a local listing would. Unknown
+    is the epoch placeholder, never "now".
+    """
+    if mtime_ns is None:
+        return _EPOCH
+    seconds, nanos = divmod(mtime_ns, 1_000_000_000)
+    return datetime.fromtimestamp(seconds + nanos * 1e-9, tz=timezone.utc)
+
+
+@dataclass(frozen=True)
+class ContentSeamSource:
+    """Where a golden repo's files are read when they are not on this pod:
+    the configured (non-local) backend, and the root that backend knows."""
+
+    backend: ContentBackend
+    root: str
+
+
+def content_seam_source(repo_path: str) -> Optional[ContentSeamSource]:
+    """The seam to read *repo_path* through, or None to read the local disk.
+
+    None -- today's behaviour, unchanged -- unless the running server's content
+    backend is NOT local. Then the repository is not on this pod: an alias
+    target that is a pod-local versioned snapshot (index state only) maps to
+    the golden repo's base clone, which the backend serves.
+    """
+    from code_indexer.server.startup.content_backend_wiring import (
+        golden_repo_content_root,
+        server_content_backend,
+    )
+
+    backend = server_content_backend()
+    if backend is None or backend.is_local:
+        return None
+    root = golden_repo_content_root(repo_path, consumer=_SEAM_CONSUMER)
+    return ContentSeamSource(backend=backend, root=str(root))
+
+
+def manifest_entries(
+    source: ContentSeamSource, prune_dirs: Sequence[str]
+) -> Tuple[ContentEntry, ...]:
+    """Every manifest entry of the repository, all pages, cached for the TTL.
+
+    ``prune_dirs`` is sent on every page, as the protocol requires; entries
+    are cached per (root, prune set), since different prune sets describe
+    different entry sets.
+    """
+    prune = tuple(sorted(set(prune_dirs)))
+    key = f"{_SEAM_CACHE_PREFIX}manifest:{','.join(prune)}:{source.root}"
+    return _ttl_cached(key, lambda: _walk_manifest(source, prune))
+
+
+def _walk_manifest(
+    source: ContentSeamSource, prune: Tuple[str, ...]
+) -> Tuple[ContentEntry, ...]:
+    """Page through the manifest until the last page.
+
+    A cursor that does not advance raises instead of looping forever on a
+    misbehaving backend.
+    """
+    entries: List[ContentEntry] = []
+    cursor: Optional[str] = None
+    while True:
+        page = source.backend.manifest(source.root, cursor=cursor, prune_dirs=prune)
+        entries.extend(page.entries)
+        if page.next_cursor is None:
+            return tuple(entries)
+        if page.next_cursor == cursor:
+            raise RuntimeError(
+                "content manifest cursor did not advance; refusing to loop"
+            )
+        cursor = page.next_cursor
+
+
+def fetch_one(source: ContentSeamSource, rel: str) -> FetchedFile:
+    """The fetch record for ONE repo-relative path.
+
+    A backend that yields nothing for it is reported as an error record, the
+    same shape as any other per-file failure.
+    """
+    fetched = next(iter(source.backend.fetch(source.root, [rel])), None)
+    if fetched is None:
+        return FetchedFile(path=rel, blob_sha=None, data=b"", error="not returned")
+    return fetched
+
+
+def directory_explorer_for(repo_path: str) -> "DirectoryExplorerService":
+    """The directory-tree service for a golden repo's alias target.
+
+    Local backends get today's disk walk of *repo_path*. A non-local backend
+    gets the same walk over the base clone's manifest, pruned of the
+    directories the tree always excludes.
+    """
+    from code_indexer.global_repos.directory_explorer import (
+        DirectoryExplorerService,
+        ManifestDirectoryExplorerService,
+    )
+
+    source = content_seam_source(repo_path)
+    if source is None:
+        return DirectoryExplorerService(Path(repo_path))
+    entries = manifest_entries(source, DirectoryExplorerService.prunable_dir_names())
+    return ManifestDirectoryExplorerService(
+        Path(source.root), ((e.path, e.is_symlink) for e in entries)
+    )
+
 
 # Same language detection as stats service
 LANGUAGE_EXTENSIONS = {
@@ -271,10 +444,15 @@ class FileListingService:
         Raises:
             FileNotFoundError: If path doesn't exist
         """
-        if not os.path.exists(repo_path):
-            raise FileNotFoundError(f"Path {repo_path} not found")
-
-        all_files = self._collect_listing(repo_path, query_params.indexed_only)
+        source = content_seam_source(repo_path)
+        if source is None:
+            if not os.path.exists(repo_path):
+                raise FileNotFoundError(f"Path {repo_path} not found")
+            all_files = self._collect_listing(repo_path, query_params.indexed_only)
+        else:
+            all_files = self._collect_listing_via_seam(
+                repo_path, source, query_params.indexed_only
+            )
         filtered_files = self._apply_filters(all_files, query_params)
         sorted_files = self._apply_sorting(filtered_files, query_params.sort_by)
         paginated_files, pagination_info = self._apply_pagination(
@@ -295,7 +473,11 @@ class FileListingService:
         — O(entries-in-dir) rather than O(files-in-repo) — and then runs the identical
         filter/sort/paginate pipeline, so results match the full-walk path exactly.
         """
-        files = self._collect_single_level(repo_path, subdir)
+        source = content_seam_source(repo_path)
+        if source is None:
+            files = self._collect_single_level(repo_path, subdir)
+        else:
+            files = self._single_level_via_seam(source, subdir)
         filtered_files = self._apply_filters(files, query_params)
         sorted_files = self._apply_sorting(filtered_files, query_params.sort_by)
         paginated_files, pagination_info = self._apply_pagination(
@@ -355,15 +537,13 @@ class FileListingService:
 
                         stat_info = entry.stat()
                         files.append(
-                            FileInfo(
-                                path=relative_path_str,
-                                size_bytes=stat_info.st_size,
-                                modified_at=datetime.fromtimestamp(
+                            self._build_file_info(
+                                relative_path_str,
+                                stat_info.st_size,
+                                datetime.fromtimestamp(
                                     stat_info.st_mtime, tz=timezone.utc
                                 ),
-                                language=self._detect_language(Path(entry.path)),
-                                is_indexed=Path(entry.name).suffix.lower()
-                                in indexable_extensions,
+                                indexable_extensions,
                             )
                         )
                     except (OSError, PermissionError) as e:
@@ -522,26 +702,157 @@ class FileListingService:
         repo) reuse the walk. Keyed on repo_path; immutable versioned golden-repo
         snapshots change path on refresh and miss naturally.
         """
-        now = time.monotonic()
-        with _collect_cache_lock:
-            entry = _collect_cache.get(repo_path)
-            if entry is not None and now < entry[0]:
-                _collect_cache.move_to_end(repo_path)
-                return entry[1]
+        return _ttl_cached(repo_path, lambda: self._collect_files_uncached(repo_path))
 
-        files = self._collect_files_uncached(repo_path)
+    # ── reads through the content seam (repository not on this pod) ────────
 
-        # Anchor expiry to POST-walk time (not the pre-walk `now` captured
-        # above). A walk that takes longer than the TTL must not be born
-        # already-expired -- that would deliver zero cache benefit for
-        # exactly the slow repos this cache targets.
-        expiry = time.monotonic() + _COLLECT_CACHE_TTL_SECONDS
-        with _collect_cache_lock:
-            _collect_cache[repo_path] = (expiry, files)
-            _collect_cache.move_to_end(repo_path)
-            while len(_collect_cache) > _COLLECT_CACHE_MAX_REPOS:
-                _collect_cache.popitem(last=False)
+    def _collect_listing_via_seam(
+        self, repo_path: str, source: ContentSeamSource, indexed_only: bool
+    ) -> List[FileInfo]:
+        """:meth:`_collect_listing` for a repository behind the content seam.
+
+        The index is cidx's own state and stays on this pod, at the alias target
+        (*repo_path*), so ``indexed_only`` still reads it there. Everything else
+        comes from the backend's manifest of the base clone.
+        """
+        if indexed_only:
+            from_index = self._collect_files_from_index(repo_path)
+            if from_index is not None:
+                return from_index
+        return self._seam_listing(source)
+
+    def _seam_listing(self, source: ContentSeamSource) -> List[FileInfo]:
+        """The seam's full listing, cached for the TTL like a local walk."""
+        return _ttl_cached(
+            f"{_SEAM_CACHE_PREFIX}listing:{source.root}",
+            lambda: self._collect_files_via_seam(source),
+        )
+
+    def _collect_files_via_seam(self, source: ContentSeamSource) -> List[FileInfo]:
+        """:meth:`_collect_files_uncached`, from the manifest instead of a walk.
+
+        Same exclusions (``ALWAYS_EXCLUDED_DIRS`` pruned by the backend and
+        re-checked here), same root ``.gitignore`` semantics, same FileInfo
+        fields: size from the entry, modified time from its ``mtime_ns``.
+
+        Symlinks: the manifest reports a link and never follows it, so a link is
+        listed as itself (its own size and time) and nothing is listed beneath a
+        linked directory. The local walk follows both.
+        """
+        entries = manifest_entries(source, sorted(self.ALWAYS_EXCLUDED_DIRS))
+        gitignore_spec = self._load_gitignore_spec_via_seam(source)
+        indexable_extensions = self._get_indexable_extensions()
+        files: List[FileInfo] = []
+        for entry in entries:
+            if self._is_in_excluded_dir(Path(entry.path)):
+                continue
+            if gitignore_spec and gitignore_spec.match_file(entry.path):
+                continue
+            files.append(
+                self._build_file_info(
+                    entry.path,
+                    entry.size,
+                    modified_at_from_ns(entry.mtime_ns),
+                    indexable_extensions,
+                )
+            )
         return files
+
+    def _single_level_via_seam(
+        self, source: ContentSeamSource, subdir: str
+    ) -> List[FileInfo]:
+        """:meth:`_collect_single_level` derived from the seam's listing.
+
+        One level of the cached full listing, so the result holds exactly what
+        the local scan returns: files only, same exclusions, same gitignore.
+        A subdir that escapes the repository yields nothing, as locally.
+        """
+        try:
+            base = confine_relative_path(subdir)
+        except PermissionError:
+            return []
+        return [
+            f for f in self._seam_listing(source) if self._dirname_of(f.path) == base
+        ]
+
+    def _load_gitignore_spec_via_seam(
+        self, source: ContentSeamSource
+    ) -> Optional[pathspec.PathSpec]:
+        """:meth:`_load_gitignore_spec`, with the root ``.gitignore`` fetched.
+
+        A missing or unfetchable file means no spec, as locally; undecodable
+        bytes are warned about and ignored, as locally.
+        """
+        fetched = fetch_one(source, ".gitignore")
+        if fetched.error is not None:
+            return None
+        try:
+            text = fetched.data.decode("utf-8")
+        except UnicodeDecodeError as e:
+            logger.warning(
+                format_error_log(
+                    "CACHE-GENERAL-014",
+                    "Failed to read .gitignore",
+                    gitignore_path=f"{source.root}/.gitignore",
+                    error=str(e),
+                ),
+                extra=get_log_extra("CACHE-GENERAL-014"),
+            )
+            return None
+        return self._gitignore_spec_from_text(text)
+
+    def _read_lines_via_seam(
+        self, source: ContentSeamSource, file_path: str
+    ) -> Tuple[List[str], int, datetime, Path]:
+        """:meth:`_read_lines_local` for a file behind the content seam.
+
+        Confinement is lexical (absolute, ``..`` and malformed paths are refused
+        with PermissionError) because there is no local tree to resolve against.
+        The bytes come from ONE fetch and are decoded exactly as the local
+        text-mode ``open`` decodes them, so lines match byte for byte. Size is
+        the fetched length; the modified time is the manifest entry's, or the
+        epoch placeholder for a file the manifest does not describe.
+        """
+        rel = confine_relative_path(file_path)
+        if not rel:
+            raise FileNotFoundError(f"Not a file: {file_path}")
+        fetched = fetch_one(source, rel)
+        entries = manifest_entries(source, sorted(self.ALWAYS_EXCLUDED_DIRS))
+        if fetched.error is not None:
+            prefix = rel + "/"
+            if any(e.path.startswith(prefix) for e in entries):
+                raise FileNotFoundError(f"Not a file: {file_path}")
+            raise FileNotFoundError(f"File not found: {file_path}")
+        entry = next((e for e in entries if e.path == rel), None)
+        all_lines = self._decode_lines(fetched.data)
+        modified_at = modified_at_from_ns(entry.mtime_ns if entry else None)
+        return all_lines, len(fetched.data), modified_at, Path(rel)
+
+    @staticmethod
+    def _decode_lines(data: bytes) -> List[str]:
+        """Lines of *data* exactly as ``open(..., "r", encoding="utf-8",
+        errors="replace").readlines()`` yields them (universal newlines)."""
+        with io.TextIOWrapper(
+            io.BytesIO(data), encoding="utf-8", errors="replace"
+        ) as text:
+            return text.readlines()
+
+    def _build_file_info(
+        self,
+        relative_path: str,
+        size: int,
+        modified_at: datetime,
+        indexable_extensions: Set[str],
+    ) -> FileInfo:
+        """One listing row, built the same way for every source of files."""
+        path = Path(relative_path)
+        return FileInfo(
+            path=relative_path,
+            size_bytes=size,
+            modified_at=modified_at,
+            language=self._detect_language(path),
+            is_indexed=path.suffix.lower() in indexable_extensions,
+        )
 
     def _get_indexable_extensions(self) -> Set[str]:
         """Indexable extensions from config, fetched ONCE per collection.
@@ -623,16 +934,16 @@ class FileListingService:
 
                         stat_info = file_path.stat()
 
-                        file_info = FileInfo(
-                            path=relative_path_str,
-                            size_bytes=stat_info.st_size,
-                            modified_at=datetime.fromtimestamp(
-                                stat_info.st_mtime, tz=timezone.utc
-                            ),
-                            language=self._detect_language(file_path),
-                            is_indexed=file_path.suffix.lower() in indexable_extensions,
+                        files.append(
+                            self._build_file_info(
+                                relative_path_str,
+                                stat_info.st_size,
+                                datetime.fromtimestamp(
+                                    stat_info.st_mtime, tz=timezone.utc
+                                ),
+                                indexable_extensions,
+                            )
                         )
-                        files.append(file_info)
 
                     except (OSError, PermissionError) as e:
                         logger.warning(
@@ -695,10 +1006,7 @@ class FileListingService:
             with open(gitignore_path, "r", encoding="utf-8") as f:
                 gitignore_content = f.read()
 
-            # Parse gitignore patterns using pathspec library
-            return pathspec.PathSpec.from_lines(
-                "gitwildmatch", gitignore_content.splitlines()
-            )
+            return self._gitignore_spec_from_text(gitignore_content)
         except (OSError, UnicodeDecodeError) as e:
             logger.warning(
                 format_error_log(
@@ -710,6 +1018,14 @@ class FileListingService:
                 extra=get_log_extra("CACHE-GENERAL-014"),
             )
             return None
+
+    @staticmethod
+    def _gitignore_spec_from_text(gitignore_content: str) -> pathspec.PathSpec:
+        """Parse a root ``.gitignore``'s text -- the one parser for both the
+        local file and the one fetched through the content seam."""
+        return pathspec.PathSpec.from_lines(
+            "gitwildmatch", gitignore_content.splitlines()
+        )
 
     def _detect_language(self, file_path: Path) -> Optional[str]:
         """
@@ -1181,6 +1497,35 @@ class FileListingService:
             PermissionError: If path traversal attempted
             FileNotFoundError: If file doesn't exist
         """
+        source = content_seam_source(repo_path)
+        if source is None:
+            all_lines, size, modified_at, language_path = self._read_lines_local(
+                repo_path, file_path
+            )
+        else:
+            all_lines, size, modified_at, language_path = self._read_lines_via_seam(
+                source, file_path
+            )
+        return self._paginate_file_lines(
+            all_lines,
+            file_path=file_path,
+            size=size,
+            modified_at=modified_at,
+            language_path=language_path,
+            offset=offset,
+            limit=limit,
+            skip_truncation=skip_truncation,
+        )
+
+    def _read_lines_local(
+        self, repo_path: str, file_path: str
+    ) -> Tuple[List[str], int, datetime, Path]:
+        """A file's lines, size, modified time and language path, from this disk.
+
+        Raises:
+            PermissionError: If path traversal attempted
+            FileNotFoundError: If file doesn't exist or is not a file
+        """
         # Bug #1891 round 2 (S1): the previous
         # str(full_file_path).startswith(str(repo_root)) check incorrectly
         # admitted a SIBLING directory whose name starts with repo_root's
@@ -1201,6 +1546,24 @@ class FileListingService:
         with open(full_file_path, "r", encoding="utf-8", errors="replace") as f:
             all_lines = f.readlines()
 
+        stat_info = full_file_path.stat()
+        modified_at = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
+        return all_lines, stat_info.st_size, modified_at, full_file_path
+
+    def _paginate_file_lines(
+        self,
+        all_lines: List[str],
+        *,
+        file_path: str,
+        size: int,
+        modified_at: datetime,
+        language_path: Path,
+        offset: Optional[int],
+        limit: Optional[int],
+        skip_truncation: bool,
+    ) -> Dict[str, Any]:
+        """The get_file_content_by_path response for a file's lines, wherever
+        they were read from: offset/limit, character budget and metadata."""
         total_lines = len(all_lines)
 
         # CRITICAL: Default behavior changed - return first chunk only (not entire file)
@@ -1290,13 +1653,10 @@ class FileListingService:
             next_offset = effective_offset + returned_lines if has_more else None
 
         # Build metadata with pagination info
-        stat_info = full_file_path.stat()
         metadata = {
-            "size": stat_info.st_size,
-            "modified_at": datetime.fromtimestamp(
-                stat_info.st_mtime, tz=timezone.utc
-            ).isoformat(),
-            "language": self._detect_language(full_file_path),
+            "size": size,
+            "modified_at": modified_at.isoformat(),
+            "language": self._detect_language(language_path),
             "path": file_path,
             # Original pagination metadata
             "total_lines": total_lines,

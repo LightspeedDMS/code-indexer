@@ -77,29 +77,7 @@ def resolve_confined_path(repo_root: Path, relative_path: str) -> Path:
             too, instead of an uncaught exception reaching a REST/MCP/
             CRUD front door as a 500 or unhandled traceback.
     """
-    if not isinstance(relative_path, str):
-        raise PermissionError("Access denied")
-
-    # Proactively reject an overlong component BEFORE any syscall.
-    # Path.resolve() itself does not raise for this input -- it is the
-    # caller's next filesystem call that would raise OSError, and by
-    # then it is too late to convert cleanly.
-    #
-    # Also catches UnicodeError here (round 3 P3): a lone surrogate code
-    # point (e.g. "\ud800") is not representable in UTF-8 and makes
-    # .encode("utf-8", "surrogateescape") raise UnicodeEncodeError --
-    # "surrogateescape" only round-trips the specific U+DC80-U+DCFF range
-    # produced by *decoding* with that handler, not an arbitrary lone
-    # surrogate appearing in a caller-supplied string.
-    try:
-        for _component in relative_path.split("/"):
-            if (
-                len(_component.encode("utf-8", "surrogateescape"))
-                > MAX_CONFINED_PATH_COMPONENT_BYTES
-            ):
-                raise PermissionError("Access denied")
-    except UnicodeError as exc:
-        raise PermissionError("Access denied") from exc
+    _reject_malformed_relative_path(relative_path)
 
     try:
         repo_root_resolved = Path(repo_root).resolve()
@@ -112,6 +90,68 @@ def resolve_confined_path(repo_root: Path, relative_path: str) -> Path:
     except ValueError:
         raise PermissionError("Access denied")
     return candidate
+
+
+def _reject_malformed_relative_path(relative_path: object) -> str:
+    """Return *relative_path* as a str, or raise PermissionError for a caller
+    path no file can have.
+
+    Shared by both confinement primitives, before either touches anything: a
+    non-string (an untrusted request body can carry ``None``), a component
+    longer than ``MAX_CONFINED_PATH_COMPONENT_BYTES``, or a component that is
+    not representable in UTF-8.
+
+    Proactively rejects an overlong component BEFORE any syscall --
+    Path.resolve() itself does not raise for this input; it is the caller's
+    next filesystem call that would raise OSError, and by then it is too late
+    to convert cleanly.
+
+    Also catches UnicodeError (round 3 P3): a lone surrogate code point (e.g.
+    "\\ud800") is not representable in UTF-8 and makes
+    ``.encode("utf-8", "surrogateescape")`` raise UnicodeEncodeError --
+    "surrogateescape" only round-trips the specific U+DC80-U+DCFF range
+    produced by *decoding* with that handler, not an arbitrary lone surrogate
+    appearing in a caller-supplied string.
+    """
+    if not isinstance(relative_path, str):
+        raise PermissionError("Access denied")
+    try:
+        for _component in relative_path.split("/"):
+            if (
+                len(_component.encode("utf-8", "surrogateescape"))
+                > MAX_CONFINED_PATH_COMPONENT_BYTES
+            ):
+                raise PermissionError("Access denied")
+    except UnicodeError as exc:
+        raise PermissionError("Access denied") from exc
+    return relative_path
+
+
+def confine_relative_path(relative_path: object) -> str:
+    """Confine a caller-supplied path LEXICALLY and return its canonical form.
+
+    The sibling of :func:`resolve_confined_path` for a repository that is not
+    on this machine's disk (a delegated content backend): there is nothing to
+    ``resolve()`` against, so confinement is decided from the string alone, and
+    the result is the repo-relative POSIX form the content seam speaks.
+
+    Stricter than the resolving primitive, never looser: an absolute path, any
+    ``..`` component and an embedded NUL are refused outright, even where
+    resolving would have landed back inside the root (``a/../b``). ``.`` and
+    empty components are dropped, so ``./a//b/`` becomes ``a/b``; the root
+    itself is ``""``, which the caller decides how to treat. Symlinks cannot be
+    judged here -- the backend refuses to follow them.
+
+    Raises:
+        PermissionError: on any refusal, the type every caller already handles.
+    """
+    path = _reject_malformed_relative_path(relative_path)
+    if "\x00" in path or path.startswith("/"):
+        raise PermissionError("Access denied")
+    parts = [part for part in path.split("/") if part not in ("", ".")]
+    if ".." in parts:
+        raise PermissionError("Access denied")
+    return "/".join(parts)
 
 
 def resolve_if_within_root(candidate: Path, resolved_root: Path) -> Optional[Path]:

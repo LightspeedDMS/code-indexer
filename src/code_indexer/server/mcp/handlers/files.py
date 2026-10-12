@@ -1624,7 +1624,10 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     if not _admission.allowed:
         return _mcp_response(memory_pressure_mcp_payload(_admission))
 
-    from code_indexer.global_repos.directory_explorer import DirectoryExplorerService
+    from code_indexer.server.services.file_service import directory_explorer_for
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
 
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -1658,6 +1661,18 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         golden_repos_dir = _get_golden_repos_dir()
         repo_path = _get_legacy()._resolve_repo_path(repository_alias, golden_repos_dir)
+        is_global = isinstance(repository_alias, str) and repository_alias.endswith(
+            "-global"
+        )
+        delegated = is_global and is_content_seam_delegated()
+        if repo_path is None and delegated:
+            # The resolver above probes THIS pod's disk (is_dir, .git), which
+            # holds no repository files under a delegated content backend. An
+            # alias it cannot find there is resolved from the alias pointer /
+            # registry instead, exactly as list_files and browse_directory do.
+            repo_path, error_resp = _resolve_global_repo_target(repository_alias, user)
+            if error_resp is not None:
+                return error_resp
         if repo_path is None:
             available_repos = _get_available_repos(user)
             return _mcp_response(
@@ -1668,7 +1683,14 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 )
             )
 
-        service = DirectoryExplorerService(Path(repo_path))
+        if is_global:
+            service = directory_explorer_for(repo_path)
+        else:
+            from code_indexer.global_repos.directory_explorer import (
+                DirectoryExplorerService,
+            )
+
+            service = DirectoryExplorerService(Path(repo_path))
         result = service.generate_tree(
             path=args.get("path"),
             max_depth=_coerce_int(args.get("max_depth"), _DEFAULT_TREE_DEPTH),
