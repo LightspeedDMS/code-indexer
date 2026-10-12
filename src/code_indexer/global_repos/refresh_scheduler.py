@@ -31,6 +31,7 @@ from code_indexer.config import ConfigManager
 from .alias_manager import AliasManager
 from .git_error_classifier import GitFetchError
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
+from code_indexer.global_repos.write_mode_markers import WriteModeMarkers
 from .git_pull_updater import GitPullUpdater
 from .meta_directory_updater import MetaDirectoryUpdater
 from .update_strategy import UpdateStrategy
@@ -464,7 +465,7 @@ def _is_git_repo_url(repo_url: str) -> bool:
 # formatter instead of reimplementing this shape per file.
 
 
-# TTL for .write_mode/{alias}.json marker files (Bug #240).
+# TTL for write-mode markers (Bug #240).
 # Markers older than this are treated as orphaned (client disconnected without
 # calling exit_write_mode) and are cleaned up automatically.
 WRITE_MODE_MARKER_TTL_SECONDS = 1800  # 30 minutes
@@ -1625,10 +1626,10 @@ class RefreshScheduler:
 
     def cleanup_stale_write_mode_markers(self, force: bool = False) -> None:
         """
-        Clean up orphaned .write_mode/{alias}.json marker files (Bug #240).
+        Clean up orphaned write-mode markers (Bug #240).
 
         When an MCP client calls enter_write_mode but disconnects without calling
-        exit_write_mode, the marker file persists indefinitely because there is no
+        exit_write_mode, the marker persists indefinitely because there is no
         session-lifecycle hook to trigger cleanup.
 
         This method is called:
@@ -1638,6 +1639,11 @@ class RefreshScheduler:
           WRITE_MODE_MARKER_TTL_SECONDS (30 minutes), preserving fresh markers for
           active sessions.
 
+        Content seam step 5a: markers are control-plane metadata. In cluster
+        mode they live in the shared registry, where a restarting node's
+        "every marker is orphaned" no longer holds -- the other nodes' sessions
+        survive it -- so force degrades to the TTL rule there.
+
         For each removed marker the corresponding write lock (owner='mcp_write_mode')
         is released so the refresh scheduler is not permanently blocked.
 
@@ -1646,55 +1652,55 @@ class RefreshScheduler:
                    If False (default), only remove markers older than
                    WRITE_MODE_MARKER_TTL_SECONDS.
         """
-        write_mode_dir = self.golden_repos_dir / ".write_mode"
-        if not write_mode_dir.exists():
-            return
+        markers = WriteModeMarkers(self.golden_repos_dir)
+        if force and markers.is_shared_across_nodes:
+            logger.info(
+                "Write-mode markers are shared across cluster nodes; startup "
+                "cleanup removes only markers past their TTL"
+            )
+            force = False
 
-        for marker_path in write_mode_dir.glob("*.json"):
-            alias = marker_path.stem  # filename without .json
+        for alias in markers.names():
             try:
-                self._cleanup_single_write_mode_marker(marker_path, alias, force)
+                self._cleanup_single_write_mode_marker(markers, alias, force)
             except Exception as exc:
                 # Never let a single marker failure crash the scheduler
                 logger.warning(
-                    f"Unexpected error cleaning write mode marker {marker_path.name}: "
+                    f"Unexpected error cleaning write mode marker {alias!r}: "
                     f"{type(exc).__name__}: {exc}"
                 )
 
     def _cleanup_single_write_mode_marker(
-        self, marker_path: Path, alias: str, force: bool
+        self, markers: WriteModeMarkers, alias: str, force: bool
     ) -> None:
         """
-        Evaluate and optionally remove a single write mode marker file.
+        Evaluate and optionally remove a single write mode marker.
 
         If force=True, the marker is always removed (startup cleanup).
         If force=False, the marker is removed only when:
-        - it contains invalid/corrupt JSON, OR
+        - it is unreadable (corrupt JSON), OR
         - the 'entered_at' field is missing, OR
         - entered_at + WRITE_MODE_MARKER_TTL_SECONDS < now.
 
         When a marker is removed the corresponding write lock is released.
         """
-        import json as _json
         from datetime import datetime, timezone
 
         should_remove = force  # Always remove on startup
         entered_at_str = ""  # H1: initialized here so TOCTOU guard can reference it
 
         if not should_remove:
-            # Determine staleness from marker content
-            try:
-                content = _json.loads(marker_path.read_text())
-            except (OSError, _json.JSONDecodeError) as exc:
+            content = markers.get(alias)
+            if content is None:
                 logger.warning(
-                    f"Corrupt write mode marker {marker_path.name} ({exc}), treating as stale"
+                    f"Unreadable write mode marker {alias!r}, treating as stale"
                 )
                 should_remove = True
             else:
                 entered_at_str = content.get("entered_at", "")
                 if not entered_at_str:
                     logger.warning(
-                        f"Write mode marker {marker_path.name} has no 'entered_at', treating as stale"
+                        f"Write mode marker {alias!r} has no 'entered_at', treating as stale"
                     )
                     should_remove = True
                 else:
@@ -1709,7 +1715,7 @@ class RefreshScheduler:
                             should_remove = True
                     except (ValueError, TypeError):
                         logger.warning(
-                            f"Write mode marker {marker_path.name} has unparseable "
+                            f"Write mode marker {alias!r} has unparseable "
                             f"'entered_at' ({entered_at_str!r}), treating as stale"
                         )
                         should_remove = True
@@ -1720,28 +1726,23 @@ class RefreshScheduler:
         # H1 fix: Re-read marker to check a new session hasn't taken over (TOCTOU guard).
         # Only applies for non-force cleanups: startup force=True removes everything unconditionally.
         if not force:
-            try:
-                current_content = _json.loads(marker_path.read_text())
+            current_content = markers.get(alias)
+            if current_content is not None:
                 current_entered_at = current_content.get("entered_at", "")
                 if current_entered_at != entered_at_str:
                     logger.debug(
-                        f"Write mode marker {marker_path.name} was refreshed by new session, skipping cleanup"
+                        f"Write mode marker {alias!r} was refreshed by new session, skipping cleanup"
                     )
                     return
-            except (OSError, _json.JSONDecodeError):
-                pass  # File gone or corrupt — proceed with cleanup
 
-        # Remove the marker file
         try:
-            marker_path.unlink(missing_ok=True)
+            markers.remove(alias)
             logger.info(
                 f"Cleaned up {'orphaned' if not force else 'startup'} write mode marker: "
-                f"{marker_path.name} (alias={alias!r})"
+                f"{alias!r}"
             )
-        except OSError as exc:
-            logger.warning(
-                f"Could not delete write mode marker {marker_path.name}: {exc}"
-            )
+        except Exception as exc:
+            logger.warning(f"Could not delete write mode marker {alias!r}: {exc}")
             return
 
         # Release the corresponding write lock so the scheduler is not blocked
@@ -1956,7 +1957,7 @@ class RefreshScheduler:
         self._running = True
         self._stop_event.clear()  # Reset event for new start
 
-        # Bug #240: On startup, ALL .write_mode/ markers are orphaned because no
+        # Bug #240: On startup, ALL write-mode markers are orphaned because no
         # MCP sessions survive a server restart. Force-clean them before the
         # scheduler loop starts so refresh cycles are not blocked.
         # Bug #734: wrap in try/except — if cleanup raises, log the error and

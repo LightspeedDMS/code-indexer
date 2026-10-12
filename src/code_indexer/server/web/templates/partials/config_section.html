@@ -1061,6 +1061,70 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<!-- Control-Plane Metadata Section (content seam step 5a) -->
+<details class="config-section" id="section-control-plane-metadata">
+    <summary>
+        <h2>Control-Plane Metadata</h2>
+    </summary>
+    <p class="section-description">
+        Golden-repo alias pointers and write-mode markers live in the server's registry
+        (PostgreSQL in cluster mode, SQLite in solo mode) instead of in files on the
+        repository volume. Until the canary is released fleet-wide they are also written to
+        the old files, so a rollback can read them. Set the read source to
+        <code>files</code> only to roll back: a rolled-back server then reads the
+        dual-written files, and its own writes go to the file first and the registry second.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-control-plane-metadata">
+            <table class="config-table">
+                <tr>
+                    <td class="config-label">Read Source</td>
+                    <td class="config-value">{{ config.control_plane_metadata.metadata_read_source }}</td>
+                    <td class="config-description">Where aliases and write-mode markers are read from (default: registry)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">File Dual-Write</td>
+                    <td class="config-value">{{ 'Yes' if config.control_plane_metadata.metadata_file_dual_write else 'No' }}</td>
+                    <td class="config-description">Also write the old alias/marker files for the rollback window (default: Yes)</td>
+                </tr>
+            </table>
+            <div class="form-actions">
+                <button class="outline small" onclick="toggleEditMode('control-plane-metadata')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-control-plane-metadata" method="post" action="/admin/config/control_plane_metadata" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.control_plane_metadata %}
+            <div class="validation-error">{{ validation_errors.control_plane_metadata }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="cpm-metadata-read-source">
+                    Read Source
+                    <select id="cpm-metadata-read-source" name="metadata_read_source">
+                        <option value="registry" {% if config.control_plane_metadata.metadata_read_source == 'registry' %}selected{% endif %}>registry</option>
+                        <option value="files" {% if config.control_plane_metadata.metadata_read_source == 'files' %}selected{% endif %}>files</option>
+                    </select>
+                    <small>registry by default. files is the rollback setting.</small>
+                </label>
+                <label for="cpm-metadata-file-dual-write">
+                    File Dual-Write
+                    <select id="cpm-metadata-file-dual-write" name="metadata_file_dual_write">
+                        <option value="true" {% if config.control_plane_metadata.metadata_file_dual_write %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.control_plane_metadata.metadata_file_dual_write %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Turned off by the release that retires the canary.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('control-plane-metadata')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 <!-- Temporal Legacy Migration Settings Section (Issue #1548) -->
 <details class="config-section" id="section-temporal-legacy-migration">
     <summary>

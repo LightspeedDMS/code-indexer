@@ -880,8 +880,10 @@ def _resolve_branch_repo_path(repository_alias: str, user: User) -> tuple:
             )
         except GoldenRepoNotFoundError:
             # Fall back to whatever AliasManager recorded for this alias.
+            # The aliases live under golden-repos/aliases -- this used to pass
+            # the golden-repos root itself, so the fallback never found one.
             golden_repos_dir = _get_golden_repos_dir()
-            alias_manager = AliasManager(golden_repos_dir)
+            alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
             target_path = alias_manager.read_alias(repository_alias) or ""
 
         if not target_path:

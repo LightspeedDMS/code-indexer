@@ -434,6 +434,27 @@ class DatabaseSchema:
         )
     """
 
+    # Content seam step 5a: control-plane metadata (golden-repo alias pointers
+    # and write-mode markers) lives in the registry, not in per-pod files
+    # under golden-repos/aliases/ and golden-repos/.write_mode/. One row per
+    # key; payload is the JSON document the file used to hold. Mirrors
+    # PostgreSQL migration 054.
+    CREATE_GOLDEN_REPO_ALIASES_TABLE = """
+        CREATE TABLE IF NOT EXISTS golden_repo_aliases (
+            name TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """
+
+    CREATE_WRITE_MODE_MARKERS_TABLE = """
+        CREATE TABLE IF NOT EXISTS write_mode_markers (
+            name TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """
+
     # Story #283: Wiki render cache tables
     CREATE_WIKI_CACHE_TABLE = """
         CREATE TABLE IF NOT EXISTS wiki_cache (
@@ -828,6 +849,9 @@ class DatabaseSchema:
             conn.execute(self.CREATE_DEPENDENCY_MAP_TRACKING_TABLE)
             # Story #1360 (Epic #1333 S3): HNSW orphan repair fleet sweep state
             conn.execute(self.CREATE_HNSW_ORPHAN_SWEEP_STATE_TABLE)
+            # Content seam step 5a: control-plane metadata in the registry
+            conn.execute(self.CREATE_GOLDEN_REPO_ALIASES_TABLE)
+            conn.execute(self.CREATE_WRITE_MODE_MARKERS_TABLE)
             # Story #283: Wiki render cache tables
             conn.execute(self.CREATE_WIKI_CACHE_TABLE)
             conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)

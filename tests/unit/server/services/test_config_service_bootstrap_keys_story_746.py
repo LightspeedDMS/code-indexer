@@ -112,6 +112,10 @@ def test_all_server_config_fields_are_classified() -> None:
             "fleet_migration_config",  # Story #1458 — runtime Web UI setting (fleet migration scheduler enable/interval)
             "temporal_legacy_migration_config",  # Issue #1548 — runtime Web UI setting (legacy temporal shard relocation gates)
             "indexing_watchdog_config",  # Bug #1530 — runtime Web UI setting (indexing watchdog thresholds)
+            # Content seam step 5a -- runtime, not bootstrap: the read source
+            # and dual-write switch must flip on every node together, which a
+            # per-pod config.json cannot guarantee.
+            "control_plane_metadata_config",
         }
     )
 

@@ -279,10 +279,9 @@ class SCIPQueryService:
                 resolve_alias_or_index_path,
             )
 
-            aliases_dir = self._golden_repos_dir / "aliases"
-            if not aliases_dir.is_dir():
+            alias_manager = AliasManager.existing(self._golden_repos_dir / "aliases")
+            if alias_manager is None:
                 return None
-            alias_manager = AliasManager(str(aliases_dir))
 
             # Bug #1315: look up repo_entry for index_path fallback.
             # Each alias variant needs its OWN repo_entry -- the -global and

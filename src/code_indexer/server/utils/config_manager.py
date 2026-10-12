@@ -1333,6 +1333,37 @@ class AliasLockConfig:
     db_backed_enabled_promoted: bool = False
 
 
+#: metadata_read_source values: where alias pointers and write-mode markers
+#: are READ from (content seam step 5a).
+METADATA_READ_SOURCE_REGISTRY = "registry"
+METADATA_READ_SOURCE_FILES = "files"
+METADATA_READ_SOURCES = (METADATA_READ_SOURCE_REGISTRY, METADATA_READ_SOURCE_FILES)
+
+
+@dataclass
+class ControlPlaneMetadataConfig:
+    """Control-plane metadata in the registry, with a file rollback window
+    (content seam step 5a; docs/content-seam-remaining-consumers.md).
+
+    Golden-repo alias pointers and write-mode markers live in the server's
+    registry (SQLite solo, PostgreSQL cluster). Until the canary is released
+    fleet-wide they are also written to the old files, so a rollback can read
+    them there.
+
+    Runtime (DB-backed, Web UI Config screen), not bootstrap: every node must
+    switch together, which a per-pod config.json cannot guarantee.
+
+    - ``metadata_read_source``: ``registry`` (default) or ``files``. Rollback
+      sets ``files``; with ``files`` a write lands in the file FIRST and the
+      registry second, synchronously, so the server reads its own writes.
+    - ``metadata_file_dual_write``: also write the files (default on). Turned
+      off, and the files removed, by the release that retires the canary.
+    """
+
+    metadata_read_source: str = METADATA_READ_SOURCE_REGISTRY
+    metadata_file_dual_write: bool = True
+
+
 @dataclass
 class FtsBackfillSweepConfig:
     """EVO-66445: golden-repo FTS backfill sweep configuration.
@@ -1925,6 +1956,9 @@ class ServerConfig:
     # Issue #1546 Phase 2 - DB-backed golden-repo alias lock rollout gate
     alias_lock_config: Optional[AliasLockConfig] = None
 
+    # Content seam step 5a - aliases and write-mode markers in the registry
+    control_plane_metadata_config: Optional[ControlPlaneMetadataConfig] = None
+
     # EVO-66445 - golden-repo FTS backfill sweep configuration
     fts_backfill_sweep_config: Optional[FtsBackfillSweepConfig] = None
     #: Semantic (vector) index self-heal backfill — ships OFF (cost gate).
@@ -2280,6 +2314,9 @@ class ServerConfig:
         # Issue #1546 Phase 2 - Initialize alias lock rollout-gate config
         if self.alias_lock_config is None:
             self.alias_lock_config = AliasLockConfig()
+        # Content seam step 5a - control-plane metadata read source / dual-write
+        if self.control_plane_metadata_config is None:
+            self.control_plane_metadata_config = ControlPlaneMetadataConfig()
         # Story #977 - Initialize X-Ray config
         if self.xray_config is None:
             self.xray_config = XRayConfig()
@@ -3067,6 +3104,17 @@ class ServerConfigManager:
             _alc_allowed = {f.name for f in fields(AliasLockConfig)}
             config_dict["alias_lock_config"] = AliasLockConfig(
                 **{k: v for k, v in _alc_dict.items() if k in _alc_allowed}
+            )
+
+        # Content seam step 5a: same dict-to-dataclass conversion, unknown
+        # keys filtered for rolling-upgrade safety.
+        if "control_plane_metadata_config" in config_dict and isinstance(
+            config_dict["control_plane_metadata_config"], dict
+        ):
+            _cpm_dict = config_dict["control_plane_metadata_config"]
+            _cpm_allowed = {f.name for f in fields(ControlPlaneMetadataConfig)}
+            config_dict["control_plane_metadata_config"] = ControlPlaneMetadataConfig(
+                **{k: v for k, v in _cpm_dict.items() if k in _cpm_allowed}
             )
 
         # Story #977: Convert xray_config dict to XRayConfig

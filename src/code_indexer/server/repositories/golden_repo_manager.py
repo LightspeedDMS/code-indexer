@@ -4768,9 +4768,7 @@ class GoldenRepoManager:
         from code_indexer.global_repos.alias_manager import AliasManager
 
         global_alias = f"{alias}-global"
-        aliases_dir = os.path.join(self.golden_repos_dir, "aliases")
-        os.makedirs(aliases_dir, exist_ok=True)
-        alias_manager = AliasManager(aliases_dir)
+        alias_manager = AliasManager(os.path.join(self.golden_repos_dir, "aliases"))
 
         current_target = alias_manager.read_alias(global_alias)
         alias_manager.create_alias(global_alias, new_snapshot_path, repo_name=alias)

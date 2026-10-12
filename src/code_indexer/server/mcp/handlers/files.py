@@ -12,6 +12,7 @@ import logging
 from typing import Dict, Any, Optional, Tuple
 from pathlib import Path
 
+from code_indexer.global_repos.write_mode_markers import WriteModeMarkers
 from code_indexer.server.auth.user_manager import User
 from . import _utils
 from code_indexer.server.services.config_service import get_config_service
@@ -81,9 +82,7 @@ def _is_write_mode_active(repo_alias: str, golden_repos_dir: Optional[str]) -> b
     """Return True if a write-mode marker exists for repo_alias."""
     if not golden_repos_dir:
         return False
-    alias = _write_mode_strip_global(repo_alias)
-    marker_file = Path(golden_repos_dir) / ".write_mode" / f"{alias}.json"
-    return marker_file.exists()
+    return WriteModeMarkers(golden_repos_dir).exists(repo_alias)
 
 
 def _start_auto_watch_if_needed(
@@ -260,48 +259,27 @@ def _write_mode_acquire_lock(refresh_scheduler: Any, alias: str) -> Tuple[bool, 
 def _write_mode_create_marker(
     golden_repos_dir: Path, alias: str, source_path: str
 ) -> None:
-    """Create the .write_mode/{alias}.json marker file."""
-    import json as _json
-    from datetime import datetime, timezone
-
-    write_mode_dir = golden_repos_dir / ".write_mode"
-    write_mode_dir.mkdir(parents=True, exist_ok=True)
-    marker_file = write_mode_dir / f"{alias}.json"
-    marker_file.write_text(
-        _json.dumps(
-            {
-                "alias": alias,
-                "source_path": source_path,
-                "entered_at": datetime.now(timezone.utc).isoformat(),
-            },
-            indent=2,
-        )
-    )
+    """Record the write-mode marker for alias (control-plane metadata)."""
+    WriteModeMarkers(golden_repos_dir).enter(alias, source_path)
 
 
 def _write_mode_run_refresh(
     refresh_scheduler: Any, repo_alias: str, golden_repos_dir: Path, alias: str
 ) -> None:
     """Run synchronous refresh, delete marker, release lock, stop auto-watch."""
-    import json as _json
-
     from code_indexer.server.services.auto_watch_manager import auto_watch_manager
 
-    marker_file = golden_repos_dir / ".write_mode" / f"{alias}.json"
+    markers = WriteModeMarkers(golden_repos_dir)
     source_path: Optional[str] = None
     try:
-        marker_data = _json.loads(marker_file.read_text())
-        source_path = marker_data.get("source_path")
+        source_path = markers.source_path(alias)
     except Exception as e:
         logger.debug(
             f"Could not read write-mode marker for {alias}: {e}",
             extra={"correlation_id": get_correlation_id()},
         )
 
-    try:
-        marker_file.unlink()
-    except FileNotFoundError:
-        pass
+    markers.remove(alias)
     refresh_scheduler.release_write_lock(alias, owner_name="mcp_write_mode")
 
     if source_path:
@@ -1561,9 +1539,8 @@ def handle_exit_write_mode(params: Dict[str, Any], user: User) -> Dict[str, Any]
         assert alias is not None
 
         golden_repos_dir = Path(_get_golden_repos_dir())
-        marker_file = golden_repos_dir / ".write_mode" / f"{alias}.json"
 
-        if not marker_file.exists():
+        if not WriteModeMarkers(golden_repos_dir).exists(alias):
             logger.warning(
                 f"exit_write_mode: no marker for '{repo_alias}' — not in write mode"
             )

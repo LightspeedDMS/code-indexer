@@ -473,6 +473,8 @@ _VALID_CONFIG_SECTIONS = (
     "temporal_legacy_migration",
     # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
     "alias_lock",
+    # Content seam step 5a - aliases and write-mode markers in the registry
+    "control_plane_metadata",
     # Issue #1398 - Query & search timeouts configuration
     "search_timeouts",
     # Story #977 - X-Ray precision AST-aware code search configuration
@@ -3269,7 +3271,7 @@ def _resolve_alias_metadata(
 
     version and last_refresh are initialized to None before branching — never duplicated.
     """
-    import json
+    from code_indexer.global_repos.alias_manager import AliasManager
 
     version = None
     last_refresh = None
@@ -3279,10 +3281,14 @@ def _resolve_alias_metadata(
         global_alias = global_repos[alias]["alias_name"]
         globally_queryable = True
         if _is_safe_alias(alias):
-            alias_file = aliases_dir / f"{alias}-global.json"
-            if alias_file.exists():
-                try:
-                    alias_data = json.loads(alias_file.read_text())
+            try:
+                alias_manager = AliasManager.existing(aliases_dir)
+                alias_data = (
+                    alias_manager.read_record(f"{alias}-global")
+                    if alias_manager is not None
+                    else None
+                )
+                if alias_data is not None:
                     index_path = alias_data.get("target_path")
                     if index_path and ".versioned" in index_path:
                         version = Path(index_path).name
@@ -3290,14 +3296,14 @@ def _resolve_alias_metadata(
                     last_refresh = (
                         _safe_ts_slice(raw_refresh, 19) if raw_refresh else None
                     )
-                except Exception as e:
-                    logger.warning(
-                        format_error_log(
-                            "SCIP-GENERAL-045",
-                            f"Could not read alias file for {alias}: {e}",
-                        ),
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+            except Exception as e:
+                logger.warning(
+                    format_error_log(
+                        "SCIP-GENERAL-045",
+                        f"Could not read alias pointer for {alias}: {e}",
+                    ),
+                    extra={"correlation_id": get_correlation_id()},
+                )
     else:
         global_alias = None
         globally_queryable = False
@@ -3900,15 +3906,11 @@ def toggle_wiki_enabled(
             # Bug #1315: fall back to registry index_path when alias pointer
             # is missing/unreadable.
             wiki_repo_entry = None
-            wiki_backend_registry = getattr(
-                request.app.state, "backend_registry", None
-            )
+            wiki_backend_registry = getattr(request.app.state, "backend_registry", None)
             if wiki_backend_registry:
                 try:
-                    wiki_repo_entry = (
-                        wiki_backend_registry.global_repos.get_repo(
-                            f"{alias}-global"
-                        )
+                    wiki_repo_entry = wiki_backend_registry.global_repos.get_repo(
+                        f"{alias}-global"
                     )
                 except Exception:
                     pass
@@ -6876,6 +6878,8 @@ def _get_current_config() -> dict:
         TemporalLegacyMigrationConfig,
         # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
         AliasLockConfig,
+        # Content seam step 5a - aliases and write-mode markers in the registry
+        ControlPlaneMetadataConfig,
         # Issue #1398 - Query & search timeouts configuration
         SearchTimeoutsConfig,
         # Story #1418 Phase 3 - Embedding & reranker call tracking config
@@ -7124,6 +7128,10 @@ def _get_current_config() -> dict:
         ),
         # Issue #1546 Phase 2: DB-backed alias lock rollout gate
         "alias_lock": settings.get("alias_lock", asdict(AliasLockConfig())),
+        # Content seam step 5a: aliases and write-mode markers in the registry
+        "control_plane_metadata": settings.get(
+            "control_plane_metadata", asdict(ControlPlaneMetadataConfig())
+        ),
         # Issue #1398: Query & search timeouts configuration
         "search_timeouts": settings.get(
             "search_timeouts", asdict(SearchTimeoutsConfig())
@@ -8421,6 +8429,14 @@ def _validate_config_section(
                 return "export_retention_days must be a valid integer"
             if export_days_int < 1 or export_days_int > 3650:
                 return "export_retention_days must be between 1 and 3650"
+
+    # Content seam step 5a: where aliases and write-mode markers are read from
+    elif section == "control_plane_metadata":
+        from code_indexer.server.utils.config_manager import METADATA_READ_SOURCES
+
+        read_source = data.get("metadata_read_source")
+        if read_source is not None and str(read_source) not in METADATA_READ_SOURCES:
+            return f"metadata_read_source must be one of {list(METADATA_READ_SOURCES)}"
 
     return None
 
