@@ -109,6 +109,25 @@ SELECT count(*), pg_size_pretty(pg_total_relation_size('xray_evaluator_cache'))
 FROM xray_evaluator_cache;
 ```
 
+## The environment xray-cli runs with
+
+xray-cli loads caller-supplied code, so it never inherits the server's
+environment. Every spawn passes `env=xray_subprocess_env()`
+(`src/code_indexer/xray/rust_backend.py`), which keeps only `PATH`, `HOME`,
+`TMPDIR`/`TMP`/`TEMP`, `LANG`/`LANGUAGE`/`LC_*`, `CIDX_DATA_DIR`, `RUSTUP_HOME`
+and `CARGO_HOME`. A test fails any new xray-cli spawn without it. A rustc that
+needs another variable has to be added to that allowlist, with a reason.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Is rustc installed and on PATH?` only from the server | rustc's directory is missing from the server's own `PATH` | put it on the server's `PATH`; xray passes `PATH` through |
+| rustup: `no default toolchain` / `toolchain not installed` | rustup lives outside `$HOME` and its vars were not set for the server | export `RUSTUP_HOME`/`CARGO_HOME` for the server |
+| `CompileError` mentioning `memory` / `out of memory` | rustc hit the compile heap bound (1 GiB default) | raise `CIDX_XRAY_COMPILE_RLIMIT_DATA_BYTES` (bytes) on the server |
+
+`CIDX_XRAY_COMPILE_RLIMIT_DATA_BYTES` bounds the heap of every compile: the
+`--compile-only` spawn, and on the scan path the rustc child that xray-cli
+starts. The scan itself is not capped.
+
 ## Gotcha: only the root node reaches `evaluate_node`
 
 A legacy evaluator is called with the file's **root** node. Checking
