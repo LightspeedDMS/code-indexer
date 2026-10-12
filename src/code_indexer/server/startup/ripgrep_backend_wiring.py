@@ -21,7 +21,7 @@ somewhere far from the configuration that caused it.
 from __future__ import annotations
 
 import logging
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from code_indexer.server.storage.shared.ripgrep_backend import (
@@ -121,42 +121,17 @@ def server_regex_target(
     """Where a server regex search runs, and the backend that runs it.
 
     A delegated backend runs ripgrep in workspace-mcp, which holds the golden
-    repos' base clones. Refresh, though, points an alias at a versioned
-    snapshot it creates on THIS pod's disk, which workspace-mcp cannot see --
-    so such a path is searched at its golden repo's base clone instead. That
-    is the repository's current checkout, which can be newer than the
-    snapshot's index. Every other path, and every local search, is unchanged.
+    repos' base clones, so a versioned-snapshot path is searched at its golden
+    repo's base clone (``golden_repo_content_root``, shared with the file
+    tools). Every other path, and every local search, is unchanged.
 
     Blocking (a registry read for a snapshot path): call it off the event loop.
     """
-    from code_indexer.server.storage.shared.snapshot_paths import (
-        is_versioned_snapshot,
+    from code_indexer.server.startup.content_backend_wiring import (
+        golden_repo_content_root,
     )
 
     backend = server_ripgrep_backend()
-    if backend is None or backend.is_local or not is_versioned_snapshot(str(repo_path)):
+    if backend is None or backend.is_local:
         return Path(repo_path), backend
-    repo_name = PurePosixPath(repo_path).parts[-2]
-    clone_path = _golden_repo_clone_path(repo_name)
-    if clone_path is None:
-        logger.warning(
-            "Regex search: no base clone registered for %s; searching the "
-            "snapshot path, which the delegated backend cannot see",
-            repo_name,
-        )
-        return Path(repo_path), backend
-    return Path(clone_path), backend
-
-
-def _golden_repo_clone_path(repo_name: str) -> Optional[str]:
-    """The golden repo's base clone path, or None when the registry cannot say."""
-    try:
-        from code_indexer.server.repositories.golden_repo_manager import (
-            get_golden_repo_manager,
-        )
-
-        repo = get_golden_repo_manager().get_golden_repo(repo_name)
-    except Exception as exc:  # the server's state, whatever it is
-        logger.debug("No golden repo record for %s: %s", repo_name, exc)
-        return None
-    return getattr(repo, "clone_path", None) or None
+    return golden_repo_content_root(repo_path, consumer="Regex search"), backend
