@@ -34,13 +34,14 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple, Union, cast
+from typing import Iterable, List, NoReturn, Optional, Tuple, Union, cast
 
 import anyio.to_thread
 
 from code_indexer.server.storage.shared.ripgrep_backend import (
     LocalRipgrepBackend,
     RipgrepBackend,
+    RipgrepRun,
 )
 from code_indexer.server.services.subprocess_executor import (
     SubprocessExecutor,
@@ -93,6 +94,8 @@ _GREP_FILE_LIST_BATCH_SIZE = 500
 # deployment target could legitimately have a tmpfs TMPDIR and this code
 # must not assume otherwise.
 _MAX_READ_BYTES = 64 * 1024 * 1024  # 64 MiB
+# ripgrep's message for a search path that does not exist.
+_RG_MISSING_PATH = "No such file or directory"
 
 # Chunk size used by _BoundedLineReader when streaming temp-file output, in
 # raw bytes (the file is opened in binary mode so this bound is exact, not
@@ -612,6 +615,26 @@ class RegexSearchService:
         # read-capped, for the structured WARNING log in search().
         self._last_read_capped_bytes: Optional[int] = None
 
+    def _raise_for_rg_error(self, result: RipgrepRun, search_path: Path) -> NoReturn:
+        """Raise for a failed ripgrep run.
+
+        A delegated backend runs ripgrep where the repository is, so a missing
+        search path comes back as ripgrep's own error instead of failing the
+        local existence check. It is the same caller mistake either way, and
+        gets the same ValueError.
+        """
+        stderr = result.stderr_output or result.error_message or ""
+        if (
+            not self._ripgrep_backend.is_local
+            and f"{search_path}: {_RG_MISSING_PATH}" in stderr
+        ):
+            raise ValueError(
+                f"Path does not exist: {os.path.relpath(search_path, self.repo_path)}"
+            )
+        raise RipgrepExecutionError(
+            f"ripgrep failed: exit_code={result.exit_code}, stderr={stderr}"
+        )
+
     def _detect_search_engine(self) -> str:
         """Detect available search engine (ripgrep preferred).
 
@@ -866,7 +889,12 @@ class RegexSearchService:
         # optional ``holder`` parameter is simply omitted.
         from .trigram_index_manager import _run_with_thread_watchdog
 
-        if deadline is not None:
+        if not self._ripgrep_backend.is_local:
+            # The repository is not on this disk -- only its index state is --
+            # so a local existence check would reject every sub-path. The
+            # backend reports a missing path itself; see _raise_for_rg_error.
+            path_exists = True
+        elif deadline is not None:
             remaining_exists = max(0.0, deadline - time.monotonic())
             path_exists, exists_timed_out = await anyio.to_thread.run_sync(
                 _run_with_thread_watchdog,
@@ -1623,10 +1651,7 @@ class RegexSearchService:
                     return [], 0
                 else:
                     # Exit code 2+ or stderr present = actual error (Finding 3.1, v10.4.4)
-                    stderr = result.stderr_output or result.error_message or ""
-                    raise RipgrepExecutionError(
-                        f"ripgrep failed: exit_code={result.exit_code}, stderr={stderr}"
-                    )
+                    self._raise_for_rg_error(result, search_path)
 
             # Issue #1601 remediation (Priority 2): the read+parse is a
             # synchronous, potentially expensive operation (file I/O,

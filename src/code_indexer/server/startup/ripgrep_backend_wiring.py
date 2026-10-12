@@ -98,3 +98,17 @@ def build_configured_ripgrep_backend(
     return build_ripgrep_backend(
         config, delegated_backend=delegated, max_workers=max_workers
     )
+
+
+def server_ripgrep_backend() -> Optional[RipgrepBackend]:
+    """The backend the running server built at startup, or None.
+
+    None outside a server process (CLI, tests) or before startup has built
+    one; the regex service then uses ``LocalRipgrepBackend``, as before. Read
+    without importing the app, so a CLI process never constructs it.
+    """
+    from code_indexer.server.utils.registry_factory import (
+        _running_server_app_state,
+    )
+
+    return getattr(_running_server_app_state(), "ripgrep_backend", None)
