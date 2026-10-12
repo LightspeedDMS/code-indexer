@@ -63,6 +63,123 @@ def run_completed_filter_scenario(bgm: BackgroundJobManager) -> None:
     assert shown("completed_partial") == ({partial}, {partial})
 
 
+def _fail() -> Dict[str, object]:
+    raise RuntimeError("example failure")
+
+
+def _run_failing_to_end(bgm: BackgroundJobManager, alias: str) -> str:
+    job_id = bgm.submit_job(
+        "refresh_golden_repo",
+        _fail,
+        submitter_username="admin",
+        is_admin=True,
+        repo_alias=alias,
+    )
+    deadline = time.monotonic() + 30
+    while job_id in bgm.jobs:
+        assert time.monotonic() < deadline, "the job never finished"
+        time.sleep(0.02)
+    return job_id
+
+
+def seed_full_partial_failed(bgm: BackgroundJobManager) -> Tuple[str, str, str]:
+    """One finished job per stored status, each on its own repo_alias
+    (idx_active_job_per_repo), all gone from memory so only the store
+    answers the listing."""
+    full = _run_to_end(bgm, {"success": True}, "example-full-global")
+    partial = _run_to_end(
+        bgm,
+        {"success": True, "partial": True, "failed_files": 1},
+        "example-part-global",
+    )
+    failed = _run_failing_to_end(bgm, "example-fail-global")
+    return full, partial, failed
+
+
+def run_list_jobs_scenario(bgm: BackgroundJobManager) -> None:
+    """The REST listing's path: the backend ``list_jobs`` and the manager's
+    ``list_jobs`` (whose ``total`` counts the listed rows)."""
+    full, partial, failed = seed_full_partial_failed(bgm)
+    backend = bgm._sqlite_backend
+    assert backend is not None
+
+    def backend_rows(status: str) -> Dict[str, str]:
+        return {j["job_id"]: j["status"] for j in backend.list_jobs(status=status)}
+
+    assert backend_rows("completed") == {
+        full: "completed",
+        partial: "completed_partial",
+    }
+    assert backend_rows("completed_partial") == {partial: "completed_partial"}
+    assert backend_rows("failed") == {failed: "failed"}
+
+    def listed(status_filter: str) -> Tuple[set, int]:
+        page = bgm.list_jobs(
+            username="admin", status_filter=status_filter, is_admin=True
+        )
+        return {j["job_id"] for j in page["jobs"]}, page["total"]
+
+    assert listed("completed") == ({full, partial}, 2)
+    assert listed("completed_partial") == ({partial}, 1)
+    assert listed("failed") == ({failed}, 1)
+
+
+def _sqlite_bgm(tmp_path: Path) -> BackgroundJobManager:
+    db_path = str(tmp_path / "cidx_server.db")
+    DatabaseSchema(db_path).initialize_database()
+    return BackgroundJobManager(
+        use_sqlite=True, db_path=db_path, job_tracker=JobTracker(db_path)
+    )
+
+
+def test_list_jobs_completed_includes_partial_sqlite(tmp_path: Path) -> None:
+    bgm = _sqlite_bgm(tmp_path)
+    try:
+        run_list_jobs_scenario(bgm)
+    finally:
+        bgm.shutdown()
+
+
+def test_rest_api_jobs_completed_lists_partial(tmp_path: Path) -> None:
+    """GET /api/jobs?status=completed through the real route lists the
+    partial completion, and ``total`` matches the listed rows."""
+    from tests.unit.server.routers.inline_routes_test_helpers import (
+        _find_route_handler,
+        _make_admin,
+        _patch_closure,
+    )
+    from fastapi.testclient import TestClient
+
+    from code_indexer.server.app import app
+    from code_indexer.server.auth.dependencies import get_current_user
+
+    bgm = _sqlite_bgm(tmp_path)
+    admin = _make_admin()
+    app.dependency_overrides[get_current_user] = lambda: admin
+    try:
+        full, partial, failed = seed_full_partial_failed(bgm)
+        handler = _find_route_handler("/api/jobs", "GET")
+        with _patch_closure(handler, "background_job_manager", bgm):
+            client = TestClient(app)
+
+            def get(status: str) -> Dict[str, str]:
+                response = client.get("/api/jobs", params={"status": status})
+                assert response.status_code == 200, response.text
+                body = response.json()
+                assert body["total"] == len(body["jobs"])
+                return {j["job_id"]: j["status"] for j in body["jobs"]}
+
+            assert get("completed") == {
+                full: "completed",
+                partial: "completed_partial",
+            }
+            assert get("completed_partial") == {partial: "completed_partial"}
+            assert get("failed") == {failed: "failed"}
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+        bgm.shutdown()
+
+
 def test_completed_filter_includes_partial_sqlite(tmp_path: Path) -> None:
     db_path = str(tmp_path / "cidx_server.db")
     DatabaseSchema(db_path).initialize_database()

@@ -722,7 +722,9 @@ class TestListJobs:
         """
         Given a status filter
         When list_jobs() is called
-        Then the SQL contains a status = %s condition.
+        Then the SQL contains a parameterized status IN (...) condition that
+        selects exactly that status (only "completed" also selects
+        completed_partial).
         """
         from code_indexer.server.storage.postgres.background_jobs_backend import (
             BackgroundJobsPostgresBackend,
@@ -734,8 +736,9 @@ class TestListJobs:
         backend.list_jobs(status="failed")
 
         sql, params = cur.execute.call_args[0]
-        assert "status = %s" in sql
+        assert "status IN (%s)" in sql
         assert "failed" in params
+        assert "completed_partial" not in params
 
 
 # ---------------------------------------------------------------------------

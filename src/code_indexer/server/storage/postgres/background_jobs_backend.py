@@ -645,8 +645,9 @@ class BackgroundJobsPostgresBackend:
             conditions.append("username = %s")
             params.append(username)
         if status:
-            conditions.append("status = %s")
-            params.append(status)
+            statuses = statuses_for_filter(status)
+            conditions.append(f"status IN ({', '.join(['%s'] * len(statuses))})")
+            params.extend(statuses)
         if operation_type:
             conditions.append("operation_type = %s")
             params.append(operation_type)

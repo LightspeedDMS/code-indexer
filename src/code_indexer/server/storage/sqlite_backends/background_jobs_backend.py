@@ -515,8 +515,9 @@ class BackgroundJobsSqliteBackend:
             conditions.append("username = ?")
             params.append(username)
         if status:
-            conditions.append("status = ?")
-            params.append(status)
+            statuses = statuses_for_filter(status)
+            conditions.append(f"status IN ({', '.join(['?'] * len(statuses))})")
+            params.extend(statuses)
         if operation_type:
             conditions.append("operation_type = ?")
             params.append(operation_type)
