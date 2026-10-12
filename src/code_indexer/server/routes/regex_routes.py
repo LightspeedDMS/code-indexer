@@ -32,7 +32,7 @@ from code_indexer.server.services.repo_access_guard import (
 # code_indexer.server.routes.regex_routes.RegexSearchService work correctly.
 from code_indexer.global_repos.regex_search import RegexSearchService
 from code_indexer.server.startup.ripgrep_backend_wiring import (
-    server_ripgrep_backend,
+    server_regex_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,6 +175,7 @@ async def _execute_single_search(
         api_metrics_service.increment_regex_search(username=user.username)
 
     repo_path = Path(repo_path_str)
+
     # Issue #1609: RegexSearchService.__init__ performs synchronous
     # filesystem calls (Path.resolve(), shutil.which()) that must never
     # run directly on the event-loop thread inside an `async def` (this
@@ -182,11 +183,11 @@ async def _execute_single_search(
     # call itself via anyio.to_thread.run_sync, mirroring the granular
     # per-call offload pattern already established elsewhere in this
     # search path (see regex_search.py's search() method).
-    service = await anyio.to_thread.run_sync(
-        functools.partial(
-            RegexSearchService, repo_path, ripgrep_backend=server_ripgrep_backend()
-        )
-    )
+    def _new_service() -> RegexSearchService:
+        root, backend = server_regex_target(repo_path)
+        return RegexSearchService(root, ripgrep_backend=backend)
+
+    service = await anyio.to_thread.run_sync(_new_service)
     result = await service.search(
         pattern=body.pattern,
         path=body.path,

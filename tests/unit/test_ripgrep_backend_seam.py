@@ -481,7 +481,7 @@ class _Constructed(Exception):
 
 def _record_construction(captured: dict):
     def _service(*args, **kwargs):
-        captured.update(kwargs)
+        captured.update(kwargs, root=args[0])
         raise _Constructed
 
     return _service
@@ -492,10 +492,11 @@ async def test_the_rest_route_passes_the_servers_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from code_indexer.server.routes import regex_routes
+    from code_indexer.server.startup import ripgrep_backend_wiring as wiring
 
     backend = _RecordingBackend()
     captured: dict = {}
-    monkeypatch.setattr(regex_routes, "server_ripgrep_backend", lambda: backend)
+    monkeypatch.setattr(wiring, "server_ripgrep_backend", lambda: backend)
     monkeypatch.setattr(
         regex_routes, "RegexSearchService", _record_construction(captured)
     )
@@ -531,3 +532,107 @@ async def test_the_mcp_tool_passes_the_servers_backend(
             {"pattern": "x"}, tmp_path, "r", MagicMock()
         )
     assert captured["ripgrep_backend"] is backend
+
+
+# --- a delegated search runs where workspace-mcp can see the repository -------
+#
+# Refresh points an alias at a versioned snapshot on THIS pod's disk; the
+# delegated backend's ripgrep runs in workspace-mcp, which holds only the
+# golden repos' base clones.
+
+
+@pytest.fixture
+def golden(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from types import SimpleNamespace
+
+    from code_indexer.server.repositories import golden_repo_manager as grm
+
+    base = tmp_path / "golden-repos"
+    clones = {"agent-router": str(base / "agent-router")}
+    manager = SimpleNamespace(
+        get_golden_repo=lambda name: (
+            SimpleNamespace(clone_path=clones[name]) if name in clones else None
+        )
+    )
+    monkeypatch.setattr(grm, "get_golden_repo_manager", lambda: manager)
+    return base
+
+
+def _target(monkeypatch: pytest.MonkeyPatch, backend, repo_path: Path):
+    from code_indexer.server.startup import ripgrep_backend_wiring as wiring
+
+    monkeypatch.setattr(wiring, "server_ripgrep_backend", lambda: backend)
+    return wiring.server_regex_target(repo_path)
+
+
+def test_a_snapshot_is_searched_at_its_base_clone(
+    golden: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _RecordingBackend()
+    snapshot = golden / ".versioned" / "agent-router" / "v_1760000000"
+
+    assert _target(monkeypatch, backend, snapshot) == (
+        golden / "agent-router",
+        backend,
+    )
+
+
+def test_a_base_clone_path_is_unchanged(
+    golden: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _RecordingBackend()
+    assert _target(monkeypatch, backend, golden / "agent-router") == (
+        golden / "agent-router",
+        backend,
+    )
+
+
+@pytest.mark.parametrize("backend", [None, "local"])
+def test_a_local_search_keeps_the_snapshot(
+    golden: Path, monkeypatch: pytest.MonkeyPatch, backend
+) -> None:
+    """Locally the snapshot IS the indexed checkout, and it is on this disk."""
+    chosen = LocalRipgrepBackend() if backend == "local" else None
+    snapshot = golden / ".versioned" / "agent-router" / "v_1760000000"
+    assert _target(monkeypatch, chosen, snapshot) == (snapshot, chosen)
+
+
+def test_an_unregistered_snapshot_is_left_alone(
+    golden: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = golden / ".versioned" / "gone" / "v_1760000000"
+    assert _target(monkeypatch, _RecordingBackend(), snapshot)[0] == snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", ["rest", "mcp"])
+async def test_both_entry_points_search_the_base_clone(
+    golden: Path, monkeypatch: pytest.MonkeyPatch, site: str
+) -> None:
+    from unittest.mock import MagicMock
+
+    import code_indexer.global_repos.regex_search as service_module
+    from code_indexer.server.mcp.handlers.search import regex_search as handler
+    from code_indexer.server.routes import regex_routes
+    from code_indexer.server.startup import ripgrep_backend_wiring as wiring
+
+    snapshot = golden / ".versioned" / "agent-router" / "v_1760000000"
+    captured: dict = {}
+    monkeypatch.setattr(wiring, "server_ripgrep_backend", _RecordingBackend)
+    monkeypatch.setattr(handler, "get_config_service", MagicMock())
+    for module in (regex_routes, service_module):
+        monkeypatch.setattr(
+            module, "RegexSearchService", _record_construction(captured)
+        )
+
+    with pytest.raises(_Constructed):
+        if site == "rest":
+            await regex_routes._execute_single_search(
+                regex_routes.RegexSearchRequest(repository_alias="r", pattern="x"),
+                str(snapshot),
+            )
+        else:
+            await handler._execute_regex_search_impl(
+                {"pattern": "x"}, snapshot, "agent-router-global", MagicMock()
+            )
+    assert captured["root"] == golden / "agent-router"

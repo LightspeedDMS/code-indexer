@@ -14,7 +14,6 @@ Refactoring is tracked separately.
 """
 
 import asyncio
-import functools
 import logging
 import time
 from pathlib import Path
@@ -330,7 +329,7 @@ async def _execute_regex_search_impl(
     """
     from code_indexer.global_repos.regex_search import RegexSearchService
     from code_indexer.server.startup.ripgrep_backend_wiring import (
-        server_ripgrep_backend,
+        server_regex_target,
     )
 
     config = get_config_service().get_config()
@@ -358,19 +357,20 @@ async def _execute_regex_search_impl(
     # call itself via anyio.to_thread.run_sync, mirroring the granular
     # per-call offload pattern already established elsewhere in this
     # search path (see regex_search.py's search() method).
-    service = await anyio.to_thread.run_sync(
-        functools.partial(
-            RegexSearchService,
-            repo_path,
+    def _new_service() -> RegexSearchService:
+        root, backend = server_regex_target(repo_path)
+        return RegexSearchService(
+            root,
             subprocess_max_workers=subprocess_max_workers,
             # Issue #1601 Priority 9: thread the already-in-scope alias
             # through so the service's read-capped WARNING log surfaces the
             # real user-facing alias, not just the (possibly
             # versioned-snapshot) repo_path.
             alias=repository_alias,
-            ripgrep_backend=server_ripgrep_backend(),
+            ripgrep_backend=backend,
         )
-    )
+
+    service = await anyio.to_thread.run_sync(_new_service)
     search_result = await service.search(
         pattern=args["pattern"],
         path=args.get("path"),
