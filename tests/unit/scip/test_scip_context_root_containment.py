@@ -305,6 +305,8 @@ class TestConfinementRootIsNotSteerable:
     """The confinement root is the repository the index was found in, never
     a location chosen by the repository's own symlinks or index metadata."""
 
+    # Builds real SQLite SCIP databases: ~2 s alone, slower under load.
+    @pytest.mark.timeout(60)
     def test_symlinked_scip_dir_and_index_metadata_touch_nothing_outside(
         self, tmp_path
     ):

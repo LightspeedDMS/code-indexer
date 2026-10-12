@@ -73,13 +73,13 @@ def _repo(root: Path, server: Any) -> FakeProviderRepo:
 
 def _write_image(repo: FakeProviderRepo, name: str, marker: str) -> None:
     # The indexer validates extension and size only; distinct bytes per image.
-    (repo.repo / "docs" / name).write_bytes(
+    (repo.repo / "manuals" / name).write_bytes(
         b"\x89PNG\r\n\x1a\n" + f"example-image-{marker}".encode()
     )
 
 
 def _write_doc(repo: FakeProviderRepo, index: int, version: str = "v1") -> None:
-    docs = repo.repo / "docs"
+    docs = repo.repo / "manuals"
     docs.mkdir(exist_ok=True)
     _write_image(repo, f"diagram_{index}.png", f"{index}")
     (docs / f"guide_{index}.md").write_text(
@@ -157,7 +157,7 @@ def test_changed_and_new_documents_are_each_sent_exactly_once(
     _index_initial(repo, fake_provider)
     _write_doc(repo, 1, version="v2")
     _write_doc(repo, _DOC_COUNT)
-    docs = repo.repo / "docs"
+    docs = repo.repo / "manuals"
     expected = {
         key: 1
         for doc in (docs / "guide_1.md", docs / f"guide_{_DOC_COUNT}.md")
@@ -181,7 +181,7 @@ def test_changed_image_under_unchanged_text_is_sent_once(
     reuse of the old image's embedding."""
     repo = _repo(tmp_path, fake_provider)
     _index_initial(repo, fake_provider)
-    doc = repo.repo / "docs" / "guide_2.md"
+    doc = repo.repo / "manuals" / "guide_2.md"
     _write_image(repo, "diagram_2.png", "2-replaced")
     # Plan the document again: a newer mtime, byte-identical text.
     future = time.time() + 120
@@ -212,14 +212,14 @@ def test_corrupt_multimodal_store_aborts_before_any_provider_call(
     try:
         damaged = conn.execute(
             "UPDATE chunks SET data = ? WHERE path = ?",
-            (b"not-a-zstd-frame", "docs/guide_0.md"),
+            (b"not-a-zstd-frame", "manuals/guide_0.md"),
         ).rowcount
         conn.commit()
     finally:
         conn.close()
     assert damaged == 1
     future = time.time() + 120
-    os.utime(repo.repo / "docs" / "guide_0.md", (future, future))
+    os.utime(repo.repo / "manuals" / "guide_0.md", (future, future))
 
     fake_provider.ledger.begin_run("after-corruption")
     proc = repo.cidx(*repo.index_args(), "--reconcile")
