@@ -50,6 +50,22 @@ logger = logging.getLogger(__name__)
 THREAD_POOL_SHUTDOWN_TIMEOUT = 30.0  # 30 seconds for graceful shutdown
 
 
+def _multimodal_content_hash(text: str, image_paths: List[Path]) -> str:
+    """Bug #2153: the ``content_hash`` (reuse key) of a multimodal chunk.
+
+    It covers everything the provider is sent: the chunk text AND the bytes
+    of every image, in order, so a changed image under unchanged text is a
+    miss, never a stale reuse. The text is length-prefixed and each image
+    contributes a fixed-size digest, so the encoding is unambiguous."""
+    text_bytes = text.encode("utf-8")
+    digest = hashlib.sha256(b"cidx-multimodal-v1\0")
+    digest.update(len(text_bytes).to_bytes(8, "big"))
+    digest.update(text_bytes)
+    for image_path in image_paths:
+        digest.update(hashlib.sha256(image_path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
 @dataclass
 class FileProcessingResult:
     """Result from complete file processing lifecycle."""
@@ -524,6 +540,180 @@ class FileChunkingManager:
 
         return vector_point
 
+    def _lookup_reusable_embeddings(
+        self,
+        file_path: Path,
+        collection_name: str,
+        metadata: Dict[str, Any],
+        chunk_count: int,
+    ) -> Dict[str, Any]:
+        """Story #2119: content_hash -> stored embedding of this file's
+        content ids and its path in ``collection_name``. Matched by content,
+        never by chunk index, so a chunk that moved (e.g. a prepended chunk)
+        is reused. Bug #2153: the multimodal collection is looked up here
+        too.
+
+        Fails CLOSED: a lookup error is never "nothing stored" -- that would
+        pay the provider for embeddings the store may already hold. It aborts
+        the whole run with the typed fatal error (exit 86 when SQLite reports
+        corruption, else 87; 89 for a missing established store, found in the
+        cause chain) before any chunk of this file is sent."""
+        file_path_for_lookup = self._normalize_path_for_storage(file_path)
+        try:
+            existing: Dict[str, Any] = (
+                self.vector_store_client.get_existing_content_hashes(
+                    file_path_for_lookup,
+                    collection_name,
+                    project_id=metadata["project_id"],
+                    file_hash=metadata["file_hash"],
+                    chunk_count=chunk_count,
+                )
+            )
+        except Exception as e:
+            logger.error(f"Embedding reuse lookup failed for {file_path}: {e}")
+            raise ChunkStoreUnavailableError(
+                f"Embedding reuse lookup failed for {file_path_for_lookup} "
+                f"in {collection_name}; aborting before any provider call: {e}"
+            ) from e
+        return existing
+
+    def _resolve_chunk_image_paths(self, chunk: Dict[str, Any]) -> List[Path]:
+        """Absolute paths of a chunk's local images that exist inside the
+        codebase. Image paths from ImageExtractorFactory are already relative
+        to codebase_dir and validated (existence, format, size); the checks
+        here are defense in depth."""
+        image_paths: List[Path] = []
+        for img_ref in chunk.get("images", []):
+            # img_ref is a relative path string (TextChunker, legacy) or a
+            # dict with a 'path' key (FixedSizeChunker + ImageExtractorFactory)
+            img_ref_path = img_ref["path"] if isinstance(img_ref, dict) else img_ref
+            if img_ref_path.startswith(("http://", "https://")):
+                logger.debug(f"Skipping remote image URL: {img_ref_path}")
+                continue
+            img_path = (self.codebase_dir / img_ref_path).resolve()
+            if not img_path.exists():
+                logger.debug(f"Image not found: {img_path} - skipping")
+                continue
+            try:
+                img_path.relative_to(self.codebase_dir)
+            except ValueError:
+                logger.warning(f"Image outside codebase: {img_path} - skipping")
+                continue
+            image_paths.append(img_path)
+        return image_paths
+
+    def _ensure_multimodal_collection(self, collection_name: str) -> None:
+        """Create the multimodal collection (same level as the code
+        embeddings) when it does not exist yet."""
+        if self.vector_store_client.collection_exists(collection_name):
+            return
+        if hasattr(self.multimodal_client, "config") and hasattr(
+            self.multimodal_client.config, "default_dimension"
+        ):
+            vector_size = self.multimodal_client.config.default_dimension
+        else:
+            vector_size = 1024  # VoyageAI default
+        self.vector_store_client.create_collection(
+            collection_name=collection_name, vector_size=vector_size
+        )
+        logger.info(
+            f"Created multimodal collection '{collection_name}' at same level "
+            f"as code embeddings"
+        )
+
+    def _multimodal_vector_point(
+        self,
+        chunk: Dict[str, Any],
+        image_paths: List[Path],
+        stored: Dict[str, Any],
+        metadata: Dict[str, Any],
+        file_path: Path,
+    ) -> Dict[str, Any]:
+        """Bug #2153: the point of one image-bearing chunk. A stored vector
+        with the same content_hash (text + image bytes) is reused without a
+        provider call; only a miss is registered with the run-spend meter
+        (Story #2122) and sent."""
+        content_hash = _multimodal_content_hash(chunk["text"], image_paths)
+        reusable = stored.get(content_hash)
+        if reusable:
+            embedding = reusable["vector"]
+        else:
+            run_spend_meter = get_run_spend_meter()
+            if run_spend_meter.is_armed():
+                run_spend_meter.register_misses(
+                    [hashlib.sha256(chunk["text"].encode("utf-8")).hexdigest()],
+                    max_retries=self.multimodal_client.request_max_retries(),
+                )
+            embedding = self.multimodal_client.get_multimodal_embedding(
+                text=chunk["text"], image_paths=image_paths
+            )
+        chunk_data = {
+            "text": chunk["text"],
+            "chunk_index": chunk.get("chunk_index", 0),
+            "total_chunks": 1,  # Multimodal chunks stored individually
+            "line_start": chunk.get("line_start"),
+            "line_end": chunk.get("line_end"),
+            "file_extension": file_path.suffix.lstrip(".") or "txt",
+            "images": chunk.get("images", []),  # Preserve images metadata
+        }
+        vector_point = self._create_vector_point(
+            chunk_data, embedding, metadata, file_path
+        )
+        vector_point["payload"]["content_hash"] = content_hash
+        return vector_point
+
+    def _embed_multimodal_chunks(
+        self,
+        multimodal_chunks: List[Dict[str, Any]],
+        chunk_count: int,
+        metadata: Dict[str, Any],
+        file_path: Path,
+    ) -> List[Dict[str, Any]]:
+        """Embed or reuse one file's image-bearing chunks; return the points
+        to write as ``{"collection_name", "vector_point"}`` entries.
+
+        Bug #1502 (Codex M6): points are only QUEUED here; the caller writes
+        them after every regular embedding of the file is validated.
+        Bug #2153: as on the text path (Story #2119), the multimodal store is
+        consulted first with ONE fail-closed lookup per file. A per-chunk
+        provider or image-read failure skips that chunk."""
+        # Cohere: collection_name property ("embed-v4.0-multimodal");
+        # VoyageAI: falls back to config.model ("voyage-multimodal-3").
+        collection_name = getattr(
+            self.multimodal_client,
+            "collection_name",
+            self.multimodal_client.config.model,
+        )
+        if not collection_name:
+            logger.warning(
+                f"No model name in multimodal client config, skipping the "
+                f"multimodal chunks of {file_path}"
+            )
+            return []
+        self._ensure_multimodal_collection(collection_name)
+        stored = self._lookup_reusable_embeddings(
+            file_path, collection_name, metadata, chunk_count
+        )
+        pending: List[Dict[str, Any]] = []
+        for chunk in multimodal_chunks:
+            image_paths = self._resolve_chunk_image_paths(chunk)
+            if not image_paths:
+                logger.warning(
+                    f"No valid images for chunk {chunk.get('chunk_index')} - skipping"
+                )
+                continue
+            try:
+                vector_point = self._multimodal_vector_point(
+                    chunk, image_paths, stored, metadata, file_path
+                )
+            except Exception as e:
+                logger.error(f"Failed to generate or store multimodal embedding: {e}")
+                continue
+            pending.append(
+                {"collection_name": collection_name, "vector_point": vector_point}
+            )
+        return pending
+
     def _process_file_clean_lifecycle(
         self,
         file_path: Path,
@@ -648,33 +838,12 @@ class FileChunkingManager:
             chunks_skipped = 0
 
             collection_name = metadata.get("collection_name")
-            file_path_for_lookup = self._normalize_path_for_storage(file_path)
-            # Story #2119: content_hash -> stored embedding of this file's
-            # content ids and its path. Matched by content, never by chunk
-            # index, so a chunk that moved (e.g. a prepended chunk) is reused.
+            # Story #2119: content_hash -> stored embedding (fail closed).
             existing_hashes: Dict[str, Any] = {}
             if collection_name:
-                try:
-                    existing_hashes = (
-                        self.vector_store_client.get_existing_content_hashes(
-                            file_path_for_lookup,
-                            collection_name,
-                            project_id=metadata["project_id"],
-                            file_hash=metadata["file_hash"],
-                            chunk_count=len(chunks),
-                        )
-                    )
-                except Exception as e:
-                    # Story #2119: fail CLOSED. A lookup error is never "nothing
-                    # stored" -- that would pay the provider for embeddings the
-                    # store may already hold. Abort the whole run with the typed
-                    # fatal error (exit 86 when SQLite reports corruption, else
-                    # 87) before any chunk of this file is sent.
-                    logger.error(f"Embedding reuse lookup failed for {file_path}: {e}")
-                    raise ChunkStoreUnavailableError(
-                        f"Embedding reuse lookup failed for {file_path_for_lookup}; "
-                        f"aborting before any provider call: {e}"
-                    ) from e
+                existing_hashes = self._lookup_reusable_embeddings(
+                    file_path, collection_name, metadata, len(chunks)
+                )
 
             # Story #2122: content_hash (sha256 hex) of every miss, the only
             # regular inputs this run may send.
@@ -808,154 +977,10 @@ class FileChunkingManager:
                 and hasattr(self, "multimodal_client")
                 and self.multimodal_client
             ):
-                logger.debug(
-                    f"Processing {len(multimodal_chunks)} multimodal chunks for {file_path}"
+                # Bug #2153: committed multimodal rows are reused (Story #2119).
+                pending_multimodal_points = self._embed_multimodal_chunks(
+                    multimodal_chunks, len(chunks), metadata, file_path
                 )
-
-                # Ensure multimodal collection exists using collection name
-                # Cohere: collection_name property returns "embed-v4.0-multimodal"
-                # VoyageAI: falls back to config.model ("voyage-multimodal-3")
-                multimodal_collection_name = getattr(
-                    self.multimodal_client,
-                    "collection_name",
-                    self.multimodal_client.config.model,
-                )
-                if not self.vector_store_client.collection_exists(
-                    multimodal_collection_name
-                ):
-                    # Use configured dimension from multimodal client
-                    if hasattr(self.multimodal_client, "config") and hasattr(
-                        self.multimodal_client.config, "default_dimension"
-                    ):
-                        vector_size = self.multimodal_client.config.default_dimension
-                    else:
-                        vector_size = 1024  # VoyageAI default
-                    self.vector_store_client.create_collection(
-                        collection_name=multimodal_collection_name,
-                        vector_size=vector_size,
-                    )
-                    logger.info(
-                        f"Created multimodal collection '{multimodal_collection_name}' at same level as code embeddings"
-                    )
-
-                for chunk in multimodal_chunks:
-                    # Image paths from ImageExtractorFactory are already relative to codebase_dir
-                    # and have been validated (existence, format, size checks)
-                    image_paths = []
-                    for img_ref in chunk.get("images", []):
-                        # img_ref can be either:
-                        # - string (relative path) from TextChunker (legacy)
-                        # - dict with 'path' key from FixedSizeChunker with ImageExtractorFactory
-                        if isinstance(img_ref, dict):
-                            img_ref_path = img_ref["path"]
-                        else:
-                            img_ref_path = img_ref
-
-                        # Skip remote URLs (http://, https://) - shouldn't happen with ImageExtractorFactory
-                        if img_ref_path.startswith(("http://", "https://")):
-                            logger.debug(f"Skipping remote image URL: {img_ref_path}")
-                            continue
-
-                        # Image paths from ImageExtractorFactory are already:
-                        # 1. Relative to codebase_dir (repo_root)
-                        # 2. Validated for existence, format, and size
-                        # 3. Security-checked (no directory traversal)
-                        # Just resolve against codebase_dir to get absolute path
-                        img_path = (self.codebase_dir / img_ref_path).resolve()
-
-                        # Double-check the path is valid (defense in depth)
-                        if not img_path.exists():
-                            logger.debug(f"Image not found: {img_path} - skipping")
-                            continue
-
-                        # Validate image is within codebase (security check - redundant but safe)
-                        try:
-                            img_path.relative_to(self.codebase_dir)
-                        except ValueError:
-                            logger.warning(
-                                f"Image outside codebase: {img_path} - skipping"
-                            )
-                            continue
-
-                        image_paths.append(img_path)
-
-                    if not image_paths:
-                        logger.warning(
-                            f"No valid images for chunk {chunk.get('chunk_index')} - skipping"
-                        )
-                        continue
-
-                    # Story #2122: the multimodal path has no reuse; it
-                    # registers exactly the input it is about to send.
-                    if run_spend_meter.is_armed():
-                        run_spend_meter.register_misses(
-                            [hashlib.sha256(chunk["text"].encode("utf-8")).hexdigest()],
-                            max_retries=self.multimodal_client.request_max_retries(),
-                        )
-                    try:
-                        # Get multimodal embedding (client handles base64 encoding)
-                        embedding = self.multimodal_client.get_multimodal_embedding(
-                            text=chunk["text"], image_paths=image_paths
-                        )
-
-                        logger.debug(
-                            f"Generated multimodal embedding (dim={len(embedding)}) "
-                            f"for chunk {chunk.get('chunk_index')} with {len(image_paths)} images"
-                        )
-
-                        # Create properly formatted vector point using existing helper
-                        chunk_data = {
-                            "text": chunk["text"],
-                            "chunk_index": chunk.get("chunk_index", 0),
-                            "total_chunks": 1,  # Multimodal chunks stored individually
-                            "line_start": chunk.get("line_start"),
-                            "line_end": chunk.get("line_end"),
-                            "file_extension": file_path.suffix.lstrip(".") or "txt",
-                            "images": chunk.get(
-                                "images", []
-                            ),  # Preserve images metadata
-                        }
-
-                        vector_point = self._create_vector_point(
-                            chunk_data, embedding, metadata, file_path
-                        )
-
-                        # Store in multimodal collection (same level as text collection)
-                        # Cohere: collection_name property ("embed-v4.0-multimodal")
-                        # VoyageAI: falls back to config.model ("voyage-multimodal-3")
-                        multimodal_collection_name = getattr(
-                            self.multimodal_client,
-                            "collection_name",
-                            self.multimodal_client.config.model,
-                        )
-                        if not multimodal_collection_name:
-                            logger.warning(
-                                f"No model name in multimodal client config, skipping storage for chunk "
-                                f"{chunk.get('chunk_index')} from {file_path}"
-                            )
-                            continue
-
-                        # Bug #1502 M6: QUEUE, don't write yet -- the
-                        # actual upsert happens in Phase 4, only after
-                        # every regular embedding has been validated.
-                        pending_multimodal_points.append(
-                            {
-                                "collection_name": multimodal_collection_name,
-                                "vector_point": vector_point,
-                            }
-                        )
-
-                        logger.debug(
-                            f"Queued multimodal embedding for chunk {chunk.get('chunk_index')} "
-                            f"for deferred atomic write to {multimodal_collection_name} collection"
-                        )
-
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to generate or store multimodal embedding: {e}"
-                        )
-                        # Continue processing other chunks rather than failing entire file
-                        continue
 
             # Bug #1502 (Codex finding 4): pending_multimodal_points is the
             # POST-embedding-attempt result -- unlike multimodal_chunks
