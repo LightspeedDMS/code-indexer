@@ -42,6 +42,7 @@ from .snapshot_retention import (
 )
 from .refresh_integrity_gate import (
     RefreshIntegrityGateResult,
+    count_collection_points,
     run_refresh_integrity_gate,
 )
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
@@ -3045,6 +3046,7 @@ class RefreshScheduler:
                         # Reuses the SAME factory the golden-repo
                         # add/registration path already applies -- never a
                         # second, duplicated copy.
+                        previous_points = self._published_point_counts(current_target)
                         self._index_source(
                             alias_name=alias_name,
                             source_path=source_path,
@@ -3067,6 +3069,7 @@ class RefreshScheduler:
                             alias_name=alias_name,
                             source_path=source_path,
                             current_target=current_target,
+                            previous_points=previous_points,
                         )
                         if not gate_result.passed:
                             detail_summary = "; ".join(
@@ -3464,6 +3467,7 @@ class RefreshScheduler:
         alias_name: str,
         source_path: str,
         current_target: Optional[str],
+        previous_points: Optional[Dict[str, int]] = None,
     ) -> RefreshIntegrityGateResult:
         """
         Shared Bug #1506 run-boundary durability-flush + integrity gate
@@ -3495,6 +3499,7 @@ class RefreshScheduler:
             source_index_dir=Path(source_path) / ".code-indexer" / "index",
             healthy_index_dir=healthy_index_dir,
             clone_backend=clone_backend,
+            previous_points=previous_points,
         )
         if not gate_result.passed:
             self._record_integrity_gate_failure(alias_name, gate_result)
@@ -3502,6 +3507,18 @@ class RefreshScheduler:
 
         self._reset_integrity_gate_quarantine(alias_name)
         return gate_result
+
+    def _published_point_counts(self, current_target: Optional[str]) -> Dict[str, int]:
+        """Per-collection point counts of the index the alias serves now.
+
+        Read BEFORE indexing: when the alias still points at the directory
+        being re-indexed (no snapshot yet), afterwards would be too late.
+        """
+        if not current_target:
+            return {}
+        return count_collection_points(
+            self._index_store.index_root(current_target) / "index"
+        )
 
     def _index_source(
         self,
@@ -4386,13 +4403,15 @@ class RefreshScheduler:
                     f"to index/publish via _create_new_index()"
                 )
 
+            current_target = self.alias_manager.read_alias(alias_name)
+            previous_points = self._published_point_counts(current_target)
             self._index_source(alias_name=alias_name, source_path=source_path)
 
-            current_target = self.alias_manager.read_alias(alias_name)
             gate_result = self._run_and_publish_integrity_gate(
                 alias_name=alias_name,
                 source_path=source_path,
                 current_target=current_target,
+                previous_points=previous_points,
             )
             if not gate_result.passed:
                 detail_summary = "; ".join(
