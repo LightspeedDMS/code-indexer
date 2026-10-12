@@ -15,8 +15,10 @@ the repository held elsewhere, and the server's content backend set to it.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Sequence
+from unittest.mock import Mock
 
 import pytest
 
@@ -118,3 +120,88 @@ def test_a_local_backend_reads_the_disk_as_before(
     )
     assert content == "line two\nline three\n"
     assert staleness["is_stale"] is False
+
+
+class _Unreachable(RuntimeError):
+    """A plugin transport error: not an OSError (evo-sandbox's ContentMcpError)."""
+
+
+def test_a_backend_that_raises_reports_an_error_not_a_failed_search(
+    pod: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list = []
+
+    def _down(repo_path: Any, paths: Sequence[str]) -> Any:
+        calls.append(list(paths))
+        raise _Unreachable("/content/fetch unreachable")
+
+    monkeypatch.setattr(pod["backend"], "fetch", _down)
+    memo: Dict[str, Any] = {}
+    for _ in range(2):
+        content, staleness = pod["store"]._get_chunk_content_with_staleness(
+            _chunk(git_blob_hash_bytes(SOURCE)), fetch_memo=memo
+        )
+        assert staleness["is_stale"] is True
+        assert staleness["staleness_indicator"] == "❌ Error"
+        assert staleness["staleness_reason"] == "retrieval_failed"
+        assert "unreachable" in content
+    assert calls == [[REL]], "a failed read is remembered for the query"
+
+
+def test_two_chunks_of_one_file_fetch_it_once_per_query(
+    pod: Dict[str, Any],
+) -> None:
+    memo: Dict[str, Any] = {}
+    first = _chunk(git_blob_hash_bytes(SOURCE))
+    second = _chunk(git_blob_hash_bytes(SOURCE))
+    second["payload"] = {"path": REL, "line_start": 4, "line_end": 4}
+    a, _ = pod["store"]._get_chunk_content_with_staleness(first, fetch_memo=memo)
+    b, _ = pod["store"]._get_chunk_content_with_staleness(second, fetch_memo=memo)
+    assert (a, b) == ("line two\nline three\n", "line four\n")
+    assert pod["backend"].fetched == [REL]
+
+
+def test_search_reads_each_file_once_for_all_its_results(
+    pod: Dict[str, Any],
+) -> None:
+    """Two results from one file: search() fetches that file once, not twice."""
+    here: Path = pod["here"]
+    (here / "src").mkdir()
+    (here / REL).write_bytes(SOURCE)
+    for argv in (
+        ["init", "-q"],
+        ["-c", "user.email=t@t", "-c", "user.name=t", "add", "."],
+        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x"],
+    ):
+        subprocess.run(["git", *argv], cwd=here, check=True, capture_output=True)
+    store = FilesystemVectorStore(
+        here / ".code-indexer" / "index",
+        project_root=here,
+        use_chunks_db_for_new_collections=False,
+    )
+    store.create_collection("c", vector_size=8)
+    vector = [1.0] * 8
+    points = [
+        {
+            "id": f"p{n}",
+            "vector": vector,
+            "payload": {"path": REL, "line_start": n, "line_end": n},
+        }
+        for n in (1, 4)
+    ]
+    store.begin_indexing("c")
+    store.upsert_points("c", points)
+    store.end_indexing("c")
+    (here / REL).unlink()  # the pod has no checkout; only the backend has it
+
+    provider = Mock()
+    provider.get_embedding.return_value = vector
+    results = store.search(
+        query="q", embedding_provider=provider, collection_name="c", limit=2
+    )
+
+    assert sorted(r["payload"]["content"] for r in results) == [
+        "line four\n",
+        "line one\n",
+    ]
+    assert pod["backend"].fetched == [REL]

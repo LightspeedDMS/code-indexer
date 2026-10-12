@@ -7449,9 +7449,14 @@ class FilesystemVectorStore:
         # Enhance with content and staleness
         t0 = time.time()
         enhanced_results = []
+        # One content-backend read per file for this query: several results can
+        # be chunks of the same file, and each read pulls the whole file.
+        fetch_memo: Dict[str, Any] = {}
         for result in limited_results:
             vector_data = result.pop("_vector_data")
-            content, staleness = self._get_chunk_content_with_staleness(vector_data)
+            content, staleness = self._get_chunk_content_with_staleness(
+                vector_data, fetch_memo=fetch_memo
+            )
             result["payload"]["content"] = content
             result["staleness"] = staleness
             # Return chunk_text at root level for optimization contract
@@ -7463,7 +7468,11 @@ class FilesystemVectorStore:
 
         return (enhanced_results, timing) if return_timing else enhanced_results
 
-    def _get_chunk_content_with_staleness(self, vector_data: Dict[str, Any]) -> tuple:
+    def _get_chunk_content_with_staleness(
+        self,
+        vector_data: Dict[str, Any],
+        fetch_memo: Optional[Dict[str, Any]] = None,
+    ) -> tuple:
         """Retrieve chunk content with staleness detection.
 
         Strategy:
@@ -7473,6 +7482,9 @@ class FilesystemVectorStore:
 
         Args:
             vector_data: Vector data dictionary from JSON
+            fetch_memo: Per-query cache of content-backend reads, keyed by
+                file path, shared across one search's results. None reads
+                every time.
 
         Returns:
             Tuple of (content, staleness_info)
@@ -7528,6 +7540,7 @@ class FilesystemVectorStore:
                     start_line,
                     end_line,
                     stored_hash,
+                    fetch_memo,
                 )
 
             # Tier 1: Try reading from current file
@@ -7650,6 +7663,7 @@ class FilesystemVectorStore:
         start_line: int,
         end_line: int,
         stored_hash: str,
+        fetch_memo: Optional[Dict[str, Any]] = None,
     ) -> tuple:
         """A blob-hash chunk's content and staleness, read through the seam.
 
@@ -7660,10 +7674,29 @@ class FilesystemVectorStore:
         than replaced by lines of the current file that may not be the chunk.
         Never skips the hash check: the backend serves the base clone, which
         can be newer than an immutable snapshot's index.
+
+        A backend that raises (transport failure, malformed reply) yields a
+        stale "Error" record, as the local tiers do, rather than failing the
+        whole search. Each file is read once per *fetch_memo*, and a failure is
+        remembered too, so a down backend is not asked again for every chunk.
         """
         from ..server.services.file_service import fetch_one
 
-        fetched = fetch_one(source, file_path)
+        fetched: Any = None if fetch_memo is None else fetch_memo.get(file_path)
+        if fetched is None:
+            try:
+                fetched = fetch_one(source, file_path)
+            except Exception as exc:  # plugin errors are not all OSError
+                fetched = exc
+            if fetch_memo is not None:
+                fetch_memo[file_path] = fetched
+        if isinstance(fetched, Exception):
+            return f"[Error retrieving content: {fetched}]", {
+                "is_stale": True,
+                "staleness_indicator": "❌ Error",
+                "staleness_reason": "retrieval_failed",
+                "hash_mismatch": False,
+            }
         if fetched.error is not None:
             return f"[File deleted, cannot retrieve: {fetched.error}]", {
                 "is_stale": True,
