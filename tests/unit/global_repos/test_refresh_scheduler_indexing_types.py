@@ -386,13 +386,13 @@ class TestTemporalIndexingInIndexSource:
         """
         import logging
 
-        from code_indexer.global_repos import refresh_scheduler as rs
+        from code_indexer.server.startup import content_backend_wiring as wiring
 
         def unreadable() -> str:
             raise RuntimeError("config service not initialised")
 
         monkeypatch.setattr(
-            rs,
+            wiring,
             "configured_content_backend_name",
             (lambda: "delegated") if backend == "delegated" else unreadable,
         )
