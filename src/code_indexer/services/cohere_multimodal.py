@@ -34,6 +34,15 @@ _SAFETY_MARGIN = 0.9
 # Maximum sleep duration for any retry path to prevent indefinite blocking
 _MAX_RETRY_SLEEP_SECONDS = 300.0
 
+# Bug #2154: the embedding-stats purpose of a request follows its Cohere
+# input_type. "index" is the generic indexing label instrument_call turns
+# into the attribution purpose ("index" or "refresh"); "query" is never
+# relabelled and never charged to the run-spend meter.
+_STATS_PURPOSE_BY_INPUT_TYPE = {
+    "search_query": "query",
+    "search_document": "index",
+}
+
 
 class CohereMultimodalClient:
     """Client for Cohere embed-v4.0-multimodal API.
@@ -183,23 +192,39 @@ class CohereMultimodalClient:
     def _make_request(
         self,
         inputs: List[Dict[str, Any]],
-        input_type: str = "search_document",
+        input_type: str,
     ) -> Dict[str, Any]:
         """Make HTTP request to Cohere embed v2 API with retry logic.
 
         Args:
             inputs: List of input dicts with 'content' key (content blocks).
-            input_type: Cohere input_type parameter.
+            input_type: Cohere input_type parameter, "search_query" or
+                "search_document" (from _map_input_type). Required: it also
+                decides the embedding-stats / run-spend purpose (Bug #2154),
+                so it never defaults.
 
         Returns:
             Parsed JSON response from the API.
 
         Raises:
-            ValueError: If API key is invalid (401 Unauthorized).
+            ValueError: If input_type is not one of the two search types
+                (raised before any HTTP attempt), or the API key is invalid
+                (401 Unauthorized).
             RuntimeError: If all retry attempts are exhausted.
         """
         import httpx
         from http import HTTPStatus
+
+        # Bug #2154: a query embedding is recorded (and run-spend metered)
+        # as "query"; a document embedding takes the generic indexing label
+        # "index", which the stats attribution turns into "refresh" in a
+        # refresh child.
+        stats_purpose = _STATS_PURPOSE_BY_INPUT_TYPE.get(input_type)
+        if stats_purpose is None:
+            raise ValueError(
+                f"Unsupported Cohere multimodal input_type {input_type!r}; "
+                f"expected one of {sorted(_STATS_PURPOSE_BY_INPUT_TYPE)}"
+            )
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -299,7 +324,7 @@ class CohereMultimodalClient:
                     item_count=len(inputs),
                     token_count=0,
                     batch_size=len(inputs),
-                    purpose="index",
+                    purpose=stats_purpose,
                     fn=_do_post_and_validate,
                     # Story #2122: _build_content_blocks puts the text block
                     # first; an input without one can never match a
