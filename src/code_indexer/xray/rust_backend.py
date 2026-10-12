@@ -401,6 +401,14 @@ def _apply_compile_resource_limits() -> None:
 # keys, database URLs, tokens). The source-level validator was the only
 # barrier. Every xray-cli spawn therefore gets an explicit allowlist instead.
 #
+# Scope: this removes the INHERITED environment (std::env::vars(), a child's
+# own /proc/self/environ). It does not stop a validator bypass from reading
+# the server's /proc/<ppid>/environ: the child runs as the server's uid, and
+# Linux lets a same-uid process read that file (verified: a child spawned with
+# a scrubbed env reads a variable from its parent's environ). Closing that
+# needs a separate uid, PID namespace or hidepid /proc for xray-cli -- the
+# long-term fix is moving X-Ray into sandbox-mcp.
+#
 # What xray-cli and the toolchain it drives actually read
 # (rust/xray-cli/src/main.rs, rust/xray-core/src/{cache.rs,compiler/}):
 #   PATH            -- xray-cli runs `rustc` by name; rustc runs the `cc` linker.

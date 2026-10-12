@@ -118,6 +118,12 @@ environment. Every spawn passes `env=xray_subprocess_env()`
 and `CARGO_HOME`. A test fails any new xray-cli spawn without it. A rustc that
 needs another variable has to be added to that allowlist, with a reason.
 
+This removes the *inherited* environment only. Residual risk: xray-cli runs
+as the server's uid, so code that gets past the validator can still read the
+server's `/proc/<ppid>/environ`. Closing that needs a separate uid, a PID
+namespace or `hidepid` on `/proc`; the long-term fix is running X-Ray in
+sandbox-mcp.
+
 | Symptom | Cause | Fix |
 |---|---|---|
 | `Is rustc installed and on PATH?` only from the server | rustc's directory is missing from the server's own `PATH` | put it on the server's `PATH`; xray passes `PATH` through |
