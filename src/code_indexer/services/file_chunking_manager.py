@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from .vector_calculation_manager import VectorCalculationManager
 from ..indexing.fixed_size_chunker import FixedSizeChunker
 from ..indexing import file_facts
+from ..indexing.file_facts import ContentUnavailableError
 from .clean_slot_tracker import CleanSlotTracker, FileData, FileStatus
 from ..storage.sqlite_chunk_store import (
     ChunkStoreUnavailableError,
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     # Type only: the prefetcher pulls in the server's content seam, which
     # local-only indexing never constructs and must not have to import.
     from ..indexing.content_prefetcher import ContentPrefetcher
+    from .multimodal_utils import ImageSource
 
 # Token counting for large file handling - using embedded tokenizer
 # No imports needed here - lazy import in _count_tokens_accurately()
@@ -53,10 +55,6 @@ logger = logging.getLogger(__name__)
 # bound on the indexing path; the only legitimate timeout is the per-request
 # outbound embedding-provider HTTP call inside the provider itself.
 THREAD_POOL_SHUTDOWN_TIMEOUT = 30.0  # 30 seconds for graceful shutdown
-
-
-class ContentUnavailableError(RuntimeError):
-    """A content source could not supply a file's bytes (not merely: it is gone)."""
 
 
 @dataclass
@@ -105,6 +103,7 @@ class FileChunkingManager:
         multimodal_client=None,  # Optional VoyageMultimodalClient for multimodal embeddings
         manifest: Optional["RepoManifest"] = None,
         content_source: Optional["ContentPrefetcher"] = None,
+        image_source: Optional["ImageSource"] = None,
     ):
         """
         Initialize FileChunkingManager with complete functionality.
@@ -123,6 +122,10 @@ class FileChunkingManager:
             content_source: Where file bytes come from. None (the default) reads
                 this container's disk; a ContentPrefetcher serves them from a
                 delegated content backend, with no local read.
+            image_source: Where referenced images' existence, size and bytes
+                come from. None (the default) asks this container's disk,
+                exactly as before; an ImagePrefetcher answers through the
+                content seam for a pod that does not hold the repository.
 
         Raises:
             ValueError: If thread_count is invalid or dependencies are None
@@ -150,6 +153,7 @@ class FileChunkingManager:
         self.multimodal_client = multimodal_client
         self.manifest = manifest
         self.content_source = content_source
+        self.image_source = image_source
 
         # CRITICAL FIX: Single cancellation event shared with VectorCalculationManager
         self._cancellation_requested = False
@@ -442,6 +446,20 @@ class FileChunkingManager:
         vector_point = {"id": point_id, "vector": embedding, "payload": payload}
 
         return vector_point
+
+    def _image_exists(self, img_path: Path) -> bool:
+        """Whether a referenced image is there: the image source's answer when
+        there is one (the pod may not mount the repository), else the disk's."""
+        if self.image_source is None:
+            return img_path.exists()
+        return self.image_source.has(img_path)
+
+    def _image_source_kwargs(self) -> Dict[str, Any]:
+        """``image_source=`` for the multimodal client, only when there is one,
+        so a local pass calls the client exactly as it always has."""
+        if self.image_source is None:
+            return {}
+        return {"image_source": self.image_source}
 
     def _read_content(self, file_path: Path) -> bytes:
         """This file's bytes: from the content source when there is one, else disk.
@@ -802,7 +820,7 @@ class FileChunkingManager:
                         img_path = (self.codebase_dir / img_ref_path).resolve()
 
                         # Double-check the path is valid (defense in depth)
-                        if not img_path.exists():
+                        if not self._image_exists(img_path):
                             logger.debug(f"Image not found: {img_path} - skipping")
                             continue
 
@@ -826,7 +844,9 @@ class FileChunkingManager:
                     try:
                         # Get multimodal embedding (client handles base64 encoding)
                         embedding = self.multimodal_client.get_multimodal_embedding(
-                            text=chunk["text"], image_paths=image_paths
+                            text=chunk["text"],
+                            image_paths=image_paths,
+                            **self._image_source_kwargs(),
                         )
 
                         logger.debug(
@@ -881,6 +901,17 @@ class FileChunkingManager:
                             f"for deferred atomic write to {multimodal_collection_name} collection"
                         )
 
+                    except ContentUnavailableError:
+                        # The backend could not serve an image batch (a
+                        # transport failure, not a missing image -- that is
+                        # FileNotFoundError and skipped below). Fail the file,
+                        # as a text-fetch failure does, so a later pass
+                        # retries it instead of recording it without its
+                        # multimodal points. Its queued text batches are
+                        # discarded; the ones not yet started are cancelled.
+                        for batch_future in batch_futures:
+                            batch_future.cancel()
+                        raise
                     except Exception as e:
                         logger.error(
                             f"Failed to generate or store multimodal embedding: {e}"

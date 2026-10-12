@@ -7,7 +7,7 @@ import httpx
 from rich.console import Console
 
 from ..config import VoyageAIConfig
-from .multimodal_utils import encode_image_to_base64
+from .multimodal_utils import ImageSource, encode_image_to_base64
 from .voyage_ai import SyncClientFactory
 
 
@@ -73,6 +73,7 @@ class VoyageMultimodalClient:
         text: str,
         image_paths: List[Union[Path, str]],
         input_type: Optional[str] = None,
+        image_source: Optional[ImageSource] = None,
     ) -> List[float]:
         """Generate multimodal embedding for text and images.
 
@@ -80,6 +81,7 @@ class VoyageMultimodalClient:
             text: Text content to embed
             image_paths: List of paths to image files (PNG, JPEG, WebP, GIF)
             input_type: Optional input type ("query", "document", or None)
+            image_source: Where image bytes come from; None reads this disk.
 
         Returns:
             1024-dimensional embedding vector as list of floats
@@ -94,7 +96,7 @@ class VoyageMultimodalClient:
 
         # Add images if provided
         for image_path in image_paths:
-            image_data_url = encode_image_to_base64(image_path)
+            image_data_url = encode_image_to_base64(image_path, image_source)
             content.append({"type": "image_base64", "image_base64": image_data_url})
 
         # Build API request payload

@@ -8,10 +8,10 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | Class | Rows |
 |---|---|
 | unclassified | 0 |
-| repo-read | 452 |
+| repo-read | 448 |
 | repo-write | 93 |
 | cidx-state-in-repo | 1325 |
-| migrated | 148 |
+| migrated | 152 |
 | local-only | 173 |
 | cidx-state | 526 |
 | not-repo | 415 |
@@ -192,9 +192,8 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/wiki/wiki_cache.py` | 0 | 4 | 0 | 0 |
 | `server/wiki/wiki_service.py` | 0 | 5 | 0 | 0 |
 | `services/chunk_migration_cli.py` | 0 | 0 | 0 | 14 |
-| `services/cohere_multimodal.py` | 0 | 1 | 0 | 0 |
 | `services/config_fixer.py` | 0 | 5 | 0 | 13 |
-| `services/file_chunking_manager.py` | 0 | 2 | 0 | 0 |
+| `services/file_chunking_manager.py` | 0 | 1 | 0 | 0 |
 | `services/file_identifier.py` | 0 | 1 | 0 | 0 |
 | `services/generic_query_service.py` | 0 | 4 | 0 | 0 |
 | `services/git_detection.py` | 0 | 0 | 0 | 6 |
@@ -205,7 +204,6 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `services/json_validator.py` | 0 | 0 | 0 | 3 |
 | `services/language_mapper.py` | 0 | 0 | 0 | 4 |
 | `services/multi_index_query_service.py` | 0 | 0 | 0 | 4 |
-| `services/multimodal_utils.py` | 0 | 2 | 0 | 0 |
 | `services/progress_subprocess_runner.py` | 0 | 3 | 0 | 0 |
 | `services/progressive_metadata.py` | 0 | 0 | 0 | 11 |
 | `services/provider_health_bridge.py` | 0 | 0 | 0 | 13 |

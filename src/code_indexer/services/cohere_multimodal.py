@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
+from .multimodal_utils import ImageSource, image_size
+
 logger = logging.getLogger(__name__)
 
 # Maximum image size: 5MB per Cohere API documentation
@@ -129,16 +131,19 @@ class CohereMultimodalClient:
 
         return int(count_tokens_single(text, model=self.config.model))
 
-    def _check_image_size(self, image_path: Path) -> bool:
+    def _check_image_size(
+        self, image_path: Path, image_source: Optional[ImageSource] = None
+    ) -> bool:
         """Check if image is within the 5MB size limit.
 
         Args:
             image_path: Path to image file.
+            image_source: Where the size comes from; None stats this disk.
 
         Returns:
             True if image is within size limit, False if oversized.
         """
-        size = os.path.getsize(str(image_path))
+        size = image_size(image_path, image_source)
         if size > COHERE_MAX_IMAGE_SIZE:
             logger.warning(
                 "Image %s exceeds 5MB size limit (%d bytes), skipping image embedding",
@@ -149,7 +154,10 @@ class CohereMultimodalClient:
         return True
 
     def _build_content_blocks(
-        self, text: str, image_paths: Sequence[Union[Path, str]]
+        self,
+        text: str,
+        image_paths: Sequence[Union[Path, str]],
+        image_source: Optional[ImageSource] = None,
     ) -> List[Dict[str, Any]]:
         """Build content blocks for the Cohere API request.
 
@@ -158,6 +166,8 @@ class CohereMultimodalClient:
         Args:
             text: Text content.
             image_paths: List of image file paths.
+            image_source: Where image sizes and bytes come from; None reads
+                this disk.
 
         Returns:
             List of content block dicts with 'type' key.
@@ -168,9 +178,9 @@ class CohereMultimodalClient:
 
         for image_path in image_paths:
             image_path = Path(image_path)
-            if not self._check_image_size(image_path):
+            if not self._check_image_size(image_path, image_source):
                 continue
-            data_url = encode_image_to_base64(image_path)
+            data_url = encode_image_to_base64(image_path, image_source)
             content.append({"type": "image_url", "image_url": {"url": data_url}})
 
         return content
@@ -415,6 +425,7 @@ class CohereMultimodalClient:
         text: str,
         image_paths: List[Union[Path, str]],
         input_type: Optional[str] = None,
+        image_source: Optional[ImageSource] = None,
     ) -> List[float]:
         """Generate multimodal embedding for text and images.
 
@@ -422,6 +433,8 @@ class CohereMultimodalClient:
             text: Text content to embed.
             image_paths: List of paths to image files (PNG, JPEG, WebP, GIF).
             input_type: Optional input type ("query", "document", or None).
+            image_source: Where image sizes and bytes come from; None reads
+                this disk.
 
         Returns:
             Embedding vector as list of floats (dimension from config.default_dimension).
@@ -432,7 +445,7 @@ class CohereMultimodalClient:
             FileNotFoundError: If any image file doesn't exist.
         """
         cohere_input_type = self._map_input_type(input_type)
-        content = self._build_content_blocks(text, image_paths)
+        content = self._build_content_blocks(text, image_paths, image_source)
         inputs = [{"content": content}]
 
         response = self._make_request(inputs, cohere_input_type)

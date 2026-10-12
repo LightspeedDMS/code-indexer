@@ -358,6 +358,28 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             expected_blob_sha=manifest.blob_sha,
         )
 
+    def _build_image_source(self, multimodal_client: Optional[Any]) -> Optional[Any]:
+        """Image bytes through the content seam, or None to read the disk.
+
+        Under the same condition as ``_build_content_source`` -- a delegated
+        manifest for this pass -- and only when there is a multimodal client to
+        want images at all. Without it every image reference was checked with a
+        local ``exists()``, False on a pod without the repository, and silently
+        dropped.
+        """
+        manifest = getattr(self, "repo_manifest", None)
+        if manifest is None or multimodal_client is None:
+            return None
+        from ..indexing.content_prefetcher import ImagePrefetcher
+        from .multimodal_utils import SUPPORTED_MEDIA_TYPES
+
+        return ImagePrefetcher(
+            self.content_backend,
+            Path(self.config.codebase_dir),
+            manifest,
+            SUPPORTED_MEDIA_TYPES,
+        )
+
     def _process_files_high_throughput(
         self,
         files: List[Path],
@@ -428,6 +450,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 multimodal_client=multimodal_client,
                 manifest=self.repo_manifest,
                 content_source=self._build_content_source(files),
+                image_source=self._build_image_source(multimodal_client),
             ) as file_manager:
                 # Bug #1746 Change 4 (M1 fix): preflight the target chunk
                 # store's writability BEFORE any file is hashed, chunked,
