@@ -32,17 +32,31 @@ import errno
 import logging
 import os
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from pathlib import Path, PurePosixPath
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Collection,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+)
 
 from ..server.storage.shared.content_backend import ContentBackend, FetchedFile
+from .file_facts import ContentUnavailableError
 from .fetch_planner import (
     DEFAULT_FETCH_BUDGET_BYTES,
     DEFAULT_FETCH_BUDGET_FILES,
     DEFAULT_FETCH_BUDGET_REQUEST_BYTES,
     plan_fetch_batches,
 )
+
+if TYPE_CHECKING:
+    from .repo_manifest import RepoManifest
+
 
 logger = logging.getLogger(__name__)
 
@@ -115,10 +129,7 @@ class ContentPrefetcher:
 
     def relative(self, file_path: Path) -> Optional[str]:
         """The repo-relative POSIX path the backend speaks, or None if outside."""
-        try:
-            return Path(file_path).relative_to(self._root).as_posix()
-        except ValueError:
-            return None
+        return _relative_to(self._root, file_path)
 
     def take(self, file_path: Path) -> PrefetchedContent:
         """This file's bytes, once. A second take of the same path is refused."""
@@ -148,21 +159,157 @@ class ContentPrefetcher:
         return PrefetchedContent(fetched.data)
 
     def _load(self, batch: _Batch) -> None:
-        """Fetch a whole batch. A transport failure fails every file in it."""
-        try:
-            batch.files = {
-                record.path: record
-                for record in self._backend.fetch(self._root, batch.paths)
-            }
-        except Exception as exc:  # the backend's transport, whatever it is
-            # The message, not just the type: "ContentMcpError" alone cannot
-            # tell a 503 from a timeout from a refused connection. The plugin's
-            # messages carry the route, status and a capped body excerpt --
-            # never the token -- and are capped again here.
-            reason = f"{type(exc).__name__}: {exc}"[:_MAX_REASON_CHARS]
-            logger.error(
-                "Content fetch failed for a batch of %d files: %s",
-                len(batch.paths),
-                reason,
+        _load_batch(self._backend, self._root, batch)
+
+
+def _load_batch(backend: ContentBackend, root: Path, batch: _Batch) -> None:
+    """Fetch a whole batch in ONE call. A transport failure fails every file in it."""
+    try:
+        batch.files = {
+            record.path: record for record in backend.fetch(root, batch.paths)
+        }
+    except Exception as exc:  # the backend's transport, whatever it is
+        # The message, not just the type: "ContentMcpError" alone cannot
+        # tell a 503 from a timeout from a refused connection. The plugin's
+        # messages carry the route, status and a capped body excerpt --
+        # never the token -- and are capped again here.
+        reason = f"{type(exc).__name__}: {exc}"[:_MAX_REASON_CHARS]
+        logger.error(
+            "Content fetch failed for a batch of %d files: %s",
+            len(batch.paths),
+            reason,
+        )
+        batch.failure = f"content fetch failed: {reason}"
+
+
+def _relative_to(root: Path, file_path: Path) -> Optional[str]:
+    """The repo-relative POSIX path the backend speaks, or None if outside."""
+    try:
+        return Path(file_path).relative_to(root).as_posix()
+    except ValueError:
+        return None
+
+
+#: Fetched image batches kept for reuse, in bytes. One image is often referenced
+#: from several chunks and files; keeping recent batches means a second
+#: reference costs no fetch. Bounded so a repository of images never sits in
+#: memory whole: past this, the least recently used batch is dropped (and
+#: fetched again, still as a batch, if it is wanted later).
+DEFAULT_IMAGE_RESIDENT_BYTES = 4 * DEFAULT_FETCH_BUDGET_BYTES
+
+
+class ImagePrefetcher:
+    """Image bytes for the multimodal path, read through the content seam.
+
+    The image references a pass will follow are only known once a document is
+    chunked, deep inside a worker -- so they cannot be planned up front the way
+    the pass's own files are. What CAN be planned up front is every image the
+    repository holds: the manifest lists them with their sizes. Those are
+    planned into byte-budgeted batches once, by the same ``plan_fetch_batches``
+    the text path uses, and a batch is fetched (ONE call) only when an image in
+    it is first wanted. A batch nobody references is never fetched, and no
+    image ever costs a call of its own unless the planner put it alone.
+
+    Satisfies ``multimodal_utils.ImageSource``: existence and size answer from
+    the manifest -- never a local ``exists``/``stat``, which on a pod without
+    the repository is False/an error for every image -- and bytes from the
+    batch.
+
+    Unlike ``ContentPrefetcher`` a path may be read more than once (one image,
+    many references), and no blob hash is checked: an image's hash goes into no
+    payload or point id, so the read has nothing to keep consistent with.
+    """
+
+    def __init__(
+        self,
+        backend: ContentBackend,
+        repo_root: Path,
+        manifest: "RepoManifest",
+        image_suffixes: Collection[str],
+        *,
+        budget_bytes: int = DEFAULT_FETCH_BUDGET_BYTES,
+        budget_files: int = DEFAULT_FETCH_BUDGET_FILES,
+        budget_request_bytes: int = DEFAULT_FETCH_BUDGET_REQUEST_BYTES,
+        resident_bytes: int = DEFAULT_IMAGE_RESIDENT_BYTES,
+    ) -> None:
+        self._backend = backend
+        self._root = Path(repo_root)
+        self._manifest = manifest
+        self._resident_limit = resident_bytes
+        suffixes = {suffix.lower() for suffix in image_suffixes}
+        images = [
+            path
+            for path in manifest.paths()
+            if PurePosixPath(path).suffix.lower() in suffixes
+        ]
+        self._batch_of: Dict[str, _Batch] = {}
+        for paths in plan_fetch_batches(
+            images,
+            manifest.size,
+            budget_bytes=budget_bytes,
+            budget_files=budget_files,
+            budget_request_bytes=budget_request_bytes,
+        ):
+            batch = _Batch(paths)
+            for path in paths:
+                self._batch_of[path] = batch
+        # Loaded batches, least recently used first, with their byte cost.
+        self._resident: "OrderedDict[_Batch, int]" = OrderedDict()
+        self._resident_total = 0
+        self._resident_lock = threading.Lock()
+
+    def has(self, image_path: Path) -> bool:
+        return image_path in self._manifest
+
+    def size(self, image_path: Path) -> int:
+        return self._manifest.size(image_path) or 0
+
+    def read(self, image_path: Path) -> bytes:
+        rel = _relative_to(self._root, image_path)
+        batch = self._batch_of.get(rel) if rel is not None else None
+        if batch is None:
+            raise FileNotFoundError(f"Image not in the repository: {image_path}")
+        with batch.lock:
+            loaded = batch.files is None and batch.failure is None
+            if loaded:
+                _load_batch(self._backend, self._root, batch)
+            # Taken under the lock: an eviction may clear ``batch.files`` the
+            # moment it is released, and this reader keeps what it saw.
+            failure, files = batch.failure, batch.files
+        if failure is not None:
+            raise ContentUnavailableError(f"{image_path}: {failure}")
+        assert files is not None  # _load_batch sets one or the other
+        if loaded:
+            self._admit(batch, files)
+        else:
+            self._touch(batch)
+        record = files.get(rel) if rel is not None else None
+        if record is None:
+            raise ContentUnavailableError(
+                f"{image_path}: the backend returned no record"
             )
-            batch.failure = f"content fetch failed: {reason}"
+        if record.error in _VANISHED_ERRORS:
+            raise FileNotFoundError(f"{image_path}: {record.error}")
+        if record.error is not None:
+            raise ContentUnavailableError(f"{image_path}: {record.error}")
+        return record.data
+
+    def _admit(self, batch: _Batch, files: Dict[str, FetchedFile]) -> None:
+        """Count a freshly loaded batch, dropping the oldest past the limit."""
+        cost = sum(len(record.data) for record in files.values())
+        with self._resident_lock:
+            self._resident[batch] = cost
+            self._resident_total += cost
+            while (
+                self._resident_total > self._resident_limit and len(self._resident) > 1
+            ):
+                old, old_cost = self._resident.popitem(last=False)
+                self._resident_total -= old_cost
+                # A reader already holding ``old.files`` keeps its reference;
+                # the next reader of this batch fetches it again, as a batch.
+                old.files = None
+
+    def _touch(self, batch: _Batch) -> None:
+        with self._resident_lock:
+            if batch in self._resident:
+                self._resident.move_to_end(batch)

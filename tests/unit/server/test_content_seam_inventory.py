@@ -331,8 +331,11 @@ _INDEX_QUERY_PATHS = (
 )
 
 #: An identifier that shows a function asks a seam: a content or git backend,
-#: the pass manifest, or prefetched content.
-_SEAM_EVIDENCE = re.compile(r"backend|manifest|delegat|content_source|prefetch", re.I)
+#: the pass manifest, prefetched content, or the multimodal path's
+#: ``image_source`` (an ImagePrefetcher over the content backend).
+_SEAM_EVIDENCE = re.compile(
+    r"backend|manifest|delegat|content_source|image_source|prefetch", re.I
+)
 
 Key = Tuple[str, str, str]  # (module, function, op)
 

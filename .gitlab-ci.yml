@@ -191,6 +191,7 @@ smoke:
       tests/unit/services/test_index_git_seam.py
       tests/unit/services/test_reconcile_git_seam_mountless.py
       tests/unit/services/test_delegated_max_file_size.py
+      tests/unit/services/test_multimodal_content_seam.py
       tests/unit/services/test_project_id_git_seam.py
       tests/unit/services/test_smart_indexer_pass_existence.py
       tests/unit/storage/test_fvs_chunk_content_seam.py

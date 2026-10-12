@@ -24,6 +24,10 @@ if TYPE_CHECKING:
     from .repo_manifest import RepoManifest
 
 
+class ContentUnavailableError(RuntimeError):
+    """A content source could not supply a file's bytes (not merely: it is gone)."""
+
+
 def file_size(file_path: Path, manifest: Optional["RepoManifest"]) -> int:
     """Bytes in the file. Raises like ``Path.stat`` when there is no manifest."""
     if manifest is None:
