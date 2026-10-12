@@ -933,7 +933,9 @@ class RefreshScheduler:
         an ERROR naming the alias and the branch. An unknown registered
         branch switches nothing and the refresh continues, with a failed
         branch read folded into ``_registered_branch``'s single WARNING. A
-        cancellation is re-raised as-is."""
+        registered branch of exactly ``HEAD`` (a repository registered from a
+        detached source) has no branch to enforce: nothing is logged, raised
+        or checked out. A cancellation is re-raised as-is."""
         branch_cmd = ["git", "branch", "--show-current"]
         current = ""
         read_failure: Optional[str] = None
@@ -963,6 +965,10 @@ class RefreshScheduler:
             alias_name, branch_read_failure=read_failure
         )
         if registered is None:
+            return
+        if registered == "HEAD":
+            # Registered from a detached source: `git rev-parse --abbrev-ref
+            # HEAD` recorded the literal "HEAD", so there is no branch.
             return
         if read_failure is not None:
             logger.error(

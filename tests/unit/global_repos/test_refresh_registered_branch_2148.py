@@ -574,3 +574,130 @@ def test_failed_branch_read_with_unknown_branch_warns_once(
         and r.getMessage() != warning
     ]
     assert other_branch_warnings == [], other_branch_warnings
+
+
+# A repository registered from a detached source (e.g. a local seed clone
+# checked out at a tag) records the literal ``HEAD`` as its branch
+# (``git rev-parse --abbrev-ref HEAD`` on a detached tree): there is no branch
+# to enforce, so the branch check must do nothing at all.
+DETACHED_REGISTRATION = "HEAD"
+
+
+def record_git_commands(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Record every git argv the refresh scheduler runs; the real git still
+    runs for each one."""
+    module = sys.modules[RefreshScheduler.__module__]
+    real = module.run_with_cancel
+    commands: list = []
+
+    def wrapper(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        commands.append(list(cmd))
+        return real(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(module, "run_with_cancel", wrapper)
+    return commands
+
+
+def branch_check_records(caplog: pytest.LogCaptureFixture) -> list:
+    """WARNING/ERROR records the registered-branch check itself can emit."""
+    markers = ("Base clone for", "Failed to reset", "Registered branch of")
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno >= logging.WARNING
+        and r.name == SCHEDULER_LOGGER
+        and any(marker in r.getMessage() for marker in markers)
+    ]
+
+
+def refresh_past_branch_check(
+    scheduler: RefreshScheduler, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Run a refresh that gets past the branch check: the golden clone is
+    not cidx-initialised, so it fails later, at indexing -- never with a
+    registered-branch error."""
+    with (
+        caplog.at_level(logging.WARNING, logger=SCHEDULER_LOGGER),
+        pytest.raises(RuntimeError, match="indexing on source failed") as excinfo,
+    ):
+        refresh(scheduler)
+    assert "registered branch" not in str(excinfo.value)
+
+
+def test_detached_registration_on_detached_clone_switches_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Registered ``HEAD``, clone detached: no checkout, no branch WARNING
+    or ERROR, and the refresh continues past the branch check."""
+    origin, master = make_feature_branch_clone(tmp_path)
+    scheduler, _ = make_git_repo_scheduler(tmp_path, origin, master)
+    register_branch(per_node_sqlite(master), origin, master, DETACHED_REGISTRATION)
+    git_out("checkout", "--detach", "HEAD", cwd=master)
+    detached_at = head_sha(master)
+    commands = record_git_commands(monkeypatch)
+
+    # A detached clone has no upstream branch to compare, so the refresh may
+    # finish (nothing to pull) instead of reaching indexing; either way it
+    # must not stop at the branch check.
+    with caplog.at_level(logging.WARNING, logger=SCHEDULER_LOGGER):
+        try:
+            refresh(scheduler)
+        except RuntimeError as e:
+            assert "branch" not in str(e), str(e)
+    assert [c[:2] for c in commands].count(["git", "branch"]) == 1
+
+    assert [c for c in commands if c[:2] == ["git", "checkout"]] == []
+    assert branch_check_records(caplog) == []
+    assert current_branch(master) == ""
+    assert head_sha(master) == detached_at
+
+
+def test_detached_registration_on_named_branch_keeps_branch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Registered ``HEAD``, clone on feature-x: no checkout, no branch
+    WARNING or ERROR; the clone stays on feature-x and the refresh pulls the
+    new upstream feature-x commit."""
+    origin, master = make_feature_branch_clone(tmp_path)
+    scheduler, _ = make_git_repo_scheduler(tmp_path, origin, master)
+    register_branch(per_node_sqlite(master), origin, master, DETACHED_REGISTRATION)
+    push_feature_commit(tmp_path)
+    upstream = git_out("rev-parse", "feature-x", cwd=tmp_path / "work")
+    commands = record_git_commands(monkeypatch)
+
+    refresh_past_branch_check(scheduler, caplog)
+
+    assert [c for c in commands if c[:2] == ["git", "checkout"]] == []
+    assert branch_check_records(caplog) == []
+    assert current_branch(master) == "feature-x"
+    assert head_sha(master) == upstream, "the refresh must pull past the check"
+
+
+@FAIL_BRANCH_READ
+def test_detached_registration_with_failed_branch_read_does_not_raise(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fail_branch_read: Callable[[Path, pytest.MonkeyPatch], None],
+) -> None:
+    """Registered ``HEAD`` and the clone's branch cannot be read: there is
+    no branch to verify, so nothing is raised, logged or checked out, and the
+    refresh pulls the new upstream feature-x commit."""
+    origin, master = make_feature_branch_clone(tmp_path)
+    scheduler, _ = make_git_repo_scheduler(tmp_path, origin, master)
+    register_branch(per_node_sqlite(master), origin, master, DETACHED_REGISTRATION)
+    push_feature_commit(tmp_path)
+    upstream = git_out("rev-parse", "feature-x", cwd=tmp_path / "work")
+    fail_branch_read(tmp_path, monkeypatch)
+    commands = record_git_commands(monkeypatch)
+
+    refresh_past_branch_check(scheduler, caplog)
+
+    assert [c for c in commands if c[:2] == ["git", "checkout"]] == []
+    assert branch_check_records(caplog) == []
+    assert current_branch(master) == "feature-x"
+    assert head_sha(master) == upstream, "the refresh must pull past the check"
