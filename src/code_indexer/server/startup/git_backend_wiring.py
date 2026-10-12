@@ -27,6 +27,7 @@ from code_indexer.server.storage.shared.git_backend import (
     VALID_GIT_BACKENDS,
     GitBackend,
     GitBackendFactory,
+    LocalGitBackend,
 )
 
 logger = logging.getLogger(__name__)
@@ -135,3 +136,21 @@ def configured_git_backend_name() -> str:
 
     config = get_config_service().get_config()
     return getattr(config, "git_backend", "local") or "local"
+
+
+def server_delegated_git_backend() -> Optional[GitBackend]:
+    """The running server's git seam when it is delegated (git-mcp), else None.
+
+    None outside a server process (CLI, daemon, tests) and on a server whose git
+    runs locally: callers then run local git exactly as before. Read from the
+    backend startup parked on ``app.state`` without importing the app, so a CLI
+    process never constructs it.
+    """
+    from code_indexer.server.utils.registry_factory import (
+        _running_server_app_state,
+    )
+
+    backend = getattr(_running_server_app_state(), "git_backend", None)
+    if not isinstance(backend, GitBackend) or isinstance(backend, LocalGitBackend):
+        return None
+    return backend

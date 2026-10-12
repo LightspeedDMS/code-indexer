@@ -64,6 +64,7 @@ from code_indexer.server.startup.content_backend_wiring import (
     configured_content_backend_name,
     content_backend_name_or_none,
 )
+from code_indexer.server.startup.git_backend_wiring import configured_git_backend_name
 from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
 from code_indexer.server.services.metadata_reader import (
     read_current_commit,
@@ -380,6 +381,19 @@ def _repository_is_elsewhere() -> bool:
     it to skip local-disk work, and skipping is the safe side of not knowing.
     """
     return content_backend_name_or_none() in (None, "delegated")
+
+
+def _history_through_git_seam() -> bool:
+    """True when git runs through the git seam (``git_backend='delegated'``).
+
+    Fails toward False when the setting cannot be read: the caller then skips
+    temporal indexing on a pod that may not hold the repository -- the safe side.
+    """
+    try:
+        return configured_git_backend_name() == "delegated"
+    except Exception as exc:  # the server config, whatever its state
+        logger.warning("git_backend setting unreadable (%s)", exc)
+        return False
 
 
 def _build_source_trigram_index(alias_name: str, source_path: str) -> None:
@@ -3654,16 +3668,22 @@ class RefreshScheduler:
             )
             enable_temporal = False
 
-        if enable_temporal and _repository_is_elsewhere():
-            # Temporal indexing runs git log on this pod with the repository as
-            # cwd; on a pod that does not hold it that fails, and the failure
-            # used to fail the WHOLE refresh. Skipped -- loudly, unlike the
-            # local:// case above, because here it is a lost feature, not an
-            # inapplicable one -- so the semantic and FTS indexes stay fresh.
+        if (
+            enable_temporal
+            and _repository_is_elsewhere()
+            and not _history_through_git_seam()
+        ):
+            # With a delegated git backend the temporal child reads the history
+            # through the git seam (git-mcp; the seam flags are stamped by
+            # append_server_layout_args). With LOCAL git on a pod that does not
+            # hold the repository it would fail, and the failure used to fail
+            # the WHOLE refresh. Skipped -- loudly, unlike the local:// case
+            # above, because here it is a lost feature, not an inapplicable one
+            # -- so the semantic and FTS indexes stay fresh.
             logger.error(
                 f"Skipping temporal indexing for {alias_name}: content_backend="
-                "'delegated' and temporal indexing does not run through the git "
-                "seam yet; the temporal index is not refreshed"
+                "'delegated' with git_backend='local' -- the history is not on "
+                "this pod; the temporal index is not refreshed"
             )
             enable_temporal = False
 

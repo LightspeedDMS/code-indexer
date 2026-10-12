@@ -254,12 +254,12 @@ def test_the_server_hands_the_configured_backend_to_the_manager() -> None:
     assert passed and set(passed) <= bound, (passed, bound)
 
 
-def test_temporal_is_refused_at_registration(pod: Any) -> None:
-    """Temporal indexing runs git log on this pod, which holds no repository."""
+def test_temporal_with_local_git_is_refused_at_registration(pod: Any) -> None:
+    """With git run on this pod, which holds no repository, there is no history."""
     make, _, git = pod
-    manager = make()
+    manager = make(git_backend=LocalGitBackend())
 
-    with pytest.raises(GitOperationError, match="temporal indexing"):
+    with pytest.raises(GitOperationError, match="git_backend='delegated'"):
         manager.add_golden_repo(
             repo_url=REMOTE_URL,
             alias="r",
@@ -269,9 +269,9 @@ def test_temporal_is_refused_at_registration(pod: Any) -> None:
     assert git.cloned == []
 
 
-def test_a_temporal_index_cannot_be_added_later(pod: Any) -> None:
+def test_a_temporal_index_with_local_git_cannot_be_added_later(pod: Any) -> None:
     make, _, _ = pod
-    manager = make()
+    manager = make(git_backend=LocalGitBackend())
     manager._resolve_golden_repo = lambda alias: object()  # registered
 
     with pytest.raises(GitOperationError, match="temporal indexing"):
@@ -280,29 +280,9 @@ def test_a_temporal_index_cannot_be_added_later(pod: Any) -> None:
         )
 
 
-def test_a_local_repo_is_created_on_this_pod(pod: Any) -> None:
-    """local:// repositories (cidx-meta, uploads) are cidx's own and live on
-    this pod: allowed under a delegated backend, even with git run here."""
-    make, volume, git = pod
-    manager = make(git_backend=LocalGitBackend())
-
-    clone_path = manager._clone_repository("local://notes", "notes", None)
-
-    assert Path(clone_path).is_dir()
-    assert git.cloned == []
-    assert not volume(clone_path).exists(), "created with the service, not here"
-
-
-def test_a_local_repo_is_not_refused_at_submission(pod: Any) -> None:
-    from unittest.mock import MagicMock
-
+def test_temporal_through_the_git_seam_is_accepted(pod: Any) -> None:
+    """With git delegated the history is read through git-mcp: not refused."""
     make, _, _ = pod
-    manager = make(git_backend=LocalGitBackend())
-    manager.background_job_manager = MagicMock()
-    manager.background_job_manager.submit_job.return_value = "job-1"
+    manager = make()
 
-    manager.add_golden_repo(
-        repo_url="local://notes", alias="notes", submitter_username="admin"
-    )
-
-    assert manager.background_job_manager.submit_job.called
+    manager._refuse_temporal_under_delegated_content()

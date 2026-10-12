@@ -33,15 +33,20 @@ registers it on the ``code_indexer.git_backend`` entry point;
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
 import threading
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 _DEFAULT_URL = "http://git-mcp.agent-orchestrator.svc.cluster.local:3000"
+
+#: Items git-mcp accepts in one git_diff_commits / git_show_objects call. A
+#: larger request is split into calls of this size -- still a batch per call.
+_MAX_HISTORY_BATCH = 256
 
 
 class GitMcpBackendError(subprocess.CalledProcessError):
@@ -416,6 +421,131 @@ class GitMcpBackend:
         self._call(
             "git_config_set", self._cow(repo_path, key=key, value=value), timeout
         )
+
+    # ── history (cidx temporal indexing and queries) ─────────────────────────
+    # git-mcp returns git's own stdout base64-encoded, so these hand cidx the
+    # exact bytes a local run would; cidx decodes them as local git output.
+
+    def log_raw(
+        self,
+        repo_path: str,
+        fmt: str,
+        revs: Sequence[str] = (),
+        *,
+        all_refs: bool = False,
+        since: Optional[str] = None,
+        skip: Optional[int] = None,
+        max_count: Optional[int] = None,
+        timeout: Any = None,
+    ) -> bytes:
+        r = self._call(
+            "git_log_raw",
+            self._cow(
+                repo_path,
+                format=fmt,
+                revs=list(revs) or None,
+                all=all_refs or None,
+                since=since,
+                skip=skip or None,
+                max_count=max_count,
+            ),
+            timeout,
+        )
+        out = self._raw_output("git_log_raw", r)
+        self._check("git_log_raw", out)
+        return bytes(out.stdout)
+
+    def diff_commits(
+        self,
+        repo_path: str,
+        pairs: Sequence[Tuple[str, str]],
+        context_lines: int,
+        timeout: Any = None,
+    ) -> List[bytes]:
+        diffs: List[bytes] = []
+        for batch in self._batches(pairs):
+            r = self._call(
+                "git_diff_commits",
+                self._cow(
+                    repo_path,
+                    pairs=[{"base": base, "commit": commit} for base, commit in batch],
+                    context_lines=context_lines,
+                ),
+                timeout,
+            )
+            items = self._items("git_diff_commits", r, "diffs", len(batch))
+            for item in items:
+                out = self._raw_output("git_diff_commits", item)
+                self._check("git_diff_commits", out)
+                diffs.append(bytes(out.stdout))
+        return diffs
+
+    def show_objects(
+        self,
+        repo_path: str,
+        specs: Sequence[Tuple[str, str]],
+        timeout: Any = None,
+    ) -> List[subprocess.CompletedProcess]:
+        objects: List[subprocess.CompletedProcess] = []
+        for batch in self._batches(specs):
+            r = self._call(
+                "git_show_objects",
+                self._cow(
+                    repo_path, specs=[{"rev": rev, "path": path} for rev, path in batch]
+                ),
+                timeout,
+            )
+            items = self._items("git_show_objects", r, "objects", len(batch))
+            objects.extend(self._raw_output("git_show_objects", i) for i in items)
+        return objects
+
+    @staticmethod
+    def _batches(items: Sequence[Any]) -> List[Sequence[Any]]:
+        return [
+            items[i : i + _MAX_HISTORY_BATCH]
+            for i in range(0, len(items), _MAX_HISTORY_BATCH)
+        ]
+
+    def _items(
+        self, tool: str, result: Dict[str, Any], key: str, expected: int
+    ) -> List[Dict[str, Any]]:
+        """``result[key]``: exactly one dict per requested item, or fail loud."""
+        items = self._require(tool, result, key)
+        if not isinstance(items, list) or len(items) != expected:
+            raise GitMcpBackendError(
+                f"git-mcp {tool} returned {len(items) if isinstance(items, list) else items!r} "
+                f"results for {expected} items"
+            )
+        return [i if isinstance(i, dict) else {} for i in items]
+
+    def _raw_output(
+        self, tool: str, result: Dict[str, Any]
+    ) -> subprocess.CompletedProcess:
+        """One git process's result: returncode, raw stdout bytes, stderr text."""
+        returncode = self._require(tool, result, "exit_code")
+        encoded = self._require(tool, result, "stdout_b64")
+        try:
+            stdout = base64.b64decode(str(encoded), validate=True)
+        except ValueError as exc:
+            raise GitMcpBackendError(
+                f"git-mcp {tool} returned stdout that is not base64"
+            ) from exc
+        return subprocess.CompletedProcess(
+            args=["git-mcp", tool],
+            returncode=int(returncode),
+            stdout=stdout,
+            stderr=str(result.get("stderr", "")),
+        )
+
+    @staticmethod
+    def _check(tool: str, out: subprocess.CompletedProcess) -> None:
+        """Raise as a local ``check=True`` run would, with git's own stderr."""
+        if out.returncode != 0:
+            raise GitMcpBackendError(
+                f"git-mcp {tool}: git exited {out.returncode}: {out.stderr}",
+                stderr=out.stderr,
+                returncode=out.returncode,
+            )
 
     # ── remotes ──────────────────────────────────────────────────────────────
 

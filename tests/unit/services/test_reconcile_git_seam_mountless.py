@@ -521,22 +521,3 @@ def _hidden_branches(pod: Dict[str, Any], rel: str) -> List[Any]:
         for p in points
         if p["payload"].get("path") == rel
     ]
-
-
-def test_temporal_indexing_through_the_seams_is_refused(pod: Dict[str, Any]) -> None:
-    """Temporal indexing reads history with LOCAL git; there is none here.
-
-    Refresh skips it on such a pod, but add, add-index, reindex and the MCP
-    rebuild spawn ``cidx index --index-commits`` with both seams stamped. The
-    child refuses, before ``--clear`` can wipe anything.
-    """
-    _cidx(pod, "init", "--embedding-provider", "voyage-ai")
-    result = CliRunner().invoke(
-        pod["cli"],
-        ["index", "--index-commits", _LAYOUT, *_SEAMS],
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 1, result.output
-    output = " ".join(result.output.split())
-    assert "does not run through the content or git seam" in output, output
-    assert "Starting temporal git history indexing" not in output

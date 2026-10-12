@@ -301,3 +301,75 @@ def test_local_backend_does_not_own_credentials(backend: LocalGitBackend):
     # Local git relies on the credential carried in the URL / ambient config, so
     # callers MUST keep any embedded token — golden-repo URLs are not stripped.
     assert backend.owns_credentials is False
+
+
+# --------------------------------------------------------------------------- #
+# History (temporal indexing and queries): raw bytes, the local argv
+# --------------------------------------------------------------------------- #
+
+
+def _cpb(stdout: bytes = b"", returncode: int = 0, stderr: bytes = b""):
+    return subprocess.CompletedProcess(
+        args=["git"], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+FMT = "%H%x00%at%x00%an%x00%ae%x00%B%x00%P%x1e"
+
+
+def test_log_raw_is_the_temporal_history_argv_as_bytes(backend):
+    with patch(PLAIN, return_value=_cpb(b"\xff\x1e")) as m:
+        out = backend.log_raw("/r", FMT, ["abc"], all_refs=True, since="2024-01-01")
+    assert out == b"\xff\x1e"
+    assert _cmd(m) == [
+        "git",
+        "log",
+        f"--format={FMT}",
+        "--all",
+        "--since",
+        "2024-01-01",
+        "abc",
+    ]
+    assert _kw(m)["text"] is False and _kw(m)["cwd"] == Path("/r")
+
+
+def test_log_raw_pages_with_skip_and_n(backend):
+    with patch(PLAIN, return_value=_cpb()) as m:
+        backend.log_raw("/r", "%ct", ["abc"], skip=3, max_count=4)
+    assert _cmd(m) == ["git", "log", "--format=%ct", "--skip=3", "-n", "4", "abc"]
+
+
+def test_log_raw_failure_raises_with_text_stderr(backend):
+    with patch(PLAIN, return_value=_cpb(returncode=128, stderr=b"fatal: bad")):
+        with pytest.raises(subprocess.CalledProcessError) as exc:
+            backend.log_raw("/r", "%H")
+    assert exc.value.returncode == 128 and exc.value.stderr == "fatal: bad"
+
+
+def test_diff_commits_runs_the_aggregator_argv_per_pair(backend):
+    with patch(PLAIN, side_effect=[_cpb(b"d1"), _cpb(b"d2")]) as m:
+        out = backend.diff_commits("/r", [("a", "b"), ("b", "c")], 5)
+    assert out == [b"d1", b"d2"]
+    assert [list(c.args[0]) for c in m.call_args_list] == [
+        ["git", "diff", "-M", "-U5", "--full-index", "a", "b"],
+        ["git", "diff", "-M", "-U5", "--full-index", "b", "c"],
+    ]
+
+
+def test_diff_commits_raises_on_a_failing_pair(backend):
+    with patch(PLAIN, return_value=_cpb(returncode=128, stderr=b"bad object")):
+        with pytest.raises(subprocess.CalledProcessError):
+            backend.diff_commits("/r", [("a", "b")], 5)
+
+
+def test_show_objects_is_check_false_per_spec(backend):
+    with patch(
+        PLAIN, side_effect=[_cpb(b"\x00x"), _cpb(returncode=128, stderr=b"no path")]
+    ) as m:
+        out = backend.show_objects("/r", [("a", "x.py"), ("b", "gone.py")])
+    assert [list(c.args[0]) for c in m.call_args_list] == [
+        ["git", "show", "a:x.py"],
+        ["git", "show", "b:gone.py"],
+    ]
+    assert (out[0].returncode, out[0].stdout) == (0, b"\x00x")
+    assert (out[1].returncode, out[1].stderr) == (128, "no path")

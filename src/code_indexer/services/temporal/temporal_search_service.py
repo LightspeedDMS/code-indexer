@@ -12,8 +12,16 @@ import logging
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any, cast
+from typing import List, Optional, Tuple, Dict, Any, Union, cast
 from dataclasses import dataclass
+
+from .temporal_git_seam import (
+    ObjectSpec,
+    commit_timestamp,
+    read_files_at_commits,
+    reconstruction_text,
+    server_history_backend,
+)
 
 # GitBlobReader removed - diff-based indexing doesn't use blob reading
 
@@ -69,14 +77,15 @@ def parse_date_range(date_range: str) -> Tuple[str, str]:
 
 
 def _history_is_elsewhere() -> bool:
-    """True in a server whose repositories are not on this pod.
+    """True in a server whose repositories are not on this pod and whose git
+    does not go through the git seam.
 
-    Temporal queries read git history with LOCAL git (``rev-parse``, ``show``)
-    and do not go through the git seam yet. Where the content backend is
-    delegated there is no history here: local git would answer "not a git
-    repository" -- read as "no such commit" or shown as a git error in place
-    of content. Those paths refuse instead. Outside a server (CLI) this is
-    False and nothing changes.
+    Temporal queries read git history: through the git seam (git-mcp) when the
+    server delegates git, otherwise with LOCAL git. Where the content backend
+    is delegated but git is local there is no history here: local git would
+    answer "not a git repository" -- read as "no such commit" or shown as a git
+    error in place of content. Those paths refuse instead. Outside a server
+    (CLI) this is False and nothing changes.
     """
     from ...server.startup.content_backend_wiring import is_content_seam_delegated
 
@@ -86,7 +95,7 @@ def _history_is_elsewhere() -> bool:
 #: What a temporal query says instead of running local git it cannot run.
 HISTORY_ELSEWHERE = (
     "the repository's git history is not on this server pod (delegated "
-    "content), and temporal queries do not run through the git seam yet"
+    "content), and no git seam (git_backend='delegated') is configured"
 )
 
 
@@ -113,8 +122,13 @@ def resolve_commit_timestamp(project_root: Path, ref: str) -> int:
     Raises:
         ValueError: If `ref` cannot be resolved to a commit in this
             repository (non-existent hash/ref, git failure, timeout), or the
-            history is not on this pod (``_history_is_elsewhere``).
+            history is not on this pod and there is no git seam
+            (``_history_is_elsewhere``). With a git seam the same questions go
+            to git-mcp (``temporal_git_seam.commit_timestamp``).
     """
+    history_backend = server_history_backend(project_root)
+    if history_backend is not None:
+        return commit_timestamp(history_backend[0], history_backend[1], ref)
     if _history_is_elsewhere():
         raise ValueError(f"at_commit '{ref}' cannot be resolved: {HISTORY_ELSEWHERE}")
     try:
@@ -317,7 +331,51 @@ class TemporalSearchService:
         else:
             return 5  # Very large limits: minimal headroom
 
-    def _reconstruct_temporal_content(self, metadata: Dict[str, Any]) -> str:
+    @staticmethod
+    def _reconstruction_source(metadata: Dict[str, Any]) -> Union[ObjectSpec, str]:
+        """The ``(rev, path)`` a pointer payload's content is read from, or the
+        text to show instead when there is none."""
+        diff_type = metadata.get("diff_type")
+        # Handle both 'path' and 'file_path' keys (different parts of the system use different names)
+        path = metadata.get("path") or metadata.get("file_path", "")
+
+        if diff_type == "added":
+            # Fetch from commit where file was added
+            return metadata["commit_hash"], path
+
+        if diff_type == "deleted":
+            # Fetch from parent commit (before deletion)
+            parent = metadata.get("parent_commit_hash")
+            if not parent:
+                return "[Content unavailable - parent commit not tracked]"
+            return parent, path
+
+        # Shouldn't happen but graceful fallback
+        return ""
+
+    def _prefetch_reconstructions(
+        self, payloads: List[Dict[str, Any]]
+    ) -> Optional[Dict[ObjectSpec, str]]:
+        """Through the git seam, every pointer payload's content in ONE call.
+
+        None without a seam: each payload then runs local git, as before.
+        """
+        history_backend = server_history_backend(self.project_root)
+        if history_backend is None:
+            return None
+        specs: List[ObjectSpec] = []
+        for payload in payloads:
+            if payload.get("reconstruct_from_git"):
+                source = self._reconstruction_source(payload)
+                if not isinstance(source, str):
+                    specs.append(source)
+        return read_files_at_commits(history_backend[0], history_backend[1], specs)
+
+    def _reconstruct_temporal_content(
+        self,
+        metadata: Dict[str, Any],
+        prefetched: Optional[Dict[ObjectSpec, str]] = None,
+    ) -> str:
         """Reconstruct content from git for added/deleted files.
 
         This method completes the storage optimization by reconstructing file content
@@ -326,6 +384,8 @@ class TemporalSearchService:
 
         Args:
             metadata: Payload metadata with reconstruct_from_git marker
+            prefetched: contents already read through the git seam
+                (``_prefetch_reconstructions``); None runs local git.
 
         Returns:
             Reconstructed file content or error message
@@ -333,28 +393,17 @@ class TemporalSearchService:
         # Check if reconstruction needed
         if not metadata.get("reconstruct_from_git"):
             return ""
+
+        source = self._reconstruction_source(metadata)
+        if isinstance(source, str):
+            return source
+        if prefetched is not None:
+            return prefetched[source]
         if _history_is_elsewhere():
             return f"[Content unavailable - {HISTORY_ELSEWHERE}]"
 
-        diff_type = metadata.get("diff_type")
-        # Handle both 'path' and 'file_path' keys (different parts of the system use different names)
-        path = metadata.get("path") or metadata.get("file_path", "")
-
-        if diff_type == "added":
-            # Fetch from commit where file was added
-            commit_hash = metadata["commit_hash"]
-            cmd = ["git", "show", f"{commit_hash}:{path}"]
-
-        elif diff_type == "deleted":
-            # Fetch from parent commit (before deletion)
-            parent = metadata.get("parent_commit_hash")
-            if not parent:
-                return "[Content unavailable - parent commit not tracked]"
-            cmd = ["git", "show", f"{parent}:{path}"]
-
-        else:
-            # Shouldn't happen but graceful fallback
-            return ""
+        commit_hash, path = source
+        cmd = ["git", "show", f"{commit_hash}:{path}"]
 
         # Execute git show
         # Story #1170: add timeout=30 to prevent hung git processes from blocking
@@ -377,14 +426,9 @@ class TemporalSearchService:
             )
             return "[Content unavailable - git reconstruction timed out]"
 
-        if result_proc.returncode == 0:
-            return result_proc.stdout
-        else:
-            # Graceful error handling - truncate stderr to avoid log spam
-            error_msg = (
-                result_proc.stderr[:100] if result_proc.stderr else "unknown error"
-            )
-            return f"[Content unavailable - git error: {error_msg}]"
+        return reconstruction_text(
+            result_proc.returncode, result_proc.stdout, result_proc.stderr
+        )
 
     def query_temporal(
         self,
@@ -911,6 +955,25 @@ class TemporalSearchService:
         """
         filtered_results = []
 
+        def _payload_of(result: Any) -> Dict[str, Any]:
+            return cast(
+                Dict[str, Any],
+                result.get("payload", {})
+                if isinstance(result, dict)
+                else getattr(result, "payload", {}),
+            )
+
+        prefetched = (
+            self._prefetch_reconstructions(
+                [_payload_of(result) for result in semantic_results]
+            )
+            if any(
+                _payload_of(result).get("reconstruct_from_git")
+                for result in semantic_results
+            )
+            else None
+        )
+
         # Process each semantic result
         for result in semantic_results:
             # Get payload - handles both dict and object formats
@@ -927,7 +990,7 @@ class TemporalSearchService:
 
             # Storage optimization: Reconstruct content from git for added/deleted files
             if payload.get("reconstruct_from_git"):
-                content = self._reconstruct_temporal_content(payload)
+                content = self._reconstruct_temporal_content(payload, prefetched)
             else:
                 # Content is in chunk_text at root level (Bug 1 fix in filesystem_vector_store)
                 # Handle both dict and object formats

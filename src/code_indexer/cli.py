@@ -3484,17 +3484,17 @@ def index(
         console.print(f"❌ {exc}", style="red")
         sys.exit(1)
 
-    # Temporal indexing walks history with LOCAL git (log, diff, show). A
-    # server stamps --content-backend/--git-backend delegated on every child
-    # spawned on a pod without the repository -- refresh skips temporal there,
-    # but add, add-index, reindex and the MCP rebuild still spawn it. Refused
-    # here, before --clear can wipe anything, rather than index a history this
-    # machine cannot read.
-    if index_commits and "delegated" in (content_backend, git_backend):
+    # Temporal indexing reads only history, and with --git-backend delegated it
+    # reads it through the git seam (git-mcp). Delegated CONTENT with LOCAL git
+    # means the repository is not on this machine and nothing can read its
+    # history: refused here, before --clear can wipe anything, rather than index
+    # an empty history.
+    if index_commits and content_backend == "delegated" and git_backend == "local":
         console.print(
-            "❌ Temporal indexing (--index-commits) does not run through the "
-            "content or git seam yet: the repository's history is not on this "
-            "machine. Refusing instead of indexing an empty history.",
+            "❌ Temporal indexing (--index-commits) with --content-backend "
+            "delegated needs --git-backend delegated: the repository's history "
+            "is not on this machine. Refusing instead of indexing an empty "
+            "history.",
             style="red",
         )
         sys.exit(1)
@@ -4040,8 +4040,19 @@ def index(
                 _temporal_coll_name = resolve_temporal_collection_name(
                     cast(str, config.temporal.active_embedder)
                 )
+                # None keeps local git; delegated reads the history through
+                # the git seam, and fails here, before any work, if the plugin
+                # is missing.
+                temporal_git_backend = (
+                    None
+                    if git_backend == "local"
+                    else _build_index_git_backend(git_backend)
+                )
                 temporal_indexer = TemporalIndexer(
-                    config_manager, vector_store, collection_name=_temporal_coll_name
+                    config_manager,
+                    vector_store,
+                    collection_name=_temporal_coll_name,
+                    git_backend=temporal_git_backend,
                 )
 
                 # Cost estimation warning for all-branches (no confirmation prompt)
@@ -4050,20 +4061,32 @@ def index(
                     try:
                         import subprocess
 
-                        result = subprocess.run(
-                            ["git", "branch", "-a"],
-                            cwd=config.codebase_dir,
-                            capture_output=True,
-                            text=True,
-                            check=True,
-                        )
-                        branch_count = len(
-                            [
-                                line
-                                for line in result.stdout.split("\n")
-                                if line.strip() and not line.strip().startswith("*")
-                            ]
-                        )
+                        if temporal_git_backend is not None:
+                            # `git branch -a` less the current branch's line.
+                            branch_count = max(
+                                len(
+                                    temporal_git_backend.list_branches(
+                                        str(config.codebase_dir), all_refs=True
+                                    )
+                                )
+                                - 1,
+                                0,
+                            )
+                        else:
+                            result = subprocess.run(
+                                ["git", "branch", "-a"],
+                                cwd=config.codebase_dir,
+                                capture_output=True,
+                                text=True,
+                                check=True,
+                            )
+                            branch_count = len(
+                                [
+                                    line
+                                    for line in result.stdout.split("\n")
+                                    if line.strip() and not line.strip().startswith("*")
+                                ]
+                            )
 
                         if branch_count > 50:
                             console.print(
