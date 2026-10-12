@@ -8,10 +8,10 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | Class | Rows |
 |---|---|
 | unclassified | 0 |
-| repo-read | 402 |
+| repo-read | 392 |
 | repo-write | 93 |
 | cidx-state-in-repo | 1322 |
-| migrated | 69 |
+| migrated | 79 |
 | local-only | 146 |
 | cidx-state | 525 |
 | not-repo | 364 |
@@ -136,7 +136,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/services/description_refresh_scheduler.py` | 0 | 0 | 0 | 15 |
 | `server/services/diagnostics_service.py` | 0 | 1 | 0 | 5 |
 | `server/services/file_crud_service.py` | 0 | 1 | 11 | 1 |
-| `server/services/file_service.py` | 0 | 21 | 0 | 1 |
+| `server/services/file_service.py` | 0 | 11 | 0 | 1 |
 | `server/services/fleet_migration/completion_gate.py` | 0 | 0 | 0 | 12 |
 | `server/services/fleet_migration/discovery.py` | 0 | 2 | 0 | 4 |
 | `server/services/fleet_migration/orchestrator.py` | 0 | 1 | 0 | 4 |

@@ -183,6 +183,7 @@ smoke:
       tests/unit/server/services/test_content_backend_plugin.py
       tests/unit/server/startup/test_content_backend_wiring.py
       tests/unit/server/startup/test_content_backend_parked_on_app_state.py
+      tests/unit/server/services/test_file_tools_content_seam.py
       tests/unit/indexing/test_fetch_planner.py
       tests/unit/indexing/test_manifest_pass_lifetime.py
       tests/unit/indexing/test_delegated_pod_has_no_local_repo.py
