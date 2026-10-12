@@ -28,6 +28,7 @@ import json
 import math
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 from unittest.mock import MagicMock
@@ -82,9 +83,14 @@ DOCS = {
 }
 
 
+#: No background auto-maintenance: it writes .git/objects/maintenance.lock
+#: while ``_local_run`` copies the repository, and copytree then fails.
+_GIT_QUIET = ("-c", "maintenance.auto=false", "-c", "gc.auto=0")
+
+
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        ["git", *_GIT_QUIET, "-c", "user.email=t@t", "-c", "user.name=t", *args],
         cwd=repo,
         check=True,
         capture_output=True,
@@ -327,9 +333,11 @@ class _Recording(LocalContentBackend):
 NOWHERE = Path("/nonexistent/golden-repos") / REPO
 
 
-def _manifest_for(files: Dict[str, bytes], tmp_path: Path) -> RepoManifest:
-    """A manifest of ``files`` taken elsewhere, but rooted at a path that does
-    not exist here -- the pod's view."""
+def _manifest_for(
+    files: Dict[str, bytes], tmp_path: Path, root: Path = NOWHERE
+) -> RepoManifest:
+    """A manifest of ``files`` taken elsewhere, but rooted at ``root`` -- by
+    default a path that does not exist here: the pod's view."""
     held = tmp_path / "held"
     for rel, data in files.items():
         (held / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -344,7 +352,7 @@ def _manifest_for(files: Dict[str, bytes], tmp_path: Path) -> RepoManifest:
         def manifest(self, repo_path: Any, **kw: Any) -> ContentPage:
             return page
 
-    return RepoManifest.build(NOWHERE, backend=Listing())
+    return RepoManifest.build(root, backend=Listing())
 
 
 def _images(n: int) -> Dict[str, bytes]:
@@ -444,6 +452,133 @@ def test_resident_bytes_are_bounded(tmp_path: Path) -> None:
     source.read(NOWHERE / "img/0.png")
     assert backend.fetches[-1] == ["img/0.png", "img/1.png"]
     assert len(backend.fetches) == 4
+
+
+def test_eviction_waits_for_a_reader_inside_the_batch_lock(tmp_path: Path) -> None:
+    """A reader between its loaded-check and its snapshot holds ``batch.lock``.
+
+    Eviction must take that lock too: if it cleared ``files`` under the LRU
+    lock alone, the reader would snapshot ``(None, None)`` -- neither loaded
+    nor failed -- and its image would be lost.
+    """
+    files = {f"img/{i}.png": bytes([i]) * 100 for i in range(4)}
+    backend = _Recording(files)
+    source = ImagePrefetcher(
+        backend,
+        NOWHERE,
+        _manifest_for(files, tmp_path),
+        SUPPORTED_MEDIA_TYPES,
+        budget_files=2,
+        resident_bytes=250,
+    )
+    source.read(NOWHERE / "img/0.png")
+    first = source._batch_of["img/0.png"]
+    assert first.files is not None
+
+    first.lock.acquire()  # a reader of the first batch, mid-critical-section
+    try:
+        evictor = threading.Thread(
+            target=source.read, args=(NOWHERE / "img/2.png",), daemon=True
+        )
+        evictor.start()
+        evictor.join(timeout=0.5)
+        assert evictor.is_alive(), "eviction must wait for the reader's lock"
+        assert first.files is not None, "evicted under a reader's lock"
+    finally:
+        first.lock.release()
+    evictor.join(timeout=5)
+    assert not evictor.is_alive()
+    assert first.files is None  # evicted once the reader let go
+    assert source.read(NOWHERE / "img/1.png") == files["img/1.png"]
+
+
+def _process_doc_with_image(
+    tmp_path: Path, image_backend: "_Recording"
+) -> Tuple[Any, List[Dict[str, Any]]]:
+    """One document with a text-only chunk and an image chunk, processed by
+    FileChunkingManager with images read through an ImagePrefetcher."""
+    from code_indexer.services.clean_slot_tracker import CleanSlotTracker
+    from code_indexer.services.file_chunking_manager import FileChunkingManager
+    from tests.unit.services.test_file_chunking_manager_1502 import (
+        _FakeCacheAwareFilesystemClient,
+        _FakeVectorManager,
+    )
+
+    root = (tmp_path / "pod").resolve()
+    root.mkdir()
+    doc = root / "guide.md"
+    doc.write_text("intro\n\n![a](img/a.png)\n")
+    chunker = MagicMock()
+    chunker.chunk_file.return_value = [
+        {
+            "text": "intro",
+            "chunk_index": 0,
+            "total_chunks": 2,
+            "line_start": 1,
+            "line_end": 1,
+        },
+        {
+            "text": "![a](img/a.png)",
+            "chunk_index": 1,
+            "total_chunks": 2,
+            "line_start": 3,
+            "line_end": 3,
+            "images": ["img/a.png"],
+        },
+    ]
+    images = ImagePrefetcher(
+        image_backend,
+        root,
+        _manifest_for({"img/a.png": b"a"}, tmp_path, root),
+        SUPPORTED_MEDIA_TYPES,
+    )
+    client = MagicMock()
+    client.collection_name = MULTIMODAL_COLLECTION
+    client.get_multimodal_embedding.side_effect = (
+        lambda text, image_paths, image_source: [
+            float(len(image_source.read(p))) for p in image_paths
+        ]
+    )
+    store = _FakeCacheAwareFilesystemClient()
+    with FileChunkingManager(
+        vector_manager=_FakeVectorManager(),
+        chunker=chunker,
+        vector_store_client=store,
+        thread_count=1,
+        slot_tracker=CleanSlotTracker(max_slots=2),
+        codebase_dir=root,
+        multimodal_client=client,
+        image_source=images,
+    ) as manager:
+        metadata = {
+            "project_id": "proj",
+            "file_hash": "sha256:abc",
+            "collection_name": "col",
+            "git_available": False,
+        }
+        result = manager.submit_file_for_processing(doc, metadata, None).result(
+            timeout=10.0
+        )
+    return result, store.upserted_points
+
+
+def test_an_image_fetch_failure_fails_the_file_so_it_is_retried(
+    tmp_path: Path,
+) -> None:
+    """A 503 on the image batch must not leave a 'successful' file that is
+    missing its multimodal points -- nothing would ever re-embed them."""
+    result, written = _process_doc_with_image(
+        tmp_path, _Recording({"img/a.png": b"a"}, fail=True)
+    )
+    assert result.success is False
+    assert "503" in (result.error or "")
+    assert written == [], "a failed file writes none of its points"
+
+
+def test_a_served_image_still_embeds_alongside_the_text(tmp_path: Path) -> None:
+    result, written = _process_doc_with_image(tmp_path, _Recording({"img/a.png": b"a"}))
+    assert result.success is True, result.error
+    assert len(written) == 2  # the text chunk and the image chunk
 
 
 def test_cohere_size_limit_reads_the_manifest_size_not_the_disk(

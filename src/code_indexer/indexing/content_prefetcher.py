@@ -273,12 +273,14 @@ class ImagePrefetcher:
             loaded = batch.files is None and batch.failure is None
             if loaded:
                 _load_batch(self._backend, self._root, batch)
-            # Taken under the lock: an eviction may clear ``batch.files`` the
-            # moment it is released, and this reader keeps what it saw.
+            # Taken under the lock, which eviction also takes: ``batch.files``
+            # cannot be cleared between the check above and this snapshot, and
+            # once the lock is released this reader keeps what it saw.
             failure, files = batch.failure, batch.files
         if failure is not None:
             raise ContentUnavailableError(f"{image_path}: {failure}")
-        assert files is not None  # _load_batch sets one or the other
+        if files is None:  # not reachable: _load_batch sets one or the other
+            raise ContentUnavailableError(f"{image_path}: batch not loaded")
         if loaded:
             self._admit(batch, files)
         else:
@@ -297,6 +299,7 @@ class ImagePrefetcher:
     def _admit(self, batch: _Batch, files: Dict[str, FetchedFile]) -> None:
         """Count a freshly loaded batch, dropping the oldest past the limit."""
         cost = sum(len(record.data) for record in files.values())
+        evicted = []
         with self._resident_lock:
             self._resident[batch] = cost
             self._resident_total += cost
@@ -305,6 +308,14 @@ class ImagePrefetcher:
             ):
                 old, old_cost = self._resident.popitem(last=False)
                 self._resident_total -= old_cost
+                evicted.append(old)
+        # Cleared under each batch's own lock -- the one ``read`` holds from its
+        # loaded-check to its snapshot -- so no reader sees a half-evicted
+        # batch. Taken after ``_resident_lock`` is released, so the two locks
+        # are never held together. A popped batch has ``files`` set and cannot
+        # be reloaded (or re-admitted) until this clears it.
+        for old in evicted:
+            with old.lock:
                 # A reader already holding ``old.files`` keeps its reference;
                 # the next reader of this batch fetches it again, as a batch.
                 old.files = None

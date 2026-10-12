@@ -901,6 +901,17 @@ class FileChunkingManager:
                             f"for deferred atomic write to {multimodal_collection_name} collection"
                         )
 
+                    except ContentUnavailableError:
+                        # The backend could not serve an image batch (a
+                        # transport failure, not a missing image -- that is
+                        # FileNotFoundError and skipped below). Fail the file,
+                        # as a text-fetch failure does, so a later pass
+                        # retries it instead of recording it without its
+                        # multimodal points. Its queued text batches are
+                        # discarded; the ones not yet started are cancelled.
+                        for batch_future in batch_futures:
+                            batch_future.cancel()
+                        raise
                     except Exception as e:
                         logger.error(
                             f"Failed to generate or store multimodal embedding: {e}"
