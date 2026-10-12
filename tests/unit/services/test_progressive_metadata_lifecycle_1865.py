@@ -140,6 +140,8 @@ def test_branch_change_reports_remaining_files_for_current_run(tmp_path, monkeyp
     # smart_index opens a content-seam pass; None is the local default.
     indexer.content_backend = None
     indexer.repo_manifest = None
+    # Local git: the graph-optimized branch path is only taken without a seam.
+    indexer.git_backend = None
     indexer.embedding_provider = _Provider()  # type: ignore[assignment]
     indexer.vector_store_client = _VectorStore()
     indexer.progressive_metadata = ProgressiveMetadata(metadata_path)

@@ -315,6 +315,19 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             if owns_pass:
                 self.end_manifest_pass()
 
+    def _exists_in_this_pass(self, file_path: Path) -> bool:
+        """Whether a file exists, as this pass sees the repository.
+
+        The pass's delegated manifest when there is one -- the repository is not
+        on this machine, so a local ``exists()`` is False for every file and a
+        reconcile would re-index nothing after clearing what it meant to replace.
+        Otherwise the local filesystem, exactly as before.
+        """
+        manifest = getattr(self, "repo_manifest", None)
+        if manifest is not None:
+            return file_path in manifest
+        return file_path.exists()
+
     def _build_content_source(self, files: List[Path]) -> Optional[Any]:
         """A prefetcher serving this pass's bytes, or None to read the disk.
 
@@ -1140,7 +1153,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             absolute_changed_files = []
             for rel_path in changed_files:
                 abs_path = self.config.codebase_dir / rel_path
-                if abs_path.exists():
+                if self._exists_in_this_pass(abs_path):
                     absolute_changed_files.append(abs_path)
 
             # This is the single choke point every relative-path-list

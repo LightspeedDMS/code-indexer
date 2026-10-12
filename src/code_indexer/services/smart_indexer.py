@@ -128,8 +128,11 @@ class SmartIndexer(HighThroughputProcessor):
         self.progressive_metadata = ProgressiveMetadata(metadata_path)
 
         # Initialize branch topology services
+        # The same git backend FileIdentifier asks: on a pod without the
+        # repository, local git would call it "not a git repository" and the
+        # reconcile pass would read every chunk as a modified file.
         self.git_topology_service = GitTopologyService(
-            config.codebase_dir, config=config
+            config.codebase_dir, config=config, git_backend=git_backend
         )
         # Removed: SmartBranchIndexer initialization (abandoned code)
 
@@ -671,10 +674,16 @@ class SmartIndexer(HighThroughputProcessor):
                     f"Branch change detection: stored_branch={stored_branch}, current_branch={current_branch}"
                 )
 
+                # The graph-optimized path diffs branches with LOCAL git
+                # (merge-base, diff, ls-tree); through the git seam there is no
+                # local repository to diff, so a backend skips it -- as it did
+                # when the topology service could not see the branch at all --
+                # and the change is indexed by the seam-aware paths below.
                 if (
                     current_branch
                     and stored_branch
                     and stored_branch != current_branch
+                    and self.git_backend is None
                     and self.vector_store_client.collection_exists(collection_name)
                 ):
                     # Branch change detected - use graph-optimized branch indexing
@@ -4380,7 +4389,15 @@ class SmartIndexer(HighThroughputProcessor):
             Empty dict on any failure (callers gracefully fall back to the
             original per-file `_get_file_commit` computation for any path
             missing from the map -- never silently skip a file).
+
+        With a delegated manifest for this pass the map is the manifest's: the
+        repository is not on this machine, so ``git ls-tree`` has nothing to
+        run against, and the manifest's blob hashes are the ones the chunks
+        were indexed under.
         """
+        manifest = getattr(self, "repo_manifest", None)
+        if manifest is not None:
+            return dict(manifest.blob_hashes())
         try:
             result = subprocess.run(
                 ["git", "ls-tree", "-r", "-z", "HEAD"],
@@ -4439,8 +4456,14 @@ class SmartIndexer(HighThroughputProcessor):
         """Get set of files that differ from HEAD (unstaged + staged) in one batch call.
 
         Bug #471: Replaces per-file git diff subprocess calls with a single batched check.
+
+        Empty with a delegated manifest: its blob hashes are taken from the
+        working tree the content backend serves, so the blob-hash content id
+        already tells a modified file from an unmodified one.
         """
         modified: set = set()
+        if getattr(self, "repo_manifest", None) is not None:
+            return modified
         try:
             # Unstaged changes
             result = subprocess.run(

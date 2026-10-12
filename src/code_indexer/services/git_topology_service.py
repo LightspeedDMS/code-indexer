@@ -13,6 +13,12 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from ..utils.blob_hash import git_blob_hashes
+from .git_head import (
+    UNKNOWN,
+    probe_backend_repository,
+    read_head_branch,
+    read_head_commit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +51,9 @@ class FileAnalysis:
 class GitTopologyService:
     """Advanced git topology analysis for smart incremental indexing."""
 
-    def __init__(self, codebase_dir: Path, config=None):
+    def __init__(
+        self, codebase_dir: Path, config=None, git_backend: Optional[Any] = None
+    ):
         """Initialize the git topology service.
 
         Args:
@@ -53,9 +61,17 @@ class GitTopologyService:
             config: Optional Config object. When provided, analyze_branch_change
                     filters files_to_reindex by file_extensions so binary files
                     (.jar, .zip, .exe, etc.) are excluded.
+            git_backend: the git seam (git-mcp) for a repository this machine
+                    does not hold. Whether the path is a repository, HEAD's
+                    branch and HEAD's commit are then asked of it -- the same
+                    questions FileIdentifier already asks it. None keeps local
+                    git, unchanged. Without it a pod with no repository volume
+                    decides "not a git repository" while the chunks it indexed
+                    say otherwise, and reconcile treats every file as modified.
         """
         self.codebase_dir = Path(codebase_dir)
         self.config = config
+        self._git_backend = git_backend
         self._git_available: Optional[bool] = None
         self._current_branch_cache: Optional[str] = None
         self._cache_timestamp: float = 0
@@ -64,6 +80,12 @@ class GitTopologyService:
     def is_git_available(self) -> bool:
         """Check if git is available and this is a git repository."""
         if self._git_available is not None:
+            return self._git_available
+
+        if self._git_backend is not None:
+            self._git_available, _ = probe_backend_repository(
+                self.codebase_dir, self._git_backend
+            )
             return self._git_available
 
         try:
@@ -95,6 +117,16 @@ class GitTopologyService:
 
         if not self.is_git_available():
             return None
+
+        if self._git_backend is not None:
+            backend_branch = read_head_branch(self.codebase_dir, self._git_backend)
+            # "unknown" is a failure, not a branch name: report no branch, as
+            # the local path does when git fails.
+            self._current_branch_cache = (
+                None if backend_branch == UNKNOWN else backend_branch
+            )
+            self._cache_timestamp = current_time
+            return self._current_branch_cache
 
         try:
             # Try to get current branch
@@ -151,6 +183,9 @@ class GitTopologyService:
 
     def _get_current_commit(self) -> Optional[str]:
         """Get current commit hash."""
+        if self._git_backend is not None:
+            commit = read_head_commit(self.codebase_dir, self._git_backend)
+            return None if commit == UNKNOWN else commit
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
