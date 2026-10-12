@@ -26,6 +26,7 @@ from dataclasses import dataclass, asdict, fields
 # at module scope (not under TYPE_CHECKING) because we need the runtime
 # class object, not just the type annotation.
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+from code_indexer.server.storage.shared.job_status_filter import statuses_for_filter
 from code_indexer.utils.credential_redaction import with_masked_repo_url
 
 # Bug #1256: driver-agnostic classifier shared with the INSERT-path
@@ -1066,7 +1067,10 @@ class BackgroundJobManager:
                         job
                         for job in self.jobs.values()
                         if (is_admin or job.username == username)
-                        and (not status_filter or job.status.value == status_filter)
+                        and (
+                            not status_filter
+                            or job.status.value in statuses_for_filter(status_filter)
+                        )
                     ]
                 active_count = len(active_matching)
 
@@ -1095,7 +1099,11 @@ class BackgroundJobManager:
                     for job in self.jobs.values():
                         if not is_admin and job.username != username:
                             continue
-                        if status_filter and job.status.value != status_filter:
+                        if (
+                            status_filter
+                            and job.status.value
+                            not in statuses_for_filter(status_filter)
+                        ):
                             continue
                         merged[job.job_id] = self._job_to_dict(job)
                 # Sort by created_at descending (all values are isoformat strings)
@@ -1126,9 +1134,8 @@ class BackgroundJobManager:
 
             # Apply status filter if provided
             if status_filter:
-                user_jobs = [
-                    job for job in user_jobs if job.status.value == status_filter
-                ]
+                selected = statuses_for_filter(status_filter)
+                user_jobs = [job for job in user_jobs if job.status.value in selected]
 
             # Sort by creation time (newest first)
             user_jobs.sort(key=lambda x: x.created_at, reverse=True)
@@ -1853,11 +1860,14 @@ class BackgroundJobManager:
                             JobStatus.COMPLETED_PARTIAL,
                         ):
                             # Bug #679: COMPLETED_PARTIAL is a completion variant — notify tracker
+                            # with the variant, or its write to the same row
+                            # replaces completed_partial with completed.
                             self._job_tracker.complete_job(
                                 job_id,
                                 result=(
                                     job.result if isinstance(job.result, dict) else None
                                 ),
+                                status=job.status.value,
                             )
                         elif job.status == JobStatus.FAILED:
                             error_msg = (
@@ -2920,7 +2930,11 @@ class BackgroundJobManager:
                 if job.status in [JobStatus.RUNNING, JobStatus.PENDING]:
                     if job.created_at >= cutoff_time:
                         include_job = True
-                elif job.status in [JobStatus.COMPLETED, JobStatus.FAILED]:
+                elif job.status in [
+                    JobStatus.COMPLETED,
+                    JobStatus.COMPLETED_PARTIAL,
+                    JobStatus.FAILED,
+                ]:
                     if job.completed_at and job.completed_at >= cutoff_time:
                         include_job = True
 
@@ -2965,7 +2979,7 @@ class BackgroundJobManager:
                                     created_dt = created_str
                                 if created_dt >= cutoff_time:
                                     include_db_job = True
-                        elif status in ("completed", "failed"):
+                        elif status in ("completed", "completed_partial", "failed"):
                             completed_str = db_job.get("completed_at")
                             if completed_str:
                                 if isinstance(completed_str, str):
@@ -3190,7 +3204,9 @@ class BackgroundJobManager:
                     if hasattr(job.status, "value")
                     else str(job.status)
                 )
-                if status_filter and status_str != status_filter:
+                if status_filter and status_str not in statuses_for_filter(
+                    status_filter
+                ):
                     continue
                 if type_filter and job.operation_type != type_filter:
                     continue

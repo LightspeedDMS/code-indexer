@@ -2960,11 +2960,18 @@ def _install_embedding_stats_writer_for_index() -> None:
     bootstrap_dir = os.environ.get("CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR")
     if bootstrap_dir:
         try:
+            from .server.services.embedding_stats_writer import (
+                CrossProcessBootstrapWriter,
+            )
             from .server.storage.postgres.embedding_stats_child_wiring import (
                 install_embedding_stats_writer_from_bootstrap,
             )
 
             writer = install_embedding_stats_writer_from_bootstrap(bootstrap_dir)
+            # A cancelled job SIGTERMs this child; flush its buffered stats
+            # first so the refresh volume alarm counts the spend.
+            if isinstance(writer, CrossProcessBootstrapWriter):
+                writer.install_sigterm_flush()
             # Best-effort final flush on normal process exit (sys.exit(0/1),
             # uncaught exception) -- atexit does NOT fire on SIGKILL/OOM,
             # which is the accepted fail-open tradeoff documented on

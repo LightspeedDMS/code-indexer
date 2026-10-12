@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import psutil
 
 from ..database_manager import DatabaseConnectionManager
+from ..shared.job_status_filter import statuses_for_filter
 
 logger = logging.getLogger(__name__)
 
@@ -567,8 +568,10 @@ class BackgroundJobsSqliteBackend:
             params.append(username)
 
         if status:
-            conditions.append("status = ?")
-            params.append(status)
+            # "completed" also selects completed_partial (job_status_filter).
+            statuses = statuses_for_filter(status)
+            conditions.append(f"status IN ({', '.join('?' for _ in statuses)})")
+            params.extend(statuses)
 
         if operation_type:
             conditions.append("operation_type = ?")
@@ -812,8 +815,10 @@ class BackgroundJobsSqliteBackend:
 
         stats = {"completed": 0, "failed": 0}
         for row in cursor.fetchall():
-            if row[0] in stats:
-                stats[row[0]] = row[1]
+            # A partial completion (Bug #679/#2125) is still a completion.
+            key = "completed" if row[0] == "completed_partial" else row[0]
+            if key in stats:
+                stats[key] += row[1]
 
         return stats
 

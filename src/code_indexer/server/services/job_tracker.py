@@ -389,6 +389,9 @@ _TERMINAL_JOB_STATUSES = (
     "interrupted",
 )
 
+# The statuses complete_job() may write (same set as DistributedJobClaimer).
+_COMPLETION_STATUSES = ("completed", "completed_partial")
+
 # Bug #1950: known error-message markers that identify a job terminated by
 # a server restart/shutdown rather than a genuine failure. The system
 # already writes one of these distinct messages at the moment a job is
@@ -667,18 +670,26 @@ class JobTracker:
         self._upsert_job(snapshot)
 
     def complete_job(
-        self, job_id: str, result: Optional[Dict[str, Any]] = None
+        self,
+        job_id: str,
+        result: Optional[Dict[str, Any]] = None,
+        status: str = "completed",
     ) -> None:
         """
         Mark job as completed.
 
-        Sets status="completed" and completed_at, persists to SQLite,
+        Sets status and completed_at, persists to SQLite,
         then removes from in-memory dict.
 
         Args:
             job_id: Job to complete.
             result: Optional result dict stored as JSON in SQLite.
+            status: The completion variant: "completed", or
+                "completed_partial" for work that finished with part of it
+                still owed (Bug #679; a partial refresh, Bug #2125).
         """
+        if status not in _COMPLETION_STATUSES:
+            raise ValueError(f"not a completion status: {status!r}")
         now = datetime.now(timezone.utc)
 
         with self._lock:
@@ -686,11 +697,11 @@ class JobTracker:
 
         if job is None:
             self._finalize_absent_job(
-                job_id, terminal_status="completed", now=now, result=result
+                job_id, terminal_status=status, now=now, result=result
             )
             return
 
-        job.status = "completed"
+        job.status = status
         job.completed_at = now
         job.progress = 100
         if result is not None:
@@ -893,7 +904,7 @@ class JobTracker:
         )
         persisted.status = terminal_status
         persisted.completed_at = now
-        if terminal_status == "completed":
+        if terminal_status in _COMPLETION_STATUSES:
             persisted.progress = 100
             if result is not None:
                 persisted.result = result

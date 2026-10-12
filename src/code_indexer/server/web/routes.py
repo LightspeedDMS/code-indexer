@@ -5056,9 +5056,15 @@ def _apply_job_filters(
     Mirrors the filter semantics BackgroundJobManager applies internally so that
     JobTracker-only jobs are subject to the same criteria.
     """
+    from code_indexer.server.storage.shared.job_status_filter import (
+        statuses_for_filter,
+    )
+
     result = []
     for job in jobs:
-        if status_filter and job.get("status") != status_filter:
+        if status_filter and job.get("status") not in statuses_for_filter(
+            status_filter
+        ):
             continue
         if type_filter and job.get("operation_type") != type_filter:
             continue

@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 
 import psutil
 
+from ..shared.job_status_filter import statuses_for_filter
 from .connection_pool import ConnectionPool
 
 # ---------------------------------------------------------------------------
@@ -705,8 +706,10 @@ class BackgroundJobsPostgresBackend:
             params.append(username)
 
         if status:
-            conditions.append("status = %s")
-            params.append(status)
+            # "completed" also selects completed_partial (job_status_filter).
+            statuses = statuses_for_filter(status)
+            conditions.append(f"status IN ({', '.join('%s' for _ in statuses)})")
+            params.extend(statuses)
         if operation_type:
             conditions.append("operation_type = %s")
             params.append(operation_type)
@@ -909,8 +912,10 @@ class BackgroundJobsPostgresBackend:
 
         stats = {"completed": 0, "failed": 0}
         for row in rows:
-            if row[0] in stats:
-                stats[row[0]] = row[1]
+            # A partial completion (Bug #679/#2125) is still a completion.
+            key = "completed" if row[0] == "completed_partial" else row[0]
+            if key in stats:
+                stats[key] += row[1]
         return stats
 
     def cleanup_orphaned_jobs_on_startup(self, node_id: Optional[str] = None) -> int:

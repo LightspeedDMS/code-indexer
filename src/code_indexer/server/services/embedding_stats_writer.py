@@ -16,7 +16,10 @@ cannot race into duplicate default instances or a torn assignment.
 from __future__ import annotations
 
 import logging
+import os
+import signal
 import threading
+import time
 from abc import ABC, abstractmethod
 from queue import Empty, Full, Queue
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, List, Optional
@@ -46,6 +49,19 @@ _MAX_DRAIN_BATCH = 1_000
 # EmbeddingStatsConfig.flush_interval_seconds's default so config-driven
 # tuning never silently changes this pre-existing behavior.
 _DEFAULT_FLUSH_INTERVAL_SECONDS = 30.0
+
+# ONE deadline for the whole SIGTERM-time drain of a `cidx index` child.
+# Below the parent's grace period (process_group.SIGTERM_GRACE_SECONDS,
+# 2.0 s), leaving time for the main thread to end the process by its own
+# SIGTERM before the parent's SIGKILL.
+_SIGTERM_DRAIN_BUDGET_SECONDS = 1.2
+# Lock wait of each insert in that drain (SQLite busy timeout, PostgreSQL
+# lock/statement timeout), so one blocked insert cannot eat the deadline.
+_SIGTERM_INSERT_BUSY_TIMEOUT_SECONDS = 0.5
+# Longest wait of each step after that deadline (reading the row accounting,
+# logging the WARNING), so a thread stalled holding either lock cannot keep
+# the process alive until the parent's SIGKILL.
+_SIGTERM_REPORT_WAIT_SECONDS = 0.1
 
 
 class EmbeddingStatsWriter(ABC):
@@ -165,6 +181,17 @@ class InProcessAsyncWriter(EmbeddingStatsWriter):
         # ONCE at child-process startup and passes only the static
         # flush_interval_seconds.
         self._flush_interval_provider = flush_interval_provider
+        # Set (before _stop) by a deadline-bounded shutdown (the SIGTERM
+        # flush): the writer thread then ends its periodic flush and does its
+        # final drain under that deadline (_drain_before).
+        self._shutdown_deadline: Optional[float] = None
+        # Rows taken off the queue whose insert has not finished, and rows
+        # whose insert failed. Updated together with the take under
+        # _accounting, so a reader holding it sees every row exactly once
+        # (queued, in flight, or failed).
+        self._accounting = threading.Lock()
+        self._in_flight_rows = 0
+        self._unwritten_rows = 0
 
     def _resolve_flush_interval(self) -> float:
         """Resolve the current flush interval: live via the provider when
@@ -195,25 +222,58 @@ class InProcessAsyncWriter(EmbeddingStatsWriter):
                 )
                 self._overflow_warned = True
 
-    def _drain(self) -> None:
-        """Drain at most _MAX_DRAIN_BATCH records and write them in ONE batch."""
+    def _take_batch(self) -> List[EmbeddingCallRecord]:
+        """Take at most _MAX_DRAIN_BATCH queued records (never blocks)."""
         batch: List[EmbeddingCallRecord] = []
         for _ in range(_MAX_DRAIN_BATCH):
             try:
                 batch.append(self._queue.get_nowait())
             except Empty:
                 break
+        return batch
+
+    def _drain(self, busy_timeout_seconds: Optional[float] = None) -> None:
+        """Drain at most _MAX_DRAIN_BATCH records and write them in ONE batch;
+        ``busy_timeout_seconds`` (shutdown drain only) bounds the insert's
+        lock wait."""
+        with self._accounting:
+            batch = self._take_batch()
+            self._in_flight_rows = len(batch)
         if not batch:
             return
+        written = False
         try:
-            self._backend.insert_batch(batch)
+            if busy_timeout_seconds is None:
+                self._backend.insert_batch(batch)
+            else:
+                self._backend.insert_batch(
+                    batch, busy_timeout_seconds=busy_timeout_seconds
+                )
+            written = True
         except Exception as exc:
             logger.warning("InProcessAsyncWriter: flush failed: %s", exc)
+        finally:
+            with self._accounting:
+                self._in_flight_rows = 0
+                if not written:
+                    self._unwritten_rows += len(batch)
 
     def flush(self) -> None:
-        """Synchronously drain the ENTIRE queue now (periodic + shutdown call)."""
-        while not self._queue.empty():
+        """Synchronously drain the ENTIRE queue now (periodic + shutdown call).
+        Stops early once a deadline-bounded shutdown is requested; the loop's
+        _drain_before then takes over."""
+        while self._shutdown_deadline is None and not self._queue.empty():
             self._drain()
+
+    def _drain_before(self, deadline: float) -> None:
+        """Write queued rows batch by batch until the queue is empty or the
+        deadline passes (time-bounded); each insert waits for a lock at most
+        _SIGTERM_INSERT_BUSY_TIMEOUT_SECONDS."""
+        while not self._queue.empty():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            self._drain(min(_SIGTERM_INSERT_BUSY_TIMEOUT_SECONDS, remaining))
 
     def _loop(self) -> None:
         """Background loop: drain every flush_interval_seconds, stop on
@@ -236,8 +296,14 @@ class InProcessAsyncWriter(EmbeddingStatsWriter):
         the artificial per-cycle ceiling."""
         while not self._stop.wait(timeout=self._resolve_flush_interval()):
             self.flush()
-        # Final drain on shutdown so no queued records are lost.
-        self.flush()
+        # Final drain on shutdown so no queued records are lost -- under the
+        # shutdown deadline when one was set (after finishing the in-flight
+        # insert above, if any).
+        deadline = self._shutdown_deadline
+        if deadline is None:
+            self.flush()
+        else:
+            self._drain_before(deadline)
 
     def start(self) -> None:
         """Start the background flush thread (idempotent)."""
@@ -283,8 +349,125 @@ class CrossProcessBootstrapWriter(InProcessAsyncWriter):
 
     On process exit (normal completion), the CLI entrypoint calls stop() in
     a finally block, which performs a final best-effort flush() of any
-    buffered records. A SIGKILL/OOM before that point loses only the
-    unflushed tail -- an accepted fail-open tradeoff consistent with this
-    project's other observability data (never blocks or fails real
-    indexing/query work over a stats-recording failure).
+    buffered records. On SIGTERM (a cancelled job: the parent's
+    terminate_process_group) install_sigterm_flush()'s handler flushes
+    before the process dies. A SIGKILL/OOM loses only the unflushed tail --
+    an accepted fail-open tradeoff consistent with this project's other
+    observability data (never blocks or fails real indexing/query work over
+    a stats-recording failure).
     """
+
+    def install_sigterm_flush(self) -> bool:
+        """Make SIGTERM flush this writer, then end the process BY SIGTERM.
+
+        The default SIGTERM disposition ends the interpreter without atexit,
+        so a cancelled child lost every buffered stats row. The handler does
+        not raise SystemExit: interpreter exit first runs every work item
+        still queued on the indexing ThreadPoolExecutors (more provider
+        spend after a cancel) and so outlasts the parent's grace period; and
+        the parent routes ``Exit code -15`` as an interruption, so the exit
+        status must stay -15. Must be called on the main thread (signal
+        handlers can only be installed there); returns False otherwise.
+
+        The handler runs on the main thread between two bytecodes, possibly
+        while that thread holds a lock (the queue's mutex inside record(),
+        a logging lock...), so it takes NO lock: it only wakes a flusher
+        thread through a pipe and returns, letting the main thread release
+        whatever it holds. The flusher sets one deadline and stops the
+        (started) writer thread, which finishes any in-flight insert and
+        drains the rest under that deadline; the flusher waits for it only
+        until the deadline, reports the rows still queued, in flight or
+        failed without blocking, then ALWAYS signals the main thread
+        (pthread_kill, so a blocking call there is interrupted), whose
+        handler restores SIG_DFL and re-sends SIGTERM (signal.signal is
+        main-thread only). A main thread stuck inside a C call never runs
+        that handler; the parent's SIGKILL then ends the process."""
+        if threading.current_thread() is not threading.main_thread():
+            logger.warning(
+                "CrossProcessBootstrapWriter: not on the main thread -- "
+                "SIGTERM will not flush embedding stats"
+            )
+            return False
+        self._sigterm_owner_pid = os.getpid()
+        self._sigterm_main_ident = threading.get_ident()
+        read_fd, self._sigterm_wake_fd = os.pipe()
+        os.set_blocking(self._sigterm_wake_fd, False)
+        self._sigterm_requested = False
+        self._sigterm_drained = False
+        threading.Thread(
+            target=self._flush_on_sigterm,
+            args=(read_fd,),
+            daemon=True,
+            name="embedding-stats-sigterm-flush",
+        ).start()
+        signal.signal(signal.SIGTERM, self._on_sigterm)
+        return True
+
+    def _on_sigterm(self, signum: int, frame: Any) -> None:
+        # Lock-free: attribute reads/writes, one non-blocking 1-byte write to
+        # an otherwise empty pipe, and the final signal.signal/os.kill.
+        # A forked descendant inherits this handler and the pipe but not the
+        # flusher thread: it must die by default, never wake the installer.
+        if self._sigterm_drained or os.getpid() != self._sigterm_owner_pid:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGTERM)
+        elif not self._sigterm_requested:
+            # A second SIGTERM while the drain runs changes nothing.
+            self._sigterm_requested = True
+            os.write(self._sigterm_wake_fd, b"\x0f")
+
+    def _flush_on_sigterm(self, read_fd: int) -> None:
+        """Flusher thread: wait for the handler, have the writer thread
+        finish its in-flight insert and drain the rest under ONE deadline
+        that fits the parent's grace period, report what was not written,
+        then ALWAYS have the main thread end the process by SIGTERM. Nothing
+        after the deadline blocks: the join is timed and the report bounded."""
+        os.read(read_fd, 1)
+        try:
+            failed_before = self._unwritten_rows
+            deadline = time.monotonic() + _SIGTERM_DRAIN_BUDGET_SECONDS
+            self._shutdown_deadline = deadline
+            self._stop.set()
+            writer_thread = self._thread
+            if writer_thread is not None:
+                writer_thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            self._report_unpersisted(failed_before)
+        finally:
+            self._sigterm_drained = True
+            signal.pthread_kill(self._sigterm_main_ident, signal.SIGTERM)
+
+    def _report_unpersisted(self, failed_before: int) -> None:
+        """Log how many rows were not persisted: still queued, in flight in
+        the writer's insert, or failed since the SIGTERM. Bounded: the
+        accounting lock is waited for at most _SIGTERM_REPORT_WAIT_SECONDS
+        (the count is "unknown" otherwise), the queue length is read without
+        the queue's mutex, and the WARNING is logged on its own thread joined
+        for at most _SIGTERM_REPORT_WAIT_SECONDS (a stalled logging lock
+        cannot hold the exit)."""
+        count = "an unknown number of"
+        if self._accounting.acquire(timeout=_SIGTERM_REPORT_WAIT_SECONDS):
+            try:
+                unwritten = (
+                    self._unwritten_rows
+                    - failed_before
+                    + self._in_flight_rows
+                    + len(self._queue.queue)
+                )
+            finally:
+                self._accounting.release()
+            if not unwritten:
+                return
+            count = str(unwritten)
+        reporter = threading.Thread(
+            target=logger.warning,
+            args=(
+                "%s embedding-call stats rows not persisted before the "
+                "SIGTERM exit (drain deadline %.1fs)",
+                count,
+                _SIGTERM_DRAIN_BUDGET_SECONDS,
+            ),
+            daemon=True,
+            name="embedding-stats-sigterm-report",
+        )
+        reporter.start()
+        reporter.join(timeout=_SIGTERM_REPORT_WAIT_SECONDS)

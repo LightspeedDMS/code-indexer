@@ -252,6 +252,9 @@ def _sum_rows_to_dict(rows: List[tuple]) -> Dict[Optional[str], int]:
     return {row[0]: int(row[1]) for row in rows}
 
 
+#: Wait for another writer's SQLite lock on an ordinary stats insert.
+_DEFAULT_SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
+
 # ---------------------------------------------------------------------------
 # SQLite backend (solo / development mode)
 # ---------------------------------------------------------------------------
@@ -319,12 +322,19 @@ class EmbeddingCallStatsSqliteBackend:
                 "EmbeddingCallStatsSqliteBackend: schema setup failed: %s", exc
             )
 
-    def insert_batch(self, records: List[EmbeddingCallRecord]) -> None:
-        """Insert a batch of records in ONE transaction. No-op for empty batch."""
+    def insert_batch(
+        self,
+        records: List[EmbeddingCallRecord],
+        busy_timeout_seconds: float = _DEFAULT_SQLITE_BUSY_TIMEOUT_SECONDS,
+    ) -> None:
+        """Insert a batch of records in ONE transaction. No-op for empty batch.
+
+        ``busy_timeout_seconds`` bounds the wait for another writer's lock
+        (the SIGTERM final drain passes a short one)."""
         if not records:
             return
         try:
-            conn = sqlite3.connect(self._db_path, timeout=30)
+            conn = sqlite3.connect(self._db_path, timeout=busy_timeout_seconds)
             try:
                 conn.executemany(
                     f"INSERT INTO embedding_call_stats ({_INSERT_COLUMNS}) "
@@ -477,7 +487,11 @@ class EmbeddingCallStatsPostgresBackend:
                 "EmbeddingCallStatsPostgresBackend: schema setup failed: %s", exc
             )
 
-    def insert_batch(self, records: List[EmbeddingCallRecord]) -> None:
+    def insert_batch(
+        self,
+        records: List[EmbeddingCallRecord],
+        busy_timeout_seconds: Optional[float] = None,
+    ) -> None:
         """Insert a batch of records in ONE transaction/commit (Bug #1181 pattern).
 
         SET LOCAL synchronous_commit = off relaxes WAL fsync for these
@@ -487,6 +501,9 @@ class EmbeddingCallStatsPostgresBackend:
         psycopg v3: executemany lives on the CURSOR, not the connection --
         using the cursor keeps this in the SAME transaction as the SET LOCAL
         above and the single commit() below.
+
+        ``busy_timeout_seconds`` (the SIGTERM final drain passes a short one)
+        bounds the lock wait and the statement for this transaction only.
         """
         if not records:
             return
@@ -495,6 +512,10 @@ class EmbeddingCallStatsPostgresBackend:
         try:
             with self._pool.connection() as conn:
                 conn.execute("SET LOCAL synchronous_commit = off")
+                if busy_timeout_seconds is not None:
+                    timeout_ms = max(1, int(busy_timeout_seconds * 1000))
+                    conn.execute(f"SET LOCAL lock_timeout = {timeout_ms}")
+                    conn.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
                 with conn.cursor() as cur:
                     cur.executemany(
                         f"INSERT INTO embedding_call_stats ({_INSERT_COLUMNS}) "
