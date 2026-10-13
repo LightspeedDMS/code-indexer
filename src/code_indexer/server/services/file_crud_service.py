@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, TYPE_CHECKING
 
+from code_indexer.global_repos.write_mode_markers import WriteModeMarkers
 from code_indexer.utils.blob_hash import git_blob_hash_bytes
 from code_indexer.utils.file_locking import nfs_safe_fsync
 from code_indexer.utils.path_confinement import (
@@ -184,7 +185,7 @@ class FileCRUDService:
         Set the golden repos directory for write-mode marker lookup (Story #231).
 
         Called at startup to inject the golden repos path so that write-mode
-        enforcement can check for marker files under .write_mode/.
+        enforcement can find the write-mode markers for that directory.
 
         Args:
             golden_repos_dir: Path to the golden repos root directory
@@ -197,7 +198,8 @@ class FileCRUDService:
 
         Write-exception repos (e.g. cidx-meta-global) require callers to call
         enter_write_mode() before issuing CRUD operations.  This is signalled by
-        a marker file at golden_repos_dir/.write_mode/{alias_without_global}.json.
+        a write-mode marker for {alias_without_global} (control-plane metadata,
+        see global_repos/write_mode_markers.py).
 
         If the repo is NOT a write exception, this check is a no-op.
 
@@ -219,15 +221,7 @@ class FileCRUDService:
                 f"golden_repos_dir not configured. Server may not be fully initialized."
             )
 
-        # Build alias name without -global suffix for marker filename
-        alias_without_global = (
-            repo_alias[: -len("-global")]
-            if repo_alias.endswith("-global")
-            else repo_alias
-        )
-        marker_file = golden_repos_dir / ".write_mode" / f"{alias_without_global}.json"
-
-        if not marker_file.exists():
+        if not WriteModeMarkers(golden_repos_dir).exists(repo_alias):
             raise PermissionError(
                 f"Repo '{repo_alias}' requires write mode. "
                 f"Call enter_write_mode('{repo_alias}') before performing file operations."

@@ -1,19 +1,27 @@
 """
-Alias Manager for managing alias pointer files.
+Alias Manager: golden-repo alias pointers.
 
-Provides atomic creation and management of alias pointer JSON files
-that map global alias names to index directory paths.
+An alias maps a global alias name (``my-repo-global``) to the index directory
+queries are served from. The pointer is control-plane metadata (content seam
+step 5a): it lives in the server's registry, with the old
+``golden-repos/aliases/<name>.json`` file kept in step during the rollback
+window. Storage, read source and dual-write are decided by
+``ControlPlaneMetadata`` -- this class only shapes alias documents.
 """
 
-import json
 import logging
-import os
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
-from code_indexer.utils.file_locking import nfs_safe_fsync
+from code_indexer.global_repos.control_plane_metadata import (
+    KIND_ALIAS,
+    ControlPlaneMetadata,
+    PathLike,
+    metadata_for,
+    pointer_from_document,
+)
+from code_indexer.global_repos.write_mode_markers import WriteModeMarkers
 
 logger = logging.getLogger(__name__)
 
@@ -70,126 +78,87 @@ def resolve_alias_or_index_path(
 
 class AliasManager:
     """
-    Manages alias pointer files for global repos.
+    Manages alias pointers for global repos.
 
-    Each alias is a JSON file containing metadata that points to
-    the actual index directory for a golden repository.
+    Each alias is a JSON document (target_path, previous_path, created_at,
+    last_refresh, swapped_at, repo_name) stored as control-plane metadata.
+    ``aliases_dir`` names the golden-repos directory it belongs to (its
+    parent); it is created on disk only when this process has no registry,
+    i.e. when the files ARE the store.
 
-    Dual-mode write-mode redirection (Task #21):
-      - Standalone: reads .write_mode/{alias}.json from the local filesystem.
-      - Cluster: reads write_mode_markers table via WriteModePgBackend.
-        The filesystem .write_mode/ directory is NOT shared across nodes, so
-        it is never consulted when a PG backend is active.
+    Write-mode redirection (Story #231): ``read_alias`` of a ``-global`` alias
+    whose repo has an open write session returns the live source path, read
+    from the write-mode marker (``WriteModeMarkers``).
     """
 
-    def __init__(self, aliases_dir: str):
+    def __init__(
+        self,
+        aliases_dir: PathLike,
+        *,
+        metadata: Optional[ControlPlaneMetadata] = None,
+    ):
         """
-        Initialize the alias manager.
-
         Args:
-            aliases_dir: Directory where alias JSON files are stored
+            aliases_dir: The golden-repos ``aliases`` directory.
+            metadata: The control-plane metadata component; defaults to the
+                one installed for ``aliases_dir``'s golden-repos directory.
         """
         self.aliases_dir = Path(aliases_dir)
-        self.aliases_dir.mkdir(parents=True, exist_ok=True)
-        # Optional PG backend for cluster-visible write-mode markers (Task #21).
-        # Type Optional[Any]: psycopg is an optional dependency — a concrete type
-        # would force its import at module load time, breaking standalone (CLI) mode.
-        self._write_mode_backend: Optional[Any] = None
+        golden_repos_dir = self.aliases_dir.parent
+        self._metadata = (
+            metadata if metadata is not None else metadata_for(golden_repos_dir)
+        )
+        self._write_mode = WriteModeMarkers(golden_repos_dir, metadata=self._metadata)
+        if not self._metadata.is_registry_backed:
+            self.aliases_dir.mkdir(parents=True, exist_ok=True)
 
-    def set_write_mode_backend(self, backend: Any) -> None:
-        """Wire a PostgreSQL write-mode backend for cluster mode.
-
-        When set, read_alias() exclusively uses the PG backend to check
-        write-mode markers — the local filesystem .write_mode/ directory
-        is not consulted (it is not NFS-shared across cluster nodes).
-
-        Args:
-            backend: WriteModePgBackend instance (or compatible interface).
-                     Type is Any — psycopg is an optional dependency, so a
-                     concrete type annotation would force its import at module
-                     load time, breaking standalone (CLI) mode.
-        """
-        self._write_mode_backend = backend
-        logger.info("AliasManager: using PostgreSQL write-mode backend (cluster mode)")
+    @classmethod
+    def existing(cls, aliases_dir: PathLike) -> Optional["AliasManager"]:
+        """An AliasManager only if aliases can exist for this directory: a
+        registry is installed for it, or the directory is already on disk.
+        Never creates the directory (callers that probe must not)."""
+        path = Path(aliases_dir)
+        if metadata_for(path.parent).is_registry_backed or path.is_dir():
+            return cls(path)
+        return None
 
     def _read_write_mode_source_path(self, alias_without_global: str) -> Optional[str]:
-        """Return the live source path for alias if write-mode is active, else None.
-
-        Dual-mode implementation:
-          - Cluster mode (PG backend set): queries write_mode_markers table.
-            The filesystem .write_mode/ directory is NOT consulted because it
-            is not NFS-shared and would give stale/empty results on other nodes.
-          - Standalone mode (no PG backend): reads the local filesystem marker.
-
-        Args:
-            alias_without_global: Repository alias without the -global suffix.
-
-        Returns:
-            source_path string if write-mode is active with a valid source,
-            None otherwise (write-mode inactive, no marker, or missing source_path).
-        """
-        if self._write_mode_backend is not None:
-            # Cluster mode: PG is the single source of truth for write-mode markers.
-            # Filesystem .write_mode/ is intentionally NOT checked here because it
-            # is local to each node and invisible to siblings in the cluster.
-            try:
-                marker = self._write_mode_backend.get_marker(alias_without_global)
-                if marker is None:
-                    return None
-                # marker.get() returns object; cast to Optional[str] is safe because
-                # source_path is always written as str by files.py (or None/absent).
-                source_path: Optional[str] = marker.get("source_path")  # type: ignore[assignment]
-                if source_path:
-                    return source_path
-                # Marker present but source_path absent — write session not yet
-                # redirected; fall through to normal alias resolution.
-                logger.warning(
-                    "PG write-mode marker for %s has no source_path; "
-                    "falling back to normal alias resolution",
-                    alias_without_global,
-                )
-                return None
-            except Exception as e:
-                logger.warning(
-                    "Failed to read PG write-mode marker for %s: %s; "
-                    "falling back to normal alias resolution",
-                    alias_without_global,
-                    e,
-                )
-                return None
-        else:
-            # Standalone mode: read the local filesystem marker.
-            golden_repos_dir = self.aliases_dir.parent
-            write_mode_marker = (
-                golden_repos_dir / ".write_mode" / f"{alias_without_global}.json"
+        """Live source path if a write session is open for the alias, else None."""
+        try:
+            return self._write_mode.source_path(alias_without_global)
+        except Exception as e:
+            logger.warning(
+                "Failed to read write-mode marker for %s: %s; "
+                "falling back to normal alias resolution",
+                alias_without_global,
+                e,
             )
-            if not write_mode_marker.exists():
-                return None
-            try:
-                marker_data = json.loads(write_mode_marker.read_text())
-                fs_source_path: Optional[str] = marker_data.get("source_path")
-                if fs_source_path:
-                    return fs_source_path
-                logger.warning(
-                    "Write-mode marker for %s has no source_path; "
-                    "falling back to normal alias resolution",
-                    alias_without_global,
-                )
-                return None
-            except (json.JSONDecodeError, IOError, OSError) as e:
-                logger.warning(
-                    "Corrupt write-mode marker for %s: %s; "
-                    "falling back to normal alias resolution",
-                    alias_without_global,
-                    e,
-                )
-                return None
+            return None
+
+    def read_record(self, alias_name: str) -> Optional[Dict[str, Any]]:
+        """The whole alias document, or None. No write-mode redirection."""
+        return self._metadata.get(KIND_ALIAS, alias_name)
+
+    def read_pointer(self, alias_name: str) -> Optional[Tuple[str, Optional[str]]]:
+        """``(target_path, previous_path)`` from ONE read of the document, with
+        no write-mode redirection (Bug #1567 Gap 1 holes A/B)."""
+        return pointer_from_document(self.read_record(alias_name))
+
+    def list_pointers(self, prefix: str = "") -> Dict[str, Tuple[str, Optional[str]]]:
+        """Every alias whose name starts with *prefix*, as ``read_pointer``
+        would return it; aliases with no usable target_path are absent."""
+        pointers: Dict[str, Tuple[str, Optional[str]]] = {}
+        for name, document in self._metadata.list_all(KIND_ALIAS, prefix).items():
+            pointer = pointer_from_document(document)
+            if pointer is not None:
+                pointers[name] = pointer
+        return pointers
 
     def create_alias(
         self, alias_name: str, target_path: str, repo_name: Optional[str] = None
     ) -> None:
         """
-        Create an alias pointer file.
+        Create (or replace) an alias pointer.
 
         Args:
             alias_name: Name of the alias (e.g., "my-repo-global")
@@ -197,63 +166,29 @@ class AliasManager:
             repo_name: Optional repository name for metadata
 
         Raises:
-            RuntimeError: If atomic write fails
+            RuntimeError: If the write fails
         """
-        alias_file = self.aliases_dir / f"{alias_name}.json"
         now = datetime.now(timezone.utc).isoformat()
-
         alias_data = {
             "target_path": target_path,
             "created_at": now,
             "last_refresh": now,
             "repo_name": repo_name or alias_name.removesuffix("-global"),
         }
-
-        # Atomic write using temp file + rename
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            dir=str(self.aliases_dir), prefix=f".{alias_name}_", suffix=".tmp"
-        )
-
         try:
-            with os.fdopen(tmp_fd, "w") as f:
-                json.dump(alias_data, f, indent=2)
-                f.flush()
-                nfs_safe_fsync(f.fileno())
-
-            # Atomic rename
-            os.replace(tmp_path, str(alias_file))
-
-            # Story #1457 AC10: fsync the parent aliases directory so the
-            # rename survives a crash, matching the durable-rename pattern
-            # established by id_index_manager.py:203-212. create_alias is
-            # the load-bearing FIRST-publish path for every brand-new
-            # temporal quarter namespace (AC6/AC11), so this gap is closed
-            # identically to swap_alias's hardening below.
-            dir_fd = os.open(str(self.aliases_dir), os.O_RDONLY)
-            try:
-                nfs_safe_fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-
-            logger.info(f"Created alias: {alias_name} -> {target_path}")
-
+            self._metadata.put(KIND_ALIAS, alias_name, alias_data)
         except Exception as e:
-            # Clean up temp file on failure
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise RuntimeError(f"Failed to create alias {alias_name}: {e}")
+            raise RuntimeError(f"Failed to create alias {alias_name}: {e}") from e
+        logger.info(f"Created alias: {alias_name} -> {target_path}")
 
     def read_alias(self, alias_name: str) -> Optional[str]:
         """
         Read the target path from an alias.
 
-        Write-mode redirection (Story #231, Task #21):
-        If the alias ends with '-global', check for an active write session
-        via _read_write_mode_source_path(). When found, the live source path
-        is returned instead of the versioned snapshot path, allowing reads
-        during an active write session to see the in-progress changes.
+        Write-mode redirection (Story #231, Task #21): for a '-global' alias
+        with an open write session, the live source path is returned instead
+        of the versioned snapshot path, so reads during the session see the
+        in-progress changes.
 
         Args:
             alias_name: Name of the alias
@@ -261,7 +196,6 @@ class AliasManager:
         Returns:
             Target path or None if alias doesn't exist
         """
-        # Task #21 / Story #231: Check write-mode for -global aliases
         if alias_name.endswith("-global"):
             alias_without_global = alias_name[: -len("-global")]
             source_path = self._read_write_mode_source_path(alias_without_global)
@@ -271,38 +205,22 @@ class AliasManager:
                     f"redirecting reads to source {source_path}"
                 )
                 return source_path
-            # source_path is None — no active write session; fall through to
-            # normal alias file resolution below.
 
-        alias_file = self.aliases_dir / f"{alias_name}.json"
-
-        if not alias_file.exists():
-            return None
-
-        try:
-            with open(alias_file, "r") as f:
-                alias_data = json.load(f)
-                target_path: Optional[str] = alias_data.get("target_path")
-                return target_path
-        except (json.JSONDecodeError, IOError, KeyError) as e:
-            logger.warning(f"Failed to read alias {alias_name}: {e}")
-            return None
+        pointer = self.read_pointer(alias_name)
+        return pointer[0] if pointer is not None else None
 
     def delete_alias(self, alias_name: str) -> None:
         """
-        Delete an alias pointer file.
+        Delete an alias pointer. A failure is logged, not raised.
 
         Args:
             alias_name: Name of the alias to delete
         """
-        alias_file = self.aliases_dir / f"{alias_name}.json"
-
-        if alias_file.exists():
-            try:
-                alias_file.unlink()
-                logger.info(f"Deleted alias: {alias_name}")
-            except OSError as e:
-                logger.warning(f"Failed to delete alias {alias_name}: {e}")
+        try:
+            self._metadata.delete(KIND_ALIAS, alias_name)
+            logger.info(f"Deleted alias: {alias_name}")
+        except Exception as e:
+            logger.warning(f"Failed to delete alias {alias_name}: {e}")
 
     def alias_exists(self, alias_name: str) -> bool:
         """
@@ -314,8 +232,7 @@ class AliasManager:
         Returns:
             True if alias exists, False otherwise
         """
-        alias_file = self.aliases_dir / f"{alias_name}.json"
-        return alias_file.exists()
+        return self.read_record(alias_name) is not None
 
     def update_refresh_timestamp(self, alias_name: str) -> None:
         """
@@ -327,43 +244,22 @@ class AliasManager:
         Raises:
             RuntimeError: If alias doesn't exist or update fails
         """
-        alias_file = self.aliases_dir / f"{alias_name}.json"
-
-        if not alias_file.exists():
+        alias_data = self.read_record(alias_name)
+        if alias_data is None:
             raise RuntimeError(f"Alias {alias_name} does not exist")
-
+        alias_data["last_refresh"] = datetime.now(timezone.utc).isoformat()
         try:
-            with open(alias_file, "r") as f:
-                alias_data = json.load(f)
-
-            alias_data["last_refresh"] = datetime.now(timezone.utc).isoformat()
-
-            # Atomic write for update
-            tmp_fd, tmp_path = tempfile.mkstemp(
-                dir=str(self.aliases_dir), prefix=f".{alias_name}_", suffix=".tmp"
-            )
-
-            with os.fdopen(tmp_fd, "w") as f:
-                json.dump(alias_data, f, indent=2)
-                f.flush()
-                nfs_safe_fsync(f.fileno())
-
-            os.replace(tmp_path, str(alias_file))
-            logger.debug(f"Updated refresh timestamp for alias: {alias_name}")
-
+            self._metadata.put(KIND_ALIAS, alias_name, alias_data)
         except Exception as e:
-            try:
-                os.unlink(tmp_path)
-            except (OSError, NameError):
-                pass
-            raise RuntimeError(f"Failed to update alias {alias_name}: {e}")
+            raise RuntimeError(f"Failed to update alias {alias_name}: {e}") from e
+        logger.debug(f"Updated refresh timestamp for alias: {alias_name}")
 
     def swap_alias(self, alias_name: str, new_target: str, old_target: str) -> None:
         """
-        Atomically swap alias to point to new target.
+        Swap alias to point to new target.
 
         Updates the alias pointer to the new index path while preserving
-        the old path for cleanup tracking. Uses atomic write pattern.
+        the old path for cleanup tracking.
 
         Args:
             alias_name: Name of the alias to swap
@@ -371,12 +267,11 @@ class AliasManager:
             old_target: Expected current target (for validation)
 
         Raises:
-            RuntimeError: If alias doesn't exist or swap fails
+            RuntimeError: If the swap fails
             ValueError: If old_target doesn't match current target
         """
-        alias_file = self.aliases_dir / f"{alias_name}.json"
-
-        if not alias_file.exists():
+        alias_data = self.read_record(alias_name)
+        if alias_data is None:
             # Self-heal rather than abort. The pointer is DERIVED state: the record
             # that a repo is globally active lives in the global registry, and the
             # caller has already built and validated the snapshot being published.
@@ -386,8 +281,8 @@ class AliasManager:
             # global_repo_refresh failing with "Alias <x>-global does not exist" while
             # a freshly built snapshot sat unpublished beside the one being served.
             #
-            # There is no old_target to validate against when no file exists, so the
-            # conflict check this method otherwise performs has nothing to protect.
+            # There is no old_target to validate against when no pointer exists, so
+            # the conflict check this method otherwise performs has nothing to protect.
             logger.warning(
                 "Alias %s missing on publish; recreating it at %s "
                 "(pointer is derived state, rebuilt from the publish in progress)",
@@ -397,60 +292,23 @@ class AliasManager:
             self.create_alias(alias_name=alias_name, target_path=new_target)
             return
 
-        try:
-            # Read current alias data
-            with open(alias_file, "r") as f:
-                alias_data = json.load(f)
-
-            # Validate old_target matches current target
-            current_target = alias_data.get("target_path")
-            if current_target != old_target:
-                raise ValueError(
-                    f"Current target '{current_target}' does not match "
-                    f"expected old target '{old_target}'"
-                )
-
-            # Update alias data
-            alias_data["target_path"] = new_target
-            alias_data["previous_path"] = old_target
-            alias_data["swapped_at"] = datetime.now(timezone.utc).isoformat()
-            alias_data["last_refresh"] = datetime.now(timezone.utc).isoformat()
-
-            # Atomic write using temp file + rename
-            tmp_fd, tmp_path = tempfile.mkstemp(
-                dir=str(self.aliases_dir), prefix=f".{alias_name}_", suffix=".tmp"
+        current_target = alias_data.get("target_path")
+        if current_target != old_target:
+            raise ValueError(
+                f"Current target '{current_target}' does not match "
+                f"expected old target '{old_target}'"
             )
 
-            with os.fdopen(tmp_fd, "w") as f:
-                json.dump(alias_data, f, indent=2)
-                f.flush()
-                nfs_safe_fsync(f.fileno())
-
-            # Atomic rename
-            os.replace(tmp_path, str(alias_file))
-
-            # Story #1457 AC10: fsync the parent aliases directory so the
-            # rename survives a crash, matching the durable-rename pattern
-            # established by id_index_manager.py:203-212 and applied to
-            # create_alias above. swap_alias is the subsequent-publish path
-            # for every temporal refresh (AC6).
-            dir_fd = os.open(str(self.aliases_dir), os.O_RDONLY)
-            try:
-                nfs_safe_fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-
-            logger.info(f"Swapped alias {alias_name}: {old_target} -> {new_target}")
-
-        except ValueError:
-            raise
+        now = datetime.now(timezone.utc).isoformat()
+        alias_data["target_path"] = new_target
+        alias_data["previous_path"] = old_target
+        alias_data["swapped_at"] = now
+        alias_data["last_refresh"] = now
+        try:
+            self._metadata.put(KIND_ALIAS, alias_name, alias_data)
         except Exception as e:
-            # Clean up temp file on failure
-            try:
-                os.unlink(tmp_path)
-            except (OSError, NameError):
-                pass
-            raise RuntimeError(f"Failed to swap alias {alias_name}: {e}")
+            raise RuntimeError(f"Failed to swap alias {alias_name}: {e}") from e
+        logger.info(f"Swapped alias {alias_name}: {old_target} -> {new_target}")
 
     def get_previous_path(self, alias_name: str) -> Optional[str]:
         """
@@ -464,16 +322,8 @@ class AliasManager:
         Returns:
             Previous target path or None if no swap occurred or alias doesn't exist
         """
-        alias_file = self.aliases_dir / f"{alias_name}.json"
-
-        if not alias_file.exists():
+        alias_data = self.read_record(alias_name)
+        if alias_data is None:
             return None
-
-        try:
-            with open(alias_file, "r") as f:
-                alias_data = json.load(f)
-                previous_path: Optional[str] = alias_data.get("previous_path")
-                return previous_path
-        except (json.JSONDecodeError, IOError, KeyError) as e:
-            logger.warning(f"Failed to read previous path for {alias_name}: {e}")
-            return None
+        previous_path = alias_data.get("previous_path")
+        return previous_path if isinstance(previous_path, str) else None

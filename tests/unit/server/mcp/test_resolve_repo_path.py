@@ -263,6 +263,10 @@ class TestHandleDirectoryTreeAliasResolution:
 
         mock_alias_manager = MagicMock()
         mock_alias_manager.read_alias.return_value = str(repo_content_dir)
+        # _resolve_repo_path builds its manager with AliasManager.existing()
+        # (content seam 5a: no directory probe when the registry is installed).
+        mock_alias_manager_cls = MagicMock(return_value=mock_alias_manager)
+        mock_alias_manager_cls.existing.return_value = mock_alias_manager
 
         with (
             patch(
@@ -275,7 +279,7 @@ class TestHandleDirectoryTreeAliasResolution:
             ),
             patch(
                 "code_indexer.server.mcp.handlers.AliasManager",
-                return_value=mock_alias_manager,
+                mock_alias_manager_cls,
             ),
         ):
             response = handle_directory_tree(args, fake_user)

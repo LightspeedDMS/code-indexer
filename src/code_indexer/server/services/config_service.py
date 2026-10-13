@@ -30,6 +30,8 @@ from typing import (
 from ..utils.config_manager import (
     CidxMetaBackupConfig,
     LifecycleAnalysisConfig,
+    METADATA_OUTBOX_SINKS,
+    METADATA_READ_SOURCES,
     RerankConfig,
     ServerConfig,
     ServerConfigManager,
@@ -191,6 +193,14 @@ def _alias_lock_settings(config: ServerConfig) -> Dict[str, Any]:
     return {
         "db_backed_enabled": alc.db_backed_enabled,
     }
+
+
+def _control_plane_metadata_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return control_plane_metadata settings for the Web UI Config screen
+    (content seam step 5a: aliases and write-mode markers in the registry)."""
+    cpm = config.control_plane_metadata_config
+    assert cpm is not None  # Guaranteed by ServerConfig.__post_init__
+    return asdict(cpm)
 
 
 def _search_timeouts_settings(config: ServerConfig) -> Dict[str, Any]:
@@ -951,6 +961,7 @@ class ConfigService:
             # configuration -- was defined but never wired into this dict.
             "temporal_legacy_migration": _temporal_legacy_migration_settings(config),
             "alias_lock": _alias_lock_settings(config),
+            "control_plane_metadata": _control_plane_metadata_settings(config),
             "content_limits": _content_limits_settings(config),
             # Issue #1398 - Query & search timeouts Web UI configuration
             "search_timeouts": _search_timeouts_settings(config),
@@ -1210,6 +1221,9 @@ class ConfigService:
         # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
         elif category == "alias_lock":
             self._update_alias_lock_setting(config, key, value)
+        # Content seam step 5a - control-plane metadata read source / dual-write
+        elif category == "control_plane_metadata":
+            self._update_control_plane_metadata_setting(config, key, value)
         # Issue #1398 - Query & search timeouts Web UI configuration
         elif category == "search_timeouts":
             self._update_search_timeouts_setting(config, key, value)
@@ -2932,6 +2946,43 @@ class ConfigService:
             alc.db_backed_enabled = _parse_bool(value)
         else:
             raise ValueError(f"Unknown alias_lock setting: {key}")
+
+    def _update_control_plane_metadata_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a control_plane_metadata setting (content seam step 5a).
+
+        ``metadata_read_source`` must be one of METADATA_READ_SOURCES -- an
+        unknown value is rejected rather than silently read as the default,
+        since it decides where every alias is resolved from.
+        """
+        cpm = config.control_plane_metadata_config
+        assert cpm is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "metadata_read_source":
+            source = str(value).strip().lower()
+            if source not in METADATA_READ_SOURCES:
+                raise ValueError(
+                    f"metadata_read_source must be one of "
+                    f"{list(METADATA_READ_SOURCES)}, got {value!r}"
+                )
+            cpm.metadata_read_source = source
+        elif key == "metadata_file_dual_write":
+            cpm.metadata_file_dual_write = _parse_bool(value)
+        elif key == "metadata_outbox_sink":
+            sink = str(value).strip().lower()
+            if sink not in METADATA_OUTBOX_SINKS:
+                raise ValueError(
+                    f"metadata_outbox_sink must be one of "
+                    f"{list(METADATA_OUTBOX_SINKS)}, got {value!r}"
+                )
+            cpm.metadata_outbox_sink = sink
+        elif key == "metadata_outbox_drain_timeout_s":
+            timeout = int(value)
+            if timeout < 1:
+                raise ValueError("metadata_outbox_drain_timeout_s must be >= 1")
+            cpm.metadata_outbox_drain_timeout_s = timeout
+        else:
+            raise ValueError(f"Unknown control_plane_metadata setting: {key}")
 
     def _update_hnsw_orphan_sweep_setting(
         self, config: ServerConfig, key: str, value: Any

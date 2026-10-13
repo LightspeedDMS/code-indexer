@@ -434,6 +434,73 @@ class DatabaseSchema:
         )
     """
 
+    # Content seam step 5a: control-plane metadata (golden-repo alias pointers
+    # and write-mode markers) lives in the registry, not in per-pod files
+    # under golden-repos/aliases/ and golden-repos/.write_mode/. One row per
+    # key; payload is the JSON document the file used to hold. Mirrors
+    # PostgreSQL migration 054.
+    CREATE_GOLDEN_REPO_ALIASES_TABLE = """
+        CREATE TABLE IF NOT EXISTS golden_repo_aliases (
+            name TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """
+
+    CREATE_WRITE_MODE_MARKERS_TABLE = """
+        CREATE TABLE IF NOT EXISTS write_mode_markers (
+            name TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """
+
+    # When each control-plane metadata key was last deleted, so the startup
+    # import never resurrects a key from a stale file. Mirrors migration 054.
+    CREATE_CONTROL_PLANE_METADATA_TOMBSTONES_TABLE = """
+        CREATE TABLE IF NOT EXISTS control_plane_metadata_tombstones (
+            kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            deleted_at TEXT NOT NULL,
+            PRIMARY KEY (kind, name)
+        )
+    """
+
+    # Content seam step 5a: the dual-write outbox. A row names a KEY (kind +
+    # name), never a payload -- the sweeper replays the registry's CURRENT
+    # value. claim_token/claimed_until are the SQLite claim (a lease, since
+    # SQLite has no row locks and solo mode may run several worker processes);
+    # PostgreSQL claims with FOR UPDATE SKIP LOCKED instead. Mirrors
+    # PostgreSQL migration 055.
+    CREATE_METADATA_OUTBOX_TABLE = """
+        CREATE TABLE IF NOT EXISTS metadata_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            claim_token TEXT,
+            claimed_until REAL
+        )
+    """
+
+    CREATE_IDX_METADATA_OUTBOX_KEY = """
+        CREATE INDEX IF NOT EXISTS idx_metadata_outbox_key
+        ON metadata_outbox (kind, name, id)
+    """
+
+    # Singleton (id=1): the drain clock and the stop flag, shared by every
+    # process so an abandon on one node stops the leader's sweeper.
+    CREATE_METADATA_OUTBOX_STATE_TABLE = """
+        CREATE TABLE IF NOT EXISTS metadata_outbox_state (
+            id INTEGER PRIMARY KEY,
+            drain_started_epoch REAL,
+            drain_sink TEXT,
+            stopped_at TEXT,
+            stopped_reason TEXT,
+            stopped_sink TEXT
+        )
+    """
+
     # Story #283: Wiki render cache tables
     CREATE_WIKI_CACHE_TABLE = """
         CREATE TABLE IF NOT EXISTS wiki_cache (
@@ -828,6 +895,13 @@ class DatabaseSchema:
             conn.execute(self.CREATE_DEPENDENCY_MAP_TRACKING_TABLE)
             # Story #1360 (Epic #1333 S3): HNSW orphan repair fleet sweep state
             conn.execute(self.CREATE_HNSW_ORPHAN_SWEEP_STATE_TABLE)
+            # Content seam step 5a: control-plane metadata in the registry
+            conn.execute(self.CREATE_GOLDEN_REPO_ALIASES_TABLE)
+            conn.execute(self.CREATE_WRITE_MODE_MARKERS_TABLE)
+            conn.execute(self.CREATE_CONTROL_PLANE_METADATA_TOMBSTONES_TABLE)
+            conn.execute(self.CREATE_METADATA_OUTBOX_TABLE)
+            conn.execute(self.CREATE_IDX_METADATA_OUTBOX_KEY)
+            conn.execute(self.CREATE_METADATA_OUTBOX_STATE_TABLE)
             # Story #283: Wiki render cache tables
             conn.execute(self.CREATE_WIKI_CACHE_TABLE)
             conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)

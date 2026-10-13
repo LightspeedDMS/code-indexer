@@ -425,6 +425,20 @@ def initialize_services() -> Dict[str, Any]:
     )
     set_xray_k_provider(_xray_k_ttl_provider)
 
+    # Content seam step 5a: golden-repo aliases and write-mode markers live in
+    # the registry. Installed before anything below can resolve or publish an
+    # alias; the import of the existing files runs on a daemon thread, with
+    # reads falling back to the files until it finishes.
+    from code_indexer.server.startup.control_plane_metadata_wiring import (
+        install_registry_metadata,
+    )
+
+    install_registry_metadata(
+        _backend_registry,
+        Path(data_dir) / "golden-repos",
+        storage_mode=_storage_mode,
+    )
+
     # Bug #575: Wire session manager to DB backend (SQLite or PG) for cluster support.
     # The module-level singleton starts in JSON file mode; set_backend() switches it
     # to use the protocol-backed storage so password-change invalidations are visible

@@ -32,6 +32,7 @@ if TYPE_CHECKING:
         AuditLogBackend,
         BackgroundJobsBackend,
         CITokensBackend,
+        ControlPlaneMetadataBackend,
         DependencyMapTrackingBackend,
         DescriptionRefreshTrackingBackend,
         DiagnosticsBackend,
@@ -134,6 +135,14 @@ class BackendRegistry:
     # backends already share the identical record_sample()/get_k() protocol
     # (KStoreProtocol in k_calibration_store.py).
     xray_k_calibration: Any = field(default=None)
+    # Content seam step 5a: golden-repo alias pointers and write-mode markers
+    # (control-plane metadata) -- SQLite in solo mode, PostgreSQL in cluster
+    # mode, replacing the per-pod golden-repos/aliases/ and .write_mode/ files.
+    # Optional only so registries built field-by-field in tests stay valid;
+    # both factory paths always set it.
+    control_plane_metadata: Optional["ControlPlaneMetadataBackend"] = field(
+        default=None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +200,7 @@ class StorageFactory:
             ApiMetricsSqliteBackend,
             BackgroundJobsSqliteBackend,
             CITokensSqliteBackend,
+            ControlPlaneMetadataSqliteBackend,
             DependencyMapTrackingBackend as DependencyMapTrackingBackend_,
             DescriptionRefreshTrackingBackend as DescriptionRefreshTrackingBackend_,
             DiagnosticsSqliteBackend,
@@ -287,6 +297,7 @@ class StorageFactory:
             xray_k_calibration=SqliteKCalibrationBackend(
                 db_path=str(Path(data_dir) / "xray_k_calibration.db")
             ),
+            control_plane_metadata=ControlPlaneMetadataSqliteBackend(db_path),
         )
 
     # ------------------------------------------------------------------
@@ -409,6 +420,9 @@ class StorageFactory:
         from code_indexer.server.storage.postgres.xray_graph_k_calibration_backend import (
             XrayGraphKCalibrationPostgresBackend,
         )
+        from code_indexer.server.storage.postgres.control_plane_metadata_backend import (
+            ControlPlaneMetadataPostgresBackend,
+        )
 
         dsn = config["postgres_dsn"]
         pool_max_size = config.get("postgres_pool_max_size", 20)
@@ -466,6 +480,7 @@ class StorageFactory:
             search_embed_event=SearchEmbedEventPostgresBackend(pool),
             embedding_call_stats=EmbeddingCallStatsPostgresBackend(pool),
             xray_k_calibration=XrayGraphKCalibrationPostgresBackend(pool),
+            control_plane_metadata=ControlPlaneMetadataPostgresBackend(pool),
             connection_pool=pool,
             critical_connection_pool=critical_pool,
         )

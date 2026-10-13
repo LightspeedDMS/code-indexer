@@ -26,6 +26,7 @@ from .api_metrics_backend import ApiMetricsBackend
 from .audit_log_backend import AuditLogBackend
 from .background_jobs_backend import BackgroundJobsBackend
 from .ci_tokens_backend import CITokensBackend
+from .control_plane_metadata_backend import ControlPlaneMetadataBackend
 from .dependency_map_tracking_backend import DependencyMapTrackingBackend
 from .description_refresh_tracking_backend import DescriptionRefreshTrackingBackend
 from .diagnostics_backend import DiagnosticsBackend
@@ -56,6 +57,7 @@ __all__ = [
     "AuditLogBackend",
     "BackgroundJobsBackend",
     "CITokensBackend",
+    "ControlPlaneMetadataBackend",
     "DependencyMapTrackingBackend",
     "DescriptionRefreshTrackingBackend",
     "DiagnosticsBackend",

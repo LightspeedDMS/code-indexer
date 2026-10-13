@@ -31,7 +31,6 @@ from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.server.services.versioned_snapshot_reconciler import (
     compute_snapshot_deletion_candidates,
-    read_pointer_target_and_previous,
     reconcile_versioned_snapshots,
 )
 from code_indexer.server.storage.shared.snapshot_manager import (
@@ -289,7 +288,7 @@ def test_concurrent_swap_stale_read_before_swap_never_schedules_new_live_target(
     tmp_path,
 ):
     """Invariant (e), ordering 1: THE pointer file is genuinely READ
-    (via read_pointer_target_and_previous, the same primitive the sweep
+    (via AliasManager.read_pointer, the same primitive the sweep
     itself uses) BEFORE swap_alias() runs. Only AFTER that real read
     does the swap complete, publishing a new live target the reader
     never saw. The stale target_path captured from that read must still
@@ -314,9 +313,8 @@ def test_concurrent_swap_stale_read_before_swap_never_schedules_new_live_target(
     )
     alias_manager.create_alias(alias_name, target_before_swap, repo_name=bare_ns)
 
-    # Genuinely READ the pointer file BEFORE the swap happens.
-    alias_file = golden_repos_dir / "aliases" / f"{alias_name}.json"
-    stale_read = read_pointer_target_and_previous(alias_file)
+    # Genuinely READ the pointer BEFORE the swap happens.
+    stale_read = alias_manager.read_pointer(alias_name)
     assert stale_read is not None
     stale_target_path, _stale_previous_path = stale_read
 
