@@ -44,14 +44,21 @@ Auth/transport: a direct JSON-RPC call carrying a bearer ``api_key``, against th
 base ``endpoint`` -- the same two-field surface the delegated clone backend uses
 (``utils.remote_endpoint.RemoteServiceEndpoint``). Which config key supplies that
 pair, and any fallback between keys, is the startup wiring's business: this
-indexer is source-agnostic and simply consumes the resolved endpoint. No API-GW authorizer secret is distributed to cidx; the
+indexer is source-agnostic and simply consumes the resolved endpoint. The
+transport itself is ``utils.sandbox_mcp_client.SandboxMcpClient``, shared with
+the other sandbox-mcp consumers. No API-GW authorizer secret is distributed to cidx; the
 route is constrained by K8s NetworkPolicy + service account.
 """
 
 from __future__ import annotations
 from code_indexer.utils.remote_endpoint import RemoteServiceEndpoint
+from code_indexer.utils.sandbox_mcp_client import (
+    DEFAULT_HEALTH_PATH,
+    DEFAULT_JSONRPC_PATH,
+    SandboxMcpClient,
+    SandboxMcpError,
+)
 
-import json
 import logging
 import os
 import time
@@ -72,20 +79,6 @@ _SCIP_TOOL_NAME = "sandbox_scip"
 # existing 30-minute subprocess timeout (typescript.py, java.py) and the tool's
 # server-side ``timeout_s: 1800`` (contract §2a / §5).
 _DEFAULT_TIMEOUT_SECONDS = 1800
-
-# Path appended to the sandbox-mcp base endpoint for the JSON-RPC front door
-# (reconciled EVO-65021 seam #2 — the authoritative sandbox contract). The
-# resolved ``scip_sandbox.endpoint`` (or ``workspace_mcp.endpoint`` as a
-# fallback, EVO-65365) is the sandbox-mcp *base* URL (e.g.
-# ``http://sandbox-mcp:8200``); ``SandboxMcpController`` mounts the MCP handler
-# at ``POST /v1/sandbox/mcp`` (URI versioning prefix 'v', v1). A dedicated param
-# keeps it tunable without a config-schema change if the route ever moves.
-_DEFAULT_JSONRPC_PATH = "/v1/sandbox/mcp"
-
-# Relative path (under the configured base endpoint) probed by ``is_available``
-# and the startup health check. Health is un-versioned and un-authed
-# (``GET /health``, no ``/v1`` prefix) per the sandbox contract.
-_DEFAULT_HEALTH_PATH = "/health"
 
 # EVO-65021: bounded budget for the post-build ``index.scip`` visibility check
 # (see ``DelegatedIndexer._index_written``). ``output_dir`` is a shared NetApp/ONTAP
@@ -117,8 +110,8 @@ class DelegatedIndexer(SCIPIndexer):
         *,
         tool_name: str = _SCIP_TOOL_NAME,
         timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
-        jsonrpc_path: str = _DEFAULT_JSONRPC_PATH,
-        health_path: str = _DEFAULT_HEALTH_PATH,
+        jsonrpc_path: str = DEFAULT_JSONRPC_PATH,
+        health_path: str = DEFAULT_HEALTH_PATH,
     ) -> None:
         """Initialize the delegated indexer.
 
@@ -140,14 +133,21 @@ class DelegatedIndexer(SCIPIndexer):
             health_path: Path appended to the base ``endpoint`` for the health
                 probe. Default ``/health`` (un-versioned, un-authed).
         """
-        self._endpoint = (config.endpoint or "").rstrip("/")
-        self._api_key = config.api_key or ""
+        # Transport (endpoint, bearer auth, tools/call, envelope parsing,
+        # health) is the shared sandbox-mcp client's. It fetches ``requests``
+        # through ``self._requests`` so a test can swap the module per instance.
+        self._client = SandboxMcpClient(
+            config,
+            timeout_seconds=timeout_seconds,
+            jsonrpc_path=jsonrpc_path,
+            health_path=health_path,
+            requests_provider=lambda: self._requests(),
+        )
+        self._endpoint = self._client.endpoint
+        self._api_key = self._client.api_key
         self._repo_root = Path(repo_root)
         self._tool_name = tool_name
         self._timeout = timeout_seconds
-        self._jsonrpc_path = jsonrpc_path
-        self._health_path = health_path
-        self._request_id = 0
         # FlexVol index-visibility settle budget (overridable in tests).
         self._index_settle_seconds = _INDEX_SETTLE_SECONDS
         self._index_poll_seconds = _INDEX_POLL_SECONDS
@@ -158,15 +158,6 @@ class DelegatedIndexer(SCIPIndexer):
         import requests  # noqa: PLC0415
 
         return requests
-
-    def _headers(self) -> Dict[str, str]:
-        headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        return headers
-
-    def _rpc_url(self) -> str:
-        return f"{self._endpoint}{self._jsonrpc_path}"
 
     def _relative(self, path: Path) -> str:
         """Workspace-relative POSIX string for *path* under ``repo_root``.
@@ -197,7 +188,6 @@ class DelegatedIndexer(SCIPIndexer):
         opts into the sandbox's locals-only fallback for a bare/unbuilt repo);
         omitted otherwise so a non-golden request is byte-identical to before.
         """
-        self._request_id += 1
         arguments: Dict[str, Any] = {
             "project_path": project_path,
             "build_system": build_system,
@@ -210,50 +200,7 @@ class DelegatedIndexer(SCIPIndexer):
             arguments["workspace_id"] = workspace_id
         if allow_degenerate:
             arguments["allow_degenerate"] = True
-        return {
-            "jsonrpc": "2.0",
-            "id": self._request_id,
-            "method": "tools/call",
-            "params": {
-                "name": self._tool_name,
-                "arguments": arguments,
-            },
-        }
-
-    @staticmethod
-    def _extract_run_result(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Pull the ``SandboxRunResult`` envelope out of a JSON-RPC response.
-
-        Handles the three shapes the tool-exec path may return (contract §2c):
-        the envelope inline under ``result``, MCP ``structuredContent``, or a
-        JSON string in ``result.content[0].text``. Returns ``None`` when the
-        payload is a JSON-RPC error or the envelope cannot be located (→ the
-        caller treats it as a failure).
-        """
-        if not isinstance(payload, dict):
-            return None
-        if payload.get("error") is not None:
-            return None
-
-        result = payload.get("result", payload)
-        if isinstance(result, dict):
-            if "exit_code" in result:
-                return result
-            structured = result.get("structuredContent")
-            if isinstance(structured, dict) and "exit_code" in structured:
-                return structured
-            content = result.get("content")
-            if isinstance(content, list) and content:
-                first = content[0]
-                text = first.get("text") if isinstance(first, dict) else None
-                if isinstance(text, str):
-                    try:
-                        parsed = json.loads(text)
-                    except (ValueError, TypeError):
-                        return None
-                    if isinstance(parsed, dict) and "exit_code" in parsed:
-                        return parsed
-        return None
+        return self._client.build_tool_call(self._tool_name, arguments)
 
     # --------------------------------------------------------------------- ABC
     def generate(
@@ -336,7 +283,6 @@ class DelegatedIndexer(SCIPIndexer):
             allow_degenerate=allow_degenerate,
         )
 
-        requests = self._requests()
         target = (
             f"golden_alias={golden_alias}"
             if golden_alias
@@ -351,43 +297,9 @@ class DelegatedIndexer(SCIPIndexer):
             target,
         )
         try:
-            response = requests.post(
-                self._rpc_url(),
-                json=request,
-                headers=self._headers(),
-                timeout=self._timeout,
-            )
-        except requests.RequestException as exc:
-            return self._failure(
-                start_time,
-                f"sandbox_scip request to '{self._rpc_url()}' failed: {exc}",
-            )
-
-        if response.status_code >= 300:
-            body = ""
-            try:
-                body = response.text[:500]
-            except Exception:  # pragma: no cover - defensive
-                pass
-            return self._failure(
-                start_time,
-                f"sandbox_scip failed (HTTP {response.status_code}): {body}",
-            )
-
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            return self._failure(
-                start_time, f"sandbox_scip returned non-JSON response: {exc}"
-            )
-
-        run_result = self._extract_run_result(payload)
-        if run_result is None:
-            return self._failure(
-                start_time,
-                f"sandbox_scip response contained no SandboxRunResult envelope: "
-                f"{json.dumps(payload)[:500]}",
-            )
+            run_result = self._client.post(request)
+        except SandboxMcpError as exc:
+            return self._failure(start_time, str(exc))
 
         return self._map_result(
             run_result, output_dir=output_dir, start_time=start_time
@@ -536,20 +448,7 @@ class DelegatedIndexer(SCIPIndexer):
         non-2xx yields False (the startup wiring turns that into a fail-loud
         ``RuntimeError``; per-call generation independently fail-softs).
         """
-        if not self._endpoint:
-            return False
-        requests = self._requests()
-        health_url = f"{self._endpoint}{self._health_path}"
-        try:
-            resp = requests.get(health_url, headers=self._headers(), timeout=10)
-        except requests.RequestException as exc:
-            logger.warning(
-                "DelegatedIndexer: health probe to '%s' failed: %s",
-                health_url,
-                exc,
-            )
-            return False
-        return bool(resp.status_code < 300)
+        return self._client.is_healthy()
 
     def get_version(self) -> Optional[str]:
         """Return None — the remote indexer version is not locally determinable.
