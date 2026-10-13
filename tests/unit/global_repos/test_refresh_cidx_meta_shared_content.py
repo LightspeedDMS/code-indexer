@@ -84,36 +84,79 @@ def _seed_at(world: MetaWorld, rel: str, mtime: int) -> None:
         ({".hidden/new.md": SNAPSHOT_TS + 10}, False),
     ],
 )
-def test_change_detection_agrees_local_and_shared(
+def test_local_change_detection_is_unchanged(
     meta_world: MetaWorld, files: Dict[str, int], expected: bool
 ) -> None:
     for rel, mtime in files.items():
         _seed_at(meta_world, rel, mtime)
-
-    local = _scheduler(meta_world.local_golden)._has_local_changes(
-        str(meta_world.local_meta), ALIAS
-    )
-    meta_world.delegated()
-    with meta_world.forbid_local_io():
-        shared = _scheduler(meta_world.pod_golden)._has_local_changes(
-            str(meta_world.pod_meta), ALIAS
+    assert (
+        _scheduler(meta_world.local_golden)._has_local_changes(
+            str(meta_world.local_meta), ALIAS
         )
-    assert local is shared is expected
+        is expected
+    )
 
 
-def test_change_detection_ignores_the_pods_own_directory(
+def _no_clock(scheduler: RefreshScheduler) -> RefreshScheduler:
+    """Shared change detection must not consult snapshot timestamps."""
+
+    def clock(alias: str) -> None:
+        raise AssertionError("snapshot timestamp consulted for shared content")
+
+    scheduler._latest_versioned_timestamp = clock  # type: ignore[method-assign]
+    return scheduler
+
+
+def _publish_fingerprint(world: MetaWorld, scheduler: RefreshScheduler) -> None:
+    """What a refresh publishes: the current shared content's fingerprint
+    with the alias pointer."""
+    shared = cmc.shared_cidx_meta(world.pod_meta)
+    assert shared is not None
+    scheduler.alias_manager.create_alias(
+        ALIAS,
+        str(world.pod_meta),
+        extra={
+            RefreshScheduler.META_FINGERPRINT_FIELD: cmc.content_fingerprint(
+                cmc.visible_entries(shared)
+            )
+        },
+    )
+
+
+def test_no_published_fingerprint_is_a_change(meta_world: MetaWorld) -> None:
+    """First ever index of shared content: changed, whatever the mtimes
+    (one extra index, never a missed change)."""
+    _seed_at(meta_world, "a.md", SNAPSHOT_TS - 10**6)
+    meta_world.delegated()
+    scheduler = _no_clock(_scheduler(meta_world.pod_golden))
+    with meta_world.forbid_local_io():
+        assert scheduler._has_local_changes(str(meta_world.pod_meta), ALIAS) is True
+
+
+def test_change_detection_compares_only_the_published_fingerprint(
     meta_world: MetaWorld,
 ) -> None:
-    """A fresh file on the POD (where the old code looked) is not a change;
-    a fresh shared file is."""
+    """A stray file on the POD (where the old code looked) is not a change,
+    nor is an mtime moved either way; edits and deletions are."""
     (meta_world.pod_meta / "stray.md").write_text("pod-local\n")
-    os.utime(meta_world.pod_meta / "stray.md", (SNAPSHOT_TS + 99,) * 2)
     _seed_at(meta_world, "a.md", SNAPSHOT_TS - 1)
+    _seed_at(meta_world, "b.md", SNAPSHOT_TS - 1)
     meta_world.delegated()
-    scheduler = _scheduler(meta_world.pod_golden)
-    assert scheduler._has_local_changes(str(meta_world.pod_meta), ALIAS) is False
+    scheduler = _no_clock(_scheduler(meta_world.pod_golden))
+    _publish_fingerprint(meta_world, scheduler)
+
+    def changed() -> bool:
+        with meta_world.forbid_local_io():
+            return scheduler._has_local_changes(str(meta_world.pod_meta), ALIAS)
+
+    assert changed() is False
+    os.utime(meta_world.remote_meta / "a.md", (SNAPSHOT_TS + 10**6,) * 2)
+    assert changed() is False
     (meta_world.remote_meta / "a.md").write_text("new shared content\n")
-    assert scheduler._has_local_changes(str(meta_world.pod_meta), ALIAS) is True
+    assert changed() is True
+    _publish_fingerprint(meta_world, scheduler)
+    (meta_world.remote_meta / "b.md").unlink()
+    assert changed() is True
 
 
 def test_change_detection_fails_loud_when_the_backend_is_down(
@@ -438,39 +481,45 @@ def _refresh_once_with(
     scheduler._execute_refresh(ALIAS)
 
 
-def test_after_an_index_change_detection_ignores_clocks(
+def test_published_fingerprint_survives_a_pod_restart_without_clocks(
     meta_world: MetaWorld, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """workspace-mcp's clock is far AHEAD of this pod: every mtime is newer
-    than every snapshot timestamp. After one index, unchanged content is not
-    a change any more; new, edited and deleted files are -- whatever their
-    mtimes."""
+    """workspace-mcp's clock is far AHEAD of the pods: every mtime is newer
+    than every snapshot timestamp. The fingerprint published with the alias
+    pointer decides: a FRESH scheduler (a restarted or different pod) sees
+    unchanged content as unchanged, and edits and deletions as changes --
+    without ever consulting a clock."""
     future = SNAPSHOT_TS + 10**6
     _seed_at(meta_world, "a.md", future)
     _seed_at(meta_world, "b.md", future)
     meta_world.delegated()
-    scheduler = _scheduler(meta_world.pod_golden)
 
-    assert _refresh_once(meta_world, monkeypatch, scheduler).call_count == 1
-    assert _refresh_once(meta_world, monkeypatch, scheduler).call_count == 0
+    def pod() -> RefreshScheduler:
+        return _no_clock(_scheduler(meta_world.pod_golden))
+
+    assert _refresh_once(meta_world, monkeypatch, pod()).call_count == 1
+    assert _refresh_once(meta_world, monkeypatch, pod()).call_count == 0
 
     (meta_world.remote_meta / "a.md").write_text("edited\n")
     os.utime(meta_world.remote_meta / "a.md", (SNAPSHOT_TS - 99,) * 2)  # clock behind
-    assert _refresh_once(meta_world, monkeypatch, scheduler).call_count == 1
-    assert _refresh_once(meta_world, monkeypatch, scheduler).call_count == 0
+    assert _refresh_once(meta_world, monkeypatch, pod()).call_count == 1
+    assert _refresh_once(meta_world, monkeypatch, pod()).call_count == 0
 
     (meta_world.remote_meta / "b.md").unlink()
-    assert _refresh_once(meta_world, monkeypatch, scheduler).call_count == 1
+    assert _refresh_once(meta_world, monkeypatch, pod()).call_count == 1
+    record = pod().alias_manager.read_record(ALIAS)
+    assert record[RefreshScheduler.META_FINGERPRINT_FIELD]
+    assert record["target_path"] == str(meta_world.pod_meta)
 
 
-def test_a_failed_refresh_does_not_record_the_fingerprint(
+def test_a_failed_refresh_does_not_publish_the_fingerprint(
     meta_world: MetaWorld, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Only a published index records the fingerprint: after a failed
     refresh the same content is still a change."""
     _seed_at(meta_world, "a.md", SNAPSHOT_TS + 5)
     meta_world.delegated()
-    scheduler = _scheduler(meta_world.pod_golden)
+    scheduler = _no_clock(_scheduler(meta_world.pod_golden))
     original_index = RefreshScheduler._index_source
 
     def failing_index(self, *args, **kwargs):
@@ -479,6 +528,38 @@ def test_a_failed_refresh_does_not_record_the_fingerprint(
     monkeypatch.setattr(RefreshScheduler, "_index_source", failing_index)
     with pytest.raises(RuntimeError):
         _refresh_once_with(meta_world, monkeypatch, scheduler, index=None)
-    assert ALIAS not in scheduler._indexed_meta_fingerprints
+    assert scheduler.alias_manager.read_record(ALIAS) is None
     monkeypatch.setattr(RefreshScheduler, "_index_source", original_index)
-    assert _refresh_once(meta_world, monkeypatch, scheduler).call_count == 1
+    assert (
+        _refresh_once(
+            meta_world, monkeypatch, _no_clock(_scheduler(meta_world.pod_golden))
+        ).call_count
+        == 1
+    )
+
+
+def test_local_swap_publishes_no_fingerprint(meta_world: MetaWorld) -> None:
+    """Under the local backend the alias document is exactly today's."""
+    scheduler = _scheduler(meta_world.local_golden)
+    assert scheduler._published_meta_fingerprint(ALIAS) == {}
+
+
+def test_alias_extra_is_published_with_the_pointer(tmp_path: Path) -> None:
+    from code_indexer.global_repos.alias_manager import AliasManager
+
+    aliases = AliasManager(str(tmp_path / "aliases"))
+    aliases.swap_alias("x-global", "/v1", "/none", extra={"content_fingerprint": "f1"})
+    first = aliases.read_record("x-global")
+    assert first["target_path"] == "/v1" and first["content_fingerprint"] == "f1"
+
+    aliases.swap_alias("x-global", "/v2", "/v1")  # no extra: fields kept
+    second = aliases.read_record("x-global")
+    assert second["target_path"] == "/v2" and second["content_fingerprint"] == "f1"
+
+    aliases.swap_alias("x-global", "/v3", "/v2", extra={"content_fingerprint": "f2"})
+    third = aliases.read_record("x-global")
+    assert third["target_path"] == "/v3" and third["content_fingerprint"] == "f2"
+    assert third["previous_path"] == "/v2"
+
+    aliases.create_alias("y-global", "/y")
+    assert "content_fingerprint" not in aliases.read_record("y-global")

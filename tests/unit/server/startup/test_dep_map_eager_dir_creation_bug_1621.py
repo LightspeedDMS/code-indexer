@@ -94,7 +94,7 @@ class TestLifespanWiresEagerCreationBeforeStaleSentinelCheck:
 
         source = inspect.getsource(make_lifespan)
         ensure_pos = source.find("_ensure_dep_map_output_dir(")
-        stale_check_pos = source.find("if _dep_map_dir.exists():")
+        stale_check_pos = source.find("_dep_map_dir.exists():")
 
         assert ensure_pos != -1, "_ensure_dep_map_output_dir(...) call not found"
         assert stale_check_pos != -1, "stale-sentinel .exists() check not found"

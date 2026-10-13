@@ -155,7 +155,11 @@ class AliasManager:
         return pointers
 
     def create_alias(
-        self, alias_name: str, target_path: str, repo_name: Optional[str] = None
+        self,
+        alias_name: str,
+        target_path: str,
+        repo_name: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Create (or replace) an alias pointer.
@@ -164,6 +168,7 @@ class AliasManager:
             alias_name: Name of the alias (e.g., "my-repo-global")
             target_path: Path to the index directory
             repo_name: Optional repository name for metadata
+            extra: Optional fields published WITH the pointer (one write)
 
         Raises:
             RuntimeError: If the write fails
@@ -175,6 +180,8 @@ class AliasManager:
             "last_refresh": now,
             "repo_name": repo_name or alias_name.removesuffix("-global"),
         }
+        if extra:
+            alias_data.update(extra)
         try:
             self._metadata.put(KIND_ALIAS, alias_name, alias_data)
         except Exception as e:
@@ -254,7 +261,13 @@ class AliasManager:
             raise RuntimeError(f"Failed to update alias {alias_name}: {e}") from e
         logger.debug(f"Updated refresh timestamp for alias: {alias_name}")
 
-    def swap_alias(self, alias_name: str, new_target: str, old_target: str) -> None:
+    def swap_alias(
+        self,
+        alias_name: str,
+        new_target: str,
+        old_target: str,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """
         Swap alias to point to new target.
 
@@ -265,6 +278,9 @@ class AliasManager:
             alias_name: Name of the alias to swap
             new_target: New index path to point to
             old_target: Expected current target (for validation)
+            extra: Optional fields describing what is published, written in
+                the SAME document write as the new pointer (so a reader never
+                sees one without the other). Fields not named are kept.
 
         Raises:
             RuntimeError: If the swap fails
@@ -289,7 +305,9 @@ class AliasManager:
                 alias_name,
                 new_target,
             )
-            self.create_alias(alias_name=alias_name, target_path=new_target)
+            self.create_alias(
+                alias_name=alias_name, target_path=new_target, extra=extra
+            )
             return
 
         current_target = alias_data.get("target_path")
@@ -304,6 +322,8 @@ class AliasManager:
         alias_data["previous_path"] = old_target
         alias_data["swapped_at"] = now
         alias_data["last_refresh"] = now
+        if extra:
+            alias_data.update(extra)
         try:
             self._metadata.put(KIND_ALIAS, alias_name, alias_data)
         except Exception as e:

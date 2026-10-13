@@ -51,6 +51,7 @@ from code_indexer.server.git.git_subprocess_env import build_non_interactive_git
 from code_indexer.server.services.cidx_meta_backup.branch_detect import (
     detect_default_branch,
 )
+from code_indexer.server.services import cidx_meta_content
 from code_indexer.server.services.cidx_meta_backup.sync import CidxMetaBackupSync
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.xray.sandbox import (
@@ -393,7 +394,10 @@ class XrayPatternService:
         target_path = target_dir / f"{name}.yaml"
 
         # 6. Capture existence BEFORE writing, then check overwrite protection
-        is_update = target_path.exists()
+        shared = cidx_meta_content.shared_cidx_meta(self._cidx_meta)
+        is_update = (
+            shared.exists(target_path) if shared is not None else target_path.exists()
+        )
         if is_update and not overwrite:
             return {
                 "error": "pattern_already_exists",
@@ -409,6 +413,15 @@ class XrayPatternService:
         result_path = str(target_path.relative_to(self._cidx_meta))
 
         def _write_and_commit(piggyback: bool) -> None:
+            if shared is not None:
+                # Shared cidx-meta: without overwrite the write must not find
+                # the file (another pod may have stored it since the check).
+                shared.put_text(
+                    target_path,
+                    pattern_yaml,
+                    expected=(cidx_meta_content.UNCONDITIONAL if overwrite else None),
+                )
+                return  # no commit: see _git_commit
             target_dir.mkdir(parents=True, exist_ok=True)
             target_path.write_text(pattern_yaml, encoding="utf-8")
             if not piggyback:
@@ -417,7 +430,16 @@ class XrayPatternService:
                     message=f"xray-patterns: {action} {scope}/{name}",
                 )
 
-        self._run_with_coarse_lock(owner, _write_and_commit)
+        try:
+            self._run_with_coarse_lock(owner, _write_and_commit)
+        except cidx_meta_content.CidxMetaConflictError:
+            return {
+                "error": "pattern_already_exists",
+                "message": (
+                    f"Pattern '{name}' already exists in scope '{scope}'. "
+                    "Use overwrite=true to replace it."
+                ),
+            }
 
         return {"success": True, "path": result_path}
 
@@ -571,6 +593,10 @@ class XrayPatternService:
         Idempotent: skips files that already exist.
         """
         any_dir = self._patterns_root / self.ANY_SCOPE
+        shared = cidx_meta_content.shared_cidx_meta(self._cidx_meta)
+        if shared is not None:
+            self._ensure_shared_seed_patterns(shared, any_dir)
+            return
         any_dir.mkdir(parents=True, exist_ok=True)
 
         created: List[Path] = []
@@ -616,8 +642,11 @@ class XrayPatternService:
                 }
 
         target_path = self._patterns_root / scope / f"{name}.yaml"
+        shared = cidx_meta_content.shared_cidx_meta(self._cidx_meta)
 
-        if not target_path.exists():
+        if not (
+            shared.exists(target_path) if shared is not None else target_path.exists()
+        ):
             return {
                 "error": "pattern_not_found",
                 "message": f"Pattern '{name}' not found in scope '{scope}'",
@@ -626,6 +655,9 @@ class XrayPatternService:
         owner = f"xray-pattern:delete:{name}"
 
         def _delete_and_commit(piggyback: bool) -> None:
+            if shared is not None:
+                shared.delete(target_path)
+                return  # no commit: see _git_commit
             target_path.unlink()
             if not piggyback:
                 self._git_commit(
@@ -636,6 +668,20 @@ class XrayPatternService:
         self._run_with_coarse_lock(owner, _delete_and_commit)
 
         return {"success": True}
+
+    def _ensure_shared_seed_patterns(
+        self, shared: "cidx_meta_content.SharedCidxMeta", any_dir: Path
+    ) -> None:
+        """ensure_seed_patterns on shared cidx-meta: each seed is written only
+        if absent (a pod racing us, or an operator's edit, wins)."""
+        for stem, content in (
+            ("catch-rethrow", _SEED_CATCH_RETHROW),
+            ("deep-nesting", _SEED_DEEP_NESTING),
+        ):
+            try:
+                shared.put_text(any_dir / f"{stem}.yaml", content, expected=None)
+            except cidx_meta_content.CidxMetaConflictError:
+                continue
 
     # ------------------------------------------------------------------
     # Coarse write-lock coordination (Bug #1037)
@@ -699,6 +745,13 @@ class XrayPatternService:
             files: List of absolute paths to git-add.
             message: Commit message.
         """
+        if cidx_meta_content.shared_cidx_meta(self._cidx_meta) is not None:
+            # Delegated content backend: the commit history exists to feed the
+            # cidx-meta git backup, which is refused there (the pod's
+            # directory is not the content, and git-mcp does not hold
+            # cidx-meta). Nothing reads it, so nothing is committed.
+            logger.debug("xray_pattern_service: shared cidx-meta, no git commit")
+            return
         env = build_non_interactive_git_env()
         env["GIT_AUTHOR_NAME"] = "cidx-meta-backup"
         env["GIT_AUTHOR_EMAIL"] = "cidx-meta-backup@example.invalid"
@@ -783,8 +836,21 @@ class XrayPatternService:
             self._patterns_root / repo_alias / f"{pattern_name}.yaml",
             self._patterns_root / self.ANY_SCOPE / f"{pattern_name}.yaml",
         ]
+        shared = cidx_meta_content.shared_cidx_meta(self._cidx_meta)
         for path in candidates:
-            if path.is_file():
+            if shared is not None:
+                # Shared cidx-meta: absent moves on to the next candidate; a
+                # backend failure raises (never "pattern not found").
+                try:
+                    text = shared.read_text(path)
+                except FileNotFoundError:
+                    continue
+                except UnicodeDecodeError as exc:
+                    raise ValueError(
+                        f"pattern_parse_error: pattern file '{path}' exists "
+                        f"but could not be read: {exc}"
+                    ) from exc
+            elif path.is_file():
                 try:
                     text = path.read_text(encoding="utf-8")
                 except (OSError, UnicodeDecodeError) as exc:
@@ -792,15 +858,17 @@ class XrayPatternService:
                         f"pattern_parse_error: pattern file '{path}' exists "
                         f"but could not be read: {exc}"
                     ) from exc
-                try:
-                    spec = yaml.safe_load(text)
-                except yaml.YAMLError as exc:
-                    raise ValueError(
-                        f"pattern_parse_error: pattern file '{path}' exists "
-                        f"but failed to parse as YAML: {exc}"
-                    ) from exc
-                self._validate_pattern_schema(spec, path)
-                return spec  # type: ignore[no-any-return]
+            else:
+                continue
+            try:
+                spec = yaml.safe_load(text)
+            except yaml.YAMLError as exc:
+                raise ValueError(
+                    f"pattern_parse_error: pattern file '{path}' exists "
+                    f"but failed to parse as YAML: {exc}"
+                ) from exc
+            self._validate_pattern_schema(spec, path)
+            return spec  # type: ignore[no-any-return]
         return None
 
     def _validate_pattern_schema(self, spec: Any, path: Path) -> None:

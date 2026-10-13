@@ -41,7 +41,9 @@ from code_indexer.global_repos.lifecycle_batch_runner import (
 from code_indexer.global_repos.write_lock_manager import describe_scheduler_lock_holder
 
 from .activity_journal_service import ActivityJournalService
+from .cidx_meta_read_mirror import synced_read_root
 from .constants import CIDX_META_REPO
+from .dep_map_delegated import analysis_refusal, refuse_analysis
 from .dep_map_health_detector import DepMapHealthDetector
 from .jittered_dispatcher import (
     DEFAULT_DEPMAP_DISPATCH_JITTER_SECONDS,
@@ -518,6 +520,7 @@ class DependencyMapService:
 
         Returns an empty-safe dict when the dep-map output directory does not exist.
         """
+        refuse_analysis("Dependency-map graph repair")
         from dataclasses import asdict
         from datetime import datetime, timezone
 
@@ -602,6 +605,11 @@ class DependencyMapService:
             DuplicateJobError: If job_tracker detects a concurrent full analysis (AC6)
             AnalysisAlreadyRunningError: If sentinel claim fails (not pre_claimed)
         """
+        # Delegated content backend: refused before any job, lock, sentinel
+        # or file is touched (see dep_map_delegated). The routes and the MCP
+        # trigger refuse before claiming a sentinel, so nothing is pre-claimed.
+        refuse_analysis("Full dependency-map analysis")
+
         # Story #1040: Clear stale cancel flag before each run so a previous
         # cancellation does not kill this new analysis.
         self._cancel_event.clear()
@@ -1608,6 +1616,13 @@ class DependencyMapService:
         """
         golden_repos_dir = Path(self._golden_repos_manager.golden_repos_dir)
 
+        # Delegated content backend: the snapshot holds index state only; the
+        # readers get a pod-local mirror of the shared descriptions and map,
+        # synced now (a sync failure raises -- never an empty map).
+        mirror_root = synced_read_root(golden_repos_dir / CIDX_META_REPO)
+        if mirror_root is not None:
+            return mirror_root
+
         # Check versioned path directly (bypasses get_actual_repo_path() bug
         # where live dir existence masks versioned content for local repos)
         versioned_base = golden_repos_dir / ".versioned" / "cidx-meta"
@@ -1937,6 +1952,12 @@ class DependencyMapService:
         dependency_map_enabled on each iteration, allowing users to enable/disable
         delta refresh via Web UI without server restart.
         """
+        refusal = analysis_refusal()
+        if refusal is not None:
+            # Every scheduled job is an analysis or refinement: not started
+            # rather than failing every poll.
+            logger.error("Dependency map scheduler not started: %s", refusal)
+            return
         logger.info("Starting dependency map delta refresh scheduler")
         self._stop_event.clear()
         self._daemon_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
@@ -3409,6 +3430,7 @@ class DependencyMapService:
         implementation lives in _run_delta_analysis_impl(), unchanged, so
         wrapping it in a custom span never requires re-indenting that body.
         """
+        refuse_analysis("Delta dependency-map analysis")
         with create_span(
             "cidx.depmap.run_delta_analysis",
             attributes={"job_id": job_id or "auto"},
@@ -4139,6 +4161,7 @@ class DependencyMapService:
             DuplicateJobError: If job_tracker detects a concurrent refinement.
             Exception: Any exception from run_refinement_cycle() propagates.
         """
+        refuse_analysis("Dependency-map refinement")
         # Conflict detection via JobTracker.
         if self._job_tracker is not None:
             try:
@@ -4236,6 +4259,7 @@ class DependencyMapService:
 
         Returns None in all cases (early exit when disabled or no domains).
         """
+        refuse_analysis("Dependency-map refinement")
         # Story #1040: Clear stale cancel flag before each run.
         self._cancel_event.clear()
 

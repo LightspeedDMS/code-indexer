@@ -582,9 +582,8 @@ class RefreshScheduler:
             index_store if index_store is not None else LocalIndexStore()
         )
         # cidx-meta under a delegated content backend: the shared content's
-        # fingerprint as of the last index on this pod (see _has_local_changes),
-        # and the one seen by the refresh in progress.
-        self._indexed_meta_fingerprints: Dict[str, str] = {}
+        # fingerprint seen by the refresh in progress, published with the
+        # alias pointer when that refresh swaps it (see _shared_meta_changed).
         self._pending_meta_fingerprints: Dict[str, str] = {}
         self._alias_lock_db_backed_enabled_getter = alias_lock_db_backed_enabled_getter
         self._alias_lock_store_resolver = alias_lock_store_resolver
@@ -3180,6 +3179,7 @@ class RefreshScheduler:
                             alias_name=alias_name,
                             new_target=new_index_path,
                             old_target=current_target,
+                            **self._published_meta_fingerprint(alias_name),
                         )
 
                     # Bug #881 Phase 2 + Bug #1775: evict stale HNSW +
@@ -3259,12 +3259,6 @@ class RefreshScheduler:
                     logger.info(
                         f"Reconciled registry with filesystem at END for {alias_name}: {detected_indexes}"
                     )
-
-                    # The shared cidx-meta content this refresh indexed is now
-                    # published: later change detection compares against it.
-                    _indexed_fp = self._pending_meta_fingerprints.pop(alias_name, None)
-                    if _indexed_fp is not None:
-                        self._indexed_meta_fingerprints[alias_name] = _indexed_fp
 
                     if sync_failure:
                         raise RuntimeError(
@@ -4718,42 +4712,44 @@ class RefreshScheduler:
             return None
         return cidx_meta_content.shared_cidx_meta(source_path)
 
+    #: The alias-document field holding the fingerprint of the shared
+    #: cidx-meta content the published index was built from.
+    META_FINGERPRINT_FIELD = "content_fingerprint"
+
     def _shared_meta_changed(
-        self,
-        alias_name: str,
-        shared: "cidx_meta_content.SharedCidxMeta",
-        latest_timestamp: float,
+        self, alias_name: str, shared: "cidx_meta_content.SharedCidxMeta"
     ) -> bool:
         """Change detection for cidx-meta's shared content (delegated backend).
 
         This pod's directory holds index state only; the content is
-        workspace-mcp's. Once this pod has indexed it, "changed" is a
-        fingerprint comparison (paths and blob shas) -- no clock, so no skew
-        between workspace-mcp's file mtimes and this pod's snapshot
-        timestamps, and deletions count. Before that (first refresh on this
-        pod since it started) the shared mtimes are compared with the newest
-        snapshot's timestamp, as the local walk does. A listing failure
-        raises.
+        workspace-mcp's. "Changed" is a fingerprint comparison (paths and blob
+        shas of the visible files) against the fingerprint published WITH the
+        alias pointer of the current index -- in the control-plane registry,
+        so every pod, a freshly started one included, compares the same
+        value. No clock is involved anywhere, and deletions count. No
+        published fingerprint (the first index of shared content) is a
+        change: one extra index, never a missed one. A listing failure raises.
         """
         entries = cidx_meta_content.visible_entries(shared)
         fingerprint = cidx_meta_content.content_fingerprint(entries)
-        indexed = self._indexed_meta_fingerprints.get(alias_name)
-        if indexed is not None:
-            has_changes = fingerprint != indexed
-        else:
-            has_changes = cidx_meta_content.changed_since(
-                shared, latest_timestamp, entries
-            )
+        record = self.alias_manager.read_record(alias_name) or {}
+        published = record.get(self.META_FINGERPRINT_FIELD)
+        has_changes = fingerprint != published
         if has_changes:
-            # Recorded as indexed only when this refresh publishes.
             self._pending_meta_fingerprints[alias_name] = fingerprint
-        else:
-            self._indexed_meta_fingerprints[alias_name] = fingerprint
         logger.debug(
-            f"shared-content check for {alias_name} (fingerprint "
-            f"{'known' if indexed else 'new'}) -> changes={has_changes}"
+            f"shared-content fingerprint check for {alias_name} "
+            f"(published: {'yes' if published else 'none'}) -> changes={has_changes}"
         )
         return has_changes
+
+    def _published_meta_fingerprint(self, alias_name: str) -> Dict[str, Any]:
+        """The ``swap_alias`` keyword publishing this refresh's cidx-meta
+        fingerprint with the new pointer; empty (today's swap) otherwise."""
+        fingerprint = self._pending_meta_fingerprints.pop(alias_name, None)
+        if fingerprint is None:
+            return {}
+        return {"extra": {self.META_FINGERPRINT_FIELD: fingerprint}}
 
     def _meta_content_is_empty(self, alias_name: str, source_path: str) -> bool:
         """Whether an index child's "No files found" for cidx-meta is the truth.
@@ -4821,6 +4817,12 @@ class RefreshScheduler:
         Returns:
             True if changes detected or first version needed, False otherwise
         """
+        # cidx-meta's shared content (delegated backend): fingerprints, no
+        # clock and no snapshot listing.
+        shared = self._shared_cidx_meta(alias_name, source_path)
+        if shared is not None:
+            return self._shared_meta_changed(alias_name, shared)
+
         # Bug #1084 Phase A7 (Defect C): use the discovery API instead of globbing
         # golden_repos_dir/.versioned. On cow-daemon the snapshots live under the
         # NFS mount, so the old glob always missed -> always "first version" ->
@@ -4836,10 +4838,6 @@ class RefreshScheduler:
         logger.debug(
             f"Latest versioned snapshot timestamp for {alias_name}: {latest_timestamp}"
         )
-
-        shared = self._shared_cidx_meta(alias_name, source_path)
-        if shared is not None:
-            return self._shared_meta_changed(alias_name, shared, latest_timestamp)
 
         # Walk source_path, skip hidden dirs and files
         max_mtime: float = 0.0

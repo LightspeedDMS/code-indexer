@@ -1859,6 +1859,17 @@ def handle_trigger_dependency_analysis(
                 }
             )
 
+        # Delegated content backend: refused before any sentinel is claimed
+        # (the analysis agent would read an empty repository tree).
+        from code_indexer.server.services.dep_map_delegated import analysis_refusal
+
+        _refusal = analysis_refusal()
+        if _refusal is not None:
+            _refused: Dict[str, Any] = _mcp_response(
+                {"success": False, "error": _refusal, "job_id": None, "mode": mode}
+            )
+            return _refused
+
         if not dependency_map_service.is_available():
             # Story #1035 AC6: read active sentinel to surface job_id in error envelope
             _active_job_id: str = "unknown"
