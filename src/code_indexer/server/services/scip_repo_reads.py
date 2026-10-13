@@ -245,6 +245,7 @@ class ContentBuildFileSource:
             )
             listing: List[str] = []
             cursor: Optional[str] = None
+            seen: Set[str] = set()
             while True:
                 page = self._backend.manifest(
                     self._content_root, cursor=cursor, **kwargs
@@ -256,11 +257,13 @@ class ContentBuildFileSource:
                 )
                 if page.next_cursor is None:
                     break
-                if page.next_cursor == cursor:
+                if page.next_cursor in seen:
+                    # A cursor handed out twice would page forever (or loop).
                     raise ScipRepoReadError(
                         f"content backend manifest of {self._content_root} did not "
-                        f"advance past cursor {cursor!r}"
+                        f"advance past cursor {page.next_cursor!r}"
                     )
+                seen.add(page.next_cursor)
                 cursor = page.next_cursor
             self._listing = listing
             self._listing_set = set(listing)

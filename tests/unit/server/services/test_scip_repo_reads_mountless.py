@@ -28,6 +28,7 @@ from code_indexer.scip.discovery import (
     ProjectDiscovery,
     has_root_build_file,
 )
+from code_indexer.server.services import scip_lifecycle as scip_lifecycle_mod
 from code_indexer.server.services import scip_repo_reads
 from code_indexer.server.services.scip_lifecycle import (
     ScipDelegationOutcome,
@@ -112,8 +113,8 @@ class _SeamBackend:
     is_local = False
 
     def __init__(self, pod: Path, remote: Path, *, prune: bool = True) -> None:
-        self._pod = pod
-        self._remote = remote
+        #: pod path -> where the backend really finds that repository.
+        self.roots = {Path(pod): Path(remote)}
         self._local = LocalContentBackend()
         self.manifest_calls: List[Tuple[Optional[str], Any]] = []
         self.fetch_calls: List[List[str]] = []
@@ -122,8 +123,8 @@ class _SeamBackend:
             self.manifest = self._manifest_without_prune  # type: ignore[method-assign]
 
     def _where(self, repo_path: Any) -> Path:
-        assert Path(repo_path) == self._pod, repo_path
-        return self._remote
+        assert Path(repo_path) in self.roots, repo_path
+        return self.roots[Path(repo_path)]
 
     def manifest(
         self,
@@ -494,20 +495,43 @@ def test_content_transport_failure_propagates(seams: Any, pod: Path) -> None:
         repo_has_root_build_file(pod)
 
 
-def test_a_stuck_manifest_cursor_fails_loud(pod: Path) -> None:
-    class _Stuck:
-        is_local = False
+#: How many manifest pages a looping fake serves before it gives up. The loop
+#: guard must stop well before this; a missing guard then fails here, at once,
+#: instead of paging forever (smoke has no per-test timeout).
+_PAGE_BUDGET = 10
 
-        def manifest(
-            self, repo_path: Any, *, cursor: Any = None, **kw: Any
-        ) -> ContentPage:
-            return ContentPage(entries=(), next_cursor="same")
 
-        def fetch(self, repo_path: Any, paths: Sequence[str]) -> Iterator[FetchedFile]:
-            return iter(())
+class _LoopingManifest:
+    """Hands out cursors from ``cycle`` forever -- the guard must stop it."""
 
+    is_local = False
+
+    def __init__(self, cycle: Sequence[str]) -> None:
+        self._cycle = list(cycle)
+        self.calls = 0
+
+    def manifest(self, repo_path: Any, *, cursor: Any = None, **kw: Any) -> ContentPage:
+        self.calls += 1
+        if self.calls > _PAGE_BUDGET:
+            raise AssertionError(f"manifest paged {self.calls} times: no loop guard")
+        return ContentPage(
+            entries=(), next_cursor=self._cycle[(self.calls - 1) % len(self._cycle)]
+        )
+
+    def fetch(self, repo_path: Any, paths: Sequence[str]) -> Iterator[FetchedFile]:
+        return iter(())
+
+
+@pytest.mark.parametrize(
+    "cycle,max_calls", [(["same"], 2), (["a", "b"], 3), (["a", "b", "c"], 4)]
+)
+def test_a_looping_manifest_cursor_fails_loud_and_fast(
+    pod: Path, cycle: List[str], max_calls: int
+) -> None:
+    backend = _LoopingManifest(cycle)
     with pytest.raises(ScipRepoReadError, match="did not advance"):
-        list(ContentBuildFileSource(_Stuck(), pod, pod).iter_files())  # type: ignore[arg-type]
+        list(ContentBuildFileSource(backend, pod, pod).iter_files())  # type: ignore[arg-type]
+    assert backend.calls == max_calls
 
 
 # ── edge cases of the content-seam source ───────────────────────────────────
@@ -559,3 +583,149 @@ def test_unreadable_root_entry_still_exists(pod: Path, remote: Path) -> None:
     source = ContentBuildFileSource(_Dir(pod, remote), pod, pod)
     assert source.exists(pod / "pom.xml") is True
     assert source.exists(pod / "go.mod") is False
+
+
+# ── the SCIP backfill reconcile on a mount-less pod ──────────────────────────
+
+
+def _reconcile_env(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str]]:
+    from unittest import mock
+
+    calls: List[Tuple[str, str]] = []
+
+    def funnel(alias: str, repo_root: str, config: Any) -> Any:
+        calls.append((alias, str(repo_root)))
+        return ScipDelegationOutcome.ENQUEUED
+
+    monkeypatch.setattr(scip_lifecycle_mod, "funnel_golden_scip", funnel)
+    cfg = mock.MagicMock()
+    cfg.get_config.return_value = object()
+    monkeypatch.setattr(
+        "code_indexer.server.services.config_service.get_config_service", lambda: cfg
+    )
+    monkeypatch.setenv("CIDX_SCIP_AUTO_RECONCILE_ENABLED", "true")
+    monkeypatch.setenv("CIDX_SCIP_LANGUAGES", "go,python,typescript,java")
+    return calls
+
+
+def test_scip_reconcile_scans_the_registry_not_the_pod_directory(
+    seams: Any,
+    pod: Path,
+    remote: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a pod holding only index state, the pod's directory is the wrong list:
+    it lacks repos registered elsewhere and keeps dirs of removed ones. The
+    reconcile must scan the registry -- and read no repository file locally."""
+    from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+
+    backend, _ = seams
+    golden = pod.parent
+    other_remote = tmp_path / "remote" / "other"
+    _write(other_remote, "go.mod", "module other")
+    backend.roots[golden / "other"] = other_remote  # registered on another pod
+    (golden / "stale" / ".code-indexer").mkdir(parents=True)  # removed repo
+    (golden / "cidx-meta").mkdir()  # local:// -- cidx's own files
+
+    m = GoldenRepoManager(data_dir=str(tmp_path / "data"))
+    m.golden_repos_dir = str(golden)
+    m._content_backend = backend  # type: ignore[assignment]
+    registry = [
+        {"alias": "svc", "repo_url": "https://x/svc.git", "clone_path": str(pod)},
+        {
+            "alias": "cidx-meta",
+            "repo_url": "local://cidx-meta",
+            "clone_path": str(golden / "cidx-meta"),
+        },
+        {
+            "alias": "other",
+            "repo_url": "https://x/other.git",
+            "clone_path": str(golden / "other"),
+        },
+    ]
+    monkeypatch.setattr(m, "list_golden_repos", lambda: registry)
+    calls = _reconcile_env(monkeypatch)
+    _forbid_repo_reads_under(monkeypatch, golden)
+
+    counts = m.reconcile_scip_from_filesystem(max_enqueue=10)
+
+    assert calls == [("other", str(golden / "other")), ("svc", str(pod))]
+    assert counts["scanned"] == 2 and counts["enqueued"] == 2 and counts["errors"] == 0
+
+
+def test_scip_reconcile_with_local_content_scans_the_directory(tmp_path: Path) -> None:
+    """Local content seam: the directory scan, exactly as before."""
+    from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+
+    m = GoldenRepoManager(data_dir=str(tmp_path / "data"))
+    assert m._content_backend.is_local
+    assert m._scip_backfill_entries() is None
+
+
+def test_backfill_engine_takes_entries_as_given(tmp_path: Path) -> None:
+    """Given entries, the engine neither lists its root nor drops a missing dir."""
+    from code_indexer.server.services.golden_index_backfill import (
+        GoldenIndexBackfillReconciler,
+    )
+
+    seen: List[str] = []
+
+    class _Policy:
+        name = "t"
+        attempt_marker = ".t"
+
+        def is_present(self, repo_path: Path) -> bool:
+            seen.append(repo_path.name)
+            return True
+
+        def is_fresh(self, repo_path: Path) -> bool:
+            return True
+
+    root = tmp_path / "missing-root"
+    counts = GoldenIndexBackfillReconciler(root).run_cycle(
+        _Policy(),  # type: ignore[arg-type]
+        max_enqueue=5,
+        cooldown_seconds=0,
+        entries=[tmp_path / "b-not-on-disk", tmp_path / ".a"],
+    )
+    assert seen == ["b-not-on-disk", ".a"]
+    assert counts.scanned == 2 and counts.present == 2
+
+
+def _forbid_repo_reads_under(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    """Fail on any read under *root* except index state (``*/.code-indexer``)."""
+
+    def guard(path: Any) -> None:
+        try:
+            p = Path(os.fspath(path)).absolute()
+        except TypeError:
+            return
+        if (p == root or root in p.parents) and ".code-indexer" not in p.parts:
+            raise AssertionError(f"local repository read on a mount-less pod: {p}")
+
+    for name in (
+        "exists",
+        "is_file",
+        "is_dir",
+        "read_text",
+        "read_bytes",
+        "glob",
+        "rglob",
+        "iterdir",
+        "stat",
+    ):
+        original = getattr(pathlib.Path, name)
+
+        def checked(self: Any, *a: Any, _o: Any = original, **kw: Any) -> Any:
+            guard(self)
+            return _o(self, *a, **kw)
+
+        monkeypatch.setattr(pathlib.Path, name, checked)
+    real_walk, real_scandir = os.walk, os.scandir
+    monkeypatch.setattr(
+        os, "walk", lambda top, *a, **kw: (guard(top), real_walk(top, *a, **kw))[1]
+    )
+    monkeypatch.setattr(
+        os, "scandir", lambda path=".": (guard(path), real_scandir(path))[1]
+    )

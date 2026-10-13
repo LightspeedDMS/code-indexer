@@ -24,7 +24,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from typing import Any, Callable, Dict, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, Iterable, Optional, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -135,22 +135,33 @@ class GoldenIndexBackfillReconciler:
         *,
         max_enqueue: int,
         cooldown_seconds: int,
+        entries: Optional[Iterable[Path]] = None,
     ) -> BackfillCounts:
         """Enqueue up to ``max_enqueue`` per-repo builds for repos missing this index.
 
         Idempotent + resumable WITHOUT a durable cursor: each cycle re-scans, so
-        already-built repos drop out and the sweep converges. A single bad repo is
+        already-built repos drop out and the sweep converges. ``entries`` replaces
+        the golden-repos directory scan with the caller's list of repo paths. A single bad repo is
         counted and logged but never aborts the cycle.
         """
         counts = BackfillCounts()
-        if not self._root.is_dir():
-            return counts
+        if entries is None:
+            if not self._root.is_dir():
+                return counts
+            candidates: Iterable[Path] = (
+                e
+                for e in sorted(self._root.iterdir(), key=lambda p: p.name)
+                if not e.name.startswith(".") and e.is_dir()
+            )
+        else:
+            # The caller's own list (e.g. the registry, on a pod that holds only
+            # index state): taken as given -- a repo's index-state dir need not
+            # exist on this pod yet, and a stray dir here is not a repo.
+            candidates = entries
         now = self._clock()
-        for entry in sorted(self._root.iterdir(), key=lambda p: p.name):
+        for entry in candidates:
             if counts.enqueued >= max_enqueue:
                 break
-            if entry.name.startswith(".") or not entry.is_dir():
-                continue
             counts.scanned += 1
             try:
                 if policy.is_present(entry) and not _index_is_outdated(policy, entry):
