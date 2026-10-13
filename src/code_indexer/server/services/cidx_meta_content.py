@@ -34,7 +34,7 @@ import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from code_indexer.server.services.constants import CIDX_META_REPO
 from code_indexer.server.services.content_writer_plugin import ECONFLICT
@@ -194,6 +194,7 @@ class SharedCidxMeta:
             self.writer.put(target, data, **_cas(expected))
         except Exception as exc:
             raise _writer_error(exc, target) from exc
+        _notify_written(self.root, self.rel(path), data)
 
     def put_text(
         self, path: PathLike, text: str, *, expected: Expected = UNCONDITIONAL
@@ -205,9 +206,11 @@ class SharedCidxMeta:
         """Delete the file; False when it was already absent."""
         target = self.absolute(path)
         try:
-            return bool(self.writer.delete(target, **_cas(expected)))
+            deleted = bool(self.writer.delete(target, **_cas(expected)))
         except Exception as exc:
             raise _writer_error(exc, target) from exc
+        _notify_written(self.root, self.rel(path), None)
+        return deleted
 
     def rename(self, old: PathLike, new: PathLike, *, overwrite: bool) -> bool:
         """Move *old* to *new*: write the new name (only if absent unless
@@ -223,6 +226,25 @@ class SharedCidxMeta:
         self.put(new, data, expected=UNCONDITIONAL if overwrite else None)
         self.delete(old, expected=sha)
         return True
+
+
+#: Called after every successful write (bytes) or delete (None) through a
+#: SharedCidxMeta in this process, as ``(root, rel, data)`` -- how pod-local
+#: derived copies (the dependency-map read mirror) see this pod's own writes
+#: at once instead of after their sync interval.
+WriteListener = Callable[[str, str, Optional[bytes]], None]
+_write_listeners: List[WriteListener] = []
+
+
+def add_write_listener(listener: WriteListener) -> None:
+    """Register *listener* for this process's shared cidx-meta writes."""
+    if listener not in _write_listeners:
+        _write_listeners.append(listener)
+
+
+def _notify_written(root: str, rel: str, data: Optional[bytes]) -> None:
+    for listener in list(_write_listeners):
+        listener(root, rel, data)
 
 
 def _cas(expected: Expected) -> Dict[str, Any]:

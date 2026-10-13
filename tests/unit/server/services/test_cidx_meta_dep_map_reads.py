@@ -308,3 +308,80 @@ def test_shared_cidx_meta_is_the_mirror_source(meta_world: MetaWorld) -> None:
     mirror = crm.cidx_meta_read_mirror(meta_world.pod_meta)
     assert shared is not None and mirror is not None
     assert mirror._shared.root == shared.root
+
+
+# ── read-your-writes on the writing pod ──────────────────────────────────
+
+
+def test_own_write_is_read_immediately(meta_world: MetaWorld) -> None:
+    """A write through the seam on this pod is in the mirror before the next
+    read -- no sync, no manifest call, inside the TTL."""
+    _seed_map(meta_world)
+    root = _mirror(meta_world)
+    shared = shared_cidx_meta(meta_world.pod_meta)
+    assert shared is not None
+    calls = meta_world.backend.manifest_calls
+    with meta_world.forbid_local_io():
+        shared.put_text("dependency-map/_index.md", "# Rewritten\n")
+        shared.put_text("dependency-map/new-domain.md", "# New\n")
+        shared.put_text("memories/not-mirrored.md", "x")
+        again = crm.synced_read_root(meta_world.pod_meta)
+    assert again == root
+    assert meta_world.backend.manifest_calls == calls  # served from the mirror
+    assert (root / "dependency-map" / "_index.md").read_text() == "# Rewritten\n"
+    assert (root / "dependency-map" / "new-domain.md").read_text() == "# New\n"
+    assert not (root / "memories").exists()
+    # And the mirror's state agrees: a forced sync fetches nothing.
+    meta_world.backend.fetch_calls.clear()
+    crm.cidx_meta_read_mirror(meta_world.pod_meta).sync(force=True)
+    assert meta_world.backend.fetch_calls == []
+
+
+def test_own_delete_is_gone_immediately(meta_world: MetaWorld) -> None:
+    _seed_map(meta_world)
+    root = _mirror(meta_world)
+    shared = shared_cidx_meta(meta_world.pod_meta)
+    assert shared is not None
+    with meta_world.forbid_local_io():
+        shared.delete("dependency-map/identity.md")
+        shared.rename("pay.md", "payments.md", overwrite=False)
+        crm.synced_read_root(meta_world.pod_meta)
+    assert not (root / "dependency-map" / "identity.md").exists()
+    assert not (root / "pay.md").exists()
+    assert (root / "payments.md").read_text().endswith("Payments service.\n")
+
+
+def test_other_pods_writes_appear_within_the_ttl(meta_world: MetaWorld) -> None:
+    """Cross-pod staleness is bounded by SYNC_TTL_SECONDS (documented)."""
+    _seed_map(meta_world)
+    root = _mirror(meta_world)
+    (meta_world.remote_meta / "dependency-map" / "_index.md").write_text(
+        "# Other pod\n"
+    )
+    crm.synced_read_root(meta_world.pod_meta)
+    assert (root / "dependency-map" / "_index.md").read_text() == "# Index\n"
+    mirror = crm.cidx_meta_read_mirror(meta_world.pod_meta)
+    mirror._synced_at -= crm.SYNC_TTL_SECONDS  # the TTL has passed
+    crm.synced_read_root(meta_world.pod_meta)
+    assert (root / "dependency-map" / "_index.md").read_text() == "# Other pod\n"
+
+
+def test_failed_write_through_forces_a_resync(
+    meta_world: MetaWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_map(meta_world)
+    root = _mirror(meta_world)
+    shared = shared_cidx_meta(meta_world.pod_meta)
+    assert shared is not None
+    real_write = crm._atomic_write
+
+    def failing(target, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(crm, "_atomic_write", failing)
+    shared.put_text("dependency-map/_index.md", "# Rewritten\n")  # still succeeds
+    monkeypatch.setattr(crm, "_atomic_write", real_write)
+    calls = meta_world.backend.manifest_calls
+    crm.synced_read_root(meta_world.pod_meta)
+    assert meta_world.backend.manifest_calls == calls + 1  # re-synced at once
+    assert (root / "dependency-map" / "_index.md").read_text() == "# Rewritten\n"

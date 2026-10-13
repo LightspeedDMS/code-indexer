@@ -16,6 +16,11 @@ blob sha changed and deleting files the shared content no longer has. The same
 reader code then runs over a tree identical to the shared one -- the same idea
 as the IndexStore's node-local checkout.
 
+Read-your-writes on the writing pod: every write or delete through
+SharedCidxMeta in this process is applied to the mirror at once (write-through;
+if that local apply fails, the mirror is marked for a full re-sync on its next
+read). Writes made by OTHER pods appear within :data:`SYNC_TTL_SECONDS`.
+
 It is derived, pod-local cidx state, never written back, and never the pod's
 own ``golden-repos/cidx-meta``. A sync that cannot list or fetch RAISES
 (CidxMetaUnavailableError): readers never get a silently empty or half-updated
@@ -37,6 +42,7 @@ from code_indexer.server.services.cidx_meta_content import (
     LISTING_PRUNE_DIRS,
     CidxMetaUnavailableError,
     SharedCidxMeta,
+    add_write_listener,
     shared_cidx_meta,
 )
 from code_indexer.utils.blob_hash import git_blob_hash_bytes
@@ -101,6 +107,32 @@ class CidxMetaReadMirror:
             self._sync_locked()
             self._synced_at = self._clock()
             return self._root
+
+    def apply_write(self, rel: str, data: Optional[bytes]) -> None:
+        """Apply this pod's own write (*data*) or delete (None) of *rel* to
+        the mirror now, so the next read sees it. A failure to apply marks the
+        mirror for a full re-sync instead -- a later read is never stale."""
+        if not self._include(rel):
+            return
+        with self._lock:
+            try:
+                held = self._read_state()
+                if data is None:
+                    (self._root / rel).unlink(missing_ok=True)
+                    held.pop(rel, None)
+                else:
+                    _atomic_write(self._root / rel, data)
+                    held[rel] = git_blob_hash_bytes(data)
+                self._write_state(held)
+            except OSError as exc:
+                logger.warning(
+                    "cidx-meta read mirror %s: write-through of %s failed (%s); "
+                    "re-syncing on next read",
+                    self._root,
+                    rel,
+                    exc,
+                )
+                self._synced_at = None
 
     def _sync_locked(self) -> None:
         wanted: Dict[str, str] = {
@@ -200,6 +232,17 @@ def cidx_meta_read_mirror(meta_dir: Path) -> Optional[CidxMetaReadMirror]:
             mirror = CidxMetaReadMirror(shared, mirror_root)
             _mirrors[key] = mirror
         return mirror
+
+
+def _on_shared_write(root: str, rel: str, data: Optional[bytes]) -> None:
+    """Write-through hook: apply a write to every mirror of *root*."""
+    with _mirrors_lock:
+        targets = [m for m in _mirrors.values() if m._shared.root == root]
+    for mirror in targets:
+        mirror.apply_write(rel, data)
+
+
+add_write_listener(_on_shared_write)
 
 
 def synced_read_root(meta_dir: Path) -> Optional[Path]:
