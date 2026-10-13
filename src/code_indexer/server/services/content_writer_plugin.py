@@ -37,6 +37,9 @@ from typing import Any, Optional
 from code_indexer.server.services.backend_plugin_loader import BackendPluginResolver
 
 ENV_VAR = "CIDX_CONTENT_WRITER"
+
+#: The writer's ``code`` for a failed ``expected_blob_sha`` precondition.
+ECONFLICT = "ECONFLICT"
 ENTRY_POINT_GROUP = "code_indexer.content_writer"
 
 

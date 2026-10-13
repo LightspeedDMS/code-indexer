@@ -47,7 +47,7 @@ so the default command line is unchanged.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from code_indexer.server.startup.content_backend_wiring import (
     configured_content_backend_name,
@@ -82,18 +82,51 @@ SERVER_DELEGATED_GIT_BACKEND_ARG = "--git-backend=delegated"
 #: The meta repository cidx writes itself (descriptions, dependency maps).
 CIDX_META_ALIASES = ("cidx-meta", "cidx-meta-global")
 
+#: The registry URL cidx-meta carries once migrated to a local:// repository.
+CIDX_META_REPO_URL = "local://cidx-meta"
+
+
+def is_cidx_meta_repo(repo_url: Optional[str], alias: Optional[str] = None) -> bool:
+    """Whether a golden repo is cidx-meta, by alias or by its local:// URL."""
+    return alias in CIDX_META_ALIASES or repo_url == CIDX_META_REPO_URL
+
 
 def is_pod_local_repo(repo_url: Optional[str], alias: Optional[str] = None) -> bool:
     """Whether a golden repo's files live on THIS pod, whatever the backends.
 
-    ``local://`` repositories -- cidx-meta first among them -- are created by
-    cidx in its own data directory and written by it (descriptions, memories,
-    uploads). They are never with workspace-mcp, so a delegated content or git
-    backend cannot see them: their index spawns must read the pod's disk.
+    ``local://`` repositories -- cidx-meta among them -- are created by cidx
+    in its own data directory and written by it (descriptions, memories,
+    uploads). A delegated GIT backend never holds them. Their CONTENT is on
+    this pod's disk too, except cidx-meta's under a delegated content backend,
+    which lives with workspace-mcp (see :func:`repo_layout_kwargs`).
     """
-    return bool(repo_url and repo_url.startswith("local://")) or alias in (
-        CIDX_META_ALIASES
+    return bool(repo_url and repo_url.startswith("local://")) or is_cidx_meta_repo(
+        repo_url, alias
     )
+
+
+def repo_layout_kwargs(
+    repo_url: Optional[str],
+    alias: Optional[str] = None,
+    *,
+    local_content: bool = False,
+) -> Dict[str, Any]:
+    """The :func:`append_server_layout_args` keywords for one golden repo.
+
+    * cidx-meta: its content is wherever the server's content backend says
+      (workspace-mcp under ``delegated``, where every server-side writer puts
+      it), but it is not a git repository any git backend holds, so git stays
+      local. Under the local default this stamps exactly what
+      ``local_content=True`` did.
+    * any other ``local://`` repository, or one the caller already knows is
+      on this pod (``local_content``): entirely on this pod.
+    * everything else: the configured backends.
+    """
+    if is_cidx_meta_repo(repo_url, alias):
+        return {"git_backend": "local"}
+    if local_content or is_pod_local_repo(repo_url, alias):
+        return {"local_content": True}
+    return {}
 
 
 def append_server_layout_args(

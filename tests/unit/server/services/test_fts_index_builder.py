@@ -247,11 +247,13 @@ def _rebuild_cmd(runner: "_FakeRunner") -> List[str]:
 
 
 @pytest.mark.parametrize(
-    "alias, local_content, delegated",
+    "alias, local_content, content_delegated, git_delegated",
     [
-        ("notes", True, False),  # a local:// repo: the caller says so
-        ("cidx-meta", False, False),  # cidx-meta: the alias says so
-        ("agent-router", False, True),  # with workspace-mcp: delegated
+        ("notes", True, False, False),  # a local:// repo: the caller says so
+        # cidx-meta: content with workspace-mcp (the alias says so), git local
+        ("cidx-meta", False, True, False),
+        ("cidx-meta", True, True, False),
+        ("agent-router", False, True, True),  # with workspace-mcp: delegated
     ],
 )
 def test_the_rebuild_reads_the_pod_for_a_pod_local_repo(
@@ -259,7 +261,8 @@ def test_the_rebuild_reads_the_pod_for_a_pod_local_repo(
     delegated_server: None,
     alias: str,
     local_content: bool,
-    delegated: bool,
+    content_delegated: bool,
+    git_delegated: bool,
 ) -> None:
     repo = _make_repo(tmp_path, config=True, fts=False)
     runner = _FakeRunner(repo)
@@ -267,8 +270,8 @@ def test_the_rebuild_reads_the_pod_for_a_pod_local_repo(
     ensure_fts_index(repo, alias=alias, runner=runner, local_content=local_content)
 
     cmd = _rebuild_cmd(runner)
-    assert ("--content-backend=delegated" in cmd) is delegated
-    assert ("--git-backend=delegated" in cmd) is delegated
+    assert ("--content-backend=delegated" in cmd) is content_delegated
+    assert ("--git-backend=delegated" in cmd) is git_delegated
 
 
 def test_the_backfill_sweep_asks_the_registry_whether_a_repo_is_pod_local(

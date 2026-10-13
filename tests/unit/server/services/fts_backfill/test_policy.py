@@ -89,8 +89,13 @@ def test_executor_reconstructs_build_from_metadata_and_returns_status(
         alias = "svc-api"
         detail = "built"
 
-    def fake_ensure(repo_path, *, alias, subprocess_env, timeout):
-        captured.update(repo_path=repo_path, alias=alias, timeout=timeout)
+    def fake_ensure(repo_path, *, alias, subprocess_env, timeout, local_content):
+        captured.update(
+            repo_path=repo_path,
+            alias=alias,
+            timeout=timeout,
+            local_content=local_content,
+        )
         return _Outcome()
 
     monkeypatch.setattr(policy_mod, "ensure_fts_index", fake_ensure)
@@ -101,4 +106,5 @@ def test_executor_reconstructs_build_from_metadata_and_returns_status(
 
     assert captured["repo_path"] == Path(tmp_path / "svc-api")
     assert captured["alias"] == "svc-api"
+    assert captured["local_content"] is False  # no registry: not local://
     assert result == {"status": "rebuilt", "alias": "svc-api", "detail": "built"}

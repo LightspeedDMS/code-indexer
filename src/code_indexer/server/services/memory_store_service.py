@@ -18,14 +18,25 @@ Algorithm (issue #877 body lines 67-143):
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import socket
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Protocol, TypeVar, runtime_checkable
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    Optional,
+    Protocol,
+    TypeVar,
+    runtime_checkable,
+)
 
+from code_indexer.server.services import cidx_meta_content
 from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.services.memory_file_lock_manager import (
     MemoryFileLockManager,
@@ -228,9 +239,13 @@ class MemoryStoreService:
             validate_edit_payload(edit_dict, current_fm, self._config.max_summary_chars)
 
             merged: Dict[str, Any] = {**current_fm, **edit_dict}
-            content_hash = self._run_with_coarse_lock(
-                owner, lambda: atomic_write_memory_file(path, merged)
-            )
+            with self._stale_on_conflict(path, memory_id):
+                content_hash = self._run_with_coarse_lock(
+                    owner,
+                    lambda: atomic_write_memory_file(
+                        path, merged, expected_content_hash=current_hash
+                    ),
+                )
             self._invalidate_cache(memory_id)
             return {"id": memory_id, "content_hash": content_hash, "path": str(path)}
 
@@ -259,7 +274,13 @@ class MemoryStoreService:
             if not self._rate_limiter.consume(username):
                 raise RateLimitError(f"Rate limit exceeded for user {username!r}")
 
-            self._run_with_coarse_lock(owner, lambda: atomic_delete_memory_file(path))
+            with self._stale_on_conflict(path, memory_id):
+                self._run_with_coarse_lock(
+                    owner,
+                    lambda: atomic_delete_memory_file(
+                        path, expected_content_hash=current_hash
+                    ),
+                )
             self._invalidate_cache(memory_id)
 
         self._run_with_per_memory_lock(memory_id, owner, _body)
@@ -301,11 +322,29 @@ class MemoryStoreService:
         """
         _validate_memory_id(memory_id)
         path = self._config.memories_dir / f"{memory_id}.md"
+        if cidx_meta_content.shared_cidx_meta_for(path) is not None:
+            # Shared cidx-meta: there is no local tree to resolve symlinks in.
+            # The id carries no separator or "..", and the seam confines the
+            # path to cidx-meta again on every read and write.
+            return path
         try:
             path.resolve().relative_to(self._config.memories_dir.resolve())
         except ValueError:
             raise ValueError(f"memory_id {memory_id!r} resolves outside memories_dir")
         return path
+
+    @contextlib.contextmanager
+    def _stale_on_conflict(self, path: Path, memory_id: str) -> Iterator[None]:
+        """A shared-content write that lost a compare-and-swap to another pod
+        is the same StaleContentError a local hash mismatch raises."""
+        try:
+            yield
+        except cidx_meta_content.CidxMetaConflictError as exc:
+            _fm, _body_text, now_hash = self._read_or_raise(path, memory_id)
+            raise StaleContentError(
+                now_hash,
+                f"Memory {memory_id!r} was changed by another writer: {exc}",
+            ) from exc
 
     def _read_or_raise(self, path: Path, memory_id: str):
         """Read memory file or raise NotFoundError."""

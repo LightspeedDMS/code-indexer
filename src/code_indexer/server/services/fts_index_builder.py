@@ -32,7 +32,7 @@ from pathlib import Path
 
 from code_indexer.server.utils.index_command_layout import (
     append_server_layout_args,
-    is_pod_local_repo,
+    repo_layout_kwargs,
 )
 from code_indexer.utils.index_store import index_root
 from code_indexer.server.services.index_freshness import (
@@ -267,9 +267,10 @@ def ensure_fts_index(
         runner,
         append_server_layout_args(
             ["cidx", "index", "--rebuild-fts-index"],
-            # A pod-local repository (local://, cidx-meta) is never with
-            # workspace-mcp; the caller knows its URL, the alias covers cidx-meta.
-            local_content=local_content or is_pod_local_repo(None, alias),
+            # A pod-local repository (local://) is never with workspace-mcp;
+            # the caller knows its URL, the alias identifies cidx-meta, whose
+            # content follows the configured content backend.
+            **repo_layout_kwargs(None, alias, local_content=local_content),
         ),
         cwd=str(repo_path),
         env=subprocess_env,

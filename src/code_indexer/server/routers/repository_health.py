@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from code_indexer.server.services import cidx_meta_content
 from code_indexer.server.services.repository_health_aggregator import (
     CollectionHealthResult,
     RepositoryHealthResult,
@@ -190,6 +191,23 @@ async def get_repository_description(
 
     # INVARIANT: cidx-meta filenames use SHORT alias ({repo_alias}.md), NOT -global.md
     cidx_meta_path = Path(golden_repos_dir) / "cidx-meta" / f"{repo_alias}.md"
+    shared = cidx_meta_content.shared_cidx_meta(cidx_meta_path.parent)
+    if shared is not None:
+        # Delegated content backend: the description is cidx-meta's shared
+        # content, read off the event loop. Absent is 404; an unreachable
+        # backend raises (500), never "no description".
+        try:
+            if shared.rel(cidx_meta_path) != cidx_meta_path.name:
+                raise PermissionError(repo_alias)
+            content = await anyio.to_thread.run_sync(shared.read_text, cidx_meta_path)
+        except (PermissionError, FileNotFoundError):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No cidx-meta description found for repository '{repo_alias}'",
+            )
+        return DescriptionResponse(
+            repo_alias=repo_alias, description=_strip_yaml_frontmatter(content)
+        )
     # Prevent path traversal: reject any alias that escapes the cidx-meta dir (Story #218)
     expected_parent = (Path(golden_repos_dir) / "cidx-meta").resolve()
     if not cidx_meta_path.resolve().is_relative_to(expected_parent):

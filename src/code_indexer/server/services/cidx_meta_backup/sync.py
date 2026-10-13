@@ -36,6 +36,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.services.cidx_meta_content import (
+    refuse_backup_of_shared_content,
+)
 
 
 @dataclass
@@ -81,6 +84,10 @@ class CidxMetaBackupSync:
         return (result.stderr or result.stdout or "").strip()
 
     def sync(self) -> SyncResult:
+        # Under a delegated content backend this pod's directory is index
+        # state only: committing and force-pushing it would replace the real
+        # backup with an empty tree. Refused loudly instead.
+        refuse_backup_of_shared_content(self.cidx_meta_path)
         status = self._git("status", "--porcelain")
         local_committed = False
         if status.stdout.strip():

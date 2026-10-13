@@ -3,6 +3,12 @@
 Memory files live at cidx-meta/memories/{uuid}.md and consist of a YAML
 frontmatter block followed by an optional markdown body.
 
+Under a delegated content backend cidx-meta is SHARED content
+(``cidx_meta_content``): the read, write and delete below go through the
+content backend and the content writer, never this pod's disk. There the
+caller's content hash becomes a compare-and-swap at the writer, so two pods
+editing one memory conflict instead of losing an update.
+
 Story #877 Phase 1b.
 """
 
@@ -11,9 +17,11 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import yaml
+
+from code_indexer.server.services import cidx_meta_content
 
 logger = logging.getLogger(__name__)
 
@@ -130,10 +138,16 @@ def read_memory_file(path: Path) -> Tuple[Dict[str, Any], str, str]:
     if not isinstance(path, Path):
         raise TypeError(f"path must be a Path, got {type(path).__name__}")
 
-    if not path.exists():
+    shared = cidx_meta_content.shared_cidx_meta_for(path)
+    if shared is not None:
+        try:
+            raw_bytes = shared.read_bytes(path)
+        except FileNotFoundError:
+            raise MemoryFileNotFoundError(f"Memory file not found: {path}") from None
+    elif not path.exists():
         raise MemoryFileNotFoundError(f"Memory file not found: {path}")
-
-    raw_bytes = path.read_bytes()
+    else:
+        raw_bytes = path.read_bytes()
     content_hash = compute_content_hash(raw_bytes)
 
     try:
@@ -145,10 +159,37 @@ def read_memory_file(path: Path) -> Tuple[Dict[str, Any], str, str]:
     return frontmatter_dict, body, content_hash
 
 
+def _shared_precondition(
+    shared: "cidx_meta_content.SharedCidxMeta",
+    path: Path,
+    expected_content_hash: Optional[str],
+) -> Any:
+    """The writer precondition for a shared write or delete.
+
+    ``None`` content hash: the file must not exist (a create). Otherwise the
+    current bytes must hash to it, and the write is conditional on exactly
+    those bytes (their blob sha), so a change by another pod in between is a
+    conflict rather than a lost update.
+    """
+    if expected_content_hash is None:
+        return None
+    try:
+        data, blob_sha = shared.read_with_sha(path)
+    except FileNotFoundError:
+        raise MemoryFileNotFoundError(f"Memory file not found: {path}") from None
+    if compute_content_hash(data) != expected_content_hash:
+        raise cidx_meta_content.CidxMetaConflictError(
+            f"Memory file {path} changed since it was read"
+        )
+    return blob_sha
+
+
 def atomic_write_memory_file(
     path: Path,
     frontmatter_dict: Dict[str, Any],
     body: str = "",
+    *,
+    expected_content_hash: Optional[str] = None,
 ) -> str:
     """Write a memory file atomically (tempfile + os.replace).
 
@@ -162,6 +203,12 @@ def atomic_write_memory_file(
 
     Does NOT take any locks (caller owns locking).
 
+    Shared cidx-meta (delegated content backend): written through the content
+    writer; ``expected_content_hash`` None means the file must not exist yet,
+    otherwise the file must still hold the bytes with that hash
+    (CidxMetaConflictError if not). Ignored on the local disk, where the
+    caller's locks and hash check govern exactly as before.
+
     Raises:
         TypeError: when path is None or not a Path.
     """
@@ -169,6 +216,13 @@ def atomic_write_memory_file(
         raise TypeError("path must be a Path, got NoneType")
     if not isinstance(path, Path):
         raise TypeError(f"path must be a Path, got {type(path).__name__}")
+
+    shared = cidx_meta_content.shared_cidx_meta_for(path)
+    if shared is not None:
+        content_bytes = serialize_memory(frontmatter_dict, body).encode("utf-8")
+        expected = _shared_precondition(shared, path, expected_content_hash)
+        shared.put(path, content_bytes, expected=expected)
+        return compute_content_hash(content_bytes)
 
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -194,8 +248,13 @@ def atomic_write_memory_file(
     return compute_content_hash(content_bytes)
 
 
-def atomic_delete_memory_file(path: Path) -> None:
+def atomic_delete_memory_file(
+    path: Path, *, expected_content_hash: Optional[str] = None
+) -> None:
     """Delete a memory file atomically.
+
+    Shared cidx-meta: deleted through the content writer, conditional on the
+    bytes with ``expected_content_hash`` when given (as for a write).
 
     Raises:
         TypeError: when path is None or not a Path.
@@ -207,6 +266,18 @@ def atomic_delete_memory_file(path: Path) -> None:
         raise TypeError("path must be a Path, got NoneType")
     if not isinstance(path, Path):
         raise TypeError(f"path must be a Path, got {type(path).__name__}")
+
+    shared = cidx_meta_content.shared_cidx_meta_for(path)
+    if shared is not None:
+        if expected_content_hash is None:
+            if not shared.exists(path):
+                raise MemoryFileNotFoundError(f"Memory file not found: {path}")
+            expected: Any = cidx_meta_content.UNCONDITIONAL
+        else:
+            expected = _shared_precondition(shared, path, expected_content_hash)
+        if not shared.delete(path, expected=expected):
+            raise MemoryFileNotFoundError(f"Memory file not found: {path}")
+        return
 
     if not path.exists():
         raise MemoryFileNotFoundError(f"Memory file not found: {path}")

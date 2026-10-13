@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from code_indexer.server.services.memory_file_lock_manager import MemoryFileLockManager
+from code_indexer.server.startup.content_backend_wiring import (
+    is_content_seam_delegated,
+)
 from code_indexer.server.services.memory_metadata_cache import MemoryMetadataCache
 from code_indexer.server.services.memory_rate_limiter import (
     MemoryRateLimiter,
@@ -83,7 +86,10 @@ def build_memory_store_service(
         is automatically invalidated on every successful write.
     """
     memories_dir = Path(golden_repos_dir) / "cidx-meta" / "memories"
-    memories_dir.mkdir(parents=True, exist_ok=True)
+    # Shared cidx-meta (delegated content backend): the writer creates the
+    # directory with the first memory; this pod's disk is not cidx-meta.
+    if not is_content_seam_delegated():
+        memories_dir.mkdir(parents=True, exist_ok=True)
 
     locks_root = Path(server_data_dir) / "locks"
     locks_root.mkdir(parents=True, exist_ok=True)

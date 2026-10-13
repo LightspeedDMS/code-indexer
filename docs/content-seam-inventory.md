@@ -10,11 +10,11 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | unclassified | 0 |
 | repo-read | 452 |
 | repo-write | 93 |
-| cidx-state-in-repo | 1297 |
-| migrated | 148 |
-| local-only | 173 |
+| cidx-state-in-repo | 1241 |
+| migrated | 196 |
+| local-only | 179 |
 | cidx-state | 526 |
-| not-repo | 419 |
+| not-repo | 421 |
 
 ## Modules with open rows
 
@@ -36,12 +36,10 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `global_repos/git_operations.py` | 0 | 14 | 0 | 0 |
 | `global_repos/git_pull_updater.py` | 0 | 6 | 3 | 0 |
 | `global_repos/global_registry.py` | 0 | 0 | 1 | 5 |
-| `global_repos/lifecycle_batch_runner.py` | 0 | 0 | 0 | 8 |
 | `global_repos/lifecycle_claude_cli_invoker.py` | 0 | 2 | 0 | 0 |
-| `global_repos/meta_description_hook.py` | 0 | 1 | 0 | 9 |
-| `global_repos/meta_directory_updater.py` | 0 | 0 | 0 | 6 |
+| `global_repos/meta_description_hook.py` | 0 | 1 | 0 | 0 |
 | `global_repos/refresh_integrity_gate.py` | 0 | 0 | 0 | 7 |
-| `global_repos/refresh_scheduler.py` | 0 | 8 | 3 | 17 |
+| `global_repos/refresh_scheduler.py` | 0 | 8 | 3 | 16 |
 | `global_repos/regex_search.py` | 0 | 3 | 0 | 1 |
 | `global_repos/repo_analyzer.py` | 0 | 7 | 0 | 0 |
 | `global_repos/shared_operations.py` | 0 | 0 | 1 | 0 |
@@ -100,12 +98,11 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/repositories/repository_listing_manager.py` | 0 | 8 | 0 | 0 |
 | `server/repositories/user_dir_permissions.py` | 0 | 2 | 4 | 0 |
 | `server/routers/activated_repos.py` | 0 | 8 | 0 | 7 |
-| `server/routers/diagnostics.py` | 0 | 0 | 0 | 4 |
 | `server/routers/git.py` | 0 | 4 | 0 | 0 |
 | `server/routers/inline_query.py` | 0 | 0 | 0 | 1 |
 | `server/routers/inline_repos.py` | 0 | 11 | 0 | 0 |
 | `server/routers/inline_repos_v2.py` | 0 | 8 | 0 | 0 |
-| `server/routers/repository_health.py` | 0 | 2 | 0 | 9 |
+| `server/routers/repository_health.py` | 0 | 2 | 0 | 6 |
 | `server/services/activated_repo_index_manager.py` | 0 | 5 | 0 | 21 |
 | `server/services/activity_journal_service.py` | 0 | 0 | 0 | 13 |
 | `server/services/alias_lock_store/factory.py` | 0 | 1 | 0 | 0 |
@@ -113,10 +110,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/services/backfill_journal_service.py` | 0 | 0 | 0 | 6 |
 | `server/services/branch_service.py` | 0 | 1 | 0 | 0 |
 | `server/services/cache_invalidation_service.py` | 0 | 0 | 0 | 4 |
-| `server/services/cidx_meta_backup/bootstrap.py` | 0 | 0 | 0 | 5 |
 | `server/services/cidx_meta_backup/branch_detect.py` | 0 | 0 | 0 | 1 |
-| `server/services/cidx_meta_backup/sync.py` | 0 | 0 | 0 | 1 |
-| `server/services/claude_cli_manager.py` | 0 | 0 | 0 | 3 |
 | `server/services/config_seeding.py` | 0 | 0 | 0 | 2 |
 | `server/services/config_service.py` | 0 | 0 | 0 | 6 |
 | `server/services/dashboard_service.py` | 0 | 6 | 0 | 3 |
@@ -135,7 +129,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/services/dependency_map_dashboard_service.py` | 0 | 0 | 0 | 2 |
 | `server/services/dependency_map_domain_service.py` | 0 | 0 | 0 | 10 |
 | `server/services/dependency_map_service.py` | 0 | 4 | 0 | 58 |
-| `server/services/description_refresh_scheduler.py` | 0 | 0 | 0 | 15 |
+| `server/services/description_refresh_scheduler.py` | 0 | 0 | 0 | 9 |
 | `server/services/diagnostics_service.py` | 0 | 1 | 0 | 5 |
 | `server/services/file_crud_service.py` | 0 | 1 | 11 | 0 |
 | `server/services/file_service.py` | 0 | 11 | 0 | 1 |
@@ -155,9 +149,6 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/services/index_freshness.py` | 0 | 1 | 0 | 3 |
 | `server/services/langfuse_readme_generator.py` | 0 | 8 | 3 | 0 |
 | `server/services/langfuse_trace_sync_service.py` | 0 | 4 | 6 | 9 |
-| `server/services/memory_io.py` | 0 | 0 | 0 | 8 |
-| `server/services/memory_store_service.py` | 0 | 0 | 0 | 1 |
-| `server/services/memory_store_service_factory.py` | 0 | 0 | 0 | 1 |
 | `server/services/metadata_outbox/sinks.py` | 0 | 0 | 0 | 2 |
 | `server/services/metadata_reader.py` | 0 | 0 | 0 | 3 |
 | `server/services/provider_index_service.py` | 0 | 0 | 0 | 6 |

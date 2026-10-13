@@ -44,6 +44,7 @@ indexes is cidx's policy and must not drift into the service that stores them.
 from __future__ import annotations
 
 import bisect
+import errno
 import logging
 import ntpath
 import os
@@ -54,6 +55,14 @@ from typing import Iterator, List, Optional, Protocol, Sequence, Tuple, Union
 from ....utils.blob_hash import git_blob_hash, git_blob_hash_bytes
 
 logger = logging.getLogger(__name__)
+
+#: Per-file fetch errors that mean "the file is there but could not be read":
+#: a directory, or a file the backend will not serve. Every OTHER per-file
+#: error reads as "not found" (workspace-mcp answers EACCES, not ENOENT, for a
+#: file under a missing directory).
+UNREADABLE_FETCH_ERRORS = frozenset(
+    {"EISDIR", os.strerror(errno.EISDIR), "EFBIG", "ESIZECHANGED"}
+)
 
 #: Entries per manifest page when the caller does not say. Matches the server
 #: seam's default so local and delegated paging behave alike.

@@ -7,6 +7,9 @@ import subprocess
 from pathlib import Path
 
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.services.cidx_meta_content import (
+    refuse_backup_of_shared_content,
+)
 
 from .branch_detect import detect_default_branch
 
@@ -87,7 +90,12 @@ class CidxMetaBackupBootstrap:
             raise RuntimeError(f"push rejected by remote: {stderr}")
 
     def bootstrap(self, cidx_meta_path: str, remote_url: str) -> str:
-        """Initialize or re-point git backup state for cidx-meta."""
+        """Initialize or re-point git backup state for cidx-meta.
+
+        Refused (CidxMetaBackupUnsupportedError) under a delegated content
+        backend: this pod's directory is not cidx-meta's content there.
+        """
+        refuse_backup_of_shared_content(cidx_meta_path)
         git_dir = Path(cidx_meta_path) / ".git"
         branch = detect_default_branch(cidx_meta_path) or "master"
 
