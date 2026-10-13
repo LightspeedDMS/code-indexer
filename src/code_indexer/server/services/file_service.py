@@ -804,16 +804,15 @@ class FileListingService:
             return None
         return self._gitignore_spec_from_text(text)
 
-    def _read_lines_via_seam(
+    def _read_bytes_via_seam(
         self, source: ContentSeamSource, file_path: str
-    ) -> Tuple[List[str], int, datetime, Path]:
-        """:meth:`_read_lines_local` for a file behind the content seam.
+    ) -> Tuple[bytes, datetime, Path]:
+        """:meth:`_read_bytes_local` for a file behind the content seam.
 
         Confinement is lexical (absolute, ``..`` and malformed paths are refused
         with PermissionError) because there is no local tree to resolve against.
-        The bytes come from ONE fetch and are decoded exactly as the local
-        text-mode ``open`` decodes them, so lines match byte for byte. Size is
-        the fetched length; the modified time is the manifest entry's, or the
+        The bytes come from ONE fetch, so lines, size and hash match the local
+        read byte for byte. The modified time is the manifest entry's, or the
         epoch placeholder for a file the manifest does not describe.
         """
         rel = confine_relative_path(file_path)
@@ -827,9 +826,8 @@ class FileListingService:
                 raise FileNotFoundError(f"Not a file: {file_path}")
             raise FileNotFoundError(f"File not found: {file_path}")
         entry = next((e for e in entries if e.path == rel), None)
-        all_lines = self._decode_lines(fetched.data)
         modified_at = modified_at_from_ns(entry.mtime_ns if entry else None)
-        return all_lines, len(fetched.data), modified_at, Path(rel)
+        return fetched.data, modified_at, Path(rel)
 
     @staticmethod
     def _decode_lines(data: bytes) -> List[str]:
@@ -1502,28 +1500,33 @@ class FileListingService:
         """
         source = content_seam_source(repo_path)
         if source is None:
-            all_lines, size, modified_at, language_path = self._read_lines_local(
+            data, modified_at, language_path = self._read_bytes_local(
                 repo_path, file_path
             )
         else:
-            all_lines, size, modified_at, language_path = self._read_lines_via_seam(
+            data, modified_at, language_path = self._read_bytes_via_seam(
                 source, file_path
             )
-        return self._paginate_file_lines(
-            all_lines,
+        response = self._paginate_file_lines(
+            self._decode_lines(data),
             file_path=file_path,
-            size=size,
+            size=len(data),
             modified_at=modified_at,
             language_path=language_path,
             offset=offset,
             limit=limit,
             skip_truncation=skip_truncation,
         )
+        # The optimistic-locking hash edit_file/delete_file check: SHA-256 of
+        # the file's bytes, exactly as FileCRUDService hashes them, so a read
+        # of a write-mode golden repo yields a hash an edit accepts.
+        response["metadata"]["content_hash"] = hashlib.sha256(data).hexdigest()
+        return response
 
-    def _read_lines_local(
+    def _read_bytes_local(
         self, repo_path: str, file_path: str
-    ) -> Tuple[List[str], int, datetime, Path]:
-        """A file's lines, size, modified time and language path, from this disk.
+    ) -> Tuple[bytes, datetime, Path]:
+        """A file's bytes, modified time and language path, from this disk.
 
         Raises:
             PermissionError: If path traversal attempted
@@ -1541,17 +1544,15 @@ class FileListingService:
         if not full_file_path.is_file():
             raise FileNotFoundError(f"Not a file: {file_path}")
 
-        # Read all lines for pagination
-        # Bug #1449: errors="replace" so a non-UTF-8 byte (e.g. Windows-1252
-        # punctuation) is substituted with U+FFFD instead of raising
-        # UnicodeDecodeError -- a legitimately-existing file must still be
-        # readable, and byte-stable line/offset pagination is preserved.
-        with open(full_file_path, "r", encoding="utf-8", errors="replace") as f:
-            all_lines = f.readlines()
+        # One read: the bytes are both hashed and decoded (_decode_lines, Bug
+        # #1449's errors="replace" text-mode decoding), so the hash and the
+        # lines describe the same content.
+        with open(full_file_path, "rb") as f:
+            data = f.read()
 
         stat_info = full_file_path.stat()
         modified_at = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
-        return all_lines, stat_info.st_size, modified_at, full_file_path
+        return data, modified_at, full_file_path
 
     def _paginate_file_lines(
         self,
