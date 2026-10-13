@@ -59,9 +59,10 @@ from code_indexer.server.services.cidx_meta_backup import (
     CidxMetaBackupSync,
     detect_default_branch,
 )
+from code_indexer.server.services import cidx_meta_content
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.constants import CIDX_META_REPO_GLOBAL
-from code_indexer.server.utils.index_command_layout import is_pod_local_repo
+from code_indexer.server.utils.index_command_layout import repo_layout_kwargs
 from code_indexer.server.startup.content_backend_wiring import (
     configured_content_backend_name,
     content_backend_name_or_none,
@@ -580,6 +581,11 @@ class RefreshScheduler:
         self._index_store: IndexStore = (
             index_store if index_store is not None else LocalIndexStore()
         )
+        # cidx-meta under a delegated content backend: the shared content's
+        # fingerprint as of the last index on this pod (see _has_local_changes),
+        # and the one seen by the refresh in progress.
+        self._indexed_meta_fingerprints: Dict[str, str] = {}
+        self._pending_meta_fingerprints: Dict[str, str] = {}
         self._alias_lock_db_backed_enabled_getter = alias_lock_db_backed_enabled_getter
         self._alias_lock_store_resolver = alias_lock_store_resolver
 
@@ -2663,6 +2669,14 @@ class RefreshScheduler:
                                 _backup_cfg_local is not None
                                 and _backup_cfg_local.enabled
                             ):
+                                sync_failure = self._cidx_meta_backup_refusal(
+                                    alias_name, master_path
+                                )
+                            if (
+                                _backup_cfg_local is not None
+                                and _backup_cfg_local.enabled
+                                and sync_failure is None
+                            ):
                                 _handled_by_backup = True
 
                                 # MED-3: MetaDirectoryUpdater first so description files are
@@ -2738,6 +2752,11 @@ class RefreshScheduler:
                                     logger.info(
                                         f"No changes detected for local repo {alias_name}, skipping refresh"
                                     )
+                                    if sync_failure:
+                                        raise RuntimeError(
+                                            "no changes to index, but backup "
+                                            + sync_failure
+                                        )
                                     return {
                                         "success": True,
                                         "alias": alias_name,
@@ -2773,9 +2792,18 @@ class RefreshScheduler:
 
                         if (
                             is_meta_repo
+                            and backup_cfg is not None
+                            and backup_cfg.enabled
+                        ):
+                            sync_failure = self._cidx_meta_backup_refusal(
+                                alias_name, master_path
+                            )
+                        if (
+                            is_meta_repo
                             and alias_name == "cidx-meta-global"
                             and backup_cfg is not None
                             and backup_cfg.enabled
+                            and sync_failure is None
                         ):
                             # MED-3: Run MetaDirectoryUpdater before sync so description
                             # files are created/removed on disk before CidxMetaBackupSync
@@ -3014,6 +3042,11 @@ class RefreshScheduler:
                                             logger.info(
                                                 f"No changes detected for {alias_name}, skipping refresh"
                                             )
+                                            if sync_failure:
+                                                raise RuntimeError(
+                                                    "no changes to index, but "
+                                                    "backup " + sync_failure
+                                                )
                                             return {
                                                 "success": True,
                                                 "alias": alias_name,
@@ -3226,6 +3259,12 @@ class RefreshScheduler:
                     logger.info(
                         f"Reconciled registry with filesystem at END for {alias_name}: {detected_indexes}"
                     )
+
+                    # The shared cidx-meta content this refresh indexed is now
+                    # published: later change detection compares against it.
+                    _indexed_fp = self._pending_meta_fingerprints.pop(alias_name, None)
+                    if _indexed_fp is not None:
+                        self._indexed_meta_fingerprints[alias_name] = _indexed_fp
 
                     if sync_failure:
                         raise RuntimeError(
@@ -3635,12 +3674,10 @@ class RefreshScheduler:
         # Story #1488: server states the new-collection layout explicitly
         # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
         _source_info = self.registry.get_global_repo(alias_name)
-        _pod_local = is_pod_local_repo(
+        _layout = repo_layout_kwargs(
             _source_info.get("repo_url") if _source_info else None, alias_name
         )
-        index_command = append_server_layout_args(
-            index_command, local_content=_pod_local
-        )
+        index_command = append_server_layout_args(index_command, **_layout)
 
         # Step 2: Temporal indexing on source (if enabled and not local://)
         repo_info = self.registry.get_global_repo(alias_name)
@@ -3718,7 +3755,7 @@ class RefreshScheduler:
             # method for the semantic command.
             temporal_command = append_server_layout_args(
                 ["cidx", "index", "--index-commits", "--progress-json"],
-                local_content=_pod_local,
+                **_layout,
             )
             logger.info(f"Temporal indexing enabled for {alias_name}")
 
@@ -3913,7 +3950,7 @@ class RefreshScheduler:
                     alias_name,
                     phase_name,
                     error_msg + "".join(_popen_stdout) + "".join(_popen_stderr),
-                ):
+                ) and self._meta_content_is_empty(alias_name, source_path):
                     logger.info(
                         "%s has no files to index yet (no repository descriptions "
                         "written); nothing to index this refresh",
@@ -4672,6 +4709,94 @@ class RefreshScheduler:
                 f"{type(reset_exc).__name__}: {reset_exc}"
             )
 
+    def _shared_cidx_meta(
+        self, alias_name: str, source_path: str
+    ) -> Optional["cidx_meta_content.SharedCidxMeta"]:
+        """cidx-meta's shared content when *alias_name* is cidx-meta and the
+        content backend is delegated, else None (read the local disk)."""
+        if alias_name != CIDX_META_REPO_GLOBAL:
+            return None
+        return cidx_meta_content.shared_cidx_meta(source_path)
+
+    def _shared_meta_changed(
+        self,
+        alias_name: str,
+        shared: "cidx_meta_content.SharedCidxMeta",
+        latest_timestamp: float,
+    ) -> bool:
+        """Change detection for cidx-meta's shared content (delegated backend).
+
+        This pod's directory holds index state only; the content is
+        workspace-mcp's. Once this pod has indexed it, "changed" is a
+        fingerprint comparison (paths and blob shas) -- no clock, so no skew
+        between workspace-mcp's file mtimes and this pod's snapshot
+        timestamps, and deletions count. Before that (first refresh on this
+        pod since it started) the shared mtimes are compared with the newest
+        snapshot's timestamp, as the local walk does. A listing failure
+        raises.
+        """
+        entries = cidx_meta_content.visible_entries(shared)
+        fingerprint = cidx_meta_content.content_fingerprint(entries)
+        indexed = self._indexed_meta_fingerprints.get(alias_name)
+        if indexed is not None:
+            has_changes = fingerprint != indexed
+        else:
+            has_changes = cidx_meta_content.changed_since(
+                shared, latest_timestamp, entries
+            )
+        if has_changes:
+            # Recorded as indexed only when this refresh publishes.
+            self._pending_meta_fingerprints[alias_name] = fingerprint
+        else:
+            self._indexed_meta_fingerprints[alias_name] = fingerprint
+        logger.debug(
+            f"shared-content check for {alias_name} (fingerprint "
+            f"{'known' if indexed else 'new'}) -> changes={has_changes}"
+        )
+        return has_changes
+
+    def _meta_content_is_empty(self, alias_name: str, source_path: str) -> bool:
+        """Whether an index child's "No files found" for cidx-meta is the truth.
+
+        Locally the child walked this disk, so it is. Under a delegated backend
+        the child asked workspace-mcp; the shared content is listed again here
+        and only a successful, empty listing counts. A listing failure raises
+        -- an unreachable backend is never an empty cidx-meta -- and a listing
+        WITH files means the child saw something else, which must fail loud.
+        """
+        shared = self._shared_cidx_meta(alias_name, source_path)
+        if shared is None:
+            return True
+        if cidx_meta_content.has_visible_files(shared):
+            logger.error(
+                "%s: the index found no files, but the shared cidx-meta at %s "
+                "holds files; failing the refresh",
+                alias_name,
+                source_path,
+            )
+            return False
+        return True
+
+    def _cidx_meta_backup_refusal(
+        self, alias_name: str, master_path: str
+    ) -> Optional[str]:
+        """Why cidx-meta's git backup cannot run this refresh, or None.
+
+        Under a delegated content backend cidx-meta's files are workspace-mcp's
+        and this pod's directory holds index state only; backing it up would
+        push an empty tree over the real backup. The refresh still indexes the
+        shared content, then FAILS with this reason, every cycle, until the
+        backup is disabled.
+        """
+        if alias_name != CIDX_META_REPO_GLOBAL:
+            return None
+        try:
+            cidx_meta_content.refuse_backup_of_shared_content(master_path)
+        except cidx_meta_content.CidxMetaBackupUnsupportedError as exc:
+            logger.error("%s: %s", alias_name, exc)
+            return str(exc)
+        return None
+
     def _has_local_changes(self, source_path: str, alias_name: str) -> bool:
         """
         Detect changes in a local (non-git) repository using file mtime comparison.
@@ -4711,6 +4836,10 @@ class RefreshScheduler:
         logger.debug(
             f"Latest versioned snapshot timestamp for {alias_name}: {latest_timestamp}"
         )
+
+        shared = self._shared_cidx_meta(alias_name, source_path)
+        if shared is not None:
+            return self._shared_meta_changed(alias_name, shared, latest_timestamp)
 
         # Walk source_path, skip hidden dirs and files
         max_mtime: float = 0.0
@@ -4774,7 +4903,14 @@ class RefreshScheduler:
                     ".code-indexer",
                     ".versioned",
                 }
-                if has_files_with_extensions(source_path, drifted_exts, _exclude):
+                shared = self._shared_cidx_meta(alias_name, source_path)
+                if (
+                    cidx_meta_content.has_files_with_extensions(
+                        shared, drifted_exts, _exclude
+                    )
+                    if shared is not None
+                    else has_files_with_extensions(source_path, drifted_exts, _exclude)
+                ):
                     logger.info(
                         "Extension drift detected (%d added, %d removed) "
                         "and matching files found for %s -- triggering reconcile",
@@ -5252,7 +5388,12 @@ class RefreshScheduler:
         # and broke 10 read paths, the UI, and access filtering. Fixed in v10.7.x.
         description_file = cidx_meta_dir / f"{short_alias}.md"
 
-        if description_file.exists():
+        shared = cidx_meta_content.shared_cidx_meta(cidx_meta_dir)
+        if (
+            shared.exists(description_file)
+            if shared is not None
+            else description_file.exists()
+        ):
             return False
 
         logger.info(

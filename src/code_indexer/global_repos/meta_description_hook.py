@@ -21,6 +21,7 @@ from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
 from code_indexer.global_repos.write_lock_manager import (
     describe_scheduler_lock_holder,
 )
+from code_indexer.server.services import cidx_meta_content
 from code_indexer.server.services.claude_cli_manager import (
     ClaudeCliManager,
     get_claude_cli_manager,
@@ -281,7 +282,9 @@ def atomic_write_description(
     Write content to target_path atomically via tempfile + os.replace.
 
     Creates a temporary file in the same directory as target_path (same
-    filesystem), writes all content, then swaps atomically.  If
+    filesystem), writes all content, then swaps atomically. Under a delegated
+    content backend target_path is cidx-meta's SHARED content and the content
+    writer replaces it atomically instead; this pod's disk is not touched. If
     refresh_scheduler is provided, acquires the cidx-meta write lock
     before the write and releases it in a finally block.  Lock acquisition
     failure propagates to the caller.
@@ -315,6 +318,10 @@ def atomic_write_description(
             )
 
     try:
+        shared = cidx_meta_content.shared_cidx_meta_for(target_path)
+        if shared is not None:
+            shared.put_text(target_path, content)
+            return
         fd, tmp_path = tempfile.mkstemp(dir=str(target_path.parent), suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -402,9 +409,13 @@ def on_repo_added(
         )
 
     cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
+    # Under a delegated content backend the description lands in cidx-meta's
+    # shared content (the writer creates directories); this pod's directory
+    # holds index state only and is never checked or written.
+    shared = cidx_meta_content.shared_cidx_meta(cidx_meta_path)
 
     # Ensure cidx-meta directory exists
-    if not cidx_meta_path.exists():
+    if shared is None and not cidx_meta_path.exists():
         logger.warning(
             f"cidx-meta directory does not exist at {cidx_meta_path}, cannot create .md file"
         )
@@ -466,11 +477,13 @@ def on_repo_added(
             DependencyMapAnalyzer,
         )
 
-        # Write to a temp file inside cidx_meta_path so same-filesystem rename works later
+        # Write to a temp file inside cidx_meta_path so same-filesystem rename
+        # works later. Shared cidx-meta: a scratch file in this pod's temp dir;
+        # only its verified text is written, through the content writer.
         with tempfile.NamedTemporaryFile(
             mode="w",
             suffix=".md",
-            dir=str(cidx_meta_path),
+            dir=str(cidx_meta_path) if shared is None else None,
             delete=False,
             encoding="utf-8",
         ) as tmp:
@@ -569,9 +582,10 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
     # DO NOT change this to use "-global" in the filename -- v10.4.9 did this
     # and broke 10 read paths, the UI, and access filtering. Fixed in v10.7.x.
     md_file = cidx_meta_path / f"{repo_name}.md"
+    shared = cidx_meta_content.shared_cidx_meta(cidx_meta_path)
 
     # Delete .md file if it exists
-    if md_file.exists():
+    if shared.exists(md_file) if shared is not None else md_file.exists():
         _lock_acquired = False
         if _refresh_scheduler is not None:
             try:
@@ -591,7 +605,10 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
                 )
                 return
         try:
-            md_file.unlink()
+            if shared is not None:
+                shared.delete(md_file)
+            else:
+                md_file.unlink()
             logger.info(f"Deleted meta description file: {md_file}")
 
             # Trigger cidx-meta reindex after successful deletion

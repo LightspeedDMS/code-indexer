@@ -228,6 +228,11 @@ smoke:
       tests/unit/utils/test_sandbox_mcp_client.py
       tests/unit/xray/test_xray_execution_seam.py
       tests/unit/server/startup/test_xray_backend_wiring.py
+      tests/unit/server/services/test_cidx_meta_content.py
+      tests/unit/server/services/test_cidx_meta_shared_writers.py
+      tests/unit/global_repos/test_refresh_cidx_meta_shared_content.py
+      tests/unit/server/utils/test_index_command_layout_1488.py
+      tests/unit/server/services/test_fts_index_builder.py
       -v --tb=short
       --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
     # The plugins ship their own suites and NO job collected either of them.

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
+from code_indexer.server.services import cidx_meta_content
 from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
@@ -692,7 +693,10 @@ class DescriptionRefreshScheduler:
         #   {short_alias}.md  (e.g., JSqlParser.md)
         # The "-global" suffix belongs to the registry alias_name, NOT the filename.
         """
-        if self._meta_dir is None or not self._meta_dir.exists():
+        if self._meta_dir is None:
+            return 0
+        shared = cidx_meta_content.shared_cidx_meta(self._meta_dir)
+        if shared is None and not self._meta_dir.exists():
             return 0
         try:
             aliases = self._list_golden_aliases()
@@ -702,14 +706,19 @@ class DescriptionRefreshScheduler:
             for alias in aliases:
                 old_file = self._meta_dir / f"{alias}-global.md"
                 new_file = self._meta_dir / f"{alias}.md"
-                if old_file.exists() and not new_file.exists():
+                if shared is not None:
+                    if not shared.rename(old_file, new_file, overwrite=False):
+                        continue
+                elif old_file.exists() and not new_file.exists():
                     old_file.rename(new_file)
-                    logger.info(
-                        "Filename migration: renamed %s -> %s",
-                        old_file.name,
-                        new_file.name,
-                    )
-                    count += 1
+                else:
+                    continue
+                logger.info(
+                    "Filename migration: renamed %s -> %s",
+                    old_file.name,
+                    new_file.name,
+                )
+                count += 1
             if count:
                 logger.info("Filename migration: renamed %d files", count)
             return count
@@ -746,9 +755,16 @@ class DescriptionRefreshScheduler:
                     continue
                 # INVARIANT: cidx-meta filenames use SHORT alias ({alias}.md), NOT -global.md
                 md_file = self._meta_dir / f"{alias}.md"
-                if not md_file.exists():
+                shared = cidx_meta_content.shared_cidx_meta(self._meta_dir)
+                if shared is not None:
+                    try:
+                        content = shared.read_text(md_file)
+                    except FileNotFoundError:
+                        continue
+                elif not md_file.exists():
                     continue
-                content = md_file.read_text()
+                else:
+                    content = md_file.read_text()
                 frontmatter_match = re.match(
                     r"^---\n(.*?)\n---\n(.*)$", content, re.DOTALL
                 )
@@ -1510,6 +1526,13 @@ class DescriptionRefreshScheduler:
         if not self._meta_dir:
             return False
         md_file = self._meta_dir / f"{alias}.md"
+        shared = cidx_meta_content.shared_cidx_meta(self._meta_dir)
+        if shared is not None:
+            try:
+                text = shared.read_text(md_file, errors="replace")
+            except FileNotFoundError:
+                return False
+            return bool(text.strip())
         if not md_file.exists():
             return False
         return bool(md_file.read_text(encoding="utf-8", errors="replace").strip())

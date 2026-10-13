@@ -37,6 +37,7 @@ from code_indexer.server.auth.dependencies import (
 )
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.claude_cli_manager import get_claude_cli_manager
+from code_indexer.server.services import cidx_meta_content
 from code_indexer.server.services.diagnostics_service import (
     DiagnosticCategory,
     DiagnosticsService,
@@ -444,6 +445,9 @@ def _generate_descriptions_sync(
             )
 
         cidx_meta_dir = Path(golden_repos_dir) / "cidx-meta"
+        # Delegated content backend: descriptions are cidx-meta's shared
+        # content; this pod's directory holds index state only.
+        shared = cidx_meta_content.shared_cidx_meta(cidx_meta_dir)
         cli_manager = get_claude_cli_manager()
 
         try:
@@ -475,12 +479,12 @@ def _generate_descriptions_sync(
             # AC3: Skip repos that already have a description file (idempotent)
             md_file = cidx_meta_dir / f"{alias}.md"
             # Prevent path traversal: reject any alias that escapes the cidx-meta dir
-            if not md_file.resolve().is_relative_to(cidx_meta_dir.resolve()):
+            if not _confined_description(shared, md_file, cidx_meta_dir):
                 logger.warning(
                     f"Skipping repo with suspicious alias (path traversal): {alias}"
                 )
                 continue
-            if md_file.exists():
+            if shared.exists(md_file) if shared is not None else md_file.exists():
                 repos_with_descriptions += 1
                 continue
 
@@ -509,6 +513,21 @@ def _generate_descriptions_sync(
         )
     finally:
         _generate_descriptions_lock.release()
+
+
+def _confined_description(
+    shared: Optional["cidx_meta_content.SharedCidxMeta"],
+    md_file: Path,
+    cidx_meta_dir: Path,
+) -> bool:
+    """Whether *md_file* stays inside cidx-meta: resolved on this disk, or
+    confined lexically by the seam for shared content (no local tree)."""
+    if shared is None:
+        return md_file.resolve().is_relative_to(cidx_meta_dir.resolve())
+    try:
+        return shared.rel(md_file) == md_file.name
+    except PermissionError:
+        return False
 
 
 def _make_description_callback(
@@ -541,8 +560,12 @@ def _make_description_callback(
         if success:
             try:
                 content = generate_fn(repo_alias, repo_url, clone_path)
-                md_path.parent.mkdir(parents=True, exist_ok=True)
-                md_path.write_text(content, encoding="utf-8")
+                shared = cidx_meta_content.shared_cidx_meta_for(md_path)
+                if shared is not None:
+                    shared.put_text(md_path, content)
+                else:
+                    md_path.parent.mkdir(parents=True, exist_ok=True)
+                    md_path.write_text(content, encoding="utf-8")
                 logger.info(f"Generated description for {repo_alias}: {md_path}")
             except Exception as gen_err:
                 logger.warning(

@@ -54,7 +54,10 @@ from code_indexer.server.storage.shared.content_backend import (
     LocalContentBackend,
 )
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
-from code_indexer.server.utils.index_command_layout import is_pod_local_repo
+from code_indexer.server.utils.index_command_layout import (
+    is_pod_local_repo,
+    repo_layout_kwargs,
+)
 from code_indexer.utils.git_runner import run_git_command
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
@@ -3333,7 +3336,9 @@ class GoldenRepoManager:
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
             temporal_command = append_server_layout_args(
                 ["cidx", "index", "--index-commits", "--progress-json"],
-                local_content=local_content,
+                **repo_layout_kwargs(
+                    None, golden_repo_alias, local_content=local_content
+                ),
             )
 
             # Story #1404: global temporal indexing floor date, composed
@@ -3624,7 +3629,9 @@ class GoldenRepoManager:
             _run_popen_with_telemetry(
                 append_server_layout_args(
                     ["cidx", "index", "--fts", "--progress-json"],
-                    local_content=local_content,
+                    **repo_layout_kwargs(
+                        None, golden_repo_alias, local_content=local_content
+                    ),
                 ),
                 phase_name="semantic",
                 error_label="semantic+FTS indexing",
@@ -5284,7 +5291,7 @@ class GoldenRepoManager:
         # straight from the dequeued (job_id, func, args, kwargs) tuple --
         # race-free, so no post-submit mutable holder is needed.
         _golden = self._resolve_golden_repo(alias)
-        _pod_local = is_pod_local_repo(getattr(_golden, "repo_url", None), alias)
+        _layout = repo_layout_kwargs(getattr(_golden, "repo_url", None), alias)
 
         def background_worker(progress_callback=None, job_id=None) -> Dict[str, Any]:
             """Execute add index operations in a single background thread with write lock + CoW."""
@@ -5459,7 +5466,7 @@ class GoldenRepoManager:
 
                         command = append_server_layout_args(
                             ["cidx", "index", "--clear", "--progress-json"],
-                            local_content=_pod_local,
+                            **_layout,
                         )
                         _run_with_popen_progress(
                             command,
@@ -5484,7 +5491,7 @@ class GoldenRepoManager:
 
                         command = append_server_layout_args(
                             ["cidx", "index", "--rebuild-fts-index"],
-                            local_content=_pod_local,
+                            **_layout,
                         )
                         from code_indexer.storage.shared.hnsw_sync_state import (
                             resolve_hnsw_sync_epoch_env_var as _resolve_fts_hnsw_epoch,
@@ -5558,7 +5565,7 @@ class GoldenRepoManager:
                                 *_clear_flags,
                                 "--progress-json",
                             ],
-                            local_content=_pod_local,
+                            **_layout,
                         )
 
                         max_commits = temporal_options.get("max_commits")

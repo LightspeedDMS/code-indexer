@@ -15,12 +15,19 @@ PATH MODEL (four path types in code-indexer golden repos):
    Users may modify for individual development.
 4. CIDX-META (golden_repos_dir/cidx-meta/): Special meta-directory.
    Writes only through locked writers. Commits through CidxMetaBackupSync.
+
+Under a delegated content backend the description files are cidx-meta's
+SHARED content (``server/services/cidx_meta_content.py``): listed through the
+content backend, created and removed through the content writer -- never this
+pod's directory, which holds index state only.
 """
 
 import logging
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
+
+from code_indexer.server.services import cidx_meta_content
 
 from .update_strategy import UpdateStrategy
 
@@ -104,7 +111,10 @@ class MetaDirectoryUpdater(UpdateStrategy):
             True if changes detected, False if in sync
         """
         registered = self._get_safe_registered_aliases()
-        all_existing = self._get_existing_description_aliases(known_aliases=None)
+        shared = cidx_meta_content.shared_cidx_meta(self.meta_dir)
+        all_existing = self._get_existing_description_aliases(
+            known_aliases=None, shared=shared
+        )
 
         if registered - all_existing:
             return True
@@ -132,7 +142,9 @@ class MetaDirectoryUpdater(UpdateStrategy):
             force_reset: Accepted for UpdateStrategy interface compatibility;
                 ignored for meta-directories which have no git state to reset.
         """
-        self.meta_dir.mkdir(parents=True, exist_ok=True)
+        shared = cidx_meta_content.shared_cidx_meta(self.meta_dir)
+        if shared is None:
+            self.meta_dir.mkdir(parents=True, exist_ok=True)
 
         lock_acquired = False
         if self._refresh_scheduler is not None:
@@ -157,17 +169,21 @@ class MetaDirectoryUpdater(UpdateStrategy):
             # Uses known_aliases=None so we find files that were previously managed but
             # whose aliases may no longer be in the registry (orphaned files).
             # The None fallback excludes _-prefixed and uppercase-initial files (README etc.).
-            all_existing = self._get_existing_description_aliases(known_aliases=None)
+            all_existing = self._get_existing_description_aliases(
+                known_aliases=None, shared=shared
+            )
 
             # For stub creation, only check files that match current registered aliases.
             existing_registered = self._get_existing_description_aliases(
-                known_aliases=registered
+                known_aliases=registered, shared=shared
             )
 
             # Create missing description files (stub only -- never overwrite existing)
             for alias in registered - existing_registered:
                 desc_file = self.meta_dir / f"{alias}.md"
-                if not desc_file.exists():
+                if shared is not None:
+                    self._create_shared_stub(shared, alias)
+                elif not desc_file.exists():
                     # INVARIANT: cidx-meta filenames use SHORT alias ({alias}.md), NOT {alias}-global.md
                     desc_file.write_text(f"# {alias}\n\nGolden repository: {alias}\n")
                     logger.info(
@@ -193,7 +209,10 @@ class MetaDirectoryUpdater(UpdateStrategy):
 
             for alias in to_delete:
                 desc_file = self.meta_dir / f"{alias}.md"
-                desc_file.unlink(missing_ok=True)
+                if shared is not None:
+                    shared.delete(desc_file)
+                else:
+                    desc_file.unlink(missing_ok=True)
                 logger.info("MetaDirectoryUpdater: removed orphaned file %s", desc_file)
         finally:
             if lock_acquired and self._refresh_scheduler is not None:
@@ -231,20 +250,43 @@ class MetaDirectoryUpdater(UpdateStrategy):
                 )
         return safe
 
+    def _create_shared_stub(
+        self, shared: "cidx_meta_content.SharedCidxMeta", alias: str
+    ) -> None:
+        """Create the stub in the shared content, only if absent: the write's
+        precondition is "must not exist", so a description another pod (or a
+        generator) wrote meanwhile is never overwritten."""
+        desc_file = self.meta_dir / f"{alias}.md"
+        try:
+            shared.put_text(
+                desc_file, f"# {alias}\n\nGolden repository: {alias}\n", expected=None
+            )
+        except cidx_meta_content.CidxMetaConflictError:
+            logger.info("MetaDirectoryUpdater: %s already exists, kept", desc_file)
+            return
+        logger.info("MetaDirectoryUpdater: created description file %s", desc_file)
+
     def _get_existing_description_aliases(
-        self, known_aliases: Optional[set] = None
+        self,
+        known_aliases: Optional[set] = None,
+        shared: Optional["cidx_meta_content.SharedCidxMeta"] = None,
     ) -> set:
         """Return set of short aliases that have description .md files in meta_dir.
 
         When known_aliases is provided (recommended), only .md files whose stem
         matches a known alias are considered managed. This prevents non-managed
         files (README.md, CHANGELOG.md, etc.) from being treated as repo
-        description files.
+        description files. *shared* lists cidx-meta's shared content instead
+        of the local directory.
         """
-        if not self.meta_dir.exists():
+        if shared is not None:
+            names = shared.list_names("", ".md")
+        elif not self.meta_dir.exists():
             return set()
+        else:
+            names = [f.name for f in self.meta_dir.glob("*.md")]
         existing = set()
-        for f in self.meta_dir.glob("*.md"):
+        for f in (Path(name) for name in names):
             if known_aliases is not None:
                 if f.stem in known_aliases:
                     existing.add(f.stem)

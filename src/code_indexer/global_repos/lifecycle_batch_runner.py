@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import yaml
 
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
+from code_indexer.server.services import cidx_meta_content
 from code_indexer.global_repos.unified_response_parser import (
     CURRENT_LIFECYCLE_SCHEMA_VERSION,
 )
@@ -213,6 +214,13 @@ def _do_write(
 
     content = f"---\n{frontmatter_yaml}---\n\n{description_body}\n"
 
+    # Delegated content backend: cidx-meta's shared content, replaced
+    # atomically by the content writer; this pod's disk is not touched.
+    shared = cidx_meta_content.shared_cidx_meta(cidx_meta_path)
+    if shared is not None:
+        shared.put_text(meta_md_path, content)
+        return
+
     cidx_meta_path.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=str(cidx_meta_path))
     try:
@@ -229,6 +237,26 @@ def _do_write(
         raise
 
     os.rename(tmp_path, str(meta_md_path))
+
+
+def _read_meta_md(meta_md_path: Path, *, required: bool = False) -> Optional[str]:
+    """The text of cidx-meta/<alias>.md, or None when it does not exist.
+
+    Read from cidx-meta's shared content under a delegated content backend,
+    else from this disk exactly as before. *required* raises
+    FileNotFoundError instead of returning None.
+    """
+    shared = cidx_meta_content.shared_cidx_meta_for(meta_md_path)
+    if shared is not None:
+        try:
+            return shared.read_text(meta_md_path)
+        except FileNotFoundError:
+            if required:
+                raise
+            return None
+    if not required and not meta_md_path.exists():
+        return None
+    return meta_md_path.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -413,11 +441,11 @@ class LifecycleFleetScanner:
             # INVARIANT: cidx-meta filenames use SHORT alias ({alias}.md), NOT {alias}-global.md
             meta_path = self._cidx_meta_dir / f"{alias}.md"
 
-            if not meta_path.exists():
+            content = _read_meta_md(meta_path)
+            if content is None:
                 broken.append(alias)
                 continue
 
-            content = meta_path.read_text(encoding="utf-8")
             frontmatter, _ = split_frontmatter_and_body(content)
 
             if not frontmatter:
@@ -737,8 +765,8 @@ class LifecycleBatchRunner:
         # burning a Claude invocation (Messi Rule #13 — fail-closed, fail-fast).
         existing_description: Optional[str] = None
         existing_last_analyzed: Optional[str] = None
-        if meta_md_path.exists():
-            pre_raw = meta_md_path.read_text(encoding="utf-8")
+        pre_raw = _read_meta_md(meta_md_path)
+        if pre_raw is not None:
             pre_fm, pre_body = split_frontmatter_and_body(pre_raw)
             if not pre_fm and pre_raw.startswith("---"):
                 raise ValueError(
@@ -805,8 +833,8 @@ class LifecycleBatchRunner:
                 "lifecycle_schema_version": CURRENT_LIFECYCLE_SCHEMA_VERSION,
                 "last_analyzed": datetime.now(timezone.utc).isoformat(),
             }
-            if meta_md_path.exists():
-                raw_content = meta_md_path.read_text(encoding="utf-8")
+            raw_content = _read_meta_md(meta_md_path)
+            if raw_content is not None:
                 existing_fm, _ = split_frontmatter_and_body(raw_content)
                 # Detect corrupt frontmatter: file starts with '---' but parsing
                 # returned empty dict (split_frontmatter_and_body swallows YAMLError
@@ -835,7 +863,7 @@ class LifecycleBatchRunner:
             # skipped under python -O via the __debug__ guard.
             if __debug__:
                 post_fm, _ = split_frontmatter_and_body(
-                    meta_md_path.read_text(encoding="utf-8")
+                    _read_meta_md(meta_md_path, required=True) or ""
                 )
                 assert post_fm.keys() >= merged_fm.keys(), (
                     f"Frontmatter key loss after write_meta_md: "

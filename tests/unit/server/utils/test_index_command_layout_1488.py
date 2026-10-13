@@ -169,10 +169,12 @@ class TestGitBackendStamp:
 
 
 class TestPodLocalRepos:
-    """local:// repositories -- cidx-meta first among them -- are created and
-    written on THIS pod; a delegated backend cannot see them. Their spawns must
-    read the pod's disk (verified on EKS: cidx-meta's refresh failed under
-    --content-backend=delegated)."""
+    """local:// repositories are created and written on THIS pod; a delegated
+    backend cannot see them, so their spawns read the pod's disk. cidx-meta is
+    the exception for CONTENT: every server-side writer puts it with
+    workspace-mcp under a delegated content backend, so its spawns read the
+    content through the configured backend -- but it is no git repository a
+    git backend holds, so git stays local."""
 
     @pytest.mark.parametrize(
         "url, alias, local",
@@ -233,4 +235,70 @@ class TestPodLocalRepos:
             and getattr(n.func, "id", None) == "append_server_layout_args"
         ]
         assert calls
-        assert all("local_content" in {k.arg for k in c.keywords} for c in calls)
+
+        def _layout_from_repo(call: ast.Call) -> bool:
+            return any(
+                k.arg is None
+                and isinstance(k.value, ast.Call)
+                and getattr(k.value.func, "id", None) == "repo_layout_kwargs"
+                for k in call.keywords
+            )
+
+        assert all(_layout_from_repo(c) for c in calls)
+
+    @pytest.mark.parametrize(
+        "url, alias, expected",
+        [
+            (None, "cidx-meta", {"git_backend": "local"}),
+            (None, "cidx-meta-global", {"git_backend": "local"}),
+            ("local://cidx-meta", "cidx-meta", {"git_backend": "local"}),
+            ("local://notes", "notes", {"local_content": True}),
+            ("https://gitlab.com/x/y.git", "y", {}),
+            (None, None, {}),
+        ],
+    )
+    def test_repo_layout_kwargs(self, url, alias, expected) -> None:
+        from code_indexer.server.utils.index_command_layout import repo_layout_kwargs
+
+        assert repo_layout_kwargs(url, alias) == expected
+
+    def test_a_caller_known_pod_local_repo_stays_local(self) -> None:
+        from code_indexer.server.utils.index_command_layout import repo_layout_kwargs
+
+        assert repo_layout_kwargs(None, "y", local_content=True) == {
+            "local_content": True
+        }
+        # cidx-meta's content follows the backend even when a caller says local.
+        assert repo_layout_kwargs(None, "cidx-meta", local_content=True) == {
+            "git_backend": "local"
+        }
+
+    @pytest.mark.parametrize("content", ["local", "delegated"])
+    def test_cidx_meta_reads_content_through_the_configured_backend(
+        self, content: str
+    ) -> None:
+        """Delegated: --content-backend=delegated, never --git-backend. Local:
+        exactly what local_content=True stamped before (byte-for-byte)."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from code_indexer.server.utils.index_command_layout import repo_layout_kwargs
+
+        service = SimpleNamespace(
+            get_config=lambda: SimpleNamespace(
+                content_backend=content, git_backend="delegated"
+            )
+        )
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service",
+            return_value=service,
+        ):
+            stamped = append_server_layout_args(
+                ["cidx", "index"], **repo_layout_kwargs(None, "cidx-meta-global")
+            )
+            before = append_server_layout_args(["cidx", "index"], local_content=True)
+        assert "--git-backend=delegated" not in stamped
+        if content == "delegated":
+            assert stamped == [*TestGitBackendStamp._BASE, "--content-backend=delegated"]
+        else:
+            assert stamped == before == TestGitBackendStamp._BASE

@@ -24,7 +24,9 @@ from typing import Callable, Optional, List, Tuple
 
 from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services import cidx_meta_content
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.constants import CIDX_META_REPO
 from code_indexer.utils.git_runner import run_git_command
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
@@ -321,15 +323,26 @@ class ClaudeCliManager:
         Returns:
             List of (alias, fallback_path) tuples for each fallback file found
         """
-        if not self._meta_dir or not self._meta_dir.exists():
+        shared = (
+            cidx_meta_content.shared_cidx_meta(self._meta_dir)
+            if self._meta_dir
+            else None
+        )
+        if shared is None and (not self._meta_dir or not self._meta_dir.exists()):
             logger.debug(
                 f"Meta directory not set or doesn't exist: {self._meta_dir}",
                 extra={"correlation_id": get_correlation_id()},
             )
             return []
+        assert self._meta_dir is not None  # narrowed above for both branches
 
         fallbacks = []
-        for path in self._meta_dir.glob("*_README.md"):
+        paths = (
+            [self._meta_dir / name for name in shared.list_names("", "_README.md")]
+            if shared is not None
+            else self._meta_dir.glob("*_README.md")
+        )
+        for path in paths:
             # Extract alias: my-repo_README.md -> my-repo
             alias = path.stem.rsplit("_README", 1)[0]
             fallbacks.append((alias, path))
@@ -501,7 +514,14 @@ class ClaudeCliManager:
         try:
             # Rename fallback to generated filename
             # In production, would generate new content via Claude CLI
-            fallback_path.rename(generated_path)
+            shared = cidx_meta_content.shared_cidx_meta(self._meta_dir)
+            if shared is not None:
+                if not shared.rename(fallback_path, generated_path, overwrite=True):
+                    raise FileNotFoundError(
+                        f"cidx-meta file not found: {fallback_path}"
+                    )
+            else:
+                fallback_path.rename(generated_path)
             logger.info(
                 f"Processed fallback for {alias}",
                 extra={"correlation_id": get_correlation_id()},
@@ -531,35 +551,40 @@ class ClaudeCliManager:
         if not self._meta_dir:
             return
 
-        try:
-            commit_msg = f"Replace README fallbacks with generated descriptions: {', '.join(processed)}"
-            # EVO-64678: cidx-meta mutations go through the git seam chokepoint
-            # like every other server-side mutation. No invoker claims cidx-meta
-            # today so these still run locally, but they are now seam-visible and
-            # pick up get_git_environment()'s safe.directory handling.
-            run_git_command(
-                ["git", "add", "."],
-                cwd=Path(self._meta_dir),
-                capture_output=True,
-                check=True,
-            )
-            run_git_command(
-                ["git", "commit", "-m", commit_msg],
-                cwd=Path(self._meta_dir),
-                capture_output=True,
-                check=False,
-            )
-            logger.info(
-                f"Committed catch-up changes for {len(processed)} files",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        except Exception as e:
-            logger.warning(
-                format_error_log(
-                    "AUTH-GENERAL-013",
-                    f"Git commit failed: {e}",
+        # Shared cidx-meta (delegated content backend): this pod's directory
+        # holds index state only and is no git repository of the content, so
+        # there is nothing to commit here; the reindex below reads the shared
+        # content.
+        if cidx_meta_content.shared_cidx_meta(self._meta_dir) is None:
+            try:
+                commit_msg = f"Replace README fallbacks with generated descriptions: {', '.join(processed)}"
+                # EVO-64678: cidx-meta mutations go through the git seam chokepoint
+                # like every other server-side mutation. No invoker claims cidx-meta
+                # today so these still run locally, but they are now seam-visible and
+                # pick up get_git_environment()'s safe.directory handling.
+                run_git_command(
+                    ["git", "add", "."],
+                    cwd=Path(self._meta_dir),
+                    capture_output=True,
+                    check=True,
                 )
-            )
+                run_git_command(
+                    ["git", "commit", "-m", commit_msg],
+                    cwd=Path(self._meta_dir),
+                    capture_output=True,
+                    check=False,
+                )
+                logger.info(
+                    f"Committed catch-up changes for {len(processed)} files",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.warning(
+                    format_error_log(
+                        "AUTH-GENERAL-013",
+                        f"Git commit failed: {e}",
+                    )
+                )
 
         try:
             # Story #1418: merge CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR
@@ -571,6 +596,7 @@ class ClaudeCliManager:
             )
             from code_indexer.server.utils.index_command_layout import (
                 append_server_layout_args,
+                repo_layout_kwargs,
             )
             from code_indexer.storage.shared.hnsw_sync_state import (
                 resolve_hnsw_sync_epoch_env_var,
@@ -589,8 +615,11 @@ class ClaudeCliManager:
             )
             _reindex_env.update(resolve_hnsw_sync_epoch_env_var())
             _result = subprocess.run(
-                # cidx-meta is written on this pod; never a delegated read.
-                append_server_layout_args(["cidx", "index"], local_content=True),
+                # cidx-meta's content follows the content backend; its git
+                # (if any) is this pod's.
+                append_server_layout_args(
+                    ["cidx", "index"], **repo_layout_kwargs(None, CIDX_META_REPO)
+                ),
                 cwd=str(self._meta_dir),
                 capture_output=True,
                 env=_reindex_env,

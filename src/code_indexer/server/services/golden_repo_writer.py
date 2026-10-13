@@ -26,8 +26,6 @@ What this module owns:
 
 from __future__ import annotations
 
-import errno
-import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional, Union
@@ -41,20 +39,15 @@ from code_indexer.server.services.file_service import (
     content_seam_source,
     fetch_one,
 )
-from code_indexer.utils.path_confinement import confine_relative_path
-
-#: Fetch errors that mean "the file is there but could not be read": a
-#: directory, or a file the backend will not serve. Every OTHER fetch error
-#: reads as "not found", the rule the read tools already apply (workspace-mcp
-#: answers EACCES, not ENOENT, for a file under a missing directory).
-_UNREADABLE_FETCH_ERRORS = frozenset(
-    {"EISDIR", os.strerror(errno.EISDIR), "EFBIG", "ESIZECHANGED"}
+from code_indexer.server.services.content_writer_plugin import ECONFLICT
+from code_indexer.server.storage.shared.content_backend import (
+    UNREADABLE_FETCH_ERRORS,
 )
+from code_indexer.utils.path_confinement import confine_relative_path
 
 #: Writer codes by the exception the CRUD front doors already map.
 _PERMISSION_CODES = frozenset({"EFORBIDDEN"})
 _INVALID_CODES = frozenset({"EINVAL", "ETOOLARGE"})
-ECONFLICT = "ECONFLICT"
 ESECRET = "ESECRET"
 
 #: An ``expected_blob_sha`` of "no precondition": the kwarg is not sent at all,
@@ -89,7 +82,7 @@ class GoldenRepoWriteTarget:
         fetched = fetch_one(self.source, rel)
         if fetched.error is None:
             return fetched.data
-        if fetched.error in _UNREADABLE_FETCH_ERRORS:
+        if fetched.error in UNREADABLE_FETCH_ERRORS:
             raise CRUDOperationError(
                 f"Failed to read file '{file_path}': {fetched.error}"
             )
