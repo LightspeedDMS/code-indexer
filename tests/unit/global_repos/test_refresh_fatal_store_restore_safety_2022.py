@@ -24,7 +24,6 @@ from code_indexer.global_repos.refresh_integrity_gate import (
 from code_indexer.server.services.alias_lock_store.base import (
     AliasLockOwnershipLostError,
 )
-from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
 from tests.utils.fatal_chunk_store_fixtures import (
     DUMMY_VOYAGE_KEY,
     corrupt_btree_pages,
@@ -92,7 +91,6 @@ def _gate(harness: Harness):
     return run_refresh_integrity_gate(
         source_index_dir=_index_dir(harness.source),
         healthy_index_dir=_index_dir(harness.snapshot),
-        clone_backend=LocalCloneBackend(),
     )
 
 
@@ -201,7 +199,6 @@ def test_veto_at_metadata_copy_propagates_and_keeps_source_metadata(
         run_refresh_integrity_gate(
             source_index_dir=_index_dir(harness.source),
             healthy_index_dir=_index_dir(harness.snapshot),
-            clone_backend=LocalCloneBackend(),
             before_restore=veto,
         )
 

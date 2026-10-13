@@ -4,8 +4,8 @@ chunk-store error must self-heal instead of failing identically forever.
 Real components throughout: the real ``cidx index`` child (resolved from
 PATH, exactly as ``_index_source`` spawns it), a real CHUNKS_DB collection
 corrupted on disk, a real published snapshot under ``.versioned/``, the real
-reflink restore (``LocalCloneBackend``), the real SQLite global registry,
-and a real metadata store (SQLite always; PostgreSQL when
+restore (an in-process atomic single-file copy from the published snapshot,
+Bug #2157), the real SQLite global registry, and a real metadata store (SQLite always; PostgreSQL when
 ``TEST_POSTGRES_DSN`` is set).
 """
 

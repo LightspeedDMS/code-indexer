@@ -26,13 +26,12 @@ Scope (Bug #1506): between ``_index_source`` returning successfully and
 collection's ``chunks.db`` is durable and structurally healthy. On failure,
 refuse to publish this refresh cycle (the caller simply skips
 ``_create_snapshot``/``swap_alias`` -- the already-published alias keeps
-serving the last verified-good snapshot) and attempt a reflink self-heal of
+serving the last verified-good snapshot) and attempt a self-heal of
 ``master_path``'s corrupt ``chunks.db`` from the corresponding collection in
-the currently-aliased ("last known good") snapshot, using the SAME
-``cp --reflink=auto`` CoW primitive (``CloneBackend.create_clone_at_path``)
-already used throughout this codebase for snapshot cloning -- never a new
-direct ``cp --reflink`` subprocess call (this project's AC15 anti-orphan
-lint gate bans that).
+the currently-aliased ("last known good") snapshot, by an atomic single-file
+copy made by this process (:func:`restore_chunks_db_file`). Bug #2157: never
+the clone backend (the CoW daemon clones directories only) and never a
+subprocess ``cp`` (this project's AC15 anti-orphan lint gate bans that).
 
 A SHARDED_JSON-only collection set (no ``chunks.db`` anywhere) has nothing
 for this gate to check and is a clean, error-free no-op pass.
@@ -47,19 +46,23 @@ copies corruption over ``master_path``) and is reported via
 ``CollectionIntegrityFailure.source_snapshot_also_corrupt=True`` -- a more
 severe condition than an ordinary single-sided failure. After a restore
 completes, the RESTORED destination is re-verified via the same primitive
-before ``self_heal_succeeded`` is ever set True -- a reflink clone that
+before ``self_heal_succeeded`` is ever set True -- a restore copy that
 completes without raising but produces a corrupt (or re-corrupted)
 destination is reported as a self-heal FAILURE, not a success.
 """
 
 from __future__ import annotations
 
+import errno
 import logging
+import os
+import shutil
 import sqlite3
+import stat
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from code_indexer.storage.shared.chunk_layout import (
     ChunkLayout,
@@ -73,16 +76,25 @@ from code_indexer.storage.sqlite_chunk_store import (
     ChunkStore,
     sqlite_error_reports_corruption,
 )
+from code_indexer.utils.file_locking import fsync_directory
 
 logger = logging.getLogger(__name__)
 
 _CHUNKS_DB_FILENAME = "chunks.db"
+# Bug #2157: a restore streams into ".<name>.restore-tmp" beside the target;
+# the leading dot keeps it out of the "metadata*.json" glob.
+_RESTORE_TEMP_SUFFIX = ".restore-tmp"
+_RESTORE_COPY_BUFFER_BYTES = 8 * 1024 * 1024
+# SQLite's per-database sidecar files: a restored chunks.db must never be
+# opened beside the discarded database's journal or WAL.
+_SQLITE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 
 
 @dataclass
 class CollectionIntegrityFailure:
     """One CHUNKS_DB collection's integrity-gate failure, plus the outcome
-    of the reflink self-heal attempt (if any)."""
+    of the self-heal attempt (if any): an in-process atomic single-file copy
+    from the published snapshot (Bug #2157)."""
 
     collection_dir: Path
     detail: str
@@ -192,48 +204,138 @@ def flush_and_check_chunks_db_integrity(chunks_db_path: Path) -> Tuple[bool, str
     return verdict is IntegrityVerdict.HEALTHY, detail
 
 
-def restore_chunks_db_via_reflink(
-    clone_backend: Any,
+def _remove_temp_sibling(temp_path: Path) -> None:
+    try:
+        temp_path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.error(
+            "Bug #2157: could not remove the temporary restore file %s: %s",
+            temp_path,
+            exc,
+        )
+
+
+class RestoreNotDurableError(Exception):
+    """The restore REPLACED its target(s) -- they now hold the snapshot's
+    content -- but making the replacement durable (the directory fsync)
+    failed. Distinct from every other restore error, after which the target
+    is untouched: the caller must still verify the replaced store and restore
+    its metadata (never leave the snapshot's store beside newer metadata),
+    and must still fail the cycle."""
+
+    replaced = True
+
+    def __init__(self, replaced_paths: List[Path], cause: BaseException) -> None:
+        self.replaced_paths = list(replaced_paths)
+        self.cause = cause
+        super().__init__(
+            f"replaced {', '.join(str(p) for p in self.replaced_paths)} but the "
+            f"replacement is not durable: {type(cause).__name__}: {cause}"
+        )
+
+
+def _remove_stale_sidecars(target_path: Path, suffixes: Tuple[str, ...]) -> None:
+    """Remove each ``<target><suffix>`` file beside *target_path*. They belong
+    to the database being discarded: a hot rollback journal left there would
+    be played back INTO the restored file on its next open. An absent sidecar
+    is skipped; anything there that is not a regular file raises."""
+    for suffix in suffixes:
+        sidecar = target_path.with_name(target_path.name + suffix)
+        try:
+            mode = sidecar.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(mode):
+            raise OSError(
+                errno.EEXIST,
+                "refusing to restore over a database whose SQLite sidecar "
+                "is not a regular file",
+                str(sidecar),
+            )
+        sidecar.unlink()
+
+
+def _restore_file_atomically(
+    source_path: Path,
+    target_path: Path,
+    *,
+    stale_sidecar_suffixes: Tuple[str, ...] = (),
+) -> None:
+    """Bug #2157: restore a single file atomically, created by this process
+    (so the service user owns it), identically on every deployment mode.
+
+    Streams *source_path* into the temporary sibling
+    ``.<target name>.restore-tmp`` in *target_path*'s directory, fsyncs it,
+    copies the source's permission bits, removes the target's stale
+    *stale_sidecar_suffixes* files (never copying the source's), then
+    ``os.replace``s it onto *target_path* and fsyncs the directory. Never the
+    clone backend: the CoW daemon clones directories only. On failure before
+    the replace only the temporary sibling is removed -- *target_path* keeps
+    its previous content (or stays absent) -- and the error propagates.
+
+    The temp name is fixed per target, so a process killed mid-restore
+    leaves at most one temp file per target, and the next restore (one at a
+    time per target: restores run under the alias's write lock) removes it
+    before copying.
+    """
+    temp_path = target_path.with_name(f".{target_path.name}{_RESTORE_TEMP_SUFFIX}")
+    # A leftover of exactly this name is a stale temp from an interrupted
+    # restore; a failure to remove it propagates with the target untouched.
+    temp_path.unlink(missing_ok=True)
+    temp_file = open(temp_path, "xb")
+    try:
+        with temp_file, open(source_path, "rb") as source:
+            shutil.copyfileobj(source, temp_file, _RESTORE_COPY_BUFFER_BYTES)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        shutil.copymode(source_path, temp_path)
+        _remove_stale_sidecars(target_path, stale_sidecar_suffixes)
+        os.replace(temp_path, target_path)
+    except BaseException:
+        _remove_temp_sibling(temp_path)
+        raise
+    try:
+        fsync_directory(target_path.parent)
+    except OSError as exc:
+        logger.error(
+            "Bug #2157: restored %s but the replacement is not durable: the "
+            "directory fsync failed (%s: %s)",
+            target_path,
+            type(exc).__name__,
+            exc,
+        )
+        raise RestoreNotDurableError([target_path], exc) from exc
+
+
+def restore_chunks_db_file(
     healthy_chunks_db_path: Path,
     corrupt_chunks_db_path: Path,
 ) -> None:
-    """Restore *corrupt_chunks_db_path* from *healthy_chunks_db_path* using
-    the SAME ``cp --reflink=auto`` CoW clone primitive already used
-    throughout this codebase for snapshot cloning
-    (``CloneBackend.create_clone_at_path``) -- never a direct subprocess
-    ``cp`` call in production code (this project's AC15 anti-orphan lint
-    gate bans exactly that).
+    """Restore *corrupt_chunks_db_path* (corrupt or missing) from
+    *healthy_chunks_db_path* atomically (:func:`_restore_file_atomically`).
+    The discarded database's journal/WAL files beside the target are removed
+    first; the snapshot's are never copied.
 
-    Raises whatever the underlying *clone_backend* raises on failure (e.g.
-    ``subprocess.CalledProcessError``), or ``RuntimeError`` if no
-    *clone_backend* is available -- callers must not swallow this, since a
-    failed restore leaves ``master_path`` corrupt and must be logged
-    loudly by the caller.
+    Raises on any failure -- callers must not swallow this, since a failed
+    restore leaves ``master_path`` corrupt and must be logged loudly by the
+    caller.
     """
-    if clone_backend is None:
-        raise RuntimeError(
-            "restore_chunks_db_via_reflink: no clone_backend available -- "
-            "cannot self-heal without the CoW clone primitive"
-        )
-    clone_backend.create_clone_at_path(
-        str(healthy_chunks_db_path), str(corrupt_chunks_db_path)
+    _restore_file_atomically(
+        Path(healthy_chunks_db_path),
+        Path(corrupt_chunks_db_path),
+        stale_sidecar_suffixes=_SQLITE_SIDECAR_SUFFIXES,
     )
 
 
-def restore_metadata_files_via_reflink(
-    clone_backend: Any,
+def restore_metadata_files(
     healthy_metadata_dir: Path,
     target_metadata_dir: Path,
 ) -> List[Path]:
-    """Bug #1509: reflink-restore every ``metadata*.json`` file (e.g.
+    """Bug #1509: restore every ``metadata*.json`` file (e.g.
     ``metadata-voyage-ai.json``, one per embedding provider -- see
     ``cli.py``'s ``_get_provider_metadata_path``) found directly under
-    *healthy_metadata_dir* into *target_metadata_dir*, using the SAME
-    ``cp --reflink=auto`` CoW primitive as
-    :func:`restore_chunks_db_via_reflink` (``clone_backend: Any`` mirrors
-    that sibling function's own signature -- both accept any object
-    exposing ``create_clone_at_path``, e.g.
-    ``CloneBackend``/``LocalCloneBackend``).
+    *healthy_metadata_dir* into *target_metadata_dir*, each atomically like
+    :func:`restore_chunks_db_file`.
 
     A self-healed ``chunks.db`` (restored from the last-known-good
     snapshot) must never be left paired with a sibling metadata file that
@@ -246,26 +348,25 @@ def restore_metadata_files_via_reflink(
 
     Returns the list of destination paths actually restored (possibly
     empty, if the healthy snapshot has no metadata files of its own --
-    e.g. its very first-ever refresh). Raises whatever the underlying
-    *clone_backend* raises on failure, or ``RuntimeError`` if no
-    *clone_backend* is available -- callers must not swallow this.
+    e.g. its very first-ever refresh). Raises on the first failed file --
+    callers must not swallow this. A file replaced but not made durable is
+    still restored: the rest are replaced too, then RestoreNotDurableError
+    names every replaced file.
     """
-    if clone_backend is None:
-        raise RuntimeError(
-            "restore_metadata_files_via_reflink: no clone_backend "
-            "available -- cannot self-heal without the CoW clone primitive"
-        )
-
     restored: List[Path] = []
     if not healthy_metadata_dir.is_dir():
         return restored
 
+    first_cause: Optional[BaseException] = None
     for healthy_metadata_path in sorted(healthy_metadata_dir.glob("metadata*.json")):
         target_metadata_path = target_metadata_dir / healthy_metadata_path.name
-        clone_backend.create_clone_at_path(
-            str(healthy_metadata_path), str(target_metadata_path)
-        )
+        try:
+            _restore_file_atomically(healthy_metadata_path, target_metadata_path)
+        except RestoreNotDurableError as not_durable:
+            first_cause = first_cause or not_durable.cause
         restored.append(target_metadata_path)
+    if first_cause is not None:
+        raise RestoreNotDurableError(restored, first_cause)
     return restored
 
 
@@ -288,7 +389,6 @@ def run_refresh_integrity_gate(
     *,
     source_index_dir: Path,
     healthy_index_dir: Optional[Path],
-    clone_backend: Optional[Any] = None,
     before_restore: Optional[Callable[[], None]] = None,
     restore_missing_stores: bool = False,
 ) -> RefreshIntegrityGateResult:
@@ -308,7 +408,7 @@ def run_refresh_integrity_gate(
     check) is called immediately before each restore copy; anything it
     raises aborts the restore and propagates as ``RestoreVetoedError``.
 
-    On any collection's integrity-check failure, attempt a reflink
+    On any collection's integrity-check failure, attempt an atomic
     self-heal of ITS ``chunks.db`` from the corresponding collection
     directory under *healthy_index_dir* (the currently-aliased,
     last-known-good snapshot's index dir). When *healthy_index_dir* is
@@ -423,17 +523,33 @@ def run_refresh_integrity_gate(
                 _check_restore_allowed(before_restore)
                 failure.self_heal_attempted = True
                 try:
-                    restore_chunks_db_via_reflink(
-                        clone_backend, healthy_chunks_db_path, chunks_db_path
-                    )
+                    durability_error: Optional[str] = None
+                    try:
+                        restore_chunks_db_file(healthy_chunks_db_path, chunks_db_path)
+                    except RestoreNotDurableError as not_durable:
+                        # Bug #2157: the store WAS replaced -- verify it and
+                        # restore its metadata like any restore, but the
+                        # self-heal is not a success.
+                        durability_error = f"restore not durable: {not_durable}"
                     # Codex review Finding 3: re-verify the RESTORED
-                    # destination before claiming success -- a reflink
-                    # clone that completes without raising can still
-                    # produce a corrupt (or re-corrupted) destination.
+                    # destination before claiming success -- an in-process
+                    # atomic single-file copy from the published snapshot
+                    # (Bug #2157) that completes without raising can still
+                    # leave a corrupt (or re-corrupted) destination.
                     post_ok, post_detail = _check_integrity_fresh_connection(
                         chunks_db_path
                     )
-                    if post_ok:
+                    if post_ok and durability_error is not None:
+                        failure.self_heal_error = durability_error
+                        logger.error(
+                            "Bug #2157: self-heal of %s restored and "
+                            "re-verified the store from %s, but %s -- the "
+                            "self-heal is FAILED, not a success.",
+                            chunks_db_path,
+                            healthy_chunks_db_path,
+                            durability_error,
+                        )
+                    elif post_ok:
                         failure.self_heal_succeeded = True
                         logger.error(
                             "Bug #1506: self-heal SUCCEEDED for %s -- "
@@ -442,6 +558,7 @@ def run_refresh_integrity_gate(
                             chunks_db_path,
                             healthy_chunks_db_path,
                         )
+                    if post_ok:
                         # Bug #1509: also restore the sibling
                         # metadata-{provider}.json file(s) from the same
                         # healthy snapshot -- _index_source() already
@@ -453,12 +570,9 @@ def run_refresh_integrity_gate(
                         # git-ref-only change detection.
                         try:
                             _check_restore_allowed(before_restore)
-                            failure.metadata_restored_files = (
-                                restore_metadata_files_via_reflink(
-                                    clone_backend,
-                                    Path(healthy_index_dir).parent,
-                                    Path(source_index_dir).parent,
-                                )
+                            failure.metadata_restored_files = restore_metadata_files(
+                                Path(healthy_index_dir).parent,
+                                Path(source_index_dir).parent,
                             )
                             if failure.metadata_restored_files:
                                 logger.error(
@@ -471,6 +585,19 @@ def run_refresh_integrity_gate(
                                 )
                         except RestoreVetoedError:
                             raise
+                        except RestoreNotDurableError as metadata_not_durable:
+                            failure.metadata_restored_files = (
+                                metadata_not_durable.replaced_paths
+                            )
+                            failure.metadata_restore_error = (
+                                f"restore not durable: {metadata_not_durable}"
+                            )
+                            logger.error(
+                                "Bug #2157: metadata file(s) for %s were "
+                                "restored but are not durable (%s)",
+                                collection_dir,
+                                metadata_not_durable,
+                            )
                         except Exception as metadata_exc:
                             failure.metadata_restore_error = (
                                 f"{type(metadata_exc).__name__}: {metadata_exc}"
@@ -489,6 +616,8 @@ def run_refresh_integrity_gate(
                         failure.self_heal_error = (
                             f"post-restore integrity re-check failed: {post_detail}"
                         )
+                        if durability_error is not None:
+                            failure.self_heal_error += f"; {durability_error}"
                         logger.error(
                             "Bug #1506 Codex Finding 3: self-heal restore "
                             "for %s completed but the RESTORED file FAILED "

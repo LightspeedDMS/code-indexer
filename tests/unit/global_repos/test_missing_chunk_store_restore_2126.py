@@ -6,8 +6,8 @@ exists.
 Real components throughout (the Bug #2022 harness): the real ``cidx index``
 child (resolved from PATH exactly as ``_index_source`` spawns it), a real
 CHUNKS_DB collection, a real published snapshot under ``.versioned/``, the
-real reflink restore (``LocalCloneBackend``), the real SQLite global
-registry, the real write-lock manager, and a real metadata store (SQLite
+real restore (an in-process atomic single-file copy from the published
+snapshot, Bug #2157), the real SQLite global registry, the real write-lock manager, and a real metadata store (SQLite
 always; PostgreSQL when ``TEST_POSTGRES_DSN`` is set).
 """
 
@@ -195,7 +195,6 @@ class TestMissingStoreRestore:
 
         self_heal_after_fatal_chunk_store_failure(
             metadata=metadata,
-            snapshot_manager=harness.scheduler._snapshot_manager,
             alias_name=ALIAS,
             source_path=str(harness.source),
             current_target=str(harness.snapshot),

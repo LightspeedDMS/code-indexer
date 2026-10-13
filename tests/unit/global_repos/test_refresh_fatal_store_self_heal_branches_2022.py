@@ -53,7 +53,6 @@ def _self_heal(harness: Harness, error: FatalChunkStoreIndexError) -> None:
     scheduler = harness.scheduler
     recovery.self_heal_after_fatal_chunk_store_failure(
         metadata=harness.metadata,
-        snapshot_manager=scheduler._snapshot_manager,
         alias_name=ALIAS,
         source_path=str(harness.source),
         current_target=str(harness.snapshot),
@@ -114,9 +113,19 @@ def test_lost_write_lock_restores_nothing(tmp_path: Path, metadata: Any) -> None
     assert harness.strikes() == 0
 
 
-def test_failed_restore_strikes_and_backs_off(tmp_path: Path, metadata: Any) -> None:
+def test_failed_restore_strikes_and_backs_off(
+    tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno
+    import shutil
+
+    def copy_then_disk_full(source, destination, *args) -> None:
+        destination.write(source.read(16))
+        raise OSError(errno.ENOSPC, "No space left on device")
+
     harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
-    harness.scheduler._snapshot_manager = None  # no clone primitive available
+    # The restore copy fails part-way (disk full).
+    monkeypatch.setattr(shutil, "copyfileobj", copy_then_disk_full)
     corrupt_btree_pages(harness.source_db)
     corrupt_sha = sha256_of(harness.source_db)
 
