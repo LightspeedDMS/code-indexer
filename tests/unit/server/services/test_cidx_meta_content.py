@@ -181,42 +181,21 @@ def test_rename(meta_world: MetaWorld) -> None:
 # ── change detection ─────────────────────────────────────────────────────
 
 
-def _set_mtime(path: Path, seconds: int) -> None:
-    os.utime(path, (seconds, seconds))
-
-
-def test_changed_since_uses_the_manifest_mtimes(meta_world: MetaWorld) -> None:
+def test_visible_entries_skip_hidden_and_index_state(meta_world: MetaWorld) -> None:
     meta_world.seed("a.md", "x")
     meta_world.seed(".hidden/new.md", "x")
     meta_world.seed(".code-indexer/state.json", "x")
-    _set_mtime(meta_world.remote_meta / "a.md", 1_000)
-    for hidden in (".hidden/new.md", ".code-indexer/state.json"):
-        _set_mtime(meta_world.remote_meta / hidden, 9_000)
     shared = _shared(meta_world)
     with meta_world.forbid_local_io():
-        assert cmc.changed_since(shared, 999) is True
-        assert cmc.changed_since(shared, 1_000) is False  # hidden files ignored
+        assert [e.path for e in cmc.visible_entries(shared)] == ["a.md"]
         assert cmc.has_visible_files(shared) is True
-
-
-def test_unknown_mtime_is_a_change(meta_world: MetaWorld) -> None:
-    from code_indexer.server.storage.shared.content_backend import (
-        ContentEntry,
-        ContentPage,
-    )
-
-    shared = _shared(meta_world)
-    meta_world.backend.manifest = lambda *a, **k: ContentPage(  # type: ignore[method-assign]
-        entries=(ContentEntry("a.md", 1, "sha", False, None),), next_cursor=None
-    )
-    assert cmc.changed_since(shared, 10**12) is True
 
 
 def test_empty_shared_content(meta_world: MetaWorld) -> None:
     meta_world.seed(".code-indexer/x.json", "{}")
     shared = _shared(meta_world)
     assert cmc.has_visible_files(shared) is False
-    assert cmc.changed_since(shared, 0) is False
+    assert cmc.visible_entries(shared) == []
 
 
 def test_has_files_with_extensions(meta_world: MetaWorld) -> None:

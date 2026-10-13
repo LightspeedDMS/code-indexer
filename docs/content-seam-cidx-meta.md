@@ -48,14 +48,15 @@ cross-pod safety where a lock is per-pod.
   hold cidx-meta). Under `local` this stamps exactly what `local_content=True`
   did. Other `local://` repos stay entirely pod-local.
 * `RefreshScheduler._has_local_changes`: cidx-meta under delegated lists the
-  shared manifest (pruned of `.code-indexer`/`.git`, visible files only).
-  Once this pod has published an index of it, "changed" is a fingerprint
-  comparison (paths + blob shas): no clock, so no skew between
-  workspace-mcp's mtimes and this pod's snapshot timestamps, and deletions
-  count. Before that (first refresh on a pod since start) the shared
-  `mtime_ns` is compared with the newest snapshot's timestamp, as the local
-  walk does; an unknown mtime counts as a change; a listing failure fails the
-  refresh. Extension-drift scanning uses the manifest too.
+  shared manifest (pruned of `.code-indexer`/`.git`, visible files only) and
+  compares its fingerprint (paths + blob shas) with the one published WITH the
+  current alias pointer (`content_fingerprint` in the alias document, i.e. the
+  control-plane registry -- shared by every pod, a restarted one included).
+  No clock is consulted; deletions count; no published fingerprint (first
+  index) is a change. A refresh publishes the fingerprint it detected in the
+  same write as the new pointer, so a failed refresh publishes nothing. A
+  listing failure fails the refresh. Extension-drift scanning uses the
+  manifest too.
 * Empty cidx-meta: "No files found to index" is tolerated only when a fresh
   manifest listing succeeds AND shows no visible file.
 * Snapshot/publish: unchanged -- the index is built in the pod's directory and

@@ -322,24 +322,6 @@ def visible_entries(shared: SharedCidxMeta) -> List[ContentEntry]:
     ]
 
 
-def changed_since(
-    shared: SharedCidxMeta,
-    timestamp: float,
-    entries: Optional[Sequence[ContentEntry]] = None,
-) -> bool:
-    """Whether any visible shared file was modified after *timestamp* (seconds).
-
-    The shared-content twin of the refresh's local mtime walk: no visible
-    file is "no changes"; a file whose mtime the backend does not report is
-    treated as changed (unknown is never the epoch). *entries* are the
-    visible entries when the caller already listed them.
-    """
-    for entry in visible_entries(shared) if entries is None else entries:
-        if entry.mtime_ns is None or entry.mtime_ns / 1_000_000_000 > timestamp:
-            return True
-    return False
-
-
 def content_fingerprint(entries: Sequence[ContentEntry]) -> str:
     """A digest of exactly which visible files exist with which bytes (path and
     git blob sha). Equal fingerprints mean unchanged content, with no clock
