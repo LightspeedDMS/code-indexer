@@ -86,7 +86,10 @@ def _hot_journal_of_other_database(work_dir: Path) -> Path:
     the transaction ends (as if the writer had been killed). Returns the copy.
 
     synchronous=OFF makes SQLite size the journal by its file length, so every
-    journaled page is played back on the next open."""
+    journaled page is played back on the next open.
+
+    The seed rows go in ONE transaction: on an autocommit connection each row
+    would be its own fsynced commit (800 of them took 30-50 s)."""
     work_dir.mkdir(parents=True)
     other_db = work_dir / "other.db"
     journal_copy = work_dir / "hot-journal"
@@ -94,10 +97,12 @@ def _hot_journal_of_other_database(work_dir: Path) -> Path:
     try:
         conn.execute("PRAGMA journal_mode=DELETE")
         conn.execute("CREATE TABLE other_rows (k INTEGER, v TEXT)")
+        conn.execute("BEGIN")
         conn.executemany(
             "INSERT INTO other_rows VALUES (?, ?)",
             [(i, "o" * 300) for i in range(800)],
         )
+        conn.execute("COMMIT")
         conn.execute("PRAGMA synchronous=OFF")
         conn.execute("BEGIN")
         conn.execute("UPDATE other_rows SET v = 'changed' || v")

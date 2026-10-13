@@ -148,6 +148,8 @@ class TestOutOfRootPathsAreRefused:
 
         _assert_refused(context, caplog)
 
+    # Builds real SQLite SCIP databases: ~2 s alone, slower under load.
+    @pytest.mark.timeout(60)
     def test_subproject_path_escaping_repo_root_returns_no_outside_content(
         self, tmp_path, caplog
     ):
