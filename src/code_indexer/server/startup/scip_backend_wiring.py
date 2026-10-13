@@ -10,7 +10,17 @@ Fail-loud policy (mirrors the ``delegated`` clone backend, EVO-64616):
   local build (the toolchain-less indexing pods would fail anyway). A *runtime*
   backend outage is handled separately: ``DelegatedIndexer.generate`` fail-softs
   per project to ``IndexerStatus.FAILED`` so a golden-repo job is never blocked.
+- ``delegated-plugin``: the compile step runs in a ``code_indexer.scip_backend``
+  PLUGIN's execution backend (``CIDX_SCIP_BACKEND`` overrides the entry point;
+  see ``services/scip_backend_plugin``), which RETURNS the index bytes -- the
+  mount-less successor of ``delegated``. No plugin, a plugin that fails to load
+  or construct, one that is not a ``ScipExecutionBackend``, or one reporting
+  itself unavailable fails loud -- never a local build, never ``delegated``.
 - ``local``: no external validation needed (default, unchanged behaviour).
+
+``delegated`` keeps meaning ``sandbox_scip`` until cutover, so installing the
+plugin (a cidx image bump) changes nothing for a deployment until it opts in by
+setting ``delegated-plugin``.
 """
 
 from __future__ import annotations
@@ -20,6 +30,46 @@ from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+_NO_LOCAL_FALLBACK = (
+    "There is NO fallback to a local build or to the sandbox_scip backend."
+)
+
+
+def _resolve_scip_execution_backend() -> Any:
+    """The plugin's ``ScipExecutionBackend``, or RuntimeError -- never None."""
+    # Imported lazily so local/delegated deployments never import the seam.
+    from code_indexer.scip.delegation_api import (  # noqa: PLC0415
+        ScipExecutionBackend,
+    )
+    from code_indexer.server.services.scip_backend_plugin import (  # noqa: PLC0415
+        ENTRY_POINT_GROUP,
+        ENV_VAR,
+        resolve_scip_backend,
+    )
+
+    try:
+        backend = resolve_scip_backend()
+    except Exception as exc:
+        raise RuntimeError(
+            "scip_backend='delegated-plugin' selected but the SCIP backend plugin "
+            f"could not be loaded or constructed: {type(exc).__name__}: {exc}. "
+            f"{_NO_LOCAL_FALLBACK}"
+        ) from exc
+    if backend is None:
+        raise RuntimeError(
+            "scip_backend='delegated-plugin' selected but no SCIP backend plugin is "
+            "installed. Install a plugin registering a factory on the "
+            f"{ENTRY_POINT_GROUP} entry point (cidx-content-backend >= 0.8.0), or "
+            f"set {ENV_VAR}='package.module:factory'. {_NO_LOCAL_FALLBACK}"
+        )
+    if not isinstance(backend, ScipExecutionBackend):
+        raise RuntimeError(
+            "scip_backend='delegated-plugin' selected but the SCIP backend plugin "
+            f"returned a {type(backend).__name__}, which has no "
+            f"build_index/is_available. {_NO_LOCAL_FALLBACK}"
+        )
+    return backend
 
 
 def _resolve_scip_sandbox_config(config: Any) -> Any:
@@ -112,6 +162,10 @@ def validate_scip_backend_config(config: Any) -> None:
             "scip_backend config value."
         )
 
+    if backend_type == ScipBackendFactory.DELEGATED_PLUGIN:
+        _resolve_scip_execution_backend()
+        return
+
     if backend_type == "delegated":
         wsm_cfg = _resolve_scip_sandbox_config(config)
         if wsm_cfg is None or not getattr(wsm_cfg, "endpoint", ""):
@@ -186,6 +240,30 @@ def build_scip_generator(
     # the eager startup call site (lifespan.py) so both
     # paths use the identical check (DRY) — see validate_scip_backend_config.
     validate_scip_backend_config(config)
+
+    if backend_type == ScipBackendFactory.DELEGATED_PLUGIN:
+        backend = _resolve_scip_execution_backend()
+        indexer_map = ScipBackendFactory.create_indexer_map(
+            backend_type, repo_root=Path(repo_root), execution_backend=backend
+        )
+        # Same fail-fast as ``delegated``'s health check: an unreachable backend
+        # at wiring time raises (the funnel turns it into a loud SKIPPED).
+        if not next(iter(indexer_map.values())).is_available():
+            raise RuntimeError(
+                f"SCIP backend plugin {type(backend).__name__} reports itself "
+                f"unavailable (sandbox-mcp unreachable?). {_NO_LOCAL_FALLBACK}"
+            )
+        logger.info(
+            "SCIPGenerator: using PluginScipIndexer (%s)", type(backend).__name__
+        )
+        return SCIPGenerator(
+            Path(repo_root),
+            max_workers=max_workers,
+            indexer_map=indexer_map,
+            workspace_id=workspace_id,
+            golden_alias=golden_alias,
+            allow_degenerate=allow_degenerate,
+        )
 
     if backend_type == "delegated":
         # EVO-65021: delegate the compile step to sandbox-mcp. Fail-fast on an
@@ -290,10 +368,15 @@ def build_scip_generator_for_golden_repo(
         unreachable (a misconfiguration/outage that fails loud at wiring time).
     """
     del golden_repo_manager  # EVO-65365: no workspace_id resolution — alias-addressed.
+    from code_indexer.scip.indexers.factory import (  # noqa: PLC0415
+        is_delegated_scip_backend,
+    )
 
     backend_type = getattr(config, "scip_backend", "local") or "local"
 
-    golden_alias: Optional[str] = alias if backend_type == "delegated" else None
+    golden_alias: Optional[str] = (
+        alias if is_delegated_scip_backend(backend_type) else None
+    )
 
     # EVO-65365: golden-repo SCIP builds are best-effort — a bare (unbuilt) golden
     # repo should get a locals-only (degenerate) index, not skip. Opt every golden

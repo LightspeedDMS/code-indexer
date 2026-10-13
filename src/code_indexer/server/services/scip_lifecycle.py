@@ -17,7 +17,9 @@ Behaviour by backend (:func:`funnel_scip_generation`):
   ``delegated`` backend — they have no retained ``workspace_id`` and the
   delegated backend cannot address a per-user checkout, so the local subprocess
   path (which honours ``--clear``) is the only path that can index them.
-* ``scip_backend='delegated'`` → the delegated build is enqueued on the
+* ``scip_backend='delegated'`` or ``'delegated-plugin'`` (the plugin-backed,
+  mount-less variant; same queue, same semantics) → the delegated build is
+  enqueued on the
   serialized :class:`DelegatedScipBuildQueue` and the caller does NOT run a local
   build. The delegated build *supersedes* the Claude-Code self-heal (the sandbox
   build IS the resolution; there is no toolchain in the indexing pod for
@@ -40,6 +42,7 @@ therefore:
 
 from __future__ import annotations
 
+from code_indexer.scip.indexers.factory import is_delegated_scip_backend
 from code_indexer.scip.paths import scip_index_dir
 import logging
 from enum import Enum
@@ -262,7 +265,7 @@ def funnel_scip_generation(
     """
     try:
         backend = getattr(config, "scip_backend", "local") or "local"
-        if backend != "delegated":
+        if not is_delegated_scip_backend(backend):
             return ScipDelegationOutcome.NOT_DELEGATED
 
         repo_root = Path(repo_root)

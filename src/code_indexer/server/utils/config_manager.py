@@ -2092,7 +2092,9 @@ class ServerConfig:
     # default) or "delegated" (compile via sandbox-mcp). "delegated" reads its
     # endpoint + api_key from ``scip_sandbox`` (falling back to ``workspace_mcp``)
     # pointed at sandbox-mcp; see server/startup/scip_backend_wiring.py (fail-loud,
-    # no local fallback).
+    # no local fallback). "delegated-plugin" (mount-less successor): the compile
+    # step runs in a ``code_indexer.scip_backend`` plugin (or CIDX_SCIP_BACKEND)
+    # that returns the index bytes; cidx writes them under the index root.
     scip_backend: str = "local"
 
     # Story #923 - Admin TOTP step-up elevation enforcement (runtime, never bootstrap)

@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
+from code_indexer.scip.indexers.base import DELEGATED_BACKPRESSURE_MARKER
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.middleware.correlation import get_correlation_id
 
@@ -387,7 +388,13 @@ class SCIPResolutionQueue:
 # (delegated.py ``_failure`` on ``status_code >= 300``). Matched to distinguish
 # "retry later" from a genuine build failure (e.g. exit-69 unsupported-language,
 # which is a plain FAILED with no 429 token → fail-soft dropped, not retried).
-_BACKPRESSURE_MARKERS = ("http 429", "too many requests")
+# The plugin-backed indexer (``scip_backend='delegated-plugin'``) reports a full
+# sandbox (no capacity, HTTP 429) with ``DELEGATED_BACKPRESSURE_MARKER``.
+_BACKPRESSURE_MARKERS = (
+    "http 429",
+    "too many requests",
+    DELEGATED_BACKPRESSURE_MARKER,
+)
 
 # Backoff between backpressure re-enqueues, and the retry ceiling.
 DELEGATED_BACKPRESSURE_RETRY_SECONDS = 30.0

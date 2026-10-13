@@ -6,6 +6,16 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+#: BSD sysexits ``EX_UNAVAILABLE``: the exit code a delegated build reports for a
+#: language it has no indexer for. ``generator.indexer_result_is_unsupported_language``
+#: reads it as a benign skip rather than a genuine build failure.
+UNSUPPORTED_LANGUAGE_EXIT_CODE = 69
+
+#: Put in a FAILED result's stderr when a delegated backend was temporarily full
+#: (no sandbox capacity). The delegated build queue re-enqueues such a build
+#: exactly as it does an HTTP 429 (``scip_resolution_queue._BACKPRESSURE_MARKERS``).
+DELEGATED_BACKPRESSURE_MARKER = "sandbox backpressure"
+
 
 class IndexerStatus(Enum):
     """Status of SCIP index generation."""

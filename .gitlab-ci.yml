@@ -228,6 +228,8 @@ smoke:
       tests/unit/utils/test_sandbox_mcp_client.py
       tests/unit/xray/test_xray_execution_seam.py
       tests/unit/server/startup/test_xray_backend_wiring.py
+      tests/unit/scip/test_plugin_scip_indexer.py
+      tests/unit/server/startup/test_scip_backend_plugin_wiring.py
       tests/unit/server/services/test_cidx_meta_content.py
       tests/unit/server/services/test_cidx_meta_shared_writers.py
       tests/unit/server/services/test_cidx_meta_dep_map_reads.py

@@ -9,6 +9,7 @@ import logging
 
 from .discovery import ProjectDiscovery, DiscoveredProject
 from .indexers.base import IndexerResult, IndexerStatus
+from .indexers.base import UNSUPPORTED_LANGUAGE_EXIT_CODE
 from .indexers.base import SCIPIndexer
 from .indexers.java import JavaIndexer
 from .indexers.typescript import TypeScriptIndexer
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 # indexes TS/JS only): they must NOT count as a real build failure for the SCIP
 # freshness decision, so a mixed-language golden repo can still mark ``fresh``
 # instead of thrashing (re-enqueuing a doomed rebuild every refresh cycle).
-SCIP_UNSUPPORTED_LANGUAGE_EXIT_CODE = 69
+SCIP_UNSUPPORTED_LANGUAGE_EXIT_CODE = UNSUPPORTED_LANGUAGE_EXIT_CODE
 _UNSUPPORTED_LANGUAGE_MARKERS = (
     "no scip indexer for language",
     "no indexer available for language",
