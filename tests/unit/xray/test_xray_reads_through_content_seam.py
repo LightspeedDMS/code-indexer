@@ -21,10 +21,13 @@ reports a link and never follows it.
 from __future__ import annotations
 
 import builtins
+import dataclasses
+import gc
 import json
 import logging
 import os
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -82,6 +85,15 @@ class MemoryContentBackend:
         self.manifest_calls: List[Dict[str, Any]] = []
         self.fetch_calls: List[List[str]] = []
         self.fail_fetch: Optional[Exception] = None
+        #: Seconds each manifest page takes, for the Phase 1 deadline tests.
+        self.page_delay = 0.0
+        #: ("fetch", paths) per fetch, in order, shared with a parse recorder.
+        self.events: List[Any] = []
+        #: Empty pages served before the first real one: a backend may page
+        #: through pruned stretches, and the Phase 1 loop never sees an entry.
+        self.empty_pages_first = 0
+        #: Overrides the size the manifest reports, by path.
+        self.reported_size: Dict[str, int] = {}
 
     @property
     def is_local(self) -> bool:
@@ -98,13 +110,23 @@ class MemoryContentBackend:
         assert str(repo_path) == self.root
         prune = set(prune_dirs or ())
         self.manifest_calls.append({"cursor": cursor, "prune": sorted(prune)})
+        if self.page_delay:
+            time.sleep(self.page_delay)
+        if cursor is None or cursor.startswith("\x00"):
+            served = 0 if cursor is None else int(cursor[1:])
+            if served < self.empty_pages_first:
+                return ContentPage(entries=(), next_cursor=f"\x00{served + 1}")
+            cursor = None
         kept = [
             e
             for e in self._entries
             if not prune & set(PurePosixPath(e.path).parts[:-1])
             and (cursor is None or e.path > cursor)
         ]
-        page = kept[: self._page_size]
+        page = [
+            dataclasses.replace(e, size=self.reported_size.get(e.path, e.size))
+            for e in kept[: self._page_size]
+        ]
         more = len(kept) > self._page_size
         return ContentPage(
             entries=tuple(page), next_cursor=page[-1].path if more else None
@@ -115,6 +137,7 @@ class MemoryContentBackend:
     ) -> Iterator[FetchedFile]:
         assert str(repo_path) == self.root
         self.fetch_calls.append(list(paths))
+        self.events.append(("fetch", list(paths)))
         if self.fail_fetch is not None:
             raise self.fail_fetch
         for rel in paths:
@@ -302,6 +325,95 @@ def test_filename_manifest_failure_fails_loud(
         )
 
 
+def test_filename_manifest_walk_honours_the_phase1_deadline(
+    golden: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow paged manifest stops at the deadline with the partial
+    candidates, exactly the local walk's timeout -- it does not fetch every
+    page first and only then notice -- and the partial walk is not cached."""
+    content, _ = _delegate(monkeypatch, golden)
+    content._page_size = 2
+    complete, _ = _filename_phase1(_snapshot(golden), FILENAME_CASES[0])
+    pages = len(content.manifest_calls)
+    assert pages > 4
+    fs_mod._collect_cache.clear()
+    content.manifest_calls.clear()
+
+    content.page_delay = 0.4
+    with pytest.raises(se_mod.XRayPhase1TimeoutError) as raised:
+        XRaySearchEngine()._run_phase1_filename(
+            _snapshot(golden), r".*", [], [], timeout_seconds=1
+        )
+    assert 1 < len(content.manifest_calls) < pages
+    partial = [
+        p.relative_to(_snapshot(golden)).as_posix() for p in raised.value.candidates
+    ]
+    assert partial and set(partial) < set(complete)
+    assert partial == sorted(partial)
+    # Release the walk the exception's traceback still holds, so a partial
+    # walk that WOULD be cached on close is cached before the next call.
+    del raised
+    gc.collect()
+
+    content.page_delay = 0.0
+    content.manifest_calls.clear()
+    assert _filename_phase1(_snapshot(golden), FILENAME_CASES[0])[0] == complete
+    assert len(content.manifest_calls) == pages  # walked again: nothing cached
+
+
+def test_filename_deadline_holds_while_the_manifest_yields_no_entries(
+    golden: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pages with no entries never reach the per-entry check, so only the
+    deadline passed down to the walk can stop it -- as the same timeout."""
+    content, _ = _delegate(monkeypatch, golden)
+    content.empty_pages_first = 20
+    content.page_delay = 0.3
+    with pytest.raises(se_mod.XRayPhase1TimeoutError) as raised:
+        XRaySearchEngine()._run_phase1_filename(
+            _snapshot(golden), r".*", [], [], timeout_seconds=1
+        )
+    assert raised.value.candidates == []
+    assert len(content.manifest_calls) < 20
+
+
+def test_filename_deadline_yields_the_run_timeout_shape(
+    golden: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content, _ = _delegate(monkeypatch, golden)
+    content.page_delay = 0.4
+    engine = XRaySearchEngine()
+    result = engine.run(
+        repo_path=_snapshot(golden),
+        driver_regex=r".*",
+        evaluator_code="unused: Phase 1 times out",
+        search_target="filename",
+        timeout_seconds=1,
+    )
+    assert result["partial"] is True and result["timeout"] is True
+    assert result["matches"] == []
+
+
+def test_iter_manifest_entries_checks_the_deadline_before_each_page(
+    golden: Path,
+) -> None:
+    content = MemoryContentBackend(_repo(golden))
+    source = fs_mod.ContentSeamSource(backend=content, root=content.root)
+    with pytest.raises(fs_mod.ManifestDeadlineExceeded):
+        next(
+            fs_mod.iter_manifest_entries(
+                source, [".git"], deadline=time.monotonic() - 1
+            )
+        )
+    assert content.manifest_calls == []
+
+    streamed = list(fs_mod.iter_manifest_entries(source, [".git"]))
+    calls = len(content.manifest_calls)
+    assert tuple(streamed) == fs_mod.manifest_entries(source, [".git"])
+    assert list(fs_mod.iter_manifest_entries(source, [".git"])) == streamed
+    assert len(content.manifest_calls) == calls  # completed walk replayed
+
+
 # --------------------------------------------------------------------------
 # Phase 1: content driver
 # --------------------------------------------------------------------------
@@ -386,10 +498,20 @@ def _fake_run_batch(**kwargs: Any) -> List[Any]:
     ]
 
 
-def _run_with_ast_debug(root: Path) -> Dict[str, Any]:
+def _run_with_ast_debug(
+    root: Path, events: Optional[List[Any]] = None
+) -> Dict[str, Any]:
     pytest.importorskip("tree_sitter_languages", reason="xray extras not installed")
     engine = XRaySearchEngine()
     setattr(engine.rust_backend, "run_batch", _fake_run_batch)
+    if events is not None:
+        parse = engine.ast_engine.parse
+
+        def _recording_parse(source: Any, lang: str) -> Any:
+            events.append(("parse", lang))
+            return parse(source, lang)
+
+        setattr(engine.ast_engine, "parse", _recording_parse)
     result = engine.run(
         repo_path=root,
         driver_regex=r"\.(py|java)$",
@@ -441,6 +563,30 @@ def test_ast_debug_backend_failure_fails_loud(
     content.fail_fetch = ConnectionError("workspace-mcp unreachable")
     with pytest.raises(ConnectionError):
         _run_with_ast_debug(_snapshot(golden))
+
+
+def test_ast_debug_fetches_in_bounded_batches_and_parses_as_they_arrive(
+    golden: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bytes are fetched a batch at a time -- never per file, never all at
+    once -- and each file is parsed before the next batch is requested, so at
+    most one batch of sources is ever in memory."""
+    local = _run_with_ast_debug(_repo(golden))
+
+    monkeypatch.setattr(se_mod, "_AST_DEBUG_FETCH_BATCH_FILES", 2)
+    content, _ = _delegate(monkeypatch, golden)
+    delegated = _run_with_ast_debug(_snapshot(golden), events=content.events)
+
+    assert json.dumps(delegated, sort_keys=True) == json.dumps(local, sort_keys=True)
+    matched = sorted({m["file_path"] for m in delegated["matches"]})
+    assert len(matched) > 4
+    assert [len(batch) for batch in content.fetch_calls] == [2] * (
+        len(matched) // 2
+    ) + ([1] if len(matched) % 2 else [])
+    assert sorted(p for batch in content.fetch_calls for p in batch) == matched
+    kinds = [kind for kind, _ in content.events]
+    # fetch, parse, parse, fetch, parse, parse, ...: never two fetches ahead.
+    assert kinds[:4] == ["fetch", "parse", "parse", "fetch"]
 
 
 # --------------------------------------------------------------------------
@@ -573,6 +719,30 @@ def test_dump_ast_traversal_never_reaches_the_backend(
         response = _dump(monkeypatch, _snapshot(golden), file_path)
         assert response["error"] == "path_traversal_rejected"
     assert content.fetch_calls == []
+
+
+def test_dump_ast_oversized_is_refused_before_any_fetch(
+    golden: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local = _dump(monkeypatch, _repo(golden), "big.py")
+    content, _ = _delegate(monkeypatch, golden)
+    delegated = _dump(monkeypatch, _snapshot(golden), "big.py")
+    assert local["error"] == "file_too_large"
+    assert delegated == local
+    assert content.fetch_calls == []  # refused on the manifest's size
+
+
+def test_dump_ast_size_is_rechecked_on_the_fetched_bytes(
+    golden: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defence in depth: a manifest that understates the size (a file that
+    grew since it was taken) is still refused before any parse."""
+    local = _dump(monkeypatch, _repo(golden), "big.py")
+    content, _ = _delegate(monkeypatch, golden)
+    content.reported_size["big.py"] = 10
+    delegated = _dump(monkeypatch, _snapshot(golden), "big.py")
+    assert delegated == local
+    assert content.fetch_calls == [["big.py"]]
 
 
 def test_dump_ast_backend_failure_fails_loud(

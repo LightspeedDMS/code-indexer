@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     Callable,
+    Iterator,
     List,
     Optional,
     Sequence,
@@ -45,7 +46,12 @@ from code_indexer.utils.path_confinement import (
     confine_relative_path,
     resolve_confined_path,
 )
-from ..storage.shared.content_backend import ContentBackend, ContentEntry, FetchedFile
+from ..storage.shared.content_backend import (
+    ContentBackend,
+    ContentEntry,
+    ContentPage,
+    FetchedFile,
+)
 
 if TYPE_CHECKING:
     from code_indexer.global_repos.directory_explorer import (
@@ -96,22 +102,33 @@ def _ttl_cached(key: str, build: Callable[[], _T]) -> _T:
     that would deliver zero cache benefit for exactly the slow repos this
     cache targets.
     """
+    hit, cached = _ttl_get(key)
+    if hit:
+        return cast(_T, cached)
+    value = build()
+    _ttl_put(key, value)
+    return value
+
+
+def _ttl_get(key: str) -> Tuple[bool, Any]:
+    """``(True, value)`` for a live entry under *key*, else ``(False, None)``."""
     now = time.monotonic()
     with _collect_cache_lock:
         entry = _collect_cache.get(key)
         if entry is not None and now < entry[0]:
             _collect_cache.move_to_end(key)
-            return cast(_T, entry[1])
+            return True, entry[1]
+    return False, None
 
-    value = build()
 
+def _ttl_put(key: str, value: Any) -> None:
+    """Cache *value* under *key*; expiry from NOW, i.e. after the build."""
     expiry = time.monotonic() + _COLLECT_CACHE_TTL_SECONDS
     with _collect_cache_lock:
         _collect_cache[key] = (expiry, value)
         _collect_cache.move_to_end(key)
         while len(_collect_cache) > _COLLECT_CACHE_MAX_REPOS:
             _collect_cache.popitem(last=False)
-    return value
 
 
 def modified_at_from_ns(mtime_ns: Optional[int]) -> datetime:
@@ -160,6 +177,10 @@ def content_seam_source(
     return ContentSeamSource(backend=backend, root=str(root))
 
 
+class ManifestDeadlineExceeded(TimeoutError):
+    """The caller's deadline passed before the manifest's last page arrived."""
+
+
 def manifest_entries(
     source: ContentSeamSource, prune_dirs: Sequence[str]
 ) -> Tuple[ContentEntry, ...]:
@@ -169,26 +190,75 @@ def manifest_entries(
     are cached per (root, prune set), since different prune sets describe
     different entry sets.
     """
-    prune = tuple(sorted(set(prune_dirs)))
-    key = f"{_SEAM_CACHE_PREFIX}manifest:{','.join(prune)}:{source.root}"
-    return _ttl_cached(key, lambda: _walk_manifest(source, prune))
+    prune = _prune_key(prune_dirs)
+    return _ttl_cached(
+        _manifest_cache_key(source, prune), lambda: _walk_manifest(source, prune)
+    )
+
+
+def iter_manifest_entries(
+    source: ContentSeamSource,
+    prune_dirs: Sequence[str],
+    *,
+    deadline: Optional[float] = None,
+) -> Iterator[ContentEntry]:
+    """:func:`manifest_entries`, yielded as each page arrives.
+
+    For a caller with a deadline (``time.monotonic()`` based): it is checked
+    before every page is requested, and a passed deadline raises
+    :class:`ManifestDeadlineExceeded` with the entries already yielded in the
+    caller's hands. Shares the TTL cache: a cached manifest is replayed, and a
+    walk that reaches the last page is cached; a walk cut short never is.
+    """
+    prune = _prune_key(prune_dirs)
+    key = _manifest_cache_key(source, prune)
+    hit, cached = _ttl_get(key)
+    if hit:
+        yield from cached
+        return
+    entries: List[ContentEntry] = []
+    for page in _manifest_pages(source, prune, deadline=deadline):
+        entries.extend(page.entries)
+        yield from page.entries
+    _ttl_put(key, tuple(entries))
+
+
+def _prune_key(prune_dirs: Sequence[str]) -> Tuple[str, ...]:
+    return tuple(sorted(set(prune_dirs)))
+
+
+def _manifest_cache_key(source: ContentSeamSource, prune: Tuple[str, ...]) -> str:
+    return f"{_SEAM_CACHE_PREFIX}manifest:{','.join(prune)}:{source.root}"
 
 
 def _walk_manifest(
     source: ContentSeamSource, prune: Tuple[str, ...]
 ) -> Tuple[ContentEntry, ...]:
+    """Every entry of every page, in order."""
+    return tuple(
+        entry for page in _manifest_pages(source, prune) for entry in page.entries
+    )
+
+
+def _manifest_pages(
+    source: ContentSeamSource,
+    prune: Tuple[str, ...],
+    *,
+    deadline: Optional[float] = None,
+) -> Iterator[ContentPage]:
     """Page through the manifest until the last page.
 
     A cursor that does not advance raises instead of looping forever on a
-    misbehaving backend.
+    misbehaving backend. ``deadline`` is checked before each page request.
     """
-    entries: List[ContentEntry] = []
     cursor: Optional[str] = None
     while True:
+        if deadline is not None and time.monotonic() > deadline:
+            raise ManifestDeadlineExceeded("content manifest walk passed its deadline")
         page = source.backend.manifest(source.root, cursor=cursor, prune_dirs=prune)
-        entries.extend(page.entries)
+        yield page
         if page.next_cursor is None:
-            return tuple(entries)
+            return
         if page.next_cursor == cursor:
             raise RuntimeError(
                 "content manifest cursor did not advance; refusing to loop"
