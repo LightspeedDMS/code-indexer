@@ -55,8 +55,9 @@ class ScipBackfillPolicy:
         # A discovery error propagates -> the engine counts it as an error (matching the
         # pre-engine behaviour: no marker written, cycle continues).
         from code_indexer.scip.discovery import ProjectDiscovery
+        from code_indexer.server.services.scip_repo_reads import build_file_source
 
-        projects = ProjectDiscovery(repo_path).discover()
+        projects = ProjectDiscovery(repo_path, build_file_source(repo_path)).discover()
         if not projects:
             self.not_discoverable += 1
             return None

@@ -7,7 +7,7 @@ from typing import List, Dict, Optional, Callable, Set
 import time
 import logging
 
-from .discovery import ProjectDiscovery, DiscoveredProject
+from .discovery import BuildFileSource, DiscoveredProject, ProjectDiscovery
 from .indexers.base import IndexerResult, IndexerStatus
 from .indexers.base import UNSUPPORTED_LANGUAGE_EXIT_CODE
 from .indexers.base import SCIPIndexer
@@ -132,6 +132,7 @@ class SCIPGenerator:
         workspace_id: Optional[str] = None,
         golden_alias: Optional[str] = None,
         allow_degenerate: bool = False,
+        build_file_source: Optional[BuildFileSource] = None,
     ):
         """
         Initialize SCIP generator.
@@ -161,8 +162,13 @@ class SCIPGenerator:
                 bare/unbuilt golden repo emits a degenerate index rather than
                 exit-71. Only the delegated backend uses it; ``False`` (default) is
                 correct for the local backend and the non-golden delegated path.
+            build_file_source: Where project discovery asks about the
+                repository's files. ``None`` (default) = this machine's disk; a
+                pod without the repository passes a content-seam source
+                (``server/services/scip_repo_reads.build_file_source``).
         """
         self.repo_root = Path(repo_root)
+        self._build_file_source = build_file_source
         self.scip_dir = scip_index_dir(self.repo_root)
         self.max_workers = max_workers
         self.workspace_id = workspace_id
@@ -303,7 +309,7 @@ class SCIPGenerator:
         start_time = time.time()
 
         # Discover projects
-        discovery = ProjectDiscovery(self.repo_root)
+        discovery = ProjectDiscovery(self.repo_root, self._build_file_source)
         projects = discovery.discover()
 
         # Clean up orphan SCIP databases before generation
@@ -445,7 +451,9 @@ class SCIPGenerator:
 
         # Clean up orphan SCIP databases before rebuilding
         # This ensures stale data from deleted/moved projects is removed
-        discovered_projects = ProjectDiscovery(self.repo_root).discover()
+        discovered_projects = ProjectDiscovery(
+            self.repo_root, self._build_file_source
+        ).discover()
         self._cleanup_orphan_scip_databases(discovered_projects)
 
         # Determine which projects to rebuild

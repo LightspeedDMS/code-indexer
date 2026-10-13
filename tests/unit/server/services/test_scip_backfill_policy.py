@@ -34,7 +34,7 @@ def test_eligibility_tracks_not_discoverable_and_language_skipped(
     routes = {"none": [], "wrong": [_Proj("ruby")], "ok": [_Proj("python")]}
 
     class _PD:
-        def __init__(self, repo_path: Path) -> None:
+        def __init__(self, repo_path: Path, source: Any = None) -> None:
             self._name = repo_path.name
 
         def discover(self) -> List[Any]:

@@ -95,7 +95,13 @@ def _index_is_outdated(policy: "IndexBackfillPolicy", repo_path: Path) -> bool:
     """
     try:
         return not policy.is_fresh(repo_path)
-    except Exception:  # noqa: BLE001 - a policy hook must never abort the sweep
+    except Exception as exc:  # noqa: BLE001 - a policy hook must never abort the sweep
+        logger.warning(
+            "golden_index_backfill[%s]: freshness check failed for %s: %s",
+            getattr(policy, "name", "?"),
+            repo_path,
+            exc,
+        )
         return False
 
 

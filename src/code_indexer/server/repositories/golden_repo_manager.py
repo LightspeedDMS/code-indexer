@@ -1636,9 +1636,11 @@ class GoldenRepoManager:
         :func:`code_indexer.scip.discovery.has_root_build_file` so the reconcile presence
         check and the funnel freshness check (``scip_lifecycle.scip_db_is_fresh``) stay in
         lockstep."""
-        from code_indexer.scip.discovery import has_root_build_file
+        from code_indexer.server.services.scip_repo_reads import (
+            repo_has_root_build_file,
+        )
 
-        return has_root_build_file(repo_dir)
+        return repo_has_root_build_file(repo_dir)
 
     def _scip_present(self, repo_dir: "Path") -> bool:
         """True if the repo already holds the SCIP index the CURRENT discovery produces.

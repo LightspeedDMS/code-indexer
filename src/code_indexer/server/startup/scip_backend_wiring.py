@@ -227,6 +227,9 @@ def build_scip_generator(
         unset or sandbox-mcp is unreachable. No BACKEND fallback is performed.
     """
     from code_indexer.scip.generator import SCIPGenerator  # noqa: PLC0415
+    from code_indexer.server.services.scip_repo_reads import (  # noqa: PLC0415
+        build_file_source,
+    )
     from code_indexer.scip.indexers.factory import (  # noqa: PLC0415
         ScipBackendFactory,
     )
@@ -240,6 +243,10 @@ def build_scip_generator(
     # the eager startup call site (lifespan.py) so both
     # paths use the identical check (DRY) — see validate_scip_backend_config.
     validate_scip_backend_config(config)
+
+    # Discovery reads go where the repository is: this pod's disk, or the
+    # content seam when the repository is not here (scip_repo_reads).
+    discovery_source = build_file_source(repo_root)
 
     if backend_type == ScipBackendFactory.DELEGATED_PLUGIN:
         backend = _resolve_scip_execution_backend()
@@ -263,6 +270,7 @@ def build_scip_generator(
             workspace_id=workspace_id,
             golden_alias=golden_alias,
             allow_degenerate=allow_degenerate,
+            build_file_source=discovery_source,
         )
 
     if backend_type == "delegated":
@@ -290,6 +298,7 @@ def build_scip_generator(
             workspace_id=workspace_id,
             golden_alias=golden_alias,
             allow_degenerate=allow_degenerate,
+            build_file_source=discovery_source,
         )
 
     # "local" (validated above — an unrecognised value already raised).
@@ -300,6 +309,7 @@ def build_scip_generator(
         workspace_id=workspace_id,
         golden_alias=golden_alias,
         allow_degenerate=allow_degenerate,
+        build_file_source=discovery_source,
     )
 
 
