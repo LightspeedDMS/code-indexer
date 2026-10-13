@@ -137,7 +137,7 @@
 - [Backlog to zero](project_backlog_clear_to_zero_mandate.md) - clear the bug backlog, running tally
 - [Backlog closing E2E](project_backlog_clear_ends_with_staging_e2e.md) - at priority-4-only, raise staging E2E (discuss first)
 - [Batch 1950-1956](project_batch_1950_1956_pending_staging.md) - NOT done until driven through both staging front doors
-- [Package 2087 resume](project_release_package_2087_resume_state.md) - READ FIRST after a reset: 12.84.0 in production; 12.87.0 validated on staging (solo + cluster), awaiting owner promotion decision
+- [Package 2087 resume](project_release_package_2087_resume_state.md) - READ FIRST after a reset: 12.87.0 in production; release issues closed, review follow-ups stay open
 - [Release 1873-1876](project_release_1873_1876_overnight_state.md) - resume state for the 2026-09-16 release
 - [Backlog paused 08-27](project_backlog_session_paused_2026_08_27.md) - resume state for the 2026-08-27 sweep (supersedes [VM migration pause](project_backlog_session_paused_for_vm_migration.md))
 - [pytest tmp](project_pytest_tmp_accumulates_unbounded.md) - clean pytest tmp dirs >15 min old
