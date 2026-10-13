@@ -880,9 +880,11 @@ def make_lifespan(
 
         # X-Ray execution seam (xray_backend, a bootstrap key). None under
         # local: each RustNativeBackend runs xray-cli in this pod, as before.
-        # Deliberately OUTSIDE any try: an invalid or not-yet-implemented
-        # selection (delegated) must stop startup, because a swallowed error
-        # would leave this unset and X-Ray would quietly run caller code here.
+        # Under delegated, the backend comes from the code_indexer.xray_backend
+        # plugin. Deliberately OUTSIDE any try: an invalid selection, or
+        # delegated without a loadable plugin, must stop startup, because a
+        # swallowed error would leave this unset and X-Ray would quietly run
+        # caller code here.
         from code_indexer.server.startup.xray_backend_wiring import (
             build_configured_xray_execution_backend,
         )
