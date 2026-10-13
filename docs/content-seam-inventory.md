@@ -8,10 +8,10 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | Class | Rows |
 |---|---|
 | unclassified | 0 |
-| repo-read | 461 |
+| repo-read | 452 |
 | repo-write | 93 |
 | cidx-state-in-repo | 1297 |
-| migrated | 139 |
+| migrated | 148 |
 | local-only | 173 |
 | cidx-state | 526 |
 | not-repo | 418 |
@@ -90,8 +90,6 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/mcp/handlers/repos.py` | 0 | 5 | 0 | 4 |
 | `server/mcp/handlers/search/regex_search.py` | 0 | 1 | 0 | 0 |
 | `server/mcp/handlers/search/repo_search.py` | 0 | 1 | 0 | 0 |
-| `server/mcp/handlers/xray/_dump_ast.py` | 0 | 4 | 0 | 0 |
-| `server/mcp/handlers/xray_graph/_candidates.py` | 0 | 1 | 0 | 0 |
 | `server/mcp/memory_retrieval_pipeline.py` | 0 | 0 | 0 | 2 |
 | `server/multi/multi_search_service.py` | 0 | 1 | 0 | 1 |
 | `server/multi/scip_multi_service.py` | 0 | 1 | 0 | 1 |
@@ -250,7 +248,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `utils/yaml_utils.py` | 0 | 0 | 0 | 5 |
 | `xray/ast_engine.py` | 0 | 1 | 0 | 0 |
 | `xray/rust_backend.py` | 0 | 2 | 0 | 0 |
-| `xray/search_engine.py` | 0 | 5 | 0 | 0 |
+| `xray/search_engine.py` | 0 | 1 | 0 | 0 |
 
 ## Local git and .git probes still open in the indexing and query paths
 
