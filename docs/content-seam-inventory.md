@@ -10,10 +10,10 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | unclassified | 0 |
 | repo-read | 452 |
 | repo-write | 93 |
-| cidx-state-in-repo | 1241 |
-| migrated | 196 |
-| local-only | 179 |
-| cidx-state | 526 |
+| cidx-state-in-repo | 1017 |
+| migrated | 275 |
+| local-only | 324 |
+| cidx-state | 533 |
 | not-repo | 421 |
 
 ## Modules with open rows
@@ -30,7 +30,6 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `global_repos/alias_manager.py` | 0 | 1 | 0 | 2 |
 | `global_repos/cleanup_manager.py` | 0 | 2 | 5 | 0 |
 | `global_repos/control_plane_metadata.py` | 0 | 0 | 0 | 10 |
-| `global_repos/dependency_map_analyzer.py` | 0 | 0 | 0 | 35 |
 | `global_repos/directory_explorer.py` | 0 | 5 | 0 | 0 |
 | `global_repos/frontmatter_verifier.py` | 0 | 0 | 0 | 2 |
 | `global_repos/git_operations.py` | 0 | 14 | 0 | 0 |
@@ -82,9 +81,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/managers/composite_file_listing.py` | 0 | 6 | 0 | 0 |
 | `server/mcp/handlers/_legacy.py` | 0 | 4 | 0 | 3 |
 | `server/mcp/handlers/_provider_temporal_job.py` | 0 | 0 | 0 | 1 |
-| `server/mcp/handlers/depmap.py` | 0 | 0 | 0 | 3 |
 | `server/mcp/handlers/files.py` | 0 | 1 | 0 | 0 |
-| `server/mcp/handlers/guides.py` | 0 | 0 | 0 | 3 |
 | `server/mcp/handlers/repos.py` | 0 | 5 | 0 | 4 |
 | `server/mcp/handlers/search/regex_search.py` | 0 | 1 | 0 | 0 |
 | `server/mcp/handlers/search/repo_search.py` | 0 | 1 | 0 | 0 |
@@ -104,7 +101,6 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/routers/inline_repos_v2.py` | 0 | 8 | 0 | 0 |
 | `server/routers/repository_health.py` | 0 | 2 | 0 | 6 |
 | `server/services/activated_repo_index_manager.py` | 0 | 5 | 0 | 21 |
-| `server/services/activity_journal_service.py` | 0 | 0 | 0 | 13 |
 | `server/services/alias_lock_store/factory.py` | 0 | 1 | 0 | 0 |
 | `server/services/auto_watch_manager.py` | 0 | 1 | 0 | 1 |
 | `server/services/backfill_journal_service.py` | 0 | 0 | 0 | 6 |
@@ -114,21 +110,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/services/config_seeding.py` | 0 | 0 | 0 | 2 |
 | `server/services/config_service.py` | 0 | 0 | 0 | 6 |
 | `server/services/dashboard_service.py` | 0 | 6 | 0 | 3 |
-| `server/services/dep_map_delta_journal.py` | 0 | 0 | 0 | 5 |
-| `server/services/dep_map_file_utils.py` | 0 | 0 | 0 | 3 |
-| `server/services/dep_map_health_detector.py` | 0 | 0 | 0 | 13 |
-| `server/services/dep_map_index_regenerator.py` | 0 | 0 | 0 | 4 |
-| `server/services/dep_map_mcp_parser.py` | 0 | 0 | 0 | 13 |
-| `server/services/dep_map_parser_graph.py` | 0 | 0 | 0 | 4 |
-| `server/services/dep_map_repair_bidirectional.py` | 0 | 0 | 0 | 1 |
-| `server/services/dep_map_repair_bidirectional_backfill.py` | 0 | 0 | 0 | 1 |
-| `server/services/dep_map_repair_executor.py` | 0 | 0 | 0 | 17 |
-| `server/services/dep_map_repair_garbage_domain.py` | 0 | 0 | 0 | 4 |
-| `server/services/dep_map_repair_malformed_yaml.py` | 0 | 0 | 0 | 3 |
-| `server/services/dep_map_repair_phase37.py` | 0 | 0 | 0 | 5 |
-| `server/services/dependency_map_dashboard_service.py` | 0 | 0 | 0 | 2 |
-| `server/services/dependency_map_domain_service.py` | 0 | 0 | 0 | 10 |
-| `server/services/dependency_map_service.py` | 0 | 4 | 0 | 58 |
+| `server/services/dependency_map_service.py` | 0 | 4 | 0 | 0 |
 | `server/services/description_refresh_scheduler.py` | 0 | 0 | 0 | 9 |
 | `server/services/diagnostics_service.py` | 0 | 1 | 0 | 5 |
 | `server/services/file_crud_service.py` | 0 | 1 | 11 | 0 |
@@ -158,25 +140,21 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/services/scip_query_service.py` | 0 | 4 | 0 | 1 |
 | `server/services/search_service.py` | 0 | 4 | 0 | 0 |
 | `server/services/semantic_backfill/policy.py` | 0 | 3 | 0 | 8 |
-| `server/services/shared_job_sentinel.py` | 0 | 0 | 0 | 7 |
 | `server/services/stats_service.py` | 0 | 7 | 0 | 1 |
 | `server/services/temporal_legacy_migration/discovery.py` | 0 | 3 | 0 | 0 |
 | `server/services/temporal_legacy_migration/mover.py` | 0 | 0 | 0 | 54 |
 | `server/services/temporal_legacy_migration/verification.py` | 0 | 0 | 0 | 15 |
 | `server/services/versioned_snapshot_reclaim.py` | 0 | 1 | 0 | 1 |
 | `server/services/versioned_snapshot_reconciler.py` | 0 | 0 | 0 | 2 |
-| `server/services/xray_pattern_service.py` | 0 | 0 | 0 | 10 |
 | `server/startup/bootstrap.py` | 0 | 3 | 0 | 6 |
 | `server/startup/claude_cli_startup.py` | 0 | 0 | 0 | 1 |
 | `server/startup/clone_backend_wiring.py` | 0 | 3 | 0 | 0 |
-| `server/startup/lifespan.py` | 0 | 1 | 0 | 7 |
+| `server/startup/lifespan.py` | 0 | 1 | 0 | 6 |
 | `server/startup/nfs_self_check.py` | 0 | 0 | 0 | 6 |
-| `server/storage/filesystem_backends.py` | 0 | 0 | 0 | 5 |
 | `server/storage/migration_service.py` | 0 | 0 | 0 | 6 |
 | `server/storage/shared/nfs_validator.py` | 0 | 1 | 0 | 7 |
 | `server/utils/cow_utils.py` | 0 | 0 | 3 | 0 |
 | `server/validators/composite_repo_validator.py` | 0 | 0 | 0 | 2 |
-| `server/web/dependency_map_routes.py` | 0 | 0 | 0 | 4 |
 | `server/web/routes.py` | 0 | 0 | 0 | 9 |
 | `server/wiki/routes.py` | 0 | 19 | 0 | 0 |
 | `server/wiki/wiki_cache.py` | 0 | 4 | 0 | 0 |

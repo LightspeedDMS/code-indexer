@@ -230,6 +230,8 @@ smoke:
       tests/unit/server/startup/test_xray_backend_wiring.py
       tests/unit/server/services/test_cidx_meta_content.py
       tests/unit/server/services/test_cidx_meta_shared_writers.py
+      tests/unit/server/services/test_cidx_meta_dep_map_reads.py
+      tests/unit/server/services/test_cidx_meta_dep_map_writes.py
       tests/unit/global_repos/test_refresh_cidx_meta_shared_content.py
       tests/unit/server/utils/test_index_command_layout_1488.py
       tests/unit/server/services/test_fts_index_builder.py

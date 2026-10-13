@@ -51,6 +51,19 @@ def _ensure_dep_map_output_dir(golden_repos_dir: Union[str, Path]) -> Path:
     return dep_map_dir
 
 
+def _dep_map_dir_is_on_this_disk() -> bool:
+    """Whether cidx-meta's dependency map is on this pod's disk (local content
+    backend). Under a delegated backend it is shared content behind
+    workspace-mcp and analysis is refused here (dep_map_delegated), so the
+    startup staging cleanup, eager output directory and stale-sentinel sweep
+    -- all on this pod's directory -- are skipped."""
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    return not is_content_seam_delegated()
+
+
 def _make_dep_map_repair_invoker_fn(
     dep_map_dir: Path,
     tracking_backend: Any,
@@ -3125,6 +3138,9 @@ def make_lifespan(
                     DescriptionRefreshTrackingBackend(db_path)
                 )
 
+            # See _dep_map_dir_is_on_this_disk: skipped under delegated.
+            _dep_map_shared = not _dep_map_dir_is_on_this_disk()
+
             # Bug #383: Clean stale staging directory on server startup.
             # A prior crashed analysis may have left dependency-map.staging/ behind.
             # RefreshScheduler would index it and bake it into versioned snapshots,
@@ -3133,7 +3149,7 @@ def make_lifespan(
                 staging_dir = (
                     Path(golden_repos_dir) / "cidx-meta" / "dependency-map.staging"
                 )
-                if staging_dir.exists():
+                if not _dep_map_shared and staging_dir.exists():
                     import shutil as _shutil
 
                     _shutil.rmtree(staging_dir)
@@ -3180,14 +3196,15 @@ def make_lifespan(
             # very first dashboard HTMX poll sees `_get_dep_map_output_dir()`
             # return None and renders a spurious "infrastructure unavailable"
             # error, even though the directory would exist moments later.
-            _ensure_dep_map_output_dir(golden_repos_dir)
+            if not _dep_map_shared:
+                _ensure_dep_map_output_dir(golden_repos_dir)
 
             # Bug #1040 follow-up: clean stale sentinel lock files on startup.
             # Server restart kills analysis threads but leaves sentinel files on
             # disk, blocking the dep-map UI with a stuck "Processing..." state.
             # CLUSTER SAFETY (Codex SENTINEL-1): only delete sentinels owned by
             # THIS node. Sibling nodes may have live jobs behind their sentinels.
-            if _dep_map_dir.exists():
+            if not _dep_map_shared and _dep_map_dir.exists():
                 import glob as _glob_sentinel
                 import json as _json_sentinel
                 import socket as _socket_sentinel

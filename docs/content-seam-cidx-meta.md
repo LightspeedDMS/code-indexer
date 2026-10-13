@@ -72,14 +72,30 @@ and then fails with that reason on every cycle (changed or not) until the
 backup is disabled. Backing up shared content needs a workspace-mcp side
 mechanism (it owns the files); out of scope here.
 
-## Not migrated yet (still read/write the pod's directory)
+## Dependency map and X-Ray patterns
 
-| Area | Why it is separate |
+| Part | Under delegated |
 |---|---|
-| Dependency map (`dependency_map_service`, `dependency_map_analyzer`, `dep_map_*` repairs/parsers/journals, `activity_journal_service`, `shared_job_sentinel`, depmap MCP handlers and web routes, dashboard cache) | ~200 accesses; its Claude agent runs with `cwd` in golden-repos and reads repositories itself (an LLM-agent consumer that needs a checkout or cidx MCP tools), and its sentinels/journals coordinate through files in cidx-meta |
-| X-Ray patterns (`xray_pattern_service`) | owned by the X-Ray sandbox work; store/load/delete/seed and its git commit must move together |
-| `guides._build_dependency_map_section`, `frontmatter_verifier` | dependency-map / tooling readers |
-| Startup (`bootstrap` override YAML, `lifespan` dep-map dirs/sentinels, `nfs_self_check`) | index config and probes on the pod's own directory, not content |
+| Readers: depmap MCP tools + `DepMapMCPParser`/graph, domain and dashboard services, health detector, quick-reference section, dashboard/health routes | Read `cidx_meta_read_path`, which is the **read mirror** `<golden_repos_dir>/.cidx-meta-read-mirror`: `dependency-map/**` and the top-level descriptions, synced from the manifest (only changed blob shas fetched, removed files dropped; at most every 5 s). A sync failure raises; never an empty map. Local: the versioned snapshot, as before. |
+| Writers: full/delta analysis, refinement, repair (incl. graph-repair dry run), lifecycle pre-flight, scheduler | **Refused** (`dep_map_delegated`): the Claude agent runs with `cwd` in golden-repos and reads the repositories with its own file tools, so on a mount-less pod it would publish an empty or partial map. Routes answer 501 and the MCP trigger an error BEFORE any sentinel is claimed; the service methods raise; the scheduler is not started. |
+| Analysis sentinel (`SharedJobSentinel`) | Same protocol on the writer's CAS: claim = create-if-absent, stale replace and release conditional on the bytes read. |
+| Dashboard cache (`_dashboard_cache.json`) | `SharedContentDashboardCacheBackend`: same file and interface; job-slot claim/swap are real CAS. |
+| Startup (staging cleanup, eager dir, stale-sentinel sweep) | Skipped: the pod's directory is not the map. |
+| X-Ray patterns (store/load/delete/seed) | Through the seam; store without overwrite and seeding are "must not exist". **No git commit**: it only fed the cidx-meta git backup, refused under delegated, and git-mcp does not hold cidx-meta. |
+
+Why refuse rather than redesign the agent: giving it repository context
+through cidx's MCP tools (browse/get_file_content/search) instead of a local
+tree changes its prompts, tool budget and output quality -- a product change
+to plan and evaluate, not a seam change. Until then analysis runs only where
+the repositories are mounted; the map it produced stays readable everywhere.
+
+## Still on the pod's directory
+
+| Area | Why |
+|---|---|
+| `bootstrap` override YAML, `claude_cli_startup` mkdir, `nfs_self_check` | index config and probes of the pod's own directory, not content |
+| `memory_retrieval_pipeline` `.resolve` | path confinement on the pod path; the read itself is through the seam |
+| `frontmatter_verifier` | no server caller |
 
 ## Deployment
 

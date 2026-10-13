@@ -104,12 +104,12 @@ def _get_dashboard_cache_backend():
 
     Returns None if _get_dep_map_output_dir() returns None (dep-map disabled/unavailable).
     """
-    dep_map_dir = _get_dep_map_output_dir()
+    dep_map_dir = _get_dep_map_coordination_dir()
     if dep_map_dir is None:
         return None
-    from ..storage.filesystem_backends import FilesystemDashboardCacheBackend
+    from ..storage.filesystem_backends import dashboard_cache_backend_for
 
-    return FilesystemDashboardCacheBackend(cache_dir=dep_map_dir)
+    return dashboard_cache_backend_for(dep_map_dir)
 
 
 def _get_job_tracker():
@@ -968,7 +968,7 @@ def depmap_job_status_partial(request: Request):
     # STATE 3b: check dashboard SharedJobSentinel for a winner on another node.
     # If another node holds the "dashboard" sentinel, attach to its job_id and
     # render the computing partial WITHOUT submitting a new job.
-    _sentinel_dir_db = _get_dep_map_output_dir()
+    _sentinel_dir_db = _get_dep_map_coordination_dir()
     if _sentinel_dir_db is not None:
         try:
             from ..services.shared_job_sentinel import SharedJobSentinel as _SJS_DB
@@ -1305,6 +1305,42 @@ def depmap_graph_data(request: Request):
         return JSONResponse(content={"nodes": [], "edges": []})
 
 
+def _delegated_dep_map_dir() -> Optional[Path]:
+    """The shared dependency-map path (inside cidx-meta) under a delegated
+    content backend, else None. It is workspace-mcp's, not this pod's disk."""
+    from ..startup.content_backend_wiring import is_content_seam_delegated
+
+    if not is_content_seam_delegated():
+        return None
+    dep_map_service = _get_dep_map_service_from_state()
+    if dep_map_service is None:
+        return None
+    sentinel_dir: Optional[Path] = dep_map_service.get_sentinel_dir()
+    return sentinel_dir
+
+
+def _get_dep_map_coordination_dir() -> Optional[Path]:
+    """Where the dashboard cache and sentinels live: the shared
+    dependency-map path under a delegated backend (the cache backend and the
+    sentinel then go through the content seam), else the output dir."""
+    shared_dir = _delegated_dep_map_dir()
+    if shared_dir is not None:
+        return shared_dir
+    return _get_dep_map_output_dir()
+
+
+def _analysis_refused_response() -> Optional[JSONResponse]:
+    """501 with the reason when dependency-map analysis/repair cannot run on
+    this server (delegated content backend), checked BEFORE any sentinel is
+    claimed or thread started; else None."""
+    from ..services.dep_map_delegated import analysis_refusal
+
+    refusal = analysis_refusal()
+    if refusal is None:
+        return None
+    return JSONResponse(content={"error": refusal}, status_code=501)
+
+
 def _get_dep_map_output_dir() -> Optional[Path]:
     """
     Get the dependency map output directory path (Story #342, Story #1035 B6).
@@ -1317,6 +1353,13 @@ def _get_dep_map_output_dir() -> Optional[Path]:
     Falls back to config-based derivation when the service is not wired up.
     """
     try:
+        # Delegated content backend: the map is shared content; readers walk
+        # the pod-local read mirror of it (synced now; a failure raises into
+        # the warning below and the map reads as unavailable, never empty).
+        if _delegated_dep_map_dir() is not None:
+            mirror_dir = _dep_map_mirror_dir()
+            return mirror_dir if mirror_dir.exists() else None
+
         # B6: prefer the service's authoritative path computation
         dep_map_service = _get_dep_map_service_from_state()
         if dep_map_service is not None:
@@ -1337,6 +1380,14 @@ def _get_dep_map_output_dir() -> Optional[Path]:
     except Exception as e:
         logger.warning("Failed to get dep map output dir: %s", e)
         return None
+
+
+def _dep_map_mirror_dir() -> Path:
+    """The dependency-map directory of the synced cidx-meta read mirror."""
+    from ..services.cidx_meta_read_mirror import DEPENDENCY_MAP_DIR
+
+    dep_map_service = _get_dep_map_service_from_state()
+    return Path(dep_map_service.cidx_meta_read_path) / DEPENDENCY_MAP_DIR
 
 
 def _get_known_repo_names() -> Optional[Set[str]]:
@@ -1708,6 +1759,10 @@ def trigger_dependency_map_repair(request: Request):
             status_code=503,
         )
 
+    refused = _analysis_refused_response()
+    if refused is not None:
+        return refused
+
     if not dep_map_service.is_available():
         return JSONResponse(
             content={"error": "Analysis already in progress"},
@@ -1793,6 +1848,10 @@ def trigger_dependency_map(
             },
             status_code=503,
         )
+
+    refused = _analysis_refused_response()
+    if refused is not None:
+        return refused
 
     # Story #1035 — B2/B3: pre-flight sentinel check; on conflict, include
     # active job_id from the shared sentinel in the 409 body.
@@ -1982,6 +2041,10 @@ def trigger_refinement(request: Request):
             },
             status_code=503,
         )
+
+    refused = _analysis_refused_response()
+    if refused is not None:
+        return refused
 
     if not dep_map_service.is_available():
         return JSONResponse(

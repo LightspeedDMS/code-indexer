@@ -126,6 +126,30 @@ def _build_dependency_map_section(cidx_meta_path: Path) -> str:
     )
 
 
+def _dependency_map_read_root(cidx_meta_path: Path) -> Path:
+    """Where the dependency map is read: cidx-meta itself, or -- under a
+    delegated content backend -- the synced read mirror of its shared content.
+
+    The section is an optional hint, so a mirror that cannot sync is logged
+    at ERROR and the section omitted (an empty mirror root has no map); the
+    rest of the quick reference is still served.
+    """
+    from code_indexer.server.services.cidx_meta_content import (
+        CidxMetaUnavailableError,
+    )
+    from code_indexer.server.services.cidx_meta_read_mirror import (
+        MIRROR_DIRNAME,
+        synced_read_root,
+    )
+
+    try:
+        mirror_root = synced_read_root(cidx_meta_path)
+    except CidxMetaUnavailableError as exc:
+        logger.error("quick_reference: dependency map unavailable: %s", exc)
+        return cidx_meta_path.parent / MIRROR_DIRNAME / "unavailable"
+    return mirror_root if mirror_root is not None else cidx_meta_path
+
+
 def _get_wiki_cache_for_handler():
     """Return a WikiCache instance using golden_repo_manager.db_path.
 
@@ -346,7 +370,9 @@ def quick_reference(
                 Path(_utils.app_module.golden_repo_manager.golden_repos_dir)
                 / "cidx-meta"
             )
-            dependency_map_section = _build_dependency_map_section(cidx_meta_path)
+            dependency_map_section = _build_dependency_map_section(
+                _dependency_map_read_root(cidx_meta_path)
+            )
             if dependency_map_section:
                 response["dependency_map"] = dependency_map_section
 

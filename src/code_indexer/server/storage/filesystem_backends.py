@@ -393,3 +393,126 @@ class FilesystemDashboardCacheBackend:
         updated = dict(cached)
         updated["job_id"] = None
         self._write_atomic(updated)
+
+
+class SharedContentDashboardCacheBackend(FilesystemDashboardCacheBackend):
+    """The dashboard cache file as cidx-meta SHARED content (delegated backend).
+
+    Same file (``<dependency-map>/_dashboard_cache.json``) and interface, read
+    through the content backend and written through the content writer, so
+    every pod sees one cache as it did on the shared volume. Plain writes are
+    last-writer-wins, as the local atomic replace is; the two job-slot claims
+    -- the cross-pod dedup -- are real compare-and-swaps on the bytes read,
+    where the local version is a read-modify-write.
+    """
+
+    def __init__(self, cache_dir: Path, shared: Any) -> None:
+        self._cache_dir = Path(cache_dir)
+        self._cache_file = self._cache_dir / self._CACHE_FILENAME
+        self._shared = shared
+
+    def _read_with_sha(self) -> "tuple[Optional[Dict[str, Any]], Optional[str]]":
+        try:
+            raw, sha = self._shared.read_with_sha(self._cache_file)
+        except FileNotFoundError:
+            return None, None
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "SharedContentDashboardCacheBackend: corrupt JSON, treating as "
+                "absent: %s",
+                exc,
+            )
+            return None, sha
+        return data if isinstance(data, dict) else None, sha
+
+    def get_cached(self) -> Optional[Dict[str, Any]]:
+        data, _sha = self._read_with_sha()
+        if data is None:
+            return None
+        return {
+            key: data.get(key)
+            for key in (
+                "result_json",
+                "computed_at",
+                "job_id",
+                "last_failure_message",
+                "last_failure_at",
+            )
+        }
+
+    def _write_atomic(self, payload: Dict[str, Any]) -> None:
+        self._shared.put(self._cache_file, json.dumps(payload).encode("utf-8"))
+
+    def _swap(self, payload: Dict[str, Any], expected_sha: Optional[str]) -> bool:
+        """Write *payload* only over exactly the bytes read (or onto no file)."""
+        from code_indexer.server.services.cidx_meta_content import (
+            CidxMetaConflictError,
+        )
+
+        try:
+            self._shared.put(
+                self._cache_file,
+                json.dumps(payload).encode("utf-8"),
+                expected=expected_sha,
+            )
+        except CidxMetaConflictError:
+            return False
+        return True
+
+    def claim_job_slot(self, new_job_id: str) -> Optional[str]:
+        data, sha = self._read_with_sha()
+        if data is not None and data.get("job_id") is not None:
+            return str(data["job_id"])
+        payload = dict(data) if data is not None else _empty_cache_payload()
+        payload["job_id"] = new_job_id
+        if self._swap(payload, sha):
+            return None
+        current = self.get_cached() or {}
+        # Lost the race: report the winner (an unknown winner still blocks).
+        return str(current.get("job_id") or "unknown")
+
+    def set_job_slot(self, job_id: str, expected_current: Optional[str]) -> bool:
+        data, sha = self._read_with_sha()
+        current = data.get("job_id") if data is not None else None
+        if current != expected_current:
+            logger.warning(
+                "SharedContentDashboardCacheBackend.set_job_slot: CAS failed -- "
+                "slot holds %r, expected_current=%r; job_id=%r not applied",
+                current,
+                expected_current,
+                job_id,
+            )
+            return False
+        payload = dict(data) if data is not None else _empty_cache_payload()
+        payload["job_id"] = job_id
+        if self._swap(payload, sha):
+            return True
+        logger.warning(
+            "SharedContentDashboardCacheBackend.set_job_slot: slot changed by "
+            "another writer; job_id=%r not applied",
+            job_id,
+        )
+        return False
+
+
+def _empty_cache_payload() -> Dict[str, Any]:
+    return {
+        "computed_at": None,
+        "job_id": None,
+        "result_json": None,
+        "last_failure_message": None,
+        "last_failure_at": None,
+    }
+
+
+def dashboard_cache_backend_for(cache_dir: Path) -> FilesystemDashboardCacheBackend:
+    """The dashboard cache backend for *cache_dir*: shared content under a
+    delegated content backend, this disk (exactly as before) otherwise."""
+    from code_indexer.server.services.cidx_meta_content import shared_cidx_meta_for
+
+    shared = shared_cidx_meta_for(cache_dir)
+    if shared is not None:
+        return SharedContentDashboardCacheBackend(cache_dir, shared)
+    return FilesystemDashboardCacheBackend(cache_dir=cache_dir)
