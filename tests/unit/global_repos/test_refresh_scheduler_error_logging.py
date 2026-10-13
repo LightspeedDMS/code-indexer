@@ -264,3 +264,70 @@ class TestCleanupErrorLogging:
             assert alias_name in log_message, (
                 f"Log must contain alias '{alias_name}', got: {log_message}"
             )
+
+
+class TestEmptyMetaDirectory:
+    """cidx-meta with no description written yet has nothing to index. That
+    is its normal state on a new server (and where description generation is
+    unavailable), so its refresh succeeds; every other "no files" still fails.
+    Mutations: drop the tolerance (the meta refresh raises); drop the alias
+    scope (a git repo with no files passes); drop the message check (any
+    cidx-meta failure passes)."""
+
+    NO_FILES = (
+        "Failed to indexing on source for cidx-meta-global: 🔧 Running in local mode\n"
+        "📁 Non-git project: cidx-meta\n❌ Indexing failed: No files found to index\n"
+    )
+
+    def _index(self, scheduler, mock_registry, tmp_path, alias, error):
+        mock_registry.get_global_repo.return_value = {
+            "alias_name": alias,
+            "repo_url": "local://cidx-meta",
+            "enable_temporal": False,
+            "enable_scip": False,
+        }
+        source_path = tmp_path / "cidx-meta"
+        source_path.mkdir()
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=IndexingSubprocessError(error),
+            ):
+                scheduler._index_source(alias, str(source_path))
+
+    def test_an_empty_cidx_meta_refreshes_without_failing(
+        self, scheduler, caplog, mock_registry, tmp_path
+    ):
+        with caplog.at_level(logging.INFO):
+            self._index(
+                scheduler, mock_registry, tmp_path, "cidx-meta-global", self.NO_FILES
+            )
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+        assert any("has no files to index yet" in r.message for r in caplog.records)
+
+    def test_a_git_repo_with_no_files_still_fails(
+        self, scheduler, mock_registry, tmp_path
+    ):
+        with pytest.raises(RuntimeError, match="indexing on source failed"):
+            self._index(
+                scheduler,
+                mock_registry,
+                tmp_path,
+                "test-repo-global",
+                self.NO_FILES.replace("cidx-meta-global", "test-repo-global"),
+            )
+
+    def test_any_other_cidx_meta_failure_still_fails(
+        self, scheduler, mock_registry, tmp_path
+    ):
+        with pytest.raises(RuntimeError, match="indexing on source failed"):
+            self._index(
+                scheduler,
+                mock_registry,
+                tmp_path,
+                "cidx-meta-global",
+                "Failed to indexing on source for cidx-meta-global: out of memory",
+            )

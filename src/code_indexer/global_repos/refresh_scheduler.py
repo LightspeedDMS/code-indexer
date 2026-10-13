@@ -60,6 +60,7 @@ from code_indexer.server.services.cidx_meta_backup import (
     detect_default_branch,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.constants import CIDX_META_REPO_GLOBAL
 from code_indexer.server.utils.index_command_layout import is_pod_local_repo
 from code_indexer.server.startup.content_backend_wiring import (
     configured_content_backend_name,
@@ -469,6 +470,28 @@ def _is_git_repo_url(repo_url: str) -> bool:
 # Markers older than this are treated as orphaned (client disconnected without
 # calling exit_write_mode) and are cleaned up automatically.
 WRITE_MODE_MARKER_TTL_SECONDS = 1800  # 30 minutes
+
+
+#: What ``cidx index`` prints when the source holds no indexable file.
+_NO_FILES_TO_INDEX = "No files found to index"
+
+
+def _is_empty_meta_directory_index(
+    alias_name: str, phase_name: str, output: str
+) -> bool:
+    """True when the semantic index of the cidx-meta directory found no file.
+
+    cidx-meta holds generated repository descriptions; until one is written
+    (a new server, or one whose description generation is unavailable) it is
+    empty, which is a normal state, and golden-repo registration already
+    accepts it. Any other repository with no files is a fault worth failing
+    the refresh for, so this is scoped to cidx-meta's semantic step.
+    """
+    return (
+        alias_name == CIDX_META_REPO_GLOBAL
+        and phase_name == "semantic"
+        and _NO_FILES_TO_INDEX in output
+    )
 
 
 class RefreshScheduler:
@@ -3886,6 +3909,17 @@ class RefreshScheduler:
                     raise RuntimeError(
                         f"Indexing interrupted by server shutdown for {alias_name}"
                     )
+                if _is_empty_meta_directory_index(
+                    alias_name,
+                    phase_name,
+                    error_msg + "".join(_popen_stdout) + "".join(_popen_stderr),
+                ):
+                    logger.info(
+                        "%s has no files to index yet (no repository descriptions "
+                        "written); nothing to index this refresh",
+                        alias_name,
+                    )
+                    return
                 logger.error(
                     f"{phase_name} indexing on source failed for {alias_name}: {error_msg}",
                     exc_info=True,

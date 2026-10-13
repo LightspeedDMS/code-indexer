@@ -203,7 +203,7 @@ def _forbid_local_reads(monkeypatch: pytest.MonkeyPatch) -> None:
         "_collect_files_uncached",
         "_collect_single_level",
         "_load_gitignore_spec",
-        "_read_lines_local",
+        "_read_bytes_local",
     ):
         monkeypatch.setattr(FileListingService, name, _boom)
 
@@ -463,6 +463,43 @@ def test_content_matches_local(
         )
         local["metadata"].pop("modified_at")
     assert delegated == local
+
+
+@pytest.mark.parametrize("delegated", [False, True])
+@pytest.mark.parametrize(
+    "file_path,kwargs",
+    [
+        ("README.md", {}),
+        ("crlf.txt", {}),  # decoded lines lose the \r; the hash must not
+        ("binary.dat", {}),  # not UTF-8: decoded with U+FFFD; the hash must not be
+        ("large.txt", {"offset": 4000, "limit": 50}),  # a page; the hash is the file's
+    ],
+)
+def test_content_hash_is_the_files_bytes_as_edit_checks_them(
+    golden: Path,
+    service: FileListingService,
+    monkeypatch: pytest.MonkeyPatch,
+    delegated: bool,
+    file_path: str,
+    kwargs: Dict[str, Any],
+) -> None:
+    """A golden-repo read carries the optimistic-locking hash that edit_file and
+    delete_file check (FileCRUDService: SHA-256 of the bytes), so a write-mode
+    repo's file can be edited from a read. Mutations: hash the decoded lines
+    (crlf/binary differ); hash the returned page (large differs); omit it."""
+    from code_indexer.server.services.file_crud_service import FileCRUDService
+
+    data = (_repo(golden) / file_path).read_bytes()
+    root = _repo(golden)
+    if delegated:
+        _use_backend(monkeypatch, DelegatedBackend())
+        _forbid_local_reads(monkeypatch)
+        root = _snapshot(golden)
+
+    got = service.get_file_content_by_path(str(root), file_path, **kwargs)
+
+    crud = object.__new__(FileCRUDService)
+    assert got["metadata"]["content_hash"] == crud._compute_hash(data)
 
 
 def test_content_reads_one_path_from_the_base_clone(
