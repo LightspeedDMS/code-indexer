@@ -1374,8 +1374,10 @@ class ControlPlaneMetadataConfig:
       own disk). The design's default is ``workspace-mcp``; it is
       ``local-files`` until workspace-mcp's file-write path exists -- the
       workspace-mcp sink fails loud and keeps every row until then.
-    - ``metadata_outbox_drain_timeout_s``: with ``local-files``, how long the
-      leader drains before it stops and logs every undrained key (default 600).
+    - ``metadata_outbox_drain_timeout_s``: with ``local-files``, how long
+      replay may fail continuously before the leader stops, logs every
+      undrained key, and falls back to one recovery probe a minute
+      (default 600).
     """
 
     metadata_read_source: str = METADATA_READ_SOURCE_REGISTRY

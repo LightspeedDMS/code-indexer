@@ -1097,7 +1097,7 @@ function saveLlmCredsConfig() {
                 <tr>
                     <td class="config-label">Outbox Drain Timeout (s)</td>
                     <td class="config-value">{{ config.control_plane_metadata.metadata_outbox_drain_timeout_s }}</td>
-                    <td class="config-description">With local-files, how long the leader drains before it stops and logs every undrained key (default: 600)</td>
+                    <td class="config-description">With local-files, how long replay may fail continuously before the leader stops, logs every undrained key, and retries once a minute until it succeeds (default: 600)</td>
                 </tr>
             </table>
             <div class="form-actions">

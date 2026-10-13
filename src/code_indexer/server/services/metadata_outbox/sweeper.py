@@ -19,12 +19,19 @@ fleet, on the elected leader -- replays the outbox to the old files:
   starts on the first sweep with a failed key and is cleared by any sweep
   with none (including one that finds the outbox empty). Once it reaches
   ``metadata_outbox_drain_timeout_s`` the sweeper stops, logs every key still
-  in the outbox by name, and does NOT keep retrying -- the rollback gate
-  (depth 0) stays red. A healthy server therefore never reaches the bound,
-  however long it runs.
+  in the outbox by name, and the rollback gate (depth 0) stays red. A healthy
+  server therefore never reaches the bound, however long it runs.
+* **Recovery.** The default sink is local-files, so the bound is armed in
+  steady state too, and an outage longer than the bound (the volume gone for
+  11 minutes) reaches it. That stop is not terminal: once every
+  ``probe_interval_s`` the stopped sweeper replays a batch as a probe, and the
+  first probe that fails no key clears the stop and the clock. A stopped
+  sweeper therefore retries slowly instead of every sweep, and resumes by
+  itself when the files are writable again.
 * **Abandon.** :meth:`abandon` (``POST /api/admin/metadata-outbox/abandon``)
   logs the remaining keys by name, deletes exactly those rows and stops the
-  sweeper; depth is then 0.
+  sweeper; depth is then 0. That stop is an operator's decision, so no probe
+  clears it.
 
 The stop state is in the registry (``metadata_outbox_state``), so an abandon
 on any node stops the leader's sweeper. Changing ``metadata_outbox_sink``
@@ -64,6 +71,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_SWEEP_INTERVAL_SECONDS = 10.0
 #: Rows claimed per sweep. Several rows for one key collapse to one write.
 DEFAULT_SWEEP_BATCH_SIZE = 500
+#: Seconds between recovery probes while stopped at the drain bound.
+DEFAULT_STOPPED_PROBE_INTERVAL_SECONDS = 60.0
 
 STOP_REASON_DRAIN_TIMEOUT = "drain_timeout"
 STOP_REASON_ABANDONED = "abandoned"
@@ -119,6 +128,7 @@ class MetadataOutboxSweeper:
         now_fn: Callable[[], float] = time.time,
         interval_s: float = DEFAULT_SWEEP_INTERVAL_SECONDS,
         batch_size: int = DEFAULT_SWEEP_BATCH_SIZE,
+        probe_interval_s: float = DEFAULT_STOPPED_PROBE_INTERVAL_SECONDS,
     ) -> None:
         self._metadata = metadata
         self._backend = backend
@@ -128,6 +138,8 @@ class MetadataOutboxSweeper:
         self._now_fn = now_fn
         self._interval_s = interval_s
         self._batch_size = batch_size
+        self._probe_interval_s = probe_interval_s
+        self._last_probe: Optional[float] = None
         self._sinks: Dict[str, MetadataSink] = {}
         self._sink_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -154,6 +166,8 @@ class MetadataOutboxSweeper:
 
         if state.stopped_at is not None:
             if state.stopped_sink == settings.sink:
+                if state.stopped_reason == STOP_REASON_DRAIN_TIMEOUT:
+                    return self._probe(settings)
                 return SweepReport(stopped=state.stopped_reason)
             logger.info(
                 "metadata outbox: sink changed %s -> %s; sweeper resumes",
@@ -169,6 +183,35 @@ class MetadataOutboxSweeper:
 
         report = self._replay(self._sink(settings.sink))
         self._advance_drain_clock(settings, state, report)
+        return report
+
+    def _probe(self, settings: OutboxSettings) -> SweepReport:
+        """Stopped at the drain bound: replay once per probe interval, and
+        resume when a replay fails no key. The probe time is per process: a
+        new leader, or a restart, probes on its first sweep."""
+        now = self._now_fn()
+        if (
+            self._last_probe is not None
+            and now - self._last_probe < self._probe_interval_s
+        ):
+            return SweepReport(stopped=STOP_REASON_DRAIN_TIMEOUT)
+        self._last_probe = now
+        report = self._replay(self._sink(settings.sink))
+        if report.failed:
+            report.stopped = STOP_REASON_DRAIN_TIMEOUT
+            return report
+        current = self._backend.get_outbox_state()
+        if current.stopped_reason != STOP_REASON_DRAIN_TIMEOUT:
+            # Abandoned on another node meanwhile: that stop stands.
+            report.stopped = current.stopped_reason
+            return report
+        logger.info(
+            "metadata outbox: replay through %s succeeded again; the sweeper "
+            "stopped at its drain bound resumes",
+            settings.sink,
+        )
+        self._backend.save_outbox_state(OutboxState())
+        self._last_probe = None
         return report
 
     def _clear_drain_clock(self, state: OutboxState) -> None:
@@ -225,6 +268,7 @@ class MetadataOutboxSweeper:
         state.stopped_reason = STOP_REASON_DRAIN_TIMEOUT
         state.stopped_sink = settings.sink
         self._backend.save_outbox_state(state)
+        self._last_probe = self._now_fn()  # the first probe is one interval out
         return SweepReport(stopped=STOP_REASON_DRAIN_TIMEOUT, undrained=undrained)
 
     def _replay(self, sink: MetadataSink) -> SweepReport:

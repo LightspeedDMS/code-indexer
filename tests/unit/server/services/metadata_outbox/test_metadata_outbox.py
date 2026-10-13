@@ -160,6 +160,7 @@ def make_sweeper(
     switches: Switches,
     sinks: Optional[Dict[str, MetadataSink]] = None,
     clock: Optional[Callable[[], float]] = None,
+    probe_interval_s: float = 60.0,
 ) -> MetadataOutboxSweeper:
     table = sinks if sinks is not None else {LOCAL_FILES: LocalFilesSink()}
     return MetadataOutboxSweeper(
@@ -168,6 +169,7 @@ def make_sweeper(
         settings=switches.outbox,
         sink_factory=lambda name: table[name],
         now_fn=clock if clock is not None else Clock(),
+        probe_interval_s=probe_interval_s,
     )
 
 
@@ -431,8 +433,8 @@ def test_10_drain_stopped_at_its_bound_logs_exactly_the_undrained_keys_and_stops
     metadata, backend, switches, golden_repos_dir, caplog
 ):
     """Mutations: drop the log (no key logged); drain past the bound (the
-    sink is tried after the bound); keep retrying after the bound (later
-    sweeps still try)."""
+    sink is tried after the bound); keep retrying every sweep after the bound
+    (a sweep inside the probe interval still tries)."""
     manager = manager_for(golden_repos_dir)
     manager.create_alias("stuck-global", "/snapshots/s")
     manager.create_alias(ALIAS, "/snapshots/v_1")
@@ -449,7 +451,7 @@ def test_10_drain_stopped_at_its_bound_logs_exactly_the_undrained_keys_and_stops
     clock.now += 2
     caplog.set_level(logging.ERROR)
     report = sweeper.sweep_once()
-    clock.now += 600
+    clock.now += 59  # inside the probe interval
     later = sweeper.sweep_once()
 
     assert report.stopped == "drain_timeout"
@@ -459,6 +461,96 @@ def test_10_drain_stopped_at_its_bound_logs_exactly_the_undrained_keys_and_stops
     assert len(sink.attempts) == attempts_inside_bound
     assert later.stopped == "drain_timeout"
     assert backend.outbox_depth() == 1  # rollback gate stays red
+
+
+def _stopped_at_bound(metadata, backend, switches, golden_repos_dir, clock):
+    """A sweeper stopped at its 600 s drain bound by a key it cannot write."""
+    manager_for(golden_repos_dir).create_alias("stuck-global", "/snapshots/s")
+    sink = _FailsForName("stuck-global")
+    switches.drain_timeout_s = 600
+    sweeper = make_sweeper(metadata, backend, switches, {LOCAL_FILES: sink}, clock)
+    sweeper.sweep_once()
+    clock.now += 601
+    assert sweeper.sweep_once().stopped == "drain_timeout"
+    return sweeper, sink
+
+
+def test_a_sweeper_stopped_at_the_bound_resumes_when_the_files_recover(
+    metadata, backend, switches, golden_repos_dir
+):
+    """The volume is gone longer than the bound, then comes back: the stop
+    clears by itself and later changes are replayed. Mutations: never probe
+    while stopped (the outbox never drains); probe every sweep (a sweep
+    inside the interval tries the sink); clear the stop on a failing probe
+    (the stop is gone while the key is still stuck)."""
+    clock = Clock()
+    sweeper, sink = _stopped_at_bound(metadata, backend, switches, golden_repos_dir, clock)
+
+    clock.now += 60
+    attempts = len(sink.attempts)
+    still_failing = sweeper.sweep_once()  # a probe: tried, still failing
+    assert still_failing.stopped == "drain_timeout"
+    assert len(sink.attempts) == attempts + 1
+    assert backend.get_outbox_state().stopped_reason == "drain_timeout"
+
+    clock.now += 30
+    assert sweeper.sweep_once().stopped == "drain_timeout"
+    assert len(sink.attempts) == attempts + 1  # inside the interval: not tried
+
+    sink.stuck_name = "nothing-is-stuck"  # the volume is back
+    clock.now += 30
+    recovered = sweeper.sweep_once()
+    assert recovered.stopped is None
+    assert recovered.replayed == [(KIND_ALIAS, "stuck-global")]
+    assert backend.get_outbox_state().stopped_at is None
+    assert backend.outbox_depth() == 0
+
+    manager_for(golden_repos_dir).create_alias(ALIAS, "/snapshots/v_1")
+    assert sweeper.sweep_once().replayed == [(KIND_ALIAS, ALIAS)]
+    assert alias_file(golden_repos_dir).exists()
+
+
+def test_a_restarted_sweeper_probes_a_persisted_drain_stop_at_once(
+    metadata, backend, switches, golden_repos_dir
+):
+    """The stop survives a restart; the restarted leader probes on its first
+    sweep. Mutation: start a new process's probe interval at construction
+    (the first sweep after the restart does not try)."""
+    clock = Clock()
+    _, sink = _stopped_at_bound(metadata, backend, switches, golden_repos_dir, clock)
+    sink.stuck_name = "nothing-is-stuck"
+
+    restarted = make_sweeper(metadata, backend, switches, {LOCAL_FILES: sink}, clock)
+    report = restarted.sweep_once()
+
+    assert report.stopped is None
+    assert backend.outbox_depth() == 0
+
+
+def test_a_probe_does_not_clear_an_abandon_made_meanwhile(
+    metadata, backend, switches, golden_repos_dir
+):
+    """Abandoned on another node while the probe replayed: the operator's
+    stop stands. Mutation: clear the state without re-reading it."""
+    clock = Clock()
+    sweeper, sink = _stopped_at_bound(metadata, backend, switches, golden_repos_dir, clock)
+    other_node = make_sweeper(metadata, backend, switches, {LOCAL_FILES: sink}, clock)
+
+    class _AbandonDuringPut:
+        name = LOCAL_FILES
+
+        def put(self, path: str, data: bytes) -> None:
+            other_node.abandon(requested_by="admin")
+
+        def delete(self, path: str) -> None:
+            raise AssertionError("not expected")
+
+    sweeper._sinks[LOCAL_FILES] = _AbandonDuringPut()
+    clock.now += 60
+    report = sweeper.sweep_once()
+
+    assert report.stopped == "abandoned"
+    assert backend.get_outbox_state().stopped_reason == "abandoned"
 
 
 def test_healthy_sweeper_never_reaches_the_drain_bound(
