@@ -33,7 +33,8 @@ from unittest.mock import patch
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.xray.rust_backend import RustNativeBackend, resolve_xray_cli_path
+from code_indexer.xray import rust_backend
+from code_indexer.xray.rust_backend import resolve_xray_cli_path
 
 
 def _require_xray_cli_binary() -> None:
@@ -207,7 +208,7 @@ async def test_refine_false_by_default_never_invokes_refine_pass(
             "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
             return_value=str(repo_root),
         ),
-        patch.object(RustNativeBackend, "_run_refine_step") as mock_refine_step,
+        patch.object(rust_backend, "_graph_refine_phase") as mock_refine_step,
     ):
         result = await handler(params, _make_user())
 
@@ -244,7 +245,7 @@ async def test_refine_true_with_empty_refine_set_skips_invocation(
             "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
             return_value=str(repo_root),
         ),
-        patch.object(RustNativeBackend, "_run_refine_step") as mock_refine_step,
+        patch.object(rust_backend, "_graph_refine_phase") as mock_refine_step,
     ):
         result = await handler(params, _make_user())
 

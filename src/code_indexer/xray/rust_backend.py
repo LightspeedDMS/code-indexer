@@ -44,9 +44,20 @@ import tempfile
 import threading
 import time
 import uuid
+from abc import ABC, abstractmethod
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Protocol, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    NamedTuple,
+    Optional,
+    Protocol,
+    Tuple,
+)
 
 from code_indexer.utils.path_confinement import is_resolved_within_root
 from code_indexer.xray.execution_backend import (
@@ -786,6 +797,27 @@ _RUSTC_STDERR_LOG_LIMIT = 200
 # Maximum stderr bytes to include in an xray-cli non-zero-exit error message.
 _XRAY_CLI_STDERR_ERROR_LIMIT = 200
 
+
+def xray_cli_timeout_message(timeout_seconds: Any) -> str:
+    """The error an xray-cli step reports when it ran out of time.
+
+    One wording for every place a step can time out -- this pod's
+    subprocess and a delegated execution's recorded step -- so the caller
+    sees the same message wherever the evaluator ran. Unsanitized: callers
+    pass it through ``_sanitize_error_message`` before it leaves cidx.
+    """
+    return f"xray-cli timed out after {timeout_seconds}s"
+
+
+def xray_cli_exit_message(returncode: int, stderr: str) -> str:
+    """The error an xray-cli step reports for a non-zero exit, with the head
+    of its stderr. Unsanitized, like ``xray_cli_timeout_message``."""
+    return (
+        f"xray-cli exited with code {returncode}: "
+        f"{stderr[:_XRAY_CLI_STDERR_ERROR_LIMIT]}"
+    )
+
+
 # Timeout for the `xray-cli --print-graph-extractor-extensions` subprocess
 # call (Bug #1907) -- no compilation and no repo walk happens on this path,
 # just serializing a fixed, tiny static list, so this stays generous
@@ -1242,6 +1274,69 @@ def _graph_error_result(
     }
 
 
+def scan_error_type(output: Dict[str, Any]) -> str:
+    """The error_type for a scan whose xray-cli JSON carries a top-level error.
+
+    Bug #1827: xray-cli's own ``error_kind`` ("compile" vs "infrastructure")
+    distinguishes a genuine problem in the user's evaluator source from an
+    xray-cli/toolchain/filesystem problem unrelated to it -- never label an
+    infrastructure failure "CompileError" (that would send an agent to debug
+    perfectly valid Rust). Absent or unrecognized error_kind conservatively
+    defaults to "XRayCliError".
+    """
+    return "CompileError" if output.get("error_kind") == "compile" else "XRayCliError"
+
+
+def parse_json_output(stdout: str) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Parse JSON from xray-cli stdout. Returns (output_dict, error_msg)."""
+    try:
+        return json.loads(stdout), None
+    except json.JSONDecodeError as exc:
+        msg = f"xray-cli produced non-JSON output: {exc}"
+        logger.warning("RustNativeBackend: %s", msg)
+        return {}, msg
+
+
+def validate_rust_code(evaluator_code: str) -> Tuple[str, Optional[str]]:
+    """Validate Rust evaluator code. Returns (rust_code, error_msg).
+
+    The evaluator_code is expected to already be valid Rust.  This checks for
+    the required signature and forbidden constructs without any
+    transformation -- if valid, returns the code unchanged.
+    """
+    from code_indexer.xray.sandbox import validate_rust_evaluator  # noqa: PLC0415
+
+    result = validate_rust_evaluator(evaluator_code)
+    if not result.ok:
+        msg = result.reason or "Rust validation failed"
+        logger.warning("RustNativeBackend: %s", msg)
+        return "", msg
+    return evaluator_code, None
+
+
+def parse_cache_identity_output(stdout: str) -> Optional[CacheIdentityInfo]:
+    """``xray-cli --print-cache-identity`` output as a CacheIdentityInfo, or
+    None when a required field is missing."""
+    fields: Dict[str, str] = {}
+    for line in stdout.splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            fields[key] = value
+    required = ("identity", "source_hash", "abi_version", "rustc_version")
+    if not all(fields.get(key) for key in required):
+        logger.warning(
+            "XrayCache: --print-cache-identity produced incomplete output: %r",
+            stdout,
+        )
+        return None
+    return CacheIdentityInfo(
+        identity=fields["identity"],
+        source_hash=fields["source_hash"],
+        abi_version=int(fields["abi_version"]),
+        rustc_version=fields["rustc_version"],
+    )
+
+
 def _safe_unlink_graph_temp_path(path: Optional[Any]) -> None:
     """Best-effort cleanup for one graph-mode temp path -- catches and
     LOGS `OSError` rather than letting a cleanup failure escape a
@@ -1259,6 +1354,426 @@ def _safe_unlink_graph_temp_path(path: Optional[Any]) -> None:
         logger.warning(
             "RustNativeBackend: graph-mode temp cleanup failed for %s: %s", path, exc
         )
+
+
+# ---------------------------------------------------------------------------
+# Graph-mode pipeline over a pluggable step executor
+#
+# compile-only -> build-graph -> analyze-graph -> (refine) is decided, parsed
+# and shaped HERE, once. Where each xray-cli step physically runs is the
+# executor's business: this pod's subprocesses (`_LocalGraphStepExecutor`), or
+# steps a delegated execution already ran and recorded (the sandbox plugin
+# replays them). Both therefore get byte-identical results from the same
+# outputs.
+# ---------------------------------------------------------------------------
+
+#: Graph steps, in the order the pipeline asks for them.
+GRAPH_STEPS: Tuple[str, ...] = ("compile", "build", "analyze", "refine")
+
+# Compile timeout when the caller gave no deadline at all.
+_GRAPH_COMPILE_DEFAULT_TIMEOUT_SECS = 300
+
+
+@dataclass(frozen=True)
+class GraphStep:
+    """One xray-cli graph step the pipeline asks an executor to run.
+
+    Attributes:
+        name: One of ``GRAPH_STEPS``.
+        timeout_seconds: The budget the pipeline grants this step.
+        so_path: The compiled evaluator ``compile`` reported; set for
+            ``build``, ``analyze`` and ``refine``.
+        refine_files: ``refine`` only: the repo-relative files the pipeline
+            narrowed the refine set to, in order.
+    """
+
+    name: str
+    timeout_seconds: int
+    so_path: Optional[str] = None
+    refine_files: Optional[List[str]] = None
+
+
+class GraphStepExecutor(ABC):
+    """Runs the graph pipeline's xray-cli steps somewhere.
+
+    The pipeline (``run_graph_pipeline``) owns every decision -- step order,
+    deadline gating, JSON parsing, status checks, refine narrowing and result
+    shaping. An executor only answers two questions: how much budget is left
+    before a step, and what a step printed.
+    """
+
+    @abstractmethod
+    def remaining_seconds(self, step: str) -> float:
+        """Seconds left before *step* (one of ``GRAPH_STEPS``). Asked once,
+        right before the pipeline would run that step; <= 0 means the
+        deadline is exhausted and the step is not run."""
+
+    @abstractmethod
+    def run_step(self, step: GraphStep) -> Tuple[str, Optional[str]]:
+        """Run *step*; return ``(stdout, None)``, or ``("", error_message)``
+        worded like ``xray_cli_timeout_message`` / ``xray_cli_exit_message``
+        and already sanitized."""
+
+    def before_compile(self, deadline_seconds: Optional[float]) -> None:
+        """Hook before the compile step (the in-pod cluster-cache pre-fill)."""
+
+    def after_compile(
+        self, compile_info: Dict[str, Any], deadline_seconds: Optional[float]
+    ) -> None:
+        """Hook after a successful compile (the in-pod cache post-fill)."""
+
+
+def _run_graph_step(
+    executor: GraphStepExecutor, step: GraphStep
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Run *step* and parse its JSON report: ``(output, None)`` or ``({}, error)``."""
+    stdout, error = executor.run_step(step)
+    if error is not None:
+        return {}, error
+    return parse_json_output(stdout)
+
+
+def build_graph_analysis_result(
+    analyze_output: Dict[str, Any],
+    build_status: str,
+    build_result: Dict[str, Any],
+    compile_info: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Story #1811 (AC3): assembles the final result, surfacing
+    `AnalysisCompleteness` HONESTLY. Every degradation counter comes
+    from the real `BuildGraphResult` via a bare `.get(key)` -- NO
+    default: `build_result` is only passed here once the build's
+    status was confirmed `"ok"`, at which point every field is always
+    present; a missing key means malformed JSON, surfacing as `None`
+    (distinct from a genuine `0`/`False`), never a silently-masked
+    "clean" reading.
+    """
+
+    status = analyze_output.get("status")
+    raw_result = analyze_output.get("result")
+    result = raw_result if isinstance(raw_result, dict) else {}
+    reported_ran_ok = status == "ran_ok"
+
+    # H11 (consolidated review, Issue #1811/Bug #1812, Codex): a
+    # ran_ok status is only trustworthy if "result" is a REAL dict
+    # carrying BOTH required fields -- `.get("x", [])`-style
+    # defaulting on a missing/malformed payload would otherwise accept
+    # `{"status": "ran_ok"}` alone as a plausible, quietly-empty
+    # success. Missing required fields under a ran_ok status is
+    # malformed CLI output, never a legitimate "nothing found".
+    schema_complete = (
+        isinstance(raw_result, dict)
+        and "findings" in raw_result
+        and "refine" in raw_result
+    )
+    ok = reported_ran_ok and schema_complete
+
+    if reported_ran_ok and not schema_complete:
+        error = {
+            "error_type": "MalformedCliOutput",
+            "error_message": _sanitize_error_message(
+                "--analyze-graph reported status=ran_ok but result is "
+                "missing required findings/refine fields"
+            ),
+        }
+    elif not ok:
+        error = {
+            "error_type": "GraphAnalysisError",
+            "error_message": _sanitize_error_message(
+                f"--analyze-graph reported status={status}"
+            ),
+        }
+    else:
+        error = None
+
+    degradation_keys = (
+        "files_with_parse_errors",
+        "unreadable_or_unsupported_files",
+        "files_with_read_errors",
+        "files_with_extractor_panics",
+        "files_with_collector_panics",
+        "files_with_unsupported_language",
+        "truncated_by_max_files",
+        # Bug #1897: surfaces BuildGraphResult::index_budget_exceeded
+        # verbatim -- true iff completeness_reasons contains
+        # "index_budget_exceeded" specifically.
+        "index_budget_exceeded",
+    )
+    return {
+        "ok": ok,
+        "error": error,
+        "status": status,
+        "findings": result.get("findings", []),
+        "refine": result.get("refine", []),
+        "fact_graph_complete": build_result.get("fact_graph_complete"),
+        "build_status": build_status,
+        "degradation": {key: build_result.get(key) for key in degradation_keys},
+        "cached": compile_info.get("cached", False),
+        "compile_ms": compile_info.get("compile_ms", 0),
+        # Bug #1897: surfaces `BuildGraphResult`'s new completeness
+        # fields verbatim -- the lossless list of every completeness
+        # condition that held (never collapsed to a single reason), plus
+        # the observed candidate count against the configured budget
+        # limit. Never re-derived from `degradation` -- `build_result`
+        # is only reached once the build's status was confirmed "ok",
+        # same guarantee `degradation`'s own bare `.get(key)` relies on.
+        "completeness_reasons": build_result.get("completeness_reasons"),
+        "candidate_count": build_result.get("candidate_count"),
+        "candidate_budget_limit": build_result.get("candidate_budget_limit"),
+    }
+
+
+def _graph_compile_phase(
+    executor: GraphStepExecutor, deadline_seconds: Optional[float]
+) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
+    """Compile the evaluator once (``--compile-only``).
+
+    Honours `deadline_seconds` the way `_get_cache_identity_info` already
+    does: an already-exhausted deadline skips the step entirely rather than
+    running one doomed to time out immediately. Returns `(so_path,
+    {"cached": bool, "compile_ms": int}, error_message)`; `so_path` is
+    `None` iff `error_message` is not `None`.
+    """
+    executor.before_compile(deadline_seconds)
+
+    if deadline_seconds is not None and deadline_seconds <= 0:
+        return None, {}, "operation deadline already exhausted before compile"
+    timeout = (
+        int(deadline_seconds) + 1
+        if deadline_seconds is not None
+        else _GRAPH_COMPILE_DEFAULT_TIMEOUT_SECS
+    )
+
+    output, error = _run_graph_step(executor, GraphStep("compile", timeout))
+    if error is not None:
+        return None, {}, error
+    compile_error = output.get("error")
+    if compile_error:
+        return None, {}, str(compile_error)
+    so_path = output.get("so_path")
+    if not so_path:
+        return None, {}, "xray-cli --compile-only produced no so_path"
+
+    compile_info = {
+        "cached": bool(output.get("cached", False)),
+        "compile_ms": int(output.get("compile_ms", 0)),
+    }
+    executor.after_compile(compile_info, deadline_seconds)
+    return so_path, compile_info, None
+
+
+def _graph_build_phase(
+    executor: GraphStepExecutor, so_path: str
+) -> Tuple[Optional[Tuple[str, Dict[str, Any]]], Optional[Dict[str, Any]]]:
+    """Runs `--build-graph`. Returns `((status, result), None)` on a real
+    `"ok"` build, or `(None, error_result)` on any failure -- including an
+    already-exhausted deadline, which never runs a doomed step.
+    """
+    remaining = executor.remaining_seconds("build")
+    if remaining <= 0:
+        return None, _graph_error_result(
+            "Timeout", "deadline exhausted before --build-graph"
+        )
+    output, error = _run_graph_step(
+        executor, GraphStep("build", int(remaining) + 1, so_path=so_path)
+    )
+    if error is not None:
+        return None, _graph_error_result("XRayCliError", error)
+    status = output.get("status")
+    result = output.get("result") or {}
+    if status != "ok":
+        return None, _graph_error_result(
+            "GraphBuildError",
+            f"--build-graph reported status={status}",
+            build_status=status,
+        )
+    return (status, result), None
+
+
+def _graph_analyze_phase(
+    executor: GraphStepExecutor, so_path: str, build_status: str
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Runs `--analyze-graph`. Returns `(output, None)` on a real step
+    success (the ChildReport's OWN status may still be non-`ran_ok`; that is
+    handled by `build_graph_analysis_result`, not here), or `(None,
+    error_result)` on a step-level failure or an already-exhausted deadline.
+    """
+    remaining = executor.remaining_seconds("analyze")
+    if remaining <= 0:
+        return None, _graph_error_result(
+            "Timeout",
+            "deadline exhausted before --analyze-graph",
+            build_status=build_status,
+        )
+    output, error = _run_graph_step(
+        executor, GraphStep("analyze", int(remaining) + 1, so_path=so_path)
+    )
+    if error is not None:
+        return None, _graph_error_result(
+            "XRayCliError", error, build_status=build_status
+        )
+    return output, None
+
+
+def _graph_refine_phase(
+    executor: GraphStepExecutor, so_path: str, files_to_refine: List[str]
+) -> Dict[str, Any]:
+    """Bug #1909: runs `xray-cli --refine` over `files_to_refine` (already
+    AC2-narrowed via `_narrow_refine_symbols_to_driver_matched_files`) and
+    maps its `ChildReport<RefineBatchResult>` onto this module's own
+    `refine_status`/`refine_findings` contract.
+
+    Every terminal outcome DEGRADES the overall analyze_graph result
+    honestly (Rule 13) -- this never raises and never turns a real
+    analyze_graph success into a failure: refine is OPTIONAL (ADR-001), so
+    a step-level failure, a non-`ran_ok` CLI status (including the common
+    `absent` case, "the compiled artifact does not export xray_refine"), or
+    an already-exhausted deadline all report a distinct `refine_status` and
+    an empty `refine_findings`, never an exception the caller has to catch.
+    """
+    remaining = executor.remaining_seconds("refine")
+    if remaining <= 0:
+        return {"refine_status": "skipped_timeout", "refine_findings": []}
+
+    output, error = _run_graph_step(
+        executor,
+        GraphStep(
+            "refine",
+            int(remaining) + 1,
+            so_path=so_path,
+            refine_files=list(files_to_refine),
+        ),
+    )
+    if error is not None:
+        return {
+            "refine_status": "error",
+            "refine_error": _sanitize_error_message(error),
+            "refine_findings": [],
+        }
+
+    status = output.get("status")
+    if status == "absent":
+        return {"refine_status": "absent", "refine_findings": []}
+    if status != "ran_ok":
+        return {
+            "refine_status": "error",
+            "refine_error": _sanitize_error_message(
+                f"--refine reported status={status}"
+            ),
+            "refine_findings": [],
+        }
+
+    raw_result = output.get("result")
+    files_out = raw_result.get("files", []) if isinstance(raw_result, dict) else []
+    findings: List[Dict[str, Any]] = []
+    truncated = False
+    for file_outcome in files_out:
+        if not isinstance(file_outcome, dict):
+            continue
+        for finding in file_outcome.get("findings", []) or []:
+            if len(findings) >= _REFINE_FINDINGS_MAX:
+                truncated = True
+                break
+            findings.append(finding)
+        if truncated:
+            break
+
+    refine_result: Dict[str, Any] = {
+        "refine_status": "ran",
+        "refine_findings": findings,
+        "refine_files_examined": len(files_out),
+    }
+    if truncated:
+        refine_result["refine_findings_truncated"] = True
+    return refine_result
+
+
+def _graph_maybe_refine(
+    executor: GraphStepExecutor,
+    analysis_result: Dict[str, Any],
+    refine: bool,
+    file_paths: List[str],
+    so_path: str,
+) -> Dict[str, Any]:
+    """Bug #1909: the SOLE gate deciding whether xray-cli's already-built
+    `--refine` phase runs at all.
+
+    Deliberately opt-in AND cost-guarded, per two independent conditions
+    (both required, checked in order so each has its own honest
+    `refine_status`):
+      1. `refine=False` (the default) never runs the refine step at all --
+         a caller must explicitly ask for a second per-file traversal,
+         since it re-opens the `timeout_seconds` budget and costs real time
+         at fleet scale.
+      2. `refine=True` but the evaluator's `analyze_graph` flagged NOTHING
+         (`GraphResult.refine` empty) also never runs it -- running refine
+         over zero files is pure waste.
+    Only reached once the base result was assembled; a prior compile/build/
+    analyze failure already returned via `_graph_error_result`.
+    """
+    if not refine:
+        return {"refine_status": "not_requested", "refine_findings": []}
+    if not analysis_result.get("ok"):
+        return {"refine_status": "skipped_analysis_failed", "refine_findings": []}
+    refine_symbols = analysis_result.get("refine") or []
+    if not refine_symbols:
+        return {"refine_status": "skipped_empty_refine_set", "refine_findings": []}
+    files_to_refine = _narrow_refine_symbols_to_driver_matched_files(
+        refine_symbols, file_paths
+    )
+    if not files_to_refine:
+        return {
+            "refine_status": "skipped_no_matching_files",
+            "refine_findings": [],
+        }
+    return _graph_refine_phase(executor, so_path, files_to_refine)
+
+
+def run_graph_pipeline(
+    executor: GraphStepExecutor,
+    *,
+    refine: bool = False,
+    file_paths: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Compile ONCE, then build-graph -> analyze-graph ->
+    `build_graph_analysis_result` -- the whole graph-mode pipeline -- with
+    every step run by *executor*.
+
+    Bug #1909: once the base result is assembled, `_graph_maybe_refine`
+    decides -- and, when it decides to, runs -- the optional `--refine`
+    step, merging its outcome into the SAME response dict (new
+    `refine_status`/`refine_findings` keys only, existing keys untouched --
+    the response envelope stays backward compatible). Every known failure
+    is a `_graph_error_result`, never an exception (Bug #1612); anything the
+    executor itself raises propagates to the caller.
+    """
+    so_path, compile_info, compile_error = _graph_compile_phase(
+        executor, executor.remaining_seconds("compile")
+    )
+    if compile_error is not None:
+        return _graph_error_result("CompileError", compile_error)
+    assert so_path is not None
+
+    build_pair, build_error_result = _graph_build_phase(executor, so_path)
+    if build_error_result is not None:
+        return build_error_result
+    assert build_pair is not None
+    build_status, build_result = build_pair
+
+    analyze_output, analyze_error_result = _graph_analyze_phase(
+        executor, so_path, build_status
+    )
+    if analyze_error_result is not None:
+        return analyze_error_result
+    assert analyze_output is not None
+
+    result = build_graph_analysis_result(
+        analyze_output, build_status, build_result, compile_info
+    )
+    result.update(
+        _graph_maybe_refine(executor, result, refine, file_paths or [], so_path)
+    )
+    return result
 
 
 class LocalXrayExecutionBackend:
@@ -1421,24 +1936,7 @@ class LocalXrayExecutionBackend:
 
     @staticmethod
     def _parse_cache_identity_output(stdout: str) -> Optional[CacheIdentityInfo]:
-        fields: Dict[str, str] = {}
-        for line in stdout.splitlines():
-            if "=" in line:
-                key, _, value = line.partition("=")
-                fields[key] = value
-        required = ("identity", "source_hash", "abi_version", "rustc_version")
-        if not all(fields.get(key) for key in required):
-            logger.warning(
-                "XrayCache: --print-cache-identity produced incomplete output: %r",
-                stdout,
-            )
-            return None
-        return CacheIdentityInfo(
-            identity=fields["identity"],
-            source_hash=fields["source_hash"],
-            abi_version=int(fields["abi_version"]),
-            rustc_version=fields["rustc_version"],
-        )
+        return parse_cache_identity_output(stdout)
 
     @staticmethod
     def _get_cache_dir() -> Path:
@@ -1561,19 +2059,8 @@ class LocalXrayExecutionBackend:
         cli_error = output.get("error")
         if cli_error:
             # Top-level CLI error (e.g. compilation failed) — deduplicate to
-            # one entry. Bug #1827: xray-cli's own `error_kind` field
-            # ("compile" vs "infrastructure") distinguishes a genuine
-            # problem in the user's evaluator source from an
-            # xray-cli/toolchain/filesystem problem unrelated to it --
-            # never label an infrastructure failure "CompileError" (that
-            # would send an agent to debug perfectly valid Rust). Absent
-            # or unrecognized error_kind conservatively defaults to
-            # "XRayCliError".
-            error_type = (
-                "CompileError"
-                if output.get("error_kind") == "compile"
-                else "XRayCliError"
-            )
+            # one entry, typed by xray-cli's error_kind (scan_error_type).
+            error_type = scan_error_type(output)
             logger.warning("RustNativeBackend: xray-cli error: %s", cli_error)
             return XrayScanOutcome(
                 [_error_tuple("", error_type, _sanitize_error_message(cli_error))]
@@ -1700,14 +2187,7 @@ class LocalXrayExecutionBackend:
         checks for required signature and forbidden constructs without any
         transformation — if valid, returns the code unchanged.
         """
-        from code_indexer.xray.sandbox import validate_rust_evaluator  # noqa: PLC0415
-
-        result = validate_rust_evaluator(evaluator_code)
-        if not result.ok:
-            msg = result.reason or "Rust validation failed"
-            logger.warning("RustNativeBackend: %s", msg)
-            return "", msg
-        return evaluator_code, None
+        return validate_rust_code(evaluator_code)
 
     def _try_pre_fill(
         self,
@@ -1936,7 +2416,7 @@ class LocalXrayExecutionBackend:
                 except (ProcessLookupError, PermissionError):
                     pass
                 proc.wait()
-                msg = f"xray-cli timed out after {timeout_seconds}s"
+                msg = xray_cli_timeout_message(timeout_seconds)
                 logger.warning("RustNativeBackend: %s", msg)
                 return "", _sanitize_error_message(msg)
 
@@ -1947,10 +2427,7 @@ class LocalXrayExecutionBackend:
             # before exiting non-zero must never be silently parsed and
             # accepted as a real result just because stdout was non-empty.
             if proc.returncode != 0:
-                raw_msg = (
-                    f"xray-cli exited with code {proc.returncode}: "
-                    f"{stderr[:_XRAY_CLI_STDERR_ERROR_LIMIT]}"
-                )
+                raw_msg = xray_cli_exit_message(proc.returncode, stderr)
                 logger.warning("RustNativeBackend: %s", raw_msg)
                 return "", _sanitize_error_message(raw_msg)
             return stdout or "", None
@@ -2078,12 +2555,7 @@ class LocalXrayExecutionBackend:
 
     def _parse_json_output(self, stdout: str) -> Tuple[Dict[str, Any], Optional[str]]:
         """Parse JSON from xray-cli stdout. Returns (output_dict, error_msg)."""
-        try:
-            return json.loads(stdout), None
-        except json.JSONDecodeError as exc:
-            msg = f"xray-cli produced non-JSON output: {exc}"
-            logger.warning("RustNativeBackend: %s", msg)
-            return {}, msg
+        return parse_json_output(stdout)
 
     def _build_results(
         self,
@@ -2093,25 +2565,14 @@ class LocalXrayExecutionBackend:
         resolved_root: Optional[Path] = None,
     ) -> _BatchResult:
         """Group findings by file and build result tuples per spec."""
-        findings_by_abs: Dict[str, List[Dict[str, Any]]] = {}
-        for finding in findings:
-            fpath = finding.get("file", "")
-            if fpath not in findings_by_abs:
-                findings_by_abs[fpath] = []
-            findings_by_abs[fpath].append(finding)
-
-        results: _BatchResult = []
-        for spec, abs_path in zip(file_specs, abs_paths):
-            spec_findings = findings_by_abs.get(abs_path, [])
-            if not spec_findings:
-                results.append(([], [], None))
-                continue
-            matches = _build_matches(
+        return _group_scan_results(
+            file_specs,
+            abs_paths,
+            findings,
+            lambda spec, abs_path, spec_findings: _build_matches(
                 spec, spec_findings, abs_path=abs_path, resolved_root=resolved_root
-            )
-            results.append((matches, [], None))
-
-        return results
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Story #1811 (S5, AC2): graph-mode driver
@@ -2128,62 +2589,23 @@ class LocalXrayExecutionBackend:
         pre-fill/post-fill machinery unchanged (Bug #1784: identity comes
         ONLY from `--print-cache-identity`, never re-derived here).
 
-        Honours `deadline_seconds` the way `_get_cache_identity_info`
-        already does: an already-exhausted deadline skips the subprocess
-        entirely rather than spawning one doomed to time out immediately.
-
-        Returns `(so_path, {"cached": bool, "compile_ms": int},
-        error_message)`. `so_path` is `None` iff `error_message` is not
-        `None`.
+        The graph pipeline's compile phase (`_graph_compile_phase`) run
+        against this pod's step executor. Returns `(so_path, {"cached":
+        bool, "compile_ms": int}, error_message)`; `so_path` is `None` iff
+        `error_message` is not `None`.
         """
-        if self._xray_cache is not None:
-            self._try_pre_fill(
-                rust_code, deadline_seconds=deadline_seconds, graph_mode=True
-            )
+        return _graph_compile_phase(
+            _LocalGraphStepExecutor(self, rust_code, eval_path=eval_path),
+            deadline_seconds,
+        )
 
-        if deadline_seconds is not None and deadline_seconds <= 0:
-            return None, {}, "operation deadline already exhausted before compile"
-        timeout = int(deadline_seconds) + 1 if deadline_seconds is not None else 300
-
-        output, error = self._run_compile_only_subprocess(eval_path, timeout)
-        if error is not None:
-            return None, {}, error
-        compile_error = output.get("error")
-        if compile_error:
-            return None, {}, str(compile_error)
-        so_path = output.get("so_path")
-        if not so_path:
-            return None, {}, "xray-cli --compile-only produced no so_path"
-
-        compile_info = {
-            "cached": bool(output.get("cached", False)),
-            "compile_ms": int(output.get("compile_ms", 0)),
-        }
-        if (
-            self._xray_cache is not None
-            and not compile_info["cached"]
-            and compile_info["compile_ms"] > 0
-        ):
-            self._try_post_fill(
-                rust_code,
-                compile_info["compile_ms"],
-                deadline_seconds=deadline_seconds,
-                graph_mode=True,
-            )
-        return so_path, compile_info, None
-
-    def _run_compile_only_subprocess(
+    def _spawn_compile_only(
         self, eval_path: str, timeout_seconds: int
-    ) -> Tuple[Dict[str, Any], Optional[str]]:
-        """Spawn `xray-cli --compile-only --dynlib <eval_path>` and parse its
-        JSON `CompileOnlyOutput`. Reuses `_run_xray_cli_process` (subprocess
-        spawn/timeout handling) and `_parse_json_output` (JSON parsing) --
-        never reimplements either. Returns `(output_dict, error_msg)` --
-        `error_msg` is `None` on a successful subprocess run (the COMPILE
-        itself may still have failed; check `output_dict["error"]`).
-        """
+    ) -> Tuple[str, Optional[str]]:
+        """Spawn `xray-cli --compile-only --dynlib <eval_path>`; return its
+        raw `(stdout, error_msg)` from `_run_xray_cli_process`."""
         cmd = [str(self._xray_cli_path), "--compile-only", "--dynlib", eval_path]
-        stdout, error = self._run_xray_cli_process(
+        return self._run_xray_cli_process(
             cmd,
             timeout_seconds,
             None,
@@ -2192,20 +2614,37 @@ class LocalXrayExecutionBackend:
             # measured against exactly what runs in it.
             apply_compile_limits=True,
         )
+
+    def _run_compile_only_subprocess(
+        self, eval_path: str, timeout_seconds: int
+    ) -> Tuple[Dict[str, Any], Optional[str]]:
+        """`_spawn_compile_only`, with its JSON `CompileOnlyOutput` parsed.
+        Returns `(output_dict, error_msg)` -- `error_msg` is `None` on a
+        successful subprocess run (the COMPILE itself may still have failed;
+        check `output_dict["error"]`).
+        """
+        stdout, error = self._spawn_compile_only(eval_path, timeout_seconds)
         if error is not None:
             return {}, error
         return self._parse_json_output(stdout)
 
+    def _spawn_graph_subcommand(
+        self, args: List[str], timeout_seconds: int
+    ) -> Tuple[str, Optional[str]]:
+        """Spawn `xray-cli <args...>` -- shared by `--build-graph`,
+        `--analyze-graph` and `--refine` (Rule 4). They run an ALREADY
+        compiled dylib, so they never take a compile slot.
+        """
+        cmd = [str(self._xray_cli_path)] + args
+        return self._run_xray_cli_process(
+            cmd, timeout_seconds, None, acquire_compile_slot=False
+        )
+
     def _run_graph_subcommand(
         self, args: List[str], timeout_seconds: int
     ) -> Tuple[Dict[str, Any], Optional[str]]:
-        """Spawn `xray-cli <args...>` and parse its JSON report -- shared
-        by `--build-graph` and `--analyze-graph` (Rule 4).
-        """
-        cmd = [str(self._xray_cli_path)] + args
-        stdout, error = self._run_xray_cli_process(
-            cmd, timeout_seconds, None, acquire_compile_slot=False
-        )
+        """`_spawn_graph_subcommand`, with its JSON report parsed."""
+        stdout, error = self._spawn_graph_subcommand(args, timeout_seconds)
         if error is not None:
             return {}, error
         return self._parse_json_output(stdout)
@@ -2217,314 +2656,9 @@ class LocalXrayExecutionBackend:
         build_result: Dict[str, Any],
         compile_info: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Story #1811 (AC3): assembles the final result, surfacing
-        `AnalysisCompleteness` HONESTLY. Every degradation counter comes
-        from the real `BuildGraphResult` via a bare `.get(key)` -- NO
-        default: `build_result` is only passed here once the build's
-        status was confirmed `"ok"`, at which point every field is always
-        present; a missing key means malformed JSON, surfacing as `None`
-        (distinct from a genuine `0`/`False`), never a silently-masked
-        "clean" reading.
-        """
-        status = analyze_output.get("status")
-        raw_result = analyze_output.get("result")
-        result = raw_result if isinstance(raw_result, dict) else {}
-        reported_ran_ok = status == "ran_ok"
-
-        # H11 (consolidated review, Issue #1811/Bug #1812, Codex): a
-        # ran_ok status is only trustworthy if "result" is a REAL dict
-        # carrying BOTH required fields -- `.get("x", [])`-style
-        # defaulting on a missing/malformed payload would otherwise accept
-        # `{"status": "ran_ok"}` alone as a plausible, quietly-empty
-        # success. Missing required fields under a ran_ok status is
-        # malformed CLI output, never a legitimate "nothing found".
-        schema_complete = (
-            isinstance(raw_result, dict)
-            and "findings" in raw_result
-            and "refine" in raw_result
-        )
-        ok = reported_ran_ok and schema_complete
-
-        if reported_ran_ok and not schema_complete:
-            error = {
-                "error_type": "MalformedCliOutput",
-                "error_message": _sanitize_error_message(
-                    "--analyze-graph reported status=ran_ok but result is "
-                    "missing required findings/refine fields"
-                ),
-            }
-        elif not ok:
-            error = {
-                "error_type": "GraphAnalysisError",
-                "error_message": _sanitize_error_message(
-                    f"--analyze-graph reported status={status}"
-                ),
-            }
-        else:
-            error = None
-
-        degradation_keys = (
-            "files_with_parse_errors",
-            "unreadable_or_unsupported_files",
-            "files_with_read_errors",
-            "files_with_extractor_panics",
-            "files_with_collector_panics",
-            "files_with_unsupported_language",
-            "truncated_by_max_files",
-            # Bug #1897: surfaces BuildGraphResult::index_budget_exceeded
-            # verbatim -- true iff completeness_reasons contains
-            # "index_budget_exceeded" specifically.
-            "index_budget_exceeded",
-        )
-        return {
-            "ok": ok,
-            "error": error,
-            "status": status,
-            "findings": result.get("findings", []),
-            "refine": result.get("refine", []),
-            "fact_graph_complete": build_result.get("fact_graph_complete"),
-            "build_status": build_status,
-            "degradation": {key: build_result.get(key) for key in degradation_keys},
-            "cached": compile_info.get("cached", False),
-            "compile_ms": compile_info.get("compile_ms", 0),
-            # Bug #1897: surfaces `BuildGraphResult`'s new completeness
-            # fields verbatim -- the lossless list of every completeness
-            # condition that held (never collapsed to a single reason), plus
-            # the observed candidate count against the configured budget
-            # limit. Never re-derived from `degradation` -- `build_result`
-            # is only reached once the build's status was confirmed "ok",
-            # same guarantee `degradation`'s own bare `.get(key)` relies on.
-            "completeness_reasons": build_result.get("completeness_reasons"),
-            "candidate_count": build_result.get("candidate_count"),
-            "candidate_budget_limit": build_result.get("candidate_budget_limit"),
-        }
-
-    def _run_build_graph_step(
-        self,
-        repo_root: str,
-        files_from_path: str,
-        so_path: str,
-        graph_out: Path,
-        facts_out: Path,
-        deadline: float,
-    ) -> Tuple[Optional[Tuple[str, Dict[str, Any]]], Optional[Dict[str, Any]]]:
-        """Runs `--build-graph`. Returns `((status, result), None)` on a
-        real `"ok"` build, or `(None, error_result)` on any failure --
-        including an already-exhausted deadline, which never spawns a
-        doomed subprocess.
-        """
-        remaining = self._remaining_seconds(deadline)
-        if remaining <= 0:
-            return None, _graph_error_result(
-                "Timeout", "deadline exhausted before --build-graph"
-            )
-        args = [
-            "--build-graph",
-            "--repo-root",
-            repo_root,
-            "--files-from",
-            files_from_path,
-            "--dylib",
-            so_path,
-            "--graph-out",
-            str(graph_out),
-            "--facts-out",
-            str(facts_out),
-        ]
-        output, error = self._run_graph_subcommand(args, int(remaining) + 1)
-        if error is not None:
-            return None, _graph_error_result("XRayCliError", error)
-        status = output.get("status")
-        result = output.get("result") or {}
-        if status != "ok":
-            return None, _graph_error_result(
-                "GraphBuildError",
-                f"--build-graph reported status={status}",
-                build_status=status,
-            )
-        return (status, result), None
-
-    def _run_analyze_graph_step(
-        self,
-        graph_out: Path,
-        so_path: str,
-        facts_out: Path,
-        deadline: float,
-        build_status: str,
-    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        """Runs `--analyze-graph`. Returns `(output, None)` on a real
-        subprocess success (the ChildReport's OWN status may still be
-        non-`ran_ok`; that is handled by `_build_graph_analysis_result`,
-        not here), or `(None, error_result)` on a subprocess-level failure
-        or an already-exhausted deadline.
-        """
-        remaining = self._remaining_seconds(deadline)
-        if remaining <= 0:
-            return None, _graph_error_result(
-                "Timeout",
-                "deadline exhausted before --analyze-graph",
-                build_status=build_status,
-            )
-        args = [
-            "--analyze-graph",
-            "--graph-in",
-            str(graph_out),
-            "--dylib",
-            so_path,
-            "--facts-in",
-            str(facts_out),
-        ]
-        output, error = self._run_graph_subcommand(args, int(remaining) + 1)
-        if error is not None:
-            return None, _graph_error_result(
-                "XRayCliError", error, build_status=build_status
-            )
-        return output, None
-
-    def _run_refine_step(
-        self,
-        graph_out: Path,
-        so_path: str,
-        facts_out: Path,
-        repo_root: str,
-        files_to_refine: List[str],
-        deadline: float,
-    ) -> Dict[str, Any]:
-        """Bug #1909: runs `xray-cli --refine` over `files_to_refine`
-        (already AC2-narrowed by the caller via
-        `_narrow_refine_symbols_to_driver_matched_files`) and maps its
-        `ChildReport<RefineBatchResult>` onto this module's own
-        `refine_status`/`refine_findings` contract.
-
-        Every terminal outcome DEGRADES the overall analyze_graph result
-        honestly (Rule 13) -- this never raises and never turns a real
-        analyze_graph success into a failure: refine is OPTIONAL (ADR-001),
-        so a subprocess-level failure, a non-`ran_ok` CLI status (including
-        the common `absent` case, "the compiled artifact does not export
-        xray_refine"), or an already-exhausted deadline all report a
-        distinct `refine_status` and an empty `refine_findings`, never an
-        exception the caller has to catch.
-        """
-        remaining = self._remaining_seconds(deadline)
-        if remaining <= 0:
-            return {"refine_status": "skipped_timeout", "refine_findings": []}
-
-        tmp_dir = _get_xray_tmp_dir()
-        files_tmp: Optional[Any] = None
-        try:
-            files_tmp = _write_temp_file(
-                "\n".join(files_to_refine), ".txt", "xray_refine_files_", tmp_dir
-            )
-            args = [
-                "--refine",
-                "--graph-in",
-                str(graph_out),
-                "--dylib",
-                so_path,
-                "--repo-root",
-                repo_root,
-                "--files-from",
-                files_tmp.name,
-                "--facts-in",
-                str(facts_out),
-            ]
-            output, error = self._run_graph_subcommand(args, int(remaining) + 1)
-        finally:
-            _safe_unlink_graph_temp_path(
-                files_tmp.name if files_tmp is not None else None
-            )
-
-        if error is not None:
-            return {
-                "refine_status": "error",
-                "refine_error": _sanitize_error_message(error),
-                "refine_findings": [],
-            }
-
-        status = output.get("status")
-        if status == "absent":
-            return {"refine_status": "absent", "refine_findings": []}
-        if status != "ran_ok":
-            return {
-                "refine_status": "error",
-                "refine_error": _sanitize_error_message(
-                    f"--refine reported status={status}"
-                ),
-                "refine_findings": [],
-            }
-
-        raw_result = output.get("result")
-        files_out = raw_result.get("files", []) if isinstance(raw_result, dict) else []
-        findings: List[Dict[str, Any]] = []
-        truncated = False
-        for file_outcome in files_out:
-            if not isinstance(file_outcome, dict):
-                continue
-            for finding in file_outcome.get("findings", []) or []:
-                if len(findings) >= _REFINE_FINDINGS_MAX:
-                    truncated = True
-                    break
-                findings.append(finding)
-            if truncated:
-                break
-
-        refine_result: Dict[str, Any] = {
-            "refine_status": "ran",
-            "refine_findings": findings,
-            "refine_files_examined": len(files_out),
-        }
-        if truncated:
-            refine_result["refine_findings_truncated"] = True
-        return refine_result
-
-    def _maybe_run_refine(
-        self,
-        analysis_result: Dict[str, Any],
-        refine: bool,
-        file_paths: List[str],
-        graph_out: Path,
-        so_path: str,
-        facts_out: Path,
-        repo_root: str,
-        deadline: float,
-    ) -> Dict[str, Any]:
-        """Bug #1909: the SOLE gate deciding whether xray-cli's already-built
-        `--refine` phase runs at all -- the fix for S3's refine phase being
-        fully built in Rust with zero callers anywhere under
-        `src/code_indexer/`.
-
-        Deliberately opt-in AND cost-guarded, per two independent
-        conditions (both required, checked in order so each has its own
-        honest `refine_status`):
-          1. `refine=False` (the default) never invokes the second
-             subprocess at all -- a caller must explicitly ask for a
-             second per-file traversal, since it re-opens the
-             `timeout_seconds` budget and costs real time at fleet scale.
-          2. `refine=True` but the evaluator's `analyze_graph` flagged
-             NOTHING (`GraphResult.refine` empty) also never invokes it --
-             running refine over zero files is pure waste.
-        Only reached once `analysis_result` reflects a REAL analyze_graph
-        success (`ok=True`) -- a prior compile/build/analyze failure
-        already returned via `_graph_error_result` before this is ever
-        called.
-        """
-        if not refine:
-            return {"refine_status": "not_requested", "refine_findings": []}
-        if not analysis_result.get("ok"):
-            return {"refine_status": "skipped_analysis_failed", "refine_findings": []}
-        refine_symbols = analysis_result.get("refine") or []
-        if not refine_symbols:
-            return {"refine_status": "skipped_empty_refine_set", "refine_findings": []}
-        files_to_refine = _narrow_refine_symbols_to_driver_matched_files(
-            refine_symbols, file_paths
-        )
-        if not files_to_refine:
-            return {
-                "refine_status": "skipped_no_matching_files",
-                "refine_findings": [],
-            }
-        return self._run_refine_step(
-            graph_out, so_path, facts_out, repo_root, files_to_refine, deadline
+        """See the module-level `build_graph_analysis_result`."""
+        return build_graph_analysis_result(
+            analyze_output, build_status, build_result, compile_info
         )
 
     def _compile_build_and_analyze(
@@ -2540,58 +2674,21 @@ class LocalXrayExecutionBackend:
         refine: bool = False,
         file_paths: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Compiles `rust_code` ONCE via `_compile_for_graph_mode`, then
-        drives `_run_build_graph_step` -> `_run_analyze_graph_step` ->
-        `_build_graph_analysis_result` -- the whole graph-mode pipeline in
-        one short orchestrator. `assert`s below are real type-narrowing
-        (Optional -> non-Optional), never a suppression: each one directly
-        follows the `is not None` check on the sibling error-result value
-        that guarantees it.
-
-        Bug #1909: once the base result is assembled, `_maybe_run_refine`
-        decides -- and, when it decides to, runs -- the optional third
-        `--refine` phase, merging its outcome into the SAME response dict
-        (new `refine_status`/`refine_findings` keys only, existing keys
-        untouched -- the response envelope stays backward compatible).
+        """The whole graph-mode pipeline (`run_graph_pipeline`) run in this
+        pod: every step is an xray-cli subprocess over the temp files the
+        caller wrote, bounded by `deadline` (a time.monotonic() instant).
         """
-        so_path, compile_info, compile_error = self._compile_for_graph_mode(
-            rust_code, eval_path, self._remaining_seconds(deadline)
+        executor = _LocalGraphStepExecutor(
+            self,
+            rust_code,
+            eval_path=eval_path,
+            deadline=deadline,
+            repo_root=repo_root,
+            files_from_path=files_from_path,
+            graph_out=graph_out,
+            facts_out=facts_out,
         )
-        if compile_error is not None:
-            return _graph_error_result("CompileError", compile_error)
-        assert so_path is not None
-
-        build_pair, build_error_result = self._run_build_graph_step(
-            repo_root, files_from_path, so_path, graph_out, facts_out, deadline
-        )
-        if build_error_result is not None:
-            return build_error_result
-        assert build_pair is not None
-        build_status, build_result = build_pair
-
-        analyze_output, analyze_error_result = self._run_analyze_graph_step(
-            graph_out, so_path, facts_out, deadline, build_status
-        )
-        if analyze_error_result is not None:
-            return analyze_error_result
-        assert analyze_output is not None
-
-        result = self._build_graph_analysis_result(
-            analyze_output, build_status, build_result, compile_info
-        )
-        result.update(
-            self._maybe_run_refine(
-                result,
-                refine,
-                file_paths or [],
-                graph_out,
-                so_path,
-                facts_out,
-                repo_root,
-                deadline,
-            )
-        )
-        return result
+        return run_graph_pipeline(executor, refine=refine, file_paths=file_paths)
 
     def execute_graph_analysis(self, request: XrayGraphRequest) -> Dict[str, Any]:
         """Story #1811 (S5, AC2): compile the evaluator ONCE (reusing the
@@ -2660,6 +2757,138 @@ class LocalXrayExecutionBackend:
             _safe_unlink_graph_temp_path(files_name)
             _safe_unlink_graph_temp_path(graph_out)
             _safe_unlink_graph_temp_path(facts_out)
+
+
+class _LocalGraphStepExecutor(GraphStepExecutor):
+    """The graph pipeline's steps as xray-cli subprocesses in this pod.
+
+    Every step goes through the backend's `_run_xray_cli_process` (process
+    group kill, env allowlist, compile slot + rlimits for the compile), and
+    the remaining budget through its `_remaining_seconds`, so the in-pod
+    behaviour is exactly the backend's. The compile hooks are the cluster
+    cache pre-fill/post-fill, keyed on the graph-mode identity (H9).
+    """
+
+    def __init__(
+        self,
+        backend: LocalXrayExecutionBackend,
+        rust_code: str,
+        *,
+        eval_path: str,
+        deadline: Optional[float] = None,
+        repo_root: str = "",
+        files_from_path: str = "",
+        graph_out: Optional[Path] = None,
+        facts_out: Optional[Path] = None,
+    ) -> None:
+        self._backend = backend
+        self._rust_code = rust_code
+        self._eval_path = eval_path
+        self._deadline = deadline
+        self._repo_root = repo_root
+        self._files_from_path = files_from_path
+        self._graph_out = graph_out
+        self._facts_out = facts_out
+
+    def remaining_seconds(self, step: str) -> float:
+        if self._deadline is None:
+            raise RuntimeError(f"no deadline was given for graph step {step!r}")
+        return self._backend._remaining_seconds(self._deadline)
+
+    def before_compile(self, deadline_seconds: Optional[float]) -> None:
+        if self._backend._xray_cache is not None:
+            self._backend._try_pre_fill(
+                self._rust_code, deadline_seconds=deadline_seconds, graph_mode=True
+            )
+
+    def after_compile(
+        self, compile_info: Dict[str, Any], deadline_seconds: Optional[float]
+    ) -> None:
+        if (
+            self._backend._xray_cache is not None
+            and not compile_info["cached"]
+            and compile_info["compile_ms"] > 0
+        ):
+            self._backend._try_post_fill(
+                self._rust_code,
+                compile_info["compile_ms"],
+                deadline_seconds=deadline_seconds,
+                graph_mode=True,
+            )
+
+    def run_step(self, step: GraphStep) -> Tuple[str, Optional[str]]:
+        if step.name == "compile":
+            return self._backend._spawn_compile_only(
+                self._eval_path, step.timeout_seconds
+            )
+        if step.so_path is None:
+            raise ValueError(f"graph step {step.name!r} needs a compiled so_path")
+        if step.name == "build":
+            return self._backend._spawn_graph_subcommand(
+                [
+                    "--build-graph",
+                    "--repo-root",
+                    self._repo_root,
+                    "--files-from",
+                    self._files_from_path,
+                    "--dylib",
+                    step.so_path,
+                    "--graph-out",
+                    str(self._graph_out),
+                    "--facts-out",
+                    str(self._facts_out),
+                ],
+                step.timeout_seconds,
+            )
+        if step.name == "analyze":
+            return self._backend._spawn_graph_subcommand(
+                [
+                    "--analyze-graph",
+                    "--graph-in",
+                    str(self._graph_out),
+                    "--dylib",
+                    step.so_path,
+                    "--facts-in",
+                    str(self._facts_out),
+                ],
+                step.timeout_seconds,
+            )
+        if step.name == "refine":
+            return self._run_refine(step.so_path, step)
+        raise ValueError(f"unknown graph step {step.name!r}")
+
+    def _run_refine(self, so_path: str, step: GraphStep) -> Tuple[str, Optional[str]]:
+        """`--refine` reads its narrowed file list from a temp file, written
+        for this step only and removed whatever the outcome."""
+        tmp_dir = _get_xray_tmp_dir()
+        files_tmp: Optional[Any] = None
+        try:
+            files_tmp = _write_temp_file(
+                "\n".join(step.refine_files or []),
+                ".txt",
+                "xray_refine_files_",
+                tmp_dir,
+            )
+            return self._backend._spawn_graph_subcommand(
+                [
+                    "--refine",
+                    "--graph-in",
+                    str(self._graph_out),
+                    "--dylib",
+                    so_path,
+                    "--repo-root",
+                    self._repo_root,
+                    "--files-from",
+                    files_tmp.name,
+                    "--facts-in",
+                    str(self._facts_out),
+                ],
+                step.timeout_seconds,
+            )
+        finally:
+            _safe_unlink_graph_temp_path(
+                files_tmp.name if files_tmp is not None else None
+            )
 
 
 class RustNativeBackend(LocalXrayExecutionBackend):
@@ -2762,13 +2991,102 @@ class RustNativeBackend(LocalXrayExecutionBackend):
         )
 
 
+# Where a match's line_content comes from: called once per xray-cli finding.
+LineContentSource = Callable[[Dict[str, Any]], str]
+
+# Builds one spec's matches from (spec, the path its findings are reported
+# under, those findings).
+_SpecMatchBuilder = Callable[
+    [Dict[str, Any], str, List[Dict[str, Any]]], List[Dict[str, Any]]
+]
+
+
+def build_matches(
+    spec: Dict[str, Any],
+    spec_findings: List[Dict[str, Any]],
+    *,
+    line_content: LineContentSource,
+) -> List[Dict[str, Any]]:
+    """Convert xray-cli findings to match dicts for one file spec.
+
+    The ONE place a scan match is shaped. ``line_content`` supplies each
+    match's ``line_content`` and is the only source of it: this function
+    reads nothing, so a caller without the repository on disk (a delegated
+    execution) passes the lines it was handed and no local read can happen.
+    """
+    lang = spec.get("lang", "")
+    rel_path = spec.get("file_path", "")
+    return [
+        {
+            "line_number": finding.get("line", 0),
+            "file_path": rel_path,
+            "language": lang,
+            "pattern": finding.get("pattern", ""),
+            "snippet": finding.get("snippet", ""),
+            "line_content": line_content(finding),
+        }
+        for finding in spec_findings
+    ]
+
+
+def _group_scan_results(
+    file_specs: List[Dict[str, Any]],
+    finding_paths: List[str],
+    findings: List[Dict[str, Any]],
+    build_spec_matches: _SpecMatchBuilder,
+) -> BatchResult:
+    """One (matches, [], None) tuple per spec, in spec order.
+
+    Findings are grouped by the exact path string xray-cli reported
+    (``finding["file"]``), which is the path it was given for that spec:
+    ``finding_paths[i]`` for ``file_specs[i]``. A spec with no findings gets
+    ``([], [], None)`` without calling ``build_spec_matches``.
+    """
+    findings_by_path: Dict[str, List[Dict[str, Any]]] = {}
+    for finding in findings:
+        findings_by_path.setdefault(finding.get("file", ""), []).append(finding)
+
+    results: BatchResult = []
+    for spec, path in zip(file_specs, finding_paths):
+        spec_findings = findings_by_path.get(path, [])
+        if not spec_findings:
+            results.append(([], [], None))
+            continue
+        results.append((build_spec_matches(spec, path, spec_findings), [], None))
+    return results
+
+
+def build_scan_results(
+    file_specs: List[Dict[str, Any]],
+    finding_paths: List[str],
+    findings: List[Dict[str, Any]],
+    *,
+    line_content_for: Callable[[Dict[str, Any], str], LineContentSource],
+) -> BatchResult:
+    """A scan's per-spec results from xray-cli's findings, with no disk read.
+
+    ``finding_paths[i]`` is the path xray-cli was given for ``file_specs[i]``
+    (findings are grouped by it, as the in-pod scan groups them);
+    ``line_content_for(spec, path)`` returns that spec's line source. Every
+    match is shaped by :func:`build_matches`.
+    """
+    return _group_scan_results(
+        file_specs,
+        finding_paths,
+        findings,
+        lambda spec, path, spec_findings: build_matches(
+            spec, spec_findings, line_content=line_content_for(spec, path)
+        ),
+    )
+
+
 def _build_matches(
     spec: Dict[str, Any],
     spec_findings: List[Dict[str, Any]],
     abs_path: str = "",
     resolved_root: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
-    """Convert xray-cli findings to match dicts for one file spec.
+    """Convert xray-cli findings to match dicts for one file spec, in this pod.
 
     ``line_content`` is the one xray-cli emitted from the source it parsed.
     Only a finding WITHOUT it (an older binary) falls back to reading
@@ -2782,8 +3100,6 @@ def _build_matches(
     upstream, for the last point before a finding's content leaves this
     function.
     """
-    lang = spec.get("lang", "")
-    rel_path = spec.get("file_path", "")
     contained = bool(abs_path) and (
         resolved_root is None or is_resolved_within_root(Path(abs_path), resolved_root)
     )
@@ -2797,27 +3113,16 @@ def _build_matches(
                 "Failed to read %s for line_content enrichment: %s", abs_path, exc
             )
 
-    matches: List[Dict[str, Any]] = []
-    for finding in spec_findings:
-        line_num = finding.get("line", 0)
-        idx = line_num - 1
+    def _line_content(finding: Dict[str, Any]) -> str:
         if not contained:
-            line_content = ""
-        elif "line_content" in finding:
-            line_content = finding["line_content"]
-        else:
-            line_content = source_lines[idx] if 0 <= idx < len(source_lines) else ""
-        matches.append(
-            {
-                "line_number": line_num,
-                "file_path": rel_path,
-                "language": lang,
-                "pattern": finding.get("pattern", ""),
-                "snippet": finding.get("snippet", ""),
-                "line_content": line_content,
-            }
-        )
-    return matches
+            return ""
+        if "line_content" in finding:
+            emitted: str = finding["line_content"]
+            return emitted
+        idx = finding.get("line", 0) - 1
+        return source_lines[idx] if 0 <= idx < len(source_lines) else ""
+
+    return build_matches(spec, spec_findings, line_content=_line_content)
 
 
 def _content_is_delegated() -> bool:

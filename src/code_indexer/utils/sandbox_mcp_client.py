@@ -1,13 +1,15 @@
 """JSON-RPC client for sandbox-mcp's fixed platform tools.
 
 cidx hands executions it must not run in its own pod to sandbox-mcp: the SCIP
-compile step today (``sandbox_scip``, see ``scip/indexers/delegated.py``), and
-X-Ray's evaluator compile + scan once ``sandbox_xray`` exists. Every such call
-has the same transport -- one JSON-RPC ``tools/call`` POST carrying a bearer
-``api_key`` against the sandbox-mcp base ``endpoint`` -- and the same reply, a
-``SandboxRunResult`` envelope (``exit_code``, ``output``, ``duration_ms``,
-``errors``). This module owns that transport so each consumer only builds its
-tool's ``arguments`` and interprets the envelope.
+compile step (``sandbox_scip``, see ``scip/indexers/delegated.py``), and X-Ray's
+evaluator compile + run (``sandbox_run_profile``, through the delegated X-Ray
+backend plugin). Every such call has the same transport -- one JSON-RPC
+``tools/call`` POST carrying a bearer ``api_key`` against the sandbox-mcp base
+``endpoint``. A run tool replies with a ``SandboxRunResult`` envelope
+(``exit_code``, ``output``, ``duration_ms``, ``errors``; :meth:`call_tool`); any
+other tool (e.g. ``sandbox_result_fetch`` paging a parked result) replies with
+its own object (:meth:`call_tool_payload`). This module owns that transport so
+each consumer only builds its tool's ``arguments`` and interprets the reply.
 
 Only a fixed, named tool is ever called (never an agent-chosen exec string).
 The endpoint comes from ``utils.remote_endpoint``; which config key supplies it
@@ -42,11 +44,14 @@ _ERROR_BODY_CHARS = 500
 
 
 class SandboxMcpError(Exception):
-    """A ``tools/call`` that produced no ``SandboxRunResult`` envelope.
+    """A ``tools/call`` that produced no usable reply.
 
-    Raised for a transport error, an HTTP status >= 300, a non-JSON body, or a
-    JSON-RPC error / envelope-less payload. The message is the operator-facing
-    reason; callers turn it into their own failure result, never a fallback.
+    Raised for a transport error, an HTTP status >= 300, a non-JSON body, a
+    JSON-RPC error, an MCP tool error (``isError``), or a reply without the
+    expected object (a ``SandboxRunResult`` envelope for :meth:`call_tool`, any
+    JSON object for :meth:`call_tool_payload`). The message is the
+    operator-facing reason; callers turn it into their own failure result,
+    never a fallback.
     """
 
 
@@ -82,6 +87,36 @@ def extract_run_result(payload: Any) -> Optional[Dict[str, Any]]:
                 if isinstance(parsed, dict) and "exit_code" in parsed:
                     return parsed
     return None
+
+
+def extract_tool_payload(payload: Any) -> Optional[Dict[str, Any]]:
+    """Pull a tool's own result object out of a JSON-RPC response.
+
+    For tools whose reply is NOT a ``SandboxRunResult`` envelope. Accepts MCP
+    ``structuredContent``, a JSON object string in ``result.content[0].text``,
+    or the object inline as ``result``. Returns ``None`` for a JSON-RPC error,
+    an MCP tool error (``result.isError``), or when no JSON object is found.
+    """
+    if not isinstance(payload, dict) or payload.get("error") is not None:
+        return None
+    result = payload.get("result")
+    if not isinstance(result, dict) or result.get("isError") is True:
+        return None
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        return structured
+    if "content" not in result:
+        return result
+    content = result.get("content")
+    first = content[0] if isinstance(content, list) and content else None
+    text = first.get("text") if isinstance(first, dict) else None
+    if not isinstance(text, str):
+        return None
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _import_requests() -> Any:
@@ -143,13 +178,12 @@ class SandboxMcpClient:
             "params": {"name": tool_name, "arguments": arguments},
         }
 
-    def post(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """POST a built ``tools/call`` *request*; return its run-result envelope.
+    def _post_json(self, request: Dict[str, Any]) -> Any:
+        """POST a built ``tools/call`` *request*; return the decoded JSON body.
 
         Raises:
-            SandboxMcpError: no envelope came back (see the class docstring).
-                The tool's own failure (a non-zero ``exit_code``) is NOT an
-                error here -- it is in the returned envelope.
+            SandboxMcpError: transport error, HTTP status >= 300, or a
+                non-JSON body.
         """
         tool_name = request["params"]["name"]
         requests = self._requests_provider()
@@ -176,23 +210,54 @@ class SandboxMcpClient:
             )
 
         try:
-            payload = response.json()
+            return response.json()
         except ValueError as exc:
             raise SandboxMcpError(
                 f"{tool_name} returned non-JSON response: {exc}"
             ) from exc
 
+    def post(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """POST a built ``tools/call`` *request*; return its run-result envelope.
+
+        Raises:
+            SandboxMcpError: no envelope came back (see the class docstring).
+                The tool's own failure (a non-zero ``exit_code``) is NOT an
+                error here -- it is in the returned envelope.
+        """
+        payload = self._post_json(request)
         run_result = extract_run_result(payload)
         if run_result is None:
             raise SandboxMcpError(
-                f"{tool_name} response contained no SandboxRunResult envelope: "
-                f"{json.dumps(payload)[:_ERROR_BODY_CHARS]}"
+                f"{request['params']['name']} response contained no "
+                f"SandboxRunResult envelope: {json.dumps(payload)[:_ERROR_BODY_CHARS]}"
             )
         return run_result
 
     def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Build and POST one ``tools/call``; see :meth:`post`."""
         return self.post(self.build_tool_call(tool_name, arguments))
+
+    def call_tool_payload(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Build and POST one ``tools/call``; return the tool's result object.
+
+        For tools that do not answer with a ``SandboxRunResult`` envelope
+        (``sandbox_result_fetch``, for one): no ``exit_code`` is required --
+        see :func:`extract_tool_payload` for the accepted shapes.
+
+        Raises:
+            SandboxMcpError: transport/HTTP/JSON failure, a JSON-RPC or MCP
+                tool error, or a reply carrying no JSON object.
+        """
+        payload = self._post_json(self.build_tool_call(tool_name, arguments))
+        body = extract_tool_payload(payload)
+        if body is None:
+            raise SandboxMcpError(
+                f"{tool_name} returned no result object: "
+                f"{json.dumps(payload)[:_ERROR_BODY_CHARS]}"
+            )
+        return body
 
     def health_url(self) -> str:
         return f"{self.endpoint}{self._health_path}"

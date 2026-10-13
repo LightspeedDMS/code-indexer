@@ -10,11 +10,15 @@ Fail-fast policy (mirrors the git, content and ripgrep wiring):
                   This is the DEFAULT, so an unset or absent config behaves
                   exactly as cidx does today. Nothing is built here: each
                   ``RustNativeBackend`` executes in-process with its own caches.
-- ``delegated`` : the evaluator runs in sandbox-mcp (``sandbox_xray``). Not
-                  implemented yet, so selecting it raises at startup. There is
+- ``delegated`` : the evaluator runs wherever the X-Ray backend PLUGIN runs
+                  it (``code_indexer.xray_backend`` entry point, or
+                  ``CIDX_XRAY_BACKEND``; see ``services/xray_backend_plugin``)
+                  -- evo-sandbox's runs it in sandbox-mcp. There is
                   deliberately **no fallback to local**: delegation exists so
                   caller-supplied code never runs in the cidx pod, and a pod
-                  built for it may hold neither the repositories nor rustc.
+                  built for it may hold neither the repositories nor rustc. No
+                  plugin installed, a plugin that fails to load or construct,
+                  or one that is not an ``XrayExecutionBackend`` stops startup.
 - anything else : raises immediately, so a typo'd config cannot degrade into a
                   surprising default.
 """
@@ -30,6 +34,11 @@ logger = logging.getLogger(__name__)
 
 VALID_XRAY_BACKENDS = ("local", "delegated")
 
+_NO_LOCAL_FALLBACK = (
+    "Refusing to fall back to local execution: delegation exists so "
+    "caller-supplied evaluators never compile or run in the cidx pod."
+)
+
 
 def build_configured_xray_execution_backend(
     config: Any,
@@ -41,7 +50,7 @@ def build_configured_xray_execution_backend(
 
     Raises:
         RuntimeError: ``xray_backend`` is unrecognised, or is ``delegated``
-            (not implemented yet).
+            and no usable plugin backend could be built.
     """
     backend_type = getattr(config, "xray_backend", "local") or "local"
 
@@ -52,16 +61,47 @@ def build_configured_xray_execution_backend(
         )
 
     if backend_type == "delegated":
-        raise RuntimeError(
-            "xray_backend='delegated' selected but delegated X-Ray execution is "
-            "not implemented yet: it needs sandbox-mcp's sandbox_xray tool. Set "
-            "xray_backend='local'. Refusing to fall back to local execution: "
-            "delegation exists so caller-supplied evaluators never compile or "
-            "run in the cidx pod."
-        )
+        return _build_delegated_backend()
 
     logger.info("XrayExecutionBackend: using local xray-cli execution (this pod)")
     return None
+
+
+def _build_delegated_backend() -> XrayExecutionBackend:
+    """The plugin's backend, or RuntimeError -- never None, never local."""
+    # Imported lazily so the local default never imports the plugin seam.
+    from code_indexer.server.services.xray_backend_plugin import (
+        ENTRY_POINT_GROUP,
+        ENV_VAR,
+        resolve_xray_backend,
+    )
+
+    try:
+        backend = resolve_xray_backend()
+    except Exception as exc:
+        raise RuntimeError(
+            "xray_backend='delegated' selected but the X-Ray backend plugin "
+            f"could not be loaded or constructed: {type(exc).__name__}: {exc}. "
+            f"{_NO_LOCAL_FALLBACK}"
+        ) from exc
+    if backend is None:
+        raise RuntimeError(
+            "xray_backend='delegated' selected but no X-Ray backend plugin is "
+            "installed. Install a plugin registering a factory on the "
+            f"{ENTRY_POINT_GROUP} entry point (cidx-content-backend >= 0.7.0), "
+            f"or set {ENV_VAR}='package.module:factory'. {_NO_LOCAL_FALLBACK}"
+        )
+    if not isinstance(backend, XrayExecutionBackend):
+        raise RuntimeError(
+            "xray_backend='delegated' selected but the X-Ray backend plugin "
+            f"returned a {type(backend).__name__}, which has no "
+            f"execute_scan/execute_graph_analysis. {_NO_LOCAL_FALLBACK}"
+        )
+    logger.info(
+        "XrayExecutionBackend: using delegated execution (%s)",
+        type(backend).__name__,
+    )
+    return backend
 
 
 def server_xray_execution_backend() -> Optional[XrayExecutionBackend]:

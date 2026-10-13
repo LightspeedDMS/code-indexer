@@ -2,7 +2,8 @@
 
 X-Ray compiles caller-supplied Rust and runs it over a repository through
 ``xray-cli``. That EXECUTION is the part that may move out of the cidx pod (to
-sandbox-mcp's ``sandbox_xray``); everything above it -- auth, validation for
+a plugin backend, e.g. evo-sandbox's, which runs it in sandbox-mcp); everything
+above it -- auth, validation for
 UX, candidate selection, job tracking, truncation -- stays in cidx and never
 learns where the evaluator ran. This module is the seam between the two:
 
@@ -12,6 +13,8 @@ learns where the evaluator ran. This module is the seam between the two:
 * ``LocalXrayExecutionBackend`` (in ``rust_backend``) -- the in-pod
   implementation: compile semaphore, rlimits, env allowlist and the local +
   Postgres compile caches all live there.
+* a delegated implementation -- a plugin on the ``code_indexer.xray_backend``
+  entry point, shaping its results with ``xray/delegation_api.py``.
 
 ``RustNativeBackend`` (what the search engine and handlers construct) keeps
 its ``run_batch`` / ``run_graph_analysis`` signatures and dispatches to the
