@@ -31,9 +31,10 @@ refresh scheduler.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from enum import Enum
-from typing import Iterator, Optional
+from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 from code_indexer.services.run_spend_meter import RunSpendDefect, get_run_spend_meter
 from code_indexer.storage.sqlite_chunk_store import (
@@ -42,6 +43,11 @@ from code_indexer.storage.sqlite_chunk_store import (
     message_reports_sqlite_corruption,
     sqlite_error_reports_corruption,
 )
+
+if TYPE_CHECKING:
+    from code_indexer.indexing.processor import ProcessingStats
+
+logger = logging.getLogger(__name__)
 
 
 class ChunkStoreFailureKind(str, Enum):
@@ -143,6 +149,44 @@ def index_failure_exit_code(exc: BaseException) -> int:
     if kind is None:
         return GENERIC_INDEX_FAILURE_EXIT_CODE
     return _EXIT_CODE_BY_KIND[kind]
+
+
+#: Bug #2155: console text of a run whose only failures were owed retries.
+OWED_RETRIES_FAILED_AGAIN_MESSAGE = (
+    "⚠️  Only files that failed in an earlier run were retried, and they "
+    "failed again; the existing index is kept and they stay recorded for "
+    "retry."
+)
+
+
+def failed_only_on_owed_retries(
+    stats: "ProcessingStats",
+    # Any vector store backend: only its read-only has_committed_points is used.
+    vector_store: Any,
+    collection_name: str,
+) -> bool:
+    """Bug #2155: whether a run that processed nothing and failed files is
+    a PARTIAL outcome rather than the Bug #1218 fail-loud failure: every
+    failure is a retry of a failure recorded before the run
+    (``stats.failed_only_on_recorded_retries``) AND the collection already
+    holds committed points (read-only ``has_committed_points``, never a
+    mutating open). A new failure or an empty store is a failure. A store
+    read error answers False (the run fails loudly), logged at WARNING."""
+    if stats is None:
+        raise ValueError("stats must be the finished run's ProcessingStats")
+    if not stats.failed_only_on_recorded_retries:
+        return False
+    try:
+        return bool(vector_store.has_committed_points(collection_name))
+    except Exception as exc:
+        logger.warning(
+            "Bug #2155: could not tell whether %s holds committed points; "
+            "the run is reported failed: %s: %s",
+            collection_name,
+            type(exc).__name__,
+            exc,
+        )
+        return False
 
 
 def chunk_store_failure_kind_for_exit_code(
