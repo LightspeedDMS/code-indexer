@@ -6,9 +6,10 @@ the mutation it was checked against (docs/content-seam-remaining-consumers.md,
 behaviour around them.
 
 Real SQLite registry backend, real filesystem, the real sweeper and real
-AliasManager. The only fakes are the workspace-mcp content writer (its write
-path does not exist yet -- these tests drive ``ContentWriterSink``, the
-adapter that will carry it) and an injected clock. The PostgreSQL claim
+AliasManager. The only fakes are the workspace-mcp content writer (the
+``code_indexer.content_writer`` plugin boundary, shaped like the 0.6.0
+plugin: ``put``/``delete`` with an optional ``expected_blob_sha``, errors
+carrying a ``.code``) and an injected clock. The PostgreSQL claim
 (FOR UPDATE SKIP LOCKED) is exercised live in
 tests/unit/server/storage/postgres/test_metadata_outbox_live_pg.py.
 """
@@ -69,29 +70,33 @@ class ContentWriterError(Exception):
 
 
 class FakeContentWriter:
-    """Stand-in for workspace-mcp's content writer (put/delete by path)."""
+    """Stand-in for workspace-mcp's content writer (put/delete by absolute
+    path; ``delete`` returns False when the file was already absent)."""
 
     def __init__(self, failures: int = 0, fail_always: bool = False) -> None:
         self.failures = failures
         self.fail_always = fail_always
         self.files: Dict[str, bytes] = {}
         self.calls: List[Tuple[str, str]] = []
+        self.kwargs: List[Dict[str, object]] = []
 
     def _maybe_fail(self) -> None:
         if self.fail_always or self.failures > 0:
             self.failures -= 1
             raise ContentWriterError("EUNAVAILABLE")
 
-    def put(self, path: str, data: bytes) -> str:
+    def put(self, path: str, data: bytes, **kwargs: object) -> str:
         self.calls.append(("put", path))
+        self.kwargs.append(kwargs)
         self._maybe_fail()
         self.files[path] = data
         return "blob-sha"
 
-    def delete(self, path: str) -> None:
+    def delete(self, path: str, **kwargs: object) -> bool:
         self.calls.append(("delete", path))
+        self.kwargs.append(kwargs)
         self._maybe_fail()
-        self.files.pop(path, None)
+        return self.files.pop(path, None) is not None
 
 
 class Switches:
@@ -484,7 +489,9 @@ def test_a_sweeper_stopped_at_the_bound_resumes_when_the_files_recover(
     inside the interval tries the sink); clear the stop on a failing probe
     (the stop is gone while the key is still stuck)."""
     clock = Clock()
-    sweeper, sink = _stopped_at_bound(metadata, backend, switches, golden_repos_dir, clock)
+    sweeper, sink = _stopped_at_bound(
+        metadata, backend, switches, golden_repos_dir, clock
+    )
 
     clock.now += 60
     attempts = len(sink.attempts)
@@ -533,7 +540,9 @@ def test_a_probe_does_not_clear_an_abandon_made_meanwhile(
     """Abandoned on another node while the probe replayed: the operator's
     stop stands. Mutation: clear the state without re-reading it."""
     clock = Clock()
-    sweeper, sink = _stopped_at_bound(metadata, backend, switches, golden_repos_dir, clock)
+    sweeper, sink = _stopped_at_bound(
+        metadata, backend, switches, golden_repos_dir, clock
+    )
     other_node = make_sweeper(metadata, backend, switches, {LOCAL_FILES: sink}, clock)
 
     class _AbandonDuringPut:
@@ -703,17 +712,18 @@ def test_dual_written_file_is_not_reimported_at_next_boot(
     assert metadata.import_files()["imported"] == 0
 
 
-def test_workspace_mcp_sink_fails_loud_and_keeps_every_row(
+def test_workspace_mcp_sink_without_a_writer_fails_loud_and_keeps_every_row(
     metadata, backend, switches, golden_repos_dir, caplog
 ):
-    """Today's workspace-mcp sink: ERROR at build, every replay raises, rows
-    are kept and depth stays visible."""
+    """No content writer (a local content backend): ERROR at build, every
+    replay raises, rows are kept and depth stays visible.
+
+    Mutation: build a ContentWriterSink over None -> the replay raises an
+    AttributeError instead, and the ERROR naming the cause is never logged."""
     caplog.set_level(logging.ERROR)
-    sink = build_sink(WORKSPACE_MCP)
+    sink = build_sink(WORKSPACE_MCP, content_writer=lambda: None)
     assert isinstance(sink, UnavailableSink)
-    assert any(
-        "no workspace-mcp write path yet" in r.getMessage() for r in caplog.records
-    )
+    assert any("no content writer configured" in r.getMessage() for r in caplog.records)
 
     switches.sink = WORKSPACE_MCP
     manager_for(golden_repos_dir).create_alias(ALIAS, "/snapshots/v_1")
@@ -723,6 +733,79 @@ def test_workspace_mcp_sink_fails_loud_and_keeps_every_row(
 
     assert report.failed == [(KIND_ALIAS, ALIAS)]
     assert backend.outbox_depth() == 1
+
+
+def test_workspace_mcp_sink_builder_adapts_the_configured_writer(
+    tmp_path, backend, switches
+):
+    """Mutation: keep returning UnavailableSink for workspace-mcp -> the row
+    is kept and the writer never receives the file."""
+    golden_repos_dir = tmp_path / "not-mounted" / "golden-repos"
+    switches.sink = WORKSPACE_MCP
+    writer = FakeContentWriter()
+    sink = build_sink(WORKSPACE_MCP, content_writer=lambda: writer)
+    assert isinstance(sink, ContentWriterSink)
+    with scoped_install(_metadata(golden_repos_dir, backend, switches)) as metadata:
+        manager_for(golden_repos_dir).create_alias(ALIAS, "/snapshots/v_1")
+
+        make_sweeper(metadata, backend, switches, {WORKSPACE_MCP: sink}).sweep_once()
+
+        assert str(alias_file(golden_repos_dir)) in writer.files
+        assert backend.outbox_depth() == 0
+
+
+def test_content_writer_sink_writes_and_deletes_unconditionally(golden_repos_dir):
+    """Last-writer-wins: no ``expected_blob_sha`` precondition is sent, so a
+    put over an existing file and a delete of any current blob both land.
+
+    Mutation: pass ``expected_blob_sha=None`` ("must not exist") -> the
+    recorded kwargs are no longer empty."""
+    writer = FakeContentWriter()
+    sink = ContentWriterSink(writer)
+    path = str(alias_file(golden_repos_dir))
+
+    sink.put(path, b"one")
+    sink.put(path, b"two")
+    assert writer.files == {path: b"two"}
+
+    sink.delete(path)
+    assert writer.files == {}
+    assert writer.calls == [("put", path), ("put", path), ("delete", path)]
+    assert writer.kwargs == [{}, {}, {}]
+
+
+def test_content_writer_sink_delete_of_a_missing_file_is_success(
+    metadata, backend, switches, golden_repos_dir
+):
+    """The writer answers False for an absent file; the replay still
+    completes the row.
+
+    Mutation: raise when the writer reports the file absent -> the row is
+    kept and depth stays 1."""
+    switches.sink = WORKSPACE_MCP
+    writer = FakeContentWriter()
+    manager = manager_for(golden_repos_dir)
+    manager.create_alias(ALIAS, "/snapshots/v_1")
+    manager.delete_alias(ALIAS)  # never replayed: the file was never written
+
+    report = make_sweeper(
+        metadata, backend, switches, {WORKSPACE_MCP: ContentWriterSink(writer)}
+    ).sweep_once()
+
+    assert report.failed == []
+    assert writer.calls == [("delete", str(alias_file(golden_repos_dir)))]
+    assert backend.outbox_depth() == 0
+
+
+def test_content_writer_failure_propagates_from_the_sink(golden_repos_dir):
+    """Mutation: swallow the writer's error in the adapter -> the sweeper
+    would complete (drop) a row that was never written."""
+    sink = ContentWriterSink(FakeContentWriter(fail_always=True))
+    path = str(alias_file(golden_repos_dir))
+    with pytest.raises(ContentWriterError):
+        sink.put(path, b"{}")
+    with pytest.raises(ContentWriterError):
+        sink.delete(path)
 
 
 def test_default_sink_builder_selects_local_files():
@@ -770,3 +853,117 @@ def test_depth_gauge_yields_nothing_when_depth_is_unreadable():
         raise RuntimeError("db down")
 
     assert list(depth_observations(broken)) == []
+
+
+# ===========================================================================
+# metadata_outbox_sink=auto
+# ===========================================================================
+
+
+def _runtime_config(sink: str, content_backend: str, drain_timeout_s: int = 600):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        content_backend=content_backend,
+        control_plane_metadata_config=SimpleNamespace(
+            metadata_outbox_sink=sink,
+            metadata_outbox_drain_timeout_s=drain_timeout_s,
+        ),
+    )
+
+
+def _auto_sweeper(metadata, backend, config, sinks, clock=None):
+    from code_indexer.server.startup.control_plane_metadata_wiring import (
+        outbox_settings_from_config_service,
+    )
+
+    return MetadataOutboxSweeper(
+        metadata=metadata,
+        backend=backend,
+        settings=outbox_settings_from_config_service(lambda: config),
+        sink_factory=lambda name: sinks[name],
+        now_fn=clock if clock is not None else Clock(),
+    )
+
+
+def test_auto_on_a_delegated_server_replays_through_the_content_writer(
+    metadata, backend, golden_repos_dir
+):
+    """Mutation: resolve auto to local-files regardless -> the writer never
+    receives the file (and the local disk gets it instead)."""
+    writer = FakeContentWriter()
+    sinks: Dict[str, MetadataSink] = {
+        WORKSPACE_MCP: ContentWriterSink(writer),
+        LOCAL_FILES: LocalFilesSink(),
+    }
+    config = _runtime_config("auto", "delegated")
+    manager_for(golden_repos_dir).create_alias(ALIAS, "/snapshots/v_1")
+
+    _auto_sweeper(metadata, backend, config, sinks).sweep_once()
+
+    assert str(alias_file(golden_repos_dir)) in writer.files
+    assert not alias_file(golden_repos_dir).exists()
+    assert backend.outbox_depth() == 0
+
+
+def test_auto_on_a_local_server_replays_to_local_files(
+    metadata, backend, golden_repos_dir
+):
+    """Mutation: resolve auto to workspace-mcp regardless -> the local file
+    never lands."""
+    writer = FakeContentWriter()
+    sinks: Dict[str, MetadataSink] = {
+        WORKSPACE_MCP: ContentWriterSink(writer),
+        LOCAL_FILES: LocalFilesSink(),
+    }
+    config = _runtime_config("auto", "local")
+    manager_for(golden_repos_dir).create_alias(ALIAS, "/snapshots/v_1")
+
+    _auto_sweeper(metadata, backend, config, sinks).sweep_once()
+
+    assert alias_file(golden_repos_dir).exists()
+    assert writer.calls == []
+
+
+def test_abandon_under_auto_stays_stopped_across_sweeps(
+    metadata, backend, golden_repos_dir
+):
+    """The stop is recorded under the RESOLVED sink, so the next sweep does
+    not read it as a sink change.
+
+    Mutation: record/compare the configured value (``auto``) against the
+    resolved one -> "sink changed" clears the stop and the late change is
+    replayed."""
+    writer = FakeContentWriter()
+    config = _runtime_config("auto", "delegated")
+    sweeper = _auto_sweeper(
+        metadata, backend, config, {WORKSPACE_MCP: ContentWriterSink(writer)}
+    )
+    sweeper.abandon(requested_by="admin")
+    assert backend.get_outbox_state().stopped_sink == WORKSPACE_MCP
+
+    manager_for(golden_repos_dir).create_alias(ALIAS, "/snapshots/v_1")
+    report = sweeper.sweep_once()
+
+    assert report.stopped == "abandoned"
+    assert writer.calls == []
+    assert backend.outbox_depth() == 1
+
+
+def test_drain_bound_is_armed_when_auto_resolves_to_local_files(
+    metadata, backend, golden_repos_dir
+):
+    """Mutation: compare the drain bound against the configured ``auto`` ->
+    the clock never starts and the sweeper never stops."""
+    clock = Clock()
+    stuck = _FailsForName(ALIAS)
+    config = _runtime_config("auto", "local", drain_timeout_s=600)
+    sweeper = _auto_sweeper(metadata, backend, config, {LOCAL_FILES: stuck}, clock)
+    manager_for(golden_repos_dir).create_alias(ALIAS, "/snapshots/v_1")
+
+    sweeper.sweep_once()
+    clock.now += 601
+    report = sweeper.sweep_once()
+
+    assert report.stopped == "drain_timeout"
+    assert backend.get_outbox_state().stopped_sink == LOCAL_FILES

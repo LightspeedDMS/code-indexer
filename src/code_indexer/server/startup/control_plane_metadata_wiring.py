@@ -94,8 +94,18 @@ def install_registry_metadata(
 def outbox_settings_from_config_service(
     get_config: Optional[Callable[[], Any]] = None,
 ) -> Callable[[], Any]:
-    """An OutboxSettings provider over the runtime (DB-backed) config."""
+    """An OutboxSettings provider over the runtime (DB-backed) config.
+
+    The sink is RESOLVED here (``auto`` -> ``workspace-mcp`` under a delegated
+    ``content_backend``, else ``local-files``), so everything the sweeper keys
+    on the sink -- the drain bound, the stop state's "sink changed" check, the
+    sink an abandon records -- sees the sink actually written through, and a
+    stop recorded under it is not cleared on the next sweep.
+    """
     from code_indexer.server.services.metadata_outbox.sweeper import OutboxSettings
+    from code_indexer.server.utils.config_manager import (
+        resolve_metadata_outbox_sink,
+    )
 
     def _get_config() -> Any:
         if get_config is not None:
@@ -105,9 +115,13 @@ def outbox_settings_from_config_service(
         return get_config_service().get_config()
 
     def _provider() -> OutboxSettings:
-        cpm = _get_config().control_plane_metadata_config
+        config = _get_config()
+        cpm = config.control_plane_metadata_config
         return OutboxSettings(
-            sink=cpm.metadata_outbox_sink,
+            sink=resolve_metadata_outbox_sink(
+                cpm.metadata_outbox_sink,
+                getattr(config, "content_backend", "local") or "local",
+            ),
             drain_timeout_s=int(cpm.metadata_outbox_drain_timeout_s),
         )
 

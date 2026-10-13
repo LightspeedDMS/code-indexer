@@ -1340,13 +1340,33 @@ METADATA_READ_SOURCE_FILES = "files"
 METADATA_READ_SOURCES = (METADATA_READ_SOURCE_REGISTRY, METADATA_READ_SOURCE_FILES)
 
 #: metadata_outbox_sink values: how the outbox sweeper writes the files.
+#: ``auto`` is a selection, not a sink: :func:`resolve_metadata_outbox_sink`
+#: turns it into one of the other two from the ``content_backend`` setting.
+METADATA_OUTBOX_SINK_AUTO = "auto"
 METADATA_OUTBOX_SINK_WORKSPACE_MCP = "workspace-mcp"
 METADATA_OUTBOX_SINK_LOCAL_FILES = "local-files"
 METADATA_OUTBOX_SINKS = (
+    METADATA_OUTBOX_SINK_AUTO,
     METADATA_OUTBOX_SINK_WORKSPACE_MCP,
     METADATA_OUTBOX_SINK_LOCAL_FILES,
 )
 DEFAULT_METADATA_OUTBOX_DRAIN_TIMEOUT_S = 600
+
+
+def resolve_metadata_outbox_sink(sink: str, content_backend: Optional[str]) -> str:
+    """The sink a ``metadata_outbox_sink`` value selects on this server.
+
+    ``auto`` follows the content backend: ``workspace-mcp`` when it is
+    ``delegated`` (the golden-repos volume is not on this pod, so only
+    workspace-mcp can write the files), else ``local-files`` -- so a server
+    with no delegated backend behaves exactly as before ``auto`` existed.
+    Every other value, including an unknown one, is returned unchanged.
+    """
+    if sink != METADATA_OUTBOX_SINK_AUTO:
+        return sink
+    if content_backend == "delegated":
+        return METADATA_OUTBOX_SINK_WORKSPACE_MCP
+    return METADATA_OUTBOX_SINK_LOCAL_FILES
 
 
 @dataclass
@@ -1370,19 +1390,20 @@ class ControlPlaneMetadataConfig:
       A change commits with an outbox row; the sweeper on the leader replays
       it to the file.
     - ``metadata_outbox_sink``: how the sweeper writes the files.
-      ``workspace-mcp`` (the mount-less fleet) or ``local-files`` (this pod's
-      own disk). The design's default is ``workspace-mcp``; it is
-      ``local-files`` until workspace-mcp's file-write path exists -- the
-      workspace-mcp sink fails loud and keeps every row until then.
-    - ``metadata_outbox_drain_timeout_s``: with ``local-files``, how long
-      replay may fail continuously before the leader stops, logs every
-      undrained key, and falls back to one recovery probe a minute
+      ``workspace-mcp`` (the mount-less fleet: through the server's content
+      writer, workspace-mcp's ``POST /content/write``), ``local-files`` (this
+      pod's own disk), or ``auto`` (default): ``workspace-mcp`` when
+      ``content_backend`` is ``delegated``, else ``local-files``. The sweeper
+      only ever sees the resolved name (:func:`resolve_metadata_outbox_sink`).
+    - ``metadata_outbox_drain_timeout_s``: with (resolved) ``local-files``,
+      how long replay may fail continuously before the leader stops, logs
+      every undrained key, and falls back to one recovery probe a minute
       (default 600).
     """
 
     metadata_read_source: str = METADATA_READ_SOURCE_REGISTRY
     metadata_file_dual_write: bool = True
-    metadata_outbox_sink: str = METADATA_OUTBOX_SINK_LOCAL_FILES
+    metadata_outbox_sink: str = METADATA_OUTBOX_SINK_AUTO
     metadata_outbox_drain_timeout_s: int = DEFAULT_METADATA_OUTBOX_DRAIN_TIMEOUT_S
 
 

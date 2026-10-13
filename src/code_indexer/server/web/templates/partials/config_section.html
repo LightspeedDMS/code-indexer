@@ -1092,12 +1092,12 @@ function saveLlmCredsConfig() {
                 <tr>
                     <td class="config-label">Outbox Sink</td>
                     <td class="config-value">{{ config.control_plane_metadata.metadata_outbox_sink }}</td>
-                    <td class="config-description">How the outbox sweeper writes the files: workspace-mcp (mount-less fleet; no write path yet, rows are kept) or local-files (this pod's disk)</td>
+                    <td class="config-description">How the outbox sweeper writes the files: auto (default: workspace-mcp when the content backend is delegated, else local-files), workspace-mcp (mount-less fleet, through the content writer) or local-files (this pod's disk)</td>
                 </tr>
                 <tr>
                     <td class="config-label">Outbox Drain Timeout (s)</td>
                     <td class="config-value">{{ config.control_plane_metadata.metadata_outbox_drain_timeout_s }}</td>
-                    <td class="config-description">With local-files, how long replay may fail continuously before the leader stops, logs every undrained key, and retries once a minute until it succeeds (default: 600)</td>
+                    <td class="config-description">With local-files (or auto resolving to it), how long replay may fail continuously before the leader stops, logs every undrained key, and retries once a minute until it succeeds (default: 600)</td>
                 </tr>
             </table>
             <div class="form-actions">
@@ -1130,10 +1130,11 @@ function saveLlmCredsConfig() {
                 <label for="cpm-metadata-outbox-sink">
                     Outbox Sink
                     <select id="cpm-metadata-outbox-sink" name="metadata_outbox_sink">
+                        <option value="auto" {% if config.control_plane_metadata.metadata_outbox_sink == 'auto' %}selected{% endif %}>auto</option>
                         <option value="local-files" {% if config.control_plane_metadata.metadata_outbox_sink == 'local-files' %}selected{% endif %}>local-files</option>
                         <option value="workspace-mcp" {% if config.control_plane_metadata.metadata_outbox_sink == 'workspace-mcp' %}selected{% endif %}>workspace-mcp</option>
                     </select>
-                    <small>workspace-mcp has no file-write path yet: with it selected the outbox is kept, not drained.</small>
+                    <small>auto follows the content backend. workspace-mcp needs a content writer (delegated content backend): without one the outbox is kept, not drained.</small>
                 </label>
                 <label for="cpm-metadata-outbox-drain-timeout">
                     Outbox Drain Timeout (s)

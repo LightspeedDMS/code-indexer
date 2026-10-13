@@ -158,9 +158,9 @@ class TestConfigCategory:
         assert settings["control_plane_metadata"] == {
             "metadata_read_source": "registry",
             "metadata_file_dual_write": True,
-            # Deviation from the design's workspace-mcp default until the
-            # workspace-mcp file-write path exists (see sinks.py).
-            "metadata_outbox_sink": "local-files",
+            # auto: workspace-mcp under a delegated content backend, else
+            # local-files -- a local server behaves exactly as before.
+            "metadata_outbox_sink": "auto",
             "metadata_outbox_drain_timeout_s": 600,
         }
 
@@ -191,6 +191,15 @@ class TestConfigCategory:
         assert cpm is not None
         assert cpm.metadata_outbox_sink == "workspace-mcp"
         assert cpm.metadata_outbox_drain_timeout_s == 120
+
+    @pytest.mark.parametrize("sink", ["auto", "local-files", "workspace-mcp"])
+    def test_every_sink_value_is_accepted(self, tmp_path, sink):
+        service = ConfigService(server_dir_path=str(tmp_path))
+        service.load_config()
+        service.update_setting("control_plane_metadata", "metadata_outbox_sink", sink)
+        cpm = service.get_config().control_plane_metadata_config
+        assert cpm is not None
+        assert cpm.metadata_outbox_sink == sink
 
     @pytest.mark.parametrize(
         "key,value",
@@ -262,6 +271,17 @@ class TestWebUiSection:
 
         assert _validate_config_section("control_plane_metadata", data) is not None
 
+    @pytest.mark.parametrize("sink", ["auto", "local-files", "workspace-mcp"])
+    def test_validation_accepts_every_sink(self, sink):
+        from code_indexer.server.web.routes import _validate_config_section
+
+        assert (
+            _validate_config_section(
+                "control_plane_metadata", {"metadata_outbox_sink": sink}
+            )
+            is None
+        )
+
     def test_validation_rejects_unknown_read_source(self):
         from code_indexer.server.web.routes import _validate_config_section
 
@@ -295,6 +315,8 @@ class TestWebUiSection:
         assert 'name="metadata_read_source"' in section
         assert 'name="metadata_file_dual_write"' in section
         assert 'name="metadata_outbox_sink"' in section
+        for sink in ("auto", "local-files", "workspace-mcp"):
+            assert f'<option value="{sink}"' in section
         assert 'name="metadata_outbox_drain_timeout_s"' in section
 
 
@@ -315,6 +337,51 @@ class TestOutboxSweeperWiring:
         )
         provider = outbox_settings_from_config_service(lambda: config)
         assert provider() == OutboxSettings(sink="workspace-mcp", drain_timeout_s=30)
+
+    @pytest.mark.parametrize(
+        "configured,content_backend,resolved",
+        [
+            ("auto", "delegated", "workspace-mcp"),
+            ("auto", "local", "local-files"),
+            ("auto", None, "local-files"),
+            ("local-files", "delegated", "local-files"),
+            ("workspace-mcp", "local", "workspace-mcp"),
+            ("local-files", "local", "local-files"),
+            ("workspace-mcp", "delegated", "workspace-mcp"),
+        ],
+    )
+    def test_outbox_settings_carry_the_resolved_sink(
+        self, configured, content_backend, resolved
+    ):
+        """auto follows content_backend; explicit values mean exactly that.
+
+        Mutation: pass the configured value through -> ``auto`` reaches the
+        sweeper (and build_sink's unknown-sink branch)."""
+        from code_indexer.server.startup.control_plane_metadata_wiring import (
+            outbox_settings_from_config_service,
+        )
+
+        config = SimpleNamespace(
+            content_backend=content_backend,
+            control_plane_metadata_config=SimpleNamespace(
+                metadata_outbox_sink=configured,
+                metadata_outbox_drain_timeout_s=600,
+            ),
+        )
+        provider = outbox_settings_from_config_service(lambda: config)
+        assert provider().sink == resolved
+
+    def test_auto_resolves_from_the_real_server_config(self, tmp_path):
+        """No content_backend declared: the default config resolves to
+        local-files, identical to the pre-auto default."""
+        from code_indexer.server.startup.control_plane_metadata_wiring import (
+            outbox_settings_from_config_service,
+        )
+
+        service = ConfigService(server_dir_path=str(tmp_path))
+        service.load_config()
+        provider = outbox_settings_from_config_service(service.get_config)
+        assert provider().sink == "local-files"
 
     def test_started_with_registry_and_gauge_registered(self, tmp_path):
         from code_indexer.global_repos.control_plane_metadata import (
