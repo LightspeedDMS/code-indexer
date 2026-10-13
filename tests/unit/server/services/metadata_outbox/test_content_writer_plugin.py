@@ -1,8 +1,8 @@
 """The content-writer plugin seam (workspace-mcp's file-write client).
 
-Resolved like the other backend plugins; not yet wired into the outbox sink
-(the write path has not published). These tests pin the seam's contract so
-wiring it later is a one-line change.
+Resolved like the other backend plugins; the outbox's workspace-mcp sink
+adapts the writer the server parks at startup (``build_sink``). These tests
+pin the seam's contract.
 """
 
 from __future__ import annotations

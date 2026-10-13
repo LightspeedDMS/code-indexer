@@ -2,27 +2,29 @@
 
 A sink is the file-write path, and nothing else: ``put`` an absolute path's
 bytes, or ``delete`` it. ANY exception means "not written" -- the sweeper then
-keeps the outbox row and retries on a later sweep. That is the whole contract,
-shaped so the workspace-mcp sink is a thin adapter over the content writer the
-workspace-mcp write path will expose (``put(path, data)`` / ``delete(path)``,
-raising an error whose ``.code`` is ECONFLICT/EINVAL/EFORBIDDEN/EUNAVAILABLE/
-ETRANSPORT).
+keeps the outbox row and retries on a later sweep. That is the whole contract.
 
-* ``local-files``: this pod's own disk -- correct for today's fleet, where the
+* ``local-files``: this pod's own disk -- correct for a fleet where the
   golden-repos volume is mounted on every pod.
-* ``workspace-mcp``: the mount-less fleet. Its file-write path does not exist
-  yet, so :func:`build_sink` returns an :class:`UnavailableSink` that fails
-  every call LOUDLY (an ERROR at build time, and a raise per replay): rows are
-  kept, ``cidx_metadata_outbox_depth`` stays visible, nothing is dropped.
-  :class:`ContentWriterSink` is the adapter that will replace it once the
-  write path publishes; ``content_writer_plugin`` resolves its client.
+* ``workspace-mcp``: the mount-less fleet. :class:`ContentWriterSink` writes
+  through the server's content writer (the ``code_indexer.content_writer``
+  seam, workspace-mcp's ``POST /content/write``) at the same absolute path,
+  so workspace-mcp's ``WSM_CONTENT_WRITE_ROOTS`` must cover the golden-repos
+  directory (``aliases/`` and the write-mode marker directory). With no
+  writer configured (a local content backend) :func:`build_sink` returns an
+  :class:`UnavailableSink` that fails every call LOUDLY (an ERROR at build
+  time, and a raise per replay): rows are kept, ``cidx_metadata_outbox_depth``
+  stays visible, nothing is dropped.
+
+``metadata_outbox_sink=auto`` never reaches this module: the settings provider
+resolves it to one of the two above (see ``resolve_metadata_outbox_sink``).
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 from code_indexer.global_repos.control_plane_metadata import MetadataFiles
 from code_indexer.server.utils.config_manager import (
@@ -33,10 +35,10 @@ from code_indexer.server.utils.config_manager import (
 logger = logging.getLogger(__name__)
 
 WORKSPACE_MCP_UNAVAILABLE = (
-    "no workspace-mcp write path yet: metadata_outbox_sink=workspace-mcp keeps "
-    "every outbox row (cidx_metadata_outbox_depth grows) until the workspace-mcp "
-    "file-write path ships; set metadata_outbox_sink=local-files on a fleet with "
-    "the golden-repos volume mounted"
+    "no content writer configured: metadata_outbox_sink=workspace-mcp keeps "
+    "every outbox row (cidx_metadata_outbox_depth grows) until one is. The "
+    "writer exists only under content_backend=delegated; on a fleet with the "
+    "golden-repos volume mounted set metadata_outbox_sink=local-files (or auto)"
 )
 
 
@@ -72,11 +74,14 @@ class LocalFilesSink:
 
 
 class ContentWriterSink:
-    """Adapter over a workspace-mcp content writer (``put``/``delete``).
+    """Adapter over the server's content writer (workspace-mcp).
 
-    Unconditional writes (no ``expected_blob_sha``): the sweeper always writes
-    the registry's current value, so last-writer-wins is the intent. Any error
-    the writer raises propagates, which keeps the outbox row.
+    Unconditional writes (no ``expected_blob_sha`` is sent): the sweeper always
+    writes the registry's CURRENT document for a key, so last-writer-wins is
+    the intent. The writer takes absolute paths, as the sweeper produces them.
+    A delete of an absent file is success (the writer returns False rather
+    than raising). Any error the writer raises propagates, which keeps the
+    outbox row.
     """
 
     name = METADATA_OUTBOX_SINK_WORKSPACE_MCP
@@ -105,14 +110,36 @@ class UnavailableSink:
         raise MetadataSinkUnavailableError(self.reason)
 
 
-def build_sink(name: str) -> MetadataSink:
-    """The sink for a ``metadata_outbox_sink`` value.
+def _server_content_writer() -> Optional[Any]:
+    from code_indexer.server.startup.content_writer_wiring import (
+        server_content_writer,
+    )
 
-    ``workspace-mcp`` fails loud: logged at ERROR here, and every replay raises.
+    return server_content_writer()
+
+
+def build_sink(
+    name: str,
+    *,
+    content_writer: Callable[[], Optional[Any]] = _server_content_writer,
+) -> MetadataSink:
+    """The sink for a resolved ``metadata_outbox_sink`` value.
+
+    ``workspace-mcp`` adapts the writer *content_writer* returns (the one the
+    running server parked at startup); with none it fails loud: logged at
+    ERROR here, and every replay raises.
     """
     if name == METADATA_OUTBOX_SINK_LOCAL_FILES:
         return LocalFilesSink()
     if name == METADATA_OUTBOX_SINK_WORKSPACE_MCP:
+        writer = content_writer()
+        if writer is not None:
+            logger.info(
+                "Metadata outbox sink %s: content writer %s",
+                name,
+                type(writer).__name__,
+            )
+            return ContentWriterSink(writer)
         logger.error("Metadata outbox sink %s: %s", name, WORKSPACE_MCP_UNAVAILABLE)
         return UnavailableSink(name, WORKSPACE_MCP_UNAVAILABLE)
     reason = f"unknown metadata_outbox_sink {name!r}"

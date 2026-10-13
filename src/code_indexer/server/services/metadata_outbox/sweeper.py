@@ -14,14 +14,15 @@ fleet, on the elected leader -- replays the outbox to the old files:
   user-facing change.
 * **Claimed.** Rows are claimed for the sweep (``FOR UPDATE SKIP LOCKED`` on
   PostgreSQL, a lease on SQLite), so two sweepers never write one key twice.
-* **Drain bound.** With ``metadata_outbox_sink=local-files`` (the rollback
+* **Drain bound.** With the sink resolved to ``local-files`` (the rollback
   sink) the clock measures how long replay has been failing CONTINUOUSLY: it
   starts on the first sweep with a failed key and is cleared by any sweep
   with none (including one that finds the outbox empty). Once it reaches
   ``metadata_outbox_drain_timeout_s`` the sweeper stops, logs every key still
   in the outbox by name, and the rollback gate (depth 0) stays red. A healthy
   server therefore never reaches the bound, however long it runs.
-* **Recovery.** The default sink is local-files, so the bound is armed in
+* **Recovery.** The default sink, ``auto``, resolves to local-files on a
+  server without a delegated content backend, so the bound is armed in
   steady state too, and an outage longer than the bound (the volume gone for
   11 minutes) reaches it. That stop is not terminal: once every
   ``probe_interval_s`` the stopped sweeper replays a batch as a probe, and the
@@ -34,8 +35,14 @@ fleet, on the elected leader -- replays the outbox to the old files:
   clears it.
 
 The stop state is in the registry (``metadata_outbox_state``), so an abandon
-on any node stops the leader's sweeper. Changing ``metadata_outbox_sink``
-clears it: the stop belongs to the sink it was reached with.
+on any node stops the leader's sweeper. Changing the sink clears it: the stop
+belongs to the sink it was reached with.
+
+``OutboxSettings.sink`` is always a RESOLVED sink name (``local-files`` or
+``workspace-mcp``, never ``auto``): the settings provider resolves ``auto``
+from ``content_backend``. The drain bound, the stop state and an abandon all
+compare that resolved name, so ``auto`` and the explicit value it resolves to
+are the same sink, and a stop recorded under it stands across sweeps.
 """
 
 from __future__ import annotations
@@ -86,7 +93,7 @@ Key = Tuple[str, str]
 
 @dataclass(frozen=True)
 class OutboxSettings:
-    """The sweeper's two runtime switches."""
+    """The sweeper's two runtime switches. ``sink`` is the resolved name."""
 
     sink: str = METADATA_OUTBOX_SINK_LOCAL_FILES
     drain_timeout_s: int = DEFAULT_METADATA_OUTBOX_DRAIN_TIMEOUT_S
