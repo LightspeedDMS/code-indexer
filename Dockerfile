@@ -66,14 +66,17 @@ RUN pip install ./plugins/cidx_git_backend
 # CIDX_CONTENT_MCP_URL / CIDX_CONTENT_MCP_TOKEN. From 0.7.0 the same package
 # also registers `code_indexer.xray_backend` (X-Ray evaluators run in
 # sandbox-mcp under `xray_backend=delegated`; CIDX_XRAY_SANDBOX_MCP_URL /
-# CIDX_XRAY_SANDBOX_MCP_TOKEN).
+# CIDX_XRAY_SANDBOX_MCP_TOKEN). From 0.8.0 it also registers
+# `code_indexer.scip_backend` (SCIP indexing in sandbox-mcp's `scip` run profile
+# under `scip_backend=delegated-plugin`; CIDX_SCIP_SANDBOX_MCP_URL /
+# CIDX_SCIP_SANDBOX_MCP_TOKEN) -- inert for `local` and `delegated`.
 #
 # The registry is private: the index URL (with credentials) arrives as a
 # BuildKit SECRET, never a build arg, so it is not written into any layer or the
 # image history. CI's build:image always supplies it, and its in-image step
 # asserts the entry point resolves -- so a CI image can never ship without the
 # plugin. A local `docker build` without the secret skips the plugin, loudly.
-ARG CIDX_CONTENT_BACKEND_VERSION=0.7.0
+ARG CIDX_CONTENT_BACKEND_VERSION=0.8.0
 RUN --mount=type=secret,id=plugin_index,required=false \
     if [ -s /run/secrets/plugin_index ]; then \
       pip install --no-cache-dir --no-deps \
