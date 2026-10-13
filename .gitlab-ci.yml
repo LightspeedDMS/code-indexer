@@ -222,6 +222,9 @@ smoke:
       tests/unit/services/test_progressive_metadata_lifecycle_1865.py
       tests/unit/server/test_content_seam_inventory.py
       tests/unit/utils/test_index_store.py
+      tests/unit/utils/test_sandbox_mcp_client.py
+      tests/unit/xray/test_xray_execution_seam.py
+      tests/unit/server/startup/test_xray_backend_wiring.py
       -v --tb=short
       --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
     # The plugins ship their own suites and NO job collected either of them.

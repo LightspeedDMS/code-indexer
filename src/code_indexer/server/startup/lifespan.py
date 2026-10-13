@@ -878,6 +878,19 @@ def make_lifespan(
             extra={"correlation_id": get_correlation_id()},
         )
 
+        # X-Ray execution seam (xray_backend, a bootstrap key). None under
+        # local: each RustNativeBackend runs xray-cli in this pod, as before.
+        # Deliberately OUTSIDE any try: an invalid or not-yet-implemented
+        # selection (delegated) must stop startup, because a swallowed error
+        # would leave this unset and X-Ray would quietly run caller code here.
+        from code_indexer.server.startup.xray_backend_wiring import (
+            build_configured_xray_execution_backend,
+        )
+
+        app.state.xray_execution_backend = build_configured_xray_execution_backend(
+            startup_config
+        )
+
         # Global xray cell concurrency limiter — shared by xray_search, xray_explore,
         # and xray_search_batch cells. Sized from runtime xray_worker_threads config (default 4).
         from code_indexer.server.services.resizable_limiter import (
