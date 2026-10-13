@@ -425,3 +425,75 @@ class TestAtomicSingleFileRestore:
         assert "No space left on device" in failure.self_heal_error
         assert source_db.read_bytes() == corrupt_bytes
         assert _names_in(source_db.parent) == names_before
+
+
+class TestRestoreSourceMustBeRegularFile:
+    """Restore sources are read only as regular files, never through a
+    symbolic link at their final component."""
+
+    def test_symlinked_chunks_db_source_is_refused_and_target_kept(
+        self, tmp_path: Path
+    ) -> None:
+        other = tmp_path / "other.bin"
+        other.write_bytes(b"bytes of another file")
+        snapshot_dir = tmp_path / "published"
+        snapshot_dir.mkdir()
+        source = snapshot_dir / "chunks.db"
+        source.symlink_to(other)
+        target_dir = tmp_path / "coll"
+        target_dir.mkdir()
+        target = target_dir / "chunks.db"
+        target.write_bytes(b"previous content")
+
+        with pytest.raises(OSError, match="not a regular file"):
+            restore_chunks_db_file(source, target)
+
+        assert target.read_bytes() == b"previous content"
+        assert _names_in(target_dir) == ["chunks.db"]
+
+    def test_symlinked_metadata_source_is_refused_and_target_kept(
+        self, tmp_path: Path
+    ) -> None:
+        other = tmp_path / "other.json"
+        other.write_text('{"c": "another file"}')
+        healthy_dir = tmp_path / "healthy"
+        healthy_dir.mkdir()
+        (healthy_dir / _METADATA_NAME).symlink_to(other)
+        target_dir = tmp_path / "target"
+        target_dir.mkdir()
+        (target_dir / _METADATA_NAME).write_text('{"c": "previous"}')
+
+        with pytest.raises(OSError, match="not a regular file"):
+            restore_metadata_files(healthy_dir, target_dir)
+
+        assert (target_dir / _METADATA_NAME).read_text() == '{"c": "previous"}'
+        assert _names_in(target_dir) == [_METADATA_NAME]
+
+    def test_directory_source_is_refused_and_target_absent(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "published" / "chunks.db"
+        source.mkdir(parents=True)
+        target_dir = tmp_path / "coll"
+        target_dir.mkdir()
+
+        with pytest.raises(OSError, match="not a regular file"):
+            restore_chunks_db_file(source, target_dir / "chunks.db")
+
+        assert _names_in(target_dir) == []
+
+    def test_regular_file_source_copied_with_its_permission_bits(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "healthy.db"
+        source.write_bytes(os.urandom(128 * 1024 + 5))
+        source.chmod(0o604)
+        target_dir = tmp_path / "coll"
+        target_dir.mkdir()
+        target = target_dir / "chunks.db"
+
+        restore_chunks_db_file(source, target)
+
+        assert target.read_bytes() == source.read_bytes()
+        assert target.stat().st_mode & 0o7777 == 0o604
+        assert _names_in(target_dir) == ["chunks.db"]

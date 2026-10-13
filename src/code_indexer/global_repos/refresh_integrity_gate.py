@@ -62,7 +62,7 @@ import stat
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import BinaryIO, Callable, List, Optional, Tuple
 
 from code_indexer.storage.shared.chunk_layout import (
     ChunkLayout,
@@ -255,6 +255,44 @@ def _remove_stale_sidecars(target_path: Path, suffixes: Tuple[str, ...]) -> None
         sidecar.unlink()
 
 
+def _open_restore_source(source_path: Path) -> Tuple[BinaryIO, int]:
+    """Open a restore source for reading only when it is a regular file,
+    never through a symbolic link at its final component.
+
+    Returns the open file and the permission bits of that same open file
+    (one ``fstat``), so the bits applied to the copy describe exactly the
+    bytes read. ``O_NONBLOCK`` makes the open return at once for any
+    non-regular file, which the ``fstat`` check then refuses; it has no
+    effect on reads of a regular file. Raises ``OSError`` naming the path
+    with "not a regular file" for a symbolic link, a directory or any other
+    non-regular file.
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(source_path, flags)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise OSError(
+                errno.ELOOP,
+                "restore source is not a regular file",
+                str(source_path),
+            ) from exc
+        raise
+    try:
+        source_stat = os.fstat(fd)
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise OSError(
+                errno.EINVAL,
+                "restore source is not a regular file",
+                str(source_path),
+            )
+        source = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    return source, stat.S_IMODE(source_stat.st_mode)
+
+
 def _restore_file_atomically(
     source_path: Path,
     target_path: Path,
@@ -264,9 +302,11 @@ def _restore_file_atomically(
     """Bug #2157: restore a single file atomically, created by this process
     (so the service user owns it), identically on every deployment mode.
 
-    Streams *source_path* into the temporary sibling
-    ``.<target name>.restore-tmp`` in *target_path*'s directory, fsyncs it,
-    copies the source's permission bits, removes the target's stale
+    *source_path* is read only when it is a regular file, never through a
+    symbolic link at its final component (:func:`_open_restore_source`).
+    Streams it into the temporary sibling ``.<target name>.restore-tmp`` in
+    *target_path*'s directory, applies the permission bits of the opened
+    source, fsyncs it, removes the target's stale
     *stale_sidecar_suffixes* files (never copying the source's), then
     ``os.replace``s it onto *target_path* and fsyncs the directory. Never the
     clone backend: the CoW daemon clones directories only. On failure before
@@ -284,11 +324,13 @@ def _restore_file_atomically(
     temp_path.unlink(missing_ok=True)
     temp_file = open(temp_path, "xb")
     try:
-        with temp_file, open(source_path, "rb") as source:
-            shutil.copyfileobj(source, temp_file, _RESTORE_COPY_BUFFER_BYTES)
+        with temp_file:
+            source, source_mode = _open_restore_source(source_path)
+            with source:
+                shutil.copyfileobj(source, temp_file, _RESTORE_COPY_BUFFER_BYTES)
+            os.fchmod(temp_file.fileno(), source_mode)
             temp_file.flush()
             os.fsync(temp_file.fileno())
-        shutil.copymode(source_path, temp_path)
         _remove_stale_sidecars(target_path, stale_sidecar_suffixes)
         os.replace(temp_path, target_path)
     except BaseException:
