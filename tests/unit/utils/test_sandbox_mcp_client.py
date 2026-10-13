@@ -20,6 +20,7 @@ from code_indexer.utils.sandbox_mcp_client import (
     SandboxMcpClient,
     SandboxMcpError,
     extract_run_result,
+    extract_tool_payload,
 )
 
 
@@ -152,6 +153,97 @@ class TestEnvelopeShapes:
     )
     def test_no_envelope(self, payload):
         assert extract_run_result(payload) is None
+
+
+FETCHED = {"result_id": "r1", "chunk": 0, "final": True, "data": "e30="}
+
+
+class TestToolPayload:
+    """call_tool_payload: tools whose reply is not a run-result envelope
+    (sandbox_result_fetch pages a parked result; it has no exit_code)."""
+
+    def test_returns_an_envelope_less_result_with_the_same_wire_shape(self):
+        fake = _requests(post=_response(payload={"result": FETCHED}))
+        client = _client(fake)
+
+        assert client.call_tool_payload("sandbox_result_fetch", {"chunk": 0}) == FETCHED
+
+        fake.post.assert_called_once_with(
+            "http://sandbox-mcp:8200/v1/sandbox/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "sandbox_result_fetch", "arguments": {"chunk": 0}},
+            },
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer tok",
+            },
+            timeout=42,
+        )
+
+    def test_call_tool_still_refuses_it(self):
+        fake = _requests(post=_response(payload={"result": FETCHED}))
+        with pytest.raises(SandboxMcpError, match="no SandboxRunResult envelope"):
+            _client(fake).call_tool("sandbox_result_fetch", {"chunk": 0})
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"result": FETCHED},
+            {"result": {"structuredContent": FETCHED, "content": []}},
+            {"result": {"content": [{"type": "text", "text": json.dumps(FETCHED)}]}},
+        ],
+    )
+    def test_accepted_shapes(self, payload):
+        assert extract_tool_payload(payload) == FETCHED
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            None,
+            [],
+            {"error": {"code": -32000, "message": "unknown result_id"}},
+            {"result": "text"},
+            {"result": {"isError": True, "content": [{"text": "{}"}]}},
+            {"result": {"content": []}},
+            {"result": {"content": [{"type": "text", "text": "not json"}]}},
+            {"result": {"content": [{"type": "text", "text": "[1]"}]}},
+        ],
+    )
+    def test_rejected_shapes(self, payload):
+        assert extract_tool_payload(payload) is None
+
+    def test_a_tool_error_raises_with_the_reply(self):
+        payload = {"jsonrpc": "2.0", "error": {"message": "unknown result_id"}}
+        fake = _requests(post=_response(payload=payload))
+        with pytest.raises(SandboxMcpError) as excinfo:
+            _client(fake).call_tool_payload("sandbox_result_fetch", {})
+        assert "sandbox_result_fetch returned no result object" in str(excinfo.value)
+        assert "unknown result_id" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "fake, expected",
+        [
+            (
+                _requests(post_raises=_FakeRequestException("refused")),
+                "sandbox_result_fetch request to",
+            ),
+            (
+                _requests(post=_response(status_code=503, text="busy")),
+                "sandbox_result_fetch failed (HTTP 503): busy",
+            ),
+            (
+                _requests(post=_response(payload=None)),
+                "sandbox_result_fetch returned non-JSON response",
+            ),
+        ],
+    )
+    def test_transport_failures_raise(self, fake, expected):
+        with pytest.raises(SandboxMcpError) as excinfo:
+            _client(fake).call_tool_payload("sandbox_result_fetch", {})
+        assert expected in str(excinfo.value)
 
 
 class TestHealth:
