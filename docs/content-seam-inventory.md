@@ -10,11 +10,11 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | unclassified | 0 |
 | repo-read | 452 |
 | repo-write | 93 |
-| cidx-state-in-repo | 1017 |
+| cidx-state-in-repo | 1022 |
 | migrated | 275 |
 | local-only | 324 |
 | cidx-state | 534 |
-| not-repo | 421 |
+| not-repo | 422 |
 
 ## Modules with open rows
 
@@ -64,6 +64,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `scip/indexers/delegated.py` | 0 | 1 | 0 | 3 |
 | `scip/indexers/go.py` | 0 | 0 | 0 | 1 |
 | `scip/indexers/java.py` | 0 | 0 | 0 | 1 |
+| `scip/indexers/plugin_backend.py` | 0 | 0 | 0 | 5 |
 | `scip/indexers/python.py` | 0 | 0 | 0 | 1 |
 | `scip/indexers/typescript.py` | 0 | 0 | 0 | 1 |
 | `scip/query/backends.py` | 0 | 1 | 0 | 1 |

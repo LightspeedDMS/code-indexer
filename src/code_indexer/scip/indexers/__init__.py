@@ -5,6 +5,7 @@ from .java import JavaIndexer
 from .typescript import TypeScriptIndexer
 from .python import PythonIndexer
 from .delegated import DelegatedIndexer
+from .plugin_backend import PluginScipIndexer
 from .factory import ScipBackendFactory
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "TypeScriptIndexer",
     "PythonIndexer",
     "DelegatedIndexer",
+    "PluginScipIndexer",
     "ScipBackendFactory",
 ]

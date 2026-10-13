@@ -331,7 +331,9 @@ class TestAddIndexesDispatchesScipBranch:
         with patch.object(
             mgr.background_job_manager, "submit_job", side_effect=fake_submit_job
         ):
-            mgr.add_indexes_to_golden_repo("test-repo", ["scip"])
+            mgr.add_indexes_to_golden_repo(
+                "test-repo", ["scip"], submitter_username="admin"
+            )
 
         spy = fake_submit_job.spy
         spy.assert_called_once()
