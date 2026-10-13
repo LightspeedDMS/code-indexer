@@ -33,6 +33,10 @@ struct JsonFinding {
     file: String,
     line: usize,
     snippet: String,
+    /// The matched source line, emitted by the scan so cidx need not re-read
+    /// the file. Absent (never `null`) where no source is in hand: `--refine`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    line_content: Option<String>,
 }
 
 struct ParsedArgs {
@@ -562,7 +566,7 @@ fn build_refine_file_outcomes(
             findings: r
                 .findings
                 .into_iter()
-                .map(|f| JsonFinding { pattern: f.pattern, file: f.file, line: f.line, snippet: f.snippet })
+                .map(|f| JsonFinding { pattern: f.pattern, file: f.file, line: f.line, snippet: f.snippet, line_content: f.line_content })
                 .collect(),
             status: refine_status_label(r.status).to_string(),
         })
@@ -1432,6 +1436,7 @@ fn main() {
                         file: f.file.clone(),
                         line: f.line,
                         snippet: f.snippet.clone(),
+                        line_content: f.line_content.clone(),
                     })
                     .collect();
                 let out = JsonOutput {
@@ -2311,6 +2316,26 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             "empty debug_messages must serialize as empty array: {}",
             json
         );
+    }
+
+    #[test]
+    fn test_json_finding_carries_line_content_and_omits_it_when_absent() {
+        let finding = |line_content: Option<&str>| JsonFinding {
+            pattern: "p".to_string(),
+            file: "/repo/A.java".to_string(),
+            line: 1,
+            snippet: "s".to_string(),
+            line_content: line_content.map(str::to_string),
+        };
+        let scanned = serde_json::to_string(&finding(Some("class A {}"))).unwrap();
+        assert!(scanned.contains("\"line_content\":\"class A {}\""), "{}", scanned);
+        // --refine has no source in hand: the key is absent, never null, so
+        // the wire shape it had before this field existed is unchanged.
+        let refined = serde_json::to_string(&finding(None)).unwrap();
+        assert!(!refined.contains("line_content"), "{}", refined);
+        let parsed: JsonFinding =
+            serde_json::from_str(r#"{"pattern":"p","file":"f","line":1,"snippet":"s"}"#).unwrap();
+        assert_eq!(parsed.line_content, None);
     }
 
     #[test]

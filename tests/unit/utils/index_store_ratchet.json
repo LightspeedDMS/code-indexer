@@ -74,6 +74,5 @@
  "services/smart_indexer.py": 2,
  "services/temporal/temporal_search_service.py": 1,
  "services/temporal/temporal_server_paths.py": 1,
- "utils/exception_logger.py": 1,
- "xray/search_engine.py": 3
+ "utils/exception_logger.py": 1
 }

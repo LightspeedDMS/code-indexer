@@ -15,11 +15,22 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+)
 
 if TYPE_CHECKING:
+    from code_indexer.server.services.file_service import ContentSeamSource
     from code_indexer.xray.rust_backend import SharedIdentityCache, XrayCacheBackend
 
+from code_indexer.utils.index_store import INDEX_DIRNAME
 from code_indexer.utils.path_confinement import is_resolved_within_root
 from code_indexer.global_repos.regex_search import (
     RegexSearchService,
@@ -34,6 +45,59 @@ logger = logging.getLogger(__name__)
 # This is a process-local operation budget, not an operator setting: at most
 # this many compiled-pattern/path comparisons are spent after Phase 1.
 _ZERO_MATCH_PATTERN_MATCH_ATTEMPT_BUDGET = 10_000
+
+#: Directory names the filename driver discards at the repository root
+#: anyway. Sent to the content manifest as its prune list so the backend never
+#: hashes cidx's own index store -- which, unlike the local walk's root-only
+#: check, it prunes at any depth (a nested ``.code-indexer`` is cidx state too).
+_FILENAME_MANIFEST_PRUNE_DIRS = (".git", INDEX_DIRNAME)
+
+
+def xray_content_source(repo_path: Path) -> Optional["ContentSeamSource"]:
+    """The content seam to read *repo_path* through, or None to read the disk.
+
+    None -- every X-Ray read exactly as before -- unless the running server's
+    content backend is NOT local; then the repository's files are read through
+    that backend (``file_service.content_seam_source``, shared with the file
+    tools). Checked before importing ``file_service`` so the ``cidx xray`` CLI
+    never imports the server's file service for nothing.
+    """
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    if not is_content_seam_delegated():
+        return None
+    from code_indexer.server.services.file_service import content_seam_source
+
+    return content_seam_source(str(repo_path), consumer="X-Ray")
+
+
+def _phase1_regex_service(repo_path: Path) -> RegexSearchService:
+    """The Phase 1 content driver for *repo_path*.
+
+    A delegated ripgrep backend runs ripgrep where the repository is, at the
+    root it can see (``server_regex_target``, shared with regex_search); match
+    paths come back repo-relative either way, so candidates still join onto
+    *repo_path*. Any other selection builds the service exactly as before.
+    """
+    from code_indexer.server.startup.ripgrep_backend_wiring import (
+        server_regex_target,
+    )
+
+    root, backend = server_regex_target(repo_path)
+    if backend is None or backend.is_local:
+        return RegexSearchService(repo_path)
+    return RegexSearchService(root, ripgrep_backend=backend)
+
+
+def _is_cidx_or_git_internal(rel: str) -> bool:
+    """CIDX's index store (Finding 3.6, v10.4.4) and git internals (v10.4.6
+    Defect 2) at the repository root: never filename candidates."""
+    return rel.startswith((INDEX_DIRNAME + "/", ".git/")) or rel in (
+        INDEX_DIRNAME,
+        ".git",
+    )
 
 
 class XRayPhase1TimeoutError(Exception):
@@ -564,6 +628,14 @@ class XRaySearchEngine:
         # original _evaluate_file implementation at lines 694-705).
         if include_ast_debug and matches:
             spec_by_path = {s["file_path"]: s for s in file_specs}
+            matched_sources = self._read_matched_sources(
+                repo_path,
+                [
+                    fp
+                    for fp in dict.fromkeys(m.get("file_path", "") for m in matches)
+                    if fp in spec_by_path
+                ],
+            )
             parsed_roots: Dict[str, Any] = {}
             for match in matches:
                 fp_str = match.get("file_path", "")
@@ -571,7 +643,9 @@ class XRaySearchEngine:
                     spec = spec_by_path.get(fp_str)
                     if spec is not None:
                         try:
-                            file_bytes = (repo_path / fp_str).read_bytes()
+                            file_bytes = matched_sources[fp_str]
+                            if isinstance(file_bytes, Exception):
+                                raise file_bytes
                             root = self.ast_engine.parse(file_bytes, spec["lang"])
                             parsed_roots[fp_str] = root
                         except Exception as exc:  # noqa: BLE001
@@ -661,6 +735,34 @@ class XRaySearchEngine:
                 )
 
         return result
+
+    @staticmethod
+    def _read_matched_sources(repo_path: Path, rel_paths: List[str]) -> Dict[str, Any]:
+        """Each matched file's bytes, or the exception that stopped the read.
+
+        Through the content seam when the repository is behind a delegated
+        backend: ONE fetch for every matched file, never one call per file. A
+        per-file error record becomes that file's exception, exactly as a local
+        read failure does; a backend that fails outright raises.
+        """
+        source = xray_content_source(repo_path)
+        read: Dict[str, Any] = {}
+        if source is None:
+            for rel in rel_paths:
+                try:
+                    read[rel] = (repo_path / rel).read_bytes()
+                except Exception as exc:  # noqa: BLE001
+                    read[rel] = exc
+            return read
+        if not rel_paths:
+            return read
+        for fetched in source.backend.fetch(source.root, rel_paths):
+            read[fetched.path] = (
+                OSError(fetched.error) if fetched.error is not None else fetched.data
+            )
+        for rel in rel_paths:
+            read.setdefault(rel, OSError("not returned by the content backend"))
+        return read
 
     # Lower-level single-file evaluation API used directly by unit tests (not dead code).
     def _evaluate_file(
@@ -921,7 +1023,7 @@ class XRaySearchEngine:
             "recursive matching across directories."
         )
         warnings: List[Dict[str, Any]] = []
-        probe_service = RegexSearchService(repo_path)
+        probe_service = _phase1_regex_service(repo_path)
         probe_loop_start = time.monotonic()
 
         for idx, pat in enumerate(include_patterns):
@@ -1087,6 +1189,38 @@ class XRaySearchEngine:
         candidates: List[Path] = []
         all_rel_paths: List[str] = []
         start = time.monotonic()
+
+        source = xray_content_source(repo_path)
+        rel_paths = (
+            self._local_filename_rel_paths(repo_path)
+            if source is None
+            else self._manifest_filename_rel_paths(source)
+        )
+        for rel in rel_paths:
+            if time.monotonic() - start > timeout_seconds:
+                raise XRayPhase1TimeoutError(candidates=sorted(candidates))
+            if rel is None or _is_cidx_or_git_internal(rel):
+                continue
+            all_rel_paths.append(rel)
+
+            if not selector.select(rel):
+                continue
+
+            if pattern.search(rel):
+                candidates.append(repo_path / rel)
+
+        self._last_phase1_warnings = self._check_zero_match_patterns(
+            include_patterns, all_rel_paths
+        )
+        return sorted(candidates)
+
+    def _local_filename_rel_paths(self, repo_path: Path) -> Iterator[Optional[str]]:
+        """Every file under *repo_path* as a repo-relative path, walking the disk.
+
+        Yields None for each walk entry that is not a candidate file, so the
+        caller's deadline is checked on EVERY ``rglob()`` entry (Bug #1598),
+        not merely per file.
+        """
         # Resolved ONCE for the whole walk, never per candidate.
         resolved_repo_root = repo_path.resolve()
 
@@ -1094,14 +1228,11 @@ class XRaySearchEngine:
         # sorted(repo_path.rglob("*")) -- sorted() would fully drain and
         # sort the entire tree in memory BEFORE the loop body executes even
         # once, so a time-check inside the loop alone could never bound
-        # that initial traversal on a large tree. Sort only the final,
-        # already-bounded candidate list to preserve deterministic output
-        # ordering.
+        # that initial traversal on a large tree. The caller sorts only the
+        # final, already-bounded candidate list.
         for p in repo_path.rglob("*"):
-            if time.monotonic() - start > timeout_seconds:
-                raise XRayPhase1TimeoutError(candidates=sorted(candidates))
-
             if not p.is_file():
+                yield None
                 continue
 
             # p.is_file() follows a symlink's target regardless of where
@@ -1111,28 +1242,25 @@ class XRaySearchEngine:
             if self._confine_to_repo_root and not is_resolved_within_root(
                 p, resolved_repo_root
             ):
+                yield None
                 continue
 
-            rel = str(p.relative_to(repo_path))
-            # Finding 3.6 (v10.4.4): skip CIDX's internal index store.
-            if rel.startswith(".code-indexer/") or rel == ".code-indexer":
-                continue
-            # v10.4.6 (Defect 2): also exclude .git/ — git internals
-            # (FETCH_HEAD, COMMIT_EDITMSG, objects/, etc.) are never code candidates.
-            if rel.startswith(".git/") or rel == ".git":
-                continue
-            all_rel_paths.append(rel)
+            yield str(p.relative_to(repo_path))
 
-            if not selector.select(rel):
-                continue
+    @staticmethod
+    def _manifest_filename_rel_paths(
+        source: "ContentSeamSource",
+    ) -> Iterator[Optional[str]]:
+        """Every file of the repository from the content manifest, no disk walk.
 
-            if pattern.search(rel):
-                candidates.append(p)
+        A symlink is skipped: the manifest reports a link and never follows it,
+        so whether its target is a file inside the repository -- the
+        confinement rule the local walk applies -- cannot be known here.
+        """
+        from code_indexer.server.services.file_service import manifest_entries
 
-        self._last_phase1_warnings = self._check_zero_match_patterns(
-            include_patterns, all_rel_paths
-        )
-        return sorted(candidates)
+        for entry in manifest_entries(source, _FILENAME_MANIFEST_PRUNE_DIRS):
+            yield None if entry.is_symlink else entry.path
 
     def _run_phase1_content(
         self,
@@ -1205,11 +1333,11 @@ class XRaySearchEngine:
         # content-mode Phase 1 — ripgrep walks it otherwise and surfaces error logs
         # / vector .json files as candidates.
         effective_excludes = [
-            ".code-indexer/**",
+            INDEX_DIRNAME + "/**",
             ".git/**",
             *list(exclude_patterns or []),
         ]
-        service = RegexSearchService(repo_path)
+        service = _phase1_regex_service(repo_path)
         try:
             search_result = _run_async_in_sync(
                 service.search(

@@ -1593,13 +1593,26 @@ class LocalXrayExecutionBackend:
                 deadline_seconds=self._remaining_seconds(operation_deadline),
             )
 
+        findings = output.get("findings", [])
+        # xray-cli emits each finding's line_content from the source it parsed.
+        # An older binary does not; re-reading the file to fill it is a local
+        # repository read, allowed only where the repository IS local. Under a
+        # delegated content backend that is an error, never a blank column.
+        if _content_is_delegated() and any(
+            "line_content" not in finding for finding in findings
+        ):
+            msg = (
+                "xray-cli did not emit line_content and the repository is "
+                "behind a delegated content backend, so it cannot be re-read "
+                "locally. Upgrade xray-cli."
+            )
+            logger.error("RustNativeBackend: %s", msg)
+            return XrayScanOutcome([_error_tuple("", "XRayCliError", msg)])
         # debug_log() messages travel beside the results; RustNativeBackend
         # stores them on _last_debug_messages, which XRaySearchEngine.run()
         # surfaces as debug_output[].
         return XrayScanOutcome(
-            self._build_results(
-                file_specs, abs_paths, output.get("findings", []), resolved_root
-            ),
+            self._build_results(file_specs, abs_paths, findings, resolved_root),
             debug_messages=output.get("debug_messages", []),
         )
 
@@ -2757,19 +2770,25 @@ def _build_matches(
 ) -> List[Dict[str, Any]]:
     """Convert xray-cli findings to match dicts for one file spec.
 
+    ``line_content`` is the one xray-cli emitted from the source it parsed.
+    Only a finding WITHOUT it (an older binary) falls back to reading
+    ``abs_path`` here -- ``run_batch`` refuses that case under a delegated
+    content backend, so this read only ever happens on a local repository.
+
     ``resolved_root``, when given, must be an already-resolved directory
     (resolved ONCE by the caller for the whole batch, not per file).
-    ``abs_path`` is read for ``line_content`` enrichment only when it
-    resolves inside that root -- defense in depth alongside the
-    candidate-collection filtering upstream, for the last point before a
-    finding's content leaves this function.
+    ``line_content`` is reported only when ``abs_path`` resolves inside that
+    root -- defense in depth alongside the candidate-collection filtering
+    upstream, for the last point before a finding's content leaves this
+    function.
     """
     lang = spec.get("lang", "")
     rel_path = spec.get("file_path", "")
-    source_lines: List[str] = []
-    if abs_path and (
+    contained = bool(abs_path) and (
         resolved_root is None or is_resolved_within_root(Path(abs_path), resolved_root)
-    ):
+    )
+    source_lines: List[str] = []
+    if contained and any("line_content" not in f for f in spec_findings):
         try:
             source = Path(abs_path).read_bytes().decode("utf-8", errors="replace")
             source_lines = source.splitlines()
@@ -2782,7 +2801,12 @@ def _build_matches(
     for finding in spec_findings:
         line_num = finding.get("line", 0)
         idx = line_num - 1
-        line_content = source_lines[idx] if 0 <= idx < len(source_lines) else ""
+        if not contained:
+            line_content = ""
+        elif "line_content" in finding:
+            line_content = finding["line_content"]
+        else:
+            line_content = source_lines[idx] if 0 <= idx < len(source_lines) else ""
         matches.append(
             {
                 "line_number": line_num,
@@ -2794,3 +2818,14 @@ def _build_matches(
             }
         )
     return matches
+
+
+def _content_is_delegated() -> bool:
+    """True when the running server reads repositories through a NON-local
+    content backend. False outside a server (CLI, tests) -- read lazily so a
+    CLI process never imports the server's wiring for nothing."""
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    return is_content_seam_delegated()

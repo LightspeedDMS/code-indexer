@@ -138,6 +138,7 @@ fn run_refine_one_file(
                     file: repo_relative_path.to_string(),
                     line: f.line,
                     snippet: f.snippet,
+                    line_content: None,
                 })
                 .collect();
             (mapped, RefineFileStatus::Ran)

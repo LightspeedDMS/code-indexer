@@ -1,15 +1,19 @@
 """Whole-repo candidate-file collection for analyze_graph (Issue #1935 Part 2).
 
-Moved verbatim out of the monolithic xray_graph.py -- pure relocation, zero
-behaviour change. See that package's __init__.py module docstring for the
-overall analyze_graph tool context.
+Moved verbatim out of the monolithic xray_graph.py. See that package's
+__init__.py module docstring for the overall analyze_graph tool context. With
+a delegated content backend the candidates come from the content manifest
+(`_manifest_rel_paths_by_dir`) instead of an `os.walk` of this pod's disk.
 """
 
 from __future__ import annotations
 
 import os
-from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Dict, Iterator, List, Set, Tuple
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.file_service import ContentSeamSource
 
 # R3-2 (Codex re-review, ROUND 3): the SAME whole-repo candidate-file cap
 # Rust's `GRAPH_INDEX_MAX_FILES` (rust/xray-cli/src/main.rs) enforces --
@@ -133,22 +137,28 @@ def _collect_graph_candidate_files(
     # file.
     from code_indexer.services.path_pattern_matcher import PathPatternMatcher
 
+    from code_indexer.xray.search_engine import xray_content_source
+
     selector = PathPatternMatcher().create_selector(include_patterns, exclude_patterns)
     results: List[str] = []
     collection_truncated = False
     files_excluded_with_extractor = 0
     files_excluded_without_extractor = 0
     languages_excluded_with_extractor: Set[str] = set()
-    for dirpath, dirnames, filenames in os.walk(repo_path):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_NAMES]
-        for filename in sorted(filenames):
-            rel = Path(dirpath, filename).relative_to(repo_path).as_posix()
-            if not selector.select(rel):
+    source = xray_content_source(repo_path)
+    rel_dirs = (
+        _local_rel_paths_by_dir(repo_path)
+        if source is None
+        else _manifest_rel_paths_by_dir(source)
+    )
+    for rel_dir in rel_dirs:
+        for rel, readable in rel_dir:
+            if not readable or not selector.select(rel):
                 # Bug #1907: this file will NEVER reach Rust -- classify it
                 # NOW, while its extension is still in hand, or it becomes
                 # permanently invisible to every completeness counter.
                 # Extension lookup only, no filesystem call.
-                ext = Path(filename).suffix.lstrip(".").lower()
+                ext = PurePosixPath(rel).suffix.lstrip(".").lower()
                 language = extractor_extensions.get(ext) if ext else None
                 if language is not None:
                     files_excluded_with_extractor += 1
@@ -170,3 +180,36 @@ def _collect_graph_candidate_files(
         files_excluded_without_extractor,
         sorted(languages_excluded_with_extractor),
     )
+
+
+#: One directory's files, in selection order: ``(repo-relative path, readable)``.
+_RelDir = List[Tuple[str, bool]]
+
+
+def _local_rel_paths_by_dir(repo_path: Path) -> Iterator[_RelDir]:
+    """The local walk: one ``os.walk`` directory at a time, skipped subtrees
+    pruned in place, files sorted per directory (see the caller)."""
+    for dirpath, dirnames, filenames in os.walk(repo_path):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_NAMES]
+        yield [
+            (Path(dirpath, filename).relative_to(repo_path).as_posix(), True)
+            for filename in sorted(filenames)
+        ]
+
+
+def _manifest_rel_paths_by_dir(source: "ContentSeamSource") -> Iterator[_RelDir]:
+    """The same candidates from the content manifest, no disk walk.
+
+    The manifest prunes ``_SKIP_DIR_NAMES`` at any depth, as the walk does. It
+    is sorted by full path, so under the cap the files kept are the first in
+    path order rather than ``os.walk``'s directory order. A symlink is never
+    followed by the manifest, so it is not readable here: it is classified
+    like an excluded file -- one in a language with an extractor downgrades
+    ``fact_graph_complete`` instead of silently thinning the graph.
+    """
+    from code_indexer.server.services.file_service import manifest_entries
+
+    yield [
+        (entry.path, not entry.is_symlink)
+        for entry in manifest_entries(source, sorted(_SKIP_DIR_NAMES))
+    ]
