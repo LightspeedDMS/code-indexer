@@ -21,7 +21,9 @@ Index of all invariant groups: [README](README.md).
   a child that reports zero forward progress for that long and raises `IndexingWatchdogKillError`. Elapsed time alone
   never triggers it. The Web UI setting `indexing_watchdog_config.stale_activity_timeout_seconds` (default 120) exists,
   but no caller passes a value to `run_with_popen_progress`, so the watchdog is currently inactive.
-- Fail loud on total failure: `cidx index` exits non-zero when `files_processed == 0 and failed_files > 0`, and
+- Fail loud on total failure: `cidx index` exits non-zero when `files_processed == 0 and failed_files > 0` (sole
+  exception, Bug #2155: every failure is a retry of a failure recorded before the run and the collection already
+  holds committed points -- exit 0 with the failures still recorded, see `failed_only_on_owed_retries`), and
   `run_with_popen_progress` raises `IndexingSubprocessError` on a non-zero exit, so a registration whose indexing all
   fails fails the registration. A failed registration removes its own fresh clone (`_cleanup_failed_clone`) so a retry
   is not blocked.
