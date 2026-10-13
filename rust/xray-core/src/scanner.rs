@@ -1,4 +1,4 @@
-use crate::finding::{EvalFinding, Finding};
+use crate::finding::{line_content_at, source_lines, EvalFinding, Finding};
 use crate::languages;
 use crate::owned_node::OwnedNode;
 use rayon::prelude::*;
@@ -149,8 +149,23 @@ fn evaluate_file(
                 file: file.to_string(),
                 line: ef.line,
                 snippet: ef.snippet,
+                line_content: None,
             });
         }
+    }
+}
+
+/// Fill each finding's `line_content` from the bytes this scan already read,
+/// so the caller never re-opens the file to show the matched line. Decoded
+/// and split once per file, and only when there is a finding to fill.
+fn fill_line_content(source: &[u8], findings: &mut [Finding]) {
+    if findings.is_empty() {
+        return;
+    }
+    let decoded = String::from_utf8_lossy(source);
+    let lines = source_lines(&decoded);
+    for finding in findings.iter_mut() {
+        finding.line_content = Some(line_content_at(&lines, finding.line));
     }
 }
 
@@ -178,6 +193,7 @@ fn process_file(
     let file_str = path.to_string_lossy().to_string();
     let mut findings = Vec::new();
     evaluate_file(&root, evaluators, &file_str, &mut findings);
+    fill_line_content(&source, &mut findings);
     let debug_msgs: Vec<String> = evaluators.iter().flat_map(|e| e.drain_debug_log()).collect();
     Some((findings, debug_msgs))
 }
@@ -309,6 +325,22 @@ mod tests {
         assert_eq!(result.files_parsed, 2);
         assert_eq!(result.files_errored, 0);
         assert_eq!(result.findings.len(), 2);
+    }
+
+    #[test]
+    fn test_scan_fills_line_content_from_the_source_it_read() {
+        let dir = TempDir::new().unwrap();
+        // CRLF plus an invalid byte: the emitted line must be exactly what
+        // Python's decode("utf-8", errors="replace").splitlines() gives.
+        let path = dir.path().join("A.java");
+        std::fs::write(&path, b"class A {} // \xff\r\nint x;\r\n").unwrap();
+        let evaluators: Vec<Box<dyn Evaluator>> = vec![Box::new(AlwaysFindsEvaluator)];
+        let result = scan_files_parallel(&[path], &evaluators);
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(
+            result.findings[0].line_content.as_deref(),
+            Some("class A {} // \u{fffd}")
+        );
     }
 
     #[test]
