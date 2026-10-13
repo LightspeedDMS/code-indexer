@@ -39,6 +39,10 @@ from tests.utils.refresh_fatal_store_harness import (
     typed_kinds,
 )
 
+# Every test runs a real `cidx index` subprocess (up to three per test):
+# several seconds alone, slower under load.
+pytestmark = pytest.mark.timeout(60)
+
 
 @pytest.fixture(params=STORE_KINDS)
 def metadata(request, tmp_path: Path) -> Iterator[Any]:

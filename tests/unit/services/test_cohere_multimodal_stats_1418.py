@@ -82,7 +82,9 @@ class TestCohereMultimodalMakeRequestSuccess:
         )
         client = CohereMultimodalClient(config)
 
-        client._make_request([{"content": [{"type": "text", "text": "hi"}]}])
+        client._make_request(
+            [{"content": [{"type": "text", "text": "hi"}]}], "search_document"
+        )
 
         assert len(writer.records) == 1
         rec = writer.records[0]
@@ -115,7 +117,9 @@ class TestCohereMultimodalMakeRequestRetryCounting:
         )
         client = CohereMultimodalClient(config)
 
-        client._make_request([{"content": [{"type": "text", "text": "hi"}]}])
+        client._make_request(
+            [{"content": [{"type": "text", "text": "hi"}]}], "search_document"
+        )
 
         assert call_count["n"] == 2
         assert len(writer.records) == 2
@@ -136,7 +140,9 @@ class TestCohereMultimodalMakeRequestRetryCounting:
         client = CohereMultimodalClient(config)
 
         with pytest.raises(Exception):
-            client._make_request([{"content": [{"type": "text", "text": "hi"}]}])
+            client._make_request(
+                [{"content": [{"type": "text", "text": "hi"}]}], "search_document"
+            )
 
         assert len(writer.records) == 1
         assert writer.records[0].success is False

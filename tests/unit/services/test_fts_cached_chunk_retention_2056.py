@@ -287,7 +287,9 @@ class TestFtsKeepsCacheReusedChunks2056:
                 create_new_fts=create_new,
                 multimodal_client=multimodal,
             )
-            assert multimodal.calls == 1
+            # Bug #2153: the second pass reuses the committed multimodal
+            # vector (never re-sent), and its text still stays in FTS.
+            assert multimodal.calls == (1 if create_new else 0)
             assert _fts_docs_per_path(index_dir) == Counter({"module.py": 2})
             assert len(_hits(index_dir, "FOXTROTTOKEN")) == 1
             assert len(_hits(index_dir, "ALPHATOKEN")) == 1

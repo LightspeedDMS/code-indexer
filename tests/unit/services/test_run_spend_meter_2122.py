@@ -112,7 +112,10 @@ class TestMultimodalCharges:
         meter.arm()
         meter.register_misses([input_key("diagram chunk")], max_retries=0)
 
-        client._make_request([{"content": [{"type": "text", "text": "diagram chunk"}]}])
+        client._make_request(
+            [{"content": [{"type": "text", "text": "diagram chunk"}]}],
+            "search_document",
+        )
 
         assert calls["n"] == 1
         snap = meter.snapshot()

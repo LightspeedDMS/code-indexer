@@ -58,7 +58,13 @@ MODEL_DIMENSIONS: Dict[str, int] = {
     "voyage-code-2": 1536,
 }
 
+#: Dimensions per multimodal model (``POST /v1/multimodalembeddings``).
+MULTIMODAL_MODEL_DIMENSIONS: Dict[str, int] = {
+    "voyage-multimodal-3": 1024,
+}
+
 EMBEDDINGS_PATH = "/v1/embeddings"
+MULTIMODAL_EMBEDDINGS_PATH = "/v1/multimodalembeddings"
 
 
 def deterministic_vector(text: str, dims: int) -> List[float]:
@@ -71,6 +77,30 @@ def deterministic_vector(text: str, dims: int) -> List[float]:
 
 def text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def parse_multimodal_request(raw: bytes) -> Tuple[str, List[str], List[str]]:
+    """``(model, texts, identities)`` of a multimodal request body: each
+    input must hold exactly one text and at least one image; its identity is
+    the text plus every image payload. Any schema error raises ValueError."""
+    try:
+        payload = json.loads(raw)
+        model = str(payload["model"])
+        texts: List[str] = []
+        identities: List[str] = []
+        for item in payload["inputs"]:
+            parts = item["content"]
+            text_parts = [str(p["text"]) for p in parts if p["type"] == "text"]
+            images = [
+                str(p["image_base64"]) for p in parts if p["type"] == "image_base64"
+            ]
+            if len(text_parts) != 1 or not images:
+                raise ValueError("one text and at least one image required")
+            texts.append(text_parts[0])
+            identities.append("\0".join([text_parts[0], *images]))
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"malformed multimodal request: {exc!r}") from exc
+    return model, texts, identities
 
 
 @dataclass
@@ -96,6 +126,9 @@ class _RunCounters:
     kill_at: Optional[float] = None
     failed_requests: int = 0
     failed_inputs: int = 0
+    #: sha256 of each multimodal input's text -> times sent (kept apart from
+    #: the text-embedding counters above).
+    multimodal_key_counts: Counter = field(default_factory=Counter)
 
 
 class EmbeddingLedger:
@@ -181,6 +214,18 @@ class EmbeddingLedger:
             self._by_id[rec.request_id] = rec
             self._cond.notify_all()
             return rec.request_id
+
+    def record_multimodal(self, texts: List[str]) -> None:
+        """Record one processed multimodal request (one key per input)."""
+        with self._cond:
+            run = self._runs.setdefault(self._current or "unlabelled", _RunCounters())
+            for text in texts:
+                run.multimodal_key_counts[text_hash(text)] += 1
+            self._cond.notify_all()
+
+    def run_multimodal_key_counts(self, label: str) -> Dict[str, int]:
+        with self._cond:
+            return dict(self._runs[label].multimodal_key_counts)
 
     def finish(self, request_id: int, written: bool) -> None:
         """The response was fully written (or the write failed: aborted)."""
@@ -379,6 +424,38 @@ def _make_handler(server: "FakeVoyageServer") -> type:
             self.end_headers()
             self.wfile.write(data)
 
+        def _multimodal(self, raw: bytes) -> None:
+            """``POST /v1/multimodalembeddings``: each input is recorded by
+            the sha256 of its text (the key the indexer's run-spend meter
+            uses); its vector depends on the text AND the images."""
+            if self.headers.get("Authorization") != f"Bearer {server.expected_api_key}":
+                ledger.record_violation(
+                    "multimodal request carried an api key other than the sentinel"
+                )
+                self._reply(401, {"detail": "invalid api key"})
+                return
+            try:
+                model, texts, identities = parse_multimodal_request(raw)
+            except ValueError as exc:
+                ledger.record_violation(str(exc))
+                self._reply(400, {"detail": "malformed multimodal request"})
+                return
+            dims = MULTIMODAL_MODEL_DIMENSIONS.get(model)
+            if dims is None:
+                ledger.record_violation(f"unknown multimodal model {model!r}")
+                self._reply(400, {"detail": f"unknown model {model}"})
+                return
+            ledger.record_multimodal(texts)
+            data = [
+                {
+                    "object": "embedding",
+                    "embedding": deterministic_vector(identity, dims),
+                    "index": i,
+                }
+                for i, identity in enumerate(identities)
+            ]
+            self._reply(200, {"object": "list", "data": data, "model": model})
+
         def do_OPTIONS(self) -> None:  # noqa: N802 - health probe
             self.send_response(200)
             self.send_header("Content-Length", "0")
@@ -398,6 +475,9 @@ def _make_handler(server: "FakeVoyageServer") -> type:
                 # The client went away mid-send (an interrupted child).
                 ledger.record_aborted()
                 self.close_connection = True
+                return
+            if self.path == MULTIMODAL_EMBEDDINGS_PATH:
+                self._multimodal(raw)
                 return
             if self.path != EMBEDDINGS_PATH:
                 ledger.record_violation(f"unexpected POST {self.path}")

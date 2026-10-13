@@ -7,8 +7,11 @@ default_branch before git pull, preventing wrong-branch contamination.
 Tests:
 1. Wrong branch triggers checkout to default_branch before pulling
 2. Correct branch skips checkout (no unnecessary git ops)
-3. Failed checkout logs error but refresh continues (no crash)
-4. Missing default_branch in repo_info defaults to "main"
+3. Failed checkout logs an error and FAILS the refresh before pulling
+   (Bug #2148: never continue on an unverified branch)
+4. No registered branch in golden_repos_metadata (Bug #469 orphan alias)
+   logs a WARNING and the refresh continues with no checkout (Bug #2148:
+   never guessed from origin/HEAD)
 """
 
 import subprocess
@@ -19,6 +22,9 @@ import pytest
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
+from code_indexer.server.storage.sqlite_backends import (
+    GoldenRepoMetadataSqliteBackend,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +78,23 @@ def scheduler(
     mock_cleanup_manager,
     mock_registry,
 ):
-    """Create RefreshScheduler with a mock registry."""
+    """Create RefreshScheduler with a mock registry.
+
+    Bug #2148: the registered branch is read only from golden_repos_metadata
+    (the solo store here: cidx_server.db next to golden-repos), never from
+    the registry row, so the fixture registers my-repo on 'main' there.
+    """
+    metadata = GoldenRepoMetadataSqliteBackend(
+        str(golden_repos_dir.parent / "cidx_server.db")
+    )
+    metadata.ensure_table_exists()
+    metadata.add_repo(
+        alias="my-repo",
+        repo_url="git@github.com:org/my-repo.git",
+        default_branch="main",
+        clone_path=str(golden_repos_dir / "my-repo"),
+        created_at="2026-01-01T00:00:00+00:00",
+    )
     return RefreshScheduler(
         golden_repos_dir=str(golden_repos_dir),
         config_source=mock_config_source,
@@ -273,23 +295,24 @@ class TestBranchGuardCorrectBranch:
 
 
 # ---------------------------------------------------------------------------
-# Test 3: Failed checkout logs error but refresh continues
+# Test 3: Failed checkout logs an error and fails the refresh
 # ---------------------------------------------------------------------------
 
 
 class TestBranchGuardCheckoutFailure:
     """
-    When git checkout <default_branch> fails, the error is logged but the
-    refresh must continue (no exception raised, no crash).
+    When git checkout <default_branch> fails, the error is logged and the
+    refresh FAILS before pulling: the clone is on an unverified branch, and
+    indexing it could publish the wrong branch (Bug #2148).
     """
 
-    def test_failed_checkout_logs_error_but_refresh_continues(
+    def test_failed_checkout_logs_error_and_fails_refresh(
         self, scheduler, golden_repos_dir, mock_registry, caplog
     ):
         """
         When git checkout <default_branch> returns non-zero, the error is
-        logged (warning/error level) but _execute_refresh does not raise
-        and the pull still proceeds.
+        logged and _execute_refresh raises before the pull (has_changes is
+        never reached).
         """
         import logging
 
@@ -353,12 +376,12 @@ class TestBranchGuardCheckoutFailure:
                 logging.WARNING, logger="code_indexer.global_repos.refresh_scheduler"
             ),
         ):
-            # Must NOT raise even though checkout failed
-            scheduler._execute_refresh(alias_name)
+            with pytest.raises(RuntimeError, match="git checkout failed"):
+                scheduler._execute_refresh(alias_name)
 
-        # Refresh must continue despite checkout failure
-        assert update_called, (
-            "updater.has_changes() must still be called after failed checkout"
+        # The refresh stops before pulling
+        assert update_called == [], (
+            "updater.has_changes() must not be called after a failed checkout"
         )
 
         # An error/warning must have been logged about the checkout failure
@@ -366,35 +389,38 @@ class TestBranchGuardCheckoutFailure:
             r.message for r in caplog.records if r.levelno >= logging.WARNING
         ]
         assert any(
-            "main" in msg or "checkout" in msg or "reset" in msg or "branch" in msg
-            for msg in error_messages
+            "Failed to reset my-repo-global to main" in msg for msg in error_messages
         ), f"Expected warning/error about checkout failure, got: {error_messages}"
 
 
 # ---------------------------------------------------------------------------
-# Test 4: Missing default_branch with all fallbacks exhausted skips checkout
+# Test 4: Missing registered branch warns and continues without a checkout
 # ---------------------------------------------------------------------------
 
 
 class TestBranchGuardDefaultBranch:
     """
-    When repo_info does not contain a 'default_branch' key AND all three
-    fallback layers (repo_info, DB, git symbolic-ref) yield no branch,
-    the branch-reset step must be skipped entirely — no checkout, no crash.
+    When golden_repos_metadata holds no registered branch for the repo (Bug
+    #469 orphan aliases), the refresh switches nothing -- no checkout, and no
+    guess from origin/HEAD (Bug #2148) -- logs a WARNING naming the alias,
+    and continues to the pull on the clone's current branch.
     """
 
-    def test_missing_default_branch_skips_checkout_when_all_fallbacks_fail(
-        self, scheduler, golden_repos_dir, mock_registry
+    def test_missing_registered_branch_warns_and_continues_without_checkout(
+        self, scheduler, golden_repos_dir, mock_registry, caplog
     ):
         """
-        When repo_info has no 'default_branch' key, the DB lookup fails,
-        and git symbolic-ref returns an empty result, the guard must skip
-        the branch-reset step entirely rather than attempting a checkout
-        with an unknown branch name.
+        With no registered row, the refresh must not check out a guessed
+        branch (even though origin/HEAD names one); it warns and proceeds.
         """
+        import logging
+
         alias_name = "my-repo-global"
         master_path = str(golden_repos_dir / "my-repo")
         (golden_repos_dir / "my-repo").mkdir(parents=True, exist_ok=True)
+        GoldenRepoMetadataSqliteBackend(
+            str(golden_repos_dir.parent / "cidx_server.db")
+        ).remove_repo("my-repo")
 
         # No 'default_branch' key in repo_info
         mock_registry.get_global_repo.return_value = {
@@ -403,13 +429,14 @@ class TestBranchGuardDefaultBranch:
         }
 
         checkout_calls = []
+        symbolic_ref_calls = []
 
         def fake_subprocess_run(cmd, **kwargs):
             if cmd == ["git", "branch", "--show-current"]:
                 return _proc(returncode=0, stdout="feature/something")
             if cmd == ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]:
-                # All fallbacks exhausted — symbolic-ref returns empty
-                return _proc(returncode=0, stdout="")
+                symbolic_ref_calls.append(cmd)
+                return _proc(returncode=0, stdout="origin/main")
             if cmd[:2] == ["git", "checkout"]:
                 checkout_calls.append(cmd)
                 return _proc(returncode=0)
@@ -444,10 +471,26 @@ class TestBranchGuardDefaultBranch:
                 return_value=mock_updater,
             ),
             patch("subprocess.run", side_effect=fake_subprocess_run),
+            caplog.at_level(
+                logging.WARNING, logger="code_indexer.global_repos.refresh_scheduler"
+            ),
         ):
             scheduler._execute_refresh(alias_name)
 
-        # When all three fallbacks fail, no checkout must be attempted
-        assert len(checkout_calls) == 0, (
-            f"Expected no checkout when all fallbacks fail, got: {checkout_calls}"
+        # No registered branch: no checkout, origin/HEAD never consulted,
+        # a WARNING names the alias, and the refresh continues to the pull
+        assert checkout_calls == [], (
+            f"Expected no checkout without a registered branch, got: {checkout_calls}"
         )
+        assert symbolic_ref_calls == [], (
+            f"origin/HEAD must never be used to guess the branch: {symbolic_ref_calls}"
+        )
+        mock_updater.has_changes.assert_called_once()
+        branch_warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "Registered branch of" in r.getMessage()
+        ]
+        assert len(branch_warnings) == 1, branch_warnings
+        assert alias_name in branch_warnings[0], branch_warnings
+        assert "no golden repo metadata row" in branch_warnings[0], branch_warnings
