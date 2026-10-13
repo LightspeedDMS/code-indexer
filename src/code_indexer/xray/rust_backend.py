@@ -49,6 +49,13 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Protocol, Tuple
 
 from code_indexer.utils.path_confinement import is_resolved_within_root
+from code_indexer.xray.execution_backend import (
+    BatchResult,
+    XrayExecutionBackend,
+    XrayGraphRequest,
+    XrayScanOutcome,
+    XrayScanRequest,
+)
 
 from code_indexer.utils.worker_budget import (
     detect_worker_count,
@@ -1162,10 +1169,8 @@ def _write_temp_file(content: str, suffix: str, prefix: str, directory: Path) ->
     return tmp
 
 
-# Type alias for the run_batch return type.
-_BatchResult = List[
-    Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]
-]
+# Type alias for the run_batch return type (defined at the execution seam).
+_BatchResult = BatchResult
 
 
 def _error_tuple(
@@ -1256,14 +1261,14 @@ def _safe_unlink_graph_temp_path(path: Optional[Any]) -> None:
         )
 
 
-class RustNativeBackend:
-    """Rust-native xray evaluator backend.
+class LocalXrayExecutionBackend:
+    """In-pod X-Ray execution: compiles and runs the evaluator via xray-cli.
 
     Validates Rust evaluator code, compiles to a dynamic library,
-    and runs the Rust xray scanner for parallel AST evaluation.
-
-    Drop-in replacement for PythonEvaluatorSandbox.run_batch() in the
-    XRaySearchEngine pipeline.
+    and runs the Rust xray scanner for parallel AST evaluation. The node-wide
+    compile semaphore, compile rlimits, ``xray_subprocess_env()`` allowlist and
+    the local + Postgres compile caches all live here, behind the
+    ``XrayExecutionBackend`` seam (``xray/execution_backend.py``).
     """
 
     def __init__(
@@ -1464,37 +1469,30 @@ class RustNativeBackend:
             )
         return (Path.home() / _CIDX_SERVER_DIR_NAME / _XRAY_CACHE_DIR_NAME).resolve()
 
-    def run_batch(
-        self,
-        *,
-        evaluator_code: str,
-        file_specs: List[Dict[str, Any]],
-        worker_threads: int = 4,
-        timeout_seconds: int = 60,
-        on_process_spawned: Optional[Callable] = None,
-        repo_path: Optional[str] = None,
-    ) -> _BatchResult:
-        """Drop-in replacement for PythonEvaluatorSandbox.run_batch().
+    def execute_scan(self, request: XrayScanRequest) -> XrayScanOutcome:
+        """Run one evaluator over one batch of candidate files in this pod.
 
-        Args:
-            evaluator_code: Rust evaluator source code containing
-                ``fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`` function.
-            file_specs: List of dicts with file_path, source, lang,
-                match_positions.
-            worker_threads: Ignored — Rust uses rayon auto-threading.
-            timeout_seconds: Timeout for the xray-cli subprocess.
-            on_process_spawned: Optional callback when subprocess starts.
-            repo_path: Base path for resolving relative file paths.
+        See ``XrayScanRequest`` for the inputs. ``evaluator_code`` must contain
+        ``fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>``;
+        ``timeout_seconds`` bounds the xray-cli subprocess.
 
         Returns:
-            List of (matches, errors, meta) tuples, one per file spec.
+            The (matches, errors, meta) tuples, one per file spec, and the
+            evaluator's debug_log() lines when xray-cli produced output.
         """
+        evaluator_code = request.evaluator_code
+        file_specs = request.file_specs
+        timeout_seconds = request.timeout_seconds
+        on_process_spawned = request.on_process_spawned
+        repo_path = request.repo_path
         if not file_specs:
-            return []
+            return XrayScanOutcome([])
 
         rust_code, validation_error = self._validate_rust_code(evaluator_code)
         if validation_error is not None:
-            return _error_all(file_specs, "ValidationError", validation_error)
+            return XrayScanOutcome(
+                _error_all(file_specs, "ValidationError", validation_error)
+            )
 
         if not self._xray_cli_path.exists():
             msg = (
@@ -1522,7 +1520,9 @@ class RustNativeBackend:
             # shape this API can return, because the caller's natural
             # conclusion ("the pattern has no hits in this repo") is the
             # exact opposite of the truth ("nothing was scanned").
-            return [_error_tuple("", "BinaryNotFound", _sanitize_error_message(msg))]
+            return XrayScanOutcome(
+                [_error_tuple("", "BinaryNotFound", _sanitize_error_message(msg))]
+            )
 
         base = Path(repo_path) if repo_path else Path.cwd()
         abs_paths = [str(base / spec.get("file_path", "")) for spec in file_specs]
@@ -1549,14 +1549,14 @@ class RustNativeBackend:
         if invoke_error is not None:
             # Compilation/invocation errors are per-evaluator, not per-file.
             # Return a single deduplicated error entry instead of one per file.
-            return [_error_tuple("", "XRayCliError", invoke_error)]
+            return XrayScanOutcome([_error_tuple("", "XRayCliError", invoke_error)])
 
         output, parse_error = self._parse_json_output(stdout)
         if parse_error is not None:
             # JSON parse failure is a per-evaluator error — deduplicate to one entry.
-            return [
-                _error_tuple("", "XRayCliError", _sanitize_error_message(parse_error))
-            ]
+            return XrayScanOutcome(
+                [_error_tuple("", "XRayCliError", _sanitize_error_message(parse_error))]
+            )
 
         cli_error = output.get("error")
         if cli_error:
@@ -1575,7 +1575,9 @@ class RustNativeBackend:
                 else "XRayCliError"
             )
             logger.warning("RustNativeBackend: xray-cli error: %s", cli_error)
-            return [_error_tuple("", error_type, _sanitize_error_message(cli_error))]
+            return XrayScanOutcome(
+                [_error_tuple("", error_type, _sanitize_error_message(cli_error))]
+            )
 
         # Cluster post-fill: upload a freshly compiled .so to PG so other nodes
         # can skip compilation. Only fires when: cache is configured, the compile
@@ -1591,11 +1593,14 @@ class RustNativeBackend:
                 deadline_seconds=self._remaining_seconds(operation_deadline),
             )
 
-        # Capture debug_log() messages as a side-channel before returning.
-        # XRaySearchEngine.run() reads _last_debug_messages to surface in debug_output[].
-        self._last_debug_messages = output.get("debug_messages", [])
-        return self._build_results(
-            file_specs, abs_paths, output.get("findings", []), resolved_root
+        # debug_log() messages travel beside the results; RustNativeBackend
+        # stores them on _last_debug_messages, which XRaySearchEngine.run()
+        # surfaces as debug_output[].
+        return XrayScanOutcome(
+            self._build_results(
+                file_specs, abs_paths, output.get("findings", []), resolved_root
+            ),
+            debug_messages=output.get("debug_messages", []),
         )
 
     # ------------------------------------------------------------------
@@ -2575,15 +2580,7 @@ class RustNativeBackend:
         )
         return result
 
-    def run_graph_analysis(
-        self,
-        *,
-        evaluator_code: str,
-        repo_root: str,
-        file_paths: List[str],
-        timeout_seconds: int = 60,
-        refine: bool = False,
-    ) -> Dict[str, Any]:
+    def execute_graph_analysis(self, request: XrayGraphRequest) -> Dict[str, Any]:
         """Story #1811 (S5, AC2): compile the evaluator ONCE (reusing the
         existing compile/cache machinery, Bug #1784), then --build-graph ->
         --analyze-graph. Every KNOWN failure returns a structured
@@ -2595,6 +2592,11 @@ class RustNativeBackend:
         (see `_maybe_run_refine`) when analyze_graph's `GraphResult.refine`
         came back non-empty -- opt-in, never the default.
         """
+        evaluator_code = request.evaluator_code
+        repo_root = request.repo_root
+        file_paths = request.file_paths
+        timeout_seconds = request.timeout_seconds
+        refine = request.refine
         if timeout_seconds <= 0 or not repo_root or not file_paths:
             return _graph_error_result(
                 "InvalidArgument", "invalid timeout_seconds/repo_root/file_paths"
@@ -2645,6 +2647,106 @@ class RustNativeBackend:
             _safe_unlink_graph_temp_path(files_name)
             _safe_unlink_graph_temp_path(graph_out)
             _safe_unlink_graph_temp_path(facts_out)
+
+
+class RustNativeBackend(LocalXrayExecutionBackend):
+    """The X-Ray evaluator backend the search engine and handlers construct.
+
+    Keeps the ``run_batch`` / ``run_graph_analysis`` signatures every caller
+    uses and hands each call, as ONE request, to the configured
+    ``XrayExecutionBackend``: an injected one, else the one the running server
+    built from ``xray_backend``, else this instance's own in-pod execution
+    (``LocalXrayExecutionBackend``) -- which is what ``xray_backend=local``,
+    the CLI and tests get, unchanged.
+    """
+
+    def __init__(
+        self,
+        xray_cache_backend: Optional[XrayCacheBackend] = None,
+        identity_cache: Optional[SharedIdentityCache] = None,
+        confine_to_repo_root: bool = True,
+        execution_backend: Optional[XrayExecutionBackend] = None,
+    ) -> None:
+        """See ``LocalXrayExecutionBackend.__init__`` for the first three.
+
+        Args:
+            execution_backend: Where to execute; None selects as described in
+                the class docstring.
+        """
+        super().__init__(
+            xray_cache_backend=xray_cache_backend,
+            identity_cache=identity_cache,
+            confine_to_repo_root=confine_to_repo_root,
+        )
+        if execution_backend is None:
+            from code_indexer.server.startup.xray_backend_wiring import (  # noqa: PLC0415
+                server_xray_execution_backend,
+            )
+
+            execution_backend = server_xray_execution_backend()
+        self._execution_backend: XrayExecutionBackend = execution_backend or self
+
+    def run_batch(
+        self,
+        *,
+        evaluator_code: str,
+        file_specs: List[Dict[str, Any]],
+        worker_threads: int = 4,
+        timeout_seconds: int = 60,
+        on_process_spawned: Optional[Callable] = None,
+        repo_path: Optional[str] = None,
+    ) -> _BatchResult:
+        """Drop-in replacement for PythonEvaluatorSandbox.run_batch().
+
+        Args:
+            evaluator_code: Rust evaluator source code containing
+                ``fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`` function.
+            file_specs: List of dicts with file_path, source, lang,
+                match_positions.
+            worker_threads: Ignored — Rust uses rayon auto-threading.
+            timeout_seconds: Timeout for the xray-cli subprocess.
+            on_process_spawned: Optional callback when subprocess starts.
+            repo_path: Base path for resolving relative file paths.
+
+        Returns:
+            List of (matches, errors, meta) tuples, one per file spec.
+        """
+        outcome = self._execution_backend.execute_scan(
+            XrayScanRequest(
+                evaluator_code=evaluator_code,
+                file_specs=file_specs,
+                repo_path=repo_path,
+                timeout_seconds=timeout_seconds,
+                on_process_spawned=on_process_spawned,
+            )
+        )
+        # Side-channel read by XRaySearchEngine.run() for debug_output[].
+        if outcome.debug_messages is not None:
+            self._last_debug_messages = outcome.debug_messages
+        return outcome.results
+
+    def run_graph_analysis(
+        self,
+        *,
+        evaluator_code: str,
+        repo_root: str,
+        file_paths: List[str],
+        timeout_seconds: int = 60,
+        refine: bool = False,
+    ) -> Dict[str, Any]:
+        """Compile once, then build-graph -> analyze-graph (-> refine).
+
+        See ``LocalXrayExecutionBackend.execute_graph_analysis``.
+        """
+        return self._execution_backend.execute_graph_analysis(
+            XrayGraphRequest(
+                evaluator_code=evaluator_code,
+                repo_root=repo_root,
+                file_paths=file_paths,
+                timeout_seconds=timeout_seconds,
+                refine=refine,
+            )
+        )
 
 
 def _build_matches(

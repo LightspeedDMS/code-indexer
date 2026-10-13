@@ -2070,6 +2070,11 @@ class ServerConfig:
     # artifact service and reads a checked-out, verified version. No fallback
     # -- see server/startup/index_store_wiring.py.
     index_store_backend: str = "local"
+    # Where X-Ray compiles and runs caller-supplied evaluators. "local" runs
+    # xray-cli in this pod (the default); "delegated" will run them in
+    # sandbox-mcp and fails startup until that exists. No fallback -- see
+    # server/startup/xray_backend_wiring.py.
+    xray_backend: str = "local"
     cow_daemon: Optional[CowDaemonConfig] = None  # Story #510: CoW daemon settings
     workspace_mcp: Optional[WorkspaceMcpConfig] = (
         None  # EVO-64616: workspace-mcp delegated clone backend settings
