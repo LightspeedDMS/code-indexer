@@ -52,6 +52,10 @@ _ZERO_MATCH_PATTERN_MATCH_ATTEMPT_BUDGET = 10_000
 #: check, it prunes at any depth (a nested ``.code-indexer`` is cidx state too).
 _FILENAME_MANIFEST_PRUNE_DIRS = (".git", INDEX_DIRNAME)
 
+#: Matched files fetched per content-seam call for the ast_debug re-parse.
+#: Bounds the bytes in flight; one call per file would be a round trip each.
+_AST_DEBUG_FETCH_BATCH_FILES = 64
+
 
 def xray_content_source(repo_path: Path) -> Optional["ContentSeamSource"]:
     """The content seam to read *repo_path* through, or None to read the disk.
@@ -89,6 +93,13 @@ def _phase1_regex_service(repo_path: Path) -> RegexSearchService:
     if backend is None or backend.is_local:
         return RegexSearchService(repo_path)
     return RegexSearchService(root, ripgrep_backend=backend)
+
+
+def _is_manifest_deadline(exc: BaseException) -> bool:
+    """Whether *exc* is the content manifest walk passing its deadline."""
+    from code_indexer.server.services.file_service import ManifestDeadlineExceeded
+
+    return isinstance(exc, ManifestDeadlineExceeded)
 
 
 def _is_cidx_or_git_internal(rel: str) -> bool:
@@ -628,38 +639,31 @@ class XRaySearchEngine:
         # original _evaluate_file implementation at lines 694-705).
         if include_ast_debug and matches:
             spec_by_path = {s["file_path"]: s for s in file_specs}
-            matched_sources = self._read_matched_sources(
-                repo_path,
-                [
-                    fp
-                    for fp in dict.fromkeys(m.get("file_path", "") for m in matches)
-                    if fp in spec_by_path
-                ],
-            )
-            parsed_roots: Dict[str, Any] = {}
+            matches_by_path: Dict[str, List[Dict[str, Any]]] = {}
             for match in matches:
-                fp_str = match.get("file_path", "")
-                if fp_str not in parsed_roots:
-                    spec = spec_by_path.get(fp_str)
-                    if spec is not None:
-                        try:
-                            file_bytes = matched_sources[fp_str]
-                            if isinstance(file_bytes, Exception):
-                                raise file_bytes
-                            root = self.ast_engine.parse(file_bytes, spec["lang"])
-                            parsed_roots[fp_str] = root
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning(
-                                "ast_debug: failed to parse %s for enrichment: %s",
-                                fp_str,
-                                exc,
-                            )
-                            parsed_roots[fp_str] = None
-                    else:
-                        parsed_roots[fp_str] = None
-                root = parsed_roots.get(fp_str)
-                if root is not None:
-                    raw_root = getattr(root, "_node", root)
+                matches_by_path.setdefault(match.get("file_path", ""), []).append(match)
+            # One file's bytes and parse tree are alive at a time: each is
+            # parsed, every match of that file enriched, then both released.
+            for fp_str, file_bytes in self._iter_matched_sources(
+                repo_path, [fp for fp in matches_by_path if fp in spec_by_path]
+            ):
+                spec = spec_by_path.get(fp_str)
+                file_matches = matches_by_path.pop(fp_str, None)
+                if spec is None or not file_matches:
+                    continue
+                try:
+                    if isinstance(file_bytes, Exception):
+                        raise file_bytes
+                    root = self.ast_engine.parse(file_bytes, spec["lang"])
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "ast_debug: failed to parse %s for enrichment: %s",
+                        fp_str,
+                        exc,
+                    )
+                    continue
+                raw_root = getattr(root, "_node", root)
+                for match in file_matches:
                     match["matched_node"] = {
                         "type": raw_root.type,
                         "start_byte": raw_root.start_byte,
@@ -737,32 +741,43 @@ class XRaySearchEngine:
         return result
 
     @staticmethod
-    def _read_matched_sources(repo_path: Path, rel_paths: List[str]) -> Dict[str, Any]:
-        """Each matched file's bytes, or the exception that stopped the read.
+    def _iter_matched_sources(
+        repo_path: Path, rel_paths: List[str]
+    ) -> Iterator[Tuple[str, Any]]:
+        """Each matched file's bytes, or the exception that stopped the read,
+        yielded one file at a time so the caller can parse and release it.
 
-        Through the content seam when the repository is behind a delegated
-        backend: ONE fetch for every matched file, never one call per file. A
-        per-file error record becomes that file's exception, exactly as a local
-        read failure does; a backend that fails outright raises.
+        Locally each file is read only when the caller asks for it. Through
+        the content seam the files are fetched in batches of
+        ``_AST_DEBUG_FETCH_BATCH_FILES`` -- never one call per file, never the
+        whole match set at once -- and each record is handed on as it arrives.
+        A per-file error record becomes that file's exception, exactly as a
+        local read failure does; a backend that fails outright raises.
         """
         source = xray_content_source(repo_path)
-        read: Dict[str, Any] = {}
         if source is None:
             for rel in rel_paths:
                 try:
-                    read[rel] = (repo_path / rel).read_bytes()
+                    yield rel, (repo_path / rel).read_bytes()
                 except Exception as exc:  # noqa: BLE001
-                    read[rel] = exc
-            return read
-        if not rel_paths:
-            return read
-        for fetched in source.backend.fetch(source.root, rel_paths):
-            read[fetched.path] = (
-                OSError(fetched.error) if fetched.error is not None else fetched.data
-            )
-        for rel in rel_paths:
-            read.setdefault(rel, OSError("not returned by the content backend"))
-        return read
+                    yield rel, exc
+            return
+        for offset in range(0, len(rel_paths), _AST_DEBUG_FETCH_BATCH_FILES):
+            batch = rel_paths[offset : offset + _AST_DEBUG_FETCH_BATCH_FILES]
+            returned = set()
+            for fetched in source.backend.fetch(source.root, batch):
+                returned.add(fetched.path)
+                yield (
+                    fetched.path,
+                    (
+                        OSError(fetched.error)
+                        if fetched.error is not None
+                        else fetched.data
+                    ),
+                )
+            for rel in batch:
+                if rel not in returned:
+                    yield rel, OSError("not returned by the content backend")
 
     # Lower-level single-file evaluation API used directly by unit tests (not dead code).
     def _evaluate_file(
@@ -1194,20 +1209,30 @@ class XRaySearchEngine:
         rel_paths = (
             self._local_filename_rel_paths(repo_path)
             if source is None
-            else self._manifest_filename_rel_paths(source)
+            else self._manifest_filename_rel_paths(
+                source, deadline=start + timeout_seconds
+            )
         )
-        for rel in rel_paths:
-            if time.monotonic() - start > timeout_seconds:
-                raise XRayPhase1TimeoutError(candidates=sorted(candidates))
-            if rel is None or _is_cidx_or_git_internal(rel):
-                continue
-            all_rel_paths.append(rel)
+        try:
+            for rel in rel_paths:
+                if time.monotonic() - start > timeout_seconds:
+                    raise XRayPhase1TimeoutError(candidates=sorted(candidates))
+                if rel is None or _is_cidx_or_git_internal(rel):
+                    continue
+                all_rel_paths.append(rel)
 
-            if not selector.select(rel):
-                continue
+                if not selector.select(rel):
+                    continue
 
-            if pattern.search(rel):
-                candidates.append(repo_path / rel)
+                if pattern.search(rel):
+                    candidates.append(repo_path / rel)
+        except TimeoutError as exc:
+            # Only the manifest walk raises this (between pages, so a slow
+            # paged walk is bounded too): the same partial-candidates timeout
+            # as the per-entry check above. The local walk never does.
+            if not _is_manifest_deadline(exc):
+                raise
+            raise XRayPhase1TimeoutError(candidates=sorted(candidates)) from exc
 
         self._last_phase1_warnings = self._check_zero_match_patterns(
             include_patterns, all_rel_paths
@@ -1249,17 +1274,23 @@ class XRaySearchEngine:
 
     @staticmethod
     def _manifest_filename_rel_paths(
-        source: "ContentSeamSource",
+        source: "ContentSeamSource", *, deadline: float
     ) -> Iterator[Optional[str]]:
         """Every file of the repository from the content manifest, no disk walk.
+
+        Entries arrive page by page, and the ``time.monotonic()`` *deadline* is
+        checked before each page is requested (``ManifestDeadlineExceeded``),
+        so a slow manifest cannot run Phase 1 past ``timeout_seconds``.
 
         A symlink is skipped: the manifest reports a link and never follows it,
         so whether its target is a file inside the repository -- the
         confinement rule the local walk applies -- cannot be known here.
         """
-        from code_indexer.server.services.file_service import manifest_entries
+        from code_indexer.server.services.file_service import iter_manifest_entries
 
-        for entry in manifest_entries(source, _FILENAME_MANIFEST_PRUNE_DIRS):
+        for entry in iter_manifest_entries(
+            source, _FILENAME_MANIFEST_PRUNE_DIRS, deadline=deadline
+        ):
             yield None if entry.is_symlink else entry.path
 
     def _run_phase1_content(

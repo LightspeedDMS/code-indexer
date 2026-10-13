@@ -245,14 +245,38 @@ def _seam_dump_target(seam: "ContentSeamSource", file_path_raw: str) -> _DumpTar
 
     Containment is lexical -- the path never touches this pod's disk -- and
     the backend refuses anything else that escapes (symlinks included), which
-    is reported as the per-file error it is. The size cap applies to the bytes
-    fetched, before any parse.
+    is reported as the per-file error it is.
+
+    The size cap is checked BEFORE the fetch against the manifest entry's
+    size -- the TTL-cached manifest the file tools (and the filename driver)
+    share -- so an oversized file is refused without moving its
+    bytes, as the local path refuses it on a stat. It is checked again on the
+    bytes fetched: a file absent from the manifest (a pruned directory), a
+    symlink (its entry's size is the link's), or one that grew since the
+    manifest was taken.
     """
-    from code_indexer.server.services.file_service import fetch_one
+    from code_indexer.server.services.file_service import (
+        FileListingService,
+        fetch_one,
+        manifest_entries,
+    )
 
     rel = posixpath.normpath(file_path_raw)
     if PurePosixPath(rel).is_absolute() or rel == ".." or rel.startswith("../"):
         return Path(rel), _no_source, _traversal_rejected(file_path_raw)
+
+    entry = next(
+        (
+            e
+            for e in manifest_entries(
+                seam, sorted(FileListingService.ALWAYS_EXCLUDED_DIRS)
+            )
+            if e.path == rel and not e.is_symlink
+        ),
+        None,
+    )
+    if entry is not None and entry.size > _DUMP_AST_MAX_FILE_SIZE_BYTES:
+        return Path(rel), _no_source, _file_too_large(entry.size)
 
     fetched = fetch_one(seam, rel)
     if fetched.error is not None:
