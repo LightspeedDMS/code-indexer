@@ -450,6 +450,7 @@ build:image:
       python -c "from importlib.metadata import entry_points; eps = [e.value for e in entry_points(group='code_indexer.content_backend')]; assert eps == ['cidx_content_backend:make_content_backend'], eps; print('content backend plugin:', eps)"
       python -c "from importlib.metadata import entry_points; eps = [e.value for e in entry_points(group='code_indexer.ripgrep_backend')]; assert eps == ['cidx_content_backend.ripgrep:make_ripgrep_backend'], eps; print('ripgrep backend plugin:', eps)"
       python -c "from importlib.metadata import entry_points; eps = [e.value for e in entry_points(group='code_indexer.index_artifacts')]; assert eps == ['cidx_content_backend.index_artifacts:make_index_artifacts'], eps; print('index artifacts plugin:', eps)"
+      python -c "from importlib.metadata import entry_points; eps = [e.value for e in entry_points(group='code_indexer.content_writer')]; assert eps == ['cidx_content_backend.content_writer:make_content_writer'], eps; print('content writer plugin:', eps)"
       python -m pip install --quiet --no-input pytest pytest-asyncio pytest-timeout
       python -m pytest \
         tests/unit/xray/ \
