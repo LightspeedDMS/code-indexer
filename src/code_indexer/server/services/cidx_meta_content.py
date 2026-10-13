@@ -30,10 +30,11 @@ a write is a conflict, never a lost update.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from code_indexer.server.services.constants import CIDX_META_REPO
 from code_indexer.server.services.content_writer_plugin import ECONFLICT
@@ -172,7 +173,9 @@ class SharedCidxMeta:
         (the shared-content twin of ``directory.glob("*" + suffix)``)."""
         prefix = "" if str(directory) in ("", ".") else self.rel(directory) + "/"
         names = []
-        for entry in self.entries():
+        # Pruned like every listing here: index state and git metadata are
+        # never listed (nor hashed by the backend), only content.
+        for entry in self.entries(prune_dirs=LISTING_PRUNE_DIRS):
             if entry.is_symlink or not entry.path.startswith(prefix):
                 continue
             name = entry.path[len(prefix) :]
@@ -319,17 +322,32 @@ def visible_entries(shared: SharedCidxMeta) -> List[ContentEntry]:
     ]
 
 
-def changed_since(shared: SharedCidxMeta, timestamp: float) -> bool:
+def changed_since(
+    shared: SharedCidxMeta,
+    timestamp: float,
+    entries: Optional[Sequence[ContentEntry]] = None,
+) -> bool:
     """Whether any visible shared file was modified after *timestamp* (seconds).
 
     The shared-content twin of the refresh's local mtime walk: no visible
     file is "no changes"; a file whose mtime the backend does not report is
-    treated as changed (unknown is never the epoch).
+    treated as changed (unknown is never the epoch). *entries* are the
+    visible entries when the caller already listed them.
     """
-    for entry in visible_entries(shared):
+    for entry in visible_entries(shared) if entries is None else entries:
         if entry.mtime_ns is None or entry.mtime_ns / 1_000_000_000 > timestamp:
             return True
     return False
+
+
+def content_fingerprint(entries: Sequence[ContentEntry]) -> str:
+    """A digest of exactly which visible files exist with which bytes (path and
+    git blob sha). Equal fingerprints mean unchanged content, with no clock
+    involved -- deletions and renames included."""
+    digest = hashlib.sha256()
+    for entry in sorted(entries, key=lambda e: e.path):
+        digest.update(f"{entry.path}\0{entry.blob_sha}\n".encode("utf-8"))
+    return digest.hexdigest()
 
 
 def has_visible_files(shared: SharedCidxMeta) -> bool:

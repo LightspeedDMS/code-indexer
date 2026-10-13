@@ -112,7 +112,7 @@ def test_change_detection_ignores_the_pods_own_directory(
     meta_world.delegated()
     scheduler = _scheduler(meta_world.pod_golden)
     assert scheduler._has_local_changes(str(meta_world.pod_meta), ALIAS) is False
-    os.utime(meta_world.remote_meta / "a.md", (SNAPSHOT_TS + 1,) * 2)
+    (meta_world.remote_meta / "a.md").write_text("new shared content\n")
     assert scheduler._has_local_changes(str(meta_world.pod_meta), ALIAS) is True
 
 
@@ -388,3 +388,97 @@ def test_backup_refusal_is_loud_even_without_changes(
 ) -> None:
     index = _refresh_with_backup(meta_world, monkeypatch, changed=False)
     index.assert_not_called()
+
+
+# ── fingerprint change detection (no clock skew) ─────────────────────────
+
+
+def _refresh_once(
+    world: MetaWorld, monkeypatch: pytest.MonkeyPatch, scheduler: RefreshScheduler
+) -> MagicMock:
+    """One full _execute_refresh of cidx-meta-global on a delegated pod (no
+    backup), with real change detection. Returns the indexing mock."""
+    index = MagicMock()
+    _refresh_once_with(world, monkeypatch, scheduler, index=index)
+    return index
+
+
+def _refresh_once_with(
+    world: MetaWorld,
+    monkeypatch: pytest.MonkeyPatch,
+    scheduler: RefreshScheduler,
+    *,
+    index: Any,
+) -> None:
+    """_refresh_once with *index* as the indexing step (None: the class's)."""
+    import code_indexer.global_repos.refresh_scheduler as rs
+
+    monkeypatch.setattr(
+        rs,
+        "get_config_service",
+        lambda: SimpleNamespace(
+            get_config=lambda: SimpleNamespace(cidx_meta_backup_config=None),
+            sync_repo_extensions_if_drifted=lambda path: None,
+        ),
+    )
+    scheduler.alias_manager.read_alias = MagicMock(return_value=str(world.pod_meta))
+    scheduler.golden_repo_metadata = MagicMock()
+    scheduler._detect_existing_indexes = MagicMock(return_value={})  # type: ignore[method-assign]
+    scheduler._reconcile_registry_with_filesystem = MagicMock()  # type: ignore[method-assign]
+    scheduler._refresh_integrity_quarantine_skip_result = (  # type: ignore[method-assign]
+        lambda alias: None
+    )
+    if index is not None:
+        scheduler._index_source = index  # type: ignore[method-assign]
+    scheduler._run_and_publish_integrity_gate = MagicMock(  # type: ignore[method-assign]
+        return_value=SimpleNamespace(passed=True, failures=[])
+    )
+    scheduler._create_snapshot = MagicMock(return_value=str(world.pod_meta))  # type: ignore[method-assign]
+    scheduler._published_point_counts = MagicMock(return_value={})  # type: ignore[method-assign]
+    scheduler._execute_refresh(ALIAS)
+
+
+def test_after_an_index_change_detection_ignores_clocks(
+    meta_world: MetaWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """workspace-mcp's clock is far AHEAD of this pod: every mtime is newer
+    than every snapshot timestamp. After one index, unchanged content is not
+    a change any more; new, edited and deleted files are -- whatever their
+    mtimes."""
+    future = SNAPSHOT_TS + 10**6
+    _seed_at(meta_world, "a.md", future)
+    _seed_at(meta_world, "b.md", future)
+    meta_world.delegated()
+    scheduler = _scheduler(meta_world.pod_golden)
+
+    assert _refresh_once(meta_world, monkeypatch, scheduler).call_count == 1
+    assert _refresh_once(meta_world, monkeypatch, scheduler).call_count == 0
+
+    (meta_world.remote_meta / "a.md").write_text("edited\n")
+    os.utime(meta_world.remote_meta / "a.md", (SNAPSHOT_TS - 99,) * 2)  # clock behind
+    assert _refresh_once(meta_world, monkeypatch, scheduler).call_count == 1
+    assert _refresh_once(meta_world, monkeypatch, scheduler).call_count == 0
+
+    (meta_world.remote_meta / "b.md").unlink()
+    assert _refresh_once(meta_world, monkeypatch, scheduler).call_count == 1
+
+
+def test_a_failed_refresh_does_not_record_the_fingerprint(
+    meta_world: MetaWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a published index records the fingerprint: after a failed
+    refresh the same content is still a change."""
+    _seed_at(meta_world, "a.md", SNAPSHOT_TS + 5)
+    meta_world.delegated()
+    scheduler = _scheduler(meta_world.pod_golden)
+    original_index = RefreshScheduler._index_source
+
+    def failing_index(self, *args, **kwargs):
+        raise RuntimeError("index failed")
+
+    monkeypatch.setattr(RefreshScheduler, "_index_source", failing_index)
+    with pytest.raises(RuntimeError):
+        _refresh_once_with(meta_world, monkeypatch, scheduler, index=None)
+    assert ALIAS not in scheduler._indexed_meta_fingerprints
+    monkeypatch.setattr(RefreshScheduler, "_index_source", original_index)
+    assert _refresh_once(meta_world, monkeypatch, scheduler).call_count == 1

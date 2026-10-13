@@ -296,3 +296,34 @@ def test_the_local_io_guard_catches_local_access(meta_world: MetaWorld) -> None:
                 attempt()
         assert (meta_world.local_meta / "a.md").exists() is False  # elsewhere: fine
     assert target.exists() is False  # outside the block: unguarded
+
+
+def test_list_names_prunes_index_state_and_git(meta_world: MetaWorld) -> None:
+    """A listing never pages through (or makes the backend hash) cidx's own
+    index state: the prune list is sent and pruned directories are absent."""
+    meta_world.seed(".code-indexer/state.md", "x")
+    meta_world.seed("a.md", "x")
+    shared = _shared(meta_world)
+    seen = []
+    original = meta_world.backend.manifest
+
+    def recording(repo_path, **kwargs):
+        seen.append(tuple(kwargs.get("prune_dirs") or ()))
+        return original(repo_path, **kwargs)
+
+    meta_world.backend.manifest = recording  # type: ignore[method-assign]
+    assert shared.list_names("", ".md") == ["a.md"]
+    assert shared.list_names(".code-indexer", ".md") == []
+    assert seen and all(set(p) >= {".code-indexer", ".git"} for p in seen)
+
+
+def test_content_fingerprint_is_paths_and_blobs() -> None:
+    from code_indexer.server.storage.shared.content_backend import ContentEntry
+
+    a = ContentEntry("a.md", 1, "sha-a", False, 1)
+    b = ContentEntry("b.md", 1, "sha-b", False, 2)
+    moved_clock = ContentEntry("a.md", 1, "sha-a", False, 999)
+    edited = ContentEntry("a.md", 1, "sha-a2", False, 1)
+    assert cmc.content_fingerprint([a, b]) == cmc.content_fingerprint([b, moved_clock])
+    assert cmc.content_fingerprint([a, b]) != cmc.content_fingerprint([edited, b])
+    assert cmc.content_fingerprint([a, b]) != cmc.content_fingerprint([a])

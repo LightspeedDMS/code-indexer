@@ -581,6 +581,11 @@ class RefreshScheduler:
         self._index_store: IndexStore = (
             index_store if index_store is not None else LocalIndexStore()
         )
+        # cidx-meta under a delegated content backend: the shared content's
+        # fingerprint as of the last index on this pod (see _has_local_changes),
+        # and the one seen by the refresh in progress.
+        self._indexed_meta_fingerprints: Dict[str, str] = {}
+        self._pending_meta_fingerprints: Dict[str, str] = {}
         self._alias_lock_db_backed_enabled_getter = alias_lock_db_backed_enabled_getter
         self._alias_lock_store_resolver = alias_lock_store_resolver
 
@@ -3255,6 +3260,12 @@ class RefreshScheduler:
                         f"Reconciled registry with filesystem at END for {alias_name}: {detected_indexes}"
                     )
 
+                    # The shared cidx-meta content this refresh indexed is now
+                    # published: later change detection compares against it.
+                    _indexed_fp = self._pending_meta_fingerprints.pop(alias_name, None)
+                    if _indexed_fp is not None:
+                        self._indexed_meta_fingerprints[alias_name] = _indexed_fp
+
                     if sync_failure:
                         raise RuntimeError(
                             "refresh complete, indexing succeeded, but backup "
@@ -4707,6 +4718,43 @@ class RefreshScheduler:
             return None
         return cidx_meta_content.shared_cidx_meta(source_path)
 
+    def _shared_meta_changed(
+        self,
+        alias_name: str,
+        shared: "cidx_meta_content.SharedCidxMeta",
+        latest_timestamp: float,
+    ) -> bool:
+        """Change detection for cidx-meta's shared content (delegated backend).
+
+        This pod's directory holds index state only; the content is
+        workspace-mcp's. Once this pod has indexed it, "changed" is a
+        fingerprint comparison (paths and blob shas) -- no clock, so no skew
+        between workspace-mcp's file mtimes and this pod's snapshot
+        timestamps, and deletions count. Before that (first refresh on this
+        pod since it started) the shared mtimes are compared with the newest
+        snapshot's timestamp, as the local walk does. A listing failure
+        raises.
+        """
+        entries = cidx_meta_content.visible_entries(shared)
+        fingerprint = cidx_meta_content.content_fingerprint(entries)
+        indexed = self._indexed_meta_fingerprints.get(alias_name)
+        if indexed is not None:
+            has_changes = fingerprint != indexed
+        else:
+            has_changes = cidx_meta_content.changed_since(
+                shared, latest_timestamp, entries
+            )
+        if has_changes:
+            # Recorded as indexed only when this refresh publishes.
+            self._pending_meta_fingerprints[alias_name] = fingerprint
+        else:
+            self._indexed_meta_fingerprints[alias_name] = fingerprint
+        logger.debug(
+            f"shared-content check for {alias_name} (fingerprint "
+            f"{'known' if indexed else 'new'}) -> changes={has_changes}"
+        )
+        return has_changes
+
     def _meta_content_is_empty(self, alias_name: str, source_path: str) -> bool:
         """Whether an index child's "No files found" for cidx-meta is the truth.
 
@@ -4791,14 +4839,7 @@ class RefreshScheduler:
 
         shared = self._shared_cidx_meta(alias_name, source_path)
         if shared is not None:
-            # This pod's directory holds index state only; the content -- and
-            # its mtimes -- are workspace-mcp's. A listing failure raises.
-            has_changes = cidx_meta_content.changed_since(shared, latest_timestamp)
-            logger.debug(
-                f"shared-content mtime check for {alias_name} vs latest_version="
-                f"{latest_timestamp} -> changes={has_changes}"
-            )
-            return has_changes
+            return self._shared_meta_changed(alias_name, shared, latest_timestamp)
 
         # Walk source_path, skip hidden dirs and files
         max_mtime: float = 0.0
