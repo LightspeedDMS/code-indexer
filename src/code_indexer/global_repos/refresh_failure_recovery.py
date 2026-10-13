@@ -256,6 +256,30 @@ def schedule_owed_retry(
     return float(due_at)
 
 
+def covers_pending_owed_retry(
+    metadata: "GoldenRepoMetadataBackend",
+    alias_name: str,
+    covered_generation: Optional[int],
+) -> bool:
+    """Bug #2159: whether a refresh cycle that just failed covered a pending
+    OWED retry (Bug #2125) -- the alias's trigger is still pending with the
+    generation the cycle captured (every new trigger takes a fresh one, so
+    an equal generation is the trigger the cycle served) and carries an
+    owed count. Such a failure must escalate the owed retry: left alone,
+    the leased trigger would re-fire at a fixed interval forever. False
+    when the cycle's generation is unknown; a store read failure
+    propagates."""
+    if covered_generation is None:
+        return False
+    state = metadata.get_refresh_failure_backoff_state(alias_name)
+    return (
+        state is not None
+        and bool(state["pending_trigger"])
+        and int(state["trigger_generation"]) == covered_generation
+        and int(state["owed_retry_count"]) > 0
+    )
+
+
 def retry_failed_trigger_only_refresh(
     metadata: "GoldenRepoMetadataBackend",
     alias_name: str,
@@ -589,7 +613,6 @@ def record_publish_gate_failure(
 
 
 def run_integrity_gate_against_published(
-    snapshot_manager: Any,
     source_path: str,
     current_target: Optional[str],
     before_restore: Optional[Callable[[], None]] = None,
@@ -606,15 +629,9 @@ def run_integrity_gate_against_published(
         if current_target and current_target != source_path
         else None
     )
-    clone_backend = (
-        getattr(snapshot_manager, "_clone_backend", None)
-        if snapshot_manager is not None
-        else None
-    )
     return run_refresh_integrity_gate(
         source_index_dir=Path(source_path) / ".code-indexer" / "index",
         healthy_index_dir=healthy_index_dir,
-        clone_backend=clone_backend,
         before_restore=before_restore,
         restore_missing_stores=restore_missing_stores,
     )
@@ -623,7 +640,6 @@ def run_integrity_gate_against_published(
 def self_heal_after_fatal_chunk_store_failure(
     *,
     metadata: "GoldenRepoMetadataBackend",
-    snapshot_manager: Any,
     alias_name: str,
     source_path: str,
     current_target: Optional[str],
@@ -638,7 +654,6 @@ def self_heal_after_fatal_chunk_store_failure(
     if error.kind is ChunkStoreFailureKind.MISSING_STORE:
         _restore_missing_stores(
             metadata=metadata,
-            snapshot_manager=snapshot_manager,
             alias_name=alias_name,
             source_path=source_path,
             current_target=current_target,
@@ -655,7 +670,7 @@ def self_heal_after_fatal_chunk_store_failure(
         record_failure_backoff(metadata, alias_name, str(error))
         return
     gate = run_integrity_gate_against_published(
-        snapshot_manager, source_path, current_target, before_restore=verify_ownership
+        source_path, current_target, before_restore=verify_ownership
     )
     if gate.passed:
         logger.error(
@@ -678,7 +693,6 @@ def self_heal_after_fatal_chunk_store_failure(
 def _restore_missing_stores(
     *,
     metadata: "GoldenRepoMetadataBackend",
-    snapshot_manager: Any,
     alias_name: str,
     source_path: str,
     current_target: Optional[str],
@@ -693,7 +707,6 @@ def _restore_missing_stores(
     strike per cycle bounds repeated loss (3 without a verified publish
     quarantine the alias); anything left unrepaired backs off."""
     gate = run_integrity_gate_against_published(
-        snapshot_manager,
         source_path,
         current_target,
         before_restore=verify_ownership,

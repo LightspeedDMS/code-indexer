@@ -2075,6 +2075,11 @@ class SmartIndexer(HighThroughputProcessor):
 
         # Git-delta deletions applied above changed the index too.
         stats.index_entries_changed += len(deleted_files)
+        # Bug #2155: which failures were retries of recorded ones (same
+        # relative form as stats.failed_paths), for the CLI's exit decision.
+        stats.retried_failed_paths = frozenset(
+            self._relative_to_codebase(p) for p in retried_failures
+        )
         return stats
 
     def _populate_fts_from_all_files(

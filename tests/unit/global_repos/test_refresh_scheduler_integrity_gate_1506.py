@@ -11,7 +11,8 @@ These tests prove:
    _create_snapshot/swap_alias entirely -- the already-published alias
    keeps serving the last verified-good snapshot.
 2. When a last-known-good snapshot IS available (current_target != master
-   path), the corrupt master_path chunks.db is reflink-self-healed, but
+   path), the corrupt master_path chunks.db is self-healed (an in-process
+   atomic single-file copy from the published snapshot, Bug #2157), but
    publish is STILL skipped for this cycle regardless.
 3. A healthy chunks.db is unaffected -- _create_snapshot/swap_alias still
    run exactly as before (no regression).
@@ -250,7 +251,8 @@ class TestIntegrityGateFailureSkipsPublish:
         mock_golden_repo_metadata,
     ):
         """A prior real snapshot exists with healthy data -- the corrupt
-        master_path chunks.db is reflink-restored from it, but this
+        master_path chunks.db is restored from it (an in-process atomic
+        single-file copy, Bug #2157), but this
         cycle's publish is STILL skipped (no new data was safely
         produced this cycle)."""
         from code_indexer.server.storage.shared.clone_backend import (

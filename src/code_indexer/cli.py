@@ -4953,13 +4953,25 @@ def index(
             sys.exit(1)
 
         if stats.failed_files > 0:
+            # Bug #2155: only retries of recorded failures failed again, on a
+            # populated store -- a partial outcome (failures stay recorded).
+            from .services.index_failure_exit_codes import (
+                OWED_RETRIES_FAILED_AGAIN_MESSAGE,
+                failed_only_on_owed_retries,
+            )
+
+            owed_only = failed_only_on_owed_retries(
+                stats, vector_store_client, collection_name
+            )
             console.print(f"⚠️  Failed files: {stats.failed_files}", style="yellow")
             if stats.files_processed == 0 and stats.failed_files > 0:
-                console.print(
-                    "❌ All files failed to index — index is empty.",
-                    style="red",
-                )
-                sys.exit(1)
+                if not owed_only:
+                    console.print(
+                        "❌ All files failed to index — index is empty.",
+                        style="red",
+                    )
+                    sys.exit(1)
+                console.print(OWED_RETRIES_FAILED_AGAIN_MESSAGE, style="yellow")
 
         # Show final indexing status
         final_status = smart_indexer.get_indexing_status()

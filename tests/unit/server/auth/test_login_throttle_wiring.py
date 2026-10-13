@@ -17,6 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _CHILD = """
 import os
 from code_indexer.server.startup.service_init import initialize_services
@@ -29,6 +31,8 @@ os._exit(0)
 """
 
 
+# A real child process imports the whole server: seconds alone, longer under suite load.
+@pytest.mark.timeout(60)
 def test_service_init_wires_the_throttle_to_the_shared_sqlite_db(tmp_path: Path):
     data_dir = tmp_path / "server"
     home = tmp_path / "home"

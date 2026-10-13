@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.87.0] - 2026-10-13
+
+### Fixed
+
+- Server: a git repository whose owed refresh retry fails again now backs off further (5 minutes doubling up to 6 hours) instead of retrying every 5 minutes indefinitely.
+- Indexing: a run whose only failures are files that already failed in an earlier run, against an index that already has content, now ends partial (exit 0, the files stay recorded for retry) instead of failed, so the server publishes, keeps the existing index and backs the retry off. A newly failing file still fails the run.
+- Server (cluster): restoring a repository's chunk store or indexing metadata from its published snapshot now works on cluster storage, where the clone service only clones directories; it previously failed and reported the repository as needing an operator. The restore also removes the replaced database's journal files, so they can no longer be applied to the restored store.
+
 ## [12.86.0] - 2026-10-12
 
 ### Upgrade notes

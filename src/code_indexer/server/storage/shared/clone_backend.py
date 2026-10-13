@@ -81,7 +81,7 @@ def _validate_path_component(value: str, field: str) -> None:
 
 class CloneDestinationExistsError(FileExistsError):
     """Raised when create_clone_at_path refuses an already-existing
-    DIRECTORY destination.
+    destination (a directory; for CowDaemonBackend any path, Bug #2157).
 
     A DEDICATED subtype (not a bare FileExistsError) so callers such as
     ActivatedRepoManager._clone_with_copy_on_write can catch it
@@ -102,11 +102,10 @@ def _reject_existing_directory_destination(dest_path: str, backend_name: str) ->
     activation destination "succeed" instead of erroring loudly (e.g. a
     traversed activation landing inside the shared golden-repos tree).
 
-    Deliberately scoped to an existing DIRECTORY only: refresh_integrity_gate.py's
-    restore_chunks_db_via_reflink / restore_metadata_files_via_reflink
-    intentionally clone a healthy file ONTO an existing corrupt/stale
-    regular file (self-heal, overwrite-in-place) -- ordinary `cp -a`
-    file-to-file semantics, not a merge, and must remain allowed.
+    Deliberately scoped to an existing DIRECTORY only: for LocalCloneBackend
+    an existing regular-file destination keeps ordinary `cp -a`
+    file-to-file overwrite semantics, not a merge. CowDaemonBackend refuses
+    every existing destination on top of this (Bug #2157).
     """
     if os.path.isdir(dest_path):
         raise CloneDestinationExistsError(
@@ -240,8 +239,8 @@ class LocalCloneBackend:
         Refuses an already-existing
         DIRECTORY destination before running `cp` at all -- see
         _reject_existing_directory_destination for the exact rationale. An
-        existing regular file destination remains allowed (overwrite,
-        refresh_integrity_gate.py's restore use case).
+        existing regular file destination remains allowed (ordinary cp
+        overwrite).
         """
         _reject_existing_directory_destination(dest_path, "LocalCloneBackend")
         attr_flag = "-a" if preserve_attrs else "-r"
@@ -658,8 +657,24 @@ class CowDaemonBackend:
         LocalCloneBackend -- this codebase's own filesystem view of
         dest_path (over the same NFS mount the daemon serves) is checked
         client-side rather than trusting the remote daemon to enforce it.
+
+        Bug #2157: the daemon removes a failed job's destination, so no job
+        is ever started for a pre-existing destination of any kind or for a
+        regular-file source (the daemon clones directories only) -- its
+        cleanup can only ever remove a path its own job created.
         """
         _reject_existing_directory_destination(dest_path, "CowDaemonBackend")
+        if os.path.lexists(dest_path):
+            raise CloneDestinationExistsError(
+                f"CowDaemonBackend.create_clone_at_path: destination "
+                f"'{dest_path}' already exists -- refusing to start a daemon "
+                "job that could remove it on failure"
+            )
+        if os.path.isfile(source_path):
+            raise NotADirectoryError(
+                f"CowDaemonBackend.create_clone_at_path: source '{source_path}' "
+                "is a regular file -- the CoW daemon clones directories only"
+            )
         requests = self._requests()
         # Translate CIDX-view paths to daemon-local paths so daemon validation passes and reflink works
         daemon_source = self._translate_to_daemon_path(source_path)

@@ -41,6 +41,22 @@ class ProcessingStats:
     #: hidden paths, un-hidden paths, restored full-text documents. With
     #: `files_processed`, tells a run that changed nothing apart.
     index_entries_changed: int = 0
+    #: Bug #2155: relative paths of the files a previous run recorded as
+    #: failed that this run re-planned (``_merge_recorded_failures``).
+    retried_failed_paths: FrozenSet[str] = frozenset()
+
+    @property
+    def failed_only_on_recorded_retries(self) -> bool:
+        """Bug #2155: the run processed no file and EVERY failure is an
+        attributed retry of a failure recorded before it started -- no new
+        work failed. An unattributed failure is never such a retry."""
+        return (
+            self.files_processed == 0
+            and self.failed_files > 0
+            and not self.cancelled
+            and self.failed_files == len(self.failed_paths)
+            and self.failed_paths <= self.retried_failed_paths
+        )
 
     @property
     def duration(self) -> float:

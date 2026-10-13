@@ -2591,16 +2591,25 @@ class RefreshScheduler:
         (retry_failed_trigger_only_refresh: an owed retry, never a new
         failure, so new-data triggers still run promptly). *covered* is the
         trigger generation this cycle covered. A git repo is retried by its
-        own schedule; externally managed mode runs no loop to fire the
-        trigger. A fatal chunk-store failure is handed over as such (its
-        self-heal may have recorded a failure backoff). A refresh that
-        published and then failed only its backup sync owes no retry. Never
-        raises: the refresh is already failing with its own error."""
+        own schedule -- except when the cycle covered a pending owed retry
+        (Bug #2159): that retry escalates the same way, or its leased
+        trigger would re-fire at a fixed interval forever. Externally
+        managed mode runs no loop to fire the trigger. A fatal chunk-store
+        failure is handed over as such (its self-heal may have recorded a
+        failure backoff). A refresh that published and then failed only its
+        backup sync owes no retry. Never raises: the refresh is already
+        failing with its own error."""
         try:
             if self._is_externally_managed():
                 return
             repo_info = self.registry.get_global_repo(alias_name)
-            if repo_info is None or _is_git_repo_url(repo_info.get("repo_url") or ""):
+            if repo_info is None:
+                return
+            if _is_git_repo_url(
+                repo_info.get("repo_url") or ""
+            ) and not failure_recovery.covers_pending_owed_retry(
+                self.golden_repo_metadata, alias_name, covered
+            ):
                 return
             chain: List[BaseException] = []
             cause: Optional[BaseException] = exc
@@ -3378,7 +3387,6 @@ class RefreshScheduler:
                             # Bug #2022: self-heal under the lock; stay failed.
                             failure_recovery.self_heal_after_fatal_chunk_store_failure(
                                 metadata=self.golden_repo_metadata,
-                                snapshot_manager=self._snapshot_manager,
                                 alias_name=alias_name,
                                 source_path=source_path,
                                 current_target=current_target,
@@ -3705,8 +3713,9 @@ class RefreshScheduler:
         Without this, a writer could start mutating chunks.db
         concurrently with the gate's fresh-connection
         ``PRAGMA integrity_check``, producing a false integrity failure
-        (reading a DB mid-write) or, worse, triggering a self-heal
-        reflink-restore over a database that was merely caught mid-write.
+        (reading a DB mid-write) or, worse, triggering a self-heal restore
+        (an in-process atomic single-file copy from the published snapshot,
+        Bug #2157) over a database that was merely caught mid-write.
 
         Yields ``True`` if the lock was acquired (caller should proceed)
         or ``False`` if another owner already holds it (caller should
@@ -3898,7 +3907,6 @@ class RefreshScheduler:
         raised ``RuntimeError`` for ``_create_new_index``).
         """
         gate_result = failure_recovery.run_integrity_gate_against_published(
-            self._snapshot_manager,
             source_path,
             current_target,
             before_restore=self._ownership_check(alias_name.removesuffix("-global")),

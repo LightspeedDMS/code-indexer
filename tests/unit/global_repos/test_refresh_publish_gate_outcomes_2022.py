@@ -10,7 +10,8 @@ PUBLISH-path integrity gate (the gate every successful indexing pass runs).
   the old snapshot forever.
 - A restore copy happens only while the refresh still owns its write lock.
 
-Real stores, real snapshot, real reflink restore. Only the embedding child
+Real stores, real snapshot, real restore (an in-process atomic single-file
+copy from the published snapshot, Bug #2157). Only the embedding child
 (``_index_source``) is replaced: it needs a provider, and the store it would
 write is the real one under test.
 """

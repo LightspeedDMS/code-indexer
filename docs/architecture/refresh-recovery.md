@@ -75,7 +75,9 @@ A missing store of an established collection is never recreated empty and never 
 
 1. Every missing store under the base clone's index is restored from the currently published snapshot. The snapshot
    copy is integrity-checked read-only first, ownership of the write lock is re-checked immediately before each copy,
-   and the restored file is checked again. The indexing metadata is restored with it, so the next refresh resumes
+   and the restored file is checked again. The copy is an in-process atomic file copy (see "Integrity gate before
+   publishing"); before installing `chunks.db` it removes the replaced database's `-journal`, `-wal` and `-shm`
+   files, because a leftover hot journal would roll the old database's pages back into the restored one. The indexing metadata is restored with it, so the next refresh resumes
    from the snapshot's state and pays only for content changed since the snapshot.
 2. A cycle that restored something records one strike; a verified publish clears it, and three restores without a
    publish in between quarantine the repository.
@@ -92,8 +94,10 @@ The restoring cycle itself stays failed; the strike makes the next cycle re-gate
 
 After `_index_source` succeeds, `run_refresh_integrity_gate()` flushes every CHUNKS_DB collection durably
 (`ChunkStore.flush_durable()`: fsync of the file and its directory) and runs `PRAGMA integrity_check` on a fresh
-read-only connection. A failure skips the snapshot and swap and attempts the same reflink restore from the published
-snapshot. Bookkeeping (`record_publish_gate_failure`): a strike only for confirmed corruption; an inconclusive check
+read-only connection. A failure skips the snapshot and swap and attempts the same restore from the published snapshot.
+Every restore of a single file (`chunks.db`, `metadata*.json`) is an in-process atomic copy
+(`_restore_file_atomically`: temp file beside the target, fsync, `os.replace`, directory fsync), never the clone
+backend, which clones directories only (Bug #2157). Bookkeeping (`record_publish_gate_failure`): a strike only for confirmed corruption; an inconclusive check
 records a backoff instead, so transient I/O never quarantines a healthy repository. A SHARDED_JSON-only repository
 passes trivially.
 
