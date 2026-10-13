@@ -52,7 +52,15 @@ class SandboxMcpError(Exception):
     JSON object for :meth:`call_tool_payload`). The message is the
     operator-facing reason; callers turn it into their own failure result,
     never a fallback.
+
+    ``status_code`` is the HTTP status when the call got an HTTP reply >= 300,
+    else ``None``: callers that act on a status (e.g. retry on 429) check it
+    instead of parsing the message, whose wording may change.
     """
+
+    def __init__(self, message: str, *, status_code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def extract_run_result(payload: Any) -> Optional[Dict[str, Any]]:
@@ -206,7 +214,8 @@ class SandboxMcpClient:
             except Exception:  # pragma: no cover - defensive
                 pass
             raise SandboxMcpError(
-                f"{tool_name} failed (HTTP {response.status_code}): {body}"
+                f"{tool_name} failed (HTTP {response.status_code}): {body}",
+                status_code=response.status_code,
             )
 
         try:

@@ -123,6 +123,22 @@ class TestToolCall:
             _client(_requests(**kwargs)).call_tool("t", {})
         assert str(excinfo.value) == message
 
+    @pytest.mark.parametrize("status", [429, 500, 503])
+    def test_an_http_error_carries_its_status_code(self, status):
+        """Callers that act on a status (retry on 429) read ``status_code``, not
+        the message. Mutation: drop the keyword (status_code is None)."""
+        fake = _requests(post=_response(status_code=status, text="busy"))
+        with pytest.raises(SandboxMcpError) as excinfo:
+            _client(fake).call_tool("t", {})
+        assert excinfo.value.status_code == status
+        assert str(excinfo.value) == f"t failed (HTTP {status}): busy"
+
+    def test_errors_without_an_http_status_have_none(self):
+        fake = _requests(post_raises=_FakeRequestException("refused"))
+        with pytest.raises(SandboxMcpError) as excinfo:
+            _client(fake).call_tool("t", {})
+        assert excinfo.value.status_code is None
+
     def test_nonzero_exit_is_returned_not_raised(self):
         envelope = {"exit_code": 3, "output": "boom"}
         fake = _requests(post=_response(payload={"result": envelope}))
