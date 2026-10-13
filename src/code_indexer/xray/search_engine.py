@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from code_indexer.server.services.file_service import ContentSeamSource
     from code_indexer.xray.rust_backend import SharedIdentityCache, XrayCacheBackend
 
+from code_indexer.utils.index_store import INDEX_DIRNAME
 from code_indexer.utils.path_confinement import is_resolved_within_root
 from code_indexer.global_repos.regex_search import (
     RegexSearchService,
@@ -49,7 +50,7 @@ _ZERO_MATCH_PATTERN_MATCH_ATTEMPT_BUDGET = 10_000
 #: anyway. Sent to the content manifest as its prune list so the backend never
 #: hashes cidx's own index store -- which, unlike the local walk's root-only
 #: check, it prunes at any depth (a nested ``.code-indexer`` is cidx state too).
-_FILENAME_MANIFEST_PRUNE_DIRS = (".git", ".code-indexer")
+_FILENAME_MANIFEST_PRUNE_DIRS = (".git", INDEX_DIRNAME)
 
 
 def xray_content_source(repo_path: Path) -> Optional["ContentSeamSource"]:
@@ -93,8 +94,8 @@ def _phase1_regex_service(repo_path: Path) -> RegexSearchService:
 def _is_cidx_or_git_internal(rel: str) -> bool:
     """CIDX's index store (Finding 3.6, v10.4.4) and git internals (v10.4.6
     Defect 2) at the repository root: never filename candidates."""
-    return rel.startswith((".code-indexer/", ".git/")) or rel in (
-        ".code-indexer",
+    return rel.startswith((INDEX_DIRNAME + "/", ".git/")) or rel in (
+        INDEX_DIRNAME,
         ".git",
     )
 
@@ -1332,7 +1333,7 @@ class XRaySearchEngine:
         # content-mode Phase 1 — ripgrep walks it otherwise and surfaces error logs
         # / vector .json files as candidates.
         effective_excludes = [
-            ".code-indexer/**",
+            INDEX_DIRNAME + "/**",
             ".git/**",
             *list(exclude_patterns or []),
         ]
