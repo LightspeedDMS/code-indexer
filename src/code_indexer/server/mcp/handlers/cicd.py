@@ -17,6 +17,7 @@ from typing import (
     Tuple,
     TypeVar,
     TYPE_CHECKING,
+    Union,
 )
 
 import anyio.to_thread
@@ -25,6 +26,10 @@ if TYPE_CHECKING:
     pass
 
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.clients.ci_identifiers import (
+    InvalidCIIdentifierError,
+    parse_ci_id,
+)
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.utils.credential_redaction import mask_url_credentials
 from code_indexer.server.telemetry.correlation_bridge import (
@@ -384,6 +389,21 @@ async def _cicd_off_loop(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T
     return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
 
 
+def _ci_id_or_error(args: Dict[str, Any], name: str) -> Union[int, Dict[str, Any]]:
+    """Return the CI identifier ``args[name]`` as a positive integer, or the
+    ready-to-return MCP error. Every CI handler calls this before resolving
+    any credential, so only a positive integer reaches a forge request."""
+    value = args.get(name)
+    if value is None or value == "":
+        return _mcp_response(
+            {"success": False, "error": f"Missing required parameter: {name}"}
+        )
+    try:
+        return parse_ci_id(value, name)
+    except InvalidCIIdentifierError as e:
+        return _mcp_response({"success": False, "error": str(e)})
+
+
 class _LegacyCiCredential(NamedTuple):
     """Token and API base_url for a legacy gh_actions/gitlab_ci call."""
 
@@ -621,15 +641,13 @@ async def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[st
     try:
         # Validate required parameters
         repository = args.get("repository")
-        run_id = args.get("run_id")
         if not repository:
             return _mcp_response(
                 {"success": False, "error": "Missing required parameter: repository"}
             )
-        if not run_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: run_id"}
-            )
+        run_id = _ci_id_or_error(args, "run_id")
+        if isinstance(run_id, dict):
+            return run_id
 
         # Access check + token, off the event loop (Bug #2039). Only a
         # registered CIDX golden repo the caller is allowed to see may use
@@ -722,16 +740,14 @@ async def handle_gh_actions_search_logs(
     try:
         # Validate required parameters
         repository = args.get("repository")
-        run_id = args.get("run_id")
         pattern = args.get("pattern")
         if not repository:
             return _mcp_response(
                 {"success": False, "error": "Missing required parameter: repository"}
             )
-        if not run_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: run_id"}
-            )
+        run_id = _ci_id_or_error(args, "run_id")
+        if isinstance(run_id, dict):
+            return run_id
         if not pattern:
             return _mcp_response(
                 {"success": False, "error": "Missing required parameter: pattern"}
@@ -832,15 +848,13 @@ async def handle_gh_actions_get_job_logs(
     try:
         # Validate required parameters
         repository = args.get("repository")
-        job_id = args.get("job_id")
         if not repository:
             return _mcp_response(
                 {"success": False, "error": "Missing required parameter: repository"}
             )
-        if not job_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: job_id"}
-            )
+        job_id = _ci_id_or_error(args, "job_id")
+        if isinstance(job_id, dict):
+            return job_id
 
         # Access check + token, off the event loop (Bug #2039). Only a
         # registered CIDX golden repo the caller is allowed to see may use
@@ -932,15 +946,13 @@ async def handle_gh_actions_retry_run(
     try:
         # Validate required parameters
         repository = args.get("repository")
-        run_id = args.get("run_id")
         if not repository:
             return _mcp_response(
                 {"success": False, "error": "Missing required parameter: repository"}
             )
-        if not run_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: run_id"}
-            )
+        run_id = _ci_id_or_error(args, "run_id")
+        if isinstance(run_id, dict):
+            return run_id
 
         # Group access check (Story #404 AC1) then a per-user write token only
         # (never the shared global CI token; host always github.com), off the
@@ -1038,15 +1050,13 @@ async def handle_gh_actions_cancel_run(
     try:
         # Validate required parameters
         repository = args.get("repository")
-        run_id = args.get("run_id")
         if not repository:
             return _mcp_response(
                 {"success": False, "error": "Missing required parameter: repository"}
             )
-        if not run_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: run_id"}
-            )
+        run_id = _ci_id_or_error(args, "run_id")
+        if isinstance(run_id, dict):
+            return run_id
 
         # Group access check (Story #404 AC1) then a per-user write token only
         # (never the shared global CI token; host always github.com), off the
@@ -1270,15 +1280,13 @@ async def handle_gitlab_ci_get_pipeline(
     try:
         # Validate required parameters
         project_id = args.get("project_id")
-        pipeline_id = args.get("pipeline_id")
         if not project_id:
             return _mcp_response(
                 {"success": False, "error": "Missing required parameter: project_id"}
             )
-        if not pipeline_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: pipeline_id"}
-            )
+        pipeline_id = _ci_id_or_error(args, "pipeline_id")
+        if isinstance(pipeline_id, dict):
+            return pipeline_id
 
         # Access check + token, off the event loop (Bug #2039). Only a
         # registered CIDX golden repo the caller is allowed to see may use
@@ -1380,16 +1388,14 @@ async def handle_gitlab_ci_search_logs(
     try:
         # Validate required parameters
         project_id = args.get("project_id")
-        pipeline_id = args.get("pipeline_id")
         pattern = args.get("pattern")
         if not project_id:
             return _mcp_response(
                 {"success": False, "error": "Missing required parameter: project_id"}
             )
-        if not pipeline_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: pipeline_id"}
-            )
+        pipeline_id = _ci_id_or_error(args, "pipeline_id")
+        if isinstance(pipeline_id, dict):
+            return pipeline_id
         if not pattern:
             return _mcp_response(
                 {"success": False, "error": "Missing required parameter: pattern"}
@@ -1503,15 +1509,13 @@ async def handle_gitlab_ci_get_job_logs(
     try:
         # Validate required parameters
         project_id = args.get("project_id")
-        job_id = args.get("job_id")
         if not project_id:
             return _mcp_response(
                 {"success": False, "error": "Missing required parameter: project_id"}
             )
-        if not job_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: job_id"}
-            )
+        job_id = _ci_id_or_error(args, "job_id")
+        if isinstance(job_id, dict):
+            return job_id
 
         # Access check + token, off the event loop (Bug #2039). Only a
         # registered CIDX golden repo the caller is allowed to see may use
@@ -1609,15 +1613,13 @@ async def handle_gitlab_ci_retry_pipeline(
     try:
         # Validate required parameters
         project_id = args.get("project_id")
-        pipeline_id = args.get("pipeline_id")
         if not project_id:
             return _mcp_response(
                 {"success": False, "error": "Missing required parameter: project_id"}
             )
-        if not pipeline_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: pipeline_id"}
-            )
+        pipeline_id = _ci_id_or_error(args, "pipeline_id")
+        if isinstance(pipeline_id, dict):
+            return pipeline_id
 
         # Story #404 AC1/AC2: group access check, then a per-user write token
         # ONLY (never the global CI token), off the event loop (Bug #2039).
@@ -1721,15 +1723,13 @@ async def handle_gitlab_ci_cancel_pipeline(
     try:
         # Validate required parameters
         project_id = args.get("project_id")
-        pipeline_id = args.get("pipeline_id")
         if not project_id:
             return _mcp_response(
                 {"success": False, "error": "Missing required parameter: project_id"}
             )
-        if not pipeline_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: pipeline_id"}
-            )
+        pipeline_id = _ci_id_or_error(args, "pipeline_id")
+        if isinstance(pipeline_id, dict):
+            return pipeline_id
 
         # Story #404 AC1/AC2: group access check, then a per-user write token
         # ONLY (never the global CI token), off the event loop (Bug #2039).
@@ -2171,15 +2171,13 @@ async def handle_ci_get_run(args: Dict[str, Any], user: Any) -> Dict[str, Any]:
     from code_indexer.server.clients.gitlab_ci_client import GitLabCIClient
 
     repository_alias = args.get("repository_alias")
-    run_id = args.get("run_id")
     if not repository_alias:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
-    if not run_id:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: run_id"}
-        )
+    run_id = _ci_id_or_error(args, "run_id")
+    if isinstance(run_id, dict):
+        return run_id
 
     target, error_resp = await _resolve_ci_target_off_loop(
         repository_alias, args.get("forge", "auto"), user, write=False
@@ -2237,15 +2235,13 @@ async def handle_ci_get_job_logs(args: Dict[str, Any], user: Any) -> Dict[str, A
     from code_indexer.server.clients.gitlab_ci_client import GitLabCIClient
 
     repository_alias = args.get("repository_alias")
-    job_id = args.get("job_id")
     if not repository_alias:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
-    if not job_id:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: job_id"}
-        )
+    job_id = _ci_id_or_error(args, "job_id")
+    if isinstance(job_id, dict):
+        return job_id
 
     target, error_resp = await _resolve_ci_target_off_loop(
         repository_alias, args.get("forge", "auto"), user, write=False
@@ -2294,16 +2290,14 @@ async def handle_ci_search_logs(args: Dict[str, Any], user: Any) -> Dict[str, An
     from code_indexer.server.clients.gitlab_ci_client import GitLabCIClient
 
     repository_alias = args.get("repository_alias")
-    run_id = args.get("run_id")
     pattern = args.get("pattern")
     if not repository_alias:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
-    if not run_id:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: run_id"}
-        )
+    run_id = _ci_id_or_error(args, "run_id")
+    if isinstance(run_id, dict):
+        return run_id
     if not pattern:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: pattern"}
@@ -2398,15 +2392,13 @@ async def handle_ci_cancel_run(args: Dict[str, Any], user: Any) -> Dict[str, Any
     from code_indexer.server.clients.gitlab_ci_client import GitLabCIClient
 
     repository_alias = args.get("repository_alias")
-    run_id = args.get("run_id")
     if not repository_alias:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
-    if not run_id:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: run_id"}
-        )
+    run_id = _ci_id_or_error(args, "run_id")
+    if isinstance(run_id, dict):
+        return run_id
 
     # Story #404 AC2: write=True -> personal PAT ONLY
     target, error_resp = await _resolve_ci_target_off_loop(
@@ -2474,15 +2466,13 @@ async def handle_ci_retry_run(args: Dict[str, Any], user: Any) -> Dict[str, Any]
     from code_indexer.server.clients.gitlab_ci_client import GitLabCIClient
 
     repository_alias = args.get("repository_alias")
-    run_id = args.get("run_id")
     if not repository_alias:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
-    if not run_id:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: run_id"}
-        )
+    run_id = _ci_id_or_error(args, "run_id")
+    if isinstance(run_id, dict):
+        return run_id
 
     # Story #404 AC2: write=True -> personal PAT ONLY
     target, error_resp = await _resolve_ci_target_off_loop(

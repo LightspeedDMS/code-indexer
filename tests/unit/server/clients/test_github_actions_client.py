@@ -98,11 +98,10 @@ class TestGitHubActionsClientListRuns:
             client = GitHubActionsClient(token="fake-token")
             runs = await client.list_runs(repository="owner/repo", branch="main")
 
-            # Verify API was called with branch filter in URL
+            # Verify API was called with branch filter as a query parameter
             call_args = mock_client_instance.get.call_args
             assert call_args is not None
-            url = call_args[0][0]
-            assert "branch=main" in url
+            assert call_args.kwargs["params"] == {"branch": "main"}
 
             assert len(runs) == 1
             assert runs[0]["branch"] == "main"
@@ -144,10 +143,9 @@ class TestGitHubActionsClientListRuns:
             client = GitHubActionsClient(token="fake-token")
             runs = await client.list_runs(repository="owner/repo", status="failure")
 
-            # Verify API was called with status filter
+            # Verify API was called with status filter as a query parameter
             call_args = mock_client_instance.get.call_args
-            url = call_args[0][0]
-            assert "status=" in url
+            assert call_args.kwargs["params"] == {"status": "failure"}
 
             assert len(runs) == 1
             assert runs[0]["conclusion"] == "failure"
