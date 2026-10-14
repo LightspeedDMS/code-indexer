@@ -146,7 +146,6 @@ def publish_index_fields(
     return published_index_fields(index_store_alias(Path(repo_path).name), version)
 
 
-
 class DelegatedIndexStore:
     """Indexes as versioned artifacts held by another service (step 2).
 
@@ -181,7 +180,6 @@ class DelegatedIndexStore:
         """The store's current version of ``store_alias`` (None: nothing yet)."""
         current = self._artifacts.current_version(store_alias)
         return str(current) if current else None
-
 
     def publish_as(self, store_alias: str, built_dir: Path) -> str:
         """``publish`` under an explicit store alias (the caller derived it)."""

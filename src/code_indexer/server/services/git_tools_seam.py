@@ -82,7 +82,12 @@ class DelegatedGitTools:
                 output=redact_url_credentials(result.stdout),
                 stderr=redact_url_credentials(result.stderr),
             )
-        return result
+        return subprocess.CompletedProcess(
+            result.args,
+            result.returncode,
+            redact_url_credentials(result.stdout),
+            redact_url_credentials(result.stderr),
+        )
 
     def _network(
         self, cmd: List[str], repo: str, *, check: bool, timeout: Optional[float]
@@ -109,11 +114,15 @@ class DelegatedGitTools:
                 self._backend.fetch(repo, remote, timeout=timeout)
         except subprocess.CalledProcessError as e:
             if check:
+                if e.stderr:
+                    e.stderr = redact_url_credentials(e.stderr)
+                if e.output:
+                    e.output = redact_url_credentials(e.output)
                 raise
-            stderr = str(e.stderr or "")
+            stderr = redact_url_credentials(e.stderr or "")
             # git's conflicts are on stdout; a backend that only had them as
             # error text still reports them where the callers read them.
-            out = str(e.output or "") or _conflict_lines(stderr)
+            out = redact_url_credentials(e.output or "") or _conflict_lines(stderr)
             return subprocess.CompletedProcess(cmd, e.returncode or 1, out, stderr)
         return subprocess.CompletedProcess(cmd, 0, stdout, "")
 
