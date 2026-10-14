@@ -344,13 +344,15 @@ class LocalGitBackend:
         stderr = bytes(result.stderr or b"").decode("utf-8", "replace")
         if check and result.returncode != 0:
             # The error travels into messages: git echoes a credentialed URL
-            # back on failure, so both streams are redacted here.
+            # back on failure, so both streams are redacted here. stdout
+            # round-trips through ``surrogateescape`` so every byte other than
+            # a redacted credential comes back exactly as git wrote it.
             raise subprocess.CalledProcessError(
                 result.returncode,
                 list(cmd),
                 output=redact_url_credentials(
-                    bytes(result.stdout or b"").decode("utf-8", "replace")
-                ).encode("utf-8"),
+                    bytes(result.stdout or b"").decode("utf-8", "surrogateescape")
+                ).encode("utf-8", "surrogateescape"),
                 stderr=redact_url_credentials(stderr),
             )
         return subprocess.CompletedProcess(

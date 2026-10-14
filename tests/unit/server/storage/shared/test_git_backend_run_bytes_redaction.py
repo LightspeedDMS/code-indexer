@@ -46,6 +46,20 @@ def test_failure_redacts_stdout_and_stderr(monkeypatch: pytest.MonkeyPatch) -> N
     assert "gitlab.com/o/r.git" in err.stderr
 
 
+def test_failure_keeps_every_non_credential_byte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Redaction touches only the credential: undecodable bytes around it
+    survive the failure path unchanged (no U+FFFD substitution)."""
+    stdout = b"\x00\xff\xfe bin " + SECRET_URL.encode() + b" \x80tail\n"
+    monkeypatch.setattr(git_backend, "run_git_command", _fake_run(1, stdout, b""))
+    with pytest.raises(subprocess.CalledProcessError) as info:
+        LocalGitBackend._run_bytes(["git", "show", "HEAD:a"], Path("/r"))
+    assert info.value.output == (
+        b"\x00\xff\xfe bin https://***@gitlab.com/o/r.git \x80tail\n"
+    )
+
+
 def test_success_keeps_exact_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
     blob = b"\x00\xff binary " + SECRET_URL.encode()
     monkeypatch.setattr(git_backend, "run_git_command", _fake_run(0, blob, b"warn\n"))
