@@ -39,6 +39,7 @@ from code_indexer.utils.git_runner import (
     run_git_command,
     run_git_command_with_retry,
 )
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -342,8 +343,15 @@ class LocalGitBackend:
         result = cls._run(cmd, cwd, check=False, timeout=timeout, text=False)
         stderr = bytes(result.stderr or b"").decode("utf-8", "replace")
         if check and result.returncode != 0:
+            # The error travels into messages: git echoes a credentialed URL
+            # back on failure, so both streams are redacted here.
             raise subprocess.CalledProcessError(
-                result.returncode, list(cmd), output=result.stdout, stderr=stderr
+                result.returncode,
+                list(cmd),
+                output=redact_url_credentials(
+                    bytes(result.stdout or b"").decode("utf-8", "replace")
+                ).encode("utf-8"),
+                stderr=redact_url_credentials(stderr),
             )
         return subprocess.CompletedProcess(
             list(cmd), result.returncode, stdout=result.stdout, stderr=stderr

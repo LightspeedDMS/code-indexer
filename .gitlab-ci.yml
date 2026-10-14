@@ -106,6 +106,8 @@ smoke:
       tests/unit/server/mcp/test_protocol.py
       tests/unit/services/test_database_health_cluster.py
       tests/unit/server/test_git_seam_no_raw_subprocess.py
+      tests/unit/server/test_no_unredacted_subprocess_streams.py
+      tests/unit/server/storage/shared/test_git_backend_run_bytes_redaction.py
       tests/unit/utils/test_git_invoker.py
       tests/unit/utils/test_subprocess_diagnostics_1832.py
       tests/unit/xray/test_python_validator_nested_std_paths.py
