@@ -250,7 +250,12 @@ def test_the_local_store_is_todays_baseline(world: Dict[str, Any]) -> None:
     missing = world["golden"] / "not-on-this-pod" / "v_1"
     seen: List[Any] = []
     real = scheduler._published_point_counts
-    setattr(scheduler, "_published_point_counts", lambda t: seen.append(t) or real(t))
+
+    def counted(target: Any) -> Any:
+        seen.append(target)
+        return real(target)
+
+    setattr(scheduler, "_published_point_counts", counted)
     baseline = _baseline(world, missing)
     assert baseline.points == {} and baseline.healthy_index_dir is None
     assert seen == [str(missing)]
@@ -325,9 +330,14 @@ def test_the_refresh_gates_on_the_baseline_and_closes_it(
     baseline = rs.IntegrityBaseline({COLLECTION: 3}, Path("/healthy"))
     setattr(baseline, "close", lambda: closed.append(True))
     asked: List[Any] = []
-    setattr(scheduler, "_integrity_baseline", lambda *a: asked.append(a) or baseline)
+
+    def integrity_baseline(*args: Any) -> Any:
+        asked.append(args)
+        return baseline
+
+    setattr(scheduler, "_integrity_baseline", integrity_baseline)
     _refresh_once_with(meta_world, monkeypatch, scheduler, index=MagicMock())
-    gate = scheduler._run_and_publish_integrity_gate
+    gate: Any = scheduler._run_and_publish_integrity_gate
     assert gate.call_args.kwargs["previous_points"] == {COLLECTION: 3}
     assert gate.call_args.kwargs["healthy_index_dir"] == Path("/healthy")
     assert asked and asked[0][0] == META_ALIAS
