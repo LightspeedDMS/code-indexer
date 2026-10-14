@@ -40,11 +40,13 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
 
     Retrieves cached content by handle with pagination support.
     Implements AC5 of Story #679.
+
+    Cached content is served only to its creator: the read is owner-checked
+    with the caller's username, so a handle the caller did not create
+    (another user's, one with no recorded creator, or a key-addressed
+    entry owned by another route) answers cache_expired, like a missing
+    handle.
     """
-    # Story #331 AC8: Accepted risk - cache handles are UUID4 (unguessable)
-    # and short-lived (TTL-based). Cross-user cache access requires knowing
-    # the exact UUID, which is not feasible. Full user-scoping tracking
-    # would add complexity without meaningful security benefit.
     from code_indexer.server.cache.payload_cache import CacheNotFoundError
 
     handle = args.get("handle")
@@ -87,7 +89,7 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
         )
 
     try:
-        result = payload_cache.retrieve(handle, page=page)
+        result = payload_cache.retrieve_owned(handle, user.username, page=page)
         return _mcp_response(
             {
                 "success": True,

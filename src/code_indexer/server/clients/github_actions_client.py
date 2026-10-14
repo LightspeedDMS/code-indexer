@@ -17,6 +17,10 @@ from tenacity import (
     retry_if_exception,
     before_sleep_log,
 )
+from code_indexer.server.clients.ci_identifiers import (
+    ci_id_segment,
+    encode_github_repository,
+)
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
@@ -98,6 +102,12 @@ class GitHubActionsClient:
         """
         return self._last_rate_limit
 
+    def _repo_url(self, repository: str, *segments: str) -> str:
+        """API URL under /repos/{owner}/{repo}/, every path segment encoded."""
+        return "/".join(
+            [f"{self.base_url}/repos", encode_github_repository(repository), *segments]
+        )
+
     @retry(
         stop=stop_after_attempt(4),  # 1 initial + 3 retries
         wait=wait_exponential(multiplier=1, min=1, max=4),  # 1s, 2s, 4s
@@ -140,19 +150,14 @@ class GitHubActionsClient:
             GitHubRepositoryNotFoundError: When repository not found (404)
         """
         # Build API URL
-        url = f"{self.base_url}/repos/{repository}/actions/runs"
+        url = self._repo_url(repository, "actions", "runs")
 
-        # Build query parameters
+        # Query parameters, encoded by httpx
         params = {}
         if branch:
             params["branch"] = branch
         if status:
             params["status"] = status
-
-        # Build query string
-        if params:
-            query_parts = [f"{k}={v}" for k, v in params.items()]
-            url = f"{url}?{'&'.join(query_parts)}"
 
         # Make API request
         headers = {
@@ -161,7 +166,7 @@ class GitHubActionsClient:
         }
 
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=headers)
+            response = await client.get(url, headers=headers, params=params)
 
             # AC10: Check for authentication failure
             if response.status_code == 401:
@@ -352,7 +357,9 @@ class GitHubActionsClient:
             - artifacts: List of artifacts (AC4 required)
             - run_started_at: When run actually started execution
         """
-        url = f"{self.base_url}/repos/{repository}/actions/runs/{run_id}"
+        run_url = self._repo_url(
+            repository, "actions", "runs", ci_id_segment(run_id, "run_id")
+        )
 
         headers = {
             "Authorization": f"token {self.token}",
@@ -360,21 +367,21 @@ class GitHubActionsClient:
         }
 
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=headers)
+            response = await client.get(run_url, headers=headers)
 
             if response.status_code != 200:
                 raise Exception(f"GitHub API error: {response.status_code}")
 
             data = response.json()
 
-            # Fetch additional data required by AC4
+            # Fetch additional data required by AC4. Follow-up URLs are built
+            # from the validated repository and run id, never taken from the
+            # response, so the token only reaches this run's endpoints.
             duration_seconds = self._calculate_duration(
                 data.get("created_at"), data.get("updated_at")
             )
-            jobs = await self._fetch_jobs(client, data["jobs_url"], headers, run_id)
-            artifacts_url = (
-                f"{self.base_url}/repos/{repository}/actions/runs/{run_id}/artifacts"
-            )
+            jobs = await self._fetch_jobs(client, f"{run_url}/jobs", headers, run_id)
+            artifacts_url = f"{run_url}/artifacts"
             artifacts = await self._fetch_artifacts(
                 client, artifacts_url, headers, run_id
             )
@@ -428,7 +435,9 @@ class GitHubActionsClient:
             - line_number: Line number in the job logs
         """
         # First, get list of jobs for this run
-        jobs_url = f"{self.base_url}/repos/{repository}/actions/runs/{run_id}/jobs"
+        jobs_url = self._repo_url(
+            repository, "actions", "runs", ci_id_segment(run_id, "run_id"), "jobs"
+        )
 
         headers = {
             "Authorization": f"token {self.token}",
@@ -456,8 +465,12 @@ class GitHubActionsClient:
                 job_name = job["name"]
 
                 # Get logs for this job
-                logs_url = (
-                    f"{self.base_url}/repos/{repository}/actions/jobs/{job_id}/logs"
+                logs_url = self._repo_url(
+                    repository,
+                    "actions",
+                    "jobs",
+                    ci_id_segment(job_id, "job_id"),
+                    "logs",
                 )
                 logs_response = await client.get(logs_url, headers=headers)
 
@@ -504,7 +517,9 @@ class GitHubActionsClient:
         Returns:
             Full log output as text
         """
-        url = f"{self.base_url}/repos/{repository}/actions/jobs/{job_id}/logs"
+        url = self._repo_url(
+            repository, "actions", "jobs", ci_id_segment(job_id, "job_id"), "logs"
+        )
 
         headers = {
             "Authorization": f"token {self.token}",
@@ -547,7 +562,9 @@ class GitHubActionsClient:
             - success: Boolean indicating retry was triggered
             - run_id: The workflow run ID that was retried
         """
-        url = f"{self.base_url}/repos/{repository}/actions/runs/{run_id}/rerun"
+        url = self._repo_url(
+            repository, "actions", "runs", ci_id_segment(run_id, "run_id"), "rerun"
+        )
 
         headers = {
             "Authorization": f"token {self.token}",
@@ -593,7 +610,9 @@ class GitHubActionsClient:
             - success: Boolean indicating cancellation was triggered
             - run_id: The workflow run ID that was cancelled
         """
-        url = f"{self.base_url}/repos/{repository}/actions/runs/{run_id}/cancel"
+        url = self._repo_url(
+            repository, "actions", "runs", ci_id_segment(run_id, "run_id"), "cancel"
+        )
 
         headers = {
             "Authorization": f"token {self.token}",

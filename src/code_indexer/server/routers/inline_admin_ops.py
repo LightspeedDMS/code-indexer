@@ -229,7 +229,11 @@ def register_admin_ops_routes(
             "total": len(repos),
         }
 
-    @app.get("/api/admin/activated-repos")
+    # Lists every user's activated repositories (user data): elevation required.
+    @app.get(
+        "/api/admin/activated-repos",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def admin_list_all_activated_repos(
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
@@ -775,7 +779,11 @@ def register_admin_ops_routes(
             "average_duration": average_duration,
         }
 
-    @app.get("/api/admin/scip-pr-history")
+    # Audit-log content: elevation required, like GET /api/v1/audit-logs.
+    @app.get(
+        "/api/admin/scip-pr-history",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def get_scip_pr_history(
         repo_alias: Optional[str] = None,
         limit: int = 100,
@@ -802,7 +810,11 @@ def register_admin_ops_routes(
             logger.error("Error fetching PR history: %s", e)
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.get("/api/admin/scip-git-cleanup-history")
+    # Audit-log content: elevation required, like GET /api/v1/audit-logs.
+    @app.get(
+        "/api/admin/scip-git-cleanup-history",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def get_scip_git_cleanup_history(
         repo_path: Optional[str] = None,
         limit: int = 100,
@@ -981,7 +993,13 @@ def register_admin_ops_routes(
             )
         return _DEFAULT_EXPORT_RETENTION_DAYS
 
-    @app.post("/api/admin/search-events/export", status_code=202)
+    # Search history (every user's query text) and its exports are admin reads
+    # of user data: each route requires the caller's own elevation window.
+    @app.post(
+        "/api/admin/search-events/export",
+        status_code=202,
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def trigger_query_analytics_export(
         request: Request,
         body: ExportFiltersRequest = Body(default=ExportFiltersRequest()),
@@ -1040,7 +1058,10 @@ def register_admin_ops_routes(
         job_id_holder["job_id"] = job_id
         return {"job_id": job_id}
 
-    @app.get("/api/admin/search-events/exports")
+    @app.get(
+        "/api/admin/search-events/exports",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def list_query_analytics_exports(
         request: Request,
         id: Optional[str] = None,
@@ -1086,7 +1107,10 @@ def register_admin_ops_routes(
             )
         return {"exports": result}
 
-    @app.get("/api/admin/search-events/exports/{export_id}/download")
+    @app.get(
+        "/api/admin/search-events/exports/{export_id}/download",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def download_query_analytics_export(
         request: Request,
         export_id: str,
@@ -1147,7 +1171,10 @@ def register_admin_ops_routes(
             filename=f"query-analytics-{_ts}.xlsx",
         )
 
-    @app.get("/api/admin/search-events")
+    @app.get(
+        "/api/admin/search-events",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def get_search_events(
         request: Request,
         username: Optional[str] = None,

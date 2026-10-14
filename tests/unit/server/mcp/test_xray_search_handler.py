@@ -440,7 +440,7 @@ class TestXraySearchHandlerTruncation:
             job_fn = mock_loop.run_in_executor.call_args[0][1]
             job_fn()
 
-        mock_truncate.assert_called_once_with(engine_result)
+        mock_truncate.assert_called_once_with(engine_result, owner="testuser")
 
 
 # ---------------------------------------------------------------------------

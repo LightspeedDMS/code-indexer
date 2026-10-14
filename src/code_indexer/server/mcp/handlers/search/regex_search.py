@@ -310,7 +310,7 @@ async def _rerank_truncate_and_filter_regex_matches(
         None, lambda: _mcp_reranking._apply_reranking_sync(**rerank_kwargs)
     )
 
-    matches = _apply_regex_payload_truncation(matches)
+    matches = _apply_regex_payload_truncation(matches, owner=user.username)
 
     cidx_meta_access_filtered = False
     if repository_alias and "cidx-meta" in repository_alias:

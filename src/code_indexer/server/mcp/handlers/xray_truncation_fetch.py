@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from code_indexer.server.cache.payload_cache import CacheNotFoundError
 
@@ -71,7 +71,11 @@ class MalformedManifestError(Exception):
 
 
 def store_pages(
-    payload_cache: Any, field_names: List[str], pages: List[Dict[str, list]]
+    payload_cache: Any,
+    field_names: List[str],
+    pages: List[Dict[str, list]],
+    *,
+    owner: Optional[str] = None,
 ) -> Tuple[str, int]:
     """Store every page AND the pages-v1 manifest that references them as
     ONE atomic batch (Bug #1928 P1) -- pre-generates every handle
@@ -79,6 +83,8 @@ def store_pages(
     manifest content can be built BEFORE any write happens, then submits
     pages+manifest together via `PayloadCache.store_batch_with_keys()`
     (one transaction, one shared timestamp/expiry, failures propagate).
+    Every entry records `owner` (the creating user) in that same batch,
+    so only that user can fetch the pages or the manifest.
     Returns (manifest_cache_handle, total_pages).
 
     Raises:
@@ -110,7 +116,7 @@ def store_pages(
     items.append((manifest_handle, json.dumps(manifest)))
 
     try:
-        payload_cache.store_batch_with_keys(items)
+        payload_cache.store_batch_with_keys(items, owner=owner)
     except Exception as exc:
         raise PageSetStoreError(
             f"failed to durably store {len(page_handles)} page(s) + the "
@@ -202,10 +208,16 @@ def _parse_and_validate_manifest(content: str, cache_handle: str) -> Dict[str, A
 
 
 def fetch_cached_page(
-    payload_cache: Any, cache_handle: str, page: int
+    payload_cache: Any, cache_handle: str, page: int, owner: str
 ) -> Dict[str, Any]:
     """Resolve a cache_handle + 1-indexed page into
     {content, page, total_pages, has_more}.
+
+    Cached content is served only to its creator: every read goes through
+    the owner-checked PayloadCache reads with `owner` (the caller's
+    username), so a handle the caller did not create -- another user's,
+    one with no recorded creator, or a key-addressed entry -- raises
+    CacheNotFoundError exactly like a missing handle.
 
     Bug #1928 P2: whether a handle is a pages-v1 manifest is decided by
     a cheap prefix check (`_PAGES_V1_HANDLE_PREFIX`) BEFORE any
@@ -239,7 +251,7 @@ def fetch_cached_page(
         raise ValueError(f"page must be an integer >= 1, got {page!r}")
 
     if cache_handle.startswith(_PAGES_V1_HANDLE_PREFIX):
-        full_content = payload_cache.retrieve_full(cache_handle)
+        full_content = payload_cache.retrieve_full_owned(cache_handle, owner)
         manifest = _parse_and_validate_manifest(full_content, cache_handle)
         page_handles = manifest["page_handles"]
         total_pages = manifest["total_pages"]
@@ -248,7 +260,7 @@ def fetch_cached_page(
                 f"Page {page} out of range for handle {cache_handle} "
                 f"(total: {total_pages})"
             )
-        page_content = payload_cache.retrieve_full(page_handles[page - 1])
+        page_content = payload_cache.retrieve_full_owned(page_handles[page - 1], owner)
         return {
             "content": page_content,
             "page": page,
@@ -256,7 +268,7 @@ def fetch_cached_page(
             "has_more": page < total_pages,
         }
 
-    legacy = payload_cache.retrieve(cache_handle, page=page - 1)
+    legacy = payload_cache.retrieve_owned(cache_handle, owner, page=page - 1)
     return {
         "content": legacy.content,
         "page": legacy.page + 1,

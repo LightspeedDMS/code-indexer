@@ -80,30 +80,38 @@ def _assert_forwarded_to_all(attr_name: str, sentinel: object) -> None:
         )
 
 
+_HANDLERS_PACKAGE = "code_indexer.server.mcp.handlers"
+
+
 @contextmanager
 def _swap_app_module(sentinel: Any) -> Generator[None, None, None]:
     """Temporarily replace app_module, restoring original on exit.
 
-    Must restore BOTH _utils.app_module AND handlers.__dict__["app_module"].
-    setattr(handlers, "app_module", x) via _ForwardingModule.__setattr__ writes
-    to both locations.  Restoring only _utils leaves handlers.__dict__ holding a
-    MagicMock, which later patch() calls save as "original" and restore back,
-    permanently poisoning _utils.app_module for all subsequent tests.
+    A write of ``app_module`` on the package or on ``_legacy`` is forwarded
+    into ``_utils``, ``_legacy`` and every domain submodule that imported the
+    name (e.g. ``git_write``).  The ``app_module`` binding of the package and
+    of EVERY loaded handlers module is therefore snapshotted and restored
+    exactly -- through ``__dict__``, so the restore itself is not forwarded.
+    A binding left holding the MagicMock would be read by later tests'
+    handlers (and saved as "original" by later patch() calls).
     """
     _ensure_modules_loaded()
-    import code_indexer.server.mcp.handlers as handlers
-    import code_indexer.server.mcp.handlers._utils as utils
-
-    original_utils = utils.app_module
-    original_handlers = handlers.__dict__.get("app_module")
+    missing = object()
+    modules = [
+        mod
+        for name, mod in list(sys.modules.items())
+        if mod is not None
+        and (name == _HANDLERS_PACKAGE or name.startswith(_HANDLERS_PACKAGE + "."))
+    ]
+    originals = [(mod, mod.__dict__.get("app_module", missing)) for mod in modules]
     try:
         yield
     finally:
-        utils.app_module = original_utils
-        if original_handlers is not None:
-            handlers.__dict__["app_module"] = original_handlers
-        elif "app_module" in handlers.__dict__:
-            del handlers.__dict__["app_module"]
+        for mod, original in originals:
+            if original is missing:
+                mod.__dict__.pop("app_module", None)
+            else:
+                mod.__dict__["app_module"] = original
 
 
 # ---------------------------------------------------------------------------

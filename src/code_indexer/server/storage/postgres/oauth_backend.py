@@ -399,8 +399,15 @@ class OAuthPostgresBackend:
     def refresh_access_token(
         self, refresh_token: str, client_id: str
     ) -> Dict[str, Any]:
-        """Exchange a refresh token for new access and refresh tokens."""
-        from code_indexer.server.auth.oauth.oauth_manager import OAuthError
+        """Exchange a refresh token for new access and refresh tokens.
+
+        The token is redeemable only by the client it was issued to (RFC 6749
+        section 6); any other client gets ``invalid_grant`` and the token
+        stays valid for its own client."""
+        from code_indexer.server.auth.oauth.oauth_manager import (
+            AuthorizationGrantRefused,
+            OAuthError,
+        )
 
         new_access_token = secrets.token_urlsafe(48)
         new_refresh_token = secrets.token_urlsafe(48)
@@ -409,25 +416,32 @@ class OAuthPostgresBackend:
 
         try:
             with self._pool.connection() as conn:
+                # One conditional statement rotates the token: of concurrent
+                # refreshes of the same token exactly one matches the row;
+                # the others match nothing and are refused.  A token past its
+                # hard expiry matches nothing either.  hard_expires_at is ISO
+                # text: cast it, with a naive value read as UTC (SET LOCAL
+                # scopes the zone to this transaction).
+                conn.execute("SET LOCAL TIME ZONE 'UTC'")
                 row = conn.execute(
-                    "SELECT token_id FROM oauth_tokens WHERE refresh_token = %s",
-                    (refresh_token,),
-                ).fetchone()
-                if not row:
-                    raise OAuthError("Invalid refresh token")
-
-                conn.execute(
                     """UPDATE oauth_tokens
                        SET access_token = %s, refresh_token = %s, expires_at = %s, last_activity = %s
-                       WHERE refresh_token = %s""",
+                       WHERE refresh_token = %s AND client_id = %s
+                         AND hard_expires_at::timestamptz > %s::timestamptz
+                       RETURNING token_id""",
                     (
                         new_access_token,
                         new_refresh_token,
                         new_expires_at.isoformat(),
                         now.isoformat(),
                         refresh_token,
+                        client_id,
+                        now.isoformat(),
                     ),
-                )
+                ).fetchone()
+                if not row:
+                    conn.rollback()
+                    raise AuthorizationGrantRefused("Invalid refresh token")
                 conn.commit()
         except OAuthError:
             raise

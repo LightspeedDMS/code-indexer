@@ -41,11 +41,22 @@ When step-up elevation enforcement is on (runtime setting `elevation_enforcement
   - search form submissions (`/admin/query`, the query results partial), which change nothing;
   - disabling MFA and regenerating recovery codes, which check the window inside the handler and also accept a
     window opened with a recovery code.
-- **Sensitive Web UI reads.** The SSH Keys and Logs pages send an unelevated administrator to `/admin/elevate`, and
-  the log list and log export require a window.
-- **REST and MCP.** Administrative REST writes carry the same requirement, and so do the MCP tools marked with it in
-  the [MCP tool reference](../reference/mcp-tools/README.md). Self-service credential changes (own API keys, MCP
-  credentials and git credentials) require it for every role.
+- **Sensitive Web UI reads.** The SSH Keys, Logs and Query Analytics Export pages send an unelevated administrator
+  to `/admin/elevate`, which returns to the page afterwards. The log list, the log export, the users list and the
+  group membership list (the User Assignments tab of the Groups page, which the page itself never renders) require
+  a window; without one the TOTP dialog opens. The analytics export page downloads its files through the same
+  dialog-aware request path.
+- **REST and MCP writes.** Administrative REST writes carry the same requirement, and so do the MCP tools marked
+  with it in the [MCP tool reference](../reference/mcp-tools/README.md). Self-service credential changes (own API
+  keys, MCP credentials and git credentials) require it for every role.
+- **REST and MCP reads of user data.** Administrative reads that return user lists, group membership, search
+  history, audit content or credentials require a window: REST `GET /api/admin/users`, `GET /api/v1/users`,
+  `GET /api/admin/search-events`, `POST /api/admin/search-events/export`, `GET /api/admin/search-events/exports`
+  and its download, `GET /api/admin/activated-repos`, `GET /api/v1/groups/{group_id}`, `GET /api/v1/audit-logs`,
+  `GET /api/admin/scip-pr-history` and `GET /api/admin/scip-git-cleanup-history`; and the MCP tools `list_users`,
+  `get_group`, `query_audit_logs`, `scip_pr_history` and `scip_cleanup_history`. Without a window they answer
+  `elevation_required`. An API key cannot hold an elevation window, so these reads refuse an administrator's API
+  key while enforcement is on. A completed analytics export is downloaded under a window too.
 
 With enforcement off, all of these run without an elevation check.
 
@@ -53,3 +64,11 @@ The routes themselves are the authority, not this page. The test
 `tests/unit/server/web/test_admin_elevation_gating_956.py` inspects the administration router and fails when a
 mutation route lacks the elevation dependency and is not on its exemption list (`_EXEMPT_ROUTES`), and it pins the
 elevation-gated reads. Adding an exemption means editing that list with a justification.
+
+For REST reads, `tests/unit/server/routers/test_admin_get_routes_require_elevation.py` enumerates every `GET`
+route under `/api/admin/` and `/api/v1/` on the real application and fails when one does not require elevation
+(read from the route's dependency tree) and is not on its `ALLOWLIST`. Every allowlist entry carries a written
+reason, for example operational counters, maintenance status polled by the auto-updater, or repository reads
+governed by repository permissions. Nothing returning user lists, emails, group membership, search history, audit
+content or credentials may be allowlisted, and an entry for a route that no longer exists or is now gated fails the
+test.

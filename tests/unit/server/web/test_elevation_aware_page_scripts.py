@@ -132,7 +132,9 @@ def _run(
     return result
 
 
-@pytest.mark.parametrize("template", ["logs.html", "ssh_keys.html"])
+@pytest.mark.parametrize(
+    "template", ["logs.html", "ssh_keys.html", "analytics_export.html"]
+)
 def test_page_script_is_valid_javascript(tmp_path: Path, template: str) -> None:
     script = tmp_path / "page.js"
     script.write_text(_page_script(template))
@@ -254,3 +256,95 @@ def test_copy_public_key_copies_a_successful_reply(tmp_path: Path) -> None:
     )
 
     assert result["clipboard"] == ["ssh-ed25519 AAAAexample example@example.com"]
+
+
+# ---------------------------------------------------------------------------
+# analytics_export.html: the export download goes through fetch(), never a
+# navigation, so a lapsed window opens the TOTP modal instead of a JSON page
+# ---------------------------------------------------------------------------
+
+_EXPORT_DOWNLOAD = "/api/admin/search-events/exports/example-id/download"
+_EXPORT_ELEMENTS = {"export-status": "", "history-tbody": ""}
+
+
+def test_export_history_renders_no_navigation_download_link(tmp_path: Path) -> None:
+    row = {
+        "id": "example-id",
+        "status": "completed",
+        "download_link": _EXPORT_DOWNLOAD,
+    }
+    result = _run(
+        tmp_path,
+        "analytics_export.html",
+        f"renderHistory([{json.dumps(row)}]);"
+        "const t = document.getElementById('history-tbody');"
+        "t.textContent = t.innerHTML;",
+        dict(_EXPORT_ELEMENTS),
+        {"status": 200, "body": "{}"},
+    )
+
+    rendered = result["text"]["history-tbody"]
+    assert "href=" not in rendered, rendered
+    assert f'data-download="{_EXPORT_DOWNLOAD}"' in rendered, rendered
+    assert "downloadExport(this.dataset.download)" in rendered, rendered
+
+
+def _download_fetches(result: Dict[str, Any]) -> list:
+    """The download's own fetches (the page also loads its history on open)."""
+    return [f for f in result["fetches"] if f["url"] == _EXPORT_DOWNLOAD]
+
+
+def test_export_download_goes_through_fetch_with_server_filename(
+    tmp_path: Path,
+) -> None:
+    filename = "query-analytics-20260101_000000.xlsx"
+    result = _run(
+        tmp_path,
+        "analytics_export.html",
+        f"downloadExport({json.dumps(_EXPORT_DOWNLOAD)})",
+        dict(_EXPORT_ELEMENTS),
+        {
+            "status": 200,
+            "body": "payload",
+            "headers": {"content-disposition": f'attachment; filename="{filename}"'},
+        },
+    )
+
+    assert result["navigatedTo"] is None, "download must not navigate the page"
+    assert _download_fetches(result) == [
+        {"url": _EXPORT_DOWNLOAD, "options": {"credentials": "same-origin"}}
+    ]
+    assert result["clicked"] == [{"href": "blob:example", "download": filename}]
+    assert filename in result["text"]["export-status"]
+
+
+def test_export_download_failure_reports_status_and_never_navigates(
+    tmp_path: Path,
+) -> None:
+    result = _run(
+        tmp_path,
+        "analytics_export.html",
+        f"downloadExport({json.dumps(_EXPORT_DOWNLOAD)})",
+        dict(_EXPORT_ELEMENTS),
+        {"status": 403, "body": '{"detail":{"error":"elevation_required"}}'},
+    )
+
+    assert result["navigatedTo"] is None
+    assert result["clicked"] == []
+    assert "403" in result["text"]["export-status"]
+
+
+def test_export_download_cancelled_elevation_reports_no_failure(
+    tmp_path: Path,
+) -> None:
+    result = _run(
+        tmp_path,
+        "analytics_export.html",
+        f"downloadExport({json.dumps(_EXPORT_DOWNLOAD)})",
+        dict(_EXPORT_ELEMENTS),
+        {"reject": "elevation_cancelled"},
+    )
+
+    assert result["navigatedTo"] is None
+    assert result["clicked"] == []
+    assert "failed" not in result["text"]["export-status"].lower()

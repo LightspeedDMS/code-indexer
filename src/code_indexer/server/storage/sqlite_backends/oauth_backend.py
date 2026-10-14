@@ -379,8 +379,14 @@ class OAuthSqliteBackend:
     def refresh_access_token(
         self, refresh_token: str, client_id: str
     ) -> Dict[str, Any]:
-        """Exchange a refresh token for new access and refresh tokens."""
-        from code_indexer.server.auth.oauth.oauth_manager import OAuthError
+        """Exchange a refresh token for new access and refresh tokens.
+
+        The token is redeemable only by the client it was issued to (RFC 6749
+        section 6); any other client gets ``invalid_grant`` and the token
+        stays valid for its own client."""
+        from code_indexer.server.auth.oauth.oauth_manager import (
+            AuthorizationGrantRefused,
+        )
 
         new_access_token = self._secrets.token_urlsafe(48)
         new_refresh_token = self._secrets.token_urlsafe(48)
@@ -391,22 +397,32 @@ class OAuthSqliteBackend:
             cursor = conn.cursor()
             cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
             cursor.execute(
-                "SELECT * FROM oauth_tokens WHERE refresh_token = ?", (refresh_token,)
+                "SELECT token_id, hard_expires_at FROM oauth_tokens "
+                "WHERE refresh_token = ? AND client_id = ?",
+                (refresh_token, client_id),
             )
             row = cursor.fetchone()
             if not row:
-                raise OAuthError("Invalid refresh token")
+                raise AuthorizationGrantRefused("Invalid refresh token")
+            # Past its hard expiry the token mints nothing (a naive stored
+            # value is UTC); checked inside the rotating transaction.
+            hard_expires_at = datetime.fromisoformat(row["hard_expires_at"])
+            if hard_expires_at.tzinfo is None:
+                hard_expires_at = hard_expires_at.replace(tzinfo=timezone.utc)
+            if now >= hard_expires_at:
+                raise AuthorizationGrantRefused("Refresh token has expired")
 
             conn.execute(
                 """UPDATE oauth_tokens
                    SET access_token = ?, refresh_token = ?, expires_at = ?, last_activity = ?
-                   WHERE refresh_token = ?""",
+                   WHERE refresh_token = ? AND client_id = ?""",
                 (
                     new_access_token,
                     new_refresh_token,
                     new_expires_at.isoformat(),
                     now.isoformat(),
                     refresh_token,
+                    client_id,
                 ),
             )
 

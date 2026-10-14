@@ -45,6 +45,7 @@ class FakeCacheResult:
 
 def _make_user() -> MagicMock:
     user = MagicMock()
+    user.username = "alice"
     user.has_permission.return_value = True
     return user
 
@@ -70,7 +71,7 @@ def _parse_mcp_response(result: dict) -> dict:
 def _make_cache(page: int = 0, total_pages: int = 3) -> MagicMock:
     """Return a mock payload_cache whose retrieve() returns a FakeCacheResult."""
     cache = MagicMock()
-    cache.retrieve.return_value = FakeCacheResult(
+    cache.retrieve_owned.return_value = FakeCacheResult(
         content="test content for page",
         page=page,
         total_pages=total_pages,
@@ -108,7 +109,7 @@ class TestCachePageIndexBug1027:
         data = _call_handler(cache, page=1)
 
         assert data["success"] is True
-        cache.retrieve.assert_called_once_with("test-handle-abc", page=0)
+        cache.retrieve_owned.assert_called_once_with("test-handle-abc", "alice", page=0)
 
     def test_default_page_calls_retrieve_with_zero_index(self) -> None:
         """Omitting page must default to 1 (1-indexed) -> retrieve(page=0)."""
@@ -116,7 +117,7 @@ class TestCachePageIndexBug1027:
         data = _call_handler(cache)
 
         assert data["success"] is True
-        cache.retrieve.assert_called_once_with("test-handle-abc", page=0)
+        cache.retrieve_owned.assert_called_once_with("test-handle-abc", "alice", page=0)
 
     def test_page_zero_clamped_to_first_page(self) -> None:
         """page=0 must be clamped to 1 via max(1, ...), so retrieve gets page=0.
@@ -129,7 +130,7 @@ class TestCachePageIndexBug1027:
         data = _call_handler(cache, page=0)
 
         assert data["success"] is True
-        cache.retrieve.assert_called_once_with("test-handle-abc", page=0)
+        cache.retrieve_owned.assert_called_once_with("test-handle-abc", "alice", page=0)
 
     def test_response_page_is_one_indexed(self) -> None:
         """Handler must return result.page + 1 so callers see 1-indexed page numbers."""
@@ -147,7 +148,7 @@ class TestCachePageIndexBug1027:
         data = _call_handler(cache, page=2)
 
         assert data["success"] is True
-        cache.retrieve.assert_called_once_with("test-handle-abc", page=1)
+        cache.retrieve_owned.assert_called_once_with("test-handle-abc", "alice", page=1)
         assert data["page"] == 2
 
     def test_cache_not_found_returns_cache_expired_error(self) -> None:
@@ -155,7 +156,7 @@ class TestCachePageIndexBug1027:
         from code_indexer.server.cache.payload_cache import CacheNotFoundError
 
         cache = MagicMock()
-        cache.retrieve.side_effect = CacheNotFoundError("handle expired")
+        cache.retrieve_owned.side_effect = CacheNotFoundError("handle expired")
 
         data = _call_handler(cache, page=1)
 

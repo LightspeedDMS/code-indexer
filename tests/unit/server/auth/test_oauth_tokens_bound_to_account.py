@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import secrets
 import sqlite3
 import uuid
@@ -123,6 +124,11 @@ def _consent(client: TestClient, client_id: str, session: str) -> Tuple[str, str
         .rstrip("=")
     )
     client.cookies.clear()
+    # The consent POST needs the Web UI CSRF token (not bound to a session):
+    # GET /login sets its signed cookie in the client jar and renders it.
+    login_page = client.get("/login")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text)
+    assert csrf is not None, login_page.text
     client.cookies.set(web_auth.SESSION_COOKIE_NAME, session)
     response = client.post(
         "/oauth/authorize/consent",
@@ -132,6 +138,7 @@ def _consent(client: TestClient, client_id: str, session: str) -> Tuple[str, str
             "code_challenge": challenge,
             "response_type": "code",
             "consent": "allow",
+            "csrf_token": csrf.group(1),
         },
     )
     client.cookies.clear()

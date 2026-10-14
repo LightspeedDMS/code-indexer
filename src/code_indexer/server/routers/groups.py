@@ -540,7 +540,11 @@ def create_group(
         )
 
 
-@router.get("/{group_id}", response_model=GroupDetailResponse)
+@router.get(
+    "/{group_id}",
+    response_model=GroupDetailResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def get_group(
     group_id: int,
     current_user: User = Depends(get_current_admin_user),
@@ -550,7 +554,8 @@ def get_group(
     Get detailed information about a specific group.
 
     Returns group details including user count and accessible repositories.
-    Requires admin role.
+    Requires admin role. The member user ids are user data, so the caller's
+    own elevation window is required too.
     """
     group = group_manager.get_group(group_id)
     if group is None:

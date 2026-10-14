@@ -4,14 +4,22 @@ Story #679: S1 - Semantic Search with Payload Control (Foundation)
 AC4: REST Cache Retrieval API
 
 Provides GET /cache/{handle} endpoint for retrieving cached content with pagination.
+
+Cached content is served only to an authenticated caller who created it:
+the route requires the same authentication as the query routes, and a
+handle the caller did not create (another user's, one with no recorded
+creator, or a key-addressed entry owned by another route) answers exactly
+like a missing handle.
 """
 
 import logging
 from typing import Union
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from code_indexer.server.auth import dependencies
+from code_indexer.server.auth.user_manager import User
 from code_indexer.server.cache.payload_cache import CacheNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -58,18 +66,23 @@ class CacheErrorResponse(BaseModel):
             ),
             "model": CacheErrorResponse,
         },
+        401: {"description": "Missing or invalid authentication credentials"},
         404: {
             "description": "Cache handle not found or expired",
             "model": CacheErrorResponse,
         },
     },
     summary="Retrieve cached content",
-    description="Retrieve cached content by handle with pagination support",
+    description=(
+        "Retrieve cached content by handle with pagination support. "
+        "Only the user whose request created the handle can read it."
+    ),
 )
 def get_cached_content(
     request: Request,
     handle: str,
     page: int = Query(default=0, ge=0, description="Page number (0-indexed)"),
+    current_user: User = Depends(dependencies.get_current_user),
 ) -> Union[CacheRetrievalResponse, JSONResponse]:
     """Retrieve cached content by handle with pagination.
 
@@ -77,6 +90,8 @@ def get_cached_content(
         request: FastAPI request object
         handle: UUID4 cache handle
         page: Page number (0-indexed, default 0)
+        current_user: Authenticated caller; only the creator of the entry
+            is served its content.
 
     Returns:
         CacheRetrievalResponse with content and pagination info on
@@ -117,7 +132,7 @@ def get_cached_content(
         )
 
     try:
-        result = payload_cache.retrieve(handle, page=page)
+        result = payload_cache.retrieve_owned(handle, current_user.username, page=page)
         return CacheRetrievalResponse(
             content=result.content,
             page=result.page,

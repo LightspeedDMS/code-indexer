@@ -102,6 +102,8 @@ class TruncationHelper:
         self,
         content: str,
         content_type: str,
+        *,
+        owner: Optional[str] = None,
     ) -> TruncationResult:
         """Truncate content if needed and cache the full content.
 
@@ -110,6 +112,8 @@ class TruncationHelper:
         Args:
             content: Full content to potentially truncate
             content_type: Type of content for limit selection ("file", "diff", "log")
+            owner: Username of the caller whose request created the entry;
+                only that user can fetch the returned handle.
 
         Returns:
             TruncationResult with preview, cache_handle, and token info
@@ -137,7 +141,7 @@ class TruncationHelper:
         preview_tokens = self.estimate_tokens(preview)
 
         # Store full content in cache (sync call)
-        cache_handle = self.payload_cache.store(content)
+        cache_handle = self.payload_cache.store(content, owner=owner)
 
         # Calculate total_pages based on content size and max_fetch_size_chars
         # This matches the pagination calculation in PayloadCache.retrieve()

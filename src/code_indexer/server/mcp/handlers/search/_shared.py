@@ -139,9 +139,16 @@ def _filter_errors_for_user(errors: dict, user: User) -> dict:
 
 
 def _apply_search_truncation(
-    results: list, search_mode: str, params: Dict[str, Any]
+    results: list,
+    search_mode: str,
+    params: Dict[str, Any],
+    *,
+    owner: Optional[str] = None,
 ) -> Tuple[list, Dict[str, Any]]:
     """Apply payload truncation based on search mode.
+
+    `owner` is the username of the caller whose search created the handles;
+    only that user can fetch them.
 
     Returns:
         (results, meta) 2-tuple.  For fts/hybrid modes, meta contains:
@@ -154,7 +161,7 @@ def _apply_search_truncation(
     MCP consumer can see how many rows were truncated and at what threshold.
     """
     if search_mode in ["fts", "hybrid"]:
-        truncated = _apply_fts_payload_truncation(results)
+        truncated = _apply_fts_payload_truncation(results, owner=owner)
         # Build meta only when a payload_cache is active.  _apply_fts_payload_truncation
         # returns the original list unchanged when there is no cache, so rows_capped
         # would be 0 anyway -- return empty meta to avoid surfacing a misleading 0.
@@ -177,9 +184,9 @@ def _apply_search_truncation(
         }
         return truncated, meta
     elif _is_temporal_query(params):
-        return _apply_temporal_payload_truncation(results), {}
+        return _apply_temporal_payload_truncation(results, owner=owner), {}
     else:
-        return _apply_payload_truncation(results), {}
+        return _apply_payload_truncation(results, owner=owner), {}
 
 
 def _resolve_search_type(params: Dict[str, Any], user: User) -> str:
@@ -285,7 +292,7 @@ def _apply_rerank_and_filter(
 
     search_mode = params.get("search_mode", "semantic")
     results, fts_truncation_meta = _apply_search_truncation(
-        results, search_mode, params
+        results, search_mode, params, owner=user.username
     )
     # AC4 (Bug #1202): surface fts truncation metadata alongside rerank meta.
     if fts_truncation_meta:

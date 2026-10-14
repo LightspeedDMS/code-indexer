@@ -262,7 +262,9 @@ class TestGitMergeUnresolvableSource:
                     params={
                         "name": "git_merge",
                         "arguments": {
-                            "repository_alias": "example-repo-global",
+                            # git write tools refuse a "-global" alias (a
+                            # shared golden repository) before running git.
+                            "repository_alias": "example-repo",
                             "source_branch": "not-a-real-branch-xyz",
                         },
                     },

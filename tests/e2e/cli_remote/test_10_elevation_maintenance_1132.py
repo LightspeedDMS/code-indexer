@@ -510,7 +510,7 @@ class TestAC1CliElevationRetry:
         self, elevation_enrolled: _EnrolledContext
     ) -> None:
         """T2: 403 -> prompt -> /auth/elevate 401 -> sys.exit(1); user NOT created."""
-        from code_indexer.api_clients.elevation import with_elevation_retry
+        from code_indexer.api_clients.elevation import elevate, with_elevation_retry
 
         ctx = elevation_enrolled
         token = ctx.admin_token  # pre-enrollment token (no MFA challenge)
@@ -529,6 +529,10 @@ class TestAC1CliElevationRetry:
             assert exc_info.value.code == 1, (
                 f"T2 expected SystemExit(1), got code={exc_info.value.code}"
             )
+            # Reading the user list requires the caller's own elevation
+            # window; open one for this token with a never-used code.
+            otp = _fresh_otp(ctx.secret, avoid=pyotp.TOTP(ctx.secret).now())
+            assert elevate(session, ctx.base_url, token, otp)
             assert not _user_exists(ctx.base_url, ctx.admin_token, username), (
                 "T2: wrong OTP must NOT create the user (no retry on elevation_failed)"
             )

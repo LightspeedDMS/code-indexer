@@ -76,7 +76,10 @@ def _enforce_repo_access(
 
 
 def _apply_multi_truncation(
-    grouped_results: Dict[str, List[Dict[str, Any]]], search_type: str
+    grouped_results: Dict[str, List[Dict[str, Any]]],
+    search_type: str,
+    *,
+    owner: Optional[str] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Apply payload truncation to multi-repo grouped search results (Story #683).
 
@@ -85,6 +88,8 @@ def _apply_multi_truncation(
     Args:
         grouped_results: Dict mapping repo_id to list of result dicts
         search_type: Search type ('semantic', 'fts', 'temporal')
+        owner: Username of the caller whose request created the entries; only
+            that user can fetch the returned handles.
 
     Returns:
         Modified grouped_results with truncation applied to each result
@@ -97,12 +102,16 @@ def _apply_multi_truncation(
 
     for repo_id, results in grouped_results.items():
         if search_type == "fts":
-            grouped_results[repo_id] = _apply_fts_payload_truncation(results)
+            grouped_results[repo_id] = _apply_fts_payload_truncation(
+                results, owner=owner
+            )
         elif search_type == "temporal":
-            grouped_results[repo_id] = _apply_temporal_payload_truncation(results)
+            grouped_results[repo_id] = _apply_temporal_payload_truncation(
+                results, owner=owner
+            )
         else:
             # Default to semantic truncation (handles both content and code_snippet)
-            grouped_results[repo_id] = _apply_payload_truncation(results)
+            grouped_results[repo_id] = _apply_payload_truncation(results, owner=owner)
 
     return grouped_results
 
@@ -323,7 +332,7 @@ def multi_repository_query(
         # Story #683: Apply payload truncation to results
         # Story #50: Now sync call (underlying handlers are sync)
         response.results = _apply_multi_truncation(
-            response.results, request.search_type
+            response.results, request.search_type, owner=user.username
         )
 
         # Log response summary

@@ -69,7 +69,7 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
-            result = _apply_scip_payload_truncation(results)  # Sync call
+            result = _apply_scip_payload_truncation(results, owner="alice")  # Sync call
 
         # Context should remain unchanged
         assert result[0]["context"] == small_context
@@ -106,7 +106,7 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
-            result = _apply_scip_payload_truncation(results)  # Sync call
+            result = _apply_scip_payload_truncation(results, owner="alice")  # Sync call
 
         # Context should be replaced with context_preview
         assert "context" not in result[0]
@@ -115,7 +115,7 @@ class TestApplyScipPayloadTruncation:
         assert result[0]["context_has_more"] is True
         assert result[0]["context_total_size"] == 5000
         # Verify store was called with the full context
-        mock_payload_cache.store.assert_called_once_with(large_context)
+        mock_payload_cache.store.assert_called_once_with(large_context, owner="alice")
 
     def test_multiple_results_mixed_sizes(self, mock_payload_cache):
         """Test truncation with mixed result sizes."""
@@ -155,7 +155,7 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
-            result = _apply_scip_payload_truncation(results)  # Sync call
+            result = _apply_scip_payload_truncation(results, owner="alice")  # Sync call
 
         # First result: small context unchanged
         assert result[0]["context"] == small_context
@@ -169,7 +169,7 @@ class TestApplyScipPayloadTruncation:
         assert result[1]["context_has_more"] is True
         assert result[1]["context_total_size"] == len(large_context)
         # Verify store was only called once (for the large context)
-        mock_payload_cache.store.assert_called_once_with(large_context)
+        mock_payload_cache.store.assert_called_once_with(large_context, owner="alice")
 
     def test_null_context_handled_gracefully(self, mock_payload_cache):
         """Test that null/None context is handled gracefully."""
@@ -193,7 +193,7 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
-            result = _apply_scip_payload_truncation(results)  # Sync call
+            result = _apply_scip_payload_truncation(results, owner="alice")  # Sync call
 
         # Should have default metadata
         assert result[0]["context"] is None
@@ -222,7 +222,7 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
-            result = _apply_scip_payload_truncation(results)  # Sync call
+            result = _apply_scip_payload_truncation(results, owner="alice")  # Sync call
 
         # Should have default metadata, no crash
         assert result[0].get("context_cache_handle") is None
@@ -252,7 +252,7 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = None  # Cache unavailable
 
-            result = _apply_scip_payload_truncation(results)  # Sync call
+            result = _apply_scip_payload_truncation(results, owner="alice")  # Sync call
 
         # Results should be unchanged
         assert result[0]["context"] == context
@@ -287,7 +287,7 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
-            result = _apply_scip_payload_truncation(results)  # Sync call
+            result = _apply_scip_payload_truncation(results, owner="alice")  # Sync call
 
         # Context should remain (error in store doesn't delete it), metadata indicates no truncation
         assert result[0]["context"] == context

@@ -36,13 +36,13 @@ def _patch_cache(cache):
     original_store = cache.store
     original_store_batch = cache.store_batch
 
-    def patched_store(content):
+    def patched_store(content, owner=None):
         store_calls[0] += 1
-        return original_store(content)
+        return original_store(content, owner=owner)
 
-    def patched_store_batch(contents):
+    def patched_store_batch(contents, owner=None):
         store_batch_calls[0] += 1
-        return original_store_batch(contents)
+        return original_store_batch(contents, owner=owner)
 
     cache.store = patched_store
     cache.store_batch = patched_store_batch

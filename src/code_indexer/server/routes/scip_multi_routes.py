@@ -149,6 +149,8 @@ def get_scip_multi_service() -> SCIPMultiService:
 
 def _apply_multi_scip_truncation(
     response: SCIPMultiResponse,
+    *,
+    owner: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Apply SCIP payload truncation to multi-repo response results (Story #685).
 
@@ -160,6 +162,8 @@ def _apply_multi_scip_truncation(
 
     Args:
         response: SCIPMultiResponse with results grouped by repository
+        owner: Username of the caller whose request created the entries; only
+            that user can fetch the returned handles.
 
     Returns:
         Dict representation with truncated context fields
@@ -174,7 +178,9 @@ def _apply_multi_scip_truncation(
     for repo_id, results_list in response_dict["results"].items():
         if results_list:
             # Apply truncation (sync call - _apply_scip_payload_truncation is sync)
-            truncated_results = _apply_scip_payload_truncation(results_list)
+            truncated_results = _apply_scip_payload_truncation(
+                results_list, owner=owner
+            )
             response_dict["results"][repo_id] = truncated_results
 
     return response_dict
@@ -344,7 +350,7 @@ def multi_repository_definition(
         )
 
         # Story #685: Apply SCIP payload truncation to context fields (sync call)
-        return _apply_multi_scip_truncation(response)
+        return _apply_multi_scip_truncation(response, owner=user.username)
 
     except ValueError as e:
         # Validation error from service
@@ -455,7 +461,7 @@ def multi_repository_references(
         )
 
         # Story #685: Apply SCIP payload truncation to context fields (sync call)
-        return _apply_multi_scip_truncation(response)
+        return _apply_multi_scip_truncation(response, owner=user.username)
 
     except ValueError as e:
         # Validation error from service
@@ -566,7 +572,7 @@ def multi_repository_dependencies(
         )
 
         # Story #685: Apply SCIP payload truncation to context fields (sync call)
-        return _apply_multi_scip_truncation(response)
+        return _apply_multi_scip_truncation(response, owner=user.username)
 
     except ValueError as e:
         # Validation error from service
@@ -677,7 +683,7 @@ def multi_repository_dependents(
         )
 
         # Story #685: Apply SCIP payload truncation to context fields (sync call)
-        return _apply_multi_scip_truncation(response)
+        return _apply_multi_scip_truncation(response, owner=user.username)
 
     except ValueError as e:
         # Validation error from service
@@ -791,7 +797,7 @@ def multi_repository_callchain(
         )
 
         # Story #685: Apply SCIP payload truncation to context fields (sync call)
-        return _apply_multi_scip_truncation(response)
+        return _apply_multi_scip_truncation(response, owner=user.username)
 
     except ValueError as e:
         # Validation error from service

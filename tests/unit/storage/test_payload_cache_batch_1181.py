@@ -217,7 +217,7 @@ class TestPayloadCacheFacadeStoreBatch:
         stored_entries = []
 
         class CapturingBackend:
-            def store_batch(self, entries, ttl_seconds=None):
+            def store_batch(self, entries, ttl_seconds=None, owner=None):
                 stored_entries.extend(entries)
 
             def store(self, *a, **kw):

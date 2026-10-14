@@ -191,7 +191,7 @@ function renderHistory(exports) {
     }
     tbody.innerHTML = exports.map(e => {
         const dl = e.download_link
-            ? `<a href="${esc(e.download_link)}" download>Download</a>`
+            ? `<button type="button" class="secondary" data-download="${esc(e.download_link)}" onclick="downloadExport(this.dataset.download)">Download</button>`
             : '—';
         return `<tr>
             <td style="font-size:0.8rem">${fmtTs(e.created_at)}</td>
@@ -203,6 +203,37 @@ function renderHistory(exports) {
             <td>${dl}</td>
         </tr>`;
     }).join('');
+}
+
+function downloadExport(url) {
+    // Download through fetch() + a blob, never a page navigation: the export
+    // is elevation-gated, and only fetch() passes through the elevation
+    // interceptor, which opens the TOTP modal and retries (as logs.html).
+    const status = document.getElementById('export-status');
+    status.textContent = 'Preparing download…';
+    return fetch(url, {credentials: 'same-origin'}).then(function (response) {
+        if (!response.ok) {
+            status.textContent = 'Download failed (HTTP ' + response.status + ').';
+            return null;
+        }
+        const disposition = response.headers.get('Content-Disposition') || '';
+        const match = /filename="([^"]+)"/.exec(disposition);
+        const filename = match ? match[1] : 'query-analytics.xlsx';
+        return response.blob().then(function (blob) {
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(link.href);
+            status.textContent = 'Downloaded ' + filename + '.';
+        });
+    }).catch(function (err) {
+        if (!err || err.message !== 'elevation_cancelled') {
+            status.textContent = 'Download failed.';
+        }
+    });
 }
 
 async function refreshHistory() {

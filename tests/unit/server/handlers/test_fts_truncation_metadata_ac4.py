@@ -18,7 +18,7 @@ def _make_payload_cache(preview_size: int = 500):
     mock_cfg.preview_size_chars = preview_size
     mock_cache.config = mock_cfg
     # store_batch returns list of handle strings
-    mock_cache.store_batch.side_effect = lambda contents: [
+    mock_cache.store_batch.side_effect = lambda contents, owner=None: [
         f"handle_{i}" for i in range(len(contents))
     ]
     return mock_cache

@@ -155,6 +155,8 @@ def _get_scip_query_service(request: Request) -> SCIPQueryService:
 
 def _apply_scip_payload_truncation(
     results: List[Dict[str, Any]],
+    *,
+    owner: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to SCIP results.
 
@@ -165,6 +167,8 @@ def _apply_scip_payload_truncation(
 
     Args:
         results: List of SCIP result dictionaries
+        owner: Username of the caller whose request created the entries; only
+            that user can fetch the returned handles.
 
     Returns:
         Results with truncated context fields if applicable
@@ -173,7 +177,7 @@ def _apply_scip_payload_truncation(
         _apply_scip_payload_truncation as mcp_truncate,
     )
 
-    return mcp_truncate(results)  # type: ignore[no-any-return]
+    return mcp_truncate(results, owner=owner)  # type: ignore[no-any-return]
 
 
 def _scip_search_payload(
@@ -243,7 +247,7 @@ def get_definition(
         )
 
         # Apply SCIP payload truncation for consistency
-        results = _apply_scip_payload_truncation(results)
+        results = _apply_scip_payload_truncation(results, owner=current_user.username)
 
         return _scip_search_payload(
             request,
@@ -321,7 +325,7 @@ def get_references(
         )
 
         # Apply SCIP payload truncation for consistency
-        results = _apply_scip_payload_truncation(results)
+        results = _apply_scip_payload_truncation(results, owner=current_user.username)
 
         return _scip_search_payload(
             request,
@@ -399,7 +403,7 @@ def get_dependencies(
         )
 
         # Apply SCIP payload truncation for consistency
-        results = _apply_scip_payload_truncation(results)
+        results = _apply_scip_payload_truncation(results, owner=current_user.username)
 
         return _scip_search_payload(
             request,
@@ -477,7 +481,7 @@ def get_dependents(
         )
 
         # Apply SCIP payload truncation for consistency
-        results = _apply_scip_payload_truncation(results)
+        results = _apply_scip_payload_truncation(results, owner=current_user.username)
 
         return _scip_search_payload(
             request,

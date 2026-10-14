@@ -184,6 +184,31 @@ class TestOAuthMfaIntegration:
         # The form should post to the OAuth-specific MFA verify endpoint
         assert "/oauth/mfa/verify" in body
 
+    def test_authorize_refuses_unregistered_redirect_uri_before_mfa_challenge(
+        self, app, registered_client, pkce_pair, totp_service
+    ):
+        """An MFA challenge is only ever opened for a registered redirect_uri."""
+        _, code_challenge = pkce_pair
+        self._enable_mfa_for_user(totp_service, "testuser")
+
+        response = app.post(
+            "/oauth/authorize",
+            data={
+                "client_id": registered_client["client_id"],
+                "redirect_uri": "https://unregistered.example.net/callback",
+                "response_type": "code",
+                "code_challenge": code_challenge,
+                "state": "test_state",
+                "username": "testuser",
+                "password": "ValidPassword123!",
+            },
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 400, response.text
+        assert "challenge_token" not in response.text
+        assert "location" not in response.headers
+
     def _get_totp_code(self, totp_service, username: str) -> str:
         """Generate current TOTP code for a user."""
         import pyotp

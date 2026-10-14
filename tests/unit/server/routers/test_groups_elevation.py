@@ -1,8 +1,9 @@
 """
 Structural elevation gate tests for groups router (Task 6 / P1-B).
 
-Verifies that all write endpoints have require_elevation() wired,
-and that the 2 GET endpoints do NOT have elevation.
+Verifies that all write endpoints have require_elevation() wired, that the
+reads exposing group membership or tool grants (GET /{group_id},
+GET /tool-access) have it too, and that the group list GET does NOT.
 Also verifies users_router (PUT /api/v1/users/{user_id}/group) has elevation.
 Also verifies users_router GET and audit_router GET have elevation (Gaps 1 & 2).
 No HTTP calls — inspects FastAPI route descriptors directly.
@@ -23,9 +24,14 @@ _ROUTE_CASES = [
     ("/api/v1/groups/{group_id}/repos", "POST", True),
     ("/api/v1/groups/{group_id}/repos/{repo_name}", "DELETE", True),
     ("/api/v1/groups/{group_id}/repos", "DELETE", True),
-    # Read endpoints — must NOT be gated
+    ("/api/v1/groups/tool-access/{tool_name}/bulk-disable", "POST", True),
+    ("/api/v1/groups/tool-access/{group_id}/{tool_name}", "POST", True),
+    ("/api/v1/groups/tool-access/{group_id}/{tool_name}", "DELETE", True),
+    # Reads exposing group membership or tool grants — must be gated
+    ("/api/v1/groups/{group_id}", "GET", True),
+    ("/api/v1/groups/tool-access", "GET", True),
+    # The group list carries no member data — must NOT be gated
     ("/api/v1/groups", "GET", False),
-    ("/api/v1/groups/{group_id}", "GET", False),
 ]
 
 

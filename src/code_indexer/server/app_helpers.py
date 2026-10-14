@@ -152,6 +152,8 @@ def get_recent_errors() -> Optional[List[Dict[str, Any]]]:
 def _apply_rest_semantic_truncation(
     results: List[Dict[str, Any]],
     payload_cache: Any = None,
+    *,
+    owner: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to semantic search results from REST API.
 
@@ -164,6 +166,8 @@ def _apply_rest_semantic_truncation(
     Args:
         results: List of semantic search result dicts with 'code_snippet' field
         payload_cache: PayloadCache instance (optional, from app.state.payload_cache)
+        owner: Username of the caller whose request created the entries; only
+            that user can fetch the returned handles.
 
     Returns:
         Modified results list with truncation applied
@@ -194,7 +198,7 @@ def _apply_rest_semantic_truncation(
 
     # Second pass: store all large snippets in ONE batch call — one DB round-trip.
     try:
-        handles = payload_cache.store_batch(large_contents)
+        handles = payload_cache.store_batch(large_contents, owner=owner)
         for idx, snippet, handle in zip(large_indices, large_contents, handles):
             result_dict = results[idx]
             result_dict["preview"] = snippet[:preview_size]
@@ -219,6 +223,8 @@ def _apply_rest_semantic_truncation(
 def _apply_rest_fts_truncation(
     results: List[Dict[str, Any]],
     payload_cache: Any = None,
+    *,
+    owner: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to FTS search results from REST API.
 
@@ -232,6 +238,8 @@ def _apply_rest_fts_truncation(
     Args:
         results: List of FTS search result dicts with 'snippet' and/or 'match_text' fields
         payload_cache: PayloadCache instance (optional, from app.state.payload_cache)
+        owner: Username of the caller whose request created the entries; only
+            that user can fetch the returned handles.
 
     Returns:
         Modified results list with truncation applied to FTS fields
@@ -259,7 +267,7 @@ def _apply_rest_fts_truncation(
 
     if snippet_large_contents:
         try:
-            handles = payload_cache.store_batch(snippet_large_contents)
+            handles = payload_cache.store_batch(snippet_large_contents, owner=owner)
             for idx, snippet, handle in zip(
                 snippet_large_indices, snippet_large_contents, handles
             ):
@@ -297,7 +305,7 @@ def _apply_rest_fts_truncation(
 
     if match_large_contents:
         try:
-            handles = payload_cache.store_batch(match_large_contents)
+            handles = payload_cache.store_batch(match_large_contents, owner=owner)
             for idx, match_text, handle in zip(
                 match_large_indices, match_large_contents, handles
             ):

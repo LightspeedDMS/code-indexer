@@ -661,6 +661,8 @@ def _get_scip_query_service():
 
 def _apply_payload_truncation(
     results: List[Dict[str, Any]],
+    *,
+    owner: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to search results (Story #679, Bug Fix #683).
 
@@ -684,6 +686,8 @@ def _apply_payload_truncation(
 
     Args:
         results: List of search result dicts with 'content' or 'code_snippet' field
+        owner: Username of the caller whose request created the entries; only
+            that user can fetch the returned handles.
 
     Returns:
         Modified results list with truncation applied
@@ -745,7 +749,8 @@ def _apply_payload_truncation(
         return results
 
     try:
-        handles = payload_cache.store_batch(large_contents)  # ONE transaction
+        # ONE transaction; the owner is written by that same transaction.
+        handles = payload_cache.store_batch(large_contents, owner=owner)
         for result_idx, field_name, content, handle in zip(
             large_result_indices, large_field_names, large_contents, handles
         ):
@@ -776,6 +781,8 @@ def _apply_payload_truncation(
 
 def _apply_fts_payload_truncation(
     results: List[Dict[str, Any]],
+    *,
+    owner: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to FTS search results (Story #680).
 
@@ -790,6 +797,8 @@ def _apply_fts_payload_truncation(
     Args:
         results: List of FTS search result dicts with 'code_snippet' and/or
                  'match_text' fields
+        owner: Username of the caller whose request created the entries; only
+            that user can fetch the returned handles.
 
     Returns:
         Modified results list with truncation applied to FTS fields
@@ -817,7 +826,7 @@ def _apply_fts_payload_truncation(
 
     if snippet_large_contents:
         try:
-            handles = payload_cache.store_batch(snippet_large_contents)
+            handles = payload_cache.store_batch(snippet_large_contents, owner=owner)
             for idx, snippet, handle in zip(
                 snippet_large_indices, snippet_large_contents, handles
             ):
@@ -855,7 +864,7 @@ def _apply_fts_payload_truncation(
 
     if match_large_contents:
         try:
-            handles = payload_cache.store_batch(match_large_contents)
+            handles = payload_cache.store_batch(match_large_contents, owner=owner)
             for idx, match_text, handle in zip(
                 match_large_indices, match_large_contents, handles
             ):
@@ -885,6 +894,8 @@ def _truncate_regex_field(
     payload_cache,
     preview_size: int,
     is_list: bool = False,
+    *,
+    owner: Optional[str] = None,
 ) -> None:
     """Truncate a single regex field if needed (Story #684 helper).
 
@@ -896,6 +907,7 @@ def _truncate_regex_field(
         payload_cache: PayloadCache instance for storing large content
         preview_size: Maximum chars before truncation
         is_list: If True, field is a list of strings to join with newlines
+        owner: Username of the caller whose request created the entry.
     """
     field_value = result_dict.get(field_name)
     if field_value is None:
@@ -904,7 +916,7 @@ def _truncate_regex_field(
     try:
         content = "\n".join(field_value) if is_list else field_value
         if len(content) > preview_size:
-            cache_handle = payload_cache.store(content)  # Sync call
+            cache_handle = payload_cache.store(content, owner=owner)  # Sync call
             result_dict[f"{field_name}_preview"] = content[:preview_size]
             result_dict[f"{field_name}_cache_handle"] = cache_handle
             result_dict[f"{field_name}_has_more"] = True
@@ -924,8 +936,12 @@ def _truncate_regex_field(
         result_dict[f"{field_name}_has_more"] = False
 
 
+# AC1: line_content is a string; AC2: context_before/after are lists of lines.
+_REGEX_FIELDS = {"line_content": False, "context_before": True, "context_after": True}
+
+
 def _apply_regex_payload_truncation(
-    results: List[Dict[str, Any]],
+    results: List[Dict[str, Any]], *, owner: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to regex search results (Story #684).
 
@@ -937,6 +953,7 @@ def _apply_regex_payload_truncation(
 
     Args:
         results: List of regex search result dicts
+        owner: Username of the caller; only that user can fetch the handles.
 
     Returns:
         Modified results list with truncation applied to regex fields
@@ -945,21 +962,10 @@ def _apply_regex_payload_truncation(
     if payload_cache is None:
         return results
 
-    preview_size = payload_cache.config.preview_size_chars
-
-    for result_dict in results:
-        # AC1: Handle line_content field (sync call)
-        _truncate_regex_field(
-            result_dict, "line_content", payload_cache, preview_size, is_list=False
-        )
-        # AC2: Handle context_before field (list of strings, sync call)
-        _truncate_regex_field(
-            result_dict, "context_before", payload_cache, preview_size, is_list=True
-        )
-        # AC2: Handle context_after field (list of strings, sync call)
-        _truncate_regex_field(
-            result_dict, "context_after", payload_cache, preview_size, is_list=True
-        )
+    size = payload_cache.config.preview_size_chars
+    for r in results:
+        for name, is_list in _REGEX_FIELDS.items():
+            _truncate_regex_field(r, name, payload_cache, size, is_list, owner=owner)
 
     return results
 
@@ -970,6 +976,8 @@ def _truncate_field(
     payload_cache,
     preview_size: int,
     log_context: str = "field",
+    *,
+    owner: Optional[str] = None,
 ) -> None:
     """Truncate a single field if it exceeds preview_size (Story #681 helper).
 
@@ -981,6 +989,7 @@ def _truncate_field(
         payload_cache: PayloadCache instance for storing large content
         preview_size: Maximum chars before truncation
         log_context: Context string for warning messages
+        owner: Username of the caller whose request created the entry.
     """
     value = container.get(field_name)
     if value is None:
@@ -988,7 +997,7 @@ def _truncate_field(
 
     try:
         if len(value) > preview_size:
-            cache_handle = payload_cache.store(value)  # Sync call
+            cache_handle = payload_cache.store(value, owner=owner)  # Sync call
             container[f"{field_name}_preview"] = value[:preview_size]
             container[f"{field_name}_cache_handle"] = cache_handle
             container[f"{field_name}_has_more"] = True
@@ -1009,7 +1018,7 @@ def _truncate_field(
 
 
 def _apply_temporal_payload_truncation(
-    results: List[Dict[str, Any]],
+    results: List[Dict[str, Any]], *, owner: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to temporal search results (Story #681).
 
@@ -1019,6 +1028,7 @@ def _apply_temporal_payload_truncation(
 
     Args:
         results: List of temporal search result dicts
+        owner: Username of the caller; only that user can fetch the handles.
 
     Returns:
         Modified results with truncation applied to content and evolution entries
@@ -1027,39 +1037,27 @@ def _apply_temporal_payload_truncation(
     if payload_cache is None:
         return results
 
-    preview_size = payload_cache.config.preview_size_chars
-
-    for result_dict in results:
-        # AC1: Handle main content field (sync call)
-        _truncate_field(
-            result_dict, "content", payload_cache, preview_size, "temporal content"
-        )
-
-        # Handle code_snippet field (temporal results use QueryResult.to_dict() format)
-        _truncate_field(
-            result_dict,
-            "code_snippet",
-            payload_cache,
-            preview_size,
-            "temporal code_snippet",
-        )
-
-        # AC2/AC3: Handle temporal_context.evolution entries (sync calls)
-        temporal_context = result_dict.get("temporal_context")
+    size = payload_cache.config.preview_size_chars
+    for r in results:
+        # AC1: main content; code_snippet is the QueryResult.to_dict() format.
+        for f in ("content", "code_snippet"):
+            _truncate_field(r, f, payload_cache, size, f"temporal {f}", owner=owner)
+        # AC2/AC3: temporal_context.evolution entries
+        temporal_context = r.get("temporal_context")
         if temporal_context and "evolution" in temporal_context:
             for entry in temporal_context["evolution"]:
-                _truncate_field(
-                    entry, "content", payload_cache, preview_size, "evolution content"
-                )
-                _truncate_field(
-                    entry, "diff", payload_cache, preview_size, "evolution diff"
-                )
+                for f in ("content", "diff"):
+                    _truncate_field(
+                        entry, f, payload_cache, size, f"evolution {f}", owner=owner
+                    )
 
     return results
 
 
 def _apply_scip_payload_truncation(
     results: List[Dict[str, Any]],
+    *,
+    owner: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to SCIP query results (Story #685).
 
@@ -1071,6 +1069,8 @@ def _apply_scip_payload_truncation(
 
     Args:
         results: List of SCIP result dicts with optional 'context' field
+        owner: Username of the caller whose request created the entries; only
+            that user can fetch the returned handles.
 
     Returns:
         Modified results list with truncation applied to context fields
@@ -1100,7 +1100,7 @@ def _apply_scip_payload_truncation(
         try:
             if len(context) > preview_size:
                 # Large context: store full content and replace with preview (sync call)
-                cache_handle = payload_cache.store(context)
+                cache_handle = payload_cache.store(context, owner=owner)
                 result_dict["context_preview"] = context[:preview_size]
                 result_dict["context_cache_handle"] = cache_handle
                 result_dict["context_has_more"] = True

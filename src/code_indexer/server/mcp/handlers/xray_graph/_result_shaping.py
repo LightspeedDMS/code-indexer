@@ -14,7 +14,7 @@ not new code.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..xray import _lazy_singleton_app_or_none
 from .. import xray_truncation
@@ -30,8 +30,13 @@ from .. import xray_truncation
 logger = logging.getLogger("code_indexer.server.mcp.handlers.xray_graph")
 
 
-def _truncate_graph_result(result: Dict[str, Any]) -> Dict[str, Any]:
+def _truncate_graph_result(
+    result: Dict[str, Any], *, owner: Optional[str] = None
+) -> Dict[str, Any]:
     """Apply PayloadCache truncation to findings[]/refine[].
+
+    `owner` is the username of the requesting user; only that user can
+    fetch the cached pages.
 
     Bug #1928: moved out of xray.py -- shared mechanics now live in
     xray_truncation.truncate_result_fields(), which owns its own
@@ -58,7 +63,7 @@ def _truncate_graph_result(result: Dict[str, Any]) -> Dict[str, Any]:
     )
     try:
         return xray_truncation.truncate_result_fields(
-            result, payload_cache, ["findings", "refine"]
+            result, payload_cache, ["findings", "refine"], owner=owner
         )
     except xray_truncation.PageSetStoreError as exc:
         logger.error("analyze_graph truncation: page-set store failed: %s", exc)

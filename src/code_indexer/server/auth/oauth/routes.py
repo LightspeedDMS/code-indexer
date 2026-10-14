@@ -69,6 +69,8 @@ from .oauth_manager import (
     OAuthManager,
     OAuthError,
     PKCEVerificationError,
+    authorization_response_url,
+    is_registered_redirect_uri,
 )
 from ..user_manager import User, UserManager
 from ..mcp_credential_manager import MCPCredentialManager
@@ -170,6 +172,18 @@ def _reject_challenge(
         method=method,
         stage="challenge",
         reason="challenge_invalid_or_expired",
+    )
+
+
+def _unregistered_redirect_page() -> HTMLResponse:
+    """RFC 6749 section 4.1.2.1: a redirect_uri not registered for the client
+    is reported to the user and never redirected to."""
+    from code_indexer.server.web.mfa_routes import _error_html_page
+
+    return _error_html_page(
+        "Invalid Authorization Request",
+        "The application's redirect address is not registered for it.",
+        status.HTTP_400_BAD_REQUEST,
     )
 
 
@@ -324,6 +338,8 @@ def get_authorize_form(
                 "error_description": "Client ID not found",
             },
         )
+    if not is_registered_redirect_uri(client, redirect_uri):
+        return _unregistered_redirect_page()
 
     # Check for existing session (Phase 5: Separate authentication from authorization)
     from code_indexer.server.web import get_session_manager
@@ -353,9 +369,15 @@ def get_authorize_form(
 
     # Authenticated - show consent screen (Phase 5: Separate authorization from authentication)
     from code_indexer.server.web.routes import templates
+    from code_indexer.server.web.mfa_routes import _page_csrf_token, _with_csrf_cookie
+    from .oauth_manager import redirect_host
 
+    # The consent POST requires this Web UI CSRF token.
+    csrf = _page_csrf_token(request)
     # state is optional per OAuth 2.1 PKCE — only include in template context when present
     template_context: dict = {
+        "csrf_token": csrf,
+        "redirect_host": redirect_host(redirect_uri),
         "request": request,
         "username": session.username,
         "client_id": client_id,
@@ -365,10 +387,11 @@ def get_authorize_form(
         "response_type": response_type,
         "state": state,  # None is a valid value; template handles empty state gracefully
     }
-    return templates.TemplateResponse(
-        request,
-        "oauth_authorize_consent.html",
-        template_context,
+    return _with_csrf_cookie(
+        templates.TemplateResponse(
+            request, "oauth_authorize_consent.html", template_context
+        ),
+        csrf,
     )
 
 
@@ -381,6 +404,7 @@ def authorize_consent(
     response_type: str = Form(...),
     state: Optional[str] = Form(None),
     consent: str = Form(...),
+    csrf_token: Optional[str] = Form(None),
     manager: OAuthManager = Depends(get_oauth_manager),
 ):
     """POST /oauth/authorize/consent - Handle consent form submission (Phase 5: Login Consolidation).
@@ -388,7 +412,20 @@ def authorize_consent(
     User is already authenticated via unified login. This endpoint only handles authorization (consent).
     Generates OAuth authorization code and redirects back to client.
     state is optional per OAuth 2.1 with PKCE (Bug #624).
+    The Web UI CSRF token rendered on the consent page is required.
     """
+    from code_indexer.server.web.mfa_routes import _csrf_refusal
+
+    csrf_err = _csrf_refusal(request, csrf_token)
+    if csrf_err is not None:
+        return csrf_err
+
+    # Only a redirect_uri registered for the client is ever redirected to or
+    # carried into the login redirect, for Allow and Deny alike (RFC 6749
+    # section 4.1.2.1).
+    if not is_registered_redirect_uri(manager.get_client(client_id), redirect_uri):
+        return _unregistered_redirect_page()
+
     # Check for existing session (required)
     from code_indexer.server.web import get_session_manager
     from urllib.parse import urlencode, quote
@@ -425,10 +462,15 @@ def authorize_consent(
             detail="code_challenge required (PKCE)",
         )
 
-    # Check consent
     if consent != "allow":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="User denied consent"
+        denied = {
+            "error": "access_denied",
+            "error_description": "The user denied the authorization request",
+            "state": state,
+        }
+        return RedirectResponse(
+            url=authorization_response_url(redirect_uri, denied),
+            status_code=status.HTTP_302_FOUND,
         )
 
     try:
@@ -452,9 +494,9 @@ def authorize_consent(
         )
 
         # Redirect back to client — include state only when provided (Bug #624)
-        redirect_url = f"{redirect_uri}?code={code}"
-        if state is not None:
-            redirect_url = f"{redirect_url}&state={state}"
+        redirect_url = authorization_response_url(
+            redirect_uri, {"code": code, "state": state}
+        )
         return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
 
     except OAuthError as e:
@@ -539,6 +581,18 @@ async def authorize_endpoint(
     # Note: state is intentionally NOT validated as required here.
     # Per OAuth 2.1 with PKCE, state is optional (Bug #624).
 
+    # Only a redirect_uri registered for the client is authenticated for,
+    # challenged for (MFA) or redirected to (RFC 6749 section 4.1.2.1).
+    client = await anyio.to_thread.run_sync(manager.get_client, client_id)
+    if not is_registered_redirect_uri(client, redirect_uri):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "invalid_request",
+                "error_description": "redirect_uri is not registered for this client",
+            },
+        )
+
     # Authenticate user (password hashing and the refusal's audit row run off
     # the event loop).
     user = await anyio.to_thread.run_sync(
@@ -607,9 +661,9 @@ async def authorize_endpoint(
         if is_form_request:
             # Browser-based flow: redirect to callback URL with code
             # Include state only when provided (Bug #624: state is optional)
-            redirect_url = f"{redirect_uri}?code={code}"
-            if state is not None:
-                redirect_url = f"{redirect_url}&state={state}"
+            redirect_url = authorization_response_url(
+                redirect_uri, {"code": code, "state": state}
+            )
             return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
         else:
             # Programmatic flow: return JSON response
@@ -770,9 +824,9 @@ def oauth_mfa_verify(
         )
 
         # Include state only when provided (Bug #624: state is optional per OAuth 2.1 PKCE)
-        redirect_url = f"{challenge.oauth_redirect_uri}?code={code}"
-        if challenge.oauth_state is not None:
-            redirect_url = f"{redirect_url}&state={challenge.oauth_state}"
+        redirect_url = authorization_response_url(
+            challenge.oauth_redirect_uri, {"code": code, "state": challenge.oauth_state}
+        )
         return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
 
     except OAuthError as e:

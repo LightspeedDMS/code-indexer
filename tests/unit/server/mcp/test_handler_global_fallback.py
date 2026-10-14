@@ -205,7 +205,7 @@ class TestScipDefinitionFallback:
             ),
             patch(
                 "code_indexer.server.mcp.handlers.scip._apply_scip_payload_truncation",
-                side_effect=lambda x: x,
+                side_effect=lambda x, **kw: x,
             ),
         ):
             result = scip_definition(params, user)
@@ -245,7 +245,7 @@ class TestScipReferencesFallback:
             ),
             patch(
                 "code_indexer.server.mcp.handlers.scip._apply_scip_payload_truncation",
-                side_effect=lambda x: x,
+                side_effect=lambda x, **kw: x,
             ),
         ):
             result = scip_references(params, user)
@@ -285,7 +285,7 @@ class TestScipDependenciesFallback:
             ),
             patch(
                 "code_indexer.server.mcp.handlers.scip._apply_scip_payload_truncation",
-                side_effect=lambda x: x,
+                side_effect=lambda x, **kw: x,
             ),
         ):
             result = scip_dependencies(params, user)
@@ -325,7 +325,7 @@ class TestScipDependentsFallback:
             ),
             patch(
                 "code_indexer.server.mcp.handlers.scip._apply_scip_payload_truncation",
-                side_effect=lambda x: x,
+                side_effect=lambda x, **kw: x,
             ),
         ):
             result = scip_dependents(params, user)

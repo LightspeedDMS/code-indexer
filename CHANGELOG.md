@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.88.0] - 2026-10-14
+
+### Upgrade notes
+
+- Server: MCP connectors (OAuth clients) authorized more than 30 days ago must authorize again the next time they refresh their token; the 30-day limit on a refresh token is now enforced at refresh.
+- Server: cached result handles issued before the upgrade answer `cache_expired` (at most the cache lifetime, 15 minutes by default); the client runs the search again. The payload cache gains a nullable `owner` column (PostgreSQL migration 075; SQLite adds it in place at startup).
+- Server (cluster): during a rolling restart, nodes not yet upgraded keep the previous behaviour until they restart.
+
+### Security
+
+- Server: OAuth authorization redirects only to a redirect URI registered for the client (exact match), before any login or consent step; the consent page shows the destination host and carries a CSRF check, and "Deny" redirects through the server. A refresh token is accepted only from the client it was issued to, is rotated atomically (one use per token, on SQLite and PostgreSQL), and stops working 30 days after it was issued.
+- Server: administrator reads of user data and search history require TOTP elevation (when elevation enforcement is enabled) on every door: REST (`GET /api/admin/users`, search-event list, export and download routes, activated repositories, SCIP PR and cleanup history, `GET /api/v1/groups/{group_id}`), MCP (`get_group`, `scip_pr_history`, `scip_cleanup_history`) and the Web UI (analytics export, SSH keys, logs, group membership).
+- Server: MCP git write tools refuse a shared global repository unless it is in write mode; they act on the user's own activated repository otherwise.
+- Server: cached result handles are served only to the authenticated user who created them (REST `GET /cache/{handle}` now requires login; MCP `get_cached_content` and `cidx_fetch_cached_payload` check the owner). A handle that belongs to another user answers like an unknown one.
+- Server: CI tools accept run, job and pipeline identifiers only as positive integers, and GitLab project paths only as valid path segments; forge requests are built only from validated values.
+
 ## [12.87.0] - 2026-10-13
 
 ### Fixed

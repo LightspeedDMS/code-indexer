@@ -75,7 +75,7 @@ class TestGetCachedContentHandler:
 
         # PayloadCache.retrieve() is SYNC after Epic #48 conversion
         mock_cache = Mock()
-        mock_cache.retrieve = Mock(
+        mock_cache.retrieve_owned = Mock(
             return_value=CacheRetrievalResult(
                 content="Cached content page 0",
                 page=0,
@@ -111,7 +111,7 @@ class TestGetCachedContentHandler:
 
         # PayloadCache.retrieve() is SYNC after Epic #48 conversion
         mock_cache = Mock()
-        mock_cache.retrieve = Mock(
+        mock_cache.retrieve_owned = Mock(
             side_effect=CacheNotFoundError("Cache handle not found: invalid-handle")
         )
 
@@ -138,7 +138,7 @@ class TestGetCachedContentHandler:
 
         # PayloadCache.retrieve() is SYNC after Epic #48 conversion
         mock_cache = Mock()
-        mock_cache.retrieve = Mock(
+        mock_cache.retrieve_owned = Mock(
             return_value=CacheRetrievalResult(
                 content="Content",
                 page=0,
@@ -155,8 +155,10 @@ class TestGetCachedContentHandler:
             # Call without page parameter
             handle_get_cached_content({"handle": "test-handle"}, mock_user)
 
-        # Verify retrieve was called with page=0
-        mock_cache.retrieve.assert_called_once_with("test-handle", page=0)
+        # Verify the owner-checked read was called as the caller with page=0
+        mock_cache.retrieve_owned.assert_called_once_with(
+            "test-handle", "testuser", page=0
+        )
 
     def test_handler_returns_error_when_cache_unavailable(self, mock_user):
         """Test handler returns error when payload_cache not initialized."""

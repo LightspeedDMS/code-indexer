@@ -34,8 +34,10 @@ from code_indexer.server.services.query_admission_gate import (
 from code_indexer.server.mcp import reranking as _mcp_reranking
 from code_indexer.scip.database.queries import MAX_DEPTH_CAP as _MAX_CALLCHAIN_DEPTH
 
+from ..auth.elevation_decorator import require_mcp_elevation
 from . import _utils
 from ._utils import (
+    _admin_role_first,
     _mcp_response,
     _coerce_int,
     _coerce_float,
@@ -382,7 +384,9 @@ def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #685: Apply SCIP payload truncation to context fields
         # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
+        results_dicts = _apply_scip_payload_truncation(
+            results_dicts, owner=user.username
+        )
 
         return _scip_response(
             {
@@ -500,7 +504,9 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #685: Apply SCIP payload truncation to context fields
         # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
+        results_dicts = _apply_scip_payload_truncation(
+            results_dicts, owner=user.username
+        )
 
         # Story #659: Apply cross-encoder reranking after retrieval, before return.
         # Guard: skip entirely when no rerank_query to avoid overhead.
@@ -653,7 +659,9 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #685: Apply SCIP payload truncation to context fields
         # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
+        results_dicts = _apply_scip_payload_truncation(
+            results_dicts, owner=user.username
+        )
 
         return _scip_response(
             {
@@ -783,7 +791,9 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #685: Apply SCIP payload truncation to context fields
         # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
+        results_dicts = _apply_scip_payload_truncation(
+            results_dicts, owner=user.username
+        )
 
         return _scip_response(
             {
@@ -1312,8 +1322,14 @@ def get_scip_audit_log(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+@_admin_role_first
+@require_mcp_elevation()
 def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get SCIP self-healing PR creation history (admin only)."""
+    """Get SCIP self-healing PR creation history (admin only).
+
+    Audit-log content: the caller's own elevation window is required, like
+    REST ``GET /api/admin/scip-pr-history``.
+    """
     try:
         if user.role != UserRole.ADMIN:
             return _mcp_response(
@@ -1364,8 +1380,14 @@ def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@_admin_role_first
+@require_mcp_elevation()
 def handle_scip_cleanup_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get SCIP workspace cleanup history (admin only)."""
+    """Get SCIP workspace cleanup history (admin only).
+
+    Audit-log content: the caller's own elevation window is required, like
+    REST ``GET /api/admin/scip-git-cleanup-history``.
+    """
     try:
         if user.role != UserRole.ADMIN:
             return _mcp_response(

@@ -33,7 +33,9 @@ class _FailingStoreBatchCache:
             max_fetch_size_chars=max_fetch_size_chars,
         )
 
-    def store_batch_with_keys(self, items: List[Tuple[str, str]]) -> None:
+    def store_batch_with_keys(
+        self, items: List[Tuple[str, str]], *, owner: str | None = None
+    ) -> None:
         raise RuntimeError("simulated page-set write failure")
 
 

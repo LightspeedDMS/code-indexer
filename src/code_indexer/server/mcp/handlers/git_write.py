@@ -48,11 +48,15 @@ def _resolve_mutable_git_repo_path(
 ) -> Tuple[Optional[str], Optional[str]]:
     """Resolve the repository path for a MUTATING git operation.
 
-    The single choke point for every git write tool in this module: the
-    path comes from ``_resolve_git_repo_path`` and is refused when it is an
-    immutable versioned snapshot in ANY layout the wired clone backend
-    produces (a global alias resolves to its snapshot target), so no write
-    ever runs inside one.
+    The single choke point for every git write tool in this module (pinned
+    by a structural test), so git write tools never modify a shared golden
+    repository. Both refusals happen before any git process starts:
+
+    - a path that is an immutable versioned snapshot in ANY layout the
+      wired clone backend produces is always refused;
+    - a ``-global`` alias (the golden repository every user reads) is
+      refused unless write mode is active for it -- the same
+      ``_is_writable_repo`` gate ``_check_writable`` applies.
 
     Returns:
         (path, error_message), same contract as ``_resolve_git_repo_path``.
@@ -60,17 +64,30 @@ def _resolve_mutable_git_repo_path(
     import code_indexer.server.mcp.handlers._legacy as _legacy
 
     repo_path, error_msg = _legacy._resolve_git_repo_path(repository_alias, username)
-    if (
-        error_msg is None
-        and repo_path is not None
-        and is_versioned_snapshot_in_running_server(repo_path)
-    ):
+    if error_msg is not None or repo_path is None:
+        return repo_path, error_msg
+    if is_versioned_snapshot_in_running_server(repo_path):
         return None, (
             f"Repository '{repository_alias}' resolves to an immutable versioned "
             "snapshot; git write operations are not allowed on it. Activate the "
             "repository to get a writable workspace."
         )
-    return repo_path, error_msg
+    if repository_alias.endswith("-global") and not _legacy._is_writable_repo(
+        repository_alias, repo_path, _legacy._get_golden_repos_dir()
+    ):
+        return None, _write_mode_required_message(
+            f"git write operations on '{repository_alias}'"
+        )
+    return repo_path, None
+
+
+def _write_mode_required_message(operation_label: str) -> str:
+    """The refusal for a git write on a repository that is not writable."""
+    return (
+        f"Write mode required for {operation_label}. "
+        "Use enter_write_mode first, or activate the repository "
+        "to create a writable workspace."
+    )
 
 
 # Error codes for git write operations (named constants for traceability)
@@ -446,14 +463,7 @@ def _check_writable(
     golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
     if not _legacy._is_writable_repo(repository_alias, repo_path, golden_repos_dir):
         return _mcp_response(
-            {
-                "success": False,
-                "error": (
-                    f"Write mode required for {operation_label}. "
-                    "Use enter_write_mode first, or activate the repository "
-                    "to create a writable workspace."
-                ),
-            }
+            {"success": False, "error": _write_mode_required_message(operation_label)}
         )
     return None
 

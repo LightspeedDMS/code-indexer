@@ -15,7 +15,11 @@ import pytest
 from code_indexer.server.cache.payload_cache import CacheNotFoundError
 from code_indexer.server.mcp.handlers import xray_truncation as xt
 
-from ._xray_truncation_test_helpers import cache_factory, make_match  # noqa: F401
+from ._xray_truncation_test_helpers import (  # noqa: F401
+    OWNER,
+    cache_factory,
+    make_match,
+)
 
 _SMALL_BUDGET_CHARS = 300
 _MANY_MATCH_COUNT = 30
@@ -28,7 +32,7 @@ class TestPageParameterValidationNoClamp:
     ) -> None:
         cache = cache_factory(max_fetch_size_chars=_SMALL_BUDGET_CHARS)
         with pytest.raises(ValueError):
-            xt.fetch_cached_page(cache, "any-handle", 0)
+            xt.fetch_cached_page(cache, "any-handle", 0, OWNER)
 
     def test_negative_page_raises_value_error(
         self,
@@ -36,7 +40,7 @@ class TestPageParameterValidationNoClamp:
     ) -> None:
         cache = cache_factory(max_fetch_size_chars=_SMALL_BUDGET_CHARS)
         with pytest.raises(ValueError):
-            xt.fetch_cached_page(cache, "any-handle", -5)
+            xt.fetch_cached_page(cache, "any-handle", -5, OWNER)
 
     def test_page_beyond_total_pages_raises_cache_not_found(
         self,
@@ -48,8 +52,9 @@ class TestPageParameterValidationNoClamp:
             {"matches": matches, "evaluation_errors": []},
             cache,
             ["matches", "evaluation_errors"],
+            owner=OWNER,
         )
         beyond = truncated["total_pages"] + 1
 
         with pytest.raises(CacheNotFoundError):
-            xt.fetch_cached_page(cache, truncated["cache_handle"], beyond)
+            xt.fetch_cached_page(cache, truncated["cache_handle"], beyond, OWNER)

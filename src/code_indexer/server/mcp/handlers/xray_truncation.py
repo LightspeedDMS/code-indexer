@@ -169,10 +169,13 @@ def _finalize_truncated(
     field_names: List[str],
     fields: Dict[str, List[Any]],
     budget_chars: int,
+    *,
+    owner: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Cache the FULL, unmodified pages (as ONE atomic page-set batch)
     and assemble the truncated response (inline preview + cache_handle +
-    metadata).
+    metadata). Every cached entry records `owner` (the requesting user),
+    so only that user can fetch the pages.
 
     Raises:
         PageSetStoreError: propagated from store_pages() -- the caller
@@ -182,7 +185,9 @@ def _finalize_truncated(
     inline_page, inline_entry_truncated = _build_inline_preview(
         field_names, fields, pages, budget_chars
     )
-    cache_handle, total_pages = store_pages(payload_cache, field_names, pages)
+    cache_handle, total_pages = store_pages(
+        payload_cache, field_names, pages, owner=owner
+    )
 
     base.update(inline_page)
     base["cache_handle"] = cache_handle
@@ -246,13 +251,17 @@ def truncate_result_fields(
     result: Dict[str, Any],
     payload_cache: Any,
     field_names: List[str],
+    *,
+    owner: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Apply PayloadCache truncation to `field_names` array fields of an
     X-Ray-family result. Shared core behind xray_search/xray_explore
     (matches, evaluation_errors), analyze_graph (findings, refine), and
     xray_search_batch (matches, errors, evaluation_errors).
 
-    See the module docstring for the full Bug #1928 contract.
+    See the module docstring for the full Bug #1928 contract. `owner` is
+    the username of the requesting user; only that user can fetch the
+    cached pages.
 
     Bug #1928 P3 (Codex): when payload_cache is None, returns a BOUNDED
     degrade response (see _degrade_cache_unavailable) -- never the full
@@ -285,7 +294,7 @@ def truncate_result_fields(
 
     try:
         return _finalize_truncated(
-            base, payload_cache, field_names, fields, budget_chars
+            base, payload_cache, field_names, fields, budget_chars, owner=owner
         )
     except PageSetStoreError as exc:
         # Bug #1928 final round (Opus P4.6): `base` here is the SAME dict
