@@ -14,6 +14,11 @@ the git runs in git-mcp, addressed by the copy's path (``cow_path``):
   operations, which carry git-mcp's credentials (cidx holds none);
 * working-tree file reads (conflict markers) -> the content seam.
 
+GOLDEN repositories are read-only: the history tools (blame, file history,
+commit/diff search, diffs, filtered logs, commit stats) run through
+:class:`GoldenGitReader`, which lets only the read-only subcommands and the
+options those tools build reach ``git_exec`` (:func:`require_read_only_git`).
+
 Under the local default :func:`delegated_git_tools` is None and the service
 runs exactly the code it always has. A delegated server whose git backend
 cannot run the tools refuses (:class:`GitToolsUnavailableError`) -- it never
@@ -23,12 +28,12 @@ runs git on this pod, where the copy does not exist.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from code_indexer.server.storage.shared.git_backend import GitCommandRunner
-from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 #: git's commit-identity variables -> git-mcp ``git_exec`` identity fields.
 _IDENTITY_ENV = {
@@ -45,8 +50,193 @@ _END_OF_OPTIONS = "--end-of-options"
 PathLike = Union[str, Path]
 
 
+def _is_typed_timeout(exc: BaseException) -> bool:
+    """True when *exc* is a backend-typed timeout (``GitMcpTimeoutError``) or
+    its ``__cause__`` chain contains a transport timeout. The typed check avoids
+    substring matching on arbitrary error text."""
+    cls_name = type(exc).__name__
+    if cls_name == "GitMcpTimeoutError":
+        return True
+    cause = exc.__cause__
+    while cause is not None:
+        if type(cause).__name__ in ("GitMcpTimeoutError", "timeout", "TimeoutError"):
+            return True
+        cause = cause.__cause__
+    return False
+
+
 class GitToolsUnavailableError(RuntimeError):
     """The repository is not on this pod and the git seam cannot run the tools."""
+
+
+class ReadOnlyGitViolation(ValueError):
+    """A git argv a golden (read-only) repository must not run."""
+
+
+# -- golden repositories: read-only git through git_exec ----------------------
+
+
+class _ReadOnlyOptions:
+    """The options one read-only subcommand may take (whole arguments)."""
+
+    def __init__(
+        self,
+        flags: Sequence[str] = (),
+        value_options: Sequence[str] = (),
+        separate_value: Sequence[str] = (),
+        attached: str = "",
+    ) -> None:
+        self.flags = frozenset(flags)
+        #: ``--name=<value>``: any value (git reads it as one argument).
+        self.value_options = tuple(value_options)
+        #: ``--name <value>``: the next argument is a value, whatever its text.
+        self.separate_value = frozenset(separate_value)
+        #: Short options with their value attached (``-51``, ``-U3``, ``-S<text>``).
+        self.attached = re.compile(attached, re.DOTALL) if attached else None
+
+    def allows(self, arg: str) -> bool:
+        return (
+            arg in self.flags
+            or arg.startswith(self.value_options)
+            or bool(self.attached and self.attached.fullmatch(arg))
+        )
+
+
+#: Golden repositories are read-only: exactly the subcommands and options the
+#: golden history tools build (global_repos/git_operations.py, and git_log /
+#: git_diff in server/services/git_operations_service.py). Nothing here writes
+#: a file, reads one from outside the repository, or runs a program.
+_READ_ONLY_GIT = {
+    "log": _ReadOnlyOptions(
+        flags=(
+            "--numstat",
+            "--name-status",
+            "--name-only",
+            "--follow",
+            "--extended-regexp",
+            "--regexp-ignore-case",
+        ),
+        value_options=(
+            "--format=",
+            "--grep=",
+            "--author=",
+            "--since=",
+            "--until=",
+            "--skip=",
+        ),
+        # A count (-51, -n50) or a pickaxe term (-S<text> / -G<regex>).
+        attached=r"-(\d+|n\d+|[SG].+)",
+    ),
+    "show": _ReadOnlyOptions(
+        flags=("--numstat", "--name-status", "-M", "-p"), value_options=("--format=",)
+    ),
+    "diff": _ReadOnlyOptions(
+        flags=("--numstat", "--name-status", "--stat"), attached=r"-U\d+"
+    ),
+    "blame": _ReadOnlyOptions(flags=("--porcelain",), separate_value=("-L",)),
+    "rev-parse": _ReadOnlyOptions(flags=("--verify", "-q")),
+    "rev-list": _ReadOnlyOptions(
+        flags=("--count",), separate_value=("--since", "--until", "--author")
+    ),
+}
+
+_END_OF_OPTIONS = "--end-of-options"
+
+
+def require_read_only_git(cmd: Sequence[str]) -> None:
+    """Refuse (:class:`ReadOnlyGitViolation`) any argv but a read-only one.
+
+    An allowlist, not a denylist: the subcommand must be one of
+    ``_READ_ONLY_GIT`` and every option-shaped argument before ``--`` /
+    ``--end-of-options`` one that subcommand's golden tools build. Git accepts
+    unambiguous abbreviations of long options (``blame --cont=<file>`` is
+    ``--contents``), so a denylist of dangerous options cannot be complete;
+    matching whole arguments is.
+    """
+    if len(cmd) < 2 or cmd[0] != "git":
+        raise ReadOnlyGitViolation("Command must start with 'git' and a subcommand")
+    options = _READ_ONLY_GIT.get(cmd[1])
+    if options is None:
+        raise ReadOnlyGitViolation(
+            f"git {cmd[1]} is not a read-only history command; golden "
+            "repositories are never modified"
+        )
+    if any("\0" in arg for arg in cmd):
+        raise ReadOnlyGitViolation("git arguments may not contain NUL")
+    args = list(cmd[2:])
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("--", _END_OF_OPTIONS):
+            return  # Everything after is a revision or a path, never an option.
+        if arg in options.separate_value:
+            if i + 1 >= len(args):
+                raise ReadOnlyGitViolation(f"git option {arg} needs a value")
+            i += 2
+            continue
+        if arg.startswith("-") and not options.allows(arg):
+            raise ReadOnlyGitViolation(
+                f"git {cmd[1]} option {arg.split('=')[0]!r} is not allowed on a "
+                "golden repository (read-only history commands only)"
+            )
+        i += 1
+
+
+class GoldenGitReader:
+    """Read-only git on a golden repository through git-mcp ``git_exec``.
+
+    ``run_git_command`` semantics -- text stdout decoded as a local run, a
+    ``CalledProcessError`` for git's own non-zero exit when *check* -- so the
+    history tools' parsers see exactly what local git prints. A failure to
+    reach git at all (transport, git-mcp refusal) is NOT a git exit: it raises
+    :class:`GitToolsUnavailableError`, never a ``CalledProcessError`` a caller
+    could read as "no commits" / "not found". A git-mcp timeout raises
+    ``subprocess.TimeoutExpired``, as the local run does.
+    """
+
+    def __init__(self, backend: GitCommandRunner) -> None:
+        self._backend = backend
+
+    def run(
+        self,
+        cmd: Sequence[str],
+        cwd: PathLike,
+        check: bool = True,
+        timeout: Optional[float] = None,
+    ) -> "subprocess.CompletedProcess[str]":
+        require_read_only_git(cmd)
+        try:
+            result: "subprocess.CompletedProcess[str]" = self._backend.run(
+                str(cwd), list(cmd[1:]), timeout=timeout
+            )
+        except subprocess.CalledProcessError as e:
+            if timeout is not None and _is_typed_timeout(e):
+                raise subprocess.TimeoutExpired(list(cmd), timeout) from e
+            detail = str(e.stderr or e)
+            raise GitToolsUnavailableError(
+                f"git-mcp could not run git {cmd[1]} on {cwd}: {detail}"
+            ) from e
+        if check and result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, list(cmd), output=result.stdout, stderr=result.stderr
+            )
+        return result
+
+
+def golden_git_reader(git_backend: Any) -> GoldenGitReader:
+    """The read-only reader over the server's git backend, or a refusal when
+    the backend plugin cannot run git (no git-mcp ``git_exec``)."""
+    from code_indexer.server.services.delegated_refusal import (
+        DelegatedRepositoryUnsupportedError,
+    )
+
+    if not isinstance(git_backend, GitCommandRunner):
+        raise DelegatedRepositoryUnsupportedError(
+            "git history on golden repositories",
+            "the git backend plugin cannot run git (no git-mcp git_exec), and "
+            "this pod does not hold the repository",
+        )
+    return GoldenGitReader(git_backend)
 
 
 class DelegatedGitTools:
@@ -77,17 +267,9 @@ class DelegatedGitTools:
         )
         if check and result.returncode != 0:
             raise subprocess.CalledProcessError(
-                result.returncode,
-                list(cmd),
-                output=redact_url_credentials(result.stdout),
-                stderr=redact_url_credentials(result.stderr),
+                result.returncode, list(cmd), output=result.stdout, stderr=result.stderr
             )
-        return subprocess.CompletedProcess(
-            result.args,
-            result.returncode,
-            redact_url_credentials(result.stdout),
-            redact_url_credentials(result.stderr),
-        )
+        return result
 
     def _network(
         self, cmd: List[str], repo: str, *, check: bool, timeout: Optional[float]
@@ -106,23 +288,16 @@ class DelegatedGitTools:
             elif verb == "pull":
                 before = self._head(repo, timeout)
                 self._backend.pull(repo, remote=remote, branch=branch, timeout=timeout)
-                try:
-                    stdout = self._changed_summary(repo, before, timeout)
-                except subprocess.CalledProcessError:
-                    pass
+                stdout = self._changed_summary(repo, before, timeout)
             else:
                 self._backend.fetch(repo, remote, timeout=timeout)
         except subprocess.CalledProcessError as e:
             if check:
-                if e.stderr:
-                    e.stderr = redact_url_credentials(e.stderr)
-                if e.output:
-                    e.output = redact_url_credentials(e.output)
                 raise
-            stderr = redact_url_credentials(e.stderr or "")
+            stderr = str(e.stderr or "")
             # git's conflicts are on stdout; a backend that only had them as
             # error text still reports them where the callers read them.
-            out = redact_url_credentials(e.output or "") or _conflict_lines(stderr)
+            out = str(e.output or "") or _conflict_lines(stderr)
             return subprocess.CompletedProcess(cmd, e.returncode or 1, out, stderr)
         return subprocess.CompletedProcess(cmd, 0, stdout, "")
 

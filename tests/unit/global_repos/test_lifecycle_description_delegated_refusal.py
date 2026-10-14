@@ -1,14 +1,17 @@
-"""Golden-repo lifecycle/description analysis: refused under a delegated backend.
+"""Golden-repo lifecycle/description analysis with a LOCAL agent: refused
+under a delegated backend.
 
 Both analyses hand an agent THIS pod's clone path: the lifecycle invoker
-dispatches with ``cwd`` there (a local Claude CLI reads it with its own file
-tools; the orchestrator invoker plugin resolves the repo to provision from that
-path's local git origin) and RepoAnalyzer runs the Claude CLI with
-``--add-dir`` on it. A mount-less pod holds index state at most there, so the
-agent would describe an empty tree and a plausible description would land in
-cidx-meta. Under ``content_backend: delegated`` both refuse BEFORE the first
-local access; under the local backend (or no running server) they run exactly
-as before.
+dispatches with ``cwd`` there (the built-in local Claude CLI reads it with its
+own file tools) and RepoAnalyzer runs the Claude CLI with ``--add-dir`` on it.
+A mount-less pod holds index state at most there, so the agent would describe
+an empty tree and a plausible description would land in cidx-meta. Under
+``content_backend: delegated`` both refuse BEFORE the first local access; under
+the local backend (or no running server) they run exactly as before.
+
+An invoker that provisions the repository itself (cidx_orchestrator_invoker)
+runs the lifecycle analysis under delegated:
+tests/unit/server/services/test_orchestrator_golden_repo_source.py.
 """
 
 from __future__ import annotations

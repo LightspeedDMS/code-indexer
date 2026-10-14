@@ -149,6 +149,26 @@ def get_invoker_factory() -> Optional[InvokerFactory]:
     return factory
 
 
+#: Module attribute a plugin sets to True when its invoker provisions the
+#: golden repository ITSELF (from cidx's registry, see
+#: content_backend_wiring.golden_repo_source) and never reads the ``cwd`` it is
+#: handed -- so it can analyze a repository this pod does not hold.
+RESOLVES_GOLDEN_REPOSITORIES = "RESOLVES_GOLDEN_REPOSITORIES"
+
+
+def invoker_resolves_golden_repositories() -> bool:
+    """Whether the configured invoker provisions golden repositories itself.
+
+    False for the built-in ClaudeInvoker (it reads ``cwd`` on this pod) and for
+    a plugin that does not declare :data:`RESOLVES_GOLDEN_REPOSITORIES`.
+    """
+    factory = get_invoker_factory()
+    if factory is None:
+        return False
+    module = sys.modules.get(getattr(factory, "__module__", "") or "")
+    return getattr(module, RESOLVES_GOLDEN_REPOSITORIES, False) is True
+
+
 def reset_cache() -> None:
     """Clear the resolved plugin. For tests."""
     global _cached

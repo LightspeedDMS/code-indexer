@@ -1606,7 +1606,9 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                     repository_alias = _promoted
 
     try:
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        repo_path, error_msg = _resolve_through_git_seam(
+            _resolve_git_repo_path, repository_alias, user.username
+        )
         if error_msg is not None:
             return _mcp_response({"success": False, "error": error_msg})
         assert repo_path is not None  # narrowed by error_msg check above
@@ -1646,6 +1648,7 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             stat_only=stat_only,
             offset=offset,
             limit=limit,
+            **_git_seam_kwargs(repository_alias),
         )
         result["success"] = True
         return _mcp_response(result)
@@ -1670,6 +1673,8 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
     except GitArgumentValidationError as e:
         return _argument_rejected("git_diff", repository_alias, e)
+    except DelegatedRepositoryUnsupportedError as e:
+        return _delegated_refused("git_diff", repository_alias, e)
     except Exception as e:
         logger.exception(
             f"Unexpected error in git_diff: {e}",

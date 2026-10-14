@@ -7,12 +7,15 @@ Uses run_git_command() from git_runner for all git operations.
 
 Golden repositories on a pod that does not hold them (``content_backend:
 delegated``): the service is built with the server's git seam (git-mcp, see
-:func:`delegated_golden_git_backend`). The operations git-mcp exposes --
-``rev_parse``, ``log_raw`` (no path/author/grep filters), ``show_objects`` --
-run through it; the rest (blame, path-filtered history, message and pickaxe
-search, arbitrary diffs, per-commit stats) have no seam operation and REFUSE
-with :class:`DelegatedRepositoryUnsupportedError` before any git runs. Without
-a backend every operation runs local git exactly as before.
+:func:`delegated_golden_git_backend`). The operations git-mcp exposes as typed
+tools -- ``rev_parse``, ``log_raw``, ``show_objects`` -- run through them; the
+rest (blame, path/author/until-filtered logs, file history, message and
+pickaxe search, diffs, per-commit stats and patches) run the SAME git argv
+through git-mcp ``git_exec`` via :meth:`GitOperationsService._run_git`, read
+only (:func:`~code_indexer.server.services.git_tools_seam.require_read_only_git`),
+so the parsers below see exactly what local git prints. A backend that cannot
+run git refuses with :class:`DelegatedRepositoryUnsupportedError`. Without a
+backend every operation runs local git exactly as before.
 """
 
 import io
@@ -36,11 +39,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-#: Why the git-mcp seam cannot serve an operation: it exposes no such command.
-_NO_SEAM_OPERATION = (
-    "git-mcp exposes no {what}, and this pod does not hold the repository"
-)
 
 
 def delegated_golden_git_backend() -> Optional["GitBackend"]:
@@ -345,12 +343,31 @@ class GitOperationsService:
         if not git_dir.exists():
             raise ValueError(f"Not a git repository: {self.repo_path}")
 
-    def _refuse_through_backend(self, feature: str, what: str) -> None:
-        """Refuse *feature* when git runs through the seam, which lacks *what*."""
-        if self._git_backend is not None:
-            raise DelegatedRepositoryUnsupportedError(
-                feature, _NO_SEAM_OPERATION.format(what=what)
+    def _run_git(
+        self, cmd: List[str], *, check: bool, timeout: Optional[float] = None
+    ) -> "subprocess.CompletedProcess[str]":
+        """The one funnel for this service's argv-built git.
+
+        Local: ``run_git_command`` in the repository, exactly as before. Through
+        the git seam: the same argv through git-mcp ``git_exec``, read-only
+        (golden repositories are never modified), decoded as a local run; a
+        backend failure raises instead of reading as git's own exit.
+        """
+        if self._git_backend is None:
+            if timeout is None:
+                local: "subprocess.CompletedProcess[str]" = run_git_command(
+                    cmd, cwd=self.repo_path, check=check
+                )
+                return local
+            timed: "subprocess.CompletedProcess[str]" = run_git_command(
+                cmd, cwd=self.repo_path, check=check, timeout=timeout
             )
+            return timed
+        from code_indexer.server.services.git_tools_seam import golden_git_reader
+
+        return golden_git_reader(self._git_backend).run(
+            cmd, self.repo_path, check=check, timeout=timeout
+        )
 
     def _backend_log(
         self,
@@ -398,14 +415,9 @@ class GitOperationsService:
         # docstring for the invariant.
         branch = validate_revision_range(branch, self.repo_path, param_name="branch")
 
-        if self._git_backend is not None:
-            # git-mcp's log takes revisions, --since and a count -- no path,
-            # author or --until filter, so those cannot be answered here.
-            if author or until or path:
-                self._refuse_through_backend(
-                    "git_log with a path, author or until filter",
-                    "path/author/until-filtered log",
-                )
+        if self._git_backend is not None and not (author or until or path):
+            # git-mcp's typed log takes revisions, --since and a count; a path,
+            # author or --until filter runs the local argv below via git_exec.
             try:
                 output = self._backend_log(
                     self.LOG_FORMAT,
@@ -443,7 +455,7 @@ class GitOperationsService:
             cmd.extend(["--", path])
 
         try:
-            result = run_git_command(cmd, cwd=self.repo_path, check=True)
+            result = self._run_git(cmd, check=True)
             output = result.stdout
         except subprocess.CalledProcessError:
             # Empty repository or no matching commits
@@ -600,19 +612,10 @@ class GitOperationsService:
         """:meth:`show_commit` through the git backend: the commit and parents.
 
         Per-file stats (``git show --numstat/--name-status``) and the commit's
-        patch (``git show -p``) have no git-mcp operation: asked for, they
-        refuse before any git runs rather than come back empty.
+        patch (``git show -p``) run the local argv through git_exec
+        (:meth:`_run_git`), parsed exactly as local.
         """
         assert self._git_backend is not None
-        if include_stats:
-            self._refuse_through_backend(
-                "git_show_commit file statistics (include_stats=true)",
-                "per-commit --numstat/--name-status",
-            )
-        if include_diff:
-            self._refuse_through_backend(
-                "git_show_commit diff (include_diff=true)", "per-commit `git show -p`"
-            )
         repo = str(self.repo_path)
         not_found = f"Commit not found: {commit_hash}"
         try:
@@ -630,7 +633,12 @@ class GitOperationsService:
         # parents: empty output), so a failure here is the seam's, and raises.
         parent_output = str(self._git_backend.rev_parse(repo, f"{full_hash}^@"))
         parents = [p.strip() for p in parent_output.strip().split("\n") if p.strip()]
-        return CommitDetail(commit=commits[0], stats=None, diff=None, parents=parents)
+        return CommitDetail(
+            commit=commits[0],
+            stats=self._get_commit_stats(full_hash) if include_stats else None,
+            diff=self._get_commit_diff(full_hash) if include_diff else None,
+            parents=parents,
+        )
 
     @staticmethod
     def _resolve_numstat_rename_path(raw_path: str) -> str:
@@ -721,10 +729,8 @@ class GitOperationsService:
         status_cmd = ["git", "show", commit_hash, "--name-status", "-M", "--format="]
 
         try:
-            numstat_result = run_git_command(
-                numstat_cmd, cwd=self.repo_path, check=True
-            )
-            status_result = run_git_command(status_cmd, cwd=self.repo_path, check=True)
+            numstat_result = self._run_git(numstat_cmd, check=True)
+            status_result = self._run_git(status_cmd, check=True)
         except subprocess.CalledProcessError as e:
             logger.debug(
                 "_get_commit_stats: git command failed for %s: %s", commit_hash, e
@@ -792,7 +798,7 @@ class GitOperationsService:
         cmd = ["git", "show", commit_hash, "--format=", "-p"]
 
         try:
-            result = run_git_command(cmd, cwd=self.repo_path, check=True)
+            result = self._run_git(cmd, check=True)
             return cast(str, result.stdout)
         except subprocess.CalledProcessError:
             return ""
@@ -929,9 +935,6 @@ class GitOperationsService:
             from_revision, self.repo_path, param_name="from_revision"
         )
         validate_revision_range(to_revision, self.repo_path, param_name="to_revision")
-        self._refuse_through_backend(
-            "git_diff", "revision/working-tree diff with --numstat/--name-status/paths"
-        )
 
         # Build base args for git diff commands
         base_args = [from_revision]
@@ -942,9 +945,7 @@ class GitOperationsService:
         # Run numstat separately (git ignores numstat when combined with name-status)
         numstat_cmd = ["git", "diff", "--numstat"] + base_args + path_args
         try:
-            numstat_result = run_git_command(
-                numstat_cmd, cwd=self.repo_path, check=True
-            )
+            numstat_result = self._run_git(numstat_cmd, check=True)
             numstat_output = numstat_result.stdout
         except subprocess.CalledProcessError as e:
             logger.debug(f"numstat command returned no output: {e}")
@@ -953,7 +954,7 @@ class GitOperationsService:
         # Run name-status separately
         status_cmd = ["git", "diff", "--name-status"] + base_args + path_args
         try:
-            status_result = run_git_command(status_cmd, cwd=self.repo_path, check=True)
+            status_result = self._run_git(status_cmd, check=True)
             status_output = status_result.stdout
         except subprocess.CalledProcessError as e:
             logger.debug(f"name-status command returned no output: {e}")
@@ -981,7 +982,7 @@ class GitOperationsService:
                 diff_cmd.extend(["--", path])
 
             try:
-                diff_result = run_git_command(diff_cmd, cwd=self.repo_path, check=True)
+                diff_result = self._run_git(diff_cmd, check=True)
                 self._parse_diff_hunks(diff_result.stdout, files_dict)
             except subprocess.CalledProcessError:
                 pass
@@ -1243,7 +1244,6 @@ class GitOperationsService:
             raise ValueError(
                 f"end_line ({end_line}) must be >= start_line ({start_line})"
             )
-        self._refuse_through_backend("git_blame", "blame")
 
         # revision is a free-form revision expression, and `git blame`
         # itself also accepts a two-dot/three-dot range (restricting the
@@ -1271,9 +1271,7 @@ class GitOperationsService:
         cmd.extend(["--", path])
 
         try:
-            result = run_git_command(
-                cmd, cwd=self.repo_path, check=True, timeout=BLAME_TIMEOUT_SECONDS
-            )
+            result = self._run_git(cmd, check=True, timeout=BLAME_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             error_msg = f"Git blame timed out after {BLAME_TIMEOUT_SECONDS} seconds"
             logger.warning(
@@ -1383,7 +1381,6 @@ class GitOperationsService:
         Returns:
             FileHistoryResult with file commit history
         """
-        self._refuse_through_backend("git_file_history", "path-filtered log")
         # Build git log command
         cmd = [
             "git",
@@ -1399,7 +1396,7 @@ class GitOperationsService:
         cmd.extend(["--", path])
 
         try:
-            result = run_git_command(cmd, cwd=self.repo_path, check=True)
+            result = self._run_git(cmd, check=True)
         except subprocess.CalledProcessError:
             return FileHistoryResult(
                 path=path,
@@ -1495,9 +1492,6 @@ class GitOperationsService:
         import time
 
         start_time = time.time()
-        self._refuse_through_backend(
-            "git_search_commits", "commit-message search (log --grep)"
-        )
 
         # Build git log command
         cmd = ["git", "log", f"--format={self.LOG_FORMAT}"]
@@ -1524,7 +1518,7 @@ class GitOperationsService:
             cmd.append(f"--until={until}")
 
         try:
-            result = run_git_command(cmd, cwd=self.repo_path, check=True)
+            result = self._run_git(cmd, check=True)
             output = result.stdout
         except subprocess.CalledProcessError:
             # No matching commits
@@ -1619,7 +1613,6 @@ class GitOperationsService:
             raise ValueError("search_string and search_pattern are mutually exclusive")
         if not search_string and not search_pattern:
             raise ValueError("Must provide either search_string or search_pattern")
-        self._refuse_through_backend("git_search_diffs", "pickaxe search (log -S/-G)")
 
         # Determine search term for result
         search_term = search_pattern if search_pattern else search_string
@@ -1653,7 +1646,7 @@ class GitOperationsService:
             cmd.extend(["--", path])
 
         try:
-            result = run_git_command(cmd, cwd=self.repo_path, check=True)
+            result = self._run_git(cmd, check=True)
             output = result.stdout
         except subprocess.CalledProcessError:
             # No matching commits

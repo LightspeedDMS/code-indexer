@@ -43,6 +43,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from typing import Optional
 
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
 from code_indexer.global_repos.repo_analyzer import invoke_claude_cli  # noqa: F401 — kept for backward-compat test patching
@@ -52,7 +53,16 @@ from code_indexer.global_repos.unified_response_parser import (
     UnifiedResult,
 )
 from code_indexer.server.services.config_service import get_config_service
-from code_indexer.server.services.delegated_refusal import refuse_when_delegated
+from code_indexer.server.services.cli_invoker_plugin import (
+    invoker_resolves_golden_repositories,
+)
+from code_indexer.server.services.delegated_refusal import (
+    DelegatedRepositoryUnsupportedError,
+    delegated_refusal,
+)
+from code_indexer.server.startup.content_backend_wiring import (
+    is_content_seam_delegated,
+)
 from code_indexer.server.services.dep_map_dispatcher_factory import (
     build_dep_map_dispatcher,
 )
@@ -61,17 +71,34 @@ _logger = logging.getLogger(__name__)
 
 #: Golden-repo lifecycle/description analysis under a delegated content
 #: backend. The analysis agent is handed the repository through THIS pod's
-#: clone path: a local Claude CLI reads it with its own file tools, and the
-#: orchestrator invoker plugin resolves the repo to provision from that path's
-#: local git origin. A mount-less pod holds index state only at that path, so
-#: the agent would analyze an empty tree and a plausible-looking description
-#: would be written to cidx-meta (the dependency-map refusal, same reason).
+#: clone path, which on a mount-less pod holds index state only. An invoker
+#: that provisions the repository itself from cidx's golden registry
+#: (cidx_orchestrator_invoker: registered remote, branch and the indexed commit
+#: via git-mcp) analyzes the real repository; the built-in local Claude CLI
+#: would read the pod path and describe an empty tree into cidx-meta, so it
+#: refuses (the dependency-map refusal, same reason).
 LIFECYCLE_ANALYSIS_FEATURE = "Golden-repo lifecycle/description analysis"
 LIFECYCLE_ANALYSIS_REFUSAL_REASON = (
-    "its analysis agent reads the repository from this pod's clone path "
-    "(local Claude CLI file tools; the orchestrator invoker resolves the repo "
-    "from that path's local git origin), which holds index state only"
+    "the configured CLI invoker reads the repository from this pod's clone "
+    "path, which holds index state only; configure an invoker that provisions "
+    "golden repositories itself (cidx_orchestrator_invoker)"
 )
+
+
+def lifecycle_analysis_refusal() -> Optional[str]:
+    """Why lifecycle/description analysis cannot run on this server, or None.
+
+    None under the local default. Under a delegated content backend, None when
+    the configured invoker provisions golden repositories itself
+    (:func:`invoker_resolves_golden_repositories`), else the refusal.
+    """
+    refusal = delegated_refusal(
+        LIFECYCLE_ANALYSIS_FEATURE, LIFECYCLE_ANALYSIS_REFUSAL_REASON
+    )
+    if refusal is None or invoker_resolves_golden_repositories():
+        return None
+    return refusal
+
 
 # Absolute path to the packaged unified prompt.  Resolved once at import
 # time.
@@ -295,6 +322,19 @@ class LifecycleClaudeCliInvoker:
         config = get_config_service().get_config()
         return build_dep_map_dispatcher(config)
 
+    @staticmethod
+    def _validate_repo_names(alias: str, repo_path: Path) -> Path:
+        """Validate alias and repo_path WITHOUT looking at this pod's disk.
+
+        Raises:
+            ValueError: if alias is None/empty or repo_path is None.
+        """
+        if not isinstance(alias, str) or not alias.strip():
+            raise ValueError(f"alias must be a non-empty string, got {alias!r}")
+        if repo_path is None:
+            raise ValueError("repo_path must not be None")
+        return Path(repo_path)
+
     def _validate_repo_inputs(self, alias: str, repo_path: Path) -> Path:
         """Validate alias and repo_path; return a validated Path on success.
 
@@ -302,11 +342,7 @@ class LifecycleClaudeCliInvoker:
             ValueError: if alias is None/empty or repo_path is None,
                 missing, or not a directory.
         """
-        if not isinstance(alias, str) or not alias.strip():
-            raise ValueError(f"alias must be a non-empty string, got {alias!r}")
-        if repo_path is None:
-            raise ValueError("repo_path must not be None")
-        path_obj = Path(repo_path)
+        path_obj = self._validate_repo_names(alias, repo_path)
         if not path_obj.exists():
             # Bug #1338: this is the ORPHAN case (registry row present, clone
             # missing on disk) -- raise the typed OrphanedRepoError, not a
@@ -354,10 +390,17 @@ class LifecycleClaudeCliInvoker:
         # Refuse BEFORE the first look at the pod's disk (_validate_repo_inputs):
         # on a delegated pod the directory holds index state at most, never the
         # repository, so validation could pass and the agent analyze nothing.
-        refuse_when_delegated(
-            LIFECYCLE_ANALYSIS_FEATURE, LIFECYCLE_ANALYSIS_REFUSAL_REASON
-        )
-        path_obj = self._validate_repo_inputs(alias, repo_path)
+        if lifecycle_analysis_refusal() is not None:
+            raise DelegatedRepositoryUnsupportedError(
+                LIFECYCLE_ANALYSIS_FEATURE, LIFECYCLE_ANALYSIS_REFUSAL_REASON
+            )
+        if is_content_seam_delegated():
+            # The invoker provisions the repository from the golden registry
+            # and git-mcp (and fails loud when they cannot answer); this pod's
+            # directory says nothing about it.
+            path_obj = self._validate_repo_names(alias, repo_path)
+        else:
+            path_obj = self._validate_repo_inputs(alias, repo_path)
         _lifecycle_cfg = get_config_service().get_config().lifecycle_analysis_config
         # The agent's subprocess cwd is a neutral scratch directory, never the
         # repo itself, so the repo's own CLAUDE.md/AGENTS.md is not auto-loaded

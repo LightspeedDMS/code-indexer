@@ -8,7 +8,7 @@ exactly as before.
 
 | What | Under delegated |
 |---|---|
-| Local subcommands (status, diff, log, add, reset, restore, commit, checkout, branch, merge, stash, clean, rev-parse, show, config --get, remote get-url, ...) | `GitCommandRunner.run` -> git-mcp `git_exec`: git's raw stdout, exit code and stderr, so the service parses exactly what a local run prints |
+| Local subcommands (status, diff, log, add, reset, restore, commit, checkout, branch, merge, stash, clean, rev-parse, show, config --get, remote get-url, ...) | `GitCommandRunner.run` -> git-mcp `git_exec`: git's raw stdout, exit code and stderr, decoded as a local run decodes it (locale, strict, universal newlines), so the service parses exactly what a local run prints |
 | Commit attribution (`GIT_AUTHOR_*` / `GIT_COMMITTER_*`) | sent as `git_exec` `identity`; any OTHER git variable a caller sets is refused (never silently dropped) |
 | `fetch` / `pull` / `push` | git-mcp `git_fetch` / `git_pull` / `git_push`, with git-mcp's credentials; `--set-upstream` is push's only option that crosses, any other option is refused |
 | Pull conflicts | git-mcp returns `{status: 'conflicts'}`; the plugin raises it as a failed pull whose output carries git's `CONFLICT (content): Merge conflict in <path>` lines, so `git_pull` reports `success: false` and the conflicted paths as locally |
@@ -35,3 +35,6 @@ nothing runs git on this pod.
 * git-mcp with `git_exec` (git-mcp MR !21), reachable as the delegated git backend.
 * cidx plugin `cidx_git_backend` at or after this change (provides `run`/`push`, raises pull conflicts).
 * git-mcp sees the activated-repos root at the same path.
+
+Golden repositories (read-only history tools, repository analysis): see
+[content-seam-golden-git-and-analysis.md](content-seam-golden-git-and-analysis.md).

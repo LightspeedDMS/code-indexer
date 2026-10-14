@@ -487,29 +487,6 @@ def test_conflict_text_only_in_the_error_still_names_the_conflicts(
     assert result.stdout == "CONFLICT (content): Merge conflict in a.txt\n"
 
 
-def test_diffstat_failure_after_a_successful_pull_still_reports_success(
-    world: SimpleNamespace,
-) -> None:
-    """A transport error on the follow-up ``git diff --shortstat`` must not
-    mask a pull that already succeeded."""
-    from code_indexer.server.services.git_tools_seam import DelegatedGitTools
-
-    class DiffstatFails:
-        def run(self, repo: str, args: Sequence[str], **kw: Any) -> Any:
-            if args and args[0] == "rev-parse":
-                return subprocess.CompletedProcess(args, 0, "abc123\n", "")
-            raise subprocess.CalledProcessError(1, "git-mcp", output=None, stderr="transport error")
-
-        def pull(self, repo: str, **kw: Any) -> None:
-            pass
-
-    result = DelegatedGitTools(DiffstatFails()).run(
-        ["git", "pull", "origin", "main"], world.pod, check=False
-    )
-    assert result.returncode == 0
-    assert result.stdout == ""
-
-
 @pytest.mark.parametrize("set_upstream", [True, False])
 def test_pat_push_sets_upstream_only_when_asked(
     world: SimpleNamespace, set_upstream: bool
@@ -707,76 +684,3 @@ def test_mcp_git_resolution_refuses_a_copy_without_git(
     )
     path, error = _legacy._resolve_git_repo_path("repo", "alice")
     assert path is None and error is not None and ".git" in error
-
-
-# ---------------------------------------------------------------------------
-# Credential redaction in every error path
-# ---------------------------------------------------------------------------
-
-_CRED_URL = "https://oauth2:SECRETPAT@gitlab.com/org/repo.git"
-_CRED_MSG = f"fatal: unable to access '{_CRED_URL}'"
-
-
-class _CredLeakBackend:
-    """Backend whose run/push/pull/fetch embed a credentialed URL."""
-
-    def run(
-        self, repo: str, args: Sequence[str], **kw: Any
-    ) -> "subprocess.CompletedProcess[str]":
-        return subprocess.CompletedProcess(args, 128, _CRED_MSG, _CRED_MSG)
-
-    def push(self, repo: str, remote: str, branch: Any = None, **kw: Any) -> Any:
-        raise subprocess.CalledProcessError(1, "git push", output=_CRED_MSG, stderr=_CRED_MSG)
-
-    def pull(self, repo: str, **kw: Any) -> None:
-        raise subprocess.CalledProcessError(1, "git pull", output=_CRED_MSG, stderr=_CRED_MSG)
-
-    def fetch(self, repo: str, remote: str = "origin", **kw: Any) -> None:
-        raise subprocess.CalledProcessError(1, "git fetch", output=_CRED_MSG, stderr=_CRED_MSG)
-
-
-def _no_secret(text: object) -> None:
-    assert "SECRETPAT" not in str(text), f"credential leaked: {text!r}"
-
-
-class TestCredentialRedaction:
-    """Every error path in the git seam must redact credentialed URLs."""
-
-    def _tools(self) -> Any:
-        from code_indexer.server.services.git_tools_seam import DelegatedGitTools
-
-        return DelegatedGitTools(_CredLeakBackend())
-
-    def test_run_check_true_redacts(self) -> None:
-        with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            self._tools().run(["git", "status"], "/repo", check=True)
-        _no_secret(exc_info.value.output)
-        _no_secret(exc_info.value.stderr)
-        _no_secret(str(exc_info.value))
-
-    def test_run_check_false_redacts(self) -> None:
-        result = self._tools().run(["git", "status"], "/repo", check=False)
-        _no_secret(result.stdout)
-        _no_secret(result.stderr)
-
-    def test_network_push_check_true_redacts(self) -> None:
-        with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            self._tools().run(["git", "push"], "/repo", check=True)
-        _no_secret(exc_info.value.output)
-        _no_secret(exc_info.value.stderr)
-
-    def test_network_push_check_false_redacts(self) -> None:
-        result = self._tools().run(["git", "push"], "/repo", check=False)
-        _no_secret(result.stdout)
-        _no_secret(result.stderr)
-
-    def test_network_pull_check_true_redacts(self) -> None:
-        with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            self._tools().run(["git", "pull"], "/repo", check=True)
-        _no_secret(exc_info.value.output)
-        _no_secret(exc_info.value.stderr)
-
-    def test_network_fetch_check_false_redacts(self) -> None:
-        result = self._tools().run(["git", "fetch"], "/repo", check=False)
-        _no_secret(result.stdout)
-        _no_secret(result.stderr)

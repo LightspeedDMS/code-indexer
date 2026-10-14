@@ -256,3 +256,63 @@ def test_user_dir_permissions_serve_activation_only() -> None:
         assert _modules_calling(helper) == [
             "server/repositories/user_dir_permissions.py"
         ], helper
+
+
+# ── golden-repos root: cidx's own state on a mount-less pod ────────────────
+
+_GOLDEN_ROOT_TAG = re.compile(r"^golden-repos root \(cidx state\): `([^`]+)` -- ")
+
+
+def _code_strings(module: str) -> List[str]:
+    """String constants in *module*'s code -- docstrings excluded."""
+    tree = ast.parse((_SRC / module).read_text(encoding="utf-8"))
+    docstrings = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if isinstance(body, list) and body:
+            first = body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                docstrings.add(id(first.value))
+    return [
+        n.value
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and id(n) not in docstrings
+    ]
+
+
+def _golden_root_rows() -> List[dict]:
+    import json
+
+    rows = json.loads(
+        (_ROOT / "tests/unit/server/content_seam_inventory.json").read_text()
+    )
+    return [r for r in rows if _GOLDEN_ROOT_TAG.match(r["note"])]
+
+
+def test_golden_root_rows_are_cidx_state_named_by_their_module() -> None:
+    """A row reclassified as cidx's own state on the golden-repos root names the
+    cidx-owned location it touches (``.locks``, ``.scratch``, ``aliases``,
+    ``.versioned``, ...), and its module's code names that same location. If
+    the module stops naming it, the path may now come from elsewhere -- the
+    classification must be re-decided."""
+    rows = _golden_root_rows()
+    assert len(rows) >= 77
+    for row in rows:
+        match = _GOLDEN_ROOT_TAG.match(row["note"])
+        assert match is not None
+        location = match.group(1)
+        assert row["class"] == "cidx-state", row
+        assert any(location in s for s in _code_strings(row["module"])), (
+            f"{row['module']} no longer names {location!r}: re-decide {row}"
+        )
+
+
+def test_golden_repos_root_is_under_cidx_data_dir() -> None:
+    """The golden-repos root is the server's own data directory, not a
+    repository: GoldenRepoManager roots it at ``<data_dir>/golden-repos``."""
+    source = (_SRC / "server/repositories/golden_repo_manager.py").read_text()
+    assert (
+        'self.golden_repos_dir = os.path.join(self.data_dir, "golden-repos")' in source
+    )

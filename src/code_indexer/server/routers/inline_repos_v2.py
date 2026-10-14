@@ -16,7 +16,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from fastapi import (
     FastAPI,
@@ -53,20 +53,9 @@ from ..auth import dependencies
 from . import repo_access_http
 from ..managers.composite_file_listing import _list_composite_files
 from ..services.stats_service import stats_service
-from ..services.file_service import ContentSeamSource, file_service
+from ..services.file_service import file_service
 from ..services.file_listing_paths import build_non_composite_path_pattern
-from code_indexer.utils.path_confinement import (
-    confine_relative_path,
-    resolve_confined_path,
-)
-from ..services.activated_copy_content import (
-    CopyContentUnavailableError,
-    CopyPathError,
-    decode_text_like_read_text,
-    delegated_copy_source,
-    read_copy_file,
-    visible_files,
-)
+from code_indexer.utils.path_confinement import resolve_confined_path
 from ..services.search_service import search_service
 from ..app_helpers import _execute_repository_sync, _get_composite_details
 
@@ -112,60 +101,6 @@ def _current_branch_name(
             "the git backend could not report the repository's current branch"
         )
     return branch
-
-
-#: Extensions /api/repositories/{id} reports as languages of an activated copy.
-_V2_LANGUAGE_MAP = {
-    ".py": "python",
-    ".js": "javascript",
-    ".ts": "typescript",
-    ".java": "java",
-    ".md": "markdown",
-    ".yml": "yaml",
-    ".json": "json",
-}
-
-
-def _copy_file_content_via_seam(source: ContentSeamSource, path: str) -> Dict[str, Any]:
-    """``/api/repositories/{id}/files?content=true`` for an activated copy on
-    workspace-mcp: the local branch's answers (404 for a missing or escaping
-    path, 400 for a directory, the same binary sniff and text decoding) from
-    one fetch. A backend failure is a 500, never "not found"."""
-    try:
-        rel = confine_relative_path(path)
-    except PermissionError:
-        raise HTTPException(status_code=404, detail=f"File '{path}' not found")
-    try:
-        if not rel:
-            raise CopyPathError("not_file", rel)
-        data = read_copy_file(source, rel)
-    except CopyPathError as e:
-        if e.kind == "missing":
-            raise HTTPException(status_code=404, detail=f"File '{path}' not found")
-        raise HTTPException(status_code=400, detail=f"Path '{path}' is not a file")
-    except CopyContentUnavailableError as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to read file: {str(e)}",
-        )
-    chunk = data[:8192]
-    is_binary = b"\x00" in chunk
-    if not is_binary:
-        try:
-            chunk.decode("utf-8")
-        except UnicodeDecodeError:
-            is_binary = True
-    if not is_binary:
-        try:
-            return {
-                "path": path,
-                "is_binary": False,
-                "size": len(data),
-                "content": decode_text_like_read_text(data),
-            }
-        except UnicodeDecodeError:
-            pass
-    return {"path": path, "is_binary": True, "size": len(data), "content": None}
 
 
 def register_repos_v2_routes(
@@ -306,18 +241,7 @@ def register_repos_v2_routes(
                         total_size = 0
                         languages = set()
 
-                        copy_source = delegated_copy_source(repo_path)
-                        if copy_source is not None:
-                            # Content seam: the copy is on workspace-mcp (its
-                            # index state on this pod); the same files the
-                            # walk below counts. A failure is this route's 500.
-                            for copy_file in visible_files(copy_source, repo_path):
-                                total_size += copy_file.size
-                                total_files += 1
-                                ext = os.path.splitext(copy_file.name)[1].lower()
-                                if ext in _V2_LANGUAGE_MAP:
-                                    languages.add(_V2_LANGUAGE_MAP[ext])
-                        elif os.path.exists(repo_path):
+                        if os.path.exists(repo_path):
                             for root, dirs, files in os.walk(repo_path):
                                 if ".git" in dirs:
                                     dirs.remove(".git")
@@ -328,8 +252,17 @@ def register_repos_v2_routes(
                                             total_size += os.path.getsize(file_path)
                                             total_files += 1
                                             ext = os.path.splitext(file)[1].lower()
-                                            if ext in _V2_LANGUAGE_MAP:
-                                                languages.add(_V2_LANGUAGE_MAP[ext])
+                                            lang_map = {
+                                                ".py": "python",
+                                                ".js": "javascript",
+                                                ".ts": "typescript",
+                                                ".java": "java",
+                                                ".md": "markdown",
+                                                ".yml": "yaml",
+                                                ".json": "json",
+                                            }
+                                            if ext in lang_map:
+                                                languages.add(lang_map[ext])
                                         except (OSError, IOError):
                                             continue
 
@@ -373,8 +306,6 @@ def register_repos_v2_routes(
 
                         return repository_data
 
-                    except CopyContentUnavailableError:
-                        raise
                     except Exception as e:
                         # If we can't get detailed info, provide basic info
                         repository_data = RepositoryDetailsV2Response(
@@ -413,11 +344,6 @@ def register_repos_v2_routes(
 
                         return repository_data
 
-        except CopyContentUnavailableError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to retrieve repository details: {str(e)}",
-            )
         except Exception as exc:
             logger.warning(
                 "get_repository_details_v2: swallowed %s: %s",
@@ -892,9 +818,7 @@ def register_repos_v2_routes(
         no mocks or simulated data.
         """
         try:
-            stats_response = stats_service.get_repository_stats(
-                repo_id, username=current_user.username
-            )
+            stats_response = stats_service.get_repository_stats(repo_id)
             return stats_response
         except FileNotFoundError:
             raise HTTPException(
@@ -962,10 +886,6 @@ def register_repos_v2_routes(
 
             repo = ActivatedRepository.from_dict(repo_dict)
 
-            copy_source = delegated_copy_source(repo.path)
-            if copy_source is not None:
-                return _copy_file_content_via_seam(copy_source, path)
-
             # Bug #1891: confine the resolved target to repo.path BEFORE any
             # exists()/is_file()/open() touches the filesystem. A caller-
             # supplied `path` containing parent-directory segments, an
@@ -1030,23 +950,12 @@ def register_repos_v2_routes(
                         "content": None,
                     }
 
-        # Check if this is a composite repository. A failure here is the
-        # route's error, never a silent switch to the regular listing.
+        # Check if this is a composite repository
         try:
             repo_dict = activated_repo_manager.get_repository(
                 current_user.username, repo_id
             )
             if repo_dict and repo_dict.get("is_composite", False):
-                # The path is relative to every component: an absolute path or
-                # a ".." component would leave the composite.
-                if path:
-                    try:
-                        confine_relative_path(path)
-                    except PermissionError:
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="Invalid path: must be a relative path within the repository",
-                        )
                 # Composite repository - use simple file listing.
                 # Bug #1886 (R3 revision): byte-identical to HEAD --
                 # `recursive` is a plain bool again (composite-only,
@@ -1057,14 +966,9 @@ def register_repos_v2_routes(
                     repo, path=path or "", recursive=recursive
                 )
                 return {"files": [f.model_dump() for f in files]}
-        except HTTPException:
-            raise
         except Exception as e:
-            logging.error(f"Failed to list composite files for {repo_id}: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to list repository files: {str(e)}",
-            )
+            logging.debug(f"Could not check composite status for {repo_id}: {e}")
+            # Fall through to regular file listing
 
         # Validate query parameters
         if page < 1:

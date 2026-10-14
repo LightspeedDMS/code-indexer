@@ -250,7 +250,7 @@ def test_smart_indexer_marks_the_store_only_for_a_delegated_backend(
             MagicMock(),
         )
         SmartIndexer(
-            SimpleNamespace(codebase_dir=tmp_path),  # type: ignore[arg-type]
+            Config(codebase_dir=tmp_path),
             MagicMock(),
             store,
             tmp_path / "meta.json",

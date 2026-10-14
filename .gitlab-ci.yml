@@ -220,6 +220,8 @@ smoke:
       tests/unit/services/test_git_push_with_pat.py
       tests/unit/services/test_git_push_upstream.py
       tests/unit/services/test_git_push_error_masks_url_authority.py
+      tests/unit/server/services/test_golden_git_history_git_exec.py
+      tests/unit/server/services/test_orchestrator_golden_repo_source.py
       tests/unit/global_repos/test_refresh_git_seam_mountless.py
       tests/unit/global_repos/test_refresh_scheduler_indexing_types.py
       tests/unit/global_repos/test_reclone_mountless.py

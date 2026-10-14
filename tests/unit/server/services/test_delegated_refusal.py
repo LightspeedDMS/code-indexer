@@ -16,7 +16,9 @@ from code_indexer.server.startup import content_backend_wiring
 
 
 def _park(monkeypatch: pytest.MonkeyPatch, backend: object) -> None:
-    monkeypatch.setattr(content_backend_wiring, "server_content_backend", lambda: backend)
+    monkeypatch.setattr(
+        content_backend_wiring, "server_content_backend", lambda: backend
+    )
 
 
 @pytest.mark.parametrize(

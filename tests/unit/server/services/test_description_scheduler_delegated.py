@@ -1,8 +1,11 @@
-"""Description refresh under a delegated content backend: not started.
+"""Description refresh under a delegated content backend with a LOCAL agent:
+not started.
 
 Every pass the scheduler runs (broken-lifecycle and terse-description
 backfills, the periodic refresh) hands a golden repo to the lifecycle agent,
-which refuses under delegated -- the repository is not on this pod. Starting
+which, being the built-in local CLI, refuses under delegated -- the repository
+is not on this pod (an invoker that provisions it itself runs them: see
+test_orchestrator_golden_repo_source.py). Starting
 them would fail a job per alias every cycle with the same refusal. So start()
 does the bookkeeping (no repository access) and says once why the rest did not
 start. Locally nothing changes.
@@ -11,7 +14,9 @@ start. Locally nothing changes.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Tuple
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,7 +25,10 @@ from code_indexer.server.services import description_refresh_scheduler as drs
 from code_indexer.server.startup import content_backend_wiring
 
 
-def _scheduler(tmp_path, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+def _scheduler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Tuple[drs.DescriptionRefreshScheduler, MagicMock]:
+    """The scheduler, with its passes replaced by recorders on the mock."""
     config = SimpleNamespace(
         claude_integration_config=SimpleNamespace(
             description_refresh_enabled=True,
@@ -43,8 +51,7 @@ def _scheduler(tmp_path, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
         "_run_loop",
     ):
         monkeypatch.setattr(scheduler, name, getattr(calls, name))
-    scheduler._calls = calls  # type: ignore[attr-defined]
-    return scheduler
+    return scheduler, calls
 
 
 def _park(monkeypatch: pytest.MonkeyPatch, *, local: bool) -> None:
@@ -54,12 +61,15 @@ def _park(monkeypatch: pytest.MonkeyPatch, *, local: bool) -> None:
     )
 
 
-def test_local_starts_every_pass(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_local_starts_every_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _park(monkeypatch, local=True)
-    scheduler = _scheduler(tmp_path, monkeypatch)
+    scheduler, calls = _scheduler(tmp_path, monkeypatch)
     scheduler.start()
+    assert scheduler._thread is not None
     scheduler._thread.join(timeout=5)
-    called = {c[0] for c in scheduler._calls.method_calls}
+    called = {c[0] for c in calls.method_calls}
     assert {
         "reconcile_broken_lifecycle_metadata",
         "reconcile_terse_descriptions",
@@ -68,13 +78,13 @@ def test_local_starts_every_pass(tmp_path, monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_delegated_starts_no_analysis_and_says_why(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     _park(monkeypatch, local=False)
-    scheduler = _scheduler(tmp_path, monkeypatch)
+    scheduler, calls = _scheduler(tmp_path, monkeypatch)
     with caplog.at_level(logging.WARNING, logger=drs.logger.name):
         scheduler.start()
-    called = {c[0] for c in scheduler._calls.method_calls}
+    called = {c[0] for c in calls.method_calls}
     assert called == {
         "_migrate_global_suffix_filenames",
         "reconcile_orphan_tracking",

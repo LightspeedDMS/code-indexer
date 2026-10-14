@@ -63,6 +63,12 @@ _URL_CREDENTIALS_RE = re.compile(r"(://)[^/@\s]+@")
 
 CLI_USED = "orchestrator"
 
+#: cidx's gate (cli_invoker_plugin.invoker_resolves_golden_repositories): this
+#: invoker provisions a golden repository itself -- the orchestrator's agent
+#: opens it from the registered remote -- and never reads the cwd it is handed,
+#: so lifecycle/description analysis can run on a pod without the repository.
+RESOLVES_GOLDEN_REPOSITORIES = True
+
 
 class OrchestratorInvoker:
     """IntelligenceCliInvoker backed by the agent-orchestrator.
@@ -132,6 +138,24 @@ class OrchestratorInvoker:
 
     @staticmethod
     def _resolve_repo(cwd: str) -> Dict[str, Any]:
+        """The repository the orchestrator provisions for a job about *cwd*.
+
+        On a pod without the repositories (cidx ``content_backend:
+        delegated``) *cwd* holds index state only: the repository is resolved
+        from cidx's golden registry (registered remote + branch) and git-mcp
+        (the commit cidx indexed) -- see :func:`_resolve_golden_repo`. Otherwise
+        it is read from the clone at *cwd*, as below.
+        """
+        from code_indexer.server.startup.content_backend_wiring import (
+            is_content_seam_delegated,
+        )
+
+        if is_content_seam_delegated():
+            return _resolve_golden_repo(cwd)
+        return OrchestratorInvoker._resolve_local_repo(cwd)
+
+    @staticmethod
+    def _resolve_local_repo(cwd: str) -> Dict[str, Any]:
         """Resolve the git origin URL + current branch of the repo at cwd.
 
         cidx's dispatcher passes a LOCAL path (the golden-repo clone on the cidx
@@ -205,6 +229,11 @@ class OrchestratorInvoker:
             body["repoUrl"] = repo["repoUrl"]
             if "branch" in repo:
                 body["branch"] = repo["branch"]
+        if "commit" in repo:
+            # The orchestrator opens repoUrl@branch; the commit cidx indexed
+            # pins the analysis to what the index describes.
+            body["metadata"]["commit"] = repo["commit"]
+            body["systemPrompt"] = _pinned_commit_instructions(repo)
         deadline = time.monotonic() + timeout
         while True:
             token = self._login()
@@ -308,6 +337,41 @@ class OrchestratorInvoker:
                 f"orchestrator invocation crashed: {exc}",
                 FailureClass.RETRYABLE_ON_OTHER,
             )
+
+
+def _resolve_golden_repo(cwd: str) -> Dict[str, Any]:
+    """The golden repository behind *cwd* on a pod that does not hold it.
+
+    ``{}`` when *cwd* is no golden repo (the job is about no repository).
+    Otherwise ``repoUrl`` (credentials stripped), ``branch`` and ``commit``.
+    A registry or git-mcp failure RAISES (GoldenRepoSourceError): handing the
+    agent no repository would publish a description of an empty tree.
+    """
+    from code_indexer.server.startup.content_backend_wiring import (
+        golden_repo_source,
+    )
+
+    source = golden_repo_source(cwd)
+    if source is None:
+        return {}
+    return {
+        "repoUrl": _URL_CREDENTIALS_RE.sub(r"\1", source["repoUrl"]),
+        "branch": source["branch"],
+        "commit": source["commit"],
+    }
+
+
+def _pinned_commit_instructions(repo: Dict[str, Any]) -> str:
+    """System-prompt lines pinning the agent to the commit cidx indexed."""
+    return (
+        "## Repository under analysis\n"
+        f"Analyze {repo['repoUrl']} on branch {repo['branch']} at commit "
+        f"{repo['commit']} -- the commit cidx indexed. After opening the "
+        "repository, check out that commit in your workspace before reading any "
+        "file. Any absolute path named in the task is cidx's own path and is "
+        "not reachable from here: read the repository only through the opened "
+        "workspace.\n"
+    )
 
 
 class _OrchError(RuntimeError):

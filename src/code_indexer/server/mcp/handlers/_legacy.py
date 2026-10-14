@@ -34,7 +34,6 @@ from code_indexer.global_repos.alias_manager import AliasManager
 # Shared utilities extracted to _utils.py (Story #496 refactoring)
 from . import _utils  # noqa: F401 — tests patch _legacy._utils
 from code_indexer.server.startup.content_backend_wiring import (
-    golden_repo_content_root,
     is_content_seam_delegated,
 )
 from ._utils import (
@@ -374,7 +373,7 @@ def _resolve_git_repo_path(
             return _resolve_delegated_golden_git_path(
                 repository_alias, username, resolved, via_git_backend=via_git_backend
             )
-        if not (Path(resolved) / ".git").exists():
+        if not _has_git_dir(resolved):
             return None, (
                 f"Repository '{repository_alias}' is a local repository "
                 "and does not support git operations."

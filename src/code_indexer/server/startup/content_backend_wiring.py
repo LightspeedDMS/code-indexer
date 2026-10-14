@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path, PurePosixPath
-from typing import Any, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 from code_indexer.server.storage.shared.content_backend import (
     ContentBackend,
@@ -292,3 +292,87 @@ def _golden_repo_clone_path(repo_name: str) -> Optional[str]:
     """The golden repo's base clone path, or None when the registry cannot say."""
     repo = _golden_repo_record(repo_name)
     return getattr(repo, "clone_path", None) or None
+
+
+class GoldenRepoSourceError(RuntimeError):
+    """The golden repository behind a path could not be resolved (registry or
+    git-mcp failed): an agent must not be handed no repository instead."""
+
+
+def golden_repo_source(repo_path: Union[str, Path]) -> Optional[Dict[str, str]]:
+    """Where an agent OFF this pod gets the golden repository at *repo_path*.
+
+    For a pod that does not hold its repositories (callers check
+    :func:`is_content_seam_delegated`): *repo_path* is a golden repo's
+    directory (``golden-repos/<alias>``) or a versioned snapshot of it, which
+    on this pod hold index state only. The repository is named by the golden
+    registry -- ``repoUrl`` (the registered remote) and ``branch`` -- and
+    ``commit`` is the commit cidx indexed, asked of git-mcp at the golden
+    repo's base clone (as index freshness does). Returns
+    ``{"alias", "repoUrl", "branch", "commit"}``.
+
+    None when *repo_path* is not under the golden-repos directory (the job is
+    about no repository). Raises :class:`GoldenRepoSourceError` when it IS a
+    golden repo path and the registry or git-mcp cannot answer, or the repo is
+    ``local://`` (its files are on this pod; nothing outside can open it) --
+    never a silent "no repository".
+    """
+    from code_indexer.server.repositories.golden_repo_manager import (
+        get_golden_repo_manager,
+    )
+    from code_indexer.server.startup.git_backend_wiring import (
+        server_delegated_git_backend,
+    )
+    from code_indexer.server.storage.shared.snapshot_paths import (
+        is_versioned_snapshot,
+    )
+
+    try:
+        manager = get_golden_repo_manager()
+        golden_root = Path(os.path.normpath(str(manager.golden_repos_dir)))
+    except Exception as exc:
+        raise GoldenRepoSourceError(f"golden-repo registry unavailable: {exc}") from exc
+    path = Path(os.path.normpath(str(repo_path)))
+    if is_versioned_snapshot(str(path)) and path.parent.parent == (
+        golden_root / ".versioned"
+    ):
+        alias = path.parent.name
+    elif path.parent == golden_root:
+        alias = path.name
+    else:
+        return None
+    try:
+        repo = manager.get_golden_repo(alias)
+    except Exception as exc:
+        raise GoldenRepoSourceError(
+            f"golden-repo registry lookup of {alias!r} failed: {exc}"
+        ) from exc
+    if repo is None:
+        raise GoldenRepoSourceError(f"{repo_path} is not a registered golden repo")
+    if str(repo.repo_url).startswith("local://"):
+        raise GoldenRepoSourceError(
+            f"golden repo {alias!r} is {repo.repo_url}: its files are on this pod "
+            "and no agent outside it can open the repository"
+        )
+    backend = server_delegated_git_backend()
+    if backend is None:
+        raise GoldenRepoSourceError(
+            f"the commit of {alias!r} is unknown: git_backend is 'local', so no "
+            "git-mcp holds the repository"
+        )
+    clone = str(golden_repo_content_root(path, consumer="repository analysis"))
+    try:
+        head = str(backend.rev_parse(clone, "HEAD")).strip()
+    except Exception as exc:
+        detail = getattr(exc, "stderr", None) or exc
+        raise GoldenRepoSourceError(
+            f"git-mcp could not resolve HEAD of {alias!r} at {clone}: {detail}"
+        ) from exc
+    if not head:
+        raise GoldenRepoSourceError(f"git-mcp returned no HEAD for {alias!r}")
+    return {
+        "alias": alias,
+        "repoUrl": str(repo.repo_url),
+        "branch": str(repo.default_branch),
+        "commit": head.split()[0],
+    }
