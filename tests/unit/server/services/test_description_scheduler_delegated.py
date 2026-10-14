@@ -1,11 +1,8 @@
-"""Description refresh under a delegated content backend with a LOCAL agent:
-not started.
+"""Description refresh under a delegated content backend: not started.
 
 Every pass the scheduler runs (broken-lifecycle and terse-description
 backfills, the periodic refresh) hands a golden repo to the lifecycle agent,
-which, being the built-in local CLI, refuses under delegated -- the repository
-is not on this pod (an invoker that provisions it itself runs them: see
-test_orchestrator_golden_repo_source.py). Starting
+which refuses under delegated -- the repository is not on this pod. Starting
 them would fail a job per alias every cycle with the same refusal. So start()
 does the bookkeeping (no repository access) and says once why the rest did not
 start. Locally nothing changes.

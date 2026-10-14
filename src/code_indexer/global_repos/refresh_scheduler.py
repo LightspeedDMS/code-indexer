@@ -77,12 +77,7 @@ from code_indexer.server.services.metadata_reader import (
     read_status,
 )
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
-from code_indexer.utils.index_store import (
-    IndexStore,
-    LocalIndexStore,
-    index_store_alias,
-    published_index_fields,
-)
+from code_indexer.utils.index_store import IndexStore, LocalIndexStore
 from code_indexer.server.storage.shared.git_backend import (
     GitBackend,
     LocalGitBackend,
@@ -650,11 +645,6 @@ class RefreshScheduler:
         # fingerprint seen by the refresh in progress, published with the
         # alias pointer when that refresh swaps it (see _shared_meta_changed).
         self._pending_meta_fingerprints: Dict[str, str] = {}
-        # IndexStore step 2: what _snapshot_from_index_store published, keyed
-        # by alias as (snapshot path, alias-document fields), recorded with
-        # the pointer when that snapshot is swapped in so any pod can check
-        # the same version out (server/services/index_materializer.py).
-        self._pending_index_publications: Dict[str, Tuple[str, Dict[str, str]]] = {}
         self._alias_lock_db_backed_enabled_getter = alias_lock_db_backed_enabled_getter
         self._alias_lock_store_resolver = alias_lock_store_resolver
 
@@ -3253,7 +3243,7 @@ class RefreshScheduler:
                             alias_name=alias_name,
                             new_target=new_index_path,
                             old_target=current_target,
-                            **self.published_swap_extra(alias_name, new_index_path),
+                            **self._published_meta_fingerprint(alias_name),
                         )
 
                     # Bug #881 Phase 2 + Bug #1775: evict stale HNSW +
@@ -4143,9 +4133,6 @@ class RefreshScheduler:
 
                 _temporal_env.update(resolve_hnsw_sync_epoch_env_var())
 
-            # Delegated IndexStore: build on the published temporal shards,
-            # not on whatever this pod last held (no-op locally).
-            self.serve_temporal_shards(alias_name)
             logger.info(
                 f"Running cidx index (temporal) on source for {alias_name}: {' '.join(temporal_command)}"
             )
@@ -4155,7 +4142,6 @@ class RefreshScheduler:
                 error_label=f"temporal indexing on source for {alias_name}",
                 env=_temporal_env,
             )
-            self.note_temporal_indexed(alias_name)
             logger.info("cidx index (temporal) on source completed successfully")
 
         # Execute Step 3: SCIP indexing (coarse markers, subprocess.run stays — it has no --progress-json)
@@ -4511,18 +4497,7 @@ class RefreshScheduler:
             raise RuntimeError(
                 f"Failed to publish the index for {alias_name}: {type(e).__name__}: {e}"
             ) from e
-        if not version:
-            raise RuntimeError(
-                f"Publishing the index for {alias_name} returned no version"
-            )
         logger.info(f"Published the index for {alias_name} as version {version}")
-        try:
-            temporal_fields = self._publish_indexed_temporal(alias_name)
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to publish the temporal shards for {alias_name}: "
-                f"{type(e).__name__}: {e}"
-            ) from e
 
         versioned_path = self._new_snapshot_path(repo_name)
         try:
@@ -4535,63 +4510,10 @@ class RefreshScheduler:
             raise RuntimeError(
                 f"Failed to create snapshot for {alias_name}: {type(e).__name__}: {e}"
             ) from e
-        fields = published_index_fields(
-            index_store_alias(Path(source_path).name), version
-        )
-        fields.update(temporal_fields)
-        if getattr(self, "_pending_index_publications", None) is None:
-            self._pending_index_publications = {}
-        self._pending_index_publications[alias_name] = (str(versioned_path), fields)
         logger.info(
             f"Versioned snapshot of {alias_name} version {version} at: {versioned_path}"
         )
         return str(versioned_path)
-
-    def serve_temporal_shards(self, alias_name: str) -> None:
-        """Under a delegated IndexStore, make this pod hold the alias's
-        recorded temporal shards before temporal indexing builds on them
-        (``temporal_index_store.served_temporal_index_root``). Raises on a
-        store failure; no-op under the local store."""
-        store = getattr(self, "_index_store", None)
-        if store is None or store.is_local:
-            return
-        from code_indexer.server.services.temporal_index_store import (
-            served_temporal_index_root,
-        )
-
-        served_temporal_index_root(self.golden_repos_dir, alias_name, store=store)
-
-    def note_temporal_indexed(self, alias_name: str) -> None:
-        """Record that temporal shards were (re)built for ``alias_name`` in this
-        job: its snapshot publish then publishes them too."""
-        store = getattr(self, "_index_store", None)
-        if store is None or store.is_local:
-            return
-        indexed = getattr(self, "_temporal_indexed", None)
-        if indexed is None:
-            indexed = set()
-            self._temporal_indexed = indexed
-        indexed.add(alias_name)
-
-    def _publish_indexed_temporal(self, alias_name: str) -> Dict[str, str]:
-        """Publish the temporal shards built in this job (delegated store);
-        the alias-document fields, or {} when none were built (the pointer
-        keeps the version it records). Raises on failure."""
-        indexed = getattr(self, "_temporal_indexed", None) or set()
-        if alias_name not in indexed:
-            return {}
-        indexed.discard(alias_name)
-        from code_indexer.server.services.temporal_index_store import (
-            publish_temporal_root,
-        )
-
-        return publish_temporal_root(
-            self.golden_repos_dir,
-            alias_name,
-            store=self._index_store,
-            base_version=None,
-            use_current_base=True,
-        )
 
     def _new_snapshot_path(self, repo_name: str) -> Path:
         """A ``v_<unix ts>`` snapshot path for ``repo_name`` that does not exist yet."""
@@ -4905,33 +4827,6 @@ class RefreshScheduler:
             f"(published: {'yes' if published else 'none'}) -> changes={has_changes}"
         )
         return has_changes
-
-    def published_swap_extra(self, alias_name: str, new_target: str) -> Dict[str, Any]:
-        """The ``swap_alias`` keyword for swapping ``alias_name`` to a snapshot
-        this scheduler just created: the cidx-meta fingerprint (as
-        ``_published_meta_fingerprint``) plus, under a delegated IndexStore,
-        the published index version of ``new_target``. Empty under the
-        local store for any repository but a delegated cidx-meta (today's
-        swap)."""
-        extra: Dict[str, Any] = dict(
-            self._published_meta_fingerprint(alias_name).get("extra", {})
-        )
-        pending = getattr(self, "_pending_index_publications", {})
-        publication = pending.pop(alias_name, None)
-        if publication is not None:
-            published_path, fields = publication
-            if published_path != new_target:
-                raise RuntimeError(
-                    f"Refusing to swap {alias_name} to {new_target}: the index "
-                    f"published by this refresh is at {published_path}"
-                )
-            extra.update(fields)
-        elif not self._index_store.is_local:
-            raise RuntimeError(
-                f"Refusing to swap {alias_name} to {new_target}: no index was "
-                "published for it, so no other pod could serve it"
-            )
-        return {"extra": extra} if extra else {}
 
     def _published_meta_fingerprint(self, alias_name: str) -> Dict[str, Any]:
         """The ``swap_alias`` keyword publishing this refresh's cidx-meta
@@ -5955,11 +5850,14 @@ def _record_fts_build_commit(source_path: Path) -> None:
 
 def _description_generation_refusal() -> Optional[str]:
     """Why golden-repo description generation cannot run on this server, or
-    None. The queued work runs through ClaudeCliManager's CliDispatcher, so it
-    runs under a delegated content backend exactly when the configured invoker
-    provisions golden repositories itself (see lifecycle_claude_cli_invoker)."""
-    from code_indexer.global_repos.lifecycle_claude_cli_invoker import (
-        lifecycle_analysis_refusal,
+    None. Delegated: the generator reads the repository from this pod's clone
+    path, which holds index state only (see repo_analyzer)."""
+    from code_indexer.global_repos.repo_analyzer import (
+        DESCRIPTION_ANALYSIS_FEATURE,
+        DESCRIPTION_ANALYSIS_REFUSAL_REASON,
     )
+    from code_indexer.server.services.delegated_refusal import delegated_refusal
 
-    return lifecycle_analysis_refusal()
+    return delegated_refusal(
+        DESCRIPTION_ANALYSIS_FEATURE, DESCRIPTION_ANALYSIS_REFUSAL_REASON
+    )

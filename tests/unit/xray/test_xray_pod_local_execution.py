@@ -4,9 +4,10 @@ The ONE per-repository decision (server/startup/xray_backend_wiring.py), taken
 by ``RustNativeBackend`` before every scan and graph analysis:
 
 * ``xray_backend=delegated`` + a pod-local repository (``local://`` other than
-  cidx-meta: Langfuse trace folders) -> executes in this pod. The plugin's
-  sandbox cannot see files that exist only here. cidx-meta and git golden
-  repositories stay delegated.
+  cidx-meta: Langfuse trace folders) -> the candidate files are read HERE and
+  sent inline to the plugin's sandbox (``PodLocalInlineXrayBackend``); the
+  evaluator never runs in this pod. cidx-meta and git golden repositories stay
+  delegated as before.
 * ``xray_backend=local`` + ``content_backend=delegated`` -> xray-cli reads the
   candidates from this pod's disk. When none of them is here (no repository
   mount) the request is refused, loudly, before xray-cli runs; with the files
@@ -19,7 +20,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import pytest
 
@@ -56,9 +57,29 @@ _URLS = {
 class _DelegatedPlugin:
     """The parked delegated X-Ray backend: records every request."""
 
+    inline_limits = SimpleNamespace(
+        max_files=10000,
+        max_file_bytes=4 * 1024 * 1024,
+        max_total_bytes=12 * 1024 * 1024,
+    )
+
     def __init__(self) -> None:
         self.scans: List[XrayScanRequest] = []
         self.graphs: List[XrayGraphRequest] = []
+        self.inline_scans: List[Tuple[XrayScanRequest, Dict[str, bytes]]] = []
+        self.inline_graphs: List[Tuple[XrayGraphRequest, Dict[str, bytes]]] = []
+
+    def execute_scan_inline(
+        self, request: XrayScanRequest, files: Dict[str, bytes]
+    ) -> XrayScanOutcome:
+        self.inline_scans.append((request, dict(files)))
+        return XrayScanOutcome([([], [], None) for _ in request.file_specs])
+
+    def execute_graph_analysis_inline(
+        self, request: XrayGraphRequest, files: Dict[str, bytes]
+    ) -> Dict[str, Any]:
+        self.inline_graphs.append((request, dict(files)))
+        return {"error": None, "where": "inline"}
 
     def execute_scan(self, request: XrayScanRequest) -> XrayScanOutcome:
         self.scans.append(request)
@@ -165,12 +186,14 @@ def _forbid_disk_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # --------------------------------------------------------------------------
-# delegated execution: pod-local repositories run here
+# delegated execution: pod-local repositories are read here, run in the sandbox
 # --------------------------------------------------------------------------
+
+TRACE = b"def handler():\n    return 1\n"
 
 
 @pytest.mark.parametrize("run", [_scan, _graph])
-def test_pod_local_repo_executes_in_this_pod_under_delegation(
+def test_pod_local_repo_runs_in_the_sandbox_with_its_files_inline(
     golden: Path,
     monkeypatch: pytest.MonkeyPatch,
     local_exec: _LocalRecorder,
@@ -179,11 +202,16 @@ def test_pod_local_repo_executes_in_this_pod_under_delegation(
     plugin = _DelegatedPlugin()
     _park(monkeypatch, content=_DelegatedContent(), xray=plugin)
     run(RustNativeBackend(), golden / POD_LOCAL, ["trace.py"])
+    # The caller's evaluator never runs in this pod ...
+    assert local_exec.scans == [] and local_exec.graphs == []
+    # ... nor goes the mounted way (the sandbox cannot mount this repo) ...
     assert plugin.scans == [] and plugin.graphs == []
-    assert len(local_exec.scans) + len(local_exec.graphs) == 1
+    # ... it goes inline, with the bytes this pod read.
+    sent = [files for _, files in plugin.inline_scans + plugin.inline_graphs]
+    assert sent == [{"trace.py": TRACE}]
 
 
-def test_pod_local_snapshot_path_executes_in_this_pod(
+def test_pod_local_snapshot_path_is_read_from_the_snapshot(
     golden: Path, monkeypatch: pytest.MonkeyPatch, local_exec: _LocalRecorder
 ) -> None:
     snapshot = golden / ".versioned" / POD_LOCAL / "v_1700000000"
@@ -192,8 +220,10 @@ def test_pod_local_snapshot_path_executes_in_this_pod(
     plugin = _DelegatedPlugin()
     _park(monkeypatch, content=_DelegatedContent(), xray=plugin)
     _scan(RustNativeBackend(), snapshot, ["trace.py"])
-    assert plugin.scans == []
-    assert [s.repo_path for s in local_exec.scans] == [str(snapshot)]
+    assert plugin.scans == [] and local_exec.scans == []
+    [(request, files)] = plugin.inline_scans
+    assert request.repo_path == str(snapshot)
+    assert files == {"trace.py": b"x = 1\n"}
 
 
 @pytest.mark.parametrize("alias", [GIT_GOLDEN, CIDX_META])
@@ -358,11 +388,12 @@ def test_startup_is_quiet_under_local_content(
 
 
 # --------------------------------------------------------------------------
-# end to end: a pod-local repo never reaches the delegated seams
+# end to end: a pod-local repo is read here, never through the content or ripgrep seams,
+# and its evaluator runs only in the sandbox
 # --------------------------------------------------------------------------
 
 
-def test_pod_local_search_never_touches_a_delegated_seam(
+def test_pod_local_search_reads_here_and_runs_in_the_sandbox(
     golden: Path, monkeypatch: pytest.MonkeyPatch, local_exec: _LocalRecorder
 ) -> None:
     pytest.importorskip("tree_sitter_languages", reason="xray extras not installed")
@@ -381,10 +412,11 @@ def test_pod_local_search_never_touches_a_delegated_seam(
     )
 
     assert result["files_total"] == 1
-    assert plugin.scans == []
-    assert [[s["file_path"] for s in scan.file_specs] for scan in local_exec.scans] == [
-        ["trace.py"]
-    ]
+    assert plugin.scans == [] and local_exec.scans == []
+    assert [
+        ([s["file_path"] for s in scan.file_specs], files)
+        for scan, files in plugin.inline_scans
+    ] == [(["trace.py"], {"trace.py": TRACE})]
     # The content driver targets this pod's repository too, not ripgrep there.
     service = _phase1_regex_service(golden / POD_LOCAL)
     assert service._ripgrep_backend is not ripgrep

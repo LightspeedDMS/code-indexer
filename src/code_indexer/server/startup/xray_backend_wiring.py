@@ -23,9 +23,11 @@ Fail-fast policy (mirrors the git, content and ripgrep wiring):
                   surprising default.
 
 Per repository, :func:`xray_execution_backend_for` -- the ONE place that
-decides where a given request executes -- overrides that selection in two
-cases (see its docstring): a pod-local repository always executes here, and an
-in-pod execution against a repository this pod does not hold is refused.
+decides where a given request executes -- adjusts that selection in two cases
+(see its docstring): under delegation a pod-local repository's files are read
+here and sent INLINE to the delegated sandbox (the evaluator still never runs
+here), and an in-pod execution against a repository this pod does not hold is
+refused.
 """
 
 from __future__ import annotations
@@ -172,12 +174,13 @@ def xray_execution_backend_for(
 
     * delegated execution, pod-local repository (a ``local://`` repo other
       than cidx-meta, e.g. Langfuse trace folders; ``is_pod_local_golden_path``,
-      shared with the content seam and the ripgrep target) -> this pod. Its
-      files exist only here; the plugin's sandbox cannot see them. Phase 1
-      already reads such a repo locally (``content_seam_source`` and
-      ``server_regex_target`` return local for it), so the whole request stays
-      on the pod. Golden (cidx-meta, git) and activated repositories keep the
-      configured backend.
+      shared with the content seam and the ripgrep target) -> the configured
+      backend, wrapped in ``PodLocalInlineXrayBackend``: its files exist only
+      here and the plugin's sandbox cannot mount them, so this pod READS the
+      candidates (its own data; Phase 1 already reads such a repo locally) and
+      sends their bytes to the sandbox, batched under the plugin's limits. The
+      caller's evaluator never runs in this pod. Golden (cidx-meta, git) and
+      activated repositories keep the configured backend unchanged.
     * in-pod execution while the content backend is delegated -> the
       candidate files are probed on this pod's disk. If NONE of them exists,
       and the repository is not pod-local, this pod does not hold the
@@ -202,12 +205,14 @@ def xray_execution_backend_for(
 
     if configured is not None:
         if is_pod_local_golden_path(repo_path):
+            from code_indexer.xray.inline_execution import PodLocalInlineXrayBackend
+
             logger.info(
-                "X-Ray: executing in this pod for pod-local repository %s "
-                "(its files are not visible to the delegated X-Ray backend)",
+                "X-Ray: pod-local repository %s -- candidate files read here and "
+                "sent inline to the delegated sandbox",
                 repo_path,
             )
-            return None
+            return PodLocalInlineXrayBackend(configured)
         return configured
     _refuse_in_pod_execution_without_repository(repo_path, rel_paths)
     return None

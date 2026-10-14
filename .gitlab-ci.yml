@@ -308,6 +308,7 @@ smoke:
       tests/unit/services/test_reconcile_working_dir_content_id.py
       tests/unit/services/test_smart_indexer_hook_install_delegated.py
       tests/unit/xray/test_xray_pod_local_execution.py
+      tests/unit/xray/test_xray_pod_local_inline.py
       -v --tb=short
       --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
     # The plugins ship their own suites and NO job collected either of them.

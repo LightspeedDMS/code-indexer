@@ -2,8 +2,7 @@
 
 With ``content_backend: delegated`` a golden repository lives with
 workspace-mcp/git-mcp. The git reads git-mcp exposes run through the git
-backend; the rest run the local argv read-only through git-mcp ``git_exec``
-(the backend's ``run``). These tests pin, for each migrated read:
+backend; the rest refuse loudly. These tests pin, for each migrated read:
 
 * parity -- the same answer locally and through the seam (the "git-mcp" here is
   a ``LocalGitBackend`` that maps the pod's path onto a real repository, so the
@@ -11,8 +10,8 @@ backend; the rest run the local argv read-only through git-mcp ``git_exec``
 * delegated -- no local git runs (``run_git_command`` is forbidden);
 * fail-loud -- a backend failure is an error, never an empty answer.
 
-A backend that cannot run git (no ``run``) refuses before any git runs. Local
-behaviour is unchanged: the local path never consults the seam.
+And for each refusal: it raises before any git runs, through the seam or
+locally. Local behaviour is unchanged: the local path never consults the seam.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ import logging
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, List, Tuple, cast
+from typing import Any, List, Tuple
 
 import pytest
 
@@ -208,34 +207,11 @@ def test_golden_errors_match_local(
         lambda s: s.show_commit("HEAD", include_stats=False, include_diff=True),
     ],
 )
-def test_golden_history_without_a_typed_operation_runs_through_git_exec(
-    repo: Path, pod: Path, seam: MappedGit, monkeypatch, call: Any
+def test_golden_without_a_seam_operation_refuses_before_any_git(
+    pod: Path, seam: MappedGit, no_local_git: None, call: Any
 ) -> None:
-    expected = call(GoldenGitService(repo))
-    _forbid_local_git(monkeypatch)
-    actual = call(GoldenGitService(pod, git_backend=seam))
-    if hasattr(expected, "search_time_ms"):
-        expected.search_time_ms = actual.search_time_ms = 0.0
-    assert actual == expected
-    assert seam.calls and all(name == "run" for name, _ in seam.calls[-1:])
-
-
-class _TypedOnlyGit:
-    """A git backend plugin built before git_exec: typed reads, no ``run``."""
-
-    def __init__(self, seam: MappedGit) -> None:
-        self._seam = seam
-
-    def log_raw(self, *args: Any, **kwargs: Any) -> Any:
-        return self._seam.log_raw(*args, **kwargs)
-
-
-def test_golden_history_refuses_without_git_exec(
-    pod: Path, seam: MappedGit, no_local_git: None
-) -> None:
-    service = GoldenGitService(pod, git_backend=cast(Any, _TypedOnlyGit(seam)))
-    with pytest.raises(DelegatedRepositoryUnsupportedError, match="git_exec"):
-        service.get_blame("a.txt")
+    with pytest.raises(DelegatedRepositoryUnsupportedError, match="git-mcp exposes"):
+        call(GoldenGitService(pod, git_backend=seam))
     assert seam.calls == []
 
 
@@ -367,17 +343,17 @@ def test_handler_reads_through_the_seam(handlers: Any, no_local_git: None) -> No
     assert data["success"] is True and data["content"] == "one\n"
 
 
-def test_handler_blame_reads_through_the_seam(
-    handlers: Any, no_local_git: None
-) -> None:
+def test_handler_refusal_is_an_error(handlers: Any, no_local_git: None) -> None:
     user = SimpleNamespace(username="u")
     data = _payload(
         handlers.handle_git_blame(
             {"repository_alias": "repo-global", "path": "a.txt"}, user
         )
     )
-    assert data["success"] is True
-    assert [line["content"] for line in data["lines"]] == ["two – ünïcode", "line"]
+    assert data["success"] is False
+    assert (
+        "git_blame is not supported with content_backend='delegated'" in data["error"]
+    )
 
 
 # ── user git tools on golden repos ─────────────────────────────────────────
@@ -418,15 +394,13 @@ def test_user_git_reads_match_local_through_the_seam(
     assert expected[3]["untracked"] == ["new.txt"]
 
 
-def test_user_git_log_with_filters_matches_local_through_git_exec(
-    repo: Path, pod: Path, seam: MappedGit, user_service: Any, monkeypatch
+def test_user_git_log_with_filters_refuses(
+    pod: Path, seam: MappedGit, user_service: Any
 ) -> None:
-    filters = ({"since_date": "2024-01-01"}, {"author": "Ada"}, {"path": "a.txt"})
-    expected = [user_service.git_log(repo, **f) for f in filters]
-    _forbid_local_git(monkeypatch)
-    actual = [user_service.git_log(pod, git_backend=seam, **f) for f in filters]
-    assert actual == expected
-    assert {name for name, _ in seam.calls} == {"run"}
+    for filters in ({"since_date": "2024-01-01"}, {"author": "Ada"}, {"path": "a"}):
+        with pytest.raises(DelegatedRepositoryUnsupportedError):
+            user_service.git_log(pod, git_backend=seam, **filters)
+    assert seam.calls == []
 
 
 def test_user_git_backend_failure_is_an_error(

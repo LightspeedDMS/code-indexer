@@ -280,3 +280,15 @@ Tool doc: `src/code_indexer/server/mcp/tool_docs/search/xray_search_batch.md`. R
 The current MCP/REST evaluator contract runs the caller-supplied Rust source through `xray-core`/`xray-cli`'s own compile-and-execute pipeline (`fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>` for single-file mode, `fn collect_facts` + `fn analyze_graph` for graph mode). See the [xray_search tool documentation](../src/code_indexer/server/mcp/tool_docs/search/xray_search.md) for its compile step and security restrictions.
 
 The codebase also retains an internal Python AST whitelist (an allow-listed node set, a small safe-builtins list, and a matching set of banned constructs) belonging to a prior evaluator generation. That module still exists in-tree but is not on the evaluation path for `xray_search`/`xray_explore` and is not the MCP/REST contract. See [X-Ray Sandbox](xray-sandbox.md) for its class name and retained internals.
+
+## Where the evaluator executes (`xray_backend`)
+
+`RustNativeBackend` hands each scan / graph analysis to an `XrayExecutionBackend` (`xray/execution_backend.py`); `xray_execution_backend_for` (`server/startup/xray_backend_wiring.py`) decides per repository:
+
+| `xray_backend` | Repository | Executes |
+|---|---|---|
+| `local` (default) | any | this pod (`LocalXrayExecutionBackend`), unchanged -- pinned by `test_the_local_default_is_untouched_for_pod_local_repos` |
+| `delegated` | golden (git, cidx-meta), activated | the plugin (evo-sandbox `cidx-content-backend`) in sandbox-mcp's `xray` profile, repo mounted read-only |
+| `delegated` | pod-local `local://` (Langfuse traces) | `PodLocalInlineXrayBackend` (`xray/inline_execution.py`): the candidate files are read **here** and sent inline to sandbox-mcp's mountless `xray-inline` profile (plugin >= 0.10.0). The caller's evaluator never runs in the cidx pod |
+
+Inline limits come from the plugin (`inline_limits`: 10000 files, 4 MiB per file, 12 MiB per run). A scan over more is split into several sandbox runs and merged into exactly the result one run would give: per-spec results in spec order, and every occurrence of a duplicated path kept in one run. Debug lines come back as the same set but not in a fixed order, because xray-cli gathers them in rayon completion order. A graph is never split. Each of these is refused loudly as a whole-batch / graph error and nothing is sent: a graph over any limit, a file over the per-file limit, a candidate whose real path leaves the repository, an unreadable candidate, or a plugin without inline support. Every batch shares the caller's one deadline. A sandbox error in any batch is the whole answer.
