@@ -20,10 +20,14 @@ External dependency mocked:
     (HNSW I/O boundary; the only patched dependency in this file)
 """
 
+from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from code_indexer.server.services.access_filtering_service import AccessFilteringService
+from code_indexer.server.services.group_access_manager import GroupAccessManager
 from code_indexer.server.services.memory_candidate_retriever import MemoryCandidate
 
 # ---------------------------------------------------------------------------
@@ -354,6 +358,7 @@ def _invoke_search_code_with_mocks(
     config_service_mock: MagicMock,
     pipeline_cls_mock: MagicMock,
     pipeline_instance: MagicMock,
+    access_filtering_service: Optional[AccessFilteringService] = None,
 ) -> dict:
     """Invoke search_code() with all external dependencies mocked.
 
@@ -361,6 +366,9 @@ def _invoke_search_code_with_mocks(
     gets the pre-built stub.  The caller is responsible for supplying a
     config_service_mock that reflects the desired memory_retrieval_enabled
     state — this keeps the helper parameter list unambiguous.
+
+    access_filtering_service: placed on app.state. None (default) skips code
+    result filtering and hides every memory candidate (fail closed).
 
     Returns:
         The raw dict returned by search_code().
@@ -374,11 +382,9 @@ def _invoke_search_code_with_mocks(
         patch(_GOLDEN_DIR_PATCH, return_value=_FAKE_GOLDEN_DIR),
         patch(_PIPELINE_CLS_PATCH, pipeline_cls_mock),
     ):
-        # Prevent _get_access_filtering_service() from returning a truthy MagicMock
-        # (which would make filter_query_results() return a MagicMock that fails JSON
-        # serialization).  Setting the attribute to None makes getattr(..., None) return
-        # None, so access-filtering is skipped in _apply_rerank_and_filter.
-        mock_app.app.state.access_filtering_service = None
+        # Never a truthy MagicMock: filter_query_results() would return a
+        # MagicMock that fails JSON serialization.
+        mock_app.app.state.access_filtering_service = access_filtering_service
         # Prevent _apply_payload_truncation from using the payload cache (which is a
         # MagicMock by default, causing truncate_result() to inject MagicMock values
         # for 'preview'/'cache_handle'/'total_size' into result dicts).  Setting to None
@@ -416,7 +422,7 @@ class TestHandlerMemoryRetrieval:
     """
 
     def test_semantic_query_instantiates_pipeline_and_verifies_full_stage_data_flow(
-        self,
+        self, tmp_path: Path
     ):
         """Scenario A: full pipeline data-flow for a semantic query.
 
@@ -425,6 +431,7 @@ class TestHandlerMemoryRetrieval:
         2. get_memory_candidates called with exact kwargs; returns raw_candidates sentinel
         3. apply_voyage_floor called with raw_candidates; returns filtered_candidates sentinel
         4. build_relevant_memories called with filtered_candidates (not raw) + exact other kwargs
+           (the caller is an admin, so the visibility check keeps every candidate)
         5. relevant_memories attached to query_metadata
         """
         from unittest.mock import ANY
@@ -446,11 +453,15 @@ class TestHandlerMemoryRetrieval:
         # Two distinct sentinels prove inter-stage data handoff:
         # raw_candidates: output of get_memory_candidates (pre-floor)
         # filtered_candidates: output of apply_voyage_floor (post-floor)
-        raw_candidates = [object()]
-        filtered_candidates = [object()]
-        assert raw_candidates is not filtered_candidates, (
-            "sentinels must be distinct objects"
-        )
+        raw_candidates = [_make_candidate("0" * 32, 0.9)]
+        filtered_candidates = [_make_candidate("f" * 32, 0.8)]
+        assert raw_candidates != filtered_candidates, "sentinels must be distinct"
+
+        group_manager = GroupAccessManager(tmp_path / "groups.db")
+        admins = group_manager.get_group_by_name("admins")
+        assert admins is not None
+        group_manager.assign_user_to_group(_EXPECTED_USERNAME, admins.id, "admin")
+        access_service = AccessFilteringService(group_manager)
 
         pipeline_instance = MagicMock()
         pipeline_instance.get_memory_candidates.return_value = raw_candidates
@@ -469,6 +480,7 @@ class TestHandlerMemoryRetrieval:
             config_service_mock=cfg_svc,
             pipeline_cls_mock=pipeline_cls,
             pipeline_instance=pipeline_instance,
+            access_filtering_service=access_service,
         )
 
         # 1. Constructor: exact config equality + exact store_base_path

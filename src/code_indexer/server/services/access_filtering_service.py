@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Dict,
     List,
     NamedTuple,
@@ -34,7 +35,12 @@ from typing import (
 
 from .constants import CIDX_META_REPO, DEFAULT_GROUP_ADMINS
 from .group_access_manager import GroupAccessManager
-from .memory_io import MemoryFileCorruptError, MemoryFileNotFoundError, read_memory_file
+from .memory_io import (
+    MemoryFileCorruptError,
+    MemoryFileNotFoundError,
+    read_memory_file,
+    read_memory_frontmatter,
+)
 from ..models.api_models import MAX_CANDIDATE_LIMIT
 
 if TYPE_CHECKING:
@@ -535,11 +541,96 @@ class AccessFilteringService:
                     result.append(filename)
         return result
 
-    def _is_memory_file_accessible(self, filename: str, accessible: Set[str]) -> bool:
+    def filter_visible_memory_ids(
+        self, memory_ids: List[str], user_id: str
+    ) -> List[str]:
+        """Return the memory ids the user may see, in their input order.
+
+        Applies the same memory rule as filter_cidx_meta_files(): admins see
+        every memory; otherwise scope=global is visible, scope=repo/file only
+        when referenced_repo is granted, and anything else is excluded. An id
+        that is not a memory identifier is excluded for every caller (fail
+        closed). Each candidate's scope is read fresh from its frontmatter
+        (never a cache, never the body). Grants are resolved once per call.
+
+        Args:
+            memory_ids: Candidate memory identifiers ({uuid4().hex}).
+            user_id: The user's unique identifier.
+
+        Returns:
+            The subset of memory_ids visible to the user.
+        """
+        valid_ids = [
+            memory_id
+            for memory_id in memory_ids
+            if isinstance(memory_id, str) and _MEMORY_FILE_RE.match(f"{memory_id}.md")
+        ]
+        if not valid_ids:
+            return []
+
+        if self.is_admin_user(user_id):
+            return valid_ids
+
+        accessible = self.get_accessible_repos(user_id)
+        return [
+            memory_id
+            for memory_id in valid_ids
+            if self._is_memory_file_accessible(
+                f"{memory_id}.md",
+                accessible,
+                lookup=self._read_memory_frontmatter_fresh,
+            )
+        ]
+
+    def _read_memory_frontmatter_fresh(
+        self, memory_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Frontmatter read from disk now (bounded, body unread); None hides.
+
+        read_memory_frontmatter always returns a dict or raises; this returns
+        None when memories_dir is unset, the file is missing or unreadable,
+        the frontmatter is malformed or oversized, or referenced_repo is not
+        a string.
+        """
+        if self._memories_dir is None:
+            logger.debug(
+                "_read_memory_frontmatter_fresh: no memories_dir for %r — excluding",
+                memory_id,
+            )
+            return None
+        try:
+            frontmatter = read_memory_frontmatter(
+                self._memories_dir / f"{memory_id}.md"
+            )
+        except (MemoryFileNotFoundError, MemoryFileCorruptError) as exc:
+            logger.debug(
+                "_read_memory_frontmatter_fresh: %r unreadable — excluding: %s",
+                memory_id,
+                exc,
+            )
+            return None
+        except OSError as exc:
+            logger.warning(
+                "_read_memory_frontmatter_fresh: I/O error reading %r — excluding: %s",
+                memory_id,
+                exc,
+            )
+            return None
+        referenced_repo = frontmatter.get("referenced_repo")
+        if referenced_repo is not None and not isinstance(referenced_repo, str):
+            return None
+        return frontmatter
+
+    def _is_memory_file_accessible(
+        self,
+        filename: str,
+        accessible: Set[str],
+        lookup: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
+    ) -> bool:
         """Determine whether a UUID-stemmed memory file is accessible to the user.
 
-        Looks up the file's frontmatter via the metadata cache (or disk when
-        cache is absent). Applies scope rules:
+        Looks up the file's frontmatter via ``lookup`` (default: the metadata
+        cache, or disk when cache is absent). Applies scope rules:
           - scope=global: always accessible.
           - scope=repo or scope=file: accessible only if referenced_repo
             (with -global suffix stripped) is in the accessible set.
@@ -551,12 +642,14 @@ class AccessFilteringService:
         Args:
             filename: Basename of the memory file (e.g. ``{uuid}.md``).
             accessible: Set of repo aliases the user can access.
+            lookup: Metadata source by memory id; None means
+                _lookup_memory_metadata.
 
         Returns:
             True if the file should be visible to the user.
         """
         memory_id = filename[: -len(".md")]
-        metadata = self._lookup_memory_metadata(memory_id)
+        metadata = (lookup or self._lookup_memory_metadata)(memory_id)
         if metadata is None:
             logger.debug(
                 "filter_cidx_meta_files: metadata unavailable for memory %r — excluding",
