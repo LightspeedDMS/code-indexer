@@ -22,6 +22,9 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, TYPE_CHECKING
 
 from code_indexer.global_repos.write_mode_markers import WriteModeMarkers
+from code_indexer.server.startup.content_backend_wiring import (
+    is_content_seam_delegated,
+)
 from code_indexer.utils.blob_hash import git_blob_hash_bytes
 from code_indexer.utils.file_locking import nfs_safe_fsync
 from code_indexer.utils.path_confinement import (
@@ -286,6 +289,12 @@ class FileCRUDService:
             username=username, user_alias=repo_alias
         )
         repo_path = Path(repo_path_str)
+
+        # Content seam: the copy is on workspace-mcp, not this pod. The
+        # registry gate above is the check; the reader/writer then fail loudly
+        # on a copy missing there (never an empty repository).
+        if is_content_seam_delegated():
+            return repo_path
 
         # Bug #394/#395: Validate the activated repo path actually exists on disk.
         # get_activated_repo_path() always constructs a path string without checking
@@ -590,11 +599,13 @@ class FileCRUDService:
     def _golden_write_target(
         self, repo_alias: str, repo_path: Path
     ) -> Optional["GoldenRepoWriteTarget"]:
-        """Where a write-exception (golden) repo is written when it is not on
-        this pod, or None to write the local disk -- always None for an
-        activated repo and under the local content backend."""
-        if not self.is_write_exception(repo_alias):
-            return None
+        """Where a repo is written when it is not on this pod, or None to write
+        the local disk -- always None under the local content backend.
+
+        Both kinds of repo this service writes go through the content writer
+        under a delegated backend: a write-exception (golden) repo, and a
+        user's activated copy, which lives on workspace-mcp at its path.
+        """
         from code_indexer.server.services.golden_repo_writer import (
             golden_repo_write_target,
         )

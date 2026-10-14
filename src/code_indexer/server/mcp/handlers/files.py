@@ -144,7 +144,14 @@ def _start_auto_watch_if_needed(
     """
     from code_indexer.server.services.file_crud_service import file_crud_service
     from code_indexer.server.services.auto_watch_manager import auto_watch_manager
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
 
+    if is_content_seam_delegated():
+        # The repository is on workspace-mcp; there is nothing on this pod to
+        # watch (AutoWatchManager refuses too) -- and no pod path to probe.
+        return
     try:
         if file_crud_service.is_write_exception(repository_alias):
             repo_path = str(

@@ -462,6 +462,9 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response(memory_pressure_mcp_payload(_admission))
 
     from code_indexer.server.services.search_error_formatter import SearchErrorFormatter
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
 
     repository_alias, err = _validate_regex_args(args)
     if err is not None:
@@ -533,7 +536,14 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             and _arm is not None
         ):
             resolved = _arm.get_activated_repo_path(user.username, repository_alias)
-            if resolved and not Path(resolved).exists():
+            # Content seam: the copy is on workspace-mcp, which the regex
+            # backend searches at this path (a missing copy fails there,
+            # loudly); this pod has nothing to stat.
+            if (
+                resolved
+                and not is_content_seam_delegated()
+                and not Path(resolved).exists()
+            ):
                 resolved = None
         else:
             golden_repos_dir = _get_golden_repos_dir()
