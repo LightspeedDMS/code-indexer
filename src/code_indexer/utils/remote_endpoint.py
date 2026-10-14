@@ -29,7 +29,14 @@ class RemoteServiceEndpoint(Protocol):
     deployment has not filled it in; a backend that requires delegation is
     expected to reject an empty ``endpoint`` with a clear error rather than
     attempt a call against "".
+
+    Read-only properties, not plain attributes: a backend only reads them, and
+    a mutable Protocol attribute is invariant, so a config dataclass declaring
+    ``endpoint: str`` (never None) would not satisfy ``Optional[str]``.
     """
 
-    endpoint: Optional[str]
-    api_key: Optional[str]
+    @property
+    def endpoint(self) -> Optional[str]: ...
+
+    @property
+    def api_key(self) -> Optional[str]: ...

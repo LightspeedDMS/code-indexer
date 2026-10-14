@@ -14,6 +14,7 @@ from __future__ import annotations
 from code_indexer.utils.remote_endpoint import RemoteServiceEndpoint
 
 import errno
+from dataclasses import dataclass
 import logging
 import os
 import re
@@ -93,6 +94,14 @@ class CloneDestinationExistsError(FileExistsError):
     that was never touched by this clone attempt, not a partial/failed
     clone of THIS attempt's own making, so it must never be deleted.
     """
+
+
+@dataclass(frozen=True)
+class WorkingCopyStat:
+    """What workspace-mcp reports for an activated working-copy path."""
+
+    exists: bool
+    is_dir: bool
 
 
 def _reject_existing_directory_destination(dest_path: str, backend_name: str) -> None:
@@ -915,11 +924,13 @@ class DelegatedCloneBackend:
         versioned_base: str = "",
         visibility_waiter: Optional[Callable[[str], None]] = None,
     ) -> None:
-        self._endpoint = config.endpoint.rstrip("/")
+        self._endpoint = (config.endpoint or "").rstrip("/")
         self._api_key = config.api_key
-        self._mount_point = (config.mount_point or "").rstrip("/")
-        self._timeout = config.timeout_seconds
-        self._poll_interval = config.poll_interval_seconds
+        # The endpoint Protocol carries only endpoint/api_key; the rest is
+        # WorkspaceMcpConfig's, read with its defaults when absent.
+        self._mount_point = (getattr(config, "mount_point", "") or "").rstrip("/")
+        self._timeout: Optional[int] = getattr(config, "timeout_seconds", None)
+        self._poll_interval = getattr(config, "poll_interval_seconds", None)
         # Snapshot-registry / delete operations run against the shared mount and
         # do NOT copy a working tree — compose LocalCloneBackend rather than
         # duplicate its logic (and keep create_clone_at_path the only delegated,
@@ -980,41 +991,111 @@ class DelegatedCloneBackend:
         error raises — NO silent local fallback (EVO-64615). poll_interval is
         accepted for CloneBackend Protocol symmetry and unused here.
         """
+        self._request_clone(
+            source_path,
+            dest_path,
+            preserve_attrs=preserve_attrs,
+            timeout=timeout,
+            cancel_check=cancel_check,
+        )
+        # dest is on the shared volume; wait until visible on this pod before
+        # returning so downstream subprocess.run(cwd=dest) does not ENOENT.
+        self._visibility_waiter(dest_path)
+        return dest_path
+
+    # -- working copies on a pod WITHOUT the repository volume ---------------
+    #
+    # Under ``content_backend='delegated'`` an activated repository's working
+    # copy exists only on workspace-mcp's storage, at the same absolute path.
+    # These three calls are the whole lifecycle cidx needs: create (never over
+    # an existing copy), ask whether one exists, remove one. None of them looks
+    # at this pod's disk -- there is nothing to wait to become visible.
+
+    def clone_working_copy(
+        self,
+        source_path: str,
+        dest_path: str,
+        timeout: Optional[int] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> str:
+        """Create the activated working copy at *dest_path*; returns it.
+
+        ``if_absent``: an existing destination is refused by workspace-mcp
+        (409) and raised as :class:`CloneDestinationExistsError`, so a second
+        activation can never replace a user's copy. No visibility wait: this
+        pod does not hold the volume.
+        """
+        self._request_clone(
+            source_path,
+            dest_path,
+            preserve_attrs=True,
+            timeout=timeout,
+            cancel_check=cancel_check,
+            if_absent=True,
+        )
+        return dest_path
+
+    def stat_working_copy(self, path: str) -> WorkingCopyStat:
+        """Whether *path* exists on workspace-mcp's storage, and is a directory."""
+        body = self._post_json("/clone-path/stat", {"path": path}, self._timeout)
+        exists = body.get("exists")
+        is_dir = body.get("is_dir")
+        if not isinstance(exists, bool) or not isinstance(is_dir, bool):
+            raise RuntimeError(
+                "DelegatedCloneBackend: workspace-mcp clone-path/stat returned "
+                f"no exists/is_dir booleans (keys {sorted(body)})"
+            )
+        return WorkingCopyStat(exists=exists, is_dir=is_dir)
+
+    def delete_working_copy(self, path: str, timeout: Optional[int] = None) -> bool:
+        """Remove the working copy at *path*; False when it was already absent."""
+        effective_timeout = timeout if timeout is not None else self._timeout
+        body = self._post_json("/clone-path/delete", {"path": path}, effective_timeout)
+        deleted = body.get("deleted")
+        if not isinstance(deleted, bool):
+            raise RuntimeError(
+                "DelegatedCloneBackend: workspace-mcp clone-path/delete returned "
+                f"no deleted boolean (keys {sorted(body)})"
+            )
+        return deleted
+
+    def _request_clone(
+        self,
+        source_path: str,
+        dest_path: str,
+        *,
+        preserve_attrs: bool,
+        timeout: Optional[int],
+        cancel_check: Optional[Callable[[], bool]],
+        if_absent: bool = False,
+    ) -> None:
+        """POST the clone; cancel_check is honored before and after it."""
         if cancel_check is not None and cancel_check():
             raise SubprocessCancelledError(
                 "activated-repo clone cancelled before workspace-mcp request"
             )
-        requests = self._requests()
-        body = {
+        body: dict = {
             "source_path": source_path,
             "dest_path": dest_path,
             "preserve_attrs": preserve_attrs,
         }
+        if if_absent:
+            body["if_absent"] = True
         effective_timeout = timeout if timeout is not None else self._timeout
         logger.info(
             "DelegatedCloneBackend: requesting workspace-mcp clone at '%s' from '%s'",
             dest_path,
             source_path,
         )
-        try:
-            response = requests.post(
-                f"{self._endpoint}/clone-path",
-                json=body,
-                headers=self._headers(),
-                timeout=effective_timeout,
+        response = self._post("/clone-path", body, effective_timeout, "clone")
+        if if_absent and response.status_code == 409:
+            raise CloneDestinationExistsError(
+                f"DelegatedCloneBackend: destination '{dest_path}' already exists "
+                "on workspace-mcp -- refusing to clone over it"
             )
-        except requests.RequestException as exc:
-            raise RuntimeError(
-                f"DelegatedCloneBackend: workspace-mcp clone request to "
-                f"'{self._endpoint}/clone-path' failed: {exc}"
-            ) from exc
-        if response.status_code >= 300:
-            raise RuntimeError(
-                f"DelegatedCloneBackend: workspace-mcp clone failed "
-                f"(HTTP {response.status_code}): {response.text[:300]}"
-            )
+        self._raise_for_status(response, "clone")
         # The remote clone completed; honor a cancellation that arrived while we
-        # waited. The caller rmtrees dest_path on this exception.
+        # waited. The caller removes dest_path on this exception.
         if cancel_check is not None and cancel_check():
             raise SubprocessCancelledError(
                 "activated-repo clone cancelled during workspace-mcp request"
@@ -1029,10 +1110,50 @@ class DelegatedCloneBackend:
             method,
             dest_path,
         )
-        # dest is on the shared volume; wait until visible on this pod before
-        # returning so downstream subprocess.run(cwd=dest) does not ENOENT.
-        self._visibility_waiter(dest_path)
-        return dest_path
+
+    def _post(
+        self, route: str, body: dict, timeout: Optional[int], what: str
+    ) -> "Response":
+        """POST *body* to *route*; a transport failure raises (no fallback)."""
+        requests = self._requests()
+        try:
+            response: "Response" = requests.post(
+                f"{self._endpoint}{route}",
+                json=body,
+                headers=self._headers(),
+                timeout=timeout,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"DelegatedCloneBackend: workspace-mcp {what} request to "
+                f"'{self._endpoint}{route}' failed: {exc}"
+            ) from exc
+        return response
+
+    @staticmethod
+    def _raise_for_status(response: "Response", what: str) -> None:
+        if response.status_code >= 300:
+            raise RuntimeError(
+                f"DelegatedCloneBackend: workspace-mcp {what} failed "
+                f"(HTTP {response.status_code}): {response.text[:300]}"
+            )
+
+    def _post_json(self, route: str, body: dict, timeout: Optional[int]) -> dict:
+        """POST and return the JSON object answer; anything else raises."""
+        response = self._post(route, body, timeout, route)
+        self._raise_for_status(response, route)
+        try:
+            answer = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"DelegatedCloneBackend: workspace-mcp {route} returned non-JSON"
+            ) from exc
+        if not isinstance(answer, dict):
+            raise RuntimeError(
+                f"DelegatedCloneBackend: workspace-mcp {route} returned "
+                f"{type(answer).__name__}, not an object"
+            )
+        return answer
 
     def delete_clone(self, clone_path: str) -> bool:
         """Remove the clone directory tree on the shared mount (no cidx copy)."""
