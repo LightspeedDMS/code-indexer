@@ -221,8 +221,9 @@ def _checkout(
 def _prune_superseded(target: Path, document: Optional[Mapping[str, Any]]) -> None:
     """Schedule removal of this pod's checked-out snapshots of the same
     repository that the alias no longer names (``_schedule_removal``). Only
-    ``.versioned/<ns>/v_<ts>`` siblings carrying ``CHECKED_OUT_MARKER`` qualify; a failure is logged, never raised (the
-    read already succeeded and the startup snapshot sweep is the backstop)."""
+    ``.versioned/<ns>/v_<ts>`` siblings carrying ``CHECKED_OUT_MARKER`` qualify;
+    a failure is logged, never raised (the read already succeeded and the
+    startup snapshot sweep is the backstop)."""
     if not _SNAPSHOT_NAME_RE.match(target.name):
         return
     if target.parent.parent.name != _VERSIONED_DIRNAME:
