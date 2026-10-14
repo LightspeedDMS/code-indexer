@@ -664,12 +664,14 @@ def test_scip_reconcile_with_local_content_scans_the_directory(tmp_path: Path) -
 
 
 def test_backfill_engine_takes_entries_as_given(tmp_path: Path) -> None:
-    """Given entries, the engine neither lists its root nor drops a missing dir."""
+    """Given entries, the engine neither lists its root nor drops a missing dir,
+    and enqueues under the alias it was given -- not the path's last component."""
     from code_indexer.server.services.golden_index_backfill import (
         GoldenIndexBackfillReconciler,
     )
 
     seen: List[str] = []
+    enqueued: List[Tuple[str, str]] = []
 
     class _Policy:
         name = "t"
@@ -677,20 +679,234 @@ def test_backfill_engine_takes_entries_as_given(tmp_path: Path) -> None:
 
         def is_present(self, repo_path: Path) -> bool:
             seen.append(repo_path.name)
-            return True
+            return repo_path.name == ".a"
 
         def is_fresh(self, repo_path: Path) -> bool:
             return True
+
+        def eligibility(self, repo_path: Path) -> Any:
+            return {}
+
+        def enqueue(self, alias: str, repo_path: Path, meta: Any) -> None:
+            enqueued.append((alias, repo_path.name))
 
     root = tmp_path / "missing-root"
     counts = GoldenIndexBackfillReconciler(root).run_cycle(
         _Policy(),  # type: ignore[arg-type]
         max_enqueue=5,
         cooldown_seconds=0,
-        entries=[tmp_path / "b-not-on-disk", tmp_path / ".a"],
+        entries=[("svc", tmp_path / "v_7"), ("dot", tmp_path / ".a")],
     )
-    assert seen == ["b-not-on-disk", ".a"]
-    assert counts.scanned == 2 and counts.present == 2
+    assert seen == ["v_7", ".a"]
+    assert enqueued == [("svc", "v_7")]
+    assert counts.scanned == 2 and counts.present == 1 and counts.enqueued == 1
+
+
+def test_scip_reconcile_uses_registry_aliases_for_versioned_and_in_place_paths(
+    seams: Any,
+    pod: Path,
+    remote: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clone path need not end in its alias: the registry's alias is enqueued."""
+    from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+
+    backend, _ = seams
+    golden = pod.parent
+    versioned = golden / ".versioned" / "svc" / "v_42"
+    in_place = tmp_path / "srv" / "checkout"
+    backend.roots = {versioned: remote, in_place: remote}
+    monkeypatch.setattr(
+        content_backend_wiring, "golden_repo_content_root", lambda p, consumer: Path(p)
+    )
+    m = GoldenRepoManager(data_dir=str(tmp_path / "data"))
+    m.golden_repos_dir = str(golden)
+    m._content_backend = backend  # type: ignore[assignment]
+    registry = [
+        {"alias": "svc", "repo_url": "https://x/svc.git", "clone_path": str(versioned)},
+        {
+            "alias": "inplace",
+            "repo_url": "file:///srv/checkout",
+            "clone_path": str(in_place),
+        },
+    ]
+    monkeypatch.setattr(m, "list_golden_repos", lambda: registry)
+    calls = _reconcile_env(monkeypatch)
+
+    counts = m.reconcile_scip_from_filesystem(max_enqueue=10)
+
+    assert calls == [("inplace", str(in_place)), ("svc", str(versioned))]
+    assert counts["errors"] == 0
+
+
+# ── fetch errors: absence is an answer, a failed read is not ─────────────────
+
+
+class _ErrorBackend(_SeamBackend):
+    """Fetch answers ``errors[path]`` for the named paths, the real file otherwise."""
+
+    def __init__(self, pod: Path, remote: Path, errors: dict) -> None:
+        super().__init__(pod, remote)
+        self.errors = dict(errors)
+
+    def fetch(self, repo_path: Any, paths: Sequence[str]) -> Iterator[FetchedFile]:
+        self.fetch_calls.append(list(paths))
+        real = {f.path: f for f in self._local.fetch(self._where(repo_path), paths)}
+        for rel in paths:
+            if rel in self.errors:
+                yield FetchedFile(
+                    path=rel, blob_sha=None, data=b"", error=self.errors[rel]
+                )
+            else:
+                yield real[rel]
+
+
+def _seam(monkeypatch: pytest.MonkeyPatch, backend: Any) -> _GitMcp:
+    git = _GitMcp()
+    monkeypatch.setattr(
+        content_backend_wiring, "server_content_backend", lambda: backend
+    )
+    monkeypatch.setattr(git_backend_wiring, "server_delegated_git_backend", lambda: git)
+    scip_repo_reads.reset_cache()
+    return git
+
+
+def test_root_entry_there_but_not_served_is_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EFBIG/EISDIR: the file is there, as Path.exists() would say."""
+    remote = tmp_path / "r" / "svc"
+    pod = tmp_path / "p" / "svc"
+    _write(remote, "README.md")
+    pod.mkdir(parents=True)
+    errors = {n: "ENOENT" for n in scip_repo_reads.ROOT_PROBE_NAMES}
+    errors["pom.xml"] = "EFBIG"
+    _seam(monkeypatch, _ErrorBackend(pod, remote, errors))
+    assert repo_has_root_build_file(pod) is True
+
+
+@pytest.mark.parametrize("error", ["EIO", "ETIMEDOUT", "unreadable"])
+def test_root_probe_failure_raises_and_caches_nothing(
+    pod: Path, remote: Path, monkeypatch: pytest.MonkeyPatch, error: str
+) -> None:
+    backend = _ErrorBackend(pod, remote, {"settings.gradle": error})
+    _seam(monkeypatch, backend)
+    with pytest.raises(ScipRepoReadError, match=error):
+        repo_has_root_build_file(pod)
+    assert scip_repo_reads._root_cache == {}
+    backend.errors.clear()  # the blip passes: the next check asks again
+    assert repo_has_root_build_file(pod) is True
+    assert len(backend.fetch_calls) == 2
+
+
+@pytest.mark.parametrize("error", ["ENOENT", "EACCES", "ENOTDIR", os.strerror(2)])
+def test_not_found_errors_mean_absent_and_are_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: str
+) -> None:
+    remote = tmp_path / "r" / "svc"
+    pod = tmp_path / "p" / "svc"
+    _write(remote, "README.md")
+    pod.mkdir(parents=True)
+    names = scip_repo_reads.ROOT_PROBE_NAMES
+    backend = _ErrorBackend(pod, remote, {n: error for n in names})
+    _seam(monkeypatch, backend)
+    assert repo_has_root_build_file(pod) is False
+    assert len(scip_repo_reads._root_cache) == 1
+    assert repo_has_root_build_file(pod) is False
+    assert len(backend.fetch_calls) == 1
+
+
+def test_probe_with_a_missing_record_raises(pod: Path, remote: Path) -> None:
+    class _Short(_SeamBackend):
+        def fetch(self, repo_path: Any, paths: Sequence[str]) -> Iterator[FetchedFile]:
+            yield FetchedFile(path=paths[0], blob_sha=None, data=b"", error="ENOENT")
+
+    source = ContentBuildFileSource(_Short(pod, remote), pod, pod)
+    with pytest.raises(ScipRepoReadError, match="no record"):
+        source.exists(pod / "pom.xml")
+
+
+@pytest.mark.parametrize(
+    "error,expect",
+    [
+        ("EIO", "raise"),
+        ("ETIMEDOUT", "raise"),
+        ("EFBIG", "raise"),
+        ("ENOENT", None),
+        ("EACCES", None),
+        ("EISDIR", None),
+        (os.strerror(21), None),
+    ],
+)
+def test_read_text_errors(pod: Path, remote: Path, error: str, expect: Any) -> None:
+    rel = "services/pom.xml"
+    source = ContentBuildFileSource(_ErrorBackend(pod, remote, {rel: error}), pod, pod)
+    if expect == "raise":
+        with pytest.raises(ScipRepoReadError, match=error):
+            source.read_text(pod / rel)
+        with pytest.raises(ScipRepoReadError):
+            ProjectDiscovery(pod, source).discover()
+    else:
+        assert source.read_text(pod / rel) is None
+
+
+def test_read_text_with_no_record_raises(pod: Path, remote: Path) -> None:
+    class _Empty(_SeamBackend):
+        def fetch(self, repo_path: Any, paths: Sequence[str]) -> Iterator[FetchedFile]:
+            return iter(())
+
+    with pytest.raises(ScipRepoReadError, match="no record"):
+        ContentBuildFileSource(_Empty(pod, remote), pod, pod).read_text(pod / "pom.xml")
+
+
+# ── HEAD is asked once per repo per cycle, not once per check ────────────────
+
+
+def test_freshness_asks_head_once(seams: Any, pod: Path) -> None:
+    _, git = seams
+    scip_dir = pod / ".code-indexer" / "scip"
+    record_scip_build_commit(scip_dir, COMMIT)
+    (scip_dir / "index.scip.db").write_bytes(b"db")
+    assert scip_db_is_fresh(pod, scip_dir) is True
+    assert len(git.calls) == 1  # the root-shape check reused it
+
+
+def test_head_memo_scopes_one_head_per_repo(seams: Any, pod: Path) -> None:
+    from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+
+    _, git = seams
+    scip_dir = pod / ".code-indexer" / "scip"
+    record_scip_build_commit(scip_dir, COMMIT)
+    (scip_dir / "index.scip.db").write_bytes(b"db")
+    with scip_repo_reads.head_memo():
+        assert GoldenRepoManager._has_root_build_file(pod) is True
+        assert scip_db_is_fresh(pod, scip_dir) is True
+        assert GoldenRepoManager._has_root_build_file(pod) is True
+    assert len(git.calls) == 1
+    git.commit = "d" * 40  # outside the block HEAD is asked again, and seen
+    assert scip_db_is_fresh(pod, scip_dir) is False
+    assert len(git.calls) == 2
+
+
+def test_reconcile_cycle_asks_head_once_per_repo(
+    seams: Any, pod: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+
+    _, git = seams
+    scip_dir = pod / ".code-indexer" / "scip"
+    record_scip_build_commit(scip_dir, COMMIT)
+    (scip_dir / "index.scip.db").write_bytes(b"db")
+    m = GoldenRepoManager(data_dir=str(tmp_path / "data"))
+    m.golden_repos_dir = str(pod.parent)
+    m._content_backend = seams[0]  # type: ignore[assignment]
+    registry = [{"alias": "svc", "repo_url": "https://x", "clone_path": str(pod)}]
+    monkeypatch.setattr(m, "list_golden_repos", lambda: registry)
+    _reconcile_env(monkeypatch)
+    counts = m.reconcile_scip_from_filesystem()
+    assert counts["scip_present"] == 1
+    assert len(git.calls) == 1
 
 
 def _forbid_repo_reads_under(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:

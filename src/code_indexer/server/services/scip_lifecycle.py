@@ -151,7 +151,7 @@ def scip_db_is_fresh(repo_root: Path, scip_dir: Path) -> bool:
     # funnel answers FRESH off the old partial build and skips the rebuild that the
     # reconcile's (now shape-aware) _scip_present correctly enqueues, silently no-op'ing it.
     # Mirror that shape-awareness here so both gates agree on when a top-level DB is required.
-    if repo_has_root_build_file(repo_root):
+    if repo_has_root_build_file(repo_root, head=commit):
         return (scip_dir / "index.scip.db").is_file()
     # bool() guards warn_return_any: _scip_db_exists returns a plain bool.
     return bool(_scip_db_exists(scip_dir))

@@ -28,11 +28,25 @@ exception into a logged skip; what must never happen is the old silent answer.
 
 from __future__ import annotations
 
+import errno
 import logging
+import os
 import threading
 from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+)
 
 from code_indexer.indexing.repo_manifest import accepts_prune_dirs
 from code_indexer.scip.discovery import (
@@ -43,8 +57,10 @@ from code_indexer.scip.discovery import (
     has_root_build_file,
 )
 from code_indexer.server.storage.shared.content_backend import (
+    NOT_FOUND_FETCH_ERRORS,
     UNREADABLE_FETCH_ERRORS,
     ContentBackend,
+    FetchedFile,
 )
 
 logger = logging.getLogger(__name__)
@@ -125,6 +141,9 @@ def _delegated_head_commit(repo_root: Union[str, Path]) -> str:
             f"{repo_root}. Configure git_backend=delegated (git-mcp)."
         )
     target = _content_root(repo_root)
+    memo = _head_memo.get()
+    if memo is not None and str(target) in memo:
+        return memo[str(target)]
     try:
         commit = str(git.rev_parse(str(target), "HEAD")).strip()
     except Exception as exc:  # the backend's transport, whatever it is
@@ -133,7 +152,30 @@ def _delegated_head_commit(repo_root: Union[str, Path]) -> str:
         ) from exc
     if not commit:
         raise ScipRepoReadError(f"git backend returned no HEAD commit for {target}")
+    if memo is not None:
+        memo[str(target)] = commit
     return commit
+
+
+#: Within ``head_memo()``: content root -> HEAD already resolved in this scope.
+_head_memo: ContextVar[Optional[Dict[str, str]]] = ContextVar(
+    "scip_repo_reads_head_memo", default=None
+)
+
+
+@contextmanager
+def head_memo() -> Iterator[None]:
+    """Resolve each repository's HEAD at most once inside this block.
+
+    For a sweep: presence and freshness of one repo both ask HEAD, a few
+    statements apart. Scoped to the block (one cycle), so a HEAD that moves is
+    seen by the next cycle; outside a block every call asks git-mcp.
+    """
+    token = _head_memo.set({})
+    try:
+        yield
+    finally:
+        _head_memo.reset(token)
 
 
 # ── root build file ──────────────────────────────────────────────────────────
@@ -142,16 +184,21 @@ _root_cache: "OrderedDict[Tuple[str, str], bool]" = OrderedDict()
 _root_cache_lock = threading.Lock()
 
 
-def repo_has_root_build_file(repo_root: Union[str, Path]) -> bool:
+def repo_has_root_build_file(
+    repo_root: Union[str, Path], *, head: Optional[str] = None
+) -> bool:
     """``discovery.has_root_build_file`` asked of wherever the repository is.
 
     Delegated answers are cached per (repository, HEAD): the build files at one
     commit never change, and the backfill sweep asks every repo every cycle.
+    ``head`` is HEAD when the caller already resolved it (freshness does), so
+    it is not asked again. Only answers built from real files and definite
+    absences are cached; a failed read raises and caches nothing.
     """
     backend = delegated_content_backend()
     if backend is None:
         return has_root_build_file(Path(repo_root))
-    commit = _delegated_head_commit(repo_root)
+    commit = head or _delegated_head_commit(repo_root)
     key = (str(_content_root(repo_root)), commit)
     with _root_cache_lock:
         if key in _root_cache:
@@ -170,6 +217,10 @@ def reset_cache() -> None:
     """Forget cached root build-file answers. For tests."""
     with _root_cache_lock:
         _root_cache.clear()
+
+
+def _is_directory(fetched: FetchedFile) -> bool:
+    return fetched.error in ("EISDIR", os.strerror(errno.EISDIR))
 
 
 # ── the content-seam source ──────────────────────────────────────────────────
@@ -224,10 +275,16 @@ class ContentBuildFileSource:
         if rel is None:
             return None
         for fetched in self._backend.fetch(self._content_root, [rel]):
-            if fetched.error is not None:
+            if fetched.error is None:
+                return fetched.data.decode("utf-8", errors="ignore")
+            # What the local read answers None for (OSError on a missing file
+            # or a directory); anything else is a failed read, not an answer.
+            if fetched.error in NOT_FOUND_FETCH_ERRORS or _is_directory(fetched):
                 return None
-            return fetched.data.decode("utf-8", errors="ignore")
-        return None
+            raise self._read_failure(fetched)
+        raise ScipRepoReadError(
+            f"content backend returned no record for {rel!r} in {self._content_root}"
+        )
 
     # -- internals ----------------------------------------------------------
 
@@ -271,14 +328,29 @@ class ContentBuildFileSource:
 
     def _probe_root(self) -> Dict[str, bool]:
         if self._root_probe is None:
-            present = {name: False for name in ROOT_PROBE_NAMES}
+            present: Dict[str, bool] = {}
             for fetched in self._backend.fetch(
                 self._content_root, list(ROOT_PROBE_NAMES)
             ):
-                if fetched.path in present:
-                    present[fetched.path] = (
-                        fetched.error is None
-                        or fetched.error in UNREADABLE_FETCH_ERRORS
-                    )
+                if fetched.path not in ROOT_PROBE_NAMES:
+                    continue
+                if fetched.error is None or fetched.error in UNREADABLE_FETCH_ERRORS:
+                    present[fetched.path] = True  # there, as Path.exists() says
+                elif fetched.error in NOT_FOUND_FETCH_ERRORS:
+                    present[fetched.path] = False
+                else:
+                    raise self._read_failure(fetched)
+            missing = [n for n in ROOT_PROBE_NAMES if n not in present]
+            if missing:
+                raise ScipRepoReadError(
+                    f"content backend returned no record for {missing} in "
+                    f"{self._content_root}"
+                )
             self._root_probe = present
         return self._root_probe
+
+    def _read_failure(self, fetched: FetchedFile) -> ScipRepoReadError:
+        return ScipRepoReadError(
+            f"content backend could not read {fetched.path!r} in "
+            f"{self._content_root}: {fetched.error}"
+        )

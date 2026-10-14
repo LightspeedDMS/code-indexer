@@ -64,6 +64,22 @@ UNREADABLE_FETCH_ERRORS = frozenset(
     {"EISDIR", os.strerror(errno.EISDIR), "EFBIG", "ESIZECHANGED"}
 )
 
+#: Per-file fetch errors that mean "there is no such file": ENOENT, ENOTDIR (a
+#: path through a file), and EACCES, which workspace-mcp answers for a file
+#: under a missing directory. For callers that must tell ABSENCE from FAILURE
+#: (an absent build file is an answer; EIO or a timeout record is not): an
+#: error in neither this set nor ``UNREADABLE_FETCH_ERRORS`` is a failure.
+NOT_FOUND_FETCH_ERRORS = frozenset(
+    {
+        "ENOENT",
+        os.strerror(errno.ENOENT),
+        "ENOTDIR",
+        os.strerror(errno.ENOTDIR),
+        "EACCES",
+        os.strerror(errno.EACCES),
+    }
+)
+
 #: Entries per manifest page when the caller does not say. Matches the server
 #: seam's default so local and delegated paging behave alike.
 DEFAULT_PAGE_SIZE = 1000
