@@ -41,7 +41,7 @@ RUN pip install ".[cluster,cohere]"
 # execution belongs in the orchestrator's sandboxed worker, not in a
 # long-lived service pod. Without this plugin every lifecycle_registration job
 # dies with exit 127. The plugin registers itself on the upstream
-# `code_indexer.llm_invoker` entry point, so installing it is enough to enable
+# `code_indexer.cli_invoker` entry point, so installing it is enough to enable
 # it (see plugins/cidx_orchestrator_invoker).
 COPY plugins/cidx_orchestrator_invoker ./plugins/cidx_orchestrator_invoker
 RUN pip install ./plugins/cidx_orchestrator_invoker
