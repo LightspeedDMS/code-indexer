@@ -46,16 +46,6 @@ class WorkingCopyUnavailableError(RuntimeError):
     """The working copies are delegated but this server cannot reach them."""
 
 
-def repository_content_is_delegated() -> bool:
-    """True when the running server's content backend is not this pod's disk."""
-    from code_indexer.server.startup.content_backend_wiring import (
-        server_content_backend,
-    )
-
-    backend = server_content_backend()
-    return backend is not None and not backend.is_local
-
-
 class LocalWorkingCopies:
     """Today's behaviour: the working copy is a directory on this pod."""
 
@@ -128,7 +118,11 @@ def working_copies_for(clone_backend: Any, git_backend: Any) -> WorkingCopies:
     the delegated ones: anything else would run against this pod's disk, where
     the copy does not exist.
     """
-    if not repository_content_is_delegated():
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    if not is_content_seam_delegated():
         return _LOCAL
     if not isinstance(clone_backend, DelegatedCloneBackend):
         raise WorkingCopyUnavailableError(
