@@ -45,6 +45,7 @@ from code_indexer.server.storage.shared.git_backend import LocalGitBackend
 from code_indexer.server.utils.config_manager import ServerResourceConfig
 
 from tests.unit.server.activated_seam_fakes import (
+    _POD_STATE_NAMES,
     ALIAS,
     INDEX_DIR,
     USER,
@@ -159,7 +160,14 @@ class CompositeWorld(ActivatedWorld):
         if full.startswith(user_root + os.sep):
             rel = Path(full).relative_to(user_root).parts
             # <composite>/<member>/.code-indexer is pod state too.
-            if len(rel) >= 3 and rel[0] == COMPOSITE and rel[2] == INDEX_DIR:
+            if len(rel) >= 3 and rel[0] == COMPOSITE and rel[2] in _POD_STATE_NAMES:
+                return False
+            # ... and so are the IndexStore checkout's markers / lock beside it
+            if (
+                len(rel) == 2
+                and rel[0] == COMPOSITE
+                and (rel[1] in _POD_STATE_NAMES or rel[1].endswith(".checkout.lock"))
+            ):
                 return False
             # The composite directory is not a repository (no files of its
             # own on workspace-mcp but the members): on this pod it is the

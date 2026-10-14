@@ -1192,9 +1192,16 @@ class ActivatedRepoManager:
                 subrepo_path = composite_path / alias
 
                 try:
-                    # Use canonical path resolution for versioned repos
+                    # Use canonical path resolution for versioned repos (under
+                    # a delegated IndexStore: the golden index served here)
+                    served_golden = (
+                        self._serve_golden_index_here(alias)
+                        if self._activated_index().is_delegated()
+                        else None
+                    )
                     golden_repo_actual_path = (
-                        self.golden_repo_manager.get_actual_repo_path(alias)
+                        served_golden
+                        or self.golden_repo_manager.get_actual_repo_path(alias)
                     )
                     # Reuse existing CoW clone method
                     success = self._clone_with_copy_on_write(
@@ -1288,6 +1295,19 @@ class ActivatedRepoManager:
                 "last_accessed": activated_at,
                 "activation_id": activation_id,
             }
+            # Delegated IndexStore: the proxy config and every member's index
+            # are published (and recorded) so any pod can serve the composite.
+            metadata.update(
+                self._publish_activated_index(
+                    username,
+                    user_alias,
+                    str(composite_path),
+                    metadata,
+                    discard=lambda: self._discard_failed_composite(
+                        composite_path, delegated, golden_repo_aliases
+                    ),
+                )
+            )
 
             try:
                 self._save_metadata(username, user_alias, metadata)
@@ -2821,11 +2841,18 @@ class ActivatedRepoManager:
         return target
 
     def _publish_activated_index(
-        self, username: str, user_alias: str, activated_repo_path: str
+        self,
+        username: str,
+        user_alias: str,
+        activated_repo_path: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        discard: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         """Publish a new activation's index; the registry fields to record.
 
-        Empty under the local store. A failure discards the copy (no
+        *metadata*: the entry about to be registered (a composite's names its
+        members, which are published too). Empty under the local store. A
+        failure discards the copy (*discard*, default: the single copy -- no
         registration was written yet) and raises.
         """
         facade = self._activated_index()
@@ -2833,10 +2860,13 @@ class ActivatedRepoManager:
             return {}
         try:
             fields: Dict[str, Any] = facade.publish(
-                username, user_alias, activated_repo_path, None, fresh=True
+                username, user_alias, activated_repo_path, metadata, fresh=True
             )
         except Exception as exc:
-            self._discard_failed_activation(activated_repo_path)
+            if discard is not None:
+                discard()
+            else:
+                self._discard_failed_activation(activated_repo_path)
             raise ActivatedRepoError(
                 f"Failed to publish the index of '{user_alias}': {exc}"
             ) from exc
@@ -3415,7 +3445,7 @@ class ActivatedRepoManager:
                 self._query_tracker.clear_quiescing(repo_dir)
         # The copy's published index goes next; a failure raises and keeps the
         # registration, so deactivating again finishes the job.
-        self._activated_index().delete(username, user_alias)
+        self._activated_index().delete(username, user_alias, metadata)
         # A composite's members each have index state under it (a single
         # copy's own config names none, so this is _remove_pod_index_state).
         self._remove_pod_composite_index_state(repo_dir)

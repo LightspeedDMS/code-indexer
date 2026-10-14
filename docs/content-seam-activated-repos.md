@@ -57,66 +57,6 @@ Refused under delegated (fail loud): a bare golden clone;
 a `clone_backend` other than `delegated`; `git_backend: local`. An unreachable
 workspace-mcp raises -- it is never "repository not found".
 
-<<<<<<< HEAD
-## Reindex after edits (no change feed)
-
-| Edit | Local | Delegated |
-|---|---|---|
-| cidx file tools: MCP `create_file`/`edit_file`/`delete_file`, REST `/api/v1/repos/{alias}/files` | auto-watch, started before the write, re-indexes | after a successful write, an incremental reindex (`semantic`, `fts`; `clear=False`) of the copy is enqueued through `trigger_reindex` (`server/services/activated_write_reindex.py`) |
-| cidx git tools that move the working tree: merge, merge abort, branch switch, checkout file, reset, clean, pull, stash push/pop/apply (MCP and REST) | an already-running auto-watch re-indexes; otherwise nothing | the same enqueue (paths `["*"]`), also after a merge or pull that stops on conflicts (git has rewritten the tree) and after a failed stash pop/apply (it may have) |
-| Anything outside cidx: a process writing workspace-mcp's storage, a commit landing on the remote (the copy changes only when cidx pulls) | the watcher sees local writes only while auto-watch runs | **not seen** -- no change feed. Indexed only by `trigger_reindex`, `sync_repository`, or the incremental pass of the next reindex a cidx write enqueues |
-
-Per copy the enqueue coalesces: a PENDING reindex of the copy has not read it
-yet, so the write joins it (`coalesced`); a RUNNING reindex (of the copy, or any
-of the user's copies -- `trigger_reindex` allows one per user) may have read past
-the written paths, so one follow-up is scheduled for when it is done
-(`deferred`); otherwise a new job (`queued`). The MCP response carries the outcome
-as `reindex` (REST response models drop it). Fail loud: `failed` (with `error`)
-is also logged at ERROR as SVC-REINDEX-001, a follow-up that never gets a slot
-as SVC-REINDEX-002. Every enqueue is gated on the registry
-(`user_has_activated_repo`) for the calling user; golden repositories in write
-mode (`-global`, write exceptions) are re-indexed by their refresh on
-`exit_write_mode`, not here. Under `content_backend: local` none of this runs and
-responses are unchanged.
-
-Follow-ups waiting for a slot are in-memory timers: a pod restart drops them.
-The written paths are then indexed by the next reindex of the copy --
-`trigger_reindex`, `sync_repository`, or the next cidx write's enqueue.
-
-## Operator tooling
-
-Host-side tools that build or use the repository volume's topology refuse under
-`content_backend: delegated`, before touching the disk:
-
-| Tool | Under delegated |
-|---|---|
-| Auto-updater CoW-daemon symlink steps (`data/golden-repos`, `data/activated-repos` into the CoW mount) | With `clone_backend: delegated` (the supported setup): unchanged no-op. With `clone_backend: cow-daemon`: refused, `DEPLOY-GENERAL-226` names why, nothing is created or renamed. The updater reads `content_backend` from the config it loads; it runs outside the server. |
-| `cidx global activate` | Exit 1 with the reason: the alias it registers names this host's `.code-indexer/index`, which no other pod has. Add or refresh through the server instead. Reads the server config at `CIDX_SERVER_DATA_DIR` (default `~/.cidx-server`); no config = plain CLI host, unchanged; an unreadable one is refused. |
-
-## REST surfaces (`server/services/activated_copy_content.py`)
-
-Every route first checks the registry for THIS user (another user's alias is
-404 and nothing is read). Under delegated:
-
-| Route | Delegated |
-|---|---|
-| `GET /api/repos/{alias}` `storage_info` | manifest sizes + the copy's index state on this pod, same rules as the local walk (non-dot names; `index_size_mb` only when this pod holds index state) |
-| `GET /api/repos/{alias}?activity=true` | `git log --oneline -5` via the git seam (`log_raw "%h %s"`); no delegated git backend is a 500 |
-| `GET /api/repos/{alias}/files` | the manifest as a tree: same entries, sorted top-down walk, `max_depth`/`limit`/`truncated`; lexical confinement (`a/../b` is refused) |
-| `GET /api/repositories/{id}` statistics | as `storage_info`, counted per file with the same language map |
-| `GET /api/repositories/{id}/files?content=true` | one fetch; same binary sniff and `read_text` decoding (universal newlines) |
-| `GET /api/repositories/{id}/stats`, MCP `repository_status` stats | manifest + pod index state; `created_at` = the registry's `activated_at` (no copy directory to stat) |
-
-`GET /api/repositories/{id}/files` on a composite: a `path` that is absolute
-or has a `..` component is a 400 (local and delegated alike), and a failure to
-check or list the composite is a 500 -- never a fall-through to the regular
-listing.
-
-Differences from local, by design: `.git` is never listed (stats count it
-locally), empty directories do not appear (a manifest lists files), and
-listings share the 30 s manifest cache of the file tools. A backend failure is
-always a 500, never an empty repository or a degraded 200.
-
 ## The copy's index on every pod (`index_store_backend: delegated`)
 
 The copy's index is pod state, built where it was activated or reindexed. It is
@@ -133,6 +73,13 @@ entry (`index_store_alias`, `index_version`), as for golden repos
 | Branch switch / sync delta reindex | serve, delta index, publish |
 | HNSW orphan sweep | serve, repair, publish the repair |
 | Deactivate | delete the alias |
+
+A composite publishes its proxy config under its own alias and each member's
+index under `activated.<sha256(username, "<composite>/<member>")>`; the entry
+records `index_version` (config) and `member_index_versions` (members from the
+registry's `discovered_repos`, never the pod's disk). Serving checks all of
+them out, so a composite is routed as a composite on any pod; deactivation
+deletes every alias.
 
 A failed fetch or publish is an error (job failed with the cause / query
 error), never "not found". Local store: none of this runs.

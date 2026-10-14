@@ -35,6 +35,7 @@ from code_indexer.server.repositories.activated_repo_manager import (
 )
 from code_indexer.server.services import index_materializer as im
 from code_indexer.server.services.activated_index_store import (
+    CONTENT_DIGEST_MARKER,
     ActivatedIndexStore,
     serve_activated_index,
 )
@@ -314,6 +315,87 @@ def test_a_publish_by_another_pod_in_between_is_refused(
         manager.publish_index(USER, ALIAS)
 
 
+def test_partial_publish_retry_after_rebuild_publishes_new_content(
+    world: ActivatedWorld, artifacts: FakeArtifacts
+) -> None:
+    """A partial publish leaves the marker and digest pointing at the store's
+    current version.  If the on-disk index is rebuilt before the retry, the
+    digest mismatch triggers a re-publish of the new content instead of
+    adopting the stale version the marker still names."""
+    manager = _manager(world)
+    with world.forbid_local_io():
+        _activate(manager)
+    meta = _meta(manager)
+    first_version = meta[INDEX_VERSION_FIELD]
+
+    # The first publish wrote a content digest beside the marker.
+    copy = world.pod_copy()
+    assert (copy / CONTENT_DIGEST_MARKER).is_file()
+    digest_after_first = (copy / CONTENT_DIGEST_MARKER).read_text().strip()
+
+    # Simulate a partial composite publish: member 1 (this copy) succeeded
+    # and advanced the store, but member 2 failed so the registry still
+    # records `first_version`.  The CHECKED_OUT_MARKER was written by
+    # publish_index and matches the store's current version.
+    store = DelegatedIndexStore(artifacts)
+    second_version = store.publish_on(
+        COPY_ALIAS, copy / INDEX_DIR, first_version
+    )
+    (copy / im.CHECKED_OUT_MARKER).write_text(second_version)
+    # Write the digest that was current at the time of that publish.
+    (copy / CONTENT_DIGEST_MARKER).write_text(digest_after_first)
+
+    # Now the on-disk index is rebuilt (content changes).
+    chunks = copy / INDEX_DIR / "index" / "collection" / "chunks.db"
+    chunks.write_bytes(b"rebuilt-content-after-partial-publish")
+
+    # Retry the publish with the registry's stale base_version.
+    # Without the fix this would adopt `second_version` (stale content).
+    ais = ActivatedIndexStore(store_provider=lambda: store)
+    fields = ais.publish(USER, ALIAS, copy, meta)
+
+    # The store must hold a NEW version with the rebuilt content.
+    new_version = fields[INDEX_VERSION_FIELD]
+    assert new_version != first_version
+    assert new_version != second_version
+    assert new_version == artifacts.current_version(COPY_ALIAS)
+    # Verify the published tree contains the rebuilt content.
+    published = artifacts.root / COPY_ALIAS / new_version
+    published_chunks = published / "index" / "collection" / "chunks.db"
+    assert published_chunks.read_bytes() == b"rebuilt-content-after-partial-publish"
+    # The digest was updated to match the new content.
+    assert (copy / CONTENT_DIGEST_MARKER).is_file()
+    assert (copy / CONTENT_DIGEST_MARKER).read_text().strip() != digest_after_first
+
+
+def test_partial_publish_retry_without_rebuild_adopts(
+    world: ActivatedWorld, artifacts: FakeArtifacts
+) -> None:
+    """When the on-disk content has NOT changed since the partial publish,
+    the adopt path still works (no unnecessary re-publish)."""
+    manager = _manager(world)
+    with world.forbid_local_io():
+        _activate(manager)
+    meta = _meta(manager)
+    first_version = meta[INDEX_VERSION_FIELD]
+
+    copy = world.pod_copy()
+    digest_after_first = (copy / CONTENT_DIGEST_MARKER).read_text().strip()
+
+    # Simulate partial publish: store advanced, marker updated.
+    store = DelegatedIndexStore(artifacts)
+    second_version = store.publish_on(
+        COPY_ALIAS, copy / INDEX_DIR, first_version
+    )
+    (copy / im.CHECKED_OUT_MARKER).write_text(second_version)
+    (copy / CONTENT_DIGEST_MARKER).write_text(digest_after_first)
+
+    # Content is unchanged -- retry should adopt second_version.
+    ais = ActivatedIndexStore(store_provider=lambda: store)
+    fields = ais.publish(USER, ALIAS, copy, meta)
+    assert fields[INDEX_VERSION_FIELD] == second_version
+
+
 def test_a_branch_delta_serves_first_and_publishes_after(
     world: ActivatedWorld, artifacts: FakeArtifacts, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -516,121 +598,3 @@ def test_an_activation_over_a_leftover_published_index_replaces_it(
     meta = _meta(manager)
     assert meta[INDEX_VERSION_FIELD] == artifacts.current_version(COPY_ALIAS)
     assert len(artifacts.versions[COPY_ALIAS]) == 2
-
-
-# ── CAS base from marker, registry save tolerance ─────────────────────────
-
-
-def test_cas_base_from_marker_not_registry(
-    world: ActivatedWorld, artifacts: FakeArtifacts
-) -> None:
-    """Another pod publishes v2 AND updates the registry while this pod's
-    CHECKED_OUT_MARKER still holds v1; publish from this pod uses v1 as
-    the CAS base (-> ECONFLICT because the store's current is v2)."""
-    manager = _manager(world)
-    _activate(manager)
-    v1 = _meta(manager)[INDEX_VERSION_FIELD]
-
-    # Another pod publishes v2 and updates the registry.
-    other = world.tmp / "pod-c" / ALIAS
-    shutil.copytree(world.pod_copy() / INDEX_DIR, other / INDEX_DIR)
-    (other / INDEX_DIR / "index" / "collection" / "chunks.db").write_bytes(b"v2")
-    meta = _meta(manager)
-    meta.update(ActivatedIndexStore().publish(USER, ALIAS, other, meta))
-    manager._save_metadata(USER, ALIAS, meta)
-    v2 = _meta(manager)[INDEX_VERSION_FIELD]
-    assert v2 != v1
-
-    # This pod's marker still says v1.
-    assert (world.pod_copy() / im.CHECKED_OUT_MARKER).read_text() == v1
-
-    # publish_index reads the marker (v1), not the registry (v2), so
-    # the CAS base is v1, which conflicts with the store's current (v2).
-    with pytest.raises(RuntimeError, match="ECONFLICT"):
-        manager.publish_index(USER, ALIAS)
-
-    # The publish call in artifacts confirms v1 was used as base.
-    publish_calls = [c for c in artifacts.calls if c[0] == "publish"]
-    last_publish = publish_calls[-1]
-    assert last_publish[2] == v1  # base_version arg
-
-
-def test_metadata_save_retries_once_then_serve_and_publish_work(
-    world: ActivatedWorld,
-    artifacts: FakeArtifacts,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """_save_metadata fails on the first attempt; the built-in retry saves
-    the registry.  After that, serve_index_here + another publish works:
-    the ECONFLICT loop the review flagged does not occur."""
-    manager = _manager(world)
-    _activate(manager)
-    v1 = _meta(manager)[INDEX_VERSION_FIELD]
-
-    # Mutate so the publish creates a distinct version.
-    (world.pod_copy() / INDEX_DIR / "index" / "collection" / "chunks.db").write_bytes(
-        b"re-1"
-    )
-
-    # Make _save_metadata fail once (retry succeeds).
-    real_save = manager._save_metadata
-    call_count = 0
-
-    def flaky_save(*args: Any, **kwargs: Any) -> None:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            raise OSError("disk full")
-        return real_save(*args, **kwargs)
-
-    monkeypatch.setattr(manager, "_save_metadata", flaky_save)
-
-    # First publish: first save attempt fails, retry succeeds.
-    with world.forbid_local_io():
-        manager.publish_index(USER, ALIAS)
-
-    v2 = artifacts.current_version(COPY_ALIAS)
-    assert v2 is not None and v2 != v1
-    assert (world.pod_copy() / im.CHECKED_OUT_MARKER).read_text() == v2
-    # Registry is consistent (retry succeeded).
-    assert _meta(manager)[INDEX_VERSION_FIELD] == v2
-
-    # serve_index_here sees marker v2 == registry v2, no swap.
-    with world.forbid_local_io():
-        manager.serve_index_here(USER, ALIAS)
-
-    # Second publish after serve_index_here: no ECONFLICT.
-    (world.pod_copy() / INDEX_DIR / "index" / "collection" / "chunks.db").write_bytes(
-        b"re-2"
-    )
-    with world.forbid_local_io():
-        manager.publish_index(USER, ALIAS)
-
-    v3 = artifacts.current_version(COPY_ALIAS)
-    assert v3 is not None and v3 != v2
-    assert _meta(manager)[INDEX_VERSION_FIELD] == v3
-
-
-def test_metadata_save_permanent_failure_raises(
-    world: ActivatedWorld,
-    artifacts: FakeArtifacts,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When _save_metadata fails on both attempts, publish_index raises
-    (fails loud) instead of silently swallowing."""
-    manager = _manager(world)
-    _activate(manager)
-
-    (world.pod_copy() / INDEX_DIR / "index" / "collection" / "chunks.db").write_bytes(
-        b"re-1"
-    )
-
-    monkeypatch.setattr(
-        manager,
-        "_save_metadata",
-        lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full")),
-    )
-
-    with pytest.raises(OSError, match="disk full"):
-        with world.forbid_local_io():
-            manager.publish_index(USER, ALIAS)

@@ -89,10 +89,23 @@ def _index_dir(store: IndexStore, target: Path) -> Path:
     return store.index_root(target) / "index"
 
 
-def is_served_here(store: IndexStore, target: Union[str, Path]) -> bool:
+def _ready_dir(store: IndexStore, target: Path, require_index: bool) -> Path:
+    """What must exist for the target's state to be complete: the index
+    directory, or (``require_index=False``: state with no index of its own,
+    like a composite's proxy config) the index root itself."""
+    root = store.index_root(target)
+    return root / "index" if require_index else root
+
+
+def is_served_here(
+    store: IndexStore, target: Union[str, Path], require_index: bool = True
+) -> bool:
     """True when this pod holds a complete index at ``target``."""
     path = Path(target)
-    return _index_dir(store, path).is_dir() and not (path / IN_PROGRESS_MARKER).exists()
+    return (
+        _ready_dir(store, path, require_index).is_dir()
+        and not (path / IN_PROGRESS_MARKER).exists()
+    )
 
 
 def run_fix_config(target: Path) -> None:
@@ -183,6 +196,7 @@ def _checkout(
     store_alias: str,
     version: str,
     fix_config: FixConfig,
+    require_index: bool = True,
 ) -> None:
     root = store.index_root(target)
     marker = target / IN_PROGRESS_MARKER
@@ -207,7 +221,7 @@ def _checkout(
         marker.write_text(version)
         checkout_as(store_alias, target, version)
         fix_config(target)
-        if not _index_dir(store, target).is_dir():
+        if not _ready_dir(store, target, require_index).is_dir():
             raise RuntimeError(f"version {version} holds no index directory")
         (target / CHECKED_OUT_MARKER).write_text(version)
         marker.unlink()
@@ -230,8 +244,13 @@ def _checked_out_version(target: Path) -> Optional[str]:
         return None
 
 
-def _is_current(store: IndexStore, target: Path, version: str) -> bool:
-    return is_served_here(store, target) and _checked_out_version(target) == version
+def _is_current(
+    store: IndexStore, target: Path, version: str, require_index: bool = True
+) -> bool:
+    return (
+        is_served_here(store, target, require_index)
+        and _checked_out_version(target) == version
+    )
 
 
 def ensure_current_index(
@@ -240,6 +259,7 @@ def ensure_current_index(
     *,
     store: IndexStore,
     fix_config: Optional[FixConfig] = None,
+    require_index: bool = True,
 ) -> None:
     """``ensure_published_index`` for a target whose index CHANGES in place.
 
@@ -249,28 +269,29 @@ def ensure_current_index(
     which one it holds; an older one is replaced (checked out beside it, then
     swapped in by rename, so a reader never sees half of either). A document
     recording nothing (an activation from before publishing existed) is
-    served from what this pod holds, or fails loud.
+    served from what this pod holds, or fails loud. ``require_index=False``
+    for state with no index directory of its own (a composite's proxy config).
     """
     if store.is_local:
         return
     target = Path(target_path)
     recorded = _fields(document)
     if recorded is None:
-        if is_served_here(store, target):
+        if is_served_here(store, target, require_index):
             return
         _recorded(document, target)  # raises: nothing here, nothing published
         return
     store_alias, version = recorded
-    if _is_current(store, target, version):
+    if _is_current(store, target, version, require_index):
         return
     with _exclusive(target):
-        if _is_current(store, target, version):
+        if _is_current(store, target, version, require_index):
             return
         fix = fix_config or run_fix_config
-        if is_served_here(store, target):
-            _replace(store, target, store_alias, version, fix)
+        if is_served_here(store, target, require_index):
+            _replace(store, target, store_alias, version, fix, require_index)
         else:
-            _checkout(store, target, store_alias, version, fix)
+            _checkout(store, target, store_alias, version, fix, require_index)
 
 
 def _fields(document: Optional[Mapping[str, Any]]) -> Optional[Tuple[str, str]]:
@@ -292,6 +313,7 @@ def _replace(
     store_alias: str,
     version: str,
     fix_config: FixConfig,
+    require_index: bool = True,
 ) -> None:
     """Swap the index this pod holds at ``target`` for ``version``."""
     checkout_as = getattr(store, "checkout_as", None)
@@ -312,7 +334,7 @@ def _replace(
         os.rename(root, retired)
         os.rename(fresh, root)
         fix_config(target)
-        if not _index_dir(store, target).is_dir():
+        if not _ready_dir(store, target, require_index).is_dir():
             raise RuntimeError(f"version {version} holds no index directory")
         (target / CHECKED_OUT_MARKER).write_text(version)
         marker.unlink()
