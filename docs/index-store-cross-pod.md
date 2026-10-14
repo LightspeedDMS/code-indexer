@@ -81,6 +81,26 @@ checkout lock), anything a query on this pod holds (marked quiescing, skipped
 while its refcount is non-zero). A registry or pointer read failure removes
 nothing (ERROR, reported). Local store: no sweeper.
 
+## A target re-published in place: HNSW orphan repairs
+
+`.versioned` snapshots are never swept (S2 rebuilds them clean). A clone path
+the alias no longer serves is this pod's build source: repaired in place, and
+the repair reaches every pod with the next refresh's publish -- as locally.
+But a clone-path TARGET (a repo added, not yet refreshed) is a published
+version every pod checks out, so the sweep
+(`HNSWOrphanRepairSweepScheduler._process_published_golden`) makes this pod
+hold the recorded version, repairs it, publishes on top of exactly that version
+(store CAS) and records the new version for the same target only if the alias
+still names it with the starting version (`AliasManager.record_republished_index`).
+Every checkout -- and every publisher's own copy (refresh, add, branch change,
+migration snapshot: `index_materializer.mark_published_here`) -- carries
+`.cidx-index-checked-out` with its version; a pod whose marker names another
+version than the alias records swaps its copy (rename, with rollback). An
+unmarked index (built before markers) is served as is. `golden_temporal`
+shards are pod-local (never published) and stay in-place repairs. Pruning
+removes only marked snapshots OLDER than the target (a newer one may be a
+refresh about to swap).
+
 ## Not covered
 
 * A write-mode redirect (live source path) is served as before.

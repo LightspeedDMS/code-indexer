@@ -5529,7 +5529,14 @@ class GoldenRepoManager:
         )
         from code_indexer.utils.index_store import publish_index_fields
 
-        return publish_index_fields(server_index_store(), repo_path, built_from)
+        fields = publish_index_fields(server_index_store(), repo_path, built_from)
+        if fields is not None:
+            from code_indexer.server.services.index_materializer import (
+                mark_published_here,
+            )
+
+            mark_published_here(built_from, fields)
+        return fields
 
     def _is_versioned_snapshot(self, path: Optional[str]) -> bool:
         """Return True when *path* is a versioned snapshot (Bug #1084 Phase A4).

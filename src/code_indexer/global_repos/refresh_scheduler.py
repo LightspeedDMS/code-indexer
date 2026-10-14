@@ -62,10 +62,7 @@ from code_indexer.server.services.cidx_meta_backup import (
 from code_indexer.server.services import cidx_meta_content
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.constants import CIDX_META_REPO_GLOBAL
-from code_indexer.server.utils.index_command_layout import (
-    repo_layout_kwargs,
-    server_backend_args,
-)
+from code_indexer.server.utils.index_command_layout import repo_layout_kwargs
 from code_indexer.server.startup.content_backend_wiring import (
     configured_content_backend_name,
     content_backend_name_or_none,
@@ -77,7 +74,14 @@ from code_indexer.server.services.metadata_reader import (
     read_status,
 )
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
-from code_indexer.utils.index_store import IndexStore, LocalIndexStore
+from code_indexer.utils.index_store import (
+    IndexStore,
+    LocalIndexStore,
+    INDEX_STORE_ALIAS_FIELD,
+    INDEX_VERSION_FIELD,
+    index_store_alias,
+    published_index_fields,
+)
 from code_indexer.server.storage.shared.git_backend import (
     GitBackend,
     LocalGitBackend,
@@ -239,10 +243,7 @@ _REFRESH_PUBLISH_LOCK_TTL_SECONDS = 24 * 60 * 60
 
 
 def has_files_with_extensions(
-    repo_path: str,
-    extensions: set,
-    exclude_dirs: set,
-    backend: Optional[Any] = None,
+    repo_path: str, extensions: set, exclude_dirs: set
 ) -> bool:
     """Return True as soon as a file with a matching extension is found (short-circuit).
 
@@ -253,19 +254,12 @@ def has_files_with_extensions(
         repo_path: Root directory to scan.
         extensions: Set of bare extension names to match (without leading dots, e.g. 'py').
         exclude_dirs: Set of directory names to skip (e.g. {'.git', 'node_modules'}).
-        backend: A NON-local content backend holding the repository (delegated
-            content): the tree is its manifest, not this pod's disk. A listing
-            failure raises -- it is never "no matching files".
 
     Returns:
         True if any file with a matching extension is found, False otherwise.
     """
     if not extensions:
         return False
-    if backend is not None:
-        return _manifest_has_files_with_extensions(
-            backend, repo_path, extensions, exclude_dirs
-        )
     for dirpath, dirnames, filenames in os.walk(repo_path, topdown=True):
         dirnames[:] = [
             d for d in dirnames if d not in exclude_dirs and not d.startswith(".")
@@ -275,43 +269,6 @@ def has_files_with_extensions(
             if ext in extensions:
                 return True
     return False
-
-
-def _manifest_has_files_with_extensions(
-    backend: Any, repo_path: str, extensions: set, exclude_dirs: set
-) -> bool:
-    """``has_files_with_extensions`` over a content backend's manifest: the same
-    pruning (excluded or hidden directories at any depth), short-circuiting."""
-    cursor: Optional[str] = None
-    prune = sorted(exclude_dirs)
-    while True:
-        page = backend.manifest(repo_path, cursor=cursor, prune_dirs=prune)
-        for entry in page.entries:
-            *dirs, name = entry.path.split("/")
-            if any(d in exclude_dirs or d.startswith(".") for d in dirs):
-                continue
-            if os.path.splitext(name)[1].lstrip(".") in extensions:
-                return True
-        if page.next_cursor is None:
-            return False
-        if page.next_cursor == cursor:
-            raise RuntimeError(f"manifest cursor did not advance for {repo_path}")
-        cursor = page.next_cursor
-
-
-def _delegated_repository_backend(pod_local: bool) -> Optional[Any]:
-    """The content backend holding a golden repo's files, or None when they are
-    on this pod (the local backend, the CLI, or a pod-local ``local://`` repo)."""
-    if pod_local:
-        return None
-    from code_indexer.server.startup.content_backend_wiring import (
-        server_content_backend,
-    )
-
-    backend = server_content_backend()
-    if backend is None or backend.is_local:
-        return None
-    return backend
 
 
 def _read_max_commits_from_temporal_meta(source_path: Path) -> Optional[int]:
@@ -436,16 +393,6 @@ def _repository_is_elsewhere() -> bool:
     return content_backend_name_or_none() in (None, "delegated")
 
 
-def _repository_is_delegated() -> bool:
-    """True when the running server's content backend is delegated: the golden
-    repos' clones live with workspace-mcp, not on this pod (False in the CLI)."""
-    from code_indexer.server.startup.content_backend_wiring import (
-        is_content_seam_delegated,
-    )
-
-    return is_content_seam_delegated()
-
-
 def _history_through_git_seam() -> bool:
     """True when git runs through the git seam (``git_backend='delegated'``).
 
@@ -555,6 +502,32 @@ def _is_empty_meta_directory_index(
     )
 
 
+#: Pod-local scratch (under golden-repos) for a delegated integrity baseline.
+INTEGRITY_BASELINE_DIRNAME = ".integrity-baseline"
+
+
+class IntegrityBaseline:
+    """The refresh integrity gate's baseline (``_integrity_baseline``):
+    ``points`` per collection, the index to self-heal from when it is not the
+    current target's, and the scratch to remove after the gate."""
+
+    def __init__(
+        self,
+        points: Dict[str, int],
+        healthy_index_dir: Optional[Path] = None,
+        *,
+        scratch: Optional[Path] = None,
+    ) -> None:
+        self.points = points
+        self.healthy_index_dir = healthy_index_dir
+        self._scratch = scratch
+
+    def close(self) -> None:
+        if self._scratch is not None:
+            shutil.rmtree(self._scratch, ignore_errors=True)
+            self._scratch = None
+
+
 class RefreshScheduler:
     """
     Timer-based scheduler for refreshing global repositories.
@@ -645,6 +618,11 @@ class RefreshScheduler:
         # fingerprint seen by the refresh in progress, published with the
         # alias pointer when that refresh swaps it (see _shared_meta_changed).
         self._pending_meta_fingerprints: Dict[str, str] = {}
+        # IndexStore step 2: what _snapshot_from_index_store published, keyed
+        # by alias as (snapshot path, alias-document fields), recorded with
+        # the pointer when that snapshot is swapped in so any pod can check
+        # the same version out (server/services/index_materializer.py).
+        self._pending_index_publications: Dict[str, Tuple[str, Dict[str, str]]] = {}
         self._alias_lock_db_backed_enabled_getter = alias_lock_db_backed_enabled_getter
         self._alias_lock_store_resolver = alias_lock_store_resolver
 
@@ -3077,9 +3055,7 @@ class RefreshScheduler:
                                         # _check_extension_drift can scan the right directory.
                                         source_path = master_path
                                         force_reconcile = self._check_extension_drift(
-                                            source_path,
-                                            alias_name,
-                                            pod_local=is_meta_repo,
+                                            source_path, alias_name
                                         )
                                         if not force_reconcile:
                                             # Bug #1508: has_changes() is a pure git-ref
@@ -3134,9 +3110,7 @@ class RefreshScheduler:
                     # it writes config on the first call and returns None on subsequent calls).
                     if not force_reconcile:
                         force_reconcile = self._check_extension_drift(
-                            source_path,
-                            alias_name,
-                            pod_local=is_local_repo or is_meta_repo,
+                            source_path, alias_name
                         )
 
                     # Bug #1506 third-pass review Item 1: the quarantine
@@ -3180,31 +3154,37 @@ class RefreshScheduler:
                         # Reuses the SAME factory the golden-repo
                         # add/registration path already applies -- never a
                         # second, duplicated copy.
-                        previous_points = self._published_point_counts(current_target)
-                        self._index_source(
-                            alias_name=alias_name,
-                            source_path=source_path,
-                            progress_callback=progress_callback,
-                            orphan_event_callback=_make_hnsw_orphan_event_logger(
-                                alias_name
-                            ),
-                            force_reconcile=force_reconcile,
-                            job_id=job_id,
+                        baseline = self._integrity_baseline(
+                            alias_name, source_path, current_target
                         )
+                        try:
+                            self._index_source(
+                                alias_name=alias_name,
+                                source_path=source_path,
+                                progress_callback=progress_callback,
+                                orphan_event_callback=_make_hnsw_orphan_event_logger(
+                                    alias_name
+                                ),
+                                force_reconcile=force_reconcile,
+                                job_id=job_id,
+                            )
 
-                        # Bug #1506: run-boundary durability-flush +
-                        # integrity gate (still under the write lock
-                        # acquired above). _run_and_publish_integrity_gate
-                        # ALSO calls reset_refresh_integrity_failure() on
-                        # a pass and record_refresh_integrity_failure() on
-                        # a failure internally -- see its docstring; no
-                        # separate reset/record call is needed here.
-                        gate_result = self._run_and_publish_integrity_gate(
-                            alias_name=alias_name,
-                            source_path=source_path,
-                            current_target=current_target,
-                            previous_points=previous_points,
-                        )
+                            # Bug #1506: run-boundary durability-flush +
+                            # integrity gate (still under the write lock
+                            # acquired above). _run_and_publish_integrity_gate
+                            # ALSO calls reset_refresh_integrity_failure() on
+                            # a pass and record_refresh_integrity_failure() on
+                            # a failure internally -- see its docstring; no
+                            # separate reset/record call is needed here.
+                            gate_result = self._run_and_publish_integrity_gate(
+                                alias_name=alias_name,
+                                source_path=source_path,
+                                current_target=current_target,
+                                previous_points=baseline.points,
+                                healthy_index_dir=baseline.healthy_index_dir,
+                            )
+                        finally:
+                            baseline.close()
                         if not gate_result.passed:
                             detail_summary = "; ".join(
                                 f"{f.collection_dir}: {f.detail}"
@@ -3243,7 +3223,7 @@ class RefreshScheduler:
                             alias_name=alias_name,
                             new_target=new_index_path,
                             old_target=current_target,
-                            **self._published_meta_fingerprint(alias_name),
+                            **self.published_swap_extra(alias_name, new_index_path),
                         )
 
                     # Bug #881 Phase 2 + Bug #1775: evict stale HNSW +
@@ -3603,6 +3583,7 @@ class RefreshScheduler:
         source_path: str,
         current_target: Optional[str],
         previous_points: Optional[Dict[str, int]] = None,
+        healthy_index_dir: Optional[Path] = None,
     ) -> RefreshIntegrityGateResult:
         """
         Shared Bug #1506 run-boundary durability-flush + integrity gate
@@ -3619,12 +3600,17 @@ class RefreshScheduler:
         check) so each caller can apply its own failure-reporting
         convention (an early-return dict for ``_execute_refresh``, a
         raised ``RuntimeError`` for ``_create_new_index``).
+
+        *healthy_index_dir*: the last-known-good index to self-heal from,
+        when it is not the current target's (a delegated baseline checked
+        out to scratch -- ``_integrity_baseline``); None: today's choice.
         """
-        healthy_index_dir = (
-            Path(current_target) / ".code-indexer" / "index"
-            if current_target and current_target != source_path
-            else None
-        )
+        if healthy_index_dir is None:
+            healthy_index_dir = (
+                Path(current_target) / ".code-indexer" / "index"
+                if current_target and current_target != source_path
+                else None
+            )
         clone_backend = (
             getattr(self._snapshot_manager, "_clone_backend", None)
             if self._snapshot_manager is not None
@@ -3653,6 +3639,96 @@ class RefreshScheduler:
             return {}
         return count_collection_points(
             self._index_store.index_root(current_target) / "index"
+        )
+
+    def _integrity_baseline(
+        self, alias_name: str, source_path: str, current_target: Optional[str]
+    ) -> "IntegrityBaseline":
+        """The integrity gate's baseline: the published index's point counts
+        (and, where it is not at the current target, the index to self-heal
+        from). Read BEFORE indexing.
+
+        Local store, no current target, or a pod that holds the current
+        target's index: ``_published_point_counts`` -- today's baseline.
+
+        Delegated, the current target not on this pod (another pod
+        published it):
+
+        * the alias records the published version -> it is checked out to
+          the target first (``AliasManager.ensure_served_here``), then
+          counted there -- also the self-heal source, as on the publisher;
+        * no recorded version (a pointer written before cross-pod
+          publishing) -> the store's current version of this repository is
+          checked out to scratch (``<golden-repos>/.integrity-baseline``)
+          and counted; ``close()`` removes it;
+        * nothing was ever published for it: a clone-path target (the
+          first refresh after an add) has no published baseline, as on a
+          first refresh today; a snapshot target with nothing published
+          cannot be judged -- that raises.
+
+        A store or checkout failure raises: the gate never compares against
+        nothing because a baseline could not be fetched.
+        """
+        if self._index_store.is_local or not current_target:
+            return IntegrityBaseline(self._published_point_counts(current_target))
+        from code_indexer.server.services.index_materializer import is_served_here
+
+        if is_served_here(self._index_store, current_target):
+            return IntegrityBaseline(self._published_point_counts(current_target))
+        record = self.alias_manager.read_record(alias_name) or {}
+        if (
+            record.get("target_path") == current_target
+            and record.get(INDEX_VERSION_FIELD)
+            and record.get(INDEX_STORE_ALIAS_FIELD)
+        ):
+            self.alias_manager.ensure_served_here(alias_name, current_target)
+            return IntegrityBaseline(self._published_point_counts(current_target))
+        return self._unrecorded_baseline(alias_name, source_path, current_target)
+
+    def _unrecorded_baseline(
+        self, alias_name: str, source_path: str, current_target: str
+    ) -> "IntegrityBaseline":
+        """``_integrity_baseline`` for a target whose pointer records no
+        published version: the store's current version, from scratch."""
+        store_alias = index_store_alias(Path(source_path).name)
+        current_version_as = getattr(self._index_store, "current_version_as", None)
+        checkout_as = getattr(self._index_store, "checkout_as", None)
+        if current_version_as is None or checkout_as is None:
+            raise RuntimeError(
+                f"Cannot judge the refresh of {alias_name}: the IndexStore "
+                f"{type(self._index_store).__name__} cannot read a published version"
+            )
+        version = current_version_as(store_alias)
+        if version is None:
+            if current_target == source_path:
+                logger.info(
+                    "%s: nothing published yet and no index on this pod -- "
+                    "first publish, no previous points to compare",
+                    alias_name,
+                )
+                return IntegrityBaseline({})
+            raise RuntimeError(
+                f"Cannot judge the refresh of {alias_name}: its current target "
+                f"{current_target} is not on this pod and nothing is published "
+                f"for {store_alias}"
+            )
+        scratch = self.golden_repos_dir / INTEGRITY_BASELINE_DIRNAME / store_alias
+        shutil.rmtree(scratch, ignore_errors=True)
+        scratch.mkdir(parents=True)
+        try:
+            root = checkout_as(store_alias, scratch, version)
+        except Exception:
+            shutil.rmtree(scratch, ignore_errors=True)
+            raise
+        index_dir = Path(root) / "index"
+        logger.info(
+            "%s: integrity baseline = published version %s (checked out to %s)",
+            alias_name,
+            version,
+            scratch,
+        )
+        return IntegrityBaseline(
+            count_collection_points(index_dir), index_dir, scratch=scratch
         )
 
     def _index_source(
@@ -4404,22 +4480,6 @@ class RefreshScheduler:
                 f"Failed to create snapshot for {alias_name}: {type(e).__name__}: {e}"
             )
 
-    def _fix_config_backend_args(self, alias_name: str) -> List[str]:
-        """The backend args ``cidx fix-config`` on this repository carries.
-
-        Stamped exactly like this repository's ``cidx index`` spawn: on a pod
-        that does not hold the repository, an unstamped fix-config would answer
-        git questions with the pod's own git and overwrite the git state and
-        project id the index run recorded through the backends. Pod-local
-        repositories stay unstamped (``repo_layout_kwargs``).
-        """
-        source_info = self.registry.get_global_repo(alias_name)
-        return server_backend_args(
-            **repo_layout_kwargs(
-                source_info.get("repo_url") if source_info else None, alias_name
-            )
-        )
-
     def _fix_snapshot_config(
         self, alias_name: str, versioned_path: Path, timeout: int
     ) -> None:
@@ -4428,12 +4488,7 @@ class RefreshScheduler:
         logger.info("Running cidx fix-config --force on clone to update paths")
         try:
             self._run_subprocess(
-                [
-                    "cidx",
-                    "fix-config",
-                    "--force",
-                    *self._fix_config_backend_args(alias_name),
-                ],
+                ["cidx", "fix-config", "--force"],
                 cwd=str(versioned_path),
                 capture_output=True,
                 text=True,
@@ -4497,6 +4552,10 @@ class RefreshScheduler:
             raise RuntimeError(
                 f"Failed to publish the index for {alias_name}: {type(e).__name__}: {e}"
             ) from e
+        if not version:
+            raise RuntimeError(
+                f"Publishing the index for {alias_name} returned no version"
+            )
         logger.info(f"Published the index for {alias_name} as version {version}")
 
         versioned_path = self._new_snapshot_path(repo_name)
@@ -4510,6 +4569,17 @@ class RefreshScheduler:
             raise RuntimeError(
                 f"Failed to create snapshot for {alias_name}: {type(e).__name__}: {e}"
             ) from e
+        from code_indexer.server.services.index_materializer import (
+            mark_published_here,
+        )
+
+        fields = published_index_fields(
+            index_store_alias(Path(source_path).name), version
+        )
+        mark_published_here(versioned_path, fields)
+        if getattr(self, "_pending_index_publications", None) is None:
+            self._pending_index_publications = {}
+        self._pending_index_publications[alias_name] = (str(versioned_path), fields)
         logger.info(
             f"Versioned snapshot of {alias_name} version {version} at: {versioned_path}"
         )
@@ -4575,15 +4645,19 @@ class RefreshScheduler:
                 )
 
             current_target = self.alias_manager.read_alias(alias_name)
-            previous_points = self._published_point_counts(current_target)
-            self._index_source(alias_name=alias_name, source_path=source_path)
+            baseline = self._integrity_baseline(alias_name, source_path, current_target)
+            try:
+                self._index_source(alias_name=alias_name, source_path=source_path)
 
-            gate_result = self._run_and_publish_integrity_gate(
-                alias_name=alias_name,
-                source_path=source_path,
-                current_target=current_target,
-                previous_points=previous_points,
-            )
+                gate_result = self._run_and_publish_integrity_gate(
+                    alias_name=alias_name,
+                    source_path=source_path,
+                    current_target=current_target,
+                    previous_points=baseline.points,
+                    healthy_index_dir=baseline.healthy_index_dir,
+                )
+            finally:
+                baseline.close()
             if not gate_result.passed:
                 detail_summary = "; ".join(
                     f"{f.collection_dir}: {f.detail}" for f in gate_result.failures
@@ -4828,6 +4902,33 @@ class RefreshScheduler:
         )
         return has_changes
 
+    def published_swap_extra(self, alias_name: str, new_target: str) -> Dict[str, Any]:
+        """The ``swap_alias`` keyword for swapping ``alias_name`` to a snapshot
+        this scheduler just created: the cidx-meta fingerprint (as
+        ``_published_meta_fingerprint``) plus, under a delegated IndexStore,
+        the published index version of ``new_target``. Empty under the
+        local store for any repository but a delegated cidx-meta (today's
+        swap)."""
+        extra: Dict[str, Any] = dict(
+            self._published_meta_fingerprint(alias_name).get("extra", {})
+        )
+        pending = getattr(self, "_pending_index_publications", {})
+        publication = pending.pop(alias_name, None)
+        if publication is not None:
+            published_path, fields = publication
+            if published_path != new_target:
+                raise RuntimeError(
+                    f"Refusing to swap {alias_name} to {new_target}: the index "
+                    f"published by this refresh is at {published_path}"
+                )
+            extra.update(fields)
+        elif not self._index_store.is_local:
+            raise RuntimeError(
+                f"Refusing to swap {alias_name} to {new_target}: no index was "
+                "published for it, so no other pod could serve it"
+            )
+        return {"extra": extra} if extra else {}
+
     def _published_meta_fingerprint(self, alias_name: str) -> Dict[str, Any]:
         """The ``swap_alias`` keyword publishing this refresh's cidx-meta
         fingerprint with the new pointer; empty (today's swap) otherwise."""
@@ -4955,9 +5056,7 @@ class RefreshScheduler:
         )
         return has_changes
 
-    def _check_extension_drift(
-        self, source_path: str, alias_name: str, *, pod_local: bool = True
-    ) -> bool:
+    def _check_extension_drift(self, source_path: str, alias_name: str) -> bool:
         """Check for extension drift and return True if --reconcile is needed.
 
         Calls sync_repo_extensions_if_drifted() on the config service.  If drift
@@ -4969,20 +5068,9 @@ class RefreshScheduler:
         calls within the same refresh cycle, so calling this helper both before
         an early-return and again at the shared drift-check site is harmless.
 
-        Where the files are listed: cidx-meta's shared content, or -- for a git
-        golden repo (``pod_local=False``) under a delegated content backend --
-        the backend's manifest of the clone (``_delegated_repository_backend``),
-        never this pod's index-state directory, where a walk finds nothing. A
-        listing failure there RAISES (fails the refresh): "could not list" is
-        never "no matching files". The config sync is then undone, so the next
-        refresh sees the same drift. A failure to sync the config is still only
-        logged, as before.
-
         Args:
             source_path: Absolute path to the live repo directory.
             alias_name: Global alias name used only for logging.
-            pod_local: The repo's files are on this pod by design (``local://``
-                repos, meta directories); False for a git golden repo.
 
         Returns:
             True if drift detected and matching files found, False otherwise.
@@ -4990,76 +5078,43 @@ class RefreshScheduler:
         try:
             config_service = get_config_service()
             drift = config_service.sync_repo_extensions_if_drifted(source_path)
+            if drift is not None and (drift.added or drift.removed):
+                drifted_exts = drift.added | drift.removed
+                _exclude = {
+                    ".git",
+                    "node_modules",
+                    "__pycache__",
+                    ".code-indexer",
+                    ".versioned",
+                }
+                shared = self._shared_cidx_meta(alias_name, source_path)
+                if (
+                    cidx_meta_content.has_files_with_extensions(
+                        shared, drifted_exts, _exclude
+                    )
+                    if shared is not None
+                    else has_files_with_extensions(source_path, drifted_exts, _exclude)
+                ):
+                    logger.info(
+                        "Extension drift detected (%d added, %d removed) "
+                        "and matching files found for %s -- triggering reconcile",
+                        len(drift.added),
+                        len(drift.removed),
+                        alias_name,
+                    )
+                    return True
+                logger.info(
+                    "Extension drift detected for %s but no matching files "
+                    "found -- using normal incremental index",
+                    alias_name,
+                )
         except Exception as e:
             logger.warning(
                 "Could not sync extensions before index for %s: %s",
                 alias_name,
                 e,
             )
-            return False
-        if drift is None or not (drift.added or drift.removed):
-            return False
-        drifted_exts = drift.added | drift.removed
-        _exclude = {
-            ".git",
-            "node_modules",
-            "__pycache__",
-            ".code-indexer",
-            ".versioned",
-        }
-        shared = self._shared_cidx_meta(alias_name, source_path)
-        try:
-            matched = (
-                cidx_meta_content.has_files_with_extensions(
-                    shared, drifted_exts, _exclude
-                )
-                if shared is not None
-                else has_files_with_extensions(
-                    source_path,
-                    drifted_exts,
-                    _exclude,
-                    backend=_delegated_repository_backend(pod_local),
-                )
-            )
-        except Exception:
-            # The sync above already wrote the new extensions; left so, the
-            # next refresh would see no drift and never reconcile them.
-            self._restore_drifted_extensions(config_service, source_path, drift)
-            raise
-        if matched:
-            logger.info(
-                "Extension drift detected (%d added, %d removed) "
-                "and matching files found for %s -- triggering reconcile",
-                len(drift.added),
-                len(drift.removed),
-                alias_name,
-            )
-            return True
-        logger.info(
-            "Extension drift detected for %s but no matching files "
-            "found -- using normal incremental index",
-            alias_name,
-        )
         return False
-
-    @staticmethod
-    def _restore_drifted_extensions(
-        config_service: Any, source_path: str, drift: Any
-    ) -> None:
-        """Put the repo config back on its pre-drift extensions, or log why not
-        (the listing failure being raised is what the refresh reports)."""
-        try:
-            config_service.restore_repo_extensions(source_path, drift)
-        except Exception as exc:
-            logger.error(
-                "Extension drift for %s could not be restored after the file "
-                "listing failed (%s): the next refresh will not reconcile the "
-                "%d added / %d removed extensions; run a reconcile index",
-                source_path,
-                exc,
-                len(drift.added),
-                len(drift.removed),
-            )
 
     def _refresh_admission_allowed(self) -> bool:
         """Should background refresh work start right now?
@@ -5471,12 +5526,7 @@ class RefreshScheduler:
         # Fix .code-indexer/ paths — non-fatal if cidx is not available
         try:
             subprocess.run(
-                [
-                    "cidx",
-                    "fix-config",
-                    "--force",
-                    *self._fix_config_backend_args(alias_name),
-                ],
+                ["cidx", "fix-config", "--force"],
                 cwd=str(master_path),
                 capture_output=True,
                 text=True,
@@ -5528,18 +5578,6 @@ class RefreshScheduler:
             if shared is not None
             else description_file.exists()
         ):
-            return False
-
-        refusal = _description_generation_refusal()
-        if refusal is not None:
-            # Generating it means an agent reading master_path, which on this
-            # pod holds index state only: a "success" here would describe an
-            # empty tree. Said once per alias per reconcile, not queued.
-            logger.warning(
-                "Reconciliation: description for %s is missing and was NOT queued: %s",
-                alias_name,
-                refusal,
-            )
             return False
 
         logger.info(
@@ -5601,17 +5639,6 @@ class RefreshScheduler:
             return
 
         logger.info("Starting startup reconciliation of golden repos (Story #236)")
-        # Under a delegated content backend the clones are workspace-mcp's and
-        # this pod's golden-repos/<alias> holds index state only: its absence
-        # here says nothing about the repository, and a reverse clone of a
-        # snapshot into master_path is no repository restore. AC4 is skipped
-        # (never decided by a local "absent"); AC5 still runs.
-        restore_masters = not _repository_is_delegated()
-        if not restore_masters:
-            logger.info(
-                "Reconciliation: content_backend='delegated' -- the golden "
-                "repos' clones are not on this pod; skipping master restore"
-            )
         restored_count = 0
         description_queued_count = 0
 
@@ -5640,7 +5667,7 @@ class RefreshScheduler:
             master_path = self.golden_repos_dir / repo_name
 
             # AC4: Restore missing master via reverse CoW clone
-            if restore_masters and not master_path.exists():
+            if not master_path.exists():
                 # Bug #239: Acquire write lock before restoring to prevent
                 # RefreshScheduler from creating a CoW snapshot of a
                 # partially-restored master directory.
@@ -5875,15 +5902,3 @@ def _record_fts_build_commit(source_path: Path) -> None:
         )
     except Exception as exc:  # noqa: BLE001 - never fail a completed index for this
         logger.debug("could not record FTS build commit for %s: %s", source_path, exc)
-
-
-def _description_generation_refusal() -> Optional[str]:
-    """Why golden-repo description generation cannot run on this server, or
-    None. The queued work runs through ClaudeCliManager's CliDispatcher, so it
-    runs under a delegated content backend exactly when the configured invoker
-    provisions golden repositories itself (see lifecycle_claude_cli_invoker)."""
-    from code_indexer.global_repos.lifecycle_claude_cli_invoker import (
-        lifecycle_analysis_refusal,
-    )
-
-    return lifecycle_analysis_refusal()

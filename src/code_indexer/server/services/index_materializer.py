@@ -58,8 +58,8 @@ __all__ = [
     "IN_PROGRESS_MARKER",
     "PublishedIndexUnavailableError",
     "ensure_current_index",
-    "exclusive_checkout",
     "ensure_published_index",
+    "mark_published_here",
     "publish_index",
     "is_served_here",
     "published_index_fields",
@@ -134,11 +134,6 @@ def _exclusive(target: Path) -> Iterator[None]:
             os.close(fd)
 
 
-#: Public name of the per-target checkout lock: a sweep that removes a
-#: checkout holds it, so it never races a checkout of the same target.
-exclusive_checkout = _exclusive
-
-
 def _recorded(document: Optional[Mapping[str, Any]], target: Path) -> Tuple[str, str]:
     fields = document or {}
     store_alias = fields.get(INDEX_STORE_ALIAS_FIELD)
@@ -167,20 +162,41 @@ def ensure_published_index(
     """Make the index published at ``target_path`` readable on this pod.
 
     ``document`` is the alias (or registry) document naming ``target_path``.
-    No-op under a local store or when the pod already serves the target.
-    ``fix_config`` defaults to ``run_fix_config``.
+    No-op under a local store or when the pod already serves the recorded
+    version: the pod holds an index there and either its
+    ``CHECKED_OUT_MARKER`` names that version, or it carries no marker (an
+    index built here before markers existed). A target is re-published in
+    place only by a repair (HNSW orphan sweep), so a marker naming another
+    version means this pod holds the pre-repair index: it is swapped for the
+    recorded one. ``fix_config`` defaults to ``run_fix_config``.
     """
     if store.is_local:
         return
     target = Path(target_path)
-    if is_served_here(store, target):
+    if _serves_recorded(store, target, document):
         return
     store_alias, version = _recorded(document, target)
+    fix = fix_config or run_fix_config
     with _exclusive(target):
-        if is_served_here(store, target):
+        if _serves_recorded(store, target, document):
             return
-        _checkout(store, target, store_alias, version, fix_config or run_fix_config)
+        if is_served_here(store, target):
+            _replace(store, target, store_alias, version, fix)
+        else:
+            _checkout(store, target, store_alias, version, fix)
     _prune_superseded(target, document)
+
+
+def _serves_recorded(
+    store: IndexStore, target: Path, document: Optional[Mapping[str, Any]]
+) -> bool:
+    """This pod holds ``target``'s index and nothing says it is not the
+    version ``document`` records."""
+    if not is_served_here(store, target):
+        return False
+    held = _checked_out_version(target)
+    recorded = _fields(document)
+    return held is None or recorded is None or held == recorded[1]
 
 
 def _checkout(
@@ -377,16 +393,33 @@ def publish_index(
         raise PublishedIndexUnavailableError(
             f"Publishing the index at {target} returned no version"
         )
-    (target / CHECKED_OUT_MARKER).write_text(version)
-    return published_index_fields(store_alias, version)
+    fields = published_index_fields(store_alias, version)
+    mark_published_here(target, fields)
+    return fields
+
+
+def mark_published_here(target: Union[str, Path], fields: Mapping[str, Any]) -> None:
+    """Record that this pod holds, at ``target``, exactly the version it just
+    published (``fields``: ``published_index_fields``). Every publisher marks
+    its own copy, so a later in-place republish (an HNSW repair) is told apart
+    from it, as a checkout is."""
+    _, version = _recorded(fields, Path(target))
+    (Path(target) / CHECKED_OUT_MARKER).write_text(version)
+
+
+def _snapshot_ts(name: str) -> int:
+    """The ``<ts>`` of a ``v_<ts>`` snapshot name."""
+    return int(name.split("_", 1)[1])
 
 
 def _prune_superseded(target: Path, document: Optional[Mapping[str, Any]]) -> None:
     """Schedule removal of this pod's checked-out snapshots of the same
     repository that the alias no longer names (``_schedule_removal``). Only
-    ``.versioned/<ns>/v_<ts>`` siblings carrying ``CHECKED_OUT_MARKER`` qualify;
-    a failure is logged, never raised (the read already succeeded and the
-    startup snapshot sweep is the backstop)."""
+    ``.versioned/<ns>/v_<ts>`` siblings carrying ``CHECKED_OUT_MARKER`` and
+    OLDER than the target qualify (the publisher marks its own snapshots too,
+    and a newer one may be a refresh about to swap); a failure is logged,
+    never raised (the read already succeeded and the startup snapshot sweep is
+    the backstop)."""
     if not _SNAPSHOT_NAME_RE.match(target.name):
         return
     if target.parent.parent.name != _VERSIONED_DIRNAME:
@@ -395,6 +428,7 @@ def _prune_superseded(target: Path, document: Optional[Mapping[str, Any]]) -> No
     previous = (document or {}).get("previous_path")
     if isinstance(previous, str) and previous:
         keep.add(str(Path(previous)))
+    newest = _snapshot_ts(target.name)
     try:
         siblings = list(target.parent.iterdir())
     except OSError as exc:
@@ -403,6 +437,8 @@ def _prune_superseded(target: Path, document: Optional[Mapping[str, Any]]) -> No
     for sibling in siblings:
         if str(sibling) in keep or not _SNAPSHOT_NAME_RE.match(sibling.name):
             continue
+        if _snapshot_ts(sibling.name) > newest:
+            continue  # newer than the alias's target: a snapshot in flight
         if not (sibling / CHECKED_OUT_MARKER).is_file():
             continue
         _schedule_removal(sibling)

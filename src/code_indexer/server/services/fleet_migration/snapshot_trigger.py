@@ -72,6 +72,12 @@ def trigger_post_consolidation_snapshot(
     published = publish_index_fields(
         refresh_scheduler._index_store, source_path, new_target
     )
+    if published is not None:
+        from code_indexer.server.services.index_materializer import (
+            mark_published_here,
+        )
+
+        mark_published_here(new_target, published)
 
     if refresh_scheduler.alias_manager.alias_exists(alias_name):
         current_target = refresh_scheduler.alias_manager.read_alias(alias_name)
