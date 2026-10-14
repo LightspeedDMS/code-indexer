@@ -33,7 +33,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
-from typing import Any, Optional, Protocol, Union
+from typing import Any, Dict, Optional, Protocol, Union
 
 #: The index directory's name inside a repository under the local backend.
 #: Exported for the code that must SKIP it while walking or searching a
@@ -112,6 +112,18 @@ def index_store_alias(repo_name: str) -> str:
     return f"{base[: _STORE_ALIAS_MAX - _ALIAS_HASH_CHARS - 1]}-{digest}"
 
 
+#: Alias-document field: the store alias a target's index is published under.
+INDEX_STORE_ALIAS_FIELD = "index_store_alias"
+#: Alias-document field: the immutable version published at the target.
+INDEX_VERSION_FIELD = "index_version"
+
+
+def published_index_fields(store_alias: str, version: str) -> Dict[str, str]:
+    """The alias-document fields recording what a publish put at a target, so
+    a pod that did not publish it can check the same version out."""
+    return {INDEX_STORE_ALIAS_FIELD: store_alias, INDEX_VERSION_FIELD: version}
+
+
 class DelegatedIndexStore:
     """Indexes as versioned artifacts held by another service (step 2).
 
@@ -134,18 +146,25 @@ class DelegatedIndexStore:
     def publish(self, repo_path: Union[str, Path], built_dir: Path) -> Optional[str]:
         """Publish on top of the store's current version (its compare-and-swap
         base): a concurrent publish in between is refused, not overwritten."""
-        alias = index_store_alias(Path(repo_path).name)
-        base = self._artifacts.current_version(alias)
-        return str(self._artifacts.publish(alias, base, str(built_dir)))
+        return self.publish_as(index_store_alias(Path(repo_path).name), built_dir)
 
     def checkout(
         self, repo_path: Union[str, Path], into: Path, version: Optional[str] = None
     ) -> Path:
         """Check ``version`` (default: current) out to ``into/<index dir>``."""
+        return self.checkout_as(index_store_alias(Path(repo_path).name), into, version)
+
+    def publish_as(self, store_alias: str, built_dir: Path) -> str:
+        """``publish`` under an explicit store alias (the caller derived it)."""
+        base = self._artifacts.current_version(store_alias)
+        return str(self._artifacts.publish(store_alias, base, str(built_dir)))
+
+    def checkout_as(
+        self, store_alias: str, into: Path, version: Optional[str] = None
+    ) -> Path:
+        """``checkout`` under an explicit store alias: ``into/<index dir>``."""
         dest = Path(into) / INDEX_DIRNAME
-        self._artifacts.checkout(
-            index_store_alias(Path(repo_path).name), str(dest), version
-        )
+        self._artifacts.checkout(store_alias, str(dest), version)
         return dest
 
 

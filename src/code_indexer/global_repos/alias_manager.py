@@ -61,6 +61,7 @@ def resolve_alias_or_index_path(
     """
     target_path = alias_manager.read_alias(alias_name)
     if target_path:
+        alias_manager.ensure_served_here(alias_name, target_path)
         return target_path
 
     index_path = repo_entry.get("index_path") if repo_entry else None
@@ -215,6 +216,34 @@ class AliasManager:
 
         pointer = self.read_pointer(alias_name)
         return pointer[0] if pointer is not None else None
+
+    def ensure_served_here(self, alias_name: str, target_path: str) -> None:
+        """Make the index at ``target_path`` (just read from ``alias_name``)
+        readable on this pod before a caller READS it.
+
+        Under a delegated IndexStore the target may have been published by
+        another pod: its recorded version is checked out here first
+        (``server/services/index_materializer.py``), and a failure raises
+        ``PublishedIndexUnavailableError`` rather than reading as "not found".
+        A write-mode redirect (a live source path) is left untouched. Under
+        the local store this does nothing (no metadata read).
+        """
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+
+        store = server_index_store()
+        if store.is_local:
+            return
+        record = self.read_record(alias_name)
+        pointer = pointer_from_document(record)
+        if pointer is None or pointer[0] != target_path:
+            return
+        from code_indexer.server.services.index_materializer import (
+            ensure_published_index,
+        )
+
+        ensure_published_index(target_path, record, store=store)
 
     def delete_alias(self, alias_name: str) -> None:
         """

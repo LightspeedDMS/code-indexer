@@ -1287,6 +1287,8 @@ class SemanticQueryManager:
                     alias_manager = AliasManager(str(aliases_dir))
 
                     target_path = alias_manager.read_alias(repo_alias)
+                    if target_path:
+                        alias_manager.ensure_served_here(repo_alias, target_path)
                     if not target_path:
                         logger.warning(
                             format_error_log(

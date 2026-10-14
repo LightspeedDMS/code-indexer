@@ -74,7 +74,12 @@ from code_indexer.server.services.metadata_reader import (
     read_status,
 )
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
-from code_indexer.utils.index_store import IndexStore, LocalIndexStore
+from code_indexer.utils.index_store import (
+    IndexStore,
+    LocalIndexStore,
+    index_store_alias,
+    published_index_fields,
+)
 from code_indexer.server.storage.shared.git_backend import (
     GitBackend,
     LocalGitBackend,
@@ -585,6 +590,11 @@ class RefreshScheduler:
         # fingerprint seen by the refresh in progress, published with the
         # alias pointer when that refresh swaps it (see _shared_meta_changed).
         self._pending_meta_fingerprints: Dict[str, str] = {}
+        # IndexStore step 2: what _snapshot_from_index_store published, keyed
+        # by alias as (snapshot path, alias-document fields), recorded with
+        # the pointer when that snapshot is swapped in so any pod can check
+        # the same version out (server/services/index_materializer.py).
+        self._pending_index_publications: Dict[str, Tuple[str, Dict[str, str]]] = {}
         self._alias_lock_db_backed_enabled_getter = alias_lock_db_backed_enabled_getter
         self._alias_lock_store_resolver = alias_lock_store_resolver
 
@@ -3179,7 +3189,7 @@ class RefreshScheduler:
                             alias_name=alias_name,
                             new_target=new_index_path,
                             old_target=current_target,
-                            **self._published_meta_fingerprint(alias_name),
+                            **self.published_swap_extra(alias_name, new_index_path),
                         )
 
                     # Bug #881 Phase 2 + Bug #1775: evict stale HNSW +
@@ -4412,6 +4422,10 @@ class RefreshScheduler:
             raise RuntimeError(
                 f"Failed to publish the index for {alias_name}: {type(e).__name__}: {e}"
             ) from e
+        if not version:
+            raise RuntimeError(
+                f"Publishing the index for {alias_name} returned no version"
+            )
         logger.info(f"Published the index for {alias_name} as version {version}")
 
         versioned_path = self._new_snapshot_path(repo_name)
@@ -4425,6 +4439,12 @@ class RefreshScheduler:
             raise RuntimeError(
                 f"Failed to create snapshot for {alias_name}: {type(e).__name__}: {e}"
             ) from e
+        if getattr(self, "_pending_index_publications", None) is None:
+            self._pending_index_publications = {}
+        self._pending_index_publications[alias_name] = (
+            str(versioned_path),
+            published_index_fields(index_store_alias(Path(source_path).name), version),
+        )
         logger.info(
             f"Versioned snapshot of {alias_name} version {version} at: {versioned_path}"
         )
@@ -4742,6 +4762,33 @@ class RefreshScheduler:
             f"(published: {'yes' if published else 'none'}) -> changes={has_changes}"
         )
         return has_changes
+
+    def published_swap_extra(self, alias_name: str, new_target: str) -> Dict[str, Any]:
+        """The ``swap_alias`` keyword for swapping ``alias_name`` to a snapshot
+        this scheduler just created: the cidx-meta fingerprint (as
+        ``_published_meta_fingerprint``) plus, under a delegated IndexStore,
+        the published index version of ``new_target``. Empty under the
+        local store for any repository but a delegated cidx-meta (today's
+        swap)."""
+        extra: Dict[str, Any] = dict(
+            self._published_meta_fingerprint(alias_name).get("extra", {})
+        )
+        pending = getattr(self, "_pending_index_publications", {})
+        publication = pending.pop(alias_name, None)
+        if publication is not None:
+            published_path, fields = publication
+            if published_path != new_target:
+                raise RuntimeError(
+                    f"Refusing to swap {alias_name} to {new_target}: the index "
+                    f"published by this refresh is at {published_path}"
+                )
+            extra.update(fields)
+        elif not self._index_store.is_local:
+            raise RuntimeError(
+                f"Refusing to swap {alias_name} to {new_target}: no index was "
+                "published for it, so no other pod could serve it"
+            )
+        return {"extra": extra} if extra else {}
 
     def _published_meta_fingerprint(self, alias_name: str) -> Dict[str, Any]:
         """The ``swap_alias`` keyword publishing this refresh's cidx-meta

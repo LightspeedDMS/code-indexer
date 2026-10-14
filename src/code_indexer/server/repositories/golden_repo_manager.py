@@ -1092,12 +1092,17 @@ class GoldenRepoManager:
                     )
 
                     global_activator = GlobalActivator(self.golden_repos_dir)
+                    published = self._publish_added_index(clone_path)
+                    activation_kwargs: Dict[str, Any] = (
+                        {"alias_extra": published} if published else {}
+                    )
                     global_activator.activate_golden_repo(
                         repo_name=alias,
                         repo_url=repo_url,
                         clone_path=clone_path,
                         enable_temporal=enable_temporal,
                         temporal_options=temporal_options,
+                        **activation_kwargs,
                     )
                     logging.info(
                         f"Golden repository '{alias}' automatically activated globally as '{alias}-global'"
@@ -4787,6 +4792,34 @@ class GoldenRepoManager:
                 f"[change_branch] HNSW post-CoW cleanup failed (non-fatal): {e}"
             )
 
+    def _publish_added_index(self, clone_path: str) -> Optional[Dict[str, str]]:
+        """Publish a newly added repository's index under a delegated IndexStore.
+
+        The add builds the index on this pod only; the alias points at the
+        clone path until the first refresh snapshots it. Publishing here and
+        recording the version with the pointer lets any other pod check the
+        same index out (``server/services/index_materializer.py``). None under
+        the local store (nothing to publish: today's add). Raises on failure,
+        which rolls the registration back like any activation failure.
+        """
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+        from code_indexer.utils.index_store import (
+            index_store_alias,
+            published_index_fields,
+        )
+
+        store = server_index_store()
+        if store.is_local:
+            return None
+        version = store.publish(clone_path, store.index_root(clone_path))
+        if not version:
+            raise RuntimeError(
+                f"Publishing the index of {clone_path} returned no version"
+            )
+        return published_index_fields(index_store_alias(Path(clone_path).name), version)
+
     def _is_versioned_snapshot(self, path: Optional[str]) -> bool:
         """Return True when *path* is a versioned snapshot (Bug #1084 Phase A4).
 
@@ -5789,6 +5822,7 @@ class GoldenRepoManager:
                         alias_name=global_alias,
                         new_target=new_snapshot,
                         old_target=current_target,
+                        **scheduler.published_swap_extra(global_alias, new_snapshot),
                     )
 
                     # Bug #1775: evict stale HNSW + chunk-store cache
