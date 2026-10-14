@@ -34,6 +34,7 @@ registers it on the ``code_indexer.git_backend`` entry point;
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import subprocess
@@ -41,6 +42,16 @@ import threading
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+def _decode_like_text_mode(raw: bytes) -> str:
+    """*raw* git stdout exactly as a local ``subprocess.run(text=True)`` (cidx's
+    ``run_git_command``) returns it: the locale encoding, strict errors (an
+    undecodable byte raises ``UnicodeDecodeError`` as the local run does), and
+    universal newlines (``\\r\\n`` / ``\\r`` -> ``\\n``)."""
+    with io.TextIOWrapper(io.BytesIO(raw), encoding=None) as text:
+        return text.read()
+
 
 _DEFAULT_URL = "http://git-mcp.agent-orchestrator.svc.cluster.local:3000"
 
@@ -573,7 +584,7 @@ class GitMcpBackend:
         return subprocess.CompletedProcess(
             args=["git", *args],
             returncode=out.returncode,
-            stdout=bytes(out.stdout).decode("utf-8", "replace"),
+            stdout=_decode_like_text_mode(bytes(out.stdout)),
             stderr=out.stderr,
         )
 

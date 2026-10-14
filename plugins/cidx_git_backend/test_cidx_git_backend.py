@@ -585,6 +585,32 @@ class TestGitToolsRunner:
             "args": ["log"],
         }
 
+    @staticmethod
+    def _local_text(raw: bytes, tmp_path) -> str:
+        """What a local ``subprocess.run(text=True)`` returns for *raw* stdout."""
+        path = tmp_path / "stdout.bin"
+        path.write_bytes(raw)
+        return subprocess.run(
+            ["cat", str(path)], capture_output=True, text=True, check=True
+        ).stdout
+
+    def test_run_decodes_exactly_as_a_local_run(self, backend, monkeypatch, tmp_path):
+        raw = "crlf\r\nlone cr\rünïcode – 日本\n".encode()
+        _install(monkeypatch, lambda b: _rpc(_content(self._raw(raw))))
+        out = backend.run(REPO, ["diff"])
+        assert out.stdout == self._local_text(raw, tmp_path)
+        assert out.stdout == "crlf\nlone cr\nünïcode – 日本\n"
+
+    def test_run_undecodable_output_raises_as_a_local_run_does(
+        self, backend, monkeypatch, tmp_path
+    ):
+        raw = b"caf\xe9\n"
+        _install(monkeypatch, lambda b: _rpc(_content(self._raw(raw))))
+        with pytest.raises(UnicodeDecodeError):
+            backend.run(REPO, ["diff"])
+        with pytest.raises(UnicodeDecodeError):
+            self._local_text(raw, tmp_path)
+
     def test_run_transport_error_raises(self, backend, monkeypatch):
         def boom(req, timeout=None):
             raise urllib.error.URLError("refused")

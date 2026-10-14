@@ -444,6 +444,13 @@ class GitOperationsService:
         except GitToolsUnavailableError as e:
             raise GitCommandError(str(e), stderr="", command=list(cmd), cwd=cwd)
 
+    def _validate_remote(self, remote: str, repo_path: Path) -> str:
+        """``validate_remote_name``: locally exactly as before (its own
+        ``git remote``); on a pod without the copy, through the git seam."""
+        if self._delegated_tools() is None:
+            return validate_remote_name(remote, repo_path)
+        return validate_remote_name(remote, repo_path, runner=self._git_run)
+
     @staticmethod
     def _delegated_tools() -> Optional[DelegatedGitTools]:
         """The delegated git tools, or None (local default)."""
@@ -1716,7 +1723,7 @@ class GitOperationsService:
             # whole element is checked and its '+'/'src:dst' contents reach
             # git unchanged. See git_argv_safety module docstring for
             # the invariant.
-            remote = validate_remote_name(remote, repo_path, runner=self._git_run)
+            remote = self._validate_remote(remote, repo_path)
             branch = validate_branch_name(branch, param_name="branch")
 
             # Defense in depth: hard option boundary right after the
@@ -1802,7 +1809,7 @@ class GitOperationsService:
         # call below, so the whole value is checked the same way as every
         # other branch site. See git_argv_safety module docstring for the
         # invariant.
-        remote = validate_remote_name(remote, repo_path, runner=self._git_run)
+        remote = self._validate_remote(remote, repo_path)
         branch = validate_branch_name(branch, param_name="branch")
 
         if self._delegated_tools() is not None:
@@ -1962,7 +1969,7 @@ class GitOperationsService:
             # whole element is checked and its '+'/'src:dst' contents reach
             # git unchanged. See git_argv_safety module docstring for
             # the invariant.
-            remote = validate_remote_name(remote, repo_path, runner=self._git_run)
+            remote = self._validate_remote(remote, repo_path)
             branch = validate_branch_name(branch, param_name="branch")
 
             # NOTE: unlike push/fetch below, `--end-of-options` is not a
@@ -2028,7 +2035,7 @@ class GitOperationsService:
             # remote must be a configured remote name; it never reaches
             # argv with a leading '-'. See git_argv_safety module docstring
             # for the invariant.
-            remote = validate_remote_name(remote, repo_path, runner=self._git_run)
+            remote = self._validate_remote(remote, repo_path)
 
             result = self._git_run(
                 # Defense in depth: hard option boundary right after the
