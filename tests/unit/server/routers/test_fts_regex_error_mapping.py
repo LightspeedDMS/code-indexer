@@ -53,6 +53,13 @@ def _build_client(monkeypatch, tmp_path: Path, search_side_effect):
         }
     ]
     activated_repo_manager.activated_repos_dir = str(activated_repos_dir)
+    # The FTS-availability check resolves the repo through the containment
+    # helper (get_activated_repo_path), not a hand-built join of
+    # activated_repos_dir -- an unconfigured MagicMock return would read as
+    # "FTS index not available".
+    activated_repo_manager.get_activated_repo_path.side_effect = lambda user, alias: (
+        str(activated_repos_dir / user / alias)
+    )
 
     semantic_query_manager = MagicMock()
 

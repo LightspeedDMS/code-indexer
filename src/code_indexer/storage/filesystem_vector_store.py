@@ -594,7 +594,7 @@ class PathIndex:
         self.save_snapshot(self.snapshot(), path)
 
     @classmethod
-    def load(cls, path: Path) -> "PathIndex":
+    def load(cls, path: Path, *, strict: bool = False) -> "PathIndex":
         """Load path index from disk. Returns an empty ``PathIndex`` if
         the file is missing OR corrupt/truncated (Bug #1575 round 6 item
         3: never raise uncaught -- a bad bin must not brick
@@ -603,6 +603,10 @@ class PathIndex:
 
         Args:
             path: File path to load from
+            strict: raise ``ValueError`` for a corrupt/unreadable file instead
+                of treating it as absent -- for a READER that would otherwise
+                serve "no files" (the listing served from the index must fall
+                back to the walk, never answer empty).
         """
         instance = cls()
 
@@ -613,6 +617,10 @@ class PathIndex:
             with open(path, "rb") as f:
                 serialized_data = msgpack.load(f)
         except (ValueError, msgpack.exceptions.UnpackException, OSError) as exc:
+            if strict:
+                raise ValueError(
+                    f"Corrupt/unreadable path_index.bin at {path}"
+                ) from exc
             logging.getLogger(__name__).warning(
                 "Corrupt/unreadable path_index.bin at %s -- treating as absent (%s)",
                 path,
@@ -621,6 +629,8 @@ class PathIndex:
             return instance
 
         if not isinstance(serialized_data, dict):
+            if strict:
+                raise ValueError(f"path_index.bin at {path} is not a mapping")
             logging.getLogger(__name__).warning(
                 "path_index.bin at %s did not deserialize to a dict -- "
                 "treating as absent",

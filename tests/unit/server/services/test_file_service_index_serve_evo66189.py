@@ -2,6 +2,7 @@
 (indexed_only fast path) instead of stat-walking the working tree over NFS."""
 
 import msgpack
+import pytest
 
 from code_indexer.server.services.file_service import FileListingService
 
@@ -75,3 +76,13 @@ class TestIndexServe:
         d.mkdir(parents=True)
         (d / "path_index.bin").write_bytes(b"\xff\xff not msgpack")
         assert _svc()._collect_files_from_index(str(tmp_path)) is None
+
+
+def test_path_index_load_is_lenient_unless_strict(tmp_path):
+    from code_indexer.storage.filesystem_vector_store import PathIndex
+
+    bad = tmp_path / "path_index.bin"
+    bad.write_bytes(b"\xff\xff not msgpack")
+    assert PathIndex.load(bad).file_paths() == []  # indexing callers: unchanged
+    with pytest.raises(ValueError, match="Corrupt"):
+        PathIndex.load(bad, strict=True)

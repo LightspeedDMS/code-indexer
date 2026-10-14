@@ -189,9 +189,7 @@ def _resolve_temporal_repo_path_rest(
         backend_registry = getattr(app.state, "backend_registry", None)
         if backend_registry:
             try:
-                repo_entry = backend_registry.global_repos.get_repo(
-                    repository_alias
-                )
+                repo_entry = backend_registry.global_repos.get_repo(repository_alias)
             except Exception:
                 pass
         alias_manager = AliasManager(str(PathLib(golden_repos_dir) / "aliases"))
@@ -825,13 +823,46 @@ def register_query_routes(
                             _fts_status = "success"
                             _fts_matches_count = len(fts_raw_results)
 
+                        except ValueError as e:
+                            # Client-side input errors from tantivy_manager.search():
+                            # an unbuildable regex (anchors ^ $, word boundaries \b
+                            # and other constructs the term-level DFA engine
+                            # rejects), or an invalid edit_distance / regex+fuzzy
+                            # combination. Bad requests, not server faults -> 400.
+                            # (Added by 451e77c; lost in the v12.78.0 snapshot.)
+                            logger.warning(
+                                format_error_log(
+                                    "APP-GENERAL-033",
+                                    f"FTS search rejected input: {e}",
+                                ),
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                            if request.search_mode == "fts":
+                                raise HTTPException(
+                                    status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail={
+                                        "error": "Invalid FTS query",
+                                        "message": str(e),
+                                        "suggestion": (
+                                            "FTS regex is term-level and "
+                                            "case-insensitive: anchors (^ $) and "
+                                            "word boundaries (\\b) are not "
+                                            "supported, and patterns cannot match "
+                                            "across whitespace; use lowercase "
+                                            "token patterns."
+                                        ),
+                                    },
+                                )
+                            # For hybrid mode, continue with semantic only
+                            search_mode_actual = "semantic"
+
                         except Exception as e:
                             logger.error(
                                 format_error_log(
                                     "APP-GENERAL-033",
                                     f"FTS search failed: {e}",
-                                    extra={"correlation_id": get_correlation_id()},
-                                )
+                                ),
+                                extra={"correlation_id": get_correlation_id()},
                             )
                             if request.search_mode == "fts":
                                 raise HTTPException(

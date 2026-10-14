@@ -739,7 +739,7 @@ class FileListingService:
         files: List[FileInfo] = []
         try:
             for pi_path in path_index_files:
-                for rel in PathIndex.load(pi_path).file_paths():
+                for rel in PathIndex.load(pi_path, strict=True).file_paths():
                     if rel in seen:
                         continue
                     seen.add(rel)
