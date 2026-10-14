@@ -203,6 +203,7 @@ smoke:
       tests/unit/server/routers/test_activated_repos_routes_content_seam.py
       tests/unit/server/repositories/test_activated_repos_content_seam.py
       tests/unit/server/services/test_activated_write_reindex.py
+      tests/unit/server/auto_update/test_operator_tooling_content_seam.py
       tests/unit/services/test_index_git_seam.py
       tests/unit/services/test_reconcile_git_seam_mountless.py
       tests/unit/services/test_delegated_max_file_size.py

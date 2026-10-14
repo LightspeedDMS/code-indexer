@@ -5502,6 +5502,11 @@ class DeploymentExecutor:
                 )
                 return True
 
+            if self._refuse_cow_symlink_under_delegated_content(
+                config, "activated-repos"
+            ):
+                return False
+
             cow_cfg = getattr(config, "cow_daemon", None)
             if cow_cfg is None or not getattr(cow_cfg, "mount_point", ""):
                 logger.warning(
@@ -5547,6 +5552,42 @@ class DeploymentExecutor:
                 )
             )
             return False
+
+    @staticmethod
+    def _refuse_cow_symlink_under_delegated_content(
+        config: Any, resource_name: str
+    ) -> bool:
+        """True (and a WARNING naming why) when *config* selects
+        ``content_backend: delegated``: the CoW-daemon symlink for
+        *resource_name* must not be built.
+
+        With a delegated content backend the repositories live on
+        workspace-mcp's storage, not on this host: ``data/<resource_name>``
+        holds cidx's index state only and activation runs through
+        ``clone_backend: delegated``. Pointing it into the CoW mount would put
+        that state back on the repository volume and mkdir a tree no reader
+        uses. The auto-updater runs outside the server process, so the
+        selection is read from the config it loaded, not from the running
+        server.
+        """
+        from code_indexer.server.startup.content_backend_wiring import (
+            content_backend_name,
+        )
+
+        if content_backend_name(config) != "delegated":
+            return False
+        logger.warning(
+            format_error_log(
+                "DEPLOY-GENERAL-226",
+                f"{resource_name} symlink for the CoW daemon refused: "
+                "content_backend='delegated' keeps repositories on "
+                "workspace-mcp, not on this host, so the CoW-mount topology "
+                "does not apply. Set clone_backend='delegated' (activation "
+                "refuses any other clone backend under a delegated content "
+                "backend). Nothing was created or changed.",
+            )
+        )
+        return True
 
     @staticmethod
     def _resolve_daemon_storage_path() -> Optional[str]:
@@ -5974,6 +6015,9 @@ class DeploymentExecutor:
                     extra={"correlation_id": get_correlation_id()},
                 )
                 return True
+
+            if self._refuse_cow_symlink_under_delegated_content(config, "golden-repos"):
+                return False
 
             cow_cfg = getattr(config, "cow_daemon", None)
             if cow_cfg is None or not getattr(cow_cfg, "mount_point", ""):

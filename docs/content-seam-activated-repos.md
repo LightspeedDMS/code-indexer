@@ -59,6 +59,16 @@ Follow-ups waiting for a slot are in-memory timers: a pod restart drops them.
 The written paths are then indexed by the next reindex of the copy --
 `trigger_reindex`, `sync_repository`, or the next cidx write's enqueue.
 
+## Operator tooling
+
+Host-side tools that build or use the repository volume's topology refuse under
+`content_backend: delegated`, before touching the disk:
+
+| Tool | Under delegated |
+|---|---|
+| Auto-updater CoW-daemon symlink steps (`data/golden-repos`, `data/activated-repos` into the CoW mount) | With `clone_backend: delegated` (the supported setup): unchanged no-op. With `clone_backend: cow-daemon`: refused, `DEPLOY-GENERAL-226` names why, nothing is created or renamed. The updater reads `content_backend` from the config it loads; it runs outside the server. |
+| `cidx global activate` | Exit 1 with the reason: the alias it registers names this host's `.code-indexer/index`, which no other pod has. Add or refresh through the server instead. Reads the server config at `CIDX_SERVER_DATA_DIR` (default `~/.cidx-server`); no config = plain CLI host, unchanged; an unreadable one is refused. |
+
 ## Deployment
 
 * `content_backend: delegated`, `clone_backend: delegated` (`workspace_mcp.endpoint`, `api_key` = `WSM_CLONE_SHARED_SECRET`), `git_backend: delegated`.

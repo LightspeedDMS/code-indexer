@@ -159,6 +159,16 @@ def content_backend_name_or_none() -> Optional[str]:
         return None
 
 
+def content_backend_name(config: Any) -> str:
+    """*config*'s ``content_backend`` selection, ``local`` when unset.
+
+    For code that holds a server config but runs outside the server process
+    (the auto-updater, operator CLI commands), where ``is_content_seam_delegated``
+    is always False because no backend was built.
+    """
+    return getattr(config, "content_backend", "local") or "local"
+
+
 def configured_content_backend_name() -> str:
     """The running server's ``content_backend`` selection, ``local`` when unset.
 
@@ -167,8 +177,7 @@ def configured_content_backend_name() -> str:
     """
     from code_indexer.server.services.config_service import get_config_service
 
-    config = get_config_service().get_config()
-    return getattr(config, "content_backend", "local") or "local"
+    return content_backend_name(get_config_service().get_config())
 
 
 def server_content_backend() -> Optional[ContentBackend]:
