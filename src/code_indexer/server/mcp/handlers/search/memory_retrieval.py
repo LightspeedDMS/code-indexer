@@ -28,13 +28,44 @@ from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.search_embed_event_emit import emit_embed_event
 from code_indexer.server.services.search_event_context import _search_event_ctx
 
-from .._utils import _coerce_int, _get_golden_repos_dir
+from code_indexer.server.services.memory_candidate_retriever import MemoryCandidate
+
+from .._utils import (
+    _coerce_int,
+    _get_access_filtering_service,
+    _get_golden_repos_dir,
+)
 from ._shared import _CIDX_META_DIR_NAME, _DEFAULT_SEARCH_LIMIT, _MEMORY_SEMANTIC_MODES
 
 # Issue #1935: literal package name (not __name__) so every submodule's
 # logger carries the identical name HEAD's single logger had -- the
 # log-audit gate and admin_logs_query front door key off this exact name.
 logger = logging.getLogger("code_indexer.server.mcp.handlers.search")
+
+
+def _visible_candidates(
+    candidates: List[MemoryCandidate], username: str
+) -> List[MemoryCandidate]:
+    """Keep only the candidates the caller may see, before any body is read.
+
+    Visibility is AccessFilteringService.filter_visible_memory_ids (one call
+    per request). Without an access service no candidate is visible.
+    """
+    if not candidates:
+        return []
+    access_service = _get_access_filtering_service()
+    if access_service is None:
+        logger.warning(
+            "Memory retrieval: access filtering service unavailable; "
+            "no memories returned for this request."
+        )
+        return []
+    visible = set(
+        access_service.filter_visible_memory_ids(
+            [c.memory_id for c in candidates], username
+        )
+    )
+    return [c for c in candidates if c.memory_id in visible]
 
 
 def _configured_embedding_timeout_seconds() -> int:
@@ -303,9 +334,10 @@ def _run_memory_retrieval(
         search_mode=search_mode,
     )
     filtered_candidates = pipeline.apply_voyage_floor(memory_candidates)
+    visible_candidates = _visible_candidates(filtered_candidates, user.username)
 
     assembled = pipeline.build_relevant_memories(
-        memory_candidates=filtered_candidates,
+        memory_candidates=visible_candidates,
         query=query_text,
         config_service=config_service,
         reranker_status=reranker_status,

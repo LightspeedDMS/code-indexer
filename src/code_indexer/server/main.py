@@ -50,6 +50,7 @@ def main():
         reload=args.reload,
         access_log=True,
         workers=args.workers,
+        server_header=False,
     )
 
 

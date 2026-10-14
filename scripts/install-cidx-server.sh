@@ -1073,7 +1073,7 @@ Environment="CIDX_REPO_ROOT=${INSTALL_DIR}"
 Environment="CIDX_AUTO_UPDATE_BRANCH=${AUTO_UPDATE_BRANCH}"
 $(if [[ -n "${VOYAGE_KEY}" ]]; then echo "Environment=\"VOYAGE_API_KEY=${voyage_key_display}\""; fi)
 
-ExecStart=${PYTHON} -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port ${PORT} --log-level info --workers ${WORKERS}
+ExecStart=${PYTHON} -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port ${PORT} --log-level info --workers ${WORKERS} --no-server-header
 
 Restart=always
 RestartSec=10

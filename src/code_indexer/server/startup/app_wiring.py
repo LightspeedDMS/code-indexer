@@ -151,9 +151,10 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     app.add_middleware(AuditRequestContextMiddleware)
     mark_server_process()
 
-    # Request admission control / backpressure. Added last so it is the OUTERMOST
-    # middleware -- it sheds excess load with 429 + Retry-After before any
-    # downstream processing. Opt-in; only wired when enabled so there is zero
+    # Request admission control / backpressure. Added after every processing
+    # middleware so it is OUTSIDE them all (only the header-only security
+    # headers middleware below wraps it) -- it sheds excess load with
+    # 429 + Retry-After before any downstream processing. Opt-in; only wired when enabled so there is zero
     # overhead by default.
     _admission_cfg = server_config.admission_control_config
     if _admission_cfg is not None and (
@@ -207,6 +208,16 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
             _admission_cfg.per_consumer_burst,
             _admission_cfg.per_consumer_refill_per_second,
         )
+
+    # Security response headers (CSP frame-ancestors, X-Frame-Options,
+    # nosniff, Referrer-Policy, strict wiki CSP, HSTS on https). Added last so
+    # it wraps every other middleware: 429 sheds and error responses get the
+    # headers too. Pure ASGI, header-only: streaming bodies pass through.
+    from code_indexer.server.middleware.security_headers import (
+        SecurityHeadersMiddleware,
+    )
+
+    app.add_middleware(SecurityHeadersMiddleware)
 
     # Add exception handlers for validation errors that FastAPI catches before middleware
     @app.exception_handler(RequestValidationError)

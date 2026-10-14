@@ -280,7 +280,36 @@ def _render_setup(
 
     show_mode=False: Setup flow with "Verify and Activate MFA" button.
     show_mode=True:  Show existing QR with "Test Code" and "View Recovery Codes".
+    Every argument is HTML-escaped before it is placed in the page; the
+    autoescaping Jinja recovery-codes partial is rendered from the raw values.
     """
+    regenerate_form = _regenerate_form(
+        recovery_link_prefix + "/recovery-codes", csrf, target_user
+    )
+    (
+        qr_b64,
+        manual_key,
+        csrf,
+        target_user,
+        error,
+        success,
+        verify_route,
+        back_link,
+        re_setup_link,
+    ) = (
+        html_module.escape(value, quote=True)
+        for value in (
+            qr_b64,
+            manual_key,
+            csrf,
+            target_user,
+            error,
+            success,
+            verify_route,
+            back_link,
+            re_setup_link,
+        )
+    )
     err = (
         f'<div style="color:#ff4444;background:#2a0a0a;padding:10px;border-radius:6px;margin:10px 0">{error}</div>'
         if error
@@ -317,7 +346,7 @@ def _render_setup(
             "<input type='hidden' name='test_only' value='1'>"
             "<input type='text' name='totp_code' maxlength='6' pattern='[0-9]{6}' placeholder='000000' autocomplete='one-time-code' required>"
             "<button type='submit' style='background:#333;color:#fff'>Test Code</button></form>"
-            f"{_regenerate_form(recovery_link_prefix + '/recovery-codes', csrf, target_user)}"
+            f"{regenerate_form}"
             f"{re_setup_html}"
         )
     else:
@@ -485,7 +514,10 @@ def mfa_setup_page(
     if mode == "show":
         uri = _totp_service.get_provisioning_uri(target_user)
         if uri is None:
-            return HTMLResponse(f"No MFA configured for {target_user}", status_code=404)
+            return HTMLResponse(
+                f"No MFA configured for {html_module.escape(target_user, quote=True)}",
+                status_code=404,
+            )
     else:
         if is_cross_user:
             secret = _totp_service.regenerate_secret_cross_user(
@@ -654,7 +686,7 @@ def mfa_verify(
     if test_only:
         if _totp_service.verify_code(username, totp_code):
             return RedirectResponse(
-                f"/admin/mfa/setup?user={username}&mode=show&verified=1",
+                f"/admin/mfa/setup?user={quote(username, safe='')}&mode=show&verified=1",
                 status_code=303,
             )
         token = _page_csrf_token(request)
@@ -745,7 +777,10 @@ def user_mfa_setup_page(request: Request, mode: Optional[str] = None):
         # MFA already active -- show existing QR with test option
         uri = _totp_service.get_provisioning_uri(username)
         if uri is None:
-            return HTMLResponse(f"No MFA configured for {username}", status_code=404)
+            return HTMLResponse(
+                f"No MFA configured for {html_module.escape(username, quote=True)}",
+                status_code=404,
+            )
         is_show = True
     else:
         # New setup or explicit re-setup
@@ -935,7 +970,7 @@ def user_mfa_status(request: Request):
 def render_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
     """Render the TOTP challenge page shown after password verification.
 
-    Returns HTMLResponse with X-Frame-Options: DENY to prevent clickjacking.
+    Framing is refused by the headers SecurityHeadersMiddleware adds.
     """
     safe_error = html_module.escape(error) if error else ""
     safe_token = html_module.escape(token)
@@ -995,10 +1030,7 @@ def render_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
         "<a href='/login' class='back'>Cancel and return to login</a>"
         "</div></body></html>"
     )
-    response = HTMLResponse(html)
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
-    return response
+    return HTMLResponse(html)
 
 
 def render_oauth_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
@@ -1006,7 +1038,7 @@ def render_oauth_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse
 
     Posts to /oauth/mfa/verify instead of /admin/mfa/challenge/verify so
     the OAuth authorization completes after TOTP verification.
-    Returns HTMLResponse with X-Frame-Options: DENY to prevent clickjacking.
+    Framing is refused by the headers SecurityHeadersMiddleware adds.
     """
     safe_error = html_module.escape(error) if error else ""
     safe_token = html_module.escape(token)
@@ -1066,10 +1098,7 @@ def render_oauth_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse
         "<a href='/login' class='back'>Cancel and return to login</a>"
         "</div></body></html>"
     )
-    response = HTMLResponse(html)
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
-    return response
+    return HTMLResponse(html)
 
 
 if TYPE_CHECKING:
