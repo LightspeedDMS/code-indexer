@@ -1222,13 +1222,15 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if (
             is_global_repo
             and not bp["recursive"]
-            and bp["path"]
+            and normalized_browse_path
             and not cross_dir_pattern
             and not bp["indexed_only"]
         ):
+            # The NORMALIZED path: a raw leading "/" (e.g. "/src") would join
+            # onto the repository path as an absolute path and list nothing.
             result = _utils.app_module.file_service.list_directory_level(
                 repo_path=repository_alias,
-                subdir=bp["path"],
+                subdir=normalized_browse_path,
                 query_params=query_params,
             )
         elif is_global_repo:
