@@ -119,6 +119,11 @@ _DUAL_FORM_VERBS = {
 # classifier, so `git remote show` being listed cannot smuggle in `git remote add`.
 ALLOWED_READS = {
     ("server/services/git_operations_service.py", "config"),
+    # These argv lists are handed to the git tools' DELEGATED runner
+    # (DelegatedGitTools.run -> git-mcp git_exec), never to a local process:
+    # a mount-less pod asks git-mcp whether a copy is a repository / mid-merge.
+    ("server/services/git_tools_seam.py", "rev-parse"),
+    ("server/mcp/handlers/_legacy.py", "rev-parse"),
     ("server/services/golden_repo_reconciler.py", "rev-parse"),
     ("server/services/cidx_meta_backup/branch_detect.py", "remote"),
     ("server/startup/lifespan.py", "remote"),

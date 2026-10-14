@@ -34,6 +34,7 @@ registers it on the ``code_indexer.git_backend`` entry point;
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import subprocess
@@ -41,6 +42,33 @@ import threading
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+def _decode_like_text_mode(raw: bytes) -> str:
+    """*raw* git stdout exactly as a local ``subprocess.run(text=True)`` (cidx's
+    ``run_git_command``) returns it: the locale encoding, strict errors (an
+    undecodable byte raises ``UnicodeDecodeError`` as the local run does), and
+    universal newlines (``\\r\\n`` / ``\\r`` -> ``\\n``)."""
+    with io.TextIOWrapper(io.BytesIO(raw), encoding=None) as text:
+        return text.read()
+
+
+def _pull_conflict_error(conflicts: Any) -> "GitMcpBackendError":
+    """git-mcp's ``git_pull`` result ``{status: 'conflicts', conflicts: [...]}``
+    -- a NORMAL tool result, not an error -- as the failure a local
+    ``git pull`` is: a ``CalledProcessError`` whose ``output`` names each
+    conflicted path in git's own ``CONFLICT ... Merge conflict in <path>``
+    form, which is what cidx's callers parse."""
+    paths = [
+        str(entry["path"])
+        for entry in (conflicts if isinstance(conflicts, list) else [])
+        if isinstance(entry, dict) and entry.get("path")
+    ]
+    lines = [f"CONFLICT (content): Merge conflict in {path}" for path in paths]
+    lines.append("Automatic merge failed; fix conflicts and then commit the result.")
+    message = f"git-mcp git_pull stopped on merge conflicts in {paths}"
+    return GitMcpBackendError(message, output="\n".join(lines) + "\n")
+
 
 _DEFAULT_URL = "http://git-mcp.agent-orchestrator.svc.cluster.local:3000"
 
@@ -71,11 +99,12 @@ class GitMcpBackendError(subprocess.CalledProcessError):
         stderr: Optional[str] = None,
         returncode: int = 1,
         cmd: str = "git-mcp",
+        output: Optional[str] = None,
     ) -> None:
         super().__init__(
             returncode,
             cmd,
-            output=None,
+            output=output,
             stderr=stderr if stderr is not None else message,
         )
         self.message = message
@@ -261,7 +290,9 @@ class GitMcpBackend:
             if flag is None:
                 raise GitMcpBackendError(f"git-mcp pull: unsupported mode {mode!r}")
             args[flag] = True
-        self._call("git_pull", args, timeout)
+        result = self._call("git_pull", args, timeout)
+        if result.get("status") == "conflicts":
+            raise _pull_conflict_error(result.get("conflicts"))
 
     def merge(self, repo_path: str, ref: str, timeout: Any = None) -> None:
         self._call("git_merge", self._cow(repo_path, branch=ref), timeout)
@@ -546,6 +577,67 @@ class GitMcpBackend:
                 stderr=out.stderr,
                 returncode=out.returncode,
             )
+
+    # ── cidx's git tools on an activated working copy (GitCommandRunner) ─────
+
+    def run(
+        self,
+        repo_path: str,
+        args: Sequence[str],
+        timeout: Any = None,
+        identity: Optional[Dict[str, str]] = None,
+    ) -> subprocess.CompletedProcess:
+        """``git <args>`` through git-mcp ``git_exec``: git's own output, the
+        exit code returned (not raised) exactly as a local ``check=False`` run."""
+        seconds = int(timeout) if isinstance(timeout, (int, float)) else None
+        result = self._call(
+            "git_exec",
+            self._cow(
+                repo_path,
+                args=list(args),
+                timeout_seconds=seconds,
+                identity=dict(identity) if identity else None,
+            ),
+            None if seconds is None else seconds + 30,
+        )
+        out = self._raw_output("git_exec", result)
+        return subprocess.CompletedProcess(
+            args=["git", *args],
+            returncode=out.returncode,
+            stdout=_decode_like_text_mode(bytes(out.stdout)),
+            stderr=out.stderr,
+        )
+
+    def push(
+        self,
+        repo_path: str,
+        remote: str,
+        branch: Optional[str] = None,
+        timeout: Any = None,
+        set_upstream: bool = False,
+    ) -> subprocess.CompletedProcess:
+        """git-mcp ``git_push`` with git-mcp's credentials; raises on failure.
+
+        ``set_upstream`` is always sent: git-mcp's own default is to set the
+        tracking branch, which a plain ``git push`` does not do."""
+        result = self._call(
+            "git_push",
+            self._cow(
+                repo_path,
+                remote=remote,
+                branch=branch,
+                set_upstream=bool(set_upstream),
+            ),
+            timeout,
+        )
+        guidance = result.get("_guidance") or {}
+        message = str(guidance.get("message", "")) if isinstance(guidance, dict) else ""
+        return subprocess.CompletedProcess(
+            args=["git", "push", remote] + ([branch] if branch else []),
+            returncode=0,
+            stdout=message,
+            stderr="",
+        )
 
     # ── remotes ──────────────────────────────────────────────────────────────
 

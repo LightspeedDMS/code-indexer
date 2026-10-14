@@ -8,10 +8,10 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | Class | Rows |
 |---|---|
 | unclassified | 0 |
-| repo-read | 381 |
+| repo-read | 355 |
 | repo-write | 67 |
 | cidx-state-in-repo | 1020 |
-| migrated | 351 |
+| migrated | 342 |
 | local-only | 324 |
 | cidx-state | 575 |
 | not-repo | 422 |
@@ -80,7 +80,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/git/git_sync_executor.py` | 0 | 11 | 9 | 0 |
 | `server/lifecycle/global_repos_lifecycle.py` | 0 | 0 | 1 | 0 |
 | `server/managers/composite_file_listing.py` | 0 | 6 | 0 | 0 |
-| `server/mcp/handlers/_legacy.py` | 0 | 4 | 0 | 3 |
+| `server/mcp/handlers/_legacy.py` | 0 | 3 | 0 | 3 |
 | `server/mcp/handlers/_provider_temporal_job.py` | 0 | 0 | 0 | 1 |
 | `server/mcp/handlers/repos.py` | 0 | 5 | 0 | 4 |
 | `server/mcp/handlers/search/repo_search.py` | 0 | 1 | 0 | 0 |
@@ -116,8 +116,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/services/fleet_migration/orchestrator.py` | 0 | 1 | 0 | 4 |
 | `server/services/fleet_migration/quarantine.py` | 0 | 0 | 0 | 4 |
 | `server/services/fts_index_builder.py` | 0 | 0 | 0 | 5 |
-| `server/services/git_argv_safety.py` | 0 | 1 | 0 | 0 |
-| `server/services/git_operations_service.py` | 0 | 24 | 0 | 2 |
+| `server/services/git_operations_service.py` | 0 | 0 | 0 | 2 |
 | `server/services/git_state_manager.py` | 0 | 5 | 0 | 0 |
 | `server/services/golden_index_backfill.py` | 0 | 2 | 0 | 4 |
 | `server/services/golden_repo_branch_service.py` | 0 | 5 | 0 | 0 |

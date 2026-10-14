@@ -273,6 +273,45 @@ class TestMutationArguments:
         backend.pull(REPO, mode="no-ff")
         assert calls[-1]["body"]["params"]["arguments"]["no_ff"] is True
 
+    def test_pull_conflicts_raise_with_git_style_conflict_lines(
+        self, backend, monkeypatch
+    ):
+        """git-mcp's gitPull RETURNS (not throws) {status: 'conflicts'} when the
+        pull stops on conflicts. Discarding it reported a mid-merge copy as a
+        clean pull; it must fail as a local `git pull` does, naming each
+        conflicted path the way git's stdout does."""
+        result = {
+            "status": "conflicts",
+            "commits_pulled": 0,
+            "conflicts": [
+                {"path": "a.txt", "conflict_type": "both_modified"},
+                {"path": "dir/b.txt", "conflict_type": "both_modified"},
+            ],
+            "_guidance": {"message": "conflicts — pulled 0 commit(s)"},
+        }
+        _install(monkeypatch, lambda b: _rpc(_content(result)))
+        with pytest.raises(GitMcpBackendError) as exc:
+            backend.pull(REPO, remote="origin", branch="main")
+        assert isinstance(exc.value, subprocess.CalledProcessError)
+        assert exc.value.returncode != 0
+        assert exc.value.output.splitlines()[:2] == [
+            "CONFLICT (content): Merge conflict in a.txt",
+            "CONFLICT (content): Merge conflict in dir/b.txt",
+        ]
+
+    def test_pull_conflicts_without_paths_still_fail(self, backend, monkeypatch):
+        _install(monkeypatch, lambda b: _rpc(_content({"status": "conflicts"})))
+        with pytest.raises(GitMcpBackendError, match="conflicts"):
+            backend.pull(REPO)
+
+    @pytest.mark.parametrize("status", ["up_to_date", "fast_forwarded", "merged"])
+    def test_a_clean_pull_returns(self, backend, monkeypatch, status):
+        _install(
+            monkeypatch,
+            lambda b: _rpc(_content({"status": status, "conflicts": None})),
+        )
+        assert backend.pull(REPO) is None
+
     def test_pull_rejects_unknown_mode(self, backend, monkeypatch):
         _install(monkeypatch, lambda b: _rpc(_content({})))
         with pytest.raises(GitMcpBackendError, match="unsupported mode"):
@@ -527,3 +566,130 @@ class TestHistoryOps:
         )
         with pytest.raises(GitMcpBackendError, match="not base64"):
             backend.log_raw(REPO, "%H")
+
+
+class TestGitToolsRunner:
+    """cidx's git tools on an activated copy: git_exec (raw, exit code
+    returned) and git_push (git-mcp's credentials)."""
+
+    @staticmethod
+    def _raw(stdout: bytes, exit_code: int = 0, stderr: str = "") -> dict:
+        import base64
+
+        return {
+            "exit_code": exit_code,
+            "stdout_b64": base64.b64encode(stdout).decode(),
+            "stderr": stderr,
+        }
+
+    def test_backend_is_a_git_command_runner(self, backend):
+        from code_indexer.server.storage.shared.git_backend import GitCommandRunner
+
+        assert isinstance(backend, GitCommandRunner)
+
+    def test_run_sends_git_exec_and_returns_text(self, backend, monkeypatch):
+        calls = _install(
+            monkeypatch, lambda b: _rpc(_content(self._raw(" M a.txt\n".encode())))
+        )
+        out = backend.run(
+            REPO,
+            ["status", "--porcelain"],
+            timeout=30,
+            identity={"author_name": "A", "author_email": "a@example.com"},
+        )
+        assert (out.returncode, out.stdout, out.args) == (
+            0,
+            " M a.txt\n",
+            ["git", "status", "--porcelain"],
+        )
+        params = calls[0]["body"]["params"]
+        assert params["name"] == "git_exec"
+        assert params["arguments"] == {
+            "cow_path": REPO,
+            "args": ["status", "--porcelain"],
+            "timeout_seconds": 30,
+            "identity": {"author_name": "A", "author_email": "a@example.com"},
+        }
+
+    def test_run_returns_a_git_failure_instead_of_raising(self, backend, monkeypatch):
+        _install(monkeypatch, lambda b: _rpc(_content(self._raw(b"", 1, "fatal: x"))))
+        out = backend.run(REPO, ["checkout", "nope"])
+        assert (out.returncode, out.stderr) == (1, "fatal: x")
+
+    def test_run_omits_unset_options(self, backend, monkeypatch):
+        calls = _install(monkeypatch, lambda b: _rpc(_content(self._raw(b""))))
+        backend.run(REPO, ["log"])
+        assert calls[0]["body"]["params"]["arguments"] == {
+            "cow_path": REPO,
+            "args": ["log"],
+        }
+
+    @staticmethod
+    def _local_text(raw: bytes, tmp_path) -> str:
+        """What a local ``subprocess.run(text=True)`` returns for *raw* stdout."""
+        path = tmp_path / "stdout.bin"
+        path.write_bytes(raw)
+        return subprocess.run(
+            ["cat", str(path)], capture_output=True, text=True, check=True
+        ).stdout
+
+    def test_run_decodes_exactly_as_a_local_run(self, backend, monkeypatch, tmp_path):
+        raw = "crlf\r\nlone cr\rünïcode – 日本\n".encode()
+        _install(monkeypatch, lambda b: _rpc(_content(self._raw(raw))))
+        out = backend.run(REPO, ["diff"])
+        assert out.stdout == self._local_text(raw, tmp_path)
+        assert out.stdout == "crlf\nlone cr\nünïcode – 日本\n"
+
+    def test_run_undecodable_output_raises_as_a_local_run_does(
+        self, backend, monkeypatch, tmp_path
+    ):
+        raw = b"caf\xe9\n"
+        _install(monkeypatch, lambda b: _rpc(_content(self._raw(raw))))
+        with pytest.raises(UnicodeDecodeError):
+            backend.run(REPO, ["diff"])
+        with pytest.raises(UnicodeDecodeError):
+            self._local_text(raw, tmp_path)
+
+    def test_run_transport_error_raises(self, backend, monkeypatch):
+        def boom(req, timeout=None):
+            raise urllib.error.URLError("refused")
+
+        monkeypatch.setattr(plugin.urllib.request, "urlopen", boom)
+        with pytest.raises(GitMcpBackendError):
+            backend.run(REPO, ["status"])
+
+    def test_push_sends_git_push(self, backend, monkeypatch):
+        calls = _install(
+            monkeypatch,
+            lambda b: _rpc(
+                _content({"branch": "w", "_guidance": {"message": "Pushed w"}})
+            ),
+        )
+        out = backend.push(REPO, "origin", "w")
+        assert (out.returncode, out.stdout) == (0, "Pushed w")
+        params = calls[0]["body"]["params"]
+        assert params["name"] == "git_push"
+        assert params["arguments"] == {
+            "cow_path": REPO,
+            "remote": "origin",
+            "branch": "w",
+            # Always sent: git-mcp's own default is to SET the upstream, which
+            # a plain `git push` does not do.
+            "set_upstream": False,
+        }
+
+    def test_push_set_upstream_is_forwarded(self, backend, monkeypatch):
+        calls = _install(monkeypatch, lambda b: _rpc(_content({"branch": "w"})))
+        backend.push(REPO, "origin", "w", set_upstream=True)
+        assert calls[0]["body"]["params"]["arguments"]["set_upstream"] is True
+
+    def test_push_tool_error_raises(self, backend, monkeypatch):
+        _install(
+            monkeypatch,
+            lambda b: _rpc(
+                {"isError": True, "content": [{"type": "text", "text": "rejected"}]}
+            ),
+        )
+        with pytest.raises(GitMcpBackendError) as exc:
+            backend.push(REPO, "origin", "main")
+        assert exc.value.stderr == "rejected"
