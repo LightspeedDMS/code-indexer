@@ -33,7 +33,8 @@ through those seams to the base clone (`golden_repo_content_root`).
 
 `AliasManager.ensure_served_here(alias, target)` runs after the alias is
 resolved by every golden read path (`resolve_alias_or_index_path`,
-`_resolve_golden_repo_path`, `SemanticQueryManager._perform_search`):
+`_resolve_golden_repo_path`, `SemanticQueryManager._perform_search`, the
+repository health check `repository_health._resolve_repository_path`):
 
 1. Local store, or `<target>/.code-indexer/index` present with no in-progress
    marker: nothing to do (the publisher, or a pod that checked it out before).

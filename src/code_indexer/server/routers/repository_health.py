@@ -515,6 +515,24 @@ def _resolve_golden_repo_alias_for_activated_repo(
     return golden_alias if isinstance(golden_alias, str) and golden_alias else None
 
 
+def _served_golden_target(golden_repo_manager: Any, alias: str) -> Optional[str]:
+    """Under a delegated IndexStore: the golden alias's target, with this pod
+    holding its published index (``AliasManager.ensure_served_here``; a
+    failure raises, never "not found"). None under the local store -- the
+    caller resolves the path as before -- and for an alias with no pointer."""
+    from code_indexer.global_repos.alias_manager import AliasManager
+    from code_indexer.server.startup.index_store_wiring import server_index_store
+
+    if server_index_store().is_local:
+        return None
+    aliases = AliasManager(str(Path(golden_repo_manager.golden_repos_dir) / "aliases"))
+    global_alias = f"{alias}-global"
+    target = aliases.read_alias(global_alias)
+    if target:
+        aliases.ensure_served_here(global_alias, target)
+    return target
+
+
 def _resolve_repository_path(repo_alias: str, current_user: User) -> Tuple[str, Path]:
     """Resolve a repo_alias to (resolved_alias, actual_repo_clone_path).
 
@@ -569,7 +587,12 @@ def _resolve_repository_path(repo_alias: str, current_user: User) -> Tuple[str, 
         )
 
     if repo:
-        actual_path = golden_repo_manager.get_actual_repo_path(resolved_alias)
+        served = _served_golden_target(golden_repo_manager, resolved_alias)
+        actual_path = (
+            served
+            if served is not None
+            else golden_repo_manager.get_actual_repo_path(resolved_alias)
+        )
         clone_path = Path(actual_path)
     else:
         assert repo_path is not None
@@ -632,7 +655,9 @@ async def check_repository_health_async(
     )
 
     try:
-        resolved_alias, clone_path = _resolve_repository_path(repo_alias, current_user)
+        resolved_alias, clone_path = await anyio.to_thread.run_sync(
+            functools.partial(_resolve_repository_path, repo_alias, current_user)
+        )
         index_base_path = clone_path / ".code-indexer" / "index"
         background_job_manager = _get_background_job_manager()
 
@@ -673,6 +698,63 @@ async def check_repository_health_async(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to start health check job: {str(e)}",
         )
+
+
+def _check_indexes(repo_alias: str, current_user: User) -> IndexesStatusResponse:
+    """Synchronous index detection; offloaded from the event loop by the handler."""
+    resolved_alias, clone_path = _resolve_repository_path(repo_alias, current_user)
+
+    golden_repo_manager = _get_golden_repo_manager()
+    repo = golden_repo_manager.get_golden_repo(resolved_alias)
+
+    index_base_path = clone_path / ".code-indexer" / "index"
+
+    has_semantic = detect_semantic_index(index_base_path)
+
+    fts_path = clone_path / ".code-indexer" / "tantivy_index"
+    has_fts = fts_path.exists() and fts_path.is_dir()
+
+    from code_indexer.services.temporal.temporal_status import (
+        get_temporal_repo_status,
+    )
+
+    has_temporal = False
+    legacy_temporal = index_base_path / "temporal"
+    if legacy_temporal.is_dir():
+        has_temporal = (legacy_temporal / "hnsw_index.bin").is_file()
+
+    if not has_temporal:
+        golden_repo_alias_for_temporal = (
+            resolved_alias
+            if repo
+            else _resolve_golden_repo_alias_for_activated_repo(
+                current_user.username, repo_alias
+            )
+        )
+        if golden_repo_alias_for_temporal:
+            golden_repos_dir = (
+                Path(_get_activated_repo_manager().activated_repos_dir).parent
+                / "golden-repos"
+            )
+            temporal_status = get_temporal_repo_status(
+                golden_repos_dir=golden_repos_dir,
+                repo_alias=golden_repo_alias_for_temporal,
+                legacy_index_path=index_base_path,
+            )
+            has_temporal = temporal_status.is_queryable
+
+    scip_path = clone_path / ".code-indexer" / "scip"
+    has_scip = False
+    if scip_path.exists() and scip_path.is_dir():
+        scip_files = list(scip_path.glob("*.scip.db"))
+        has_scip = len(scip_files) > 0
+
+    return IndexesStatusResponse(
+        has_semantic=has_semantic,
+        has_fts=has_fts,
+        has_temporal=has_temporal,
+        has_scip=has_scip,
+    )
 
 
 @router.get(
@@ -731,111 +813,14 @@ async def get_repository_indexes(
     )
 
     try:
-        # Multi-strategy repository resolution (same as health endpoint)
-        # Strategy 1: Try as golden repo (exact match)
-        golden_repo_manager = _get_golden_repo_manager()
-        repo = golden_repo_manager.get_golden_repo(repo_alias)
-        repo_path = None
-        resolved_alias = repo_alias
-
-        # Strategy 2: If not found and ends with -global, try without suffix
-        if not repo and repo_alias.endswith("-global"):
-            base_alias = repo_alias[:-7]  # Remove "-global" suffix
-            repo = golden_repo_manager.get_golden_repo(base_alias)
-            if repo:
-                resolved_alias = base_alias
-
-        # Strategy 3: Try as user-activated repo
-        if not repo:
-            activated_repo_manager = _get_activated_repo_manager()
-            potential_path = activated_repo_manager.get_activated_repo_path(
-                current_user.username, repo_alias
+        result = await anyio.to_thread.run_sync(
+            functools.partial(
+                _check_indexes, repo_alias, current_user
             )
-            # Validate path exists before using it
-            if Path(potential_path).exists():
-                repo_path = potential_path
-
-        # If still not found via any strategy, return 404
-        if not repo and not repo_path:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Repository '{repo_alias}' not found",
-            )
-
-        # Resolve actual filesystem path
-        if repo:
-            # Golden repo path
-            actual_path = golden_repo_manager.get_actual_repo_path(resolved_alias)
-            clone_path = Path(actual_path)
-        else:
-            # Activated repo path
-            assert repo_path is not None
-            clone_path = Path(repo_path)
-
-        # Check for each index type
-        index_base_path = clone_path / ".code-indexer" / "index"
-
-        # Semantic index: dynamic detection across all embedding providers
-        has_semantic = detect_semantic_index(index_base_path)
-
-        # FTS index: tantivy_index/ directory (sibling to index/, not subdirectory)
-        fts_path = clone_path / ".code-indexer" / "tantivy_index"
-        has_fts = fts_path.exists() and fts_path.is_dir()
-
-        # Temporal index: legacy bare "temporal" dir (pre-#1290, no
-        # sister-location equivalent, never migrated -- kept as a pure
-        # local-clone check) OR resolver-aware detection of
-        # code-indexer-temporal* namespaces, which may have relocated to
-        # Story #1457's golden-owned sister location (GitHub Issue #1459
-        # AC4) -- routes through the SAME TemporalShardResolver/catalog
-        # mechanism the query path uses, never a parallel sister-root scan.
-        from code_indexer.services.temporal.temporal_status import (
-            get_temporal_repo_status,
         )
-
-        has_temporal = False
-        # Check legacy "temporal" directory first
-        legacy_temporal = index_base_path / "temporal"
-        if legacy_temporal.is_dir():
-            has_temporal = (legacy_temporal / "hnsw_index.bin").is_file()
-
-        if not has_temporal:
-            golden_repo_alias_for_temporal = (
-                resolved_alias
-                if repo
-                else _resolve_golden_repo_alias_for_activated_repo(
-                    current_user.username, repo_alias
-                )
-            )
-            if golden_repo_alias_for_temporal:
-                golden_repos_dir = (
-                    Path(_get_activated_repo_manager().activated_repos_dir).parent
-                    / "golden-repos"
-                )
-                temporal_status = get_temporal_repo_status(
-                    golden_repos_dir=golden_repos_dir,
-                    repo_alias=golden_repo_alias_for_temporal,
-                    legacy_index_path=index_base_path,
-                )
-                has_temporal = temporal_status.is_queryable
-
-        # SCIP index: scip/ directory with .scip.db files
-        scip_path = clone_path / ".code-indexer" / "scip"
-        has_scip = False
-        if scip_path.exists() and scip_path.is_dir():
-            # Check if there are any .scip.db files
-            scip_files = list(scip_path.glob("*.scip.db"))
-            has_scip = len(scip_files) > 0
-
-        return IndexesStatusResponse(
-            has_semantic=has_semantic,
-            has_fts=has_fts,
-            has_temporal=has_temporal,
-            has_scip=has_scip,
-        )
+        return result
 
     except HTTPException:
-        # Re-raise HTTP exceptions (404, etc.)
         raise
     except Exception as e:
         logger.error(
