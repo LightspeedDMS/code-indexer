@@ -1980,6 +1980,107 @@ class TestDelegatedCloneBackendCreateCloneAtPath:
         assert seen == ["/mnt/dst"]
 
 
+class TestDelegatedCloneBackendWorkingCopies:
+    """Mount-less activations: clone (if_absent), stat and delete of a working
+    copy through workspace-mcp, never looking at this pod's disk."""
+
+    def test_clone_working_copy_sends_if_absent_and_skips_visibility(self, tmp_path):
+        from code_indexer.server.storage.shared.clone_backend import (
+            DelegatedCloneBackend,
+        )
+
+        seen = []
+        backend = DelegatedCloneBackend(
+            config=_make_wsm_config(),
+            versioned_base=str(tmp_path),
+            visibility_waiter=lambda p: seen.append(p),
+        )
+        mock_req = _mock_delegated_requests(
+            post_resp=_make_response(200, {"method": "reflink"})
+        )
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            result = backend.clone_working_copy("/g/repo", "/a/u/repo")
+
+        assert result == "/a/u/repo"
+        assert mock_req.post.call_args[0][0] == "http://workspace-mcp:8080/clone-path"
+        assert mock_req.post.call_args[1]["json"] == {
+            "source_path": "/g/repo",
+            "dest_path": "/a/u/repo",
+            "preserve_attrs": True,
+            "if_absent": True,
+        }
+        assert seen == []
+
+    def test_clone_working_copy_409_is_destination_exists(self, tmp_path):
+        from code_indexer.server.storage.shared.clone_backend import (
+            CloneDestinationExistsError,
+        )
+
+        backend = _make_delegated_backend(str(tmp_path))
+        mock_req = _mock_delegated_requests(post_resp=_make_response(409, {}))
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            with pytest.raises(CloneDestinationExistsError):
+                backend.clone_working_copy("/g/repo", "/a/u/repo")
+
+    def test_create_clone_at_path_does_not_send_if_absent(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path))
+        mock_req = _mock_delegated_requests(post_resp=_make_response(200, {}))
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone_at_path("/src", "/dst")
+        assert "if_absent" not in mock_req.post.call_args[1]["json"]
+
+    def test_stat_working_copy(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path))
+        mock_req = _mock_delegated_requests(
+            post_resp=_make_response(
+                200, {"path": "/a", "exists": True, "is_dir": True}
+            )
+        )
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            stat_result = backend.stat_working_copy("/a")
+        assert (stat_result.exists, stat_result.is_dir) == (True, True)
+        assert mock_req.post.call_args[0][0].endswith("/clone-path/stat")
+        assert mock_req.post.call_args[1]["json"] == {"path": "/a"}
+        headers = mock_req.post.call_args[1]["headers"]
+        assert headers["Authorization"] == "Bearer test-api-key"
+
+    def test_stat_wrong_shape_raises_not_absent(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path))
+        mock_req = _mock_delegated_requests(post_resp=_make_response(200, {}))
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            with pytest.raises(RuntimeError, match="exists/is_dir"):
+                backend.stat_working_copy("/a")
+
+    def test_stat_http_error_raises(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path))
+        mock_req = _mock_delegated_requests(post_resp=_make_response(503, {}))
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            with pytest.raises(RuntimeError, match="HTTP 503"):
+                backend.stat_working_copy("/a")
+
+    def test_delete_working_copy(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path))
+        mock_req = _mock_delegated_requests(
+            post_resp=_make_response(200, {"path": "/a", "deleted": False})
+        )
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            assert backend.delete_working_copy("/a") is False
+        assert mock_req.post.call_args[0][0].endswith("/clone-path/delete")
+
+    def test_delete_wrong_shape_and_transport_error_raise(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path))
+        mock_req = _mock_delegated_requests(post_resp=_make_response(200, []))
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            with pytest.raises(RuntimeError, match="not an object"):
+                backend.delete_working_copy("/a")
+        mock_req = _mock_delegated_requests(
+            post_side_effect=_FakeRequestException("conn refused")
+        )
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            with pytest.raises(RuntimeError, match="conn refused"):
+                backend.delete_working_copy("/a")
+
+
 class TestDelegatedCloneBackendSnapshotMethods:
     """Snapshot-registry / delete methods run locally on the shared mount
     (composed LocalCloneBackend) — no workspace-mcp call, no working-tree copy."""
