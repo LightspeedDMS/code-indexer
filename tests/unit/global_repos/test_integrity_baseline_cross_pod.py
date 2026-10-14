@@ -344,6 +344,36 @@ def test_the_refresh_gates_on_the_baseline_and_closes_it(
     assert closed == [True]
 
 
+def test_baseline_closed_when_index_source_raises(
+    meta_world: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """baseline.close() must run even when _index_source raises, otherwise the
+    scratch directory leaks on disk."""
+    _seed_at(meta_world, "a.md", 1_700_000_000)
+    meta_world.delegated()
+    scheduler = _meta_scheduler(meta_world.pod_golden)
+    closed: List[bool] = []
+    scratch = meta_world.pod_golden / rs.INTEGRITY_BASELINE_DIRNAME / "cidx-meta"
+    scratch.mkdir(parents=True)
+    baseline = rs.IntegrityBaseline({COLLECTION: 3}, scratch, scratch=scratch)
+    real_close = baseline.close
+
+    def tracking_close() -> None:
+        closed.append(True)
+        real_close()
+
+    setattr(baseline, "close", tracking_close)
+    setattr(scheduler, "_integrity_baseline", lambda *a: baseline)
+
+    def boom(**kwargs: Any) -> None:
+        raise RuntimeError("indexing exploded")
+
+    with pytest.raises(RuntimeError, match="indexing exploded"):
+        _refresh_once_with(meta_world, monkeypatch, scheduler, index=boom)
+    assert closed == [True], "baseline.close() must be called on _index_source failure"
+    assert not scratch.exists(), "scratch directory should be cleaned up"
+
+
 def test_a_chunk_store_count_matches(tmp_path: Path) -> None:
     """Sanity: the fixture's collections are what the gate counts."""
     root = _built_index(tmp_path, 4)

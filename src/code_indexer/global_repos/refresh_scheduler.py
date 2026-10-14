@@ -3157,25 +3157,25 @@ class RefreshScheduler:
                         baseline = self._integrity_baseline(
                             alias_name, source_path, current_target
                         )
-                        self._index_source(
-                            alias_name=alias_name,
-                            source_path=source_path,
-                            progress_callback=progress_callback,
-                            orphan_event_callback=_make_hnsw_orphan_event_logger(
-                                alias_name
-                            ),
-                            force_reconcile=force_reconcile,
-                            job_id=job_id,
-                        )
-
-                        # Bug #1506: run-boundary durability-flush +
-                        # integrity gate (still under the write lock
-                        # acquired above). _run_and_publish_integrity_gate
-                        # ALSO calls reset_refresh_integrity_failure() on
-                        # a pass and record_refresh_integrity_failure() on
-                        # a failure internally -- see its docstring; no
-                        # separate reset/record call is needed here.
                         try:
+                            self._index_source(
+                                alias_name=alias_name,
+                                source_path=source_path,
+                                progress_callback=progress_callback,
+                                orphan_event_callback=_make_hnsw_orphan_event_logger(
+                                    alias_name
+                                ),
+                                force_reconcile=force_reconcile,
+                                job_id=job_id,
+                            )
+
+                            # Bug #1506: run-boundary durability-flush +
+                            # integrity gate (still under the write lock
+                            # acquired above). _run_and_publish_integrity_gate
+                            # ALSO calls reset_refresh_integrity_failure() on
+                            # a pass and record_refresh_integrity_failure() on
+                            # a failure internally -- see its docstring; no
+                            # separate reset/record call is needed here.
                             gate_result = self._run_and_publish_integrity_gate(
                                 alias_name=alias_name,
                                 source_path=source_path,
@@ -4641,9 +4641,9 @@ class RefreshScheduler:
 
             current_target = self.alias_manager.read_alias(alias_name)
             baseline = self._integrity_baseline(alias_name, source_path, current_target)
-            self._index_source(alias_name=alias_name, source_path=source_path)
-
             try:
+                self._index_source(alias_name=alias_name, source_path=source_path)
+
                 gate_result = self._run_and_publish_integrity_gate(
                     alias_name=alias_name,
                     source_path=source_path,
