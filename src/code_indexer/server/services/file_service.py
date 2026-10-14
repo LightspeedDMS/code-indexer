@@ -479,11 +479,18 @@ class FileListingService:
         """
         repo_path = self._get_repository_path(repo_id, username)
 
-        if not os.path.exists(repo_path):
-            raise FileNotFoundError(f"Repository {repo_id} not found")
+        source = content_seam_source(repo_path)
+        if source is not None:
+            # Content seam: the activated copy is on workspace-mcp at this path.
+            all_files = self._collect_listing_via_seam(
+                repo_path, source, query_params.indexed_only
+            )
+        else:
+            if not os.path.exists(repo_path):
+                raise FileNotFoundError(f"Repository {repo_id} not found")
 
-        # Collect all files
-        all_files = self._collect_listing(repo_path, query_params.indexed_only)
+            # Collect all files
+            all_files = self._collect_listing(repo_path, query_params.indexed_only)
 
         # Apply filters
         filtered_files = self._apply_filters(all_files, query_params)
@@ -635,6 +642,36 @@ class FileListingService:
 
         return files
 
+    @staticmethod
+    def _delegated_activated_path(repo_id: str, username: str) -> Optional[str]:
+        """The user's activated copy under a delegated content backend, or None.
+
+        None -- the local default, unchanged below -- unless the server's
+        content backend is delegated. Then the copy is on workspace-mcp, not
+        this pod, so "is it activated for this user" is the registry's answer
+        (the server's DI-wired manager, never a pod-disk probe) and the path is
+        returned for the content seam to read; a copy missing on workspace-mcp
+        then fails loudly there, never as an empty repository.
+        """
+        from code_indexer.server.startup.content_backend_wiring import (
+            is_content_seam_delegated,
+        )
+
+        if not is_content_seam_delegated():
+            return None
+        from code_indexer.server.services.file_crud_service import (
+            _get_activated_repo_manager,
+        )
+
+        manager = _get_activated_repo_manager()
+        if not manager.user_has_activated_repo(username, repo_id):
+            raise FileNotFoundError(
+                f"Repository '{repo_id}' not found for user '{username}'"
+            )
+        return str(
+            manager.get_activated_repo_path(username=username, user_alias=repo_id)
+        )
+
     def _get_repository_path(self, repo_id: str, username: str) -> str:
         """
         Get file system path for repository from activated repositories.
@@ -653,6 +690,9 @@ class FileListingService:
             RuntimeError: If database lookup fails
             FileNotFoundError: If repository not found
         """
+        delegated_path = self._delegated_activated_path(repo_id, username)
+        if delegated_path is not None:
+            return delegated_path
         try:
             # Use ActivatedRepositoryManager to search user's workspace
             activated_path = self.activated_repo_manager.get_activated_repo_path(
@@ -1384,6 +1424,17 @@ class FileListingService:
             - pagination_hint: Helpful message for navigating large files
         """
         repo_path = self._get_repository_path(repository_alias, username)
+        if content_seam_source(repo_path) is not None:
+            # Content seam: the activated copy is on workspace-mcp; read it as
+            # every delegated repository is read (bytes, byte-sha256 hash --
+            # the hash the delegated edit/delete compare against).
+            return self.get_file_content_by_path(
+                repo_path,
+                file_path,
+                offset=offset,
+                limit=limit,
+                skip_truncation=skip_truncation,
+            )
         # Bug #1891 round 2 (S1): the previous
         # str(full_file_path).startswith(str(repo_root)) check incorrectly
         # admitted a SIBLING directory whose name starts with repo_root's
