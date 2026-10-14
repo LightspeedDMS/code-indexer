@@ -230,6 +230,18 @@ def iter_manifest_entries(
     _ttl_put(key, tuple(entries))
 
 
+def walk_manifest_entries(
+    source: ContentSeamSource, prune_dirs: Sequence[str]
+) -> Tuple[ContentEntry, ...]:
+    """Every manifest entry, all pages, NEVER cached.
+
+    For a writable copy (an activated repository) a cached listing would hide
+    the user's own recent writes; a golden repository's reads go through
+    :func:`manifest_entries` instead.
+    """
+    return _walk_manifest(source, _prune_key(prune_dirs))
+
+
 def _prune_key(prune_dirs: Sequence[str]) -> Tuple[str, ...]:
     return tuple(sorted(set(prune_dirs)))
 

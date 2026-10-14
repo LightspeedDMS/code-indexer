@@ -30,7 +30,30 @@ path**, and every consumer reaches it through a seam addressed by that path.
 | Failed activation | rmtree (+ late-materialization grace loop) | one delete (workspace-mcp's clone is synchronous) |
 | Finders (`find_repos_by_golden_alias`, `find_by_canonical_url`) | per-user dirs | the registry |
 
-Refused under delegated (fail loud): composite activation; a bare golden clone;
+## Composite repositories
+
+A composite is `<user>/<alias>/` with one working copy per member,
+`<alias>/<member>`. Delegated, it lives on workspace-mcp like any copy.
+
+| Step | Local | Delegated |
+|---|---|---|
+| Exists? | `Path.exists` | `POST /clone-path/stat` |
+| Proxy config | `ProxyInitializer.initialize` + discovery walk | `create_proxy_config` under the pod's `index_root(composite)`; members = sorted activated aliases (`set_repositories`), no walk |
+| Members | CoW clone each | the single-activation delegated clone per member (workspace-mcp creates the composite dir with the first one) |
+| Rollback | rmtree | one `/clone-path/delete` of the composite + pod index state of every member |
+| Deactivate | rename to `.trash`, purge | `_do_deactivate_delegated`; pod index state of every member the proxy config names |
+| File listing (`_list_composite_files`) | walk each member | manifest per member (never cached); members from the registry |
+| Details (`_get_composite_details`) | walk each member | manifest sizes + pod index state; members from the registry |
+
+Fail loud: a member missing on workspace-mcp, an unreachable backend or a
+manifest entry without an mtime raises; a listing `path` that is absolute or
+contains `..` is refused. Known differences, both because the manifest lists
+files only and never follows a symlink: a directory in a single-level listing
+reports the newest mtime beneath it (locally its own), a symlink its own size
+and mtime (locally its target's); details' size excludes `.git` (the manifest
+never walks it).
+
+Refused under delegated (fail loud): a bare golden clone;
 a `clone_backend` other than `delegated`; `git_backend: local`. An unreachable
 workspace-mcp raises -- it is never "repository not found".
 
@@ -78,7 +101,8 @@ Host-side tools that build or use the repository volume's topology refuse under
 
 ## Tests
 
-`tests/unit/server/repositories/test_activated_repos_content_seam.py` runs each
+`tests/unit/server/repositories/test_activated_repos_content_seam.py` (and
+`test_activated_composite_content_seam.py` for composites) runs each
 step locally and delegated over one upstream repository (fakes in
 `tests/unit/server/activated_seam_fakes.py`) and requires equal results, with
 every local access to a pod repository path -- and any subprocess run in one --

@@ -1021,14 +1021,21 @@ class ActivatedRepoManager:
             Job ID for tracking activation progress
 
         Raises:
-            ActivatedRepoError: If validation or activation fails
+            ActivatedRepoError: If validation or activation fails, or the
+                content seam is delegated but cannot reach the working copies
         """
-        if self._working_copies().is_delegated:
-            raise ActivatedRepoError(
-                "Composite repositories cannot be activated on a server without "
-                "the repository volume (content_backend='delegated'); activate "
-                "each repository on its own."
-            )
+        # Content seam: a misconfigured delegated server refuses here, before
+        # a job is queued (never falls back to this pod's disk).
+        self._working_copies()
+
+        # The default alias is resolved BEFORE the job is submitted: it is the
+        # job's repo_alias, and submit_job's atomic (operation_type,
+        # repo_alias) claim is what stops two concurrent activations of the
+        # same composite -- on this pod or another -- from both passing the
+        # job's "already exists" check (the loser's rollback would delete the
+        # winner's in-progress composite). A None repo_alias is never claimed.
+        if user_alias is None:
+            user_alias = self._default_composite_alias(golden_repo_aliases)
 
         # Submit background job for composite activation
         job_id = self.background_job_manager.submit_job(
@@ -1045,6 +1052,12 @@ class ActivatedRepoManager:
 
         return job_id
 
+    @staticmethod
+    def _default_composite_alias(golden_repo_aliases: List[str]) -> str:
+        """A composite's alias when the caller gives none: its members' names
+        joined with ``_``, in the order given."""
+        return "_".join(golden_repo_aliases)
+
     def _do_activate_composite_repository(
         self,
         username: str,
@@ -1057,6 +1070,14 @@ class ActivatedRepoManager:
 
         Creates a composite repository structure using ProxyInitializer and
         CoW clones of each golden repository.
+
+        Content seam (``content_backend='delegated'``): the composite
+        directory and its members live on workspace-mcp, each member created
+        by the same delegated clone as a single activation (files via
+        ``/clone-path``, git via git-mcp, index state seeded on this pod). The
+        composite's proxy config and every member's index are this pod's index
+        state under the composite path; the member list is the activated
+        aliases themselves (see ``_composite_member_list``).
 
         Args:
             username: Username requesting activation
@@ -1091,7 +1112,7 @@ class ActivatedRepoManager:
 
             # Step 1: Determine user_alias (default to joined names if not provided)
             if user_alias is None:
-                user_alias = "_".join(golden_repo_aliases)
+                user_alias = self._default_composite_alias(golden_repo_aliases)
                 self.logger.info(
                     f"User alias not provided, defaulting to: {user_alias}"
                 )
@@ -1106,17 +1127,20 @@ class ActivatedRepoManager:
             # created -- an unsafe username/user_alias raises here.
             composite_path_str = self._safe_user_scoped_path(username, user_alias)
             user_dir = self._safe_user_dir(username)
-            ensure_activated_user_dir(user_dir)
+            delegated = self._working_copies().is_delegated
+            # Content seam: workspace-mcp creates the copies' parents itself.
+            if not delegated:
+                ensure_activated_user_dir(user_dir)
 
             composite_path = Path(composite_path_str)
 
             # Check if already exists
-            if composite_path.exists():
+            if self._composite_exists(composite_path, delegated):
                 raise ActivatedRepoError(
                     f"Composite repository '{user_alias}' already exists for user '{username}'"
                 )
 
-            composite_path.mkdir(parents=True, exist_ok=True)
+            self._create_composite_dir(composite_path, delegated)
             update_progress(20, f"Created composite directory at {composite_path}")
 
             # Step 3: Use ProxyInitializer to create proxy configuration
@@ -1125,7 +1149,14 @@ class ActivatedRepoManager:
                 from ...proxy.proxy_initializer import ProxyInitializer
 
                 proxy_init = ProxyInitializer(composite_path)
-                proxy_init.initialize(force=True)
+                if delegated:
+                    # The composite path on this pod holds index state only:
+                    # nothing to discover yet (the members are cloned next)
+                    # and no parent proxy to nest under -- the parents are the
+                    # user's directory and the activated-repos root.
+                    proxy_init.create_proxy_config()
+                else:
+                    proxy_init.initialize(force=True)
                 update_progress(30, "Proxy configuration initialized")
 
                 # Add FilesystemVectorStore and VoyageAI config for composite repos
@@ -1139,8 +1170,9 @@ class ActivatedRepoManager:
                 # this frame.  No metadata row was ever written (Step 6 comes
                 # later), so the rename-to-trash pattern used during
                 # deactivation is both unnecessary and inappropriate here.
-                if composite_path.exists():
-                    shutil.rmtree(composite_path, ignore_errors=True)
+                self._discard_failed_composite(
+                    composite_path, delegated, golden_repo_aliases
+                )
                 raise ActivatedRepoError(
                     f"Failed to initialize proxy configuration: {str(e)}"
                 )
@@ -1192,8 +1224,9 @@ class ActivatedRepoManager:
                         f"Failed to clone repository '{alias}': {str(e)}",
                         extra={"correlation_id": get_correlation_id()},
                     )
-                    if composite_path.exists():
-                        shutil.rmtree(composite_path, ignore_errors=True)
+                    self._discard_failed_composite(
+                        composite_path, delegated, golden_repo_aliases
+                    )
                     raise ActivatedRepoError(
                         f"Failed to clone repository '{alias}': {str(e)}"
                     )
@@ -1206,7 +1239,12 @@ class ActivatedRepoManager:
                 from ...proxy.config_manager import ProxyConfigManager
 
                 proxy_config = ProxyConfigManager(composite_path)
-                proxy_config.refresh_repositories()
+                if delegated:
+                    proxy_config.set_repositories(
+                        self._composite_member_list(golden_repo_aliases)
+                    )
+                else:
+                    proxy_config.refresh_repositories()
                 update_progress(90, "Repository discovery completed")
             except Exception as e:
                 # Activation failure during proxy-config refresh — roll back
@@ -1219,8 +1257,9 @@ class ActivatedRepoManager:
                     f"Failed to refresh repositories: {str(e)}",
                     extra={"correlation_id": get_correlation_id()},
                 )
-                if composite_path.exists():
-                    shutil.rmtree(composite_path, ignore_errors=True)
+                self._discard_failed_composite(
+                    composite_path, delegated, golden_repo_aliases
+                )
                 raise ActivatedRepoError(
                     f"Failed to refresh repository configuration: {str(e)}"
                 )
@@ -1263,8 +1302,9 @@ class ActivatedRepoManager:
                     f"Failed to create metadata: {str(e)}",
                     extra={"correlation_id": get_correlation_id()},
                 )
-                if composite_path.exists():
-                    shutil.rmtree(composite_path, ignore_errors=True)
+                self._discard_failed_composite(
+                    composite_path, delegated, golden_repo_aliases
+                )
                 raise ActivatedRepoError(f"Failed to create metadata: {str(e)}")
 
             update_progress(
@@ -2706,6 +2746,98 @@ class ActivatedRepoManager:
         except OSError:
             pass  # absent, or something else lives there: leave it
 
+    @staticmethod
+    def _composite_member_list(golden_repo_aliases: List[str]) -> List[str]:
+        """A composite's members, as local discovery lists them.
+
+        Locally ``ProxyConfigManager.refresh_repositories`` walks the
+        composite directory for ``.code-indexer`` dirs, which the CoW clone
+        brought along with every member: the sorted member directory names.
+        Under the content seam the members' files are not on this pod and
+        each member's index is seeded by its clone (no index is an error, see
+        ``_seed_index_state``), so the activated aliases ARE that list.
+        """
+        return sorted(set(golden_repo_aliases))
+
+    def _composite_exists(self, composite_path: Path, delegated: bool) -> bool:
+        """Whether the composite's directory exists (workspace-mcp's, delegated)."""
+        if delegated:
+            return self._working_copies().exists(composite_path)
+        return composite_path.exists()
+
+    @staticmethod
+    def _create_composite_dir(composite_path: Path, delegated: bool) -> None:
+        """Create the composite's directory -- delegated, only THIS pod's index
+        state for it: workspace-mcp creates the directory with the first
+        member's clone."""
+        if delegated:
+            index_root(composite_path).mkdir(parents=True, exist_ok=True)
+            return
+        composite_path.mkdir(parents=True, exist_ok=True)
+
+    def _discard_failed_composite(
+        self, composite_path: Path, delegated: bool, members: List[str]
+    ) -> None:
+        """Roll back a composite activation that failed before registration.
+
+        Delegated: the members' copies go with the composite directory on
+        workspace-mcp (one delete), then this pod's index state for it and for
+        every member the activation may have seeded (*members*: the proxy
+        config does not list them until all are cloned).
+        """
+        if delegated:
+            working_copies = self._working_copies()
+            assert isinstance(working_copies, DelegatedWorkingCopies)
+            working_copies.discard(composite_path)
+            self._remove_pod_composite_index_state(str(composite_path), members)
+        elif composite_path.exists():
+            shutil.rmtree(composite_path, ignore_errors=True)
+
+    @classmethod
+    def _remove_pod_composite_index_state(
+        cls, composite_path: str, members: Optional[List[str]] = None
+    ) -> None:
+        """Remove THIS pod's index state for a delegated composite: each
+        member's (*members* plus those the composite's own proxy config --
+        itself pod state -- names), then the composite's. Never touches
+        repository files."""
+        from code_indexer.server.services.composite_content import (
+            plain_member_names,
+        )
+
+        named = plain_member_names(members or [], composite_path)
+        for member in dict.fromkeys(named + cls._pod_composite_members(composite_path)):
+            cls._remove_pod_index_state(os.path.join(composite_path, member))
+        cls._remove_pod_index_state(composite_path)
+
+    @staticmethod
+    def _pod_composite_members(composite_path: str) -> List[str]:
+        """The members the composite's pod proxy config names; [] if none
+        (no config, or the config of a single, non-proxy copy).
+
+        A member name that is not one plain path component is skipped (and
+        logged): removal must never reach outside the composite's directory.
+        """
+        config_file = index_root(composite_path) / "config.json"
+        try:
+            with open(config_file) as f:
+                config = json.load(f)
+            if config.get("proxy_mode") is not True:
+                return []  # a single copy's own config, not a composite's
+            members = config.get("discovered_repos") or []
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError, AttributeError) as e:
+            logging.getLogger(__name__).warning(
+                "Unreadable composite proxy config %s: %s", config_file, e
+            )
+            return []
+        from code_indexer.server.services.composite_content import (
+            plain_member_names,
+        )
+
+        return plain_member_names(members, composite_path)
+
     def _discard_failed_activation(self, activated_repo_path: str) -> None:
         """Remove the copy of an activation that failed after cloning."""
         working_copies = self._working_copies()
@@ -3158,7 +3290,9 @@ class ActivatedRepoManager:
         finally:
             if self._query_tracker is not None:
                 self._query_tracker.clear_quiescing(repo_dir)
-        self._remove_pod_index_state(repo_dir)
+        # A composite's members each have index state under it (a single
+        # copy's own config names none, so this is _remove_pod_index_state).
+        self._remove_pod_composite_index_state(repo_dir)
         try:
             self._delete_metadata(username, user_alias)
         except (OSError, IOError) as e:
@@ -3764,7 +3898,7 @@ class ActivatedRepoManager:
             )
 
             # Check if .code-indexer directory exists (has configuration)
-            config_dir = repo_path / ".code-indexer"
+            config_dir = index_root(repo_path)
             if not config_dir.exists():
                 self.logger.debug(
                     "No .code-indexer directory, skipping service stop",
@@ -5301,7 +5435,7 @@ class ActivatedRepoManager:
             ActivatedRepoError: If config update fails
         """
         try:
-            config_file = composite_path / ".code-indexer" / "config.json"
+            config_file = index_root(composite_path) / "config.json"
 
             if not config_file.exists():
                 raise ActivatedRepoError(

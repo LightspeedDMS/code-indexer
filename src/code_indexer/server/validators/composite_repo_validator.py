@@ -15,6 +15,7 @@ from typing import Dict
 
 from fastapi import HTTPException
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.utils.index_store import index_root
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,9 @@ class CompositeRepoValidator:
             ... )
             HTTPException: Branch operations are not supported for composite repositories
         """
-        config_file = repo_path / ".code-indexer" / "config.json"
+        # The proxy config is index state: inside the repository locally, this
+        # pod's own state under the content seam (never repository content).
+        config_file = index_root(repo_path) / "config.json"
 
         # If no config file exists, it's not a composite repo
         if not config_file.exists():
