@@ -52,11 +52,26 @@ from code_indexer.global_repos.unified_response_parser import (
     UnifiedResult,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.delegated_refusal import refuse_when_delegated
 from code_indexer.server.services.dep_map_dispatcher_factory import (
     build_dep_map_dispatcher,
 )
 
 _logger = logging.getLogger(__name__)
+
+#: Golden-repo lifecycle/description analysis under a delegated content
+#: backend. The analysis agent is handed the repository through THIS pod's
+#: clone path: a local Claude CLI reads it with its own file tools, and the
+#: orchestrator invoker plugin resolves the repo to provision from that path's
+#: local git origin. A mount-less pod holds index state only at that path, so
+#: the agent would analyze an empty tree and a plausible-looking description
+#: would be written to cidx-meta (the dependency-map refusal, same reason).
+LIFECYCLE_ANALYSIS_FEATURE = "Golden-repo lifecycle/description analysis"
+LIFECYCLE_ANALYSIS_REFUSAL_REASON = (
+    "its analysis agent reads the repository from this pod's clone path "
+    "(local Claude CLI file tools; the orchestrator invoker resolves the repo "
+    "from that path's local git origin), which holds index state only"
+)
 
 # Absolute path to the packaged unified prompt.  Resolved once at import
 # time.
@@ -331,9 +346,17 @@ class LifecycleClaudeCliInvoker:
         Raises:
             ValueError: invalid alias or repo_path.
             RuntimeError: dispatcher reports failure.
+            DelegatedRepositoryUnsupportedError: (a RuntimeError) the server's
+                content backend is delegated -- the repository is not here.
             UnifiedResponseParseError: output fails schema validation after all
                 optional-section fallbacks are exhausted.
         """
+        # Refuse BEFORE the first look at the pod's disk (_validate_repo_inputs):
+        # on a delegated pod the directory holds index state at most, never the
+        # repository, so validation could pass and the agent analyze nothing.
+        refuse_when_delegated(
+            LIFECYCLE_ANALYSIS_FEATURE, LIFECYCLE_ANALYSIS_REFUSAL_REASON
+        )
         path_obj = self._validate_repo_inputs(alias, repo_path)
         _lifecycle_cfg = get_config_service().get_config().lifecycle_analysis_config
         # The agent's subprocess cwd is a neutral scratch directory, never the

@@ -34,6 +34,7 @@ from ..repositories.activated_repo_manager import (  # noqa: E402
 from ..repositories.background_jobs import DuplicateJobError  # noqa: E402
 from ..repositories.repository_listing_manager import (
     RepositoryListingError,
+    RepositoryStatisticsUnavailableError,
 )  # noqa: E402
 from ..services.repository_discovery_service import (
     RepositoryDiscoveryError,
@@ -929,6 +930,9 @@ def register_repo_routes(
                         # If this succeeds, the alias exists but might not be activated
                         # Return the alias as the ID for now
                         return alias
+                    except RepositoryStatisticsUnavailableError:
+                        # The content backend failed: an error, not "not found".
+                        raise
                     except Exception:
                         pass
 

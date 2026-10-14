@@ -3,11 +3,15 @@
 import logging
 import re
 from datetime import date, datetime
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from pathlib import Path, PurePath
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from .wiki_cache import WikiCache
+
+#: One markdown file as read through the content backend: its repo-relative
+#: path, and its text -- or None with the reason it could not be read.
+MarkdownText = Tuple[PurePath, Optional[str], Optional[str]]
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +34,22 @@ class WikiService:
                          None means "use all defaults" (same as WikiConfig()).
         """
         raw_content = file_path.read_text(encoding="utf-8")
+        return self.render_article_source(
+            raw_content, file_path, repo_alias, wiki_config=wiki_config
+        )
+
+    def render_article_source(
+        self,
+        raw_content: str,
+        file_path: PurePath,
+        repo_alias: str,
+        wiki_config: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """:meth:`render_article` for markdown already in hand.
+
+        For an article read through the content backend; ``file_path`` only
+        names the article (its stem is the fallback title).
+        """
         metadata, content = self._strip_front_matter(raw_content)
         # AC1/AC2: Skip header block parsing when toggle is OFF
         header_parsing_enabled = True
@@ -124,7 +144,7 @@ class WikiService:
 
         return "\n".join(result_lines).lstrip("\n")
 
-    def _extract_title(self, metadata: Dict[str, Any], file_path: Path) -> str:
+    def _extract_title(self, metadata: Dict[str, Any], file_path: PurePath) -> str:
         """Extract title from front matter or derive from filename."""
         if metadata.get("title"):
             return str(metadata["title"])
@@ -398,24 +418,63 @@ class WikiService:
             except Exception as e:
                 logger.warning("Failed to parse front matter for %s: %s", md_file, e)
                 metadata = {}
-            title = self._extract_title(metadata, md_file)
-            raw_category = metadata.get("category")
-            category = str(raw_category).strip() if raw_category is not None else ""
-            # Normalize empty/missing category to the Uncategorized fallback
-            if not category:
-                category = self.UNCATEGORIZED_LABEL
-            article_path = str(rel.with_suffix(""))
-            group_key = rel.parts[0] if len(rel.parts) > 1 else ""
-            if group_key not in tree:
-                tree[group_key] = {
-                    "name": group_key or "Root",
-                    "path": group_key,
-                    "articles": [],  # Always empty — kept for structural compatibility
-                    "categories": {},
-                }
-            article = {"title": title, "path": article_path, "slug": article_path}
-            tree[group_key]["categories"].setdefault(category, [])
-            tree[group_key]["categories"][category].append(article)
+            self._add_sidebar_article(tree, rel, metadata)
+        return self._sorted_sidebar(tree)
+
+    def build_sidebar_tree_from_texts(
+        self, texts: Iterable[MarkdownText]
+    ) -> List[Dict[str, Any]]:
+        """:meth:`build_sidebar_tree` over markdown read through the content
+        backend (the repository is not on this pod).
+
+        ``texts`` are every ``*.md`` of the repository in the order the local
+        walk visits them; hidden paths are skipped here exactly as there. A
+        file that could not be read is listed with no front matter, as a local
+        read failure is.
+        """
+        tree: Dict[str, Dict[str, Any]] = {}
+        for rel, raw, failure in texts:
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            if raw is None:
+                logger.warning(
+                    "Failed to parse front matter for %s: %s", rel.as_posix(), failure
+                )
+                metadata: Dict[str, Any] = {}
+            else:
+                metadata, _ = self._strip_front_matter(raw)
+            self._add_sidebar_article(tree, rel, metadata)
+        return self._sorted_sidebar(tree)
+
+    def _add_sidebar_article(
+        self,
+        tree: Dict[str, Dict[str, Any]],
+        rel: PurePath,
+        metadata: Dict[str, Any],
+    ) -> None:
+        """File one article (repo-relative *rel*) into its group and category."""
+        title = self._extract_title(metadata, rel)
+        raw_category = metadata.get("category")
+        category = str(raw_category).strip() if raw_category is not None else ""
+        # Normalize empty/missing category to the Uncategorized fallback
+        if not category:
+            category = self.UNCATEGORIZED_LABEL
+        article_path = str(rel.with_suffix(""))
+        group_key = rel.parts[0] if len(rel.parts) > 1 else ""
+        if group_key not in tree:
+            tree[group_key] = {
+                "name": group_key or "Root",
+                "path": group_key,
+                "articles": [],  # Always empty — kept for structural compatibility
+                "categories": {},
+            }
+        article = {"title": title, "path": article_path, "slug": article_path}
+        tree[group_key]["categories"].setdefault(category, [])
+        tree[group_key]["categories"][category].append(article)
+
+    @staticmethod
+    def _sorted_sidebar(tree: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Sort each category's articles by title and the groups by name."""
         for group in tree.values():
             for cat_articles in group["categories"].values():
                 cat_articles.sort(key=lambda a: a["title"].lower())
@@ -535,6 +594,26 @@ class WikiService:
             )
             return
 
+        from .wiki_content_seam import WikiContentUnavailable, content_backend_wiki_tree
+
+        try:
+            # The repository is not on this pod under a delegated content
+            # backend: its markdown comes through the backend instead.
+            seam_tree = content_backend_wiki_tree(str(repo_path))
+            if seam_tree is not None:
+                self._seed_views_from_texts(
+                    repo_alias, seam_tree.read_visible_md_texts(), wiki_cache
+                )
+                return
+        except WikiContentUnavailable as exc:
+            # Runs in a background thread: say so in the log, then fail.
+            logger.error(
+                "populate_views_from_front_matter: cannot read %s: %s",
+                repo_alias,
+                exc,
+            )
+            raise
+
         for md_file in sorted(repo_path.rglob("*.md")):
             rel = md_file.relative_to(repo_path)
             if any(part.startswith(".") for part in rel.parts):
@@ -549,34 +628,71 @@ class WikiService:
                     exc,
                 )
                 continue
+            self._seed_article_views(repo_alias, rel, md_file, metadata, wiki_cache)
 
-            views_raw = metadata.get("views")
-            if views_raw is None:
+    def _seed_views_from_texts(
+        self,
+        repo_alias: str,
+        texts: Iterable[MarkdownText],
+        wiki_cache: "WikiCache",
+    ) -> None:
+        """The seeding loop of :meth:`populate_views_from_front_matter` over
+        markdown read through the content backend. An unreadable file is
+        skipped with a warning, as a local read failure is."""
+        for rel, raw, failure in texts:
+            if any(part.startswith(".") for part in rel.parts):
                 continue
-            try:
-                views = int(views_raw)
-            except (TypeError, ValueError):
+            if raw is None:
                 logger.warning(
-                    "populate_views_from_front_matter: non-numeric views field in %s: %r",
-                    md_file,
-                    views_raw,
+                    "populate_views_from_front_matter: failed to read %s: %s",
+                    rel.as_posix(),
+                    failure,
                 )
                 continue
-            if views < 0:
-                logger.warning(
-                    "populate_views_from_front_matter: negative views value %d in %s, skipping",
-                    views,
-                    md_file,
-                )
-                continue
+            metadata, _ = self._strip_front_matter(raw)
+            self._seed_article_views(
+                repo_alias, rel, rel.as_posix(), metadata, wiki_cache
+            )
 
-            article_path = str(rel.with_suffix(""))
-            try:
-                wiki_cache.insert_initial_views(repo_alias, article_path, views)
-            except Exception as exc:
-                logger.warning(
-                    "populate_views_from_front_matter: failed to insert views for %s/%s: %s",
-                    repo_alias,
-                    article_path,
-                    exc,
-                )
+    def _seed_article_views(
+        self,
+        repo_alias: str,
+        rel: PurePath,
+        label: Any,
+        metadata: Dict[str, Any],
+        wiki_cache: "WikiCache",
+    ) -> None:
+        """Seed one article's view count from its front matter ``views``.
+
+        ``label`` names the file in warnings.
+        """
+        views_raw = metadata.get("views")
+        if views_raw is None:
+            return
+        try:
+            views = int(views_raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "populate_views_from_front_matter: non-numeric views field in %s: %r",
+                label,
+                views_raw,
+            )
+            return
+        if views < 0:
+            logger.warning(
+                "populate_views_from_front_matter: negative views value %d in %s, skipping",
+                views,
+                label,
+            )
+            return
+
+        article_path = str(rel.with_suffix(""))
+        try:
+            wiki_cache.insert_initial_views(repo_alias, article_path, views)
+        except Exception as exc:
+            logger.warning(
+                "populate_views_from_front_matter: failed to insert views for %s/%s: %s",
+                repo_alias,
+                article_path,
+                exc,
+            )

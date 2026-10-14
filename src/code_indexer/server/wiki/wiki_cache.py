@@ -4,9 +4,10 @@ import json
 import logging
 import sqlite3
 import threading
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 from code_indexer.server.storage.json_column import parse_json_column
@@ -61,6 +62,34 @@ _CREATE_WIKI_ARTICLE_VIEWS_TABLE = """
         PRIMARY KEY (repo_alias, article_path)
     )
 """
+
+
+@dataclass(frozen=True)
+class FileStamp:
+    """An article's (mtime, size) as the cache validates it, when the file is
+    not on this pod's disk to ``stat()``: the content backend's manifest entry.
+
+    ``mtime`` is computed exactly as ``os.stat().st_mtime`` derives it from the
+    same nanoseconds, so a row cached from a local stat validates against the
+    manifest and vice versa. ``None`` is "unknown": never a cache hit, never
+    stored.
+    """
+
+    mtime: Optional[float]
+    size: int
+
+
+def _stamp_values(file_path: Union[Path, FileStamp]) -> Optional[Tuple[float, int]]:
+    """(mtime, size) to validate/store against; None when they are unknown.
+
+    A ``Path`` is stat()ed -- OSError propagates; a ``FileStamp`` is taken as is.
+    """
+    if isinstance(file_path, FileStamp):
+        if file_path.mtime is None:
+            return None
+        return file_path.mtime, file_path.size
+    stat = file_path.stat()
+    return stat.st_mtime, stat.st_size
 
 
 def _max_mtime_of_md_files(repo_dir: Path) -> float:
@@ -220,23 +249,32 @@ class WikiCache:
         self._conn_manager.execute_atomic(_do_insert)
 
     def get_article(
-        self, repo_alias: str, article_path: str, file_path: Path
+        self,
+        repo_alias: str,
+        article_path: str,
+        file_path: Union[Path, FileStamp],
     ) -> Optional[Dict]:
         """Return cached article dict if stat values match, else None.
 
-        Result dict contains 'html', 'title', and 'metadata' (dict or None).
+        ``file_path`` is the local file to stat(), or the ``FileStamp`` of a
+        file read through the content backend (the golden wiki on a pod without
+        the repositories). Result dict contains 'html', 'title', and 'metadata'
+        (dict or None).
         """
         try:
-            stat = file_path.stat()
+            stamp = _stamp_values(file_path)
         except OSError:
             return None
+        if stamp is None:
+            return None
+        current_mtime, current_size = stamp
         if self._backend is not None:
             row_dict = self._backend.get_article(repo_alias, article_path)
             if row_dict is None:
                 return None
             stored_mtime = row_dict.get("file_mtime")
             stored_size = row_dict.get("file_size")
-            if stored_mtime != stat.st_mtime or stored_size != stat.st_size:
+            if stored_mtime != current_mtime or stored_size != current_size:
                 return None
             metadata: Optional[Dict] = None
             stored_metadata_json = row_dict.get("metadata_json")
@@ -258,7 +296,7 @@ class WikiCache:
         if row is None:
             return None
         stored_html, stored_title, stored_mtime, stored_size, stored_metadata_json = row
-        if stored_mtime != stat.st_mtime or stored_size != stat.st_size:
+        if stored_mtime != current_mtime or stored_size != current_size:
             return None
         metadata = None
         if stored_metadata_json:
@@ -271,15 +309,20 @@ class WikiCache:
         article_path: str,
         html: str,
         title: str,
-        file_path: Path,
+        file_path: Union[Path, FileStamp],
         *,
         metadata: Optional[Dict] = None,
     ) -> None:
         """Store rendered article with current stat values from os.stat(file_path).
 
+        ``file_path`` may instead be the manifest's ``FileStamp`` (see
+        :meth:`get_article`); a stamp with an unknown mtime stores nothing.
         Optional metadata kwarg stores front-matter dict as JSON (Story #289).
         """
-        stat = file_path.stat()
+        stamp = _stamp_values(file_path)
+        if stamp is None:
+            return
+        file_mtime, file_size = stamp
         rendered_at = datetime.utcnow().isoformat()
         metadata_json_str: Optional[str] = (
             json.dumps(metadata, default=_json_default)
@@ -293,8 +336,8 @@ class WikiCache:
                 article_path,
                 html,
                 title,
-                stat.st_mtime,
-                stat.st_size,
+                file_mtime,
+                file_size,
                 rendered_at,
                 metadata_json_str,
             )
@@ -310,8 +353,8 @@ class WikiCache:
                     article_path,
                     html,
                     title,
-                    stat.st_mtime,
-                    stat.st_size,
+                    file_mtime,
+                    file_size,
                     rendered_at,
                     metadata_json_str,
                 ),
@@ -350,9 +393,22 @@ class WikiCache:
         # as the backend-path branch above).
         return parse_json_column(row[0], list, "sidebar_json")  # type: ignore[no-any-return]
 
-    def put_sidebar(self, repo_alias: str, sidebar_data: List, repo_dir: Path) -> None:
-        """Store sidebar JSON with current max_mtime of .md files."""
-        max_mtime = _max_mtime_of_md_files(repo_dir)
+    def put_sidebar(
+        self,
+        repo_alias: str,
+        sidebar_data: List,
+        repo_dir: Path,
+        *,
+        max_mtime: Optional[float] = None,
+    ) -> None:
+        """Store sidebar JSON with current max_mtime of .md files.
+
+        ``max_mtime`` is given when the caller already knows it from the
+        content backend's manifest (the repository is not on this pod); only
+        when it is omitted is ``repo_dir`` walked for it.
+        """
+        if max_mtime is None:
+            max_mtime = _max_mtime_of_md_files(repo_dir)
         built_at = datetime.utcnow().isoformat()
 
         if self._backend is not None:

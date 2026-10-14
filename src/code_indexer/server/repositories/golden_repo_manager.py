@@ -58,6 +58,7 @@ from code_indexer.server.git.git_subprocess_env import build_non_interactive_git
 from code_indexer.server.utils.index_command_layout import (
     is_pod_local_repo,
     repo_layout_kwargs,
+    server_backend_args,
 )
 from code_indexer.utils.git_runner import run_git_command
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
@@ -282,6 +283,48 @@ def _make_hnsw_orphan_event_logger(alias: str):
         )
 
     return _log_event
+
+
+class DelegatedRepositoryRemoval:
+    """What a removal did to a golden clone held by workspace-mcp.
+
+    Under ``content_backend='delegated'`` the clone lives at workspace-mcp, at
+    the same absolute path as this pod's index-state directory. *outcome* is
+    ``deleted`` (workspace-mcp removed it), ``already_absent`` (nothing was
+    there -- a re-run, say) or ``retained`` (cidx does not own it; *reason*
+    says why). Only ``deleted`` ever claims a deletion.
+    """
+
+    DELETED = "deleted"
+    ALREADY_ABSENT = "already_absent"
+    RETAINED = "retained"
+
+    def __init__(
+        self, clone_path: str, outcome: str, reason: Optional[str] = None
+    ) -> None:
+        self.clone_path = clone_path
+        self.outcome = outcome
+        self.reason = reason
+
+    def note(self) -> str:
+        """The clause the removal's result message carries."""
+        if self.outcome == self.DELETED:
+            return f" (deleted the repository at {self.clone_path} on workspace-mcp)"
+        if self.outcome == self.ALREADY_ABSENT:
+            return (
+                f" (the repository at {self.clone_path} was already absent on "
+                "workspace-mcp)"
+            )
+        return f" (the repository at {self.clone_path} was NOT deleted: {self.reason})"
+
+    def record(self, cascade_results: Dict[str, Any]) -> None:
+        """Name the path in the job result under what happened to it."""
+        cascade_results[f"repository_{self.outcome}_at"] = self.clone_path
+
+
+#: The index-artifact client's error code for an alias it cannot delete now:
+#: a publish of it is running or a checkout lease on it is live (transient).
+_INDEX_ARTIFACT_ALIAS_BUSY = "ECONFLICT"
 
 
 class GoldenRepoError(Exception):
@@ -947,6 +990,44 @@ class GoldenRepoManager:
             """
             if not clone_path:
                 return
+            if self.repositories_are_delegated() and not repo_url.startswith(
+                "local://"
+            ):
+                # The clone is with git-mcp/workspace-mcp; its index state is
+                # here. Remove both, and only while no registry row names the
+                # alias: a row means a registered repository (a reclaimed
+                # re-run of an add whose first executor committed it), whose
+                # index state and clone are live, not this failure's debris.
+                try:
+                    registered = self.get_golden_repo(alias) is not None
+                except Exception as lookup_exc:
+                    logging.error(
+                        "Bug #1218: registration of '%s' failed and its registry "
+                        "row could not be read (%s); its index state and clone "
+                        "at %s are kept",
+                        alias,
+                        lookup_exc,
+                        clone_path,
+                    )
+                    return
+                if registered:
+                    logging.warning(
+                        "Bug #1218: registration of '%s' failed; its index state "
+                        "and clone at %s are kept: a registry row still names it",
+                        alias,
+                        clone_path,
+                    )
+                    return
+                try:
+                    self._remove_pod_index_state(clone_path)
+                except OSError as cleanup_exc:
+                    logging.warning(
+                        "Bug #1218: failed to remove index state at '%s': %s",
+                        clone_path,
+                        cleanup_exc,
+                    )
+                self._discard_failed_delegated_clone(alias, repo_url, clone_path)
+                return
             try:
                 if os.path.islink(clone_path):
                     # EVO-64228: a symlink must be unlinked, never rmtree'd —
@@ -991,6 +1072,15 @@ class GoldenRepoManager:
                 # Remove such an orphan up front (guards inside the helper never
                 # touch in-place content or a committed registration).
                 self._remove_orphan_clone_for_retry(repo_url, alias)
+                if self.repositories_are_delegated() and not self._is_local_path(
+                    repo_url
+                ):
+                    # git-mcp can fail a clone partway (or the visibility wait
+                    # can time out) and leave a partial clone there, so track
+                    # the path from here. _cleanup_failed_clone removes nothing
+                    # while a registry row names the alias (a reclaimed re-run
+                    # of an add whose first executor committed it).
+                    _clone_path_for_cleanup = os.path.join(self.golden_repos_dir, alias)
                 # Clone repository
                 clone_path = self._clone_repository(repo_url, alias, default_branch)
                 # EVO-64228 (review MAJOR): in index-in-place mode clone_path IS
@@ -1242,6 +1332,8 @@ class GoldenRepoManager:
         Returns True iff an orphan clone was removed.
         """
         clone_path = os.path.join(self.golden_repos_dir, alias)
+        if self.repositories_are_delegated() and not repo_url.startswith("local://"):
+            return self._remove_delegated_orphan_for_retry(repo_url, alias, clone_path)
         if not os.path.exists(clone_path):
             return False
         if self._is_in_place_registration(repo_url, clone_path):
@@ -1272,6 +1364,82 @@ class GoldenRepoManager:
                 "directory still exists after removal"
             )
         return True
+
+    def _remove_delegated_orphan_for_retry(
+        self, repo_url: str, alias: str, clone_path: str
+    ) -> bool:
+        """The delegated half of :meth:`_remove_orphan_clone_for_retry`.
+
+        The interrupted attempt left its index state HERE and its partial
+        clone at workspace-mcp (git-mcp cloned it there), where the next clone
+        would fail with "destination exists". With no committed registry row
+        for *alias*, both are removed: the index state on this pod, the clone
+        through workspace-mcp's ``/clone-path/delete`` (idempotent: nothing
+        there is a no-op). Never an in-place registration's directory -- that
+        content is its provisioner's (EVO-64228).
+
+        Another pod's add of the same alias cannot be mid-clone here: an add
+        runs only as an ``add_golden_repo`` job row, and the
+        ``idx_active_job_per_repo`` partial unique index on
+        ``(operation_type, repo_alias)`` admits ONE pending/running such row
+        cluster-wide (``register_job_if_no_conflict`` at submit); a pod-pull
+        reclaim re-runs that same row only after its executor was declared
+        dead. So with no registry row, whatever is at the path is an orphan.
+
+        Returns True iff anything was removed. A workspace-mcp failure raises:
+        the clone must not proceed into a destination that may still exist.
+        """
+        if self.get_golden_repo(alias) is not None:
+            return False
+        removed = False
+        if os.path.lexists(clone_path):
+            try:
+                self._remove_pod_index_state(clone_path)
+            except OSError as cleanup_error:
+                raise GitOperationError(
+                    f"Failed orphan index-state cleanup for '{alias}' at "
+                    f"{clone_path}: {cleanup_error}"
+                ) from cleanup_error
+            removed = True
+        reason = self._delegated_clone_retain_reason(alias, repo_url, clone_path)
+        if reason is not None:
+            logging.info(
+                "add_golden_repo retry for '%s': %s left at workspace-mcp: %s",
+                alias,
+                clone_path,
+                reason,
+            )
+            return removed
+        copies = self._delegated_working_copies_if_wired()
+        if copies is None:
+            # Nothing reaches workspace-mcp, so a leftover clone can be neither
+            # seen nor removed. A clean add has none and proceeds; if one is
+            # there, git-mcp's clone fails loud with "destination exists".
+            logging.warning(
+                "add_golden_repo for '%s': no workspace-mcp clone backend "
+                "(clone_backend='delegated') is wired, so a partial clone an "
+                "interrupted add may have left at %s cannot be removed; if one "
+                "is there, the clone fails with 'destination exists'",
+                alias,
+                clone_path,
+            )
+            return removed
+        try:
+            deleted = copies.remove(clone_path)
+        except Exception as exc:  # workspace-mcp transport / HTTP error
+            raise GitOperationError(
+                f"Failed orphan cleanup for '{alias}': the partial clone at "
+                f"{clone_path} could not be deleted on workspace-mcp ({exc}); "
+                "cloning into it would fail with 'destination exists'"
+            ) from exc
+        if deleted:
+            logging.warning(
+                "add_golden_repo retry: deleted orphan partial clone for '%s' at "
+                "%s on workspace-mcp (no committed registry row)",
+                alias,
+                clone_path,
+            )
+        return removed or deleted
 
     def _golden_description_generation_enabled(self) -> bool:
         """EVO-65484: whether to run description/lifecycle generation on golden add.
@@ -1447,7 +1615,12 @@ class GoldenRepoManager:
     def _reconstruct_repo_identity(self, repo_dir: "Path") -> tuple[str, str]:
         """Reconstruct (repo_url, default_branch) for a registry backfill from the
         on-disk git clone. Falls back to a ``file://`` URL and ``main`` when git
-        metadata is unavailable (non-git / detached HEAD)."""
+        metadata is unavailable (non-git / detached HEAD).
+
+        Delegated: asked of the git seam -- see
+        :meth:`_reconstruct_repo_identity_delegated`."""
+        if self.repositories_are_delegated():
+            return self._reconstruct_repo_identity_delegated(repo_dir)
         repo_url = f"file://{repo_dir}"
         default_branch = "main"
         try:
@@ -1472,6 +1645,35 @@ class GoldenRepoManager:
             pass
         return repo_url, default_branch
 
+    _IDENTITY_GIT_TIMEOUT_SECONDS = 15
+
+    def _reconstruct_repo_identity_delegated(self, repo_dir: "Path") -> tuple[str, str]:
+        """(repo_url, default_branch) from git-mcp, for a pod without the clone.
+
+        The local method's ``file://`` / ``main`` fallbacks describe what a
+        directory holding no repository looks like, so they would register an
+        identity nothing can fetch from. Here an unreadable origin raises
+        GitOperationError (the reconcile counts it and skips the backfill);
+        only a detached HEAD falls back to ``main``, as locally.
+        """
+        backend = self.delegated_git_backend("registry backfill")
+        timeout = self._IDENTITY_GIT_TIMEOUT_SECONDS
+        try:
+            repo_url = backend.remote_get_url(str(repo_dir), "origin", timeout=timeout)
+            branch = backend.rev_parse(
+                str(repo_dir), "--abbrev-ref", "HEAD", timeout=timeout
+            )
+        except subprocess.CalledProcessError as e:
+            raise GitOperationError(
+                f"Reading the identity of {repo_dir} through the git backend "
+                f"failed: {redact_url_credentials(e.stderr or str(e))}"
+            ) from e
+        if not repo_url:
+            raise GitOperationError(
+                f"The git backend reports no origin URL for {repo_dir}"
+            )
+        return repo_url, branch if branch and branch != "HEAD" else "main"
+
     def reconcile_registry_from_filesystem(self) -> Dict[str, int]:
         """EVO-65484: make the golden-repo registry a faithful, self-healing
         projection of on-disk state — BIDIRECTIONALLY.
@@ -1489,7 +1691,10 @@ class GoldenRepoManager:
 
         2. Row-orphan (registry row, but its on-disk clone directory is entirely
            gone — e.g. a removeOnDisk that didn't deregister). The row is
-           unqueryable and misleads callers. Heal: prune the row.
+           unqueryable and misleads callers. Heal: prune the row. Under
+           ``content_backend='delegated'`` "gone" is workspace-mcp's answer for
+           the clone path (``/clone-path/stat``), never this pod's index-state
+           directory; a failed answer skips the row.
 
         Both passes are idempotent and tolerate sibling pods racing (IntegrityError
         on insert / already-gone on delete are benign). The prune is deliberately
@@ -1575,8 +1780,37 @@ class GoldenRepoManager:
                 )
 
         # Pass 2 — prune row-orphans whose in-tree clone dir has vanished.
+        # When delegated, the dirs listed above are this pod's index state, so
+        # a missing one means "not indexed here", not "repository gone" --
+        # pruning on it would deregister live repositories (every one of them,
+        # on a pod with a fresh volume). There the clone's presence is asked of
+        # workspace-mcp, which holds it at the same path; a failed answer skips
+        # the row (never a prune on an error). local:// rows are skipped: a
+        # pod-local repository is on ONE pod, so another pod's disk proves
+        # nothing about it, and cidx-meta's content is not a clone.
+        prune_rows = registered_rows
+        working_copies = None
+        if self.repositories_are_delegated():
+            prune_rows = [
+                r
+                for r in registered_rows
+                if not is_pod_local_repo(r.get("repo_url"), r.get("alias"))
+            ]
+            try:
+                if prune_rows:
+                    working_copies = self._delegated_working_copies(
+                        "registry reconcile"
+                    )
+            except GitOperationError as exc:
+                prune_rows = []
+                counts["errors"] += 1
+                logging.warning(
+                    "EVO-65484: row-orphan prune skipped -- workspace-mcp, which "
+                    "holds the clones, cannot be asked: %s",
+                    exc,
+                )
         root_str = str(root)
-        for row in registered_rows:
+        for row in prune_rows:
             alias = row.get("alias")
             clone_path = row.get("clone_path")
             if not alias or not clone_path:
@@ -1587,8 +1821,23 @@ class GoldenRepoManager:
             parent = os.path.dirname(os.path.normpath(clone_path))
             if parent != root_str:
                 continue
-            if os.path.basename(os.path.normpath(clone_path)) in present_dirs:
-                continue  # dir still present — not an orphan
+            if working_copies is None:
+                if os.path.basename(os.path.normpath(clone_path)) in present_dirs:
+                    continue  # dir still present — not an orphan
+            else:
+                try:
+                    if working_copies.exists(clone_path):
+                        continue  # workspace-mcp holds the clone — not an orphan
+                except Exception as exc:  # never prune on an error
+                    counts["errors"] += 1
+                    logging.warning(
+                        "EVO-65484: could not ask workspace-mcp whether the "
+                        "clone of '%s' at %s exists; row left: %s",
+                        alias,
+                        clone_path,
+                        exc,
+                    )
+                    continue
             try:
                 if self.is_globally_active(alias):
                     counts["orphan_rows_skipped_global"] += 1
@@ -2189,6 +2438,24 @@ class GoldenRepoManager:
                 actual_path = None
                 repo_exists_on_disk = False
 
+            # Published index versions (index_store_backend='delegated') go
+            # BEFORE the registry row: a failure (ECONFLICT while a query pod
+            # holds a checkout lease, say) then aborts with the repository
+            # still registered, so re-running the removal completes it --
+            # after the row is gone the alias could no longer be removed, and
+            # its versions would stay published with nothing to name them.
+            # delete is idempotent (0 versions on a re-run). None: this
+            # store publishes nothing (local; nothing changes).
+            index_versions_deleted = self._delete_published_index_versions(alias)
+
+            # Content seam: on a delegated pod the clone is with workspace-mcp
+            # at the same path, and only its index state is here. The clone
+            # goes now, for the same reason as the index versions: a failure
+            # aborts with the repository still registered, and a re-run
+            # completes it (workspace-mcp's delete is idempotent). None: the
+            # repository is on this pod (local backend, or local://).
+            delegated_removal = self._delete_delegated_repository_for_removal(alias)
+
             # Bug #1317: remove the registry row BEFORE deleting any on-disk
             # files. The old order deleted files first and removed the row
             # only afterwards -- if that row removal then failed (a
@@ -2364,7 +2631,12 @@ class GoldenRepoManager:
             try:
                 if repo_exists_on_disk:
                     assert actual_path is not None
-                    cleanup_successful = self._cleanup_repository_files(actual_path)
+                    if delegated_removal is not None:
+                        cleanup_successful = self._cleanup_repository_files(
+                            actual_path, delegated=True
+                        )
+                    else:
+                        cleanup_successful = self._cleanup_repository_files(actual_path)
                 else:
                     cleanup_successful = True
 
@@ -2377,8 +2649,12 @@ class GoldenRepoManager:
                 # MUST happen before the write lock is released below (codex
                 # review, turn 11): releasing first would open a window for a
                 # new refresh to write into the still-unquarantined wreckage.
+                # Never under delegation: the remains are index state plus
+                # entries cidx cannot prove are its own (_remove_pod_index_state
+                # left them on purpose), and a rename would move them anyway.
                 if (
                     not cleanup_successful
+                    and delegated_removal is None
                     and repo_exists_on_disk
                     and actual_path
                     and os.path.exists(actual_path)
@@ -2409,14 +2685,22 @@ class GoldenRepoManager:
             # Bug #1523: this signal is unchanged -- an incomplete cleanup is
             # still reported as a resource leak; it just no longer suppresses
             # the detach steps above.
+            repository_note = (
+                delegated_removal.note() if delegated_removal is not None else ""
+            )
             if not cleanup_successful:
                 raise GitOperationError(
                     "Repository metadata removed but cleanup incomplete. "
                     "Resource leak detected: some cleanup operations did not complete fully."
+                    + repository_note
                 )
 
             # Mark golden repo as deleted
             cascade_results["golden_repo_deleted"] = True
+            if delegated_removal is not None:
+                delegated_removal.record(cascade_results)
+            if index_versions_deleted is not None:
+                cascade_results["index_versions_deleted"] = index_versions_deleted
 
             # Build enhanced message with cascade deletion counts
             activated_count = len(cascade_results["activated_repos_deleted"])
@@ -2429,6 +2713,11 @@ class GoldenRepoManager:
                 message += (
                     f" (WARNING: {failed_count} activated repos failed to delete)"
                 )
+            if index_versions_deleted is not None:
+                message += (
+                    f" (deleted {index_versions_deleted} published index versions)"
+                )
+            message += repository_note
 
             return {
                 "success": True,
@@ -2587,6 +2876,258 @@ class GoldenRepoManager:
                 "backend never reads and the branch would be looked up in a "
                 "directory that holds no repository"
             )
+
+    def repositories_are_delegated(self) -> bool:
+        """True when this pod does not hold the repositories.
+
+        Either signal counts: this manager's own content backend, or the
+        running server's -- a secondary manager built without the injected
+        backend, on a delegated server, must not act as if the repository were
+        here. The destructive lifecycle steps branch on it: on a delegated pod a
+        directory missing HERE says nothing about the repository, and deleting a
+        directory here can only ever remove cidx's own index state.
+        """
+        if not self._content_backend.is_local:
+            return True
+        from code_indexer.server.startup.content_backend_wiring import (
+            is_content_seam_delegated,
+        )
+
+        return is_content_seam_delegated()
+
+    def delegated_git_backend(self, feature: str) -> GitBackend:
+        """The git seam to ask about a repository this pod does not hold.
+
+        This manager's own backend when it is delegated, else the running
+        server's. Raises rather than fall back to local git, which on a pod
+        without the repository answers "not a git repository".
+        """
+        if not isinstance(self._git_backend, LocalGitBackend):
+            return self._git_backend
+        from code_indexer.server.startup.git_backend_wiring import (
+            server_delegated_git_backend,
+        )
+
+        backend = server_delegated_git_backend()
+        if backend is None:
+            raise GitOperationError(
+                f"{feature}: content_backend='delegated' needs "
+                "git_backend='delegated': local git on this pod would read a "
+                "directory that holds no repository"
+            )
+        return backend
+
+    def _remove_pod_index_state(self, path: str) -> bool:
+        """The pod half of deleting a delegated golden clone: remove what is here.
+
+        On a delegated pod the directory at *path* holds only cidx's index
+        state; the repository is with workspace-mcp/git-mcp at the same path,
+        and is deleted THERE, through workspace-mcp (see
+        :meth:`_delete_delegated_repository_for_removal`), never through this
+        pod's disk. So this removes the
+        index state (``index_root``), then the directory itself only if that
+        left it EMPTY -- ``os.rmdir`` refuses a non-empty directory, so content
+        cidx cannot prove is its own (a mount that is still attached, say) is
+        never deleted. A symlink is unlinked, never followed.
+
+        Returns True when nothing is left at *path*; False (logged) when other
+        entries remain. Filesystem errors propagate to the caller.
+        """
+        from code_indexer.utils.index_store import index_root
+
+        if os.path.islink(path):
+            os.unlink(path)
+            return True
+        state = index_root(path)
+        if os.path.islink(state):
+            os.unlink(state)
+        elif state.is_dir():
+            shutil.rmtree(state)
+        try:
+            os.rmdir(path)
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            logging.warning(
+                "content_backend='delegated': %s still holds entries other "
+                "than cidx's index state (%s) -- left in place; cidx deletes "
+                "only what it can prove is its own",
+                path,
+                exc,
+            )
+            return False
+        return True
+
+    def _delete_published_index_versions(self, alias: str) -> Optional[int]:
+        """Delete *alias*'s published index versions through the server's store.
+
+        The versions refresh published (``index_store_backend='delegated'``)
+        live with the artifact service, not in any directory removal deletes.
+        The alias is the one refresh publishes under: ``IndexStore.delete``
+        derives it from the same ``golden-repos/<alias>`` path ``publish``
+        does. Returns the number deleted, or None when no store publishes
+        anything (local store, or no running server).
+
+        Raises GitOperationError -- the removal aborts with the repository
+        still registered, to be re-run -- when a refresh is running (it would
+        publish again behind the deletion) or the versions could not be
+        deleted; the message says they were NOT deleted and why.
+        """
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+
+        store = server_index_store()
+        if store is None or store.is_local:
+            return None
+        not_deleted = (
+            f"Golden repository '{alias}' was NOT removed: its published index "
+            "versions were NOT deleted"
+        )
+        rerun = "; it is still registered -- re-run the removal to complete it"
+        scheduler = getattr(self, "_refresh_scheduler", None)
+        if scheduler is not None:
+            try:
+                scheduler.check_refresh_not_in_progress(alias)
+            except DuplicateJobError as refresh_error:
+                raise GitOperationError(
+                    f"{not_deleted} (a refresh is in progress: {refresh_error}){rerun}"
+                ) from refresh_error
+        try:
+            deleted = store.delete(os.path.join(self.golden_repos_dir, alias))
+        except Exception as exc:
+            if getattr(exc, "code", None) == _INDEX_ARTIFACT_ALIAS_BUSY:
+                reason = (
+                    "the index alias is busy: a publish is running or a "
+                    "checkout lease is live"
+                )
+            else:
+                reason = f"{type(exc).__name__}: {exc}"
+            logging.error("%s (%s)%s", not_deleted, reason, rerun)
+            raise GitOperationError(f"{not_deleted} ({reason}){rerun}") from exc
+        if deleted is None:
+            raise GitOperationError(
+                f"{not_deleted} (the {type(store).__name__} publishes versions but "
+                f"reported no deletion){rerun}"
+            )
+        logging.info(
+            "Deleted %d published index versions of golden repository '%s'",
+            deleted,
+            alias,
+        )
+        return deleted
+
+    def _delegated_working_copies(self, feature: str) -> Any:
+        """workspace-mcp's clone-path endpoints, for a clone this pod lacks.
+
+        The same access path activated repositories use: the server's
+        DelegatedCloneBackend (wired into the snapshot manager at startup and
+        shared with ActivatedRepoManager) behind ``DelegatedWorkingCopies``
+        (``/clone-path/stat`` and ``/clone-path/delete``). Raises -- never a
+        fallback to this pod's disk -- when no such backend is wired.
+        """
+        copies = self._delegated_working_copies_if_wired()
+        if copies is None:
+            clone_backend = getattr(self._snapshot_manager, "_clone_backend", None)
+            raise GitOperationError(
+                f"{feature}: content_backend='delegated' keeps golden clones on "
+                "workspace-mcp, which this server reaches only through "
+                "clone_backend='delegated' (workspace_mcp.endpoint); its clone "
+                f"backend is {type(clone_backend).__name__}"
+            )
+        return copies
+
+    def _delegated_working_copies_if_wired(self) -> Any:
+        """:meth:`_delegated_working_copies`, or None when no DelegatedCloneBackend
+        is wired -- for a step that may proceed without workspace-mcp."""
+        from code_indexer.server.repositories.activated_working_copy import (
+            DelegatedWorkingCopies,
+        )
+        from code_indexer.server.storage.shared.clone_backend import (
+            DelegatedCloneBackend,
+        )
+
+        clone_backend = getattr(self._snapshot_manager, "_clone_backend", None)
+        if not isinstance(clone_backend, DelegatedCloneBackend):
+            return None
+        return DelegatedWorkingCopies(clone_backend)
+
+    def _delegated_clone_retain_reason(
+        self, alias: str, repo_url: str, clone_path: str
+    ) -> Optional[str]:
+        """None when cidx owns the delegated clone at *clone_path*; else why not.
+
+        cidx owns exactly what it cloned: golden-repos/<alias> for a
+        non-local:// repository registered by URL. Never a ``local://``
+        repository (pod-local or cidx-meta), never a path that is not that
+        alias's own entry under the golden-repos root, and never an in-place
+        registration -- a source its provisioner (workspace-mcp) materialized
+        at the path and cidx only indexes (EVO-64228).
+        """
+        if is_pod_local_repo(repo_url, alias):
+            return "a local:// repository is not a workspace-mcp clone"
+        root = os.path.normpath(self.golden_repos_dir)
+        own = os.path.normpath(os.path.join(root, alias))
+        if (
+            os.path.dirname(own) != root
+            or os.path.basename(own).startswith(".")
+            or os.path.normpath(clone_path) != own
+        ):
+            return (
+                f"it is not golden repository '{alias}''s own clone under "
+                f"{root}, so cidx does not own it"
+            )
+        if self._is_in_place_registration(repo_url, clone_path):
+            return (
+                "it was registered in place (provisioned there by its owner, "
+                "not cloned by cidx), so it is not cidx's to delete"
+            )
+        return None
+
+    def _discard_failed_delegated_clone(
+        self, alias: str, repo_url: str, clone_path: str
+    ) -> None:
+        """Delete a failed add's clone on workspace-mcp, when nothing names it.
+
+        Only with no registry row for *alias* (the add's rollback removed it,
+        or it never got that far) and only a clone cidx owns. Never raises: it
+        runs while the add's own failure propagates, which must not be masked
+        -- a clone that could not be deleted is logged as a leak, and the next
+        add's :meth:`_remove_delegated_orphan_for_retry` removes it.
+        """
+        try:
+            reason = self._delegated_clone_retain_reason(alias, repo_url, clone_path)
+            if reason is None and self.get_golden_repo(alias) is not None:
+                reason = "a registry row still names it"
+            if reason is not None:
+                logging.warning(
+                    "Bug #1218: registration of '%s' failed; the clone at %s was "
+                    "NOT deleted on workspace-mcp: %s",
+                    alias,
+                    clone_path,
+                    reason,
+                )
+                return
+            deleted = self._delegated_working_copies(f"failed add of '{alias}'").remove(
+                clone_path
+            )
+        except Exception as exc:  # the add's own failure is what is reported
+            logging.error(
+                "RESOURCE LEAK WARNING: registration of '%s' failed and its clone "
+                "at %s could not be deleted on workspace-mcp (%s); the next add "
+                "of this alias removes it",
+                alias,
+                clone_path,
+                exc,
+            )
+            return
+        logging.info(
+            "Bug #1218: registration of '%s' failed; %s its clone at %s on "
+            "workspace-mcp",
+            alias,
+            "deleted" if deleted else "no clone was left of",
+            clone_path,
+        )
 
     def _await_clone_visible_through_content_backend(
         self, clone_path: str, *, attempts: int = 100, delay_seconds: float = 0.1
@@ -3074,7 +3615,116 @@ class GoldenRepoManager:
                 f"'{versioned_ns_dir}' for '{alias}': {dir_error}"
             )
 
-    def _cleanup_repository_files(self, clone_path: str) -> bool:
+    def _delete_delegated_repository_for_removal(
+        self, alias: str
+    ) -> Optional[DelegatedRepositoryRemoval]:
+        """Delete *alias*'s clone on workspace-mcp, before its registry row goes.
+
+        None when the repository is on this pod: a local content backend, or
+        a ``local://`` repository (pod-local by design, or cidx-meta, whose
+        directory here is what removal has always deleted) -- the local
+        removal then runs unchanged.
+
+        Otherwise the clone is with workspace-mcp at the same path as this
+        pod's index-state directory. A clone cidx owns (see
+        :meth:`_delegated_clone_retain_reason`) is deleted through
+        ``/clone-path/delete``; one it does not own -- an in-place
+        registration, a path outside golden-repos, or a row that cannot be
+        read -- is retained and the result says why. The deletion runs under
+        the same guards the local file cleanup uses (no refresh in progress,
+        the alias write lock), because a refresh fetches into that clone.
+
+        Raises GitOperationError -- the removal aborts with the repository
+        still registered and is re-runnable (the delete is idempotent) --
+        when a refresh is running, the lock is held, or workspace-mcp could
+        not delete it; the message says it was NOT deleted.
+        """
+        if not self.repositories_are_delegated():
+            return None
+        record = self._resolve_golden_repo(alias)
+        if record is not None and record.repo_url.startswith("local://"):
+            return None
+        own_path = os.path.join(self.golden_repos_dir, alias)
+        if record is None:
+            return self._retain_delegated_repository(
+                alias,
+                own_path,
+                "its registry row could not be read, so cidx cannot show it "
+                "owns the clone",
+            )
+        clone_path = str(record.clone_path or own_path)
+        reason = self._delegated_clone_retain_reason(alias, record.repo_url, clone_path)
+        if reason is not None:
+            return self._retain_delegated_repository(alias, clone_path, reason)
+
+        not_removed = (
+            f"Golden repository '{alias}' was NOT removed: its repository at "
+            f"{clone_path} was NOT deleted on workspace-mcp"
+        )
+        rerun = "; it is still registered -- re-run the removal to complete it"
+        scheduler = getattr(self, "_refresh_scheduler", None)
+        lock_acquired = False
+        if scheduler is not None:
+            try:
+                scheduler.check_refresh_not_in_progress(alias)
+            except DuplicateJobError as refresh_error:
+                raise GitOperationError(
+                    f"{not_removed} (a refresh is in progress: {refresh_error}){rerun}"
+                ) from refresh_error
+            if not scheduler.acquire_write_lock(alias, owner_name="remove_repo"):
+                raise GitOperationError(
+                    f"{not_removed} (the write lock is held by another "
+                    f"operation){rerun}"
+                )
+            lock_acquired = True
+        try:
+            working_copies = self._delegated_working_copies(
+                f"removal of golden repository '{alias}'"
+            )
+            deleted = working_copies.remove(clone_path)
+        except Exception as exc:  # workspace-mcp transport / HTTP / wiring
+            logging.error("%s (%s)%s", not_removed, exc, rerun)
+            raise GitOperationError(f"{not_removed} ({exc}){rerun}") from exc
+        finally:
+            if lock_acquired:
+                scheduler.release_write_lock(alias, owner_name="remove_repo")
+        if not deleted:
+            logging.info(
+                "Golden repository '%s': its clone at %s was already absent on "
+                "workspace-mcp",
+                alias,
+                clone_path,
+            )
+            return DelegatedRepositoryRemoval(
+                clone_path, DelegatedRepositoryRemoval.ALREADY_ABSENT
+            )
+        logging.info(
+            "Golden repository '%s': deleted its clone at %s on workspace-mcp",
+            alias,
+            clone_path,
+        )
+        return DelegatedRepositoryRemoval(
+            clone_path, DelegatedRepositoryRemoval.DELETED
+        )
+
+    @staticmethod
+    def _retain_delegated_repository(
+        alias: str, clone_path: str, reason: str
+    ) -> DelegatedRepositoryRemoval:
+        """Say, loudly, that removal leaves *alias*'s clone on workspace-mcp."""
+        logging.warning(
+            "Golden repository '%s': the repository at %s is NOT deleted: %s",
+            alias,
+            clone_path,
+            reason,
+        )
+        return DelegatedRepositoryRemoval(
+            clone_path, DelegatedRepositoryRemoval.RETAINED, reason
+        )
+
+    def _cleanup_repository_files(
+        self, clone_path: str, *, delegated: bool = False
+    ) -> bool:
         """
         Clean up repository files and directories using orchestrated cleanup.
 
@@ -3083,6 +3733,9 @@ class GoldenRepoManager:
 
         Args:
             clone_path: Path to repository directory to clean up
+            delegated: the repository is NOT on this pod (content_backend
+                'delegated'): only cidx's index state at *clone_path* is
+                removed -- see :meth:`_remove_pod_index_state`.
 
         Returns:
             bool: True if cleanup was successful, False if there were issues
@@ -3091,6 +3744,11 @@ class GoldenRepoManager:
         Raises:
             GitOperationError: Only for critical failures that should prevent deletion
         """
+        if delegated:
+            try:
+                return self._remove_pod_index_state(clone_path)
+            except OSError as e:
+                return self._handle_cleanup_errors(e, clone_path)
         if not os.path.exists(clone_path):
             return True  # Already cleaned up
 
@@ -4096,14 +4754,23 @@ class GoldenRepoManager:
                         repo_dict
                     )  # Convert to Dict[str, Any]
                     repo_dict_any["canonical_url"] = canonical_url
-                    # Use canonical path resolution to handle versioned structure repos
-                    actual_path = self.get_actual_repo_path(repo.alias)
+                    # Use canonical path resolution to handle versioned structure repos.
+                    # Delegated: the registered clone, where git-mcp sees the
+                    # repository -- index state missing HERE must not drop it.
+                    if self.repositories_are_delegated():
+                        actual_path = repo.clone_path
+                    else:
+                        actual_path = self.get_actual_repo_path(repo.alias)
                     repo_dict_any["branches"] = self._get_repository_branches(
                         actual_path
                     )
 
                     matching_repos.append(repo_dict_any)
 
+            except GitOperationError:
+                # A delegated branch lookup that failed: an error, never a
+                # repository silently dropped from the match.
+                raise
             except Exception as e:
                 logging.warning(
                     f"Failed to normalize URL for repo {repo.alias}: {str(e)}"
@@ -4122,6 +4789,8 @@ class GoldenRepoManager:
         Returns:
             List of branch names
         """
+        if self.repositories_are_delegated():
+            return self._get_repository_branches_delegated(repo_path)
         try:
             if not os.path.exists(repo_path):
                 return ["main"]  # Default fallback
@@ -4140,18 +4809,51 @@ class GoldenRepoManager:
             except subprocess.CalledProcessError:
                 return ["main"]
 
-            branches = []
-            for line in remote_branch_lines:
-                # Clean up branch name (remove origin/ prefix)
-                branch = line.replace("origin/", "")
-                if branch and branch != "HEAD":
-                    branches.append(branch)
-
-            return branches if branches else ["main"]
+            return self._branch_names_from_remote_lines(remote_branch_lines)
 
         except Exception as e:
             logging.warning(f"Failed to get branches for {repo_path}: {str(e)}")
             return ["main"]
+
+    @staticmethod
+    def _branch_names_from_remote_lines(remote_branch_lines: List[str]) -> List[str]:
+        """Branch names from ``git branch -r`` lines; ``["main"]`` when none."""
+        branches = []
+        for line in remote_branch_lines:
+            # Clean up branch name (remove origin/ prefix)
+            branch = line.replace("origin/", "")
+            if branch and branch != "HEAD":
+                branches.append(branch)
+
+        return branches if branches else ["main"]
+
+    def _get_repository_branches_delegated(self, repo_path: str) -> List[str]:
+        """The delegated twin of :meth:`_get_repository_branches`.
+
+        This pod holds only index state, so nothing here is probed: the git
+        seam is asked, at the path git-mcp sees (a versioned snapshot maps to
+        its base clone). A failure raises GitOperationError -- the local
+        method's ``["main"]`` fallback would report a repository git-mcp could
+        not read as one with a single ``main`` branch.
+        """
+        from code_indexer.server.startup.content_backend_wiring import (
+            golden_repo_content_root,
+        )
+
+        root = str(golden_repo_content_root(repo_path, consumer="branch listing"))
+        backend = self.delegated_git_backend("branch listing")
+        try:
+            remote_branch_lines = backend.list_branches(
+                root,
+                remote=True,
+                timeout=self.resource_config.git_untracked_file_timeout,
+            )
+        except subprocess.CalledProcessError as e:
+            raise GitOperationError(
+                f"Listing branches of {root} through the git backend failed: "
+                f"{redact_url_credentials(e.stderr or str(e))}"
+            ) from e
+        return self._branch_names_from_remote_lines(remote_branch_lines)
 
     def get_golden_repo(self, alias: str) -> Optional[GoldenRepo]:
         """
@@ -4626,10 +5328,22 @@ class GoldenRepoManager:
                 timeout=cow_timeout,
                 check=True,
             )
-        # fix-config on clone only (non-fatal)
+        # fix-config on clone only (non-fatal), stamped with the repository's
+        # backends like its `cidx index` spawn: on a pod that does not hold the
+        # repository it must not rewrite the git state the index run recorded.
         try:
+            golden_repo = self.get_golden_repo(alias)
             subprocess.run(
-                ["cidx", "fix-config", "--force"],
+                [
+                    "cidx",
+                    "fix-config",
+                    "--force",
+                    *server_backend_args(
+                        **repo_layout_kwargs(
+                            golden_repo.repo_url if golden_repo else None, alias
+                        )
+                    ),
+                ],
                 cwd=snapshot_path,
                 capture_output=True,
                 text=True,

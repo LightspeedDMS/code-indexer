@@ -899,6 +899,9 @@ class FilesystemVectorStore:
         self._cached_repo_root: Optional[Path] = None
         self._repo_root_cached: bool = False
         self._repo_root_lock: threading.Lock = threading.Lock()
+        # Set by an indexing pass whose repository is behind a delegated
+        # content or git backend (mark_repository_delegated).
+        self._repository_delegated: bool = False
 
         # Story #1456: production write-path opt-in (see __init__ docstring).
         # Bug #1528: the caller's TRI-STATE value is ALSO retained verbatim,
@@ -3528,6 +3531,18 @@ class FilesystemVectorStore:
 
         return {"status": "ok", "deleted": deleted}
 
+    def mark_repository_delegated(self) -> None:
+        """This store indexes a repository that is NOT on this machine.
+
+        Called by an indexing pass reading through a delegated content (or git)
+        backend. Writes then never ask local git for the repository root, its
+        HEAD blob hashes or its uncommitted files: every chunk keeps its text
+        (``chunk_text``), so its content never depends on a git object store
+        this machine does not have -- what such a pod got before, by local git
+        failing, now by decision.
+        """
+        self._repository_delegated = True
+
     def _get_repo_root(self) -> Optional[Path]:
         """Get git repository root directory (memoized).
 
@@ -3535,9 +3550,14 @@ class FilesystemVectorStore:
         Both positive (Path) and negative (None) results are cached after the
         first call so the subprocess runs at most once per instance.
 
+        None, without running git, for a delegated repository
+        (``mark_repository_delegated``).
+
         Returns:
             Path to git repo root, or None if not a git repo
         """
+        if getattr(self, "_repository_delegated", False):
+            return None
         with self._repo_root_lock:
             if self._repo_root_cached:
                 return self._cached_repo_root

@@ -473,3 +473,75 @@ class TestGenerateIndexMdParseRoundtrip:
         assert "| Repository | Domain |" in content, (
             "_index.md Repo-to-Domain Matrix must use 'Domain' (singular) column header"
         )
+
+
+def _delegated_sizes(monkeypatch, manifests, calls):
+    """Point the content seam at *manifests*: clone path -> [(path, size)] or
+    an exception to raise. Records each manifest request in *calls*."""
+    from types import SimpleNamespace
+
+    from code_indexer.server.services import file_service
+    from code_indexer.server.storage.shared.content_backend import ContentEntry
+
+    def source(repo_path, *, consumer):
+        return SimpleNamespace(root=repo_path)
+
+    def entries(src, prune_dirs):
+        calls.append((src.root, tuple(prune_dirs)))
+        listing = manifests[src.root]
+        if isinstance(listing, Exception):
+            raise listing
+        return tuple(
+            ContentEntry(path=p, size=n, blob_sha="x", is_symlink=False)
+            for p, n in listing
+        )
+
+    monkeypatch.setattr(file_service, "content_seam_source", source)
+    monkeypatch.setattr(file_service, "manifest_entries", entries)
+
+
+class TestEnrichRepoSizesThroughTheContentSeam:
+    """On a pod without the repositories (content_backend: delegated) the
+    clone directory holds only index state: sizes come from the content
+    backend's manifest, never a walk of this pod's directory."""
+
+    def test_sizes_come_from_the_manifest(self, tmp_path, monkeypatch):
+        svc = _make_service(tmp_path)
+        big, small, empty = (str(tmp_path / n) for n in ("big", "small", "empty"))
+        for pod_dir in (big, small, empty):
+            # What the pod holds: index state only.
+            state = tmp_path / pod_dir / ".code-indexer"
+            state.mkdir(parents=True)
+            (state / "config.json").write_text("{}")
+        calls: list = []
+        _delegated_sizes(
+            monkeypatch,
+            {big: [("a.py", 70), ("b/c.py", 30)], small: [("x.md", 5)], empty: []},
+            calls,
+        )
+
+        result = svc._enrich_repo_sizes(
+            [
+                {"alias": "small", "clone_path": small},
+                {"alias": "empty", "clone_path": empty},
+                {"alias": "big", "clone_path": big},
+            ]
+        )
+
+        assert [(r["alias"], r["file_count"], r["total_bytes"]) for r in result] == [
+            ("big", 2, 100),
+            ("small", 1, 5),
+        ]
+        assert {prune for _, prune in calls} == {(".git", ".code-indexer")}
+
+    def test_a_listing_failure_is_an_error_not_an_empty_repo(
+        self, tmp_path, monkeypatch
+    ):
+        import pytest
+
+        svc = _make_service(tmp_path)
+        path = str(tmp_path / "repo")
+        _delegated_sizes(monkeypatch, {path: ConnectionError("wsm down")}, [])
+
+        with pytest.raises(ConnectionError, match="wsm down"):
+            svc._enrich_repo_sizes([{"alias": "repo", "clone_path": path}])

@@ -10249,9 +10249,35 @@ def uninstall(ctx, wipe_all: bool, confirm: bool):
 )
 @click.option("--verbose", is_flag=True, help="Show detailed information about fixes")
 @click.option("--force", is_flag=True, help="Apply fixes without confirmation prompts")
+@click.option(
+    "--content-backend",
+    type=click.Choice(["local", "delegated"]),
+    default="local",
+    hidden=True,
+    help="Internal: where the repository's files are. 'delegated' means they "
+    "are not on this machine, so the project id and git state the index run "
+    "recorded are kept instead of being re-derived here. Stamped by the server.",
+)
+@click.option(
+    "--git-backend",
+    type=click.Choice(["local", "delegated"]),
+    default="local",
+    hidden=True,
+    help="Internal: who answers git questions about the repository. "
+    "'delegated' keeps the git state the index run recorded through the "
+    "server's git backend instead of asking this machine's git. Stamped by "
+    "the server.",
+)
 @click.pass_context
 @require_mode("local", "remote", "proxy")
-def fix_config(ctx, dry_run: bool, verbose: bool, force: bool):
+def fix_config(
+    ctx,
+    dry_run: bool,
+    verbose: bool,
+    force: bool,
+    content_backend: str = "local",
+    git_backend: str = "local",
+):
     """Fix corrupted configuration files.
 
     \b
@@ -10333,7 +10359,11 @@ def fix_config(ctx, dry_run: bool, verbose: bool, force: bool):
             console.print(f"  📄 Metadata file: {config_dir / 'metadata.json'}")
 
         # Initialize repairer
-        repairer = ConfigurationRepairer(config_dir, dry_run=dry_run)
+        repairer = ConfigurationRepairer(
+            config_dir,
+            dry_run=dry_run,
+            repository_backend_delegated="delegated" in (content_backend, git_backend),
+        )
 
         # Run the fix process
         result = repairer.fix_configuration()

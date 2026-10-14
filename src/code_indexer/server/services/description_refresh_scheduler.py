@@ -48,6 +48,20 @@ PROMPT_FAILURE_QUARANTINE_THRESHOLD = 3
 TERSE_DESCRIPTION_MAX_CHARS = 200
 
 
+def _lifecycle_analysis_refusal() -> Optional[str]:
+    """Why lifecycle/description analysis cannot run on this server, or None
+    (delegated content backend: see lifecycle_claude_cli_invoker)."""
+    from code_indexer.global_repos.lifecycle_claude_cli_invoker import (
+        LIFECYCLE_ANALYSIS_FEATURE,
+        LIFECYCLE_ANALYSIS_REFUSAL_REASON,
+    )
+    from code_indexer.server.services.delegated_refusal import delegated_refusal
+
+    return delegated_refusal(
+        LIFECYCLE_ANALYSIS_FEATURE, LIFECYCLE_ANALYSIS_REFUSAL_REASON
+    )
+
+
 def _build_claude_env() -> dict:
     """
     Build a sanitised copy of ``os.environ`` for Claude CLI subprocess.
@@ -254,6 +268,19 @@ class DescriptionRefreshScheduler:
         self._migrate_global_suffix_filenames()
         self.reconcile_orphan_tracking()
         self._reconcile_stale_next_run_rows()
+
+        refusal = _lifecycle_analysis_refusal()
+        if refusal is not None:
+            # Every pass below runs the lifecycle agent against a repository
+            # this pod does not hold: each would fail its job with the same
+            # refusal, every cycle. Say it once and do not start them.
+            logger.warning(
+                "Description refresh scheduler NOT started (backfills and "
+                "periodic refresh): %s",
+                refusal,
+            )
+            return
+
         self.reconcile_broken_lifecycle_metadata()
         self.reconcile_terse_descriptions()
 

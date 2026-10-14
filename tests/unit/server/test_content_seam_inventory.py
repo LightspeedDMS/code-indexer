@@ -62,6 +62,8 @@ Classes (see the phase-5 doc in docs/content-seam-*.md for the plan):
     repo-write          writes or mutates the repository tree: migrate to workspace-mcp
     cidx-state-in-repo  cidx's own state stored inside the repository volume: relocate
     migrated            has a delegated path; this local access runs only when local
+    refused             a delegated server refuses the feature, loudly, before this
+                        access (``refuse_when_delegated``): it runs only when local
     local-only          runs only where a local checkout is by design (watch, CLI-only)
     cidx-state          cidx's own data on its own volume: stays
     not-repo            not repository data at all (config, logs, temp, system files)
@@ -77,6 +79,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
+
+import pytest
 
 from tests.unit.server.test_git_seam_no_raw_subprocess import (
     _call_kind,
@@ -99,12 +103,24 @@ CLASSES = (
     "repo-write",
     "cidx-state-in-repo",
     "migrated",
+    "refused",
     "local-only",
     "cidx-state",
     "not-repo",
 )
 #: Classes that still block the mount from coming off.
 OPEN_CLASSES = ("unclassified", "repo-read", "repo-write", "cidx-state-in-repo")
+
+#: Open REPOSITORY rows: the pod reading or writing the repository itself.
+REPOSITORY_CLASSES = ("unclassified", "repo-read", "repo-write")
+
+#: Work streams that own their open repository rows elsewhere: activated repos
+#: (feat/activated-repos-content-seam) and the SCIP generator (scip/).
+#: Everywhere else the count of open repository rows is ZERO --
+#: test_no_open_repository_rows_outside_the_excluded_areas. A row joins an
+#: area ONLY by its explicit ``area`` field, with a note saying why: never by
+#: a name that merely contains "activat" or "scip".
+EXCLUDED_AREAS = ("activation", "scip")
 
 #: Module-level functions that touch the filesystem, by dotted name.
 _FUNCTIONS = frozenset(
@@ -336,12 +352,30 @@ _INDEX_QUERY_PATHS = (
 _SEAM_EVIDENCE = re.compile(
     r"backend|manifest|delegat|content_source|image_source|prefetch", re.I
 )
+#: An identifier that shows a function REFUSES under delegated: the refusal
+#: helpers (``refuse_when_delegated``, ``delegated_refusal``,
+#: ``refuse_analysis`` ...) or the refusal error itself. Naming a backend is
+#: not refusing.
+_REFUSAL_EVIDENCE = re.compile(r"refus|DelegatedRepositoryUnsupported", re.I)
+
+#: Programs that read or write a directory tree: a spawn of one is a
+#: repository access like any filesystem call (``spawn <program>``), whatever
+#: path its argv names. Other programs (installers, systemctl, the ``cidx``
+#: child whose own accesses are scanned through ``cli.py``) are not listed.
+_TREE_TOOLS = frozenset(
+    {"rg", "grep", "find", "cp", "mv", "rm", "rsync", "tar", "du", "ls", "cat"}
+)
 
 Key = Tuple[str, str, str]  # (module, function, op)
 
 
 def in_index_query_path(module: str) -> bool:
     return module.startswith(_INDEX_QUERY_PATHS)
+
+
+def area_of(row: dict) -> Optional[str]:
+    """The excluded work stream (EXCLUDED_AREAS) that owns *row*, or None."""
+    return str(row["area"]) if row.get("area") else None
 
 
 def is_local_git(op: str) -> bool:
@@ -541,6 +575,26 @@ def git_operation(
     return f"git {_verb(argv) or '<dynamic>'}"
 
 
+def tree_tool_operation(call: ast.Call, spawn_aliases: Dict[str, str]) -> Optional[str]:
+    """``spawn <program>`` for a spawn whose literal program is a tree tool."""
+    kind = _call_kind(call, spawn_aliases)
+    if kind not in ("list", "varargs", "string") or not call.args:
+        return None
+    first = call.args[0]
+    program: Optional[str] = None
+    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+        # One string is a shell command line (or a lone program name).
+        words = first.value.split()
+        program = words[0] if words else None
+    elif isinstance(first, (ast.List, ast.Tuple)) and first.elts:
+        head = first.elts[0]
+        if isinstance(head, ast.Constant) and isinstance(head.value, str):
+            program = head.value
+    if program is None or Path(program).name not in _TREE_TOOLS:
+        return None
+    return f"spawn {Path(program).name}"
+
+
 def scan_source(module: str, source: str) -> Counter:
     tree = ast.parse(source)
     aliases = import_aliases(tree)
@@ -584,6 +638,9 @@ def scan_source(module: str, source: str) -> Counter:
             git_op = git_operation(node, tree, functions[-1], spawn_aliases)
             if git_op is not None:
                 found[(module, where, git_op)] += 1
+            tool_op = tree_tool_operation(node, spawn_aliases)
+            if tool_op is not None:
+                found[(module, where, tool_op)] += 1
             self.generic_visit(node)
 
     _Visitor().visit(tree)
@@ -631,8 +688,9 @@ def merged_rows(
         # larger one leaves it where it was, for the guard to fail on.
         if "ceiling" in old:
             row["ceiling"] = min(old["ceiling"], found[key])
-        if "gate" in old:
-            row["gate"] = old["gate"]
+        for carried in ("gate", "area"):
+            if carried in old:
+                row[carried] = old[carried]
         rows.append(row)
     return rows
 
@@ -774,6 +832,39 @@ def test_no_new_open_rows_in_the_indexing_and_query_paths() -> None:
     )
 
 
+def test_no_open_repository_rows_outside_the_excluded_areas() -> None:
+    """The goal state: outside activation and SCIP (rows with an explicit area),
+    nothing the server runs reads or writes the repository on this pod.
+
+    Each such access is migrated onto a seam, refused under delegated, or
+    proven unreachable there (local-only), or is not repository data at all.
+    A new direct repository access anywhere else fails here, whatever its
+    count -- classify it as what it is, and if that is repo-read/repo-write,
+    route it through the content backend, the content writer or the git
+    backend, or refuse the feature under delegated (``refuse_when_delegated``).
+    """
+    left = sorted(
+        (k, r["class"])
+        for k, r in load_inventory().items()
+        if r["class"] in REPOSITORY_CLASSES and area_of(r) is None
+    )
+    assert not left, (
+        f"{len(left)} open repository rows outside {EXCLUDED_AREAS}:\n"
+        + "\n".join(f"  {k} {c}" for k, c in left[:40])
+    )
+
+
+def test_explicit_areas_are_known_and_explained() -> None:
+    """An ``area`` hands a row to another work stream: it must name one, and
+    say why the row belongs there (its note)."""
+    bad = [
+        (k, r.get("area"))
+        for k, r in load_inventory().items()
+        if "area" in r and (r["area"] not in EXCLUDED_AREAS or not r["note"])
+    ]
+    assert not bad, f"rows with an unknown or unexplained area: {bad[:20]}"
+
+
 @functools.lru_cache(maxsize=None)
 def _function_node(module: str, function: str) -> Optional[ast.AST]:
     node: ast.AST = ast.parse((_SRC / module).read_text(encoding="utf-8"))
@@ -818,8 +909,8 @@ def _identifiers(node: ast.AST) -> Iterable[str]:
             yield n.args[1].value
 
 
-def seam_evidence(module: str, function: str) -> List[str]:
-    """Identifiers in *function* that name a seam (_SEAM_EVIDENCE).
+def _evidence(module: str, function: str, pattern: "re.Pattern[str]") -> List[str]:
+    """Identifiers in *function* that match *pattern*.
 
     *function* may be ``other/module.py:Class.method`` for a gate that lives
     in another module.
@@ -829,7 +920,37 @@ def seam_evidence(module: str, function: str) -> List[str]:
     node = _function_node(module, function)
     if node is None:
         return []
-    return sorted({i for i in _identifiers(node) if _SEAM_EVIDENCE.search(i)})
+    return sorted({i for i in _identifiers(node) if pattern.search(i)})
+
+
+def seam_evidence(module: str, function: str) -> List[str]:
+    """Identifiers in *function* that name a seam (_SEAM_EVIDENCE)."""
+    return _evidence(module, function, _SEAM_EVIDENCE)
+
+
+def refusal_evidence(module: str, function: str) -> List[str]:
+    """Identifiers in *function* that refuse under delegated (_REFUSAL_EVIDENCE)."""
+    return _evidence(module, function, _REFUSAL_EVIDENCE)
+
+
+def test_refused_rows_show_their_refusal() -> None:
+    """`refused` is a claim that a delegated branch refuses before the access.
+
+    Checked anywhere, not only in the indexing and query paths: the function
+    (or the ``gate`` the row names) must call a refusal
+    (``_REFUSAL_EVIDENCE``). Naming a backend or the delegated predicate is
+    not enough: that is a branch, not a refusal.
+    """
+    unproven = [
+        (k, r.get("gate"))
+        for k, r in sorted(load_inventory().items())
+        if r["class"] == "refused" and not refusal_evidence(k[0], r.get("gate", k[1]))
+    ]
+    assert not unproven, (
+        "rows classified refused whose function (or gate) no longer refuses "
+        "under delegated ((module, function, op), gate):\n"
+        + "\n".join(f"  {u}" for u in unproven)
+    )
 
 
 def test_migrated_rows_in_the_indexing_and_query_paths_show_their_seam() -> None:
@@ -990,6 +1111,19 @@ class TestScannerSeesEveryShape:
         )
         assert not self._ops(src)
 
+    def test_a_tree_tool_spawn_is_listed(self) -> None:
+        src = (
+            "import subprocess\n"
+            "def f(src, dst, root):\n"
+            "    subprocess.run(['cp', '-a', src, dst], check=True)\n"
+            "    subprocess.Popen(('/usr/bin/rg', '--json', 'x', root))\n"
+            "    subprocess.check_output('find . -name x', shell=True)\n"
+            "    subprocess.run(['systemctl', 'restart', 'cidx'])\n"
+        )
+        assert self._ops(src) == Counter(
+            {"spawn cp": 1, "spawn rg": 1, "spawn find": 1}
+        )
+
     def test_a_dot_git_probe_is_its_own_op(self) -> None:
         src = (
             "import os\n"
@@ -1039,10 +1173,80 @@ class TestTheIndexingAndQueryRules:
         }
         assert found == {"has": ["_git_backend"], "attr": ["repo_manifest"], "doc": []}
 
+    def test_refusal_evidence_is_a_refusal_not_a_backend(self) -> None:
+        tree = ast.parse(
+            "def refuses():\n    refuse_when_delegated('f', 'r')\n"
+            "def raises():\n    raise DelegatedRepositoryUnsupportedError('f', 'r')\n"
+            "def branches(self):\n    if self._content_backend is not None:\n"
+            "        pass\n"
+        )
+        found = {
+            f.name: sorted(i for i in _identifiers(f) if _REFUSAL_EVIDENCE.search(i))
+            for f in tree.body
+            if isinstance(f, ast.FunctionDef)
+        }
+        assert found == {
+            "refuses": ["refuse_when_delegated"],
+            "raises": ["DelegatedRepositoryUnsupportedError"],
+            "branches": [],
+        }
+
     def test_a_gate_in_another_module_is_followed(self) -> None:
         assert seam_evidence(
             "x.py", "services/smart_indexer.py:SmartIndexer._smart_index"
         ) == ["git_backend"]
+
+
+class TestTheExcludedAreas:
+    @pytest.mark.parametrize(
+        "row,area",
+        [
+            # Only an explicit area hands a row over; a name never does.
+            ({"module": "scip/generator.py", "function": "f"}, None),
+            (
+                {
+                    "module": "server/services/dependency_map_service.py",
+                    "function": "f",
+                },
+                None,
+            ),
+            (
+                {
+                    "module": "server/repositories/activated_repo_manager.py",
+                    "function": "f",
+                },
+                None,
+            ),
+            ({"module": "server/x.py", "function": "Svc.deactivate_repo"}, None),
+            (
+                {"module": "server/x.py", "function": "f", "area": "activation"},
+                "activation",
+            ),
+            ({"module": "scip/generator.py", "function": "f", "area": "scip"}, "scip"),
+            (
+                {"module": "server/services/scip_query_service.py", "function": "f"},
+                None,
+            ),
+            ({"module": "server/wiki/routes.py", "function": "f"}, None),
+        ],
+    )
+    def test_area_of(self, row: dict, area: Optional[str]) -> None:
+        assert area_of(row) == area
+
+    def test_an_area_survives_regeneration(self) -> None:
+        key = ("server/x.py", "f", ".exists")
+        old = {
+            key: {
+                "class": "repo-read",
+                "baseline": True,
+                "note": "n",
+                "area": "activation",
+            }
+        }
+        assert (
+            merged_rows(Counter({key: 1}), old, baseline=False)[0]["area"]
+            == "activation"
+        )
 
 
 if __name__ == "__main__":

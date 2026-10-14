@@ -486,6 +486,37 @@ class GitMcpBackend:
         self._check("git_log_raw", out)
         return bytes(out.stdout)
 
+    def for_each_ref(
+        self,
+        repo_path: str,
+        fmt: str,
+        patterns: Sequence[str] = (),
+        *,
+        sort: Optional[str] = None,
+        count: Optional[int] = None,
+        timeout: Any = None,
+    ) -> bytes:
+        """``git for-each-ref`` in ONE call: every matching ref with its fields.
+
+        git-mcp validates the arguments (patterns are never option-shaped and
+        at most 256; ``sort`` is a key name, optionally ``-``-prefixed) and
+        runs ``git for-each-ref --format=<fmt> [--sort] [--count] -- <patterns>``.
+        """
+        r = self._call(
+            "git_for_each_ref",
+            self._cow(
+                repo_path,
+                format=fmt,
+                patterns=list(patterns) or None,
+                sort=sort,
+                count=count,
+            ),
+            timeout,
+        )
+        out = self._raw_output("git_for_each_ref", r)
+        self._check("git_for_each_ref", out)
+        return bytes(out.stdout)
+
     def diff_commits(
         self,
         repo_path: str,

@@ -23,6 +23,9 @@ from code_indexer.server.services.query_admission_gate import (
 )
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
+from code_indexer.server.repositories.repository_listing_manager import (
+    RepositoryStatisticsUnavailableError,
+)
 from code_indexer.config import write_json_atomic
 from code_indexer.server.services.repository_health_aggregator import (
     compute_repository_health,
@@ -569,6 +572,8 @@ def get_all_repositories_status(params: Dict[str, Any], user: User) -> Dict[str,
                     )
                 )
                 status_summary.append(details)
+            except RepositoryStatisticsUnavailableError:
+                raise  # delegated backend failure: never drop the repo silently
             except Exception as detail_err:
                 logger.debug(
                     "Skipping repo %s in status summary: %s",

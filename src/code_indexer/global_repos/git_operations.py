@@ -4,22 +4,104 @@ Git operations service for history exploration.
 Provides operations for browsing git commit history and retrieving
 file contents at specific revisions without requiring temporal indexing.
 Uses run_git_command() from git_runner for all git operations.
+
+Golden repositories on a pod that does not hold them (``content_backend:
+delegated``): the service is built with the server's git seam (git-mcp, see
+:func:`delegated_golden_git_backend`). The operations git-mcp exposes --
+``rev_parse``, ``log_raw`` (no path/author/grep filters), ``show_objects`` --
+run through it; the rest (blame, path-filtered history, message and pickaxe
+search, arbitrary diffs, per-commit stats) have no seam operation and REFUSE
+with :class:`DelegatedRepositoryUnsupportedError` before any git runs. Without
+a backend every operation runs local git exactly as before.
 """
 
+import io
 import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Union, cast
+from typing import TYPE_CHECKING, List, Optional, Sequence, Union, cast
 
 from code_indexer.utils.git_runner import run_git_command
+from code_indexer.server.services.delegated_refusal import (
+    DelegatedRepositoryUnsupportedError,
+)
 from code_indexer.server.services.git_argv_safety import (
     validate_revision,
     validate_revision_range,
 )
 
+if TYPE_CHECKING:
+    from code_indexer.server.storage.shared.git_backend import GitBackend
+
 
 logger = logging.getLogger(__name__)
+
+#: Why the git-mcp seam cannot serve an operation: it exposes no such command.
+_NO_SEAM_OPERATION = (
+    "git-mcp exposes no {what}, and this pod does not hold the repository"
+)
+
+
+def delegated_golden_git_backend() -> Optional["GitBackend"]:
+    """The git seam for a GOLDEN repository this pod does not hold, else None.
+
+    None when the running server reads repositories locally (and outside a
+    server: CLI, tests), so the service runs local git exactly as before. With
+    ``content_backend: delegated`` the repository is with workspace-mcp/git-mcp:
+    the server's delegated git backend is returned, and a server whose git
+    backend is still local has nothing to run git against -- that REFUSES
+    instead of running git on an empty directory.
+    """
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    if not is_content_seam_delegated():
+        return None
+    from code_indexer.server.startup.git_backend_wiring import (
+        server_delegated_git_backend,
+    )
+
+    backend = server_delegated_git_backend()
+    if backend is None:
+        raise DelegatedRepositoryUnsupportedError(
+            "git history on golden repositories",
+            "git_backend is 'local', so no git-mcp holds the repository",
+        )
+    return backend
+
+
+def decode_like_run_git_command(raw: bytes) -> str:
+    """*raw* git stdout exactly as ``run_git_command(text=True)`` returns it:
+    the locale encoding, strict, universal newlines."""
+    with io.TextIOWrapper(io.BytesIO(raw), encoding="locale") as text:
+        return text.read()
+
+
+#: git's own words for "no such revision / no commits": what a local run's
+#: non-zero exit means for log, rev-parse and show. Through git-mcp a failure
+#: is also a transport, JSON-RPC or tool error, or "not a git repository" for
+#: a clone that is not there -- none of which may read as "no history".
+_REVISION_MISS_MARKERS = (
+    "does not have any commits yet",
+    "bad default revision",
+    "unknown revision",
+    "bad revision",
+    "bad object",
+    "invalid object name",
+    "Needed a single revision",
+)
+
+
+def is_revision_miss(exc: subprocess.CalledProcessError) -> bool:
+    """True when *exc* is git saying the revision (or any commit) does not
+    exist -- the only failure the seam may answer as empty or not found."""
+    stderr = exc.stderr
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    return any(marker in str(stderr or "") for marker in _REVISION_MISS_MARKERS)
+
 
 # Timeout for git blame on repos with deep history (Bug #1008)
 BLAME_TIMEOUT_SECONDS = 30
@@ -231,27 +313,59 @@ class GitOperationsService:
     # Fields separated by NUL character (\x00) for reliable parsing
     LOG_FORMAT = "%H%x00%h%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%s%x00%b%x00"
 
-    def __init__(self, repo_path: Path):
+    def __init__(self, repo_path: Path, *, git_backend: Optional["GitBackend"] = None):
         """Initialize GitOperationsService.
 
         Args:
             repo_path: Path to the git repository
+            git_backend: the git seam (git-mcp) for a repository this pod does
+                not hold (:func:`delegated_golden_git_backend`); *repo_path* is
+                then where git-mcp sees it. None runs local git.
 
         Raises:
             ValueError: If the path is not a git repository
         """
         self.repo_path = repo_path
+        self._git_backend = git_backend
         self._verify_git_repository()
 
     def _verify_git_repository(self) -> None:
         """Verify the path is a git repository.
 
+        Through a git backend the repository is not on this disk: the caller
+        resolved it from the golden-repo registry, and git-mcp's own answer
+        (a failed command) reports a path that is not a repository.
+
         Raises:
             ValueError: If not a git repository
         """
+        if self._git_backend is not None:
+            return
         git_dir = self.repo_path / ".git"
         if not git_dir.exists():
             raise ValueError(f"Not a git repository: {self.repo_path}")
+
+    def _refuse_through_backend(self, feature: str, what: str) -> None:
+        """Refuse *feature* when git runs through the seam, which lacks *what*."""
+        if self._git_backend is not None:
+            raise DelegatedRepositoryUnsupportedError(
+                feature, _NO_SEAM_OPERATION.format(what=what)
+            )
+
+    def _backend_log(
+        self,
+        fmt: str,
+        revs: Sequence[str] = (),
+        *,
+        since: Optional[str] = None,
+        max_count: Optional[int] = None,
+    ) -> str:
+        """``git log --format=<fmt>`` through the git backend, decoded as local."""
+        assert self._git_backend is not None
+        raw = self._git_backend.log_raw(
+            str(self.repo_path), fmt, revs, since=since, max_count=max_count
+        )
+        return decode_like_run_git_command(bytes(raw))
 
     def get_log(
         self,
@@ -284,6 +398,30 @@ class GitOperationsService:
         # docstring for the invariant.
         branch = validate_revision_range(branch, self.repo_path, param_name="branch")
 
+        if self._git_backend is not None:
+            # git-mcp's log takes revisions, --since and a count -- no path,
+            # author or --until filter, so those cannot be answered here.
+            if author or until or path:
+                self._refuse_through_backend(
+                    "git_log with a path, author or until filter",
+                    "path/author/until-filtered log",
+                )
+            try:
+                output = self._backend_log(
+                    self.LOG_FORMAT,
+                    [branch] if branch else [],
+                    since=since,
+                    max_count=limit + 1,
+                )
+            except subprocess.CalledProcessError as exc:
+                # As local: empty repository or no matching revision. Any other
+                # failure (git-mcp down, clone missing) is an error, not "no
+                # history".
+                if not is_revision_miss(exc):
+                    raise
+                return GitLogResult(commits=[], total_count=0, truncated=False)
+            return self._log_result(output, limit)
+
         # Build git log command
         cmd = ["git", "log", f"--format={self.LOG_FORMAT}"]
 
@@ -311,7 +449,10 @@ class GitOperationsService:
             # Empty repository or no matching commits
             return GitLogResult(commits=[], total_count=0, truncated=False)
 
-        # Parse output
+        return self._log_result(output, limit)
+
+    def _log_result(self, output: str, limit: int) -> GitLogResult:
+        """Parse ``git log`` output fetched with one commit over *limit*."""
         commits = self._parse_log_output(output)
 
         # Check if truncated
@@ -399,6 +540,11 @@ class GitOperationsService:
         assert _validated_commit_hash is not None  # required parameter, never None
         commit_hash = _validated_commit_hash
 
+        if self._git_backend is not None:
+            return self._show_commit_through_backend(
+                commit_hash, include_diff=include_diff, include_stats=include_stats
+            )
+
         # First, resolve the commit hash to full SHA
         try:
             resolve_result = run_git_command(
@@ -447,6 +593,44 @@ class GitOperationsService:
             diff=diff,
             parents=parents,
         )
+
+    def _show_commit_through_backend(
+        self, commit_hash: str, *, include_diff: bool, include_stats: bool
+    ) -> CommitDetail:
+        """:meth:`show_commit` through the git backend: the commit and parents.
+
+        Per-file stats (``git show --numstat/--name-status``) and the commit's
+        patch (``git show -p``) have no git-mcp operation: asked for, they
+        refuse before any git runs rather than come back empty.
+        """
+        assert self._git_backend is not None
+        if include_stats:
+            self._refuse_through_backend(
+                "git_show_commit file statistics (include_stats=true)",
+                "per-commit --numstat/--name-status",
+            )
+        if include_diff:
+            self._refuse_through_backend(
+                "git_show_commit diff (include_diff=true)", "per-commit `git show -p`"
+            )
+        repo = str(self.repo_path)
+        not_found = f"Commit not found: {commit_hash}"
+        try:
+            full_hash = str(self._git_backend.rev_parse(repo, commit_hash)).strip()
+            commits = self._parse_log_output(
+                self._backend_log(self.LOG_FORMAT, [full_hash], max_count=1)
+            )
+        except subprocess.CalledProcessError as exc:
+            if is_revision_miss(exc):
+                raise ValueError(not_found) from exc
+            raise
+        if not commits:
+            raise ValueError(not_found)
+        # A resolved commit's `<sha>^@` always succeeds (a root commit has no
+        # parents: empty output), so a failure here is the seam's, and raises.
+        parent_output = str(self._git_backend.rev_parse(repo, f"{full_hash}^@"))
+        parents = [p.strip() for p in parent_output.strip().split("\n") if p.strip()]
+        return CommitDetail(commit=commits[0], stats=None, diff=None, parents=parents)
 
     @staticmethod
     def _resolve_numstat_rename_path(raw_path: str) -> str:
@@ -643,6 +827,9 @@ class GitOperationsService:
         assert _validated_revision is not None  # required parameter, never None
         revision = _validated_revision
 
+        if self._git_backend is not None:
+            return self._file_at_revision_through_backend(path, revision)
+
         # First resolve the revision to full SHA and verify it exists
         try:
             # Use rev-parse --verify to check the revision actually exists
@@ -669,6 +856,41 @@ class GitOperationsService:
             # All other errors are file not found
             raise ValueError(f"File not found: {path} at revision {revision}")
 
+        return FileRevisionResult(
+            path=path,
+            revision=revision,
+            resolved_revision=resolved_revision,
+            content=content,
+            size_bytes=len(content.encode("utf-8")),
+        )
+
+    def _file_at_revision_through_backend(
+        self, path: str, revision: str
+    ) -> FileRevisionResult:
+        """:meth:`get_file_at_revision` through git-mcp: ``rev_parse --verify``
+        then ``show_objects`` -- the same two commands, the same errors."""
+        assert self._git_backend is not None
+        repo = str(self.repo_path)
+        try:
+            resolved_revision = str(
+                self._git_backend.rev_parse(repo, "--verify", f"{revision}^{{commit}}")
+            ).strip()
+        except subprocess.CalledProcessError as exc:
+            if is_revision_miss(exc):
+                raise ValueError(f"Invalid revision: {revision}") from exc
+            raise
+        shown = self._git_backend.show_objects(repo, [(resolved_revision, path)])
+        if len(shown) != 1:
+            raise RuntimeError(
+                f"git backend returned {len(shown)} results for one show_objects spec"
+            )
+        result = shown[0]
+        if result.returncode != 0:
+            stderr = str(result.stderr or "")
+            if "bad revision" in stderr or "unknown revision" in stderr:
+                raise ValueError(f"Invalid revision: {revision}")
+            raise ValueError(f"File not found: {path} at revision {revision}")
+        content = decode_like_run_git_command(bytes(result.stdout))
         return FileRevisionResult(
             path=path,
             revision=revision,
@@ -707,6 +929,9 @@ class GitOperationsService:
             from_revision, self.repo_path, param_name="from_revision"
         )
         validate_revision_range(to_revision, self.repo_path, param_name="to_revision")
+        self._refuse_through_backend(
+            "git_diff", "revision/working-tree diff with --numstat/--name-status/paths"
+        )
 
         # Build base args for git diff commands
         base_args = [from_revision]
@@ -1018,6 +1243,7 @@ class GitOperationsService:
             raise ValueError(
                 f"end_line ({end_line}) must be >= start_line ({start_line})"
             )
+        self._refuse_through_backend("git_blame", "blame")
 
         # revision is a free-form revision expression, and `git blame`
         # itself also accepts a two-dot/three-dot range (restricting the
@@ -1157,6 +1383,7 @@ class GitOperationsService:
         Returns:
             FileHistoryResult with file commit history
         """
+        self._refuse_through_backend("git_file_history", "path-filtered log")
         # Build git log command
         cmd = [
             "git",
@@ -1268,6 +1495,9 @@ class GitOperationsService:
         import time
 
         start_time = time.time()
+        self._refuse_through_backend(
+            "git_search_commits", "commit-message search (log --grep)"
+        )
 
         # Build git log command
         cmd = ["git", "log", f"--format={self.LOG_FORMAT}"]
@@ -1389,6 +1619,7 @@ class GitOperationsService:
             raise ValueError("search_string and search_pattern are mutually exclusive")
         if not search_string and not search_pattern:
             raise ValueError("Must provide either search_string or search_pattern")
+        self._refuse_through_backend("git_search_diffs", "pickaxe search (log -S/-G)")
 
         # Determine search term for result
         search_term = search_pattern if search_pattern else search_string

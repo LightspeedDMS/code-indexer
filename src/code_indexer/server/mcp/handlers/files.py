@@ -149,8 +149,14 @@ def _start_auto_watch_if_needed(
     )
 
     if is_content_seam_delegated():
-        # The repository is on workspace-mcp; there is nothing on this pod to
-        # watch (AutoWatchManager refuses too) -- and no pod path to probe.
+        # Content seam: the repository is not on this pod, so there is no
+        # directory here to probe or watch (AutoWatchManager.start_watch
+        # refuses a delegated backend too). Changes reach a delegated index
+        # through re-index, never through a local inotify watch.
+        logger.debug(
+            f"Skipping auto-watch for {repository_alias}: delegated content backend",
+            extra={"correlation_id": get_correlation_id()},
+        )
         return
     try:
         if file_crud_service.is_write_exception(repository_alias):

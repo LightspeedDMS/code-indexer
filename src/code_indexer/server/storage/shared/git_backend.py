@@ -210,6 +210,23 @@ class GitBackend(Protocol):
         """``git log --format=<fmt> [--all] [--since S] [--skip=N] [-n M] [<revs>]``."""
         ...  # pragma: no cover
 
+    def for_each_ref(
+        self,
+        repo_path: str,
+        fmt: str,
+        patterns: Sequence[str] = (),
+        *,
+        sort: Optional[str] = None,
+        count: Optional[int] = None,
+        timeout: Timeout = None,
+    ) -> bytes:
+        """``git for-each-ref --format=<fmt> [--sort=S] [--count=N] -- <patterns>``.
+
+        Every matching ref with its fields in ONE call (e.g. all branch tips).
+        Patterns are ref prefixes/globs, never options (they follow ``--``).
+        """
+        ...  # pragma: no cover
+
     def diff_commits(
         self,
         repo_path: str,
@@ -646,6 +663,26 @@ class LocalGitBackend:
         if max_count:
             cmd.extend(["-n", str(max_count)])
         cmd.extend(revs)
+        return bytes(self._run_bytes(cmd, Path(repo_path), timeout=timeout).stdout)
+
+    def for_each_ref(
+        self,
+        repo_path: str,
+        fmt: str,
+        patterns: Sequence[str] = (),
+        *,
+        sort: Optional[str] = None,
+        count: Optional[int] = None,
+        timeout: Timeout = None,
+    ) -> bytes:
+        # The argv git-mcp's git_for_each_ref runs: options, then ``--`` patterns.
+        cmd = ["git", "for-each-ref", f"--format={fmt}"]
+        if sort:
+            cmd.append(f"--sort={sort}")
+        if count:
+            cmd.append(f"--count={count}")
+        cmd.append("--")
+        cmd.extend(patterns)
         return bytes(self._run_bytes(cmd, Path(repo_path), timeout=timeout).stdout)
 
     def diff_commits(

@@ -593,14 +593,18 @@ class RegexSearchService:
         # _to_repo_relative(). Without this, an unresolved symlinked repo
         # root desyncs against candidate paths that subprocesses report back
         # resolved, raising an uncaught pathlib ValueError downstream.
-        self.repo_path = Path(repo_path).resolve()
-        self._subprocess_max_workers = subprocess_max_workers
-        self._alias = alias
         self._ripgrep_backend: RipgrepBackend = (
             ripgrep_backend
             if ripgrep_backend is not None
             else LocalRipgrepBackend(max_workers=subprocess_max_workers)
         )
+        # Content seam: a delegated backend runs ripgrep where the repository
+        # is, at the same absolute path. This pod holds only index state there,
+        # so resolving symlinks against THIS disk would describe a tree that is
+        # not the one searched -- the root is normalized lexically instead.
+        self.repo_path = self._canonical_path(Path(repo_path))
+        self._subprocess_max_workers = subprocess_max_workers
+        self._alias = alias
         self._search_engine = self._detect_search_engine()
         self._pcre2_supported: Optional[bool] = None  # Lazy-detected, cached
         # Issue #1601: per-call carrier set by _search_ripgrep/_search_grep/
@@ -1056,6 +1060,18 @@ class RegexSearchService:
             )
         return ""
 
+    def _canonical_path(self, path: Path) -> Path:
+        """*path* in the form every containment check compares.
+
+        Local backend: ``Path.resolve()`` (symlinks followed, Bug #1401) --
+        unchanged. Delegated backend: the repository is not on this disk, so
+        nothing here may be stat'ed or followed; ``..`` and ``.`` are collapsed
+        lexically, which still rejects a reported path that escapes the root.
+        """
+        if self._ripgrep_backend.is_local:
+            return path.resolve()
+        return Path(os.path.normpath(os.path.abspath(path)))
+
     def _to_repo_relative(self, raw_path: str) -> Optional[str]:
         """Convert a subprocess-reported path into a repo-relative string.
 
@@ -1079,7 +1095,7 @@ class RegexSearchService:
         if not candidate.is_absolute():
             candidate = self.repo_path / candidate
         try:
-            resolved = candidate.resolve()
+            resolved = self._canonical_path(candidate)
             rel = resolved.relative_to(self.repo_path)
         except ValueError:
             logger.warning(

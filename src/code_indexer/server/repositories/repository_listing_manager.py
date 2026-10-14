@@ -15,19 +15,32 @@ from code_indexer.utils.subprocess_diagnostics import (
 import os
 import subprocess
 import logging
-from typing import Dict, List, Optional, Any
+from typing import TYPE_CHECKING, Dict, List, Optional, Any
 from datetime import datetime, timezone
 
 from .golden_repo_manager import GoldenRepoManager
 from .activated_repo_manager import ActivatedRepoManager
 
+if TYPE_CHECKING:
+    from code_indexer.server.services.file_service import ContentSeamSource
+
 logger = logging.getLogger(__name__)
+
+#: Named in the warning the content seam logs when a snapshot path has no
+#: registered base clone to map to.
+_SEAM_CONSUMER = "Repository statistics"
 
 
 class RepositoryListingError(Exception):
     """Base exception for repository listing operations."""
 
     pass
+
+
+class RepositoryStatisticsUnavailableError(RuntimeError):
+    """The delegated content backend could not describe a golden repository's
+    files. Raised instead of reporting zero files: under a delegated backend a
+    failed manifest must never read as an empty repository."""
 
 
 class RepositoryListingManager:
@@ -171,6 +184,21 @@ class RepositoryListingManager:
                 return repo_data
         return None
 
+    def get_golden_clone_path(self, alias: str) -> str:
+        """The registered clone path of golden repository *alias*.
+
+        For a caller that needs only where the repository is: unlike
+        :meth:`get_repository_details` it computes no statistics (a content
+        backend manifest under ``delegated``) and lists no branches.
+
+        Raises:
+            RepositoryListingError: If repository not found
+        """
+        golden_repo = self._find_golden_repository(alias)
+        if not golden_repo:
+            raise RepositoryListingError(f"Repository '{alias}' not found")
+        return str(golden_repo["clone_path"])
+
     def get_repository_details(self, alias: str, username: str) -> Dict[str, Any]:
         """
         Get detailed information about a specific golden repository.
@@ -227,6 +255,8 @@ class RepositoryListingManager:
             details["file_count"] = stats["file_count"]
             details["index_size"] = stats["index_size"]
             details["last_updated"] = stats["last_updated"]
+        except RepositoryStatisticsUnavailableError:
+            raise
         except Exception:
             logger.warning(
                 format_error_log(
@@ -350,6 +380,12 @@ class RepositoryListingManager:
 
         clone_path = golden_repo["clone_path"]
 
+        # Content seam: under a delegated content backend the clone on this
+        # pod holds index state only -- walking it would count index files.
+        source = self._content_seam_source(golden_repo)
+        if source is not None:
+            return self._manifest_statistics(source, golden_repo)
+
         # Calculate file count
         file_count = self._get_repository_file_count(clone_path)
 
@@ -365,6 +401,59 @@ class RepositoryListingManager:
         return {
             "file_count": file_count,
             "index_size": index_size,
+            "last_updated": last_updated,
+        }
+
+    @staticmethod
+    def _content_seam_source(
+        golden_repo: Dict[str, Any],
+    ) -> Optional["ContentSeamSource"]:
+        """The content backend to describe *golden_repo* through, or None to
+        walk the local clone (the local default, and pod-local ``local://``
+        repositories, whose files are on this pod by design)."""
+        from code_indexer.server.services.file_service import content_seam_source
+        from code_indexer.server.utils.index_command_layout import (
+            is_cidx_meta_repo,
+            is_pod_local_repo,
+        )
+
+        repo_url = golden_repo.get("repo_url")
+        alias = golden_repo.get("alias")
+        if is_pod_local_repo(repo_url, alias) and not is_cidx_meta_repo(
+            repo_url, alias
+        ):
+            return None
+        return content_seam_source(golden_repo["clone_path"], consumer=_SEAM_CONSUMER)
+
+    @staticmethod
+    def _manifest_statistics(
+        source: "ContentSeamSource", golden_repo: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """File count, total size and newest mtime from the backend's manifest
+        of the golden repo (``.git`` is never listed). A backend failure raises
+        :class:`RepositoryStatisticsUnavailableError`; an unknown mtime is the
+        registration time, never "now"."""
+        from code_indexer.server.services.file_service import (
+            manifest_entries,
+            modified_at_from_ns,
+        )
+
+        try:
+            entries = manifest_entries(source, ())
+        except Exception as exc:
+            raise RepositoryStatisticsUnavailableError(
+                f"Content backend could not list repository "
+                f"'{golden_repo.get('alias')}': {exc}"
+            ) from exc
+        mtimes = [e.mtime_ns for e in entries if e.mtime_ns is not None]
+        last_updated = (
+            modified_at_from_ns(max(mtimes)).isoformat()
+            if mtimes
+            else golden_repo["created_at"]
+        )
+        return {
+            "file_count": len(entries),
+            "index_size": sum(e.size for e in entries),
             "last_updated": last_updated,
         }
 

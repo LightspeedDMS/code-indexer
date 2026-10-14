@@ -1,12 +1,14 @@
 """Wiki route endpoints for CIDX Server (Stories #280, #281, #282, #283, #286)."""
 
+import functools
 import logging
 import mimetypes
-from pathlib import Path
-from typing import Optional, cast
+from contextlib import contextmanager
+from pathlib import Path, PurePath, PurePosixPath
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette import status
 
@@ -15,7 +17,12 @@ from ..auth.dependencies import get_current_user_hybrid
 from ..auth.user_manager import User
 from ..services.deactivation_query_drain import track_activated_repo_query
 from ..utils.registry_factory import resolve_backend_registry_attr
-from .wiki_cache import WikiCache
+from .wiki_cache import FileStamp, WikiCache
+from .wiki_content_seam import (
+    SeamWikiTree,
+    WikiContentUnavailable,
+    content_backend_wiki_tree,
+)
 from .wiki_service import WikiService
 
 logger = logging.getLogger(__name__)
@@ -62,6 +69,8 @@ def get_wiki_user_hybrid(request: Request) -> User:
 WIKI_TEMPLATES_DIR = Path(__file__).parent / "templates"
 wiki_templates = Jinja2Templates(directory=str(WIKI_TEMPLATES_DIR))
 WIKI_ALLOWED_EXTENSIONS = {".md", ".markdown", ".txt"}
+#: The article a golden wiki's root serves when the repository has one.
+_HOME_MD = "home.md"
 WIKI_ASSET_EXTENSIONS = {
     ".png",
     ".jpg",
@@ -508,124 +517,135 @@ def serve_user_wiki_article(
 
 
 # ---------------------------------------------------------------------------
-# Golden repo wiki routes (existing — unchanged)
+# Golden repo wiki routes
+#
+# With a delegated content backend the golden repo is not on this pod: each
+# route lists and reads it through the backend (wiki_content_seam) instead of
+# the disk, and a backend failure is a 503 with its message -- never an empty
+# wiki or a 404 for a file that exists. Otherwise the local code runs as before.
 # ---------------------------------------------------------------------------
 
 
-@wiki_router.get("/{repo_alias}/_assets/{asset_path:path}")
-def serve_wiki_asset(
-    repo_alias: str,
-    asset_path: str,
-    request: Request,
-    current_user: User = Depends(get_wiki_user_hybrid),
-):
-    """Serve image/asset files from wiki repo."""
-    actual_path = _check_wiki_access(request, repo_alias, current_user)
-    repo_dir = Path(actual_path)
-    file_path = repo_dir / asset_path
+@contextmanager
+def _content_unavailable_as_503() -> Iterator[None]:
+    """Turn the content backend's failure into a 503 carrying its message."""
     try:
-        file_path.resolve().relative_to(repo_dir.resolve())
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Not found")
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(status_code=404, detail="Not found")
-    if file_path.suffix.lower() not in WIKI_ASSET_EXTENSIONS:
-        raise HTTPException(status_code=404, detail="Not found")
-    media_type, _ = mimetypes.guess_type(str(file_path))
-    return FileResponse(
-        path=str(file_path), media_type=media_type or "application/octet-stream"
+        yield
+    except WikiContentUnavailable as exc:
+        logger.error("%s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+
+
+def _golden_content_backend_tree(actual_path: str) -> Optional[SeamWikiTree]:
+    """The golden repo through the content backend, or None to read the disk."""
+    with _content_unavailable_as_503():
+        return content_backend_wiki_tree(actual_path)
+
+
+def _article_page(
+    request: Request,
+    repo_alias: str,
+    *,
+    title: str,
+    raw_html: str,
+    metadata: Optional[dict],
+    current_dir: str,
+    current_path: str,
+    sidebar: list,
+    cache: WikiCache,
+    wiki_config: Any,
+) -> Any:
+    """The article.html response for a golden repo article (cached or fresh)."""
+    html = _wiki_service.rewrite_links(raw_html, repo_alias, current_dir)
+    breadcrumbs = _wiki_service.build_breadcrumbs(current_path, repo_alias)
+    metadata_panel = (
+        _wiki_service.prepare_metadata_context(
+            metadata or {},
+            repo_alias,
+            current_path,
+            cache,
+            wiki_config=wiki_config,
+        )
+        or None
+    )
+    return wiki_templates.TemplateResponse(
+        request,
+        "article.html",
+        {
+            "request": request,
+            "title": title,
+            "content": html,
+            "repo_alias": repo_alias,
+            "sidebar": sidebar,
+            "breadcrumbs": breadcrumbs,
+            "current_path": current_path,
+            "metadata_panel": metadata_panel,
+        },
     )
 
 
-@wiki_router.get("/{repo_alias}/", response_class=HTMLResponse)
-def serve_wiki_root(
-    repo_alias: str,
+def _serve_article(
     request: Request,
-    current_user: User = Depends(get_wiki_user_hybrid),
-):
-    """Serve wiki root page - home.md or article index."""
-    actual_path = _check_wiki_access(request, repo_alias, current_user)
-    repo_dir = Path(actual_path)
-    home_md = repo_dir / "home.md"
-    cache = _get_wiki_cache(request)
-    wiki_config = _get_wiki_config(request)
+    repo_alias: str,
+    *,
+    article_rel_path: str,
+    current_dir: str,
+    stamp: Union[Path, FileStamp],
+    render: Callable[[], Dict[str, Any]],
+    sidebar: list,
+    cache: WikiCache,
+    wiki_config: Any,
+) -> Any:
+    """Serve a golden repo article from the render cache, or render and cache it.
 
-    sidebar = cache.get_sidebar(repo_alias, repo_dir)
-    if sidebar is None:
-        sidebar = _wiki_service.build_sidebar_tree(repo_dir, repo_alias)
-        cache.put_sidebar(repo_alias, sidebar, repo_dir)
+    ``stamp`` validates the cache: the local file to stat(), or the manifest's
+    stamp for a file read through the content backend.
+    """
+    page = functools.partial(
+        _article_page,
+        request,
+        repo_alias,
+        current_dir=current_dir,
+        current_path=article_rel_path,
+        sidebar=sidebar,
+        cache=cache,
+        wiki_config=wiki_config,
+    )
+    cached_article = cache.get_article(repo_alias, article_rel_path, stamp)
+    if cached_article is not None:
+        return page(
+            title=cached_article["title"],
+            raw_html=cached_article["html"],
+            metadata=cached_article.get("metadata"),
+        )
+    result = render()
+    cache.put_article(
+        repo_alias,
+        article_rel_path,
+        result["html"],
+        result["title"],
+        stamp,
+        metadata=result.get("metadata"),
+    )
+    return page(
+        title=result["title"], raw_html=result["html"], metadata=result.get("metadata")
+    )
 
-    if home_md.exists() and home_md.is_file():
-        cache.increment_view(repo_alias, "")
-        cached_article = cache.get_article(repo_alias, "", home_md)
-        if cached_article is not None:
-            html = _wiki_service.rewrite_links(cached_article["html"], repo_alias, "")
-            breadcrumbs = _wiki_service.build_breadcrumbs("", repo_alias)
-            cached_meta = cached_article.get("metadata") or {}
-            metadata_panel = (
-                _wiki_service.prepare_metadata_context(
-                    cached_meta, repo_alias, "", cache, wiki_config=wiki_config
-                )
-                or None
-            )
-            return wiki_templates.TemplateResponse(
-                request,
-                "article.html",
-                {
-                    "request": request,
-                    "title": cached_article["title"],
-                    "content": html,
-                    "repo_alias": repo_alias,
-                    "sidebar": sidebar,
-                    "breadcrumbs": breadcrumbs,
-                    "current_path": "",
-                    "metadata_panel": metadata_panel,
-                },
-            )
-        result = _wiki_service.render_article(
-            home_md, repo_alias, wiki_config=wiki_config
-        )
-        cache.put_article(
-            repo_alias,
-            "",
-            result["html"],
-            result["title"],
-            home_md,
-            metadata=result.get("metadata"),
-        )
-        html = _wiki_service.rewrite_links(result["html"], repo_alias, "")
-        breadcrumbs = _wiki_service.build_breadcrumbs("", repo_alias)
-        metadata_panel = (
-            _wiki_service.prepare_metadata_context(
-                result.get("metadata") or {},
-                repo_alias,
-                "",
-                cache,
-                wiki_config=wiki_config,
-            )
-            or None
-        )
-        return wiki_templates.TemplateResponse(
-            request,
-            "article.html",
-            {
-                "request": request,
-                "title": result["title"],
-                "content": html,
-                "repo_alias": repo_alias,
-                "sidebar": sidebar,
-                "breadcrumbs": breadcrumbs,
-                "current_path": "",
-                "metadata_panel": metadata_panel,
-            },
-        )
-    articles = []
-    for md_file in sorted(repo_dir.rglob("*.md")):
-        rel = md_file.relative_to(repo_dir)
-        if any(part.startswith(".") for part in rel.parts):
-            continue
-        stem = md_file.stem.replace("-", " ").replace("_", " ").title()
-        articles.append({"path": str(rel.with_suffix("")), "title": stem})
+
+def _index_entry(rel: PurePath) -> Optional[Dict[str, str]]:
+    """The article-index entry for one repo-relative ``*.md``; None if hidden."""
+    if any(part.startswith(".") for part in rel.parts):
+        return None
+    stem = rel.stem.replace("-", " ").replace("_", " ").title()
+    return {"path": str(rel.with_suffix("")), "title": stem}
+
+
+def _index_page(
+    request: Request, repo_alias: str, articles: List[Dict[str, str]], sidebar: list
+) -> Any:
+    """The golden wiki root when there is no home.md: an index of articles."""
     if articles:
         items = "".join(
             f'<li><a href="/wiki/{repo_alias}/{a["path"]}">{a["title"]}</a></li>'
@@ -649,6 +669,140 @@ def serve_wiki_root(
             "metadata_panel": None,
         },
     )
+
+
+def _seam_sidebar(cache: WikiCache, repo_alias: str, tree: SeamWikiTree) -> list:
+    """The cached sidebar, or one built from markdown read through the backend."""
+    repo_dir = Path(tree.root)
+    sidebar = cache.get_sidebar(repo_alias, repo_dir)
+    if sidebar is None:
+        sidebar = _wiki_service.build_sidebar_tree_from_texts(
+            tree.read_visible_md_texts()
+        )
+        cache.put_sidebar(repo_alias, sidebar, repo_dir, max_mtime=tree.max_md_mtime())
+    return sidebar
+
+
+def _media_type(name: str) -> str:
+    media_type, _ = mimetypes.guess_type(name)
+    return media_type or "application/octet-stream"
+
+
+def _serve_wiki_asset_via_seam(tree: SeamWikiTree, asset_path: str) -> Response:
+    """:func:`serve_wiki_asset` for a golden repo behind the content backend."""
+    rel = tree.confine(asset_path)
+    if rel is None or not tree.has_file(rel):
+        raise HTTPException(status_code=404, detail="Not found")
+    if PurePosixPath(rel).suffix.lower() not in WIKI_ASSET_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="Not found")
+    return Response(content=tree.fetch_bytes(rel), media_type=_media_type(rel))
+
+
+@wiki_router.get("/{repo_alias}/_assets/{asset_path:path}")
+def serve_wiki_asset(
+    repo_alias: str,
+    asset_path: str,
+    request: Request,
+    current_user: User = Depends(get_wiki_user_hybrid),
+):
+    """Serve image/asset files from wiki repo."""
+    actual_path = _check_wiki_access(request, repo_alias, current_user)
+    tree = _golden_content_backend_tree(actual_path)
+    if tree is not None:
+        with _content_unavailable_as_503():
+            return _serve_wiki_asset_via_seam(tree, asset_path)
+    repo_dir = Path(actual_path)
+    file_path = repo_dir / asset_path
+    try:
+        file_path.resolve().relative_to(repo_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    if file_path.suffix.lower() not in WIKI_ASSET_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(path=str(file_path), media_type=_media_type(str(file_path)))
+
+
+def _serve_wiki_root_via_seam(
+    request: Request, repo_alias: str, tree: SeamWikiTree
+) -> Any:
+    """:func:`serve_wiki_root` for a golden repo behind the content backend."""
+    cache = _get_wiki_cache(request)
+    wiki_config = _get_wiki_config(request)
+    sidebar = _seam_sidebar(cache, repo_alias, tree)
+    if tree.has_file(_HOME_MD):
+        cache.increment_view(repo_alias, "")
+        return _serve_article(
+            request,
+            repo_alias,
+            article_rel_path="",
+            current_dir="",
+            stamp=tree.stamp(_HOME_MD),
+            render=lambda: _wiki_service.render_article_source(
+                tree.fetch_text(_HOME_MD),
+                PurePosixPath(_HOME_MD),
+                repo_alias,
+                wiki_config=wiki_config,
+            ),
+            sidebar=sidebar,
+            cache=cache,
+            wiki_config=wiki_config,
+        )
+    articles = [
+        entry
+        for entry in (_index_entry(PurePosixPath(p)) for p in tree.md_paths())
+        if entry is not None
+    ]
+    return _index_page(request, repo_alias, articles, sidebar)
+
+
+@wiki_router.get("/{repo_alias}/", response_class=HTMLResponse)
+def serve_wiki_root(
+    repo_alias: str,
+    request: Request,
+    current_user: User = Depends(get_wiki_user_hybrid),
+):
+    """Serve wiki root page - home.md or article index."""
+    actual_path = _check_wiki_access(request, repo_alias, current_user)
+    tree = _golden_content_backend_tree(actual_path)
+    if tree is not None:
+        with _content_unavailable_as_503():
+            return _serve_wiki_root_via_seam(request, repo_alias, tree)
+    repo_dir = Path(actual_path)
+    home_md = repo_dir / _HOME_MD
+    cache = _get_wiki_cache(request)
+    wiki_config = _get_wiki_config(request)
+
+    sidebar = cache.get_sidebar(repo_alias, repo_dir)
+    if sidebar is None:
+        sidebar = _wiki_service.build_sidebar_tree(repo_dir, repo_alias)
+        cache.put_sidebar(repo_alias, sidebar, repo_dir)
+
+    if home_md.exists() and home_md.is_file():
+        cache.increment_view(repo_alias, "")
+        return _serve_article(
+            request,
+            repo_alias,
+            article_rel_path="",
+            current_dir="",
+            stamp=home_md,
+            render=lambda: _wiki_service.render_article(
+                home_md, repo_alias, wiki_config=wiki_config
+            ),
+            sidebar=sidebar,
+            cache=cache,
+            wiki_config=wiki_config,
+        )
+    articles = [
+        entry
+        for entry in (
+            _index_entry(md_file.relative_to(repo_dir))
+            for md_file in sorted(repo_dir.rglob("*.md"))
+        )
+        if entry is not None
+    ]
+    return _index_page(request, repo_alias, articles, sidebar)
 
 
 @wiki_router.get("/{repo_alias}/_search")
@@ -723,6 +877,58 @@ def wiki_search(
     return JSONResponse(content=mapped)
 
 
+def _article_dirs(rel_path: PurePath) -> Tuple[str, str]:
+    """(current_dir, article_rel_path) of a repo-relative article path."""
+    current_dir = str(rel_path.parent)
+    if current_dir == ".":
+        current_dir = ""
+    return current_dir, str(rel_path.with_suffix(""))
+
+
+def _serve_wiki_article_via_seam(
+    request: Request, repo_alias: str, tree: SeamWikiTree, path: str
+) -> Any:
+    """:func:`serve_wiki_article` for a golden repo behind the content backend."""
+    rel = tree.confine(path)
+    if rel is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not tree.has_path(rel) and not PurePosixPath(rel).suffix:
+        md_rel = f"{rel}.md"
+        if tree.has_path(md_rel):
+            rel = md_rel
+    if PurePosixPath(rel).suffix.lower() not in WIKI_ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not tree.has_file(rel):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    current_dir, article_rel_path = _article_dirs(PurePosixPath(rel))
+    cache = _get_wiki_cache(request)
+    wiki_config = _get_wiki_config(request)
+    cache.increment_view(repo_alias, article_rel_path)
+    sidebar = _seam_sidebar(cache, repo_alias, tree)
+
+    def render() -> Dict[str, Any]:
+        try:
+            text = tree.fetch_text(rel)
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=404, detail="Not found")
+        return _wiki_service.render_article_source(
+            text, PurePosixPath(rel), repo_alias, wiki_config=wiki_config
+        )
+
+    return _serve_article(
+        request,
+        repo_alias,
+        article_rel_path=article_rel_path,
+        current_dir=current_dir,
+        stamp=tree.stamp(rel),
+        render=render,
+        sidebar=sidebar,
+        cache=cache,
+        wiki_config=wiki_config,
+    )
+
+
 @wiki_router.get("/{repo_alias}/{path:path}", response_class=HTMLResponse)
 def serve_wiki_article(
     repo_alias: str,
@@ -732,6 +938,10 @@ def serve_wiki_article(
 ):
     """Serve rendered wiki article."""
     actual_path = _check_wiki_access(request, repo_alias, current_user)
+    tree = _golden_content_backend_tree(actual_path)
+    if tree is not None:
+        with _content_unavailable_as_503():
+            return _serve_wiki_article_via_seam(request, repo_alias, tree, path)
     repo_dir = Path(actual_path)
     article_path = repo_dir / path
     try:
@@ -747,12 +957,7 @@ def serve_wiki_article(
     if not article_path.exists() or not article_path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
 
-    rel_path = article_path.relative_to(repo_dir)
-    current_dir = str(rel_path.parent)
-    if current_dir == ".":
-        current_dir = ""
-    article_rel_path = str(rel_path.with_suffix(""))
-
+    current_dir, article_rel_path = _article_dirs(article_path.relative_to(repo_dir))
     cache = _get_wiki_cache(request)
     wiki_config = _get_wiki_config(request)
     cache.increment_view(repo_alias, article_rel_path)
@@ -762,78 +967,22 @@ def serve_wiki_article(
         sidebar = _wiki_service.build_sidebar_tree(repo_dir, repo_alias)
         cache.put_sidebar(repo_alias, sidebar, repo_dir)
 
-    cached_article = cache.get_article(repo_alias, article_rel_path, article_path)
-    if cached_article is not None:
-        html = _wiki_service.rewrite_links(
-            cached_article["html"], repo_alias, current_dir
-        )
-        breadcrumbs = _wiki_service.build_breadcrumbs(article_rel_path, repo_alias)
-        cached_meta = cached_article.get("metadata") or {}
-        metadata_panel = (
-            _wiki_service.prepare_metadata_context(
-                cached_meta,
-                repo_alias,
-                article_rel_path,
-                cache,
-                wiki_config=wiki_config,
+    def render() -> Dict[str, Any]:
+        try:
+            return _wiki_service.render_article(
+                article_path, repo_alias, wiki_config=wiki_config
             )
-            or None
-        )
-        return wiki_templates.TemplateResponse(
-            request,
-            "article.html",
-            {
-                "request": request,
-                "title": cached_article["title"],
-                "content": html,
-                "repo_alias": repo_alias,
-                "sidebar": sidebar,
-                "breadcrumbs": breadcrumbs,
-                "current_path": article_rel_path,
-                "metadata_panel": metadata_panel,
-            },
-        )
+        except (UnicodeDecodeError, OSError):
+            raise HTTPException(status_code=404, detail="Not found")
 
-    try:
-        result = _wiki_service.render_article(
-            article_path, repo_alias, wiki_config=wiki_config
-        )
-    except (UnicodeDecodeError, OSError):
-        raise HTTPException(status_code=404, detail="Not found")
-
-    cache.put_article(
-        repo_alias,
-        article_rel_path,
-        result["html"],
-        result["title"],
-        article_path,
-        metadata=result.get("metadata"),
-    )
-
-    html = _wiki_service.rewrite_links(result["html"], repo_alias, current_dir)
-    breadcrumbs = _wiki_service.build_breadcrumbs(article_rel_path, repo_alias)
-    metadata_panel = (
-        _wiki_service.prepare_metadata_context(
-            result.get("metadata") or {},
-            repo_alias,
-            article_rel_path,
-            cache,
-            wiki_config=wiki_config,
-        )
-        or None
-    )
-
-    return wiki_templates.TemplateResponse(
+    return _serve_article(
         request,
-        "article.html",
-        {
-            "request": request,
-            "title": result["title"],
-            "content": html,
-            "repo_alias": repo_alias,
-            "sidebar": sidebar,
-            "breadcrumbs": breadcrumbs,
-            "current_path": article_rel_path,
-            "metadata_panel": metadata_panel,
-        },
+        repo_alias,
+        article_rel_path=article_rel_path,
+        current_dir=current_dir,
+        stamp=article_path,
+        render=render,
+        sidebar=sidebar,
+        cache=cache,
+        wiki_config=wiki_config,
     )

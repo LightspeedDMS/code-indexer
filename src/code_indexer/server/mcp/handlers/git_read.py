@@ -24,7 +24,7 @@ import json as json_module
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
@@ -41,8 +41,14 @@ from code_indexer.server.services.git_operations_service import (
     GitCommandError,
     git_operations_service,
 )
-from code_indexer.global_repos.git_operations import GitOperationsService
+from code_indexer.global_repos.git_operations import (
+    GitOperationsService,
+    delegated_golden_git_backend,
+)
 from code_indexer.server.mcp import reranking as _mcp_reranking
+from code_indexer.server.services.delegated_refusal import (
+    DelegatedRepositoryUnsupportedError,
+)
 
 from ._utils import (
     CapBreach,
@@ -54,6 +60,9 @@ from ._utils import (
     _parse_json_string_array,
     cap_breach_response,
 )
+
+if TYPE_CHECKING:
+    from code_indexer.server.storage.shared.git_backend import GitBackend
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +83,62 @@ def _argument_rejected(
         extra={"correlation_id": get_correlation_id()},
     )
     return _mcp_response({"success": False, "error": str(exc)})  # type: ignore[no-any-return]
+
+
+def _golden_git_backend(repository_alias: Any) -> Optional["GitBackend"]:
+    """The git seam (git-mcp) for a golden alias this pod does not hold.
+
+    None for an activated repository and on a pod that holds its repositories:
+    the tool then runs local git exactly as before. Pairs with
+    :func:`_resolve_through_git_seam`, which hands back the path git-mcp sees
+    the golden repository at.
+    """
+    if isinstance(repository_alias, str) and repository_alias.endswith("-global"):
+        return delegated_golden_git_backend()
+    return None
+
+
+def _git_seam_kwargs(repository_alias: Any) -> Dict[str, Any]:
+    """``git_backend=`` for a git operation on *repository_alias*, or nothing.
+
+    Nothing when git runs locally, so the local call is exactly what it was.
+    """
+    backend = _golden_git_backend(repository_alias)
+    return {} if backend is None else {"git_backend": backend}
+
+
+def _resolve_through_git_seam(
+    resolve: Callable[..., Tuple[Optional[str], Optional[str]]],
+    repository_alias: Any,
+    username: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """``_resolve_git_repo_path`` for a tool that runs git through the seam.
+
+    On a delegated pod a golden repository resolves to where git-mcp sees it
+    (``via_git_backend``); everywhere else the call is exactly the local one.
+    """
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    if is_content_seam_delegated():
+        return resolve(repository_alias, username, via_git_backend=True)
+    return resolve(repository_alias, username)
+
+
+def _delegated_refused(
+    tool: str, repository_alias: Any, exc: DelegatedRepositoryUnsupportedError
+) -> Dict[str, Any]:
+    """A git tool that cannot run on a delegated pod: the refusal, as an error."""
+    logger.warning(
+        "%s refused for %s: %s",
+        tool,
+        repository_alias,
+        exc,
+        extra={"correlation_id": get_correlation_id()},
+    )
+    response: Dict[str, Any] = _mcp_response({"success": False, "error": str(exc)})
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -178,14 +243,18 @@ def handle_git_file_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                     repository_alias = _promoted
 
     try:
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        repo_path, error_msg = _resolve_through_git_seam(
+            _resolve_git_repo_path, repository_alias, user.username
+        )
         if error_msg is not None:
             return _mcp_response({"success": False, "error": error_msg})
         assert repo_path is not None
         requested_limit = max(1, _coerce_int(args.get("limit"), 50))
         rerank_query = args.get("rerank_query") or None
         fetch_limit = _compute_file_history_fetch_limit(requested_limit, rerank_query)
-        service = GitOperationsService(Path(repo_path))
+        service = GitOperationsService(
+            Path(repo_path), **_git_seam_kwargs(repository_alias)
+        )
         result = service.get_file_history(
             path=path,
             limit=fetch_limit,
@@ -223,6 +292,8 @@ def handle_git_file_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 },
             }
         )
+    except DelegatedRepositoryUnsupportedError as e:
+        return _delegated_refused("git_file_history", repository_alias, e)
     except ValueError as e:
         return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
@@ -365,7 +436,9 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     try:
         # Resolve repository path, checking for .git directory existence
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        repo_path, error_msg = _resolve_through_git_seam(
+            _resolve_git_repo_path, repository_alias, user.username
+        )
         if error_msg is not None:
             return _mcp_response({"success": False, "error": error_msg})
         assert repo_path is not None  # narrowed by error_msg check above
@@ -378,7 +451,9 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Create service and execute query
         from code_indexer.global_repos.git_operations import GitOperationsService
 
-        service = GitOperationsService(Path(repo_path))
+        service = GitOperationsService(
+            Path(repo_path), **_git_seam_kwargs(repository_alias)
+        )
         result = service.get_log(
             limit=fetch_limit,
             path=args.get("path"),
@@ -448,6 +523,8 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
 
+    except DelegatedRepositoryUnsupportedError as e:
+        return _delegated_refused("git_log", repository_alias, e)
     except GitArgumentValidationError as e:
         return _argument_rejected("git_log", repository_alias, e)
     except Exception as e:
@@ -498,7 +575,9 @@ def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     try:
         # Resolve repository path, checking for .git directory existence
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        repo_path, error_msg = _resolve_through_git_seam(
+            _resolve_git_repo_path, repository_alias, user.username
+        )
         if error_msg is not None:
             return _mcp_response({"success": False, "error": error_msg})
         assert repo_path is not None  # narrowed by error_msg check above
@@ -506,7 +585,9 @@ def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Create service and execute query
         from code_indexer.global_repos.git_operations import GitOperationsService
 
-        service = GitOperationsService(Path(repo_path))
+        service = GitOperationsService(
+            Path(repo_path), **_git_seam_kwargs(repository_alias)
+        )
         result = service.show_commit(
             commit_hash=commit_hash,
             include_diff=args.get("include_diff", False),
@@ -549,6 +630,8 @@ def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
 
+    except DelegatedRepositoryUnsupportedError as e:
+        return _delegated_refused("git_show_commit", repository_alias, e)
     except GitArgumentValidationError as e:
         return _argument_rejected("git_show_commit", repository_alias, e)
     except ValueError as e:
@@ -607,7 +690,9 @@ def handle_git_file_at_revision(args: Dict[str, Any], user: User) -> Dict[str, A
 
     try:
         # Resolve repository path, checking for .git directory existence
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        repo_path, error_msg = _resolve_through_git_seam(
+            _resolve_git_repo_path, repository_alias, user.username
+        )
         if error_msg is not None:
             return _mcp_response({"success": False, "error": error_msg})
         assert repo_path is not None  # narrowed by error_msg check above
@@ -615,7 +700,9 @@ def handle_git_file_at_revision(args: Dict[str, Any], user: User) -> Dict[str, A
         # Create service and execute query
         from code_indexer.global_repos.git_operations import GitOperationsService
 
-        service = GitOperationsService(Path(repo_path))
+        service = GitOperationsService(
+            Path(repo_path), **_git_seam_kwargs(repository_alias)
+        )
         result = service.get_file_at_revision(path=path, revision=revision)
 
         return _mcp_response(
@@ -629,6 +716,8 @@ def handle_git_file_at_revision(args: Dict[str, Any], user: User) -> Dict[str, A
             }
         )
 
+    except DelegatedRepositoryUnsupportedError as e:
+        return _delegated_refused("git_file_at_revision", repository_alias, e)
     except GitArgumentValidationError as e:
         return _argument_rejected("git_file_at_revision", repository_alias, e)
     except ValueError as e:
@@ -761,8 +850,8 @@ def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                     repository_alias = _promoted
 
     try:
-        repo_path, error_msg = _get_legacy()._resolve_git_repo_path(
-            repository_alias, user.username
+        repo_path, error_msg = _resolve_through_git_seam(
+            _get_legacy()._resolve_git_repo_path, repository_alias, user.username
         )
         if error_msg is not None:
             return _mcp_response({"success": False, "error": error_msg})
@@ -773,7 +862,9 @@ def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             GitOperationsService,
         )
 
-        result = GitOperationsService(Path(repo_path)).get_blame(
+        result = GitOperationsService(
+            Path(repo_path), **_git_seam_kwargs(repository_alias)
+        ).get_blame(
             path=path,
             revision=args.get("revision"),
             start_line=start_line,
@@ -787,6 +878,8 @@ def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         payload = _build_git_blame_response(result, lines, len(lines), _handler_utils)
         return _mcp_response(payload)
 
+    except DelegatedRepositoryUnsupportedError as e:
+        return _delegated_refused("git_blame", repository_alias, e)
     except GitArgumentValidationError as e:
         return _argument_rejected("git_blame", repository_alias, e)
     except ValueError as e:
@@ -866,8 +959,8 @@ def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]
         rerank_query=args.get("rerank_query"),
         rerank_instruction=args.get("rerank_instruction"),
         content_extractor=lambda r: (
-            ((r.get("subject") or "") + " " + (r.get("body") or "")).strip()
-        ),
+            (r.get("subject") or "") + " " + (r.get("body") or "")
+        ).strip(),
         requested_limit=_commit_limit,
         config_service=get_config_service(),
     )
@@ -957,7 +1050,9 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
 
     try:
         # Resolve repository path, checking for .git directory existence
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        repo_path, error_msg = _resolve_through_git_seam(
+            _resolve_git_repo_path, repository_alias, user.username
+        )
         if error_msg is not None:
             return _mcp_response({"success": False, "error": error_msg})
         assert repo_path is not None  # narrowed by error_msg check above
@@ -965,7 +1060,9 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
         # Create service and execute search
         from code_indexer.global_repos.git_operations import GitOperationsService
 
-        service = GitOperationsService(Path(repo_path))
+        service = GitOperationsService(
+            Path(repo_path), **_git_seam_kwargs(repository_alias)
+        )
         result = service.search_commits(
             query=query,
             is_regex=args.get("is_regex", False),
@@ -997,8 +1094,8 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
             rerank_query=args.get("rerank_query"),
             rerank_instruction=args.get("rerank_instruction"),
             content_extractor=lambda r: (
-                ((r.get("subject") or "") + " " + (r.get("body") or "")).strip()
-            ),
+                (r.get("subject") or "") + " " + (r.get("body") or "")
+            ).strip(),
             requested_limit=_commit_limit,
             config_service=get_config_service(),
         )
@@ -1021,6 +1118,8 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
             }
         )
 
+    except DelegatedRepositoryUnsupportedError as e:
+        return _delegated_refused("git_search_commits", repository_alias, e)
     except Exception as e:
         logger.exception(
             f"Error in git_search_commits: {e}",
@@ -1084,13 +1183,17 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     try:
         # Resolve repository path, checking for .git directory existence
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        repo_path, error_msg = _resolve_through_git_seam(
+            _resolve_git_repo_path, repository_alias, user.username
+        )
         if error_msg is not None:
             return _mcp_response({"success": False, "error": error_msg})
         assert repo_path is not None  # narrowed by error_msg check above
 
         # Create service and execute search
-        service = GitOperationsService(Path(repo_path))
+        service = GitOperationsService(
+            Path(repo_path), **_git_seam_kwargs(repository_alias)
+        )
         is_regex = args.get("is_regex", False)
         if is_regex:
             result = service.search_diffs(
@@ -1130,9 +1233,7 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             results=matches,
             rerank_query=args.get("rerank_query"),
             rerank_instruction=args.get("rerank_instruction"),
-            content_extractor=lambda r: (
-                r.get("diff_snippet") or r.get("subject") or ""
-            ),
+            content_extractor=lambda r: r.get("diff_snippet") or r.get("subject") or "",
             requested_limit=_coerce_int(args.get("limit"), 50),
             config_service=get_config_service(),
         )
@@ -1155,6 +1256,8 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
 
+    except DelegatedRepositoryUnsupportedError as e:
+        return _delegated_refused("git_search_diffs", repository_alias, e)
     except ValueError as e:
         return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
@@ -1198,7 +1301,9 @@ def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                     repository_alias = _promoted
 
     try:
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        repo_path, error_msg = _resolve_through_git_seam(
+            _resolve_git_repo_path, repository_alias, user.username
+        )
         if error_msg is not None:
             return _mcp_response({"success": False, "error": error_msg})
         assert repo_path is not None  # narrowed by error_msg check above
@@ -1223,10 +1328,14 @@ def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                     {"success": True, "staged": [], "unstaged": [], "untracked": []}
                 )
 
-        result = git_operations_service.git_status(Path(repo_path))
+        result = git_operations_service.git_status(
+            Path(repo_path), **_git_seam_kwargs(repository_alias)
+        )
         result["success"] = True
         return _mcp_response(result)
 
+    except DelegatedRepositoryUnsupportedError as e:
+        return _delegated_refused("git_status", repository_alias, e)
     except GitCommandError as e:
         logger.error(
             format_error_log(
@@ -1349,15 +1458,21 @@ def git_branch_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                     repository_alias = _promoted
 
     try:
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        repo_path, error_msg = _resolve_through_git_seam(
+            _resolve_git_repo_path, repository_alias, user.username
+        )
         if error_msg is not None:
             return _mcp_response({"success": False, "error": error_msg})
         assert repo_path is not None  # narrowed by error_msg check above
 
-        result = git_operations_service.git_branch_list(Path(repo_path))
+        result = git_operations_service.git_branch_list(
+            Path(repo_path), **_git_seam_kwargs(repository_alias)
+        )
         result["success"] = True
         return _mcp_response(result)
 
+    except DelegatedRepositoryUnsupportedError as e:
+        return _delegated_refused("git_branch_list", repository_alias, e)
     except GitCommandError as e:
         logger.error(
             format_error_log(
@@ -1596,7 +1711,9 @@ def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                     repository_alias = _promoted
 
     try:
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        repo_path, error_msg = _resolve_through_git_seam(
+            _resolve_git_repo_path, repository_alias, user.username
+        )
         if error_msg is not None:
             return _mcp_response({"success": False, "error": error_msg})
         assert repo_path is not None  # narrowed by error_msg check above
@@ -1627,6 +1744,7 @@ def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             author=author,
             branch=branch,
             path=path,
+            **_git_seam_kwargs(repository_alias),
         )
 
         # Story #660: Apply reranking after retrieval, before response.
@@ -1656,6 +1774,8 @@ def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         }
         return _mcp_response(result)
 
+    except DelegatedRepositoryUnsupportedError as e:
+        return _delegated_refused("git_log", repository_alias, e)
     except GitCommandError as e:
         logger.error(
             format_error_log(

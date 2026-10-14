@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Sequence
 import pathspec
 
-from ..config import Config
+from ..config import OVERRIDE_FILENAME, Config, override_config_from_bytes
 from .fetch_planner import plan_fetch_batches
+from .file_facts import ContentUnavailableError
 from ..services.override_filter_service import OverrideFilterService
 from ..utils.path_confinement import is_resolved_within_root
 
@@ -36,8 +37,18 @@ class FileFinder:
         # Kept so ending a delegated pass restores it without re-reading a disk
         # that, on a delegated pod, may not hold the repository.
         self._local_exclude_spec = self.exclude_spec
+        # The override ConfigManager.load found on this machine, and the
+        # patterns built from it -- restored when a delegated pass ends (a pass
+        # applies the repository's own override, fetched through its backend).
+        self._local_override_config = getattr(config, "override_config", None)
+        self._local_base_patterns = self._base_patterns
 
-        # Initialize override filter service if override config is available
+        self._install_override_filters()
+
+    def _install_override_filters(self) -> None:
+        """Build the override filter and force-include spec from the config's
+        current ``override_config`` (none when it is absent or a test Mock)."""
+        config = self.config
         self.override_filter_service = None
         self._force_include_spec = None
         # Only initialize if we have a real OverrideConfig object, not a Mock
@@ -119,6 +130,16 @@ class FileFinder:
 
     def _create_gitignore_spec(self) -> None:
         """Create pathspec for excluded directories."""
+        patterns = self._exclude_dir_and_common_patterns()
+        self._base_patterns = list(patterns)
+
+        # Check for .gitignore files (root and nested)
+        self._add_gitignore_patterns(self.config.codebase_dir, patterns)
+
+        self.exclude_spec = pathspec.PathSpec.from_lines("gitwildmatch", patterns)
+
+    def _exclude_dir_and_common_patterns(self) -> List[str]:
+        """The exclude patterns that come from configuration, not .gitignore."""
         patterns = []
 
         # Add patterns for all excluded directories
@@ -163,16 +184,10 @@ class FileFinder:
                 "target/",
                 ".git/",
                 # Code indexer configuration files
-                ".code-indexer-override.yaml",
+                OVERRIDE_FILENAME,
             ]
         )
-
-        self._base_patterns = list(patterns)
-
-        # Check for .gitignore files (root and nested)
-        self._add_gitignore_patterns(self.config.codebase_dir, patterns)
-
-        self.exclude_spec = pathspec.PathSpec.from_lines("gitwildmatch", patterns)
+        return patterns
 
     def set_manifest(
         self, manifest: Optional["RepoManifest"], backend: Optional[Any] = None
@@ -188,11 +203,63 @@ class FileFinder:
         self._manifest = manifest
         self._fetched_negations: List[str] = []
         if manifest is None:
+            self._apply_override(self._local_override_config)
             self.exclude_spec = self._local_exclude_spec
             return
+        self._apply_override(self._fetched_override_config(manifest, backend))
         patterns = list(self._base_patterns)
         patterns.extend(self._fetched_gitignore_patterns(manifest, backend))
         self.exclude_spec = pathspec.PathSpec.from_lines("gitwildmatch", patterns)
+
+    def _apply_override(self, override_config: Any) -> None:
+        """Make ``override_config`` the one discovery applies.
+
+        A no-op when it already is -- every local pass, and a delegated pass of a
+        repository without its own override file -- so their filters and
+        patterns are exactly the ones built at construction.
+        """
+        if override_config is getattr(self.config, "override_config", None):
+            return
+        self.config.override_config = override_config
+        self._install_override_filters()
+        if override_config is self._local_override_config:
+            self._base_patterns = self._local_base_patterns
+        else:
+            self._base_patterns = self._exclude_dir_and_common_patterns()
+
+    def _fetched_override_config(
+        self, manifest: "RepoManifest", backend: Optional[Any]
+    ) -> Any:
+        """The repository's own override file, read through ``backend``.
+
+        ``ConfigManager.load`` looks for it on this machine's disk, which on a
+        pod without the repository never holds it -- the index would silently
+        ignore the repository's override. So a delegated pass asks the manifest
+        and fetches it. Not listed: the locally loaded override stands (on such a
+        pod, one found in a parent directory -- the local walk's next stop).
+        Unparseable: logged and ignored, as ``ConfigManager.load`` does -- the
+        repository-root file shadows any parent one there too. A backend that
+        cannot supply a listed file raises: never read as "no override".
+        """
+        if backend is None or OVERRIDE_FILENAME not in manifest:
+            return self._local_override_config
+        origin = str(Path(self.config.codebase_dir) / OVERRIDE_FILENAME)
+        record = next(
+            (
+                r
+                for r in backend.fetch(self.config.codebase_dir, [OVERRIDE_FILENAME])
+                if r.path == OVERRIDE_FILENAME
+            ),
+            None,
+        )
+        if record is None or record.error is not None or record.data is None:
+            reason = "not returned" if record is None else record.error
+            raise ContentUnavailableError(f"{origin}: {reason}")
+        try:
+            return override_config_from_bytes(record.data, origin)
+        except Exception as e:
+            logger.warning(f"Failed to load override config from {origin}: {e}")
+            return None
 
     def _fetched_gitignore_patterns(
         self, manifest: "RepoManifest", backend: Optional[Any]
@@ -696,10 +763,15 @@ def attach_delegated_manifest(
         root, backend=backend, prune_dirs=finder.manifest_prune_dirs()
     )
     finder.set_manifest(manifest, backend)
-    if manifest.pruned and finder.negation_could_rescue(manifest.pruned, backend):
+    if manifest.pruned and (
+        # The repository's own override (fetched by set_manifest) may forbid
+        # pruning a directory the first build skipped (force-include patterns).
+        not set(manifest.pruned) <= set(finder.manifest_prune_dirs())
+        or finder.negation_could_rescue(manifest.pruned, backend)
+    ):
         logger.info(
-            "a .gitignore negation could re-include a pruned directory; "
-            "rebuilding the manifest unpruned"
+            "a .gitignore negation or the repository's override could re-include "
+            "a pruned directory; rebuilding the manifest unpruned"
         )
         manifest = RepoManifest.build(root, backend=backend)
         finder.set_manifest(manifest, backend)

@@ -464,10 +464,10 @@ class TestReconcileWorkingDirDirtyUnaffected:
         # exactly like before this change (working_dir identity scheme).
         assert "a.py" in result["changed_files"]
 
-    def test_dirty_file_content_id_uses_working_dir_scheme(self, tmp_path):
-        """Directly verify `_get_effective_content_id_for_reconcile` produces
-        the untouched `working_dir_<mtime>_<size>` format for a dirty file,
-        proving the dirty-file code path was not altered by this fix."""
+    def test_dirty_file_content_id_uses_working_blob_hash(self, tmp_path):
+        """A dirty file's reconcile id is the blob hash of its WORKING bytes --
+        the hash FileIdentifier indexed it under -- never the HEAD blob hash
+        (see test_reconcile_working_dir_content_id.py)."""
         root = tmp_path / "repo"
         root.mkdir()
         _init_repo(root)
@@ -483,7 +483,9 @@ class TestReconcileWorkingDirDirtyUnaffected:
 
         content_id = indexer._get_effective_content_id_for_reconcile("a.py")
 
-        assert content_id.startswith("a.py:working_dir_")
+        working_blob = _git(root, "hash-object", "a.py")
+        assert content_id == f"a.py:blob:{working_blob}"
+        assert working_blob != _blob_hash_at_head(root, "a.py")
 
 
 # ---------------------------------------------------------------------------

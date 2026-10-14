@@ -195,6 +195,13 @@ class TemporalIndexer:
         self.codebase_dir = vector_store.project_root
 
         self._git_backend = git_backend
+        if git_backend is not None:
+            # History through the git seam: this machine's git holds nothing
+            # to ask for the repository root. Temporal points carry no "path",
+            # so their stored form does not depend on that answer either way.
+            mark_delegated = getattr(vector_store, "mark_repository_delegated", None)
+            if callable(mark_delegated):
+                mark_delegated()
 
         # Initialize FileIdentifier for project_id lookup
         self.file_identifier = FileIdentifier(

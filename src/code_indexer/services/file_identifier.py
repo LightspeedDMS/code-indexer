@@ -16,11 +16,17 @@ from typing import Dict, Any, Optional
 
 from ..config import Config
 from ..utils.git_runner import run_git_command, is_git_repository
+from ..indexing.file_facts import ContentUnavailableError
 from ..indexing.repo_manifest import RepoManifest
 from ..utils.blob_hash import git_blob_hash, git_blob_hash_bytes
 from .git_head import probe_backend_repository, read_head_branch, read_head_commit
 
 logger = logging.getLogger(__name__)
+
+
+def _is_delegated_manifest(manifest: Optional[RepoManifest]) -> bool:
+    """Whether ``manifest`` came from a backend that does NOT read this disk."""
+    return manifest is not None and not manifest.backend_is_local
 
 
 class FileIdentifier:
@@ -58,7 +64,10 @@ class FileIdentifier:
 
         self.project_dir = project_dir
         self.config = config
-        self.git_available = self._detect_git()
+        # With a git backend the backend answers (below); probing local git
+        # first would fork `git rev-parse` against a path a delegated pod does
+        # not hold, only for the answer to be overwritten.
+        self.git_available = False if git_backend is not None else self._detect_git()
         # A manifest supplies git blob hashes by construction, so a repository it
         # can describe IS git-addressable whether or not this container can see a
         # .git directory. Without this a delegated pod probes a path it has no
@@ -385,6 +394,10 @@ class FileIdentifier:
         # manifest reports but never follows. Falling through to the read keeps
         # the answer correct; trusting a None here would change the point UUID of
         # every such chunk, silently.
+        #
+        # Except under a DELEGATED manifest: the repository is not on this
+        # machine, so the read finds nothing and would quietly hand back None --
+        # the same silent re-identification. That file fails loudly instead.
         if content is not None:
             git_metadata["git_hash"] = git_blob_hash_bytes(content)
         else:
@@ -393,6 +406,11 @@ class FileIdentifier:
                 if self._manifest is not None
                 else None
             )
+            if from_manifest is None and _is_delegated_manifest(self._manifest):
+                raise ContentUnavailableError(
+                    f"{file_path}: no blob hash in this pass's delegated manifest, "
+                    "and the repository is not on this machine to hash it"
+                )
             git_metadata["git_hash"] = (
                 from_manifest if from_manifest is not None else git_blob_hash(file_path)
             )

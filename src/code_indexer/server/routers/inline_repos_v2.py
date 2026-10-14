@@ -62,6 +62,46 @@ from ..app_helpers import _execute_repository_sync, _get_composite_details
 # Module-level logger
 logger = logging.getLogger(__name__)
 
+#: What the branches endpoint reports as the current branch of a path that is
+#: not a git repository (unchanged behaviour).
+_NON_GIT_CURRENT_BRANCH = "master"
+
+
+def _current_branch_name(
+    local_topology: GitTopologyService, repo_path: Path, *, golden: bool
+) -> str:
+    """The checked-out branch for the branches endpoint.
+
+    Locally (and for activated repositories) *local_topology* -- the one the
+    branch listing already probed -- answers through local git, a non-git path
+    or a failure reading "master" as before. For a GOLDEN repository under
+    ``content_backend: delegated`` the repository is with git-mcp, so the
+    branch is asked of the git seam at the path it sees the repository at. Only
+    git's explicit "not a git repository" keeps the "master" answer; a failure
+    to read the branch raises -- it is not a branch called "master".
+    """
+    from code_indexer.global_repos.git_operations import (
+        delegated_golden_git_backend,
+    )
+
+    backend = delegated_golden_git_backend() if golden else None
+    if backend is None:
+        return local_topology.get_current_branch() or _NON_GIT_CURRENT_BRANCH
+    from ..startup.content_backend_wiring import golden_repo_content_root
+
+    topology = GitTopologyService(
+        golden_repo_content_root(repo_path, consumer="branch listing"),
+        git_backend=backend,
+    )
+    if not topology.is_git_available():
+        return _NON_GIT_CURRENT_BRANCH
+    branch = topology.get_current_branch()
+    if branch is None:
+        raise RuntimeError(
+            "the git backend could not report the repository's current branch"
+        )
+    return branch
+
 
 def register_repos_v2_routes(
     app: FastAPI,
@@ -491,6 +531,7 @@ def register_repos_v2_routes(
             # Check if repository exists and user has access (following existing pattern)
             repo_found = False
             repo_path = None
+            is_golden = False
 
             # Look for activated repository
             if activated_repo_manager:
@@ -515,11 +556,16 @@ def register_repos_v2_routes(
                 # Also check golden repositories
                 _enforce_golden_access(current_user.username, cleaned_repo_id)
                 try:
-                    repo_details = repository_listing_manager.get_repository_details(
-                        alias=cleaned_repo_id, username=current_user.username
+                    # Only the clone path: the details call would also compute
+                    # the repository's statistics (a content-backend manifest
+                    # under `delegated`) that this endpoint never reports.
+                    repo_path = Path(
+                        repository_listing_manager.get_golden_clone_path(
+                            cleaned_repo_id
+                        )
                     )
                     repo_found = True
-                    repo_path = Path(repo_details["clone_path"])
+                    is_golden = True
                 except RepositoryListingError:
                     pass
 
@@ -542,9 +588,9 @@ def register_repos_v2_routes(
                 # Get branch information
                 branches = branch_service.list_branches(include_remote=include_remote)
 
-                # Get current branch name
-                current_branch_name = (
-                    git_topology_service.get_current_branch() or "master"
+                # Get current branch name (git-mcp for a delegated golden repo)
+                current_branch_name = _current_branch_name(
+                    git_topology_service, repo_path, golden=is_golden
                 )
 
                 return BranchListResponse(

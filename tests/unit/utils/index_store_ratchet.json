@@ -42,7 +42,7 @@
  "server/services/activated_repo_index_manager.py": 10,
  "server/services/cidx_meta_backup/bootstrap.py": 1,
  "server/services/config_seeding.py": 1,
- "server/services/config_service.py": 3,
+ "server/services/config_service.py": 1,
  "server/services/dashboard_service.py": 2,
  "server/services/dependency_map_service.py": 1,
  "server/services/description_refresh_scheduler.py": 4,

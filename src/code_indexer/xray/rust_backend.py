@@ -2088,13 +2088,10 @@ class LocalXrayExecutionBackend:
         if _content_is_delegated() and any(
             "line_content" not in finding for finding in findings
         ):
-            msg = (
-                "xray-cli did not emit line_content and the repository is "
-                "behind a delegated content backend, so it cannot be re-read "
-                "locally. Upgrade xray-cli."
+            logger.error("RustNativeBackend: %s", _LINE_CONTENT_REFUSAL)
+            return XrayScanOutcome(
+                [_error_tuple("", "XRayCliError", _LINE_CONTENT_REFUSAL)]
             )
-            logger.error("RustNativeBackend: %s", msg)
-            return XrayScanOutcome([_error_tuple("", "XRayCliError", msg)])
         # debug_log() messages travel beside the results; RustNativeBackend
         # stores them on _last_debug_messages, which XRaySearchEngine.run()
         # surfaces as debug_output[].
@@ -2900,6 +2897,11 @@ class RustNativeBackend(LocalXrayExecutionBackend):
     built from ``xray_backend``, else this instance's own in-pod execution
     (``LocalXrayExecutionBackend``) -- which is what ``xray_backend=local``,
     the CLI and tests get, unchanged.
+
+    Per request, ``xray_execution_backend_for`` (server wiring) may override
+    that choice for the repository at hand: a pod-local repository executes
+    here, and in-pod execution against a repository this pod does not hold is
+    refused. See ``_execution_backend_for``.
     """
 
     def __init__(
@@ -2928,6 +2930,28 @@ class RustNativeBackend(LocalXrayExecutionBackend):
             execution_backend = server_xray_execution_backend()
         self._execution_backend: XrayExecutionBackend = execution_backend or self
 
+    def _execution_backend_for(
+        self, repo_path: Optional[str], rel_paths: List[str]
+    ) -> XrayExecutionBackend:
+        """The backend THIS request over *repo_path* executes on.
+
+        The configured one (``_execution_backend``) unless the server's
+        per-repository rule says otherwise (``xray_execution_backend_for``):
+        None from it means this instance, in this pod.
+
+        Raises:
+            DelegatedRepositoryUnsupportedError: in-pod execution under a
+                delegated content backend on a pod without the repository.
+        """
+        from code_indexer.server.startup.xray_backend_wiring import (
+            xray_execution_backend_for,
+        )
+
+        configured = (
+            None if self._execution_backend is self else self._execution_backend
+        )
+        return xray_execution_backend_for(configured, repo_path, rel_paths) or self
+
     def run_batch(
         self,
         *,
@@ -2953,7 +2977,10 @@ class RustNativeBackend(LocalXrayExecutionBackend):
         Returns:
             List of (matches, errors, meta) tuples, one per file spec.
         """
-        outcome = self._execution_backend.execute_scan(
+        backend = self._execution_backend_for(
+            repo_path, [spec.get("file_path", "") for spec in file_specs]
+        )
+        outcome = backend.execute_scan(
             XrayScanRequest(
                 evaluator_code=evaluator_code,
                 file_specs=file_specs,
@@ -2980,7 +3007,8 @@ class RustNativeBackend(LocalXrayExecutionBackend):
 
         See ``LocalXrayExecutionBackend.execute_graph_analysis``.
         """
-        return self._execution_backend.execute_graph_analysis(
+        backend = self._execution_backend_for(repo_root, file_paths)
+        return backend.execute_graph_analysis(
             XrayGraphRequest(
                 evaluator_code=evaluator_code,
                 repo_root=repo_root,
@@ -3123,6 +3151,15 @@ def _build_matches(
         return source_lines[idx] if 0 <= idx < len(source_lines) else ""
 
     return build_matches(spec, spec_findings, line_content=_line_content)
+
+
+#: The whole-batch error for findings without ``line_content`` under a
+#: delegated content backend: filling them would re-read the repository here.
+_LINE_CONTENT_REFUSAL = (
+    "xray-cli did not emit line_content and the repository is "
+    "behind a delegated content backend, so it cannot be re-read "
+    "locally. Upgrade xray-cli."
+)
 
 
 def _content_is_delegated() -> bool:

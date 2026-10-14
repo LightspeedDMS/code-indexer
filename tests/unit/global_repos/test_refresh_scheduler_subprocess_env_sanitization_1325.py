@@ -258,6 +258,8 @@ class TestCreateSnapshotFixConfigSanitizesPythonPath:
             query_tracker=query_tracker,
             cleanup_manager=cleanup_manager,
             snapshot_manager=mock_snapshot_manager,
+            # fix-config is stamped from the repo's registry entry; none here.
+            registry=Mock(get_global_repo=Mock(return_value=None)),
         )
 
     def test_fix_config_receives_absolutized_pythonpath(
@@ -365,6 +367,8 @@ class TestRestoreMasterFromVersionedSanitizesPythonPath:
             query_tracker=query_tracker,
             cleanup_manager=cleanup_manager,
             snapshot_manager=mock_snapshot_manager,
+            # fix-config is stamped from the repo's registry entry; none here.
+            registry=Mock(get_global_repo=Mock(return_value=None)),
         )
 
     def test_fix_config_receives_absolutized_pythonpath(

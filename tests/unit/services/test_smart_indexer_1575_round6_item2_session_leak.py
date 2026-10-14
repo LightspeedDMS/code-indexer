@@ -67,11 +67,12 @@ def test_mid_section_exception_still_calls_end_indexing(tmp_path):
 
     vector_store = _RaisingDeleteByFilterClient()
     file_stat = (root / "a.py").stat()
-    # A working_dir DB point whose content-id FORMAT never matches the
-    # disk-side computation (":working_dir:M:S" vs ":working_dir_M_S"),
-    # so this file is reliably classified as "modified" and enters the
-    # delete loop regardless of actual mtime/size values.
-    vector_store.add_working_dir_point("a.py", file_stat.st_mtime, file_stat.st_size)
+    # A working_dir DB point recorded at an OLDER mtime than the file on
+    # disk, so this file is reliably classified as "modified" and enters
+    # the delete loop.
+    vector_store.add_working_dir_point(
+        "a.py", int(file_stat.st_mtime) - 10, file_stat.st_size
+    )
 
     indexer = _make_indexer(root, vector_store)
     assert indexer.is_git_aware() is False

@@ -164,14 +164,21 @@ def content_seam_source(
     target that is a pod-local versioned snapshot (index state only) maps to
     the golden repo's base clone, which the backend serves. ``consumer`` names
     the caller in the warning logged when that mapping fails.
+
+    Pod-local ``local://`` repositories (Langfuse trace folders) are None even
+    then: their files live only on this pod, never with the backend. cidx-meta
+    is ``local://`` too but shared through the backend, so it keeps the seam.
     """
     from code_indexer.server.startup.content_backend_wiring import (
         golden_repo_content_root,
+        is_pod_local_golden_path,
         server_content_backend,
     )
 
     backend = server_content_backend()
     if backend is None or backend.is_local:
+        return None
+    if is_pod_local_golden_path(repo_path):
         return None
     root = golden_repo_content_root(repo_path, consumer=consumer)
     return ContentSeamSource(backend=backend, root=str(root))

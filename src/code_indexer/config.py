@@ -8,7 +8,7 @@ import tempfile
 import threading as _threading
 import yaml  # type: ignore
 from pathlib import Path
-from typing import List, Optional, Any, Literal, Tuple, Dict
+from typing import IO, List, Optional, Any, Literal, Tuple, Dict, Union
 
 from pydantic import (
     BaseModel,
@@ -1628,6 +1628,10 @@ code-indexer index --clear
         return socket_path
 
 
+#: The repository-root file a project uses to adjust what cidx indexes.
+OVERRIDE_FILENAME = ".code-indexer-override.yaml"
+
+
 def _load_override_config(override_path: Path) -> OverrideConfig:
     """Load override configuration from YAML file.
 
@@ -1642,40 +1646,61 @@ def _load_override_config(override_path: Path) -> OverrideConfig:
     """
     try:
         with open(override_path, "r") as f:
-            data = yaml.safe_load(f)
-
-        if not isinstance(data, dict):
-            raise ValueError("Override config must be a YAML dictionary")
-
-        # Validate required fields exist
-        required_fields = [
-            "add_extensions",
-            "remove_extensions",
-            "add_exclude_dirs",
-            "add_include_dirs",
-            "force_include_patterns",
-            "force_exclude_patterns",
-        ]
-
-        missing_fields = [field for field in required_fields if field not in data]
-        if missing_fields:
-            raise ValueError(
-                f"Missing required fields in override config: {missing_fields}"
-            )
-
-        return OverrideConfig(
-            add_extensions=data["add_extensions"] or [],
-            remove_extensions=data["remove_extensions"] or [],
-            add_exclude_dirs=data["add_exclude_dirs"] or [],
-            add_include_dirs=data["add_include_dirs"] or [],
-            force_include_patterns=data["force_include_patterns"] or [],
-            force_exclude_patterns=data["force_exclude_patterns"] or [],
-        )
-
+            return _override_config_from_yaml(f)
     except yaml.YAMLError as e:
         raise Exception(f"Failed to parse override YAML file {override_path}: {e}")
     except Exception as e:
         raise Exception(f"Failed to load override config from {override_path}: {e}")
+
+
+def override_config_from_bytes(data: bytes, origin: str) -> OverrideConfig:
+    """Parse an override file's bytes -- the same rules and errors as
+    ``_load_override_config``, with ``origin`` naming the file in the message.
+
+    For a repository that is not on this machine: a delegated indexing pass
+    fetches the repository's own override file through the content backend
+    (``FileFinder.set_manifest``) instead of the local probe in
+    ``ConfigManager.load``, which on such a pod never finds it.
+    """
+    try:
+        return _override_config_from_yaml(data)
+    except yaml.YAMLError as e:
+        raise Exception(f"Failed to parse override YAML file {origin}: {e}")
+    except Exception as e:
+        raise Exception(f"Failed to load override config from {origin}: {e}")
+
+
+def _override_config_from_yaml(stream: Union[bytes, IO[str]]) -> OverrideConfig:
+    """Parse and validate override YAML. Raises the raw YAML/ValueError."""
+    data = yaml.safe_load(stream)
+
+    if not isinstance(data, dict):
+        raise ValueError("Override config must be a YAML dictionary")
+
+    # Validate required fields exist
+    required_fields = [
+        "add_extensions",
+        "remove_extensions",
+        "add_exclude_dirs",
+        "add_include_dirs",
+        "force_include_patterns",
+        "force_exclude_patterns",
+    ]
+
+    missing_fields = [field for field in required_fields if field not in data]
+    if missing_fields:
+        raise ValueError(
+            f"Missing required fields in override config: {missing_fields}"
+        )
+
+    return OverrideConfig(
+        add_extensions=data["add_extensions"] or [],
+        remove_extensions=data["remove_extensions"] or [],
+        add_exclude_dirs=data["add_exclude_dirs"] or [],
+        add_include_dirs=data["add_include_dirs"] or [],
+        force_include_patterns=data["force_include_patterns"] or [],
+        force_exclude_patterns=data["force_exclude_patterns"] or [],
+    )
 
 
 def _find_override_file(start_dir: Path) -> Optional[Path]:
@@ -1692,7 +1717,7 @@ def _find_override_file(start_dir: Path) -> Optional[Path]:
     # Walk up the directory tree looking for .code-indexer-override.yaml
     search_paths = [current] + list(current.parents)
     for path in search_paths:
-        override_path = path / ".code-indexer-override.yaml"
+        override_path = path / OVERRIDE_FILENAME
         if override_path.exists():
             return override_path
 

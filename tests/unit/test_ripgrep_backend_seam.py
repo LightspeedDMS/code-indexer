@@ -587,6 +587,53 @@ def test_a_base_clone_path_is_unchanged(
     )
 
 
+@pytest.fixture
+def pod_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A registry holding a pod-local Langfuse repo, cidx-meta and a git repo."""
+    from types import SimpleNamespace
+
+    from code_indexer.server.repositories import golden_repo_manager as grm
+
+    base = tmp_path / "golden-repos"
+    urls = {
+        "langfuse_proj": "local://langfuse_proj",
+        "cidx-meta": "local://cidx-meta",
+        "agent-router": "https://gitlab.example.com/agent-router.git",
+    }
+    manager = SimpleNamespace(
+        get_golden_repo=lambda name: (
+            SimpleNamespace(repo_url=urls[name], clone_path=str(base / name))
+            if name in urls
+            else None
+        )
+    )
+    monkeypatch.setattr(grm, "get_golden_repo_manager", lambda: manager)
+    return base
+
+
+@pytest.mark.parametrize(
+    "rel",
+    ["langfuse_proj", ".versioned/langfuse_proj/v_1760000000"],
+    ids=["base", "snapshot"],
+)
+def test_a_pod_local_repo_is_searched_here_by_the_local_backend(
+    pod_local: Path, monkeypatch: pytest.MonkeyPatch, rel: str
+) -> None:
+    """workspace-mcp never holds a pod-local local:// repo: searching it there
+    would find nothing. It is searched on this pod (backend None = local)."""
+    path = pod_local / rel
+    assert _target(monkeypatch, _RecordingBackend(), path) == (path, None)
+
+
+@pytest.mark.parametrize("alias", ["cidx-meta", "agent-router"])
+def test_shared_repos_keep_the_delegated_backend(
+    pod_local: Path, monkeypatch: pytest.MonkeyPatch, alias: str
+) -> None:
+    backend = _RecordingBackend()
+    snapshot = pod_local / ".versioned" / alias / "v_1760000000"
+    assert _target(monkeypatch, backend, snapshot) == (pod_local / alias, backend)
+
+
 @pytest.mark.parametrize("backend", [None, "local"])
 def test_a_local_search_keeps_the_snapshot(
     golden: Path, monkeypatch: pytest.MonkeyPatch, backend
@@ -636,3 +683,13 @@ async def test_both_entry_points_search_the_base_clone(
                 {"pattern": "x"}, snapshot, "agent-router-global", MagicMock()
             )
     assert captured["root"] == golden / "agent-router"
+
+
+def test_a_path_that_only_shares_a_pod_local_alias_is_not_pod_local(
+    pod_local: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An activated copy named like a pod-local golden repo is the user's
+    working copy, held by workspace-mcp: it keeps the delegated backend."""
+    backend = _RecordingBackend()
+    activated = pod_local.parent / "activated-repos" / "alice" / "langfuse_proj"
+    assert _target(monkeypatch, backend, activated) == (activated, backend)

@@ -22,7 +22,7 @@ content and ripgrep wiring:
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from code_indexer.utils.index_store import (
     DelegatedIndexStore,
@@ -84,16 +84,22 @@ def build_configured_index_store(config: Any) -> IndexStore:
     return build_index_store(config, artifacts=artifacts)
 
 
-def server_index_store() -> IndexStore:
-    """The store the running server built at startup (``app.state.index_store``).
+def server_index_store() -> Optional[IndexStore]:
+    """The running server's publishing IndexStore (parked on ``app.state``).
 
-    ``LocalIndexStore`` outside a server process (CLI, tests) or before startup
-    built one: indexes are then read where they were built, as before. Read
-    without importing the app, so a CLI process never constructs a store.
+    None outside a server process (CLI, daemon, tests): there is no published
+    index to act on there. Read without importing the app, as
+    ``server_delegated_git_backend`` does.
     """
     from code_indexer.server.utils.registry_factory import (
         _running_server_app_state,
     )
 
     store = getattr(_running_server_app_state(), "index_store", None)
-    return store if store is not None else LocalIndexStore()
+    if store is None:
+        return None
+    if not (hasattr(store, "is_local") and callable(getattr(store, "delete", None))):
+        raise RuntimeError(
+            f"app.state.index_store is a {type(store).__name__}, not an IndexStore"
+        )
+    return cast(IndexStore, store)

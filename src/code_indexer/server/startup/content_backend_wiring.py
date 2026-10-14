@@ -24,6 +24,7 @@ entirely successful. An error is the only safe failure.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional, Union
 
@@ -226,15 +227,59 @@ def golden_repo_content_root(repo_path: Union[str, Path], *, consumer: str) -> P
     return Path(clone_path)
 
 
-def _golden_repo_clone_path(repo_name: str) -> Optional[str]:
-    """The golden repo's base clone path, or None when the registry cannot say."""
+def is_pod_local_golden_path(repo_path: Union[str, Path]) -> bool:
+    """Whether the golden repo behind *repo_path* keeps its files on THIS pod.
+
+    *repo_path* is a golden repo's base clone or a ``.versioned/<alias>/v_*``
+    snapshot of it. Pod-local means a ``local://`` repository other than
+    cidx-meta (Langfuse trace folders): created and written by this pod, never
+    held by a delegated backend, so a delegated read must not be sent there.
+    cidx-meta is ``local://`` too, but its content is shared through the
+    backend. A repo the registry cannot describe is not pod-local -- the
+    delegated seam, as before.
+
+    Blocking (a registry read): call it off the event loop.
+    """
+    from code_indexer.server.storage.shared.snapshot_paths import (
+        is_versioned_snapshot,
+    )
+    from code_indexer.server.utils.index_command_layout import (
+        is_cidx_meta_repo,
+        is_pod_local_repo,
+    )
+
+    parts = PurePosixPath(str(repo_path)).parts
+    if not parts:
+        return False
+    snapshot = is_versioned_snapshot(str(repo_path))
+    alias = parts[-2] if snapshot else parts[-1]
+    repo = _golden_repo_record(alias)
+    repo_url = getattr(repo, "repo_url", None) or None
+    if not snapshot:
+        # Only the golden repo's own directory: an activated copy (or any
+        # other path) that merely ends in the same name is not it.
+        clone_path = getattr(repo, "clone_path", None)
+        if not clone_path or os.path.normpath(str(clone_path)) != os.path.normpath(
+            str(repo_path)
+        ):
+            return False
+    return is_pod_local_repo(repo_url, alias) and not is_cidx_meta_repo(repo_url, alias)
+
+
+def _golden_repo_record(repo_name: str) -> Any:
+    """The golden repo's registry record, or None when the registry cannot say."""
     try:
         from code_indexer.server.repositories.golden_repo_manager import (
             get_golden_repo_manager,
         )
 
-        repo = get_golden_repo_manager().get_golden_repo(repo_name)
+        return get_golden_repo_manager().get_golden_repo(repo_name)
     except Exception as exc:  # the server's state, whatever it is
         logger.debug("No golden repo record for %s: %s", repo_name, exc)
         return None
+
+
+def _golden_repo_clone_path(repo_name: str) -> Optional[str]:
+    """The golden repo's base clone path, or None when the registry cannot say."""
+    repo = _golden_repo_record(repo_name)
     return getattr(repo, "clone_path", None) or None

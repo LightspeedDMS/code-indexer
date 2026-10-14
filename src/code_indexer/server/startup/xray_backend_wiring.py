@@ -21,12 +21,18 @@ Fail-fast policy (mirrors the git, content and ripgrep wiring):
                   or one that is not an ``XrayExecutionBackend`` stops startup.
 - anything else : raises immediately, so a typo'd config cannot degrade into a
                   surprising default.
+
+Per repository, :func:`xray_execution_backend_for` -- the ONE place that
+decides where a given request executes -- overrides that selection in two
+cases (see its docstring): a pod-local repository always executes here, and an
+in-pod execution against a repository this pod does not hold is refused.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Optional, Sequence
 
 from code_indexer.xray.execution_backend import XrayExecutionBackend
 
@@ -64,7 +70,36 @@ def build_configured_xray_execution_backend(
         return _build_delegated_backend()
 
     logger.info("XrayExecutionBackend: using local xray-cli execution (this pod)")
+    _warn_local_execution_under_delegated_content(config)
     return None
+
+
+def _warn_local_execution_under_delegated_content(config: Any) -> None:
+    """Say loudly, at startup, that in-pod X-Ray needs the repositories here.
+
+    ``content_backend=delegated`` with ``xray_backend=local`` is a legitimate
+    rollout state: a pod that still has the repository mount reads candidates
+    through the seam and runs xray-cli here, over the files on its disk. It is
+    NOT refused at startup, because no cheap startup probe can tell "mount
+    present" from "mount gone" reliably (an empty registry, a cidx-meta-only
+    registry or a not-yet-cloned repo all look like "absent") -- and refusing
+    a pod that has the mount would remove a working feature. Instead every
+    request is checked against the files it is about to read
+    (:func:`xray_execution_backend_for`) and refused, before xray-cli runs,
+    when this pod does not hold them.
+    """
+    content_backend = getattr(config, "content_backend", "local") or "local"
+    if content_backend == "local":
+        return
+    logger.warning(
+        "XrayExecutionBackend: xray_backend='local' with content_backend=%r: "
+        "xray-cli runs in THIS pod and reads candidate files from THIS pod's "
+        "disk. X-Ray works only for repositories whose files are on this pod "
+        "(a repository mount, or pod-local local:// repositories); requests "
+        "against any other repository are refused. Set "
+        "xray_backend='delegated' to execute where the repositories are.",
+        content_backend,
+    )
 
 
 def _build_delegated_backend() -> XrayExecutionBackend:
@@ -117,3 +152,95 @@ def server_xray_execution_backend() -> Optional[XrayExecutionBackend]:
     )
 
     return getattr(_running_server_app_state(), "xray_execution_backend", None)
+
+
+#: The feature named in an in-pod X-Ray refusal.
+_LOCAL_XRAY_FEATURE = "X-Ray with xray_backend='local'"
+
+
+def xray_execution_backend_for(
+    configured: Optional[XrayExecutionBackend],
+    repo_path: Optional[str],
+    rel_paths: Sequence[str],
+) -> Optional[XrayExecutionBackend]:
+    """Where ONE X-Ray request over *repo_path* executes; None means this pod.
+
+    The single per-repository decision, made by ``RustNativeBackend`` before
+    every scan and graph analysis. *configured* is the backend the server
+    selected (``xray_backend``), or None for in-pod execution; *rel_paths* are
+    the candidate files, relative to *repo_path*, that execution will read.
+
+    * delegated execution, pod-local repository (a ``local://`` repo other
+      than cidx-meta, e.g. Langfuse trace folders; ``is_pod_local_golden_path``,
+      shared with the content seam and the ripgrep target) -> this pod. Its
+      files exist only here; the plugin's sandbox cannot see them. Phase 1
+      already reads such a repo locally (``content_seam_source`` and
+      ``server_regex_target`` return local for it), so the whole request stays
+      on the pod. Golden (cidx-meta, git) and activated repositories keep the
+      configured backend.
+    * in-pod execution while the content backend is delegated -> the
+      candidate files are probed on this pod's disk. If NONE of them exists,
+      and the repository is not pod-local, this pod does not hold the
+      repository (no mount): refused with ``DelegatedRepositoryUnsupportedError``
+      before xray-cli runs, so no partial result is produced. One file found is
+      enough to run: the mount is there, and a single missing file is a per-file
+      xray-cli error exactly as on a local pod.
+    * everything else (``xray_backend=local`` with local content, the CLI,
+      tests without a running server) -> unchanged: *configured*.
+
+    Blocking (a registry read, filesystem stats): call it off the event loop.
+
+    Raises:
+        DelegatedRepositoryUnsupportedError: in-pod execution under a
+            delegated content backend, and this pod holds none of the files.
+    """
+    if repo_path is None:
+        return configured
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_pod_local_golden_path,
+    )
+
+    if configured is not None:
+        if is_pod_local_golden_path(repo_path):
+            logger.info(
+                "X-Ray: executing in this pod for pod-local repository %s "
+                "(its files are not visible to the delegated X-Ray backend)",
+                repo_path,
+            )
+            return None
+        return configured
+    _refuse_in_pod_execution_without_repository(repo_path, rel_paths)
+    return None
+
+
+def _refuse_in_pod_execution_without_repository(
+    repo_path: str, rel_paths: Sequence[str]
+) -> None:
+    """Refuse in-pod execution under delegated content when no candidate is here.
+
+    A presence probe of THIS pod's disk (stat only, stopping at the first file
+    found): it never reads repository content and never turns an absence into
+    an answer -- absence is the refusal.
+    """
+    from code_indexer.server.services.delegated_refusal import (
+        DelegatedRepositoryUnsupportedError,
+    )
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+        is_pod_local_golden_path,
+    )
+
+    if not rel_paths or not is_content_seam_delegated():
+        return
+    root = Path(repo_path)
+    if any((root / rel).is_file() for rel in rel_paths):
+        return
+    if is_pod_local_golden_path(repo_path):
+        return
+    raise DelegatedRepositoryUnsupportedError(
+        _LOCAL_XRAY_FEATURE,
+        f"xray-cli runs in this pod and reads the candidate files from its "
+        f"disk, but none of the {len(rel_paths)} candidate file(s) exists "
+        f"under {repo_path}; set xray_backend='delegated' to execute where "
+        "the repository is",
+    )
