@@ -8,12 +8,12 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | Class | Rows |
 |---|---|
 | unclassified | 0 |
-| repo-read | 355 |
+| repo-read | 344 |
 | repo-write | 67 |
 | cidx-state-in-repo | 1020 |
-| migrated | 342 |
+| migrated | 347 |
 | local-only | 324 |
-| cidx-state | 575 |
+| cidx-state | 576 |
 | not-repo | 422 |
 
 ## Modules with open rows
@@ -90,8 +90,8 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/query/semantic_query_manager.py` | 0 | 0 | 0 | 4 |
 | `server/repositories/activated_repo_manager.py` | 0 | 1 | 2 | 8 |
 | `server/repositories/golden_repo_manager.py` | 0 | 23 | 9 | 31 |
-| `server/repositories/repository_listing_manager.py` | 0 | 8 | 0 | 0 |
-| `server/routers/activated_repos.py` | 0 | 8 | 0 | 7 |
+| `server/repositories/repository_listing_manager.py` | 0 | 5 | 0 | 0 |
+| `server/routers/activated_repos.py` | 0 | 0 | 0 | 7 |
 | `server/routers/git.py` | 0 | 4 | 0 | 0 |
 | `server/routers/inline_query.py` | 0 | 0 | 0 | 1 |
 | `server/routers/inline_repos.py` | 0 | 11 | 0 | 0 |

@@ -9,7 +9,7 @@ import logging
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -21,6 +21,10 @@ from code_indexer.server.services.repository_health_aggregator import (
     compute_repository_health,
     get_shared_health_service,
 )
+from code_indexer.server.startup.content_backend_wiring import (
+    is_content_seam_delegated,
+)
+from code_indexer.server.storage.shared.git_backend import head_branch
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
@@ -160,6 +164,89 @@ def _get_activated_repo_manager():
             "Server must set app.state.activated_repo_manager during startup."
         )
     return manager
+
+
+def _activated_copy_present(
+    activated_manager: Any, username: str, user_alias: str, repo_path: Path
+) -> bool:
+    """Whether the user's activated copy is there: its directory on this pod,
+    or -- when the repositories are not on this pod (delegated content
+    backend) -- the registry's record of the activation for THIS user. The
+    operation that follows reaches the copy through its seam and fails loudly
+    if it is gone; a pod-path probe would only see this pod's index state."""
+    if not is_content_seam_delegated():
+        return repo_path.exists()
+    return bool(activated_manager.user_has_activated_repo(username, user_alias))
+
+
+def _delegated_branches(repo_path: str) -> Tuple[str, List[str]]:
+    """``git branch`` of a copy that is not on this pod, through the git seam
+    (git-mcp): (current branch, local branches), in the shape the local
+    ``git branch`` parse gives -- including a detached HEAD, which is reported
+    as ``(HEAD detached at|from <ref>)`` and listed first. No delegated git
+    backend is an error -- never a local git run against a path this pod does
+    not hold. Any git-mcp failure other than a detached HEAD propagates."""
+    from code_indexer.server.startup.git_backend_wiring import (
+        server_delegated_git_backend,
+    )
+
+    backend = server_delegated_git_backend()
+    if backend is None:
+        raise RuntimeError(
+            "Repositories are not on this server (content_backend='delegated') "
+            "but git runs locally; set git_backend='delegated'."
+        )
+    names = backend.list_branches(repo_path, fmt="%(refname:short)")
+    current = head_branch(backend, repo_path)
+    if current is not None:
+        return current, sorted(names)
+    heads = _local_heads(backend, repo_path)
+    label = _detached_head_label(backend, repo_path, names, heads)
+    # `git branch` lists the detached HEAD before every branch.
+    return label, [label, *sorted(heads)]
+
+
+def _local_heads(backend: Any, repo_path: str) -> List[str]:
+    """Local branch names from ``git show-ref --heads`` (no branches: rc 1)."""
+    result = backend.show_ref(repo_path, "--heads")
+    if result.returncode != 0:
+        return []
+    return [
+        line.split(" ", 1)[1][len(_HEADS_PREFIX) :]
+        for line in str(result.stdout).splitlines()
+        if " " + _HEADS_PREFIX in line
+    ]
+
+
+def _detached_head_label(
+    backend: Any, repo_path: str, names: List[str], heads: List[str]
+) -> str:
+    """``(HEAD detached at|from <ref>)`` as ``git branch`` prints it.
+
+    git-mcp's branch list carries the detached HEAD as a bare ``<ref>`` entry
+    (the ref it was detached at), so ``<ref>`` is the one listed name that is
+    not a local branch. It is ``at`` while HEAD still points at ``<ref>``,
+    ``from`` once HEAD has moved -- the rule git applies. With no such name
+    (the ref is also a branch name) the label falls back to the short commit;
+    more than one means the two listings disagree, which is an error, never a
+    guess."""
+    extra = [n for n in names if n not in set(heads)]
+    if len(extra) > 1:
+        raise RuntimeError(
+            "git-mcp's branch list and show-ref disagree about the local "
+            f"branches of a detached HEAD ({len(extra)} unknown names)"
+        )
+    if not extra:
+        short = backend.rev_parse(repo_path, "--short", "HEAD")
+        return f"(HEAD detached at {short})"
+    ref = extra[0]
+    head, target = backend.rev_parse(
+        repo_path, "HEAD", f"{ref}^{{commit}}"
+    ).splitlines()
+    return f"(HEAD detached {'at' if head == target else 'from'} {ref})"
+
+
+_HEADS_PREFIX = "refs/heads/"
 
 
 def _get_background_job_manager():
@@ -306,7 +393,9 @@ async def get_indexes_status(
 
         # Check if repository exists
         repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
+        if not _activated_copy_present(
+            activated_manager, target_username, user_alias, repo_path_obj
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Activated repository '{user_alias}' not found",
@@ -491,7 +580,9 @@ async def trigger_reindex(
 
         # Check if repository exists
         repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
+        if not _activated_copy_present(
+            activated_manager, current_user.username, user_alias, repo_path_obj
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Activated repository '{user_alias}' not found",
@@ -615,7 +706,9 @@ async def add_index_type(
 
         # Check if repository exists
         repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
+        if not _activated_copy_present(
+            activated_manager, current_user.username, user_alias, repo_path_obj
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Activated repository '{user_alias}' not found",
@@ -717,7 +810,9 @@ async def check_activated_repo_health_async(
         )
 
         repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
+        if not _activated_copy_present(
+            activated_manager, current_user.username, user_alias, repo_path_obj
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Activated repository '{user_alias}' not found",
@@ -806,7 +901,9 @@ async def sync_repository(
 
         # Check if repository exists
         repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
+        if not _activated_copy_present(
+            activated_manager, current_user.username, user_alias, repo_path_obj
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Activated repository '{user_alias}' not found",
@@ -937,7 +1034,9 @@ async def switch_branch(
 
         # Check if repository exists
         repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
+        if not _activated_copy_present(
+            activated_manager, current_user.username, user_alias, repo_path_obj
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Activated repository '{user_alias}' not found",
@@ -1032,33 +1131,38 @@ async def list_branches(
 
         # Check if repository exists
         repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
+        if not _activated_copy_present(
+            activated_manager, current_user.username, user_alias, repo_path_obj
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Activated repository '{user_alias}' not found",
             )
 
-        # Get branches using git
-        result = subprocess.run(
-            ["git", "branch"],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        if is_content_seam_delegated():
+            current_branch, branches = _delegated_branches(repo_path)
+        else:
+            # Get branches using git
+            result = subprocess.run(
+                ["git", "branch"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
 
-        # Parse git branch output
-        branches = []
-        current_branch = ""
+            # Parse git branch output
+            branches = []
+            current_branch = ""
 
-        for line in result.stdout.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("* "):
-                # Current branch
-                current_branch = line[2:]
-                branches.append(current_branch)
-            else:
-                branches.append(line)
+            for line in result.stdout.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("* "):
+                    # Current branch
+                    current_branch = line[2:]
+                    branches.append(current_branch)
+                else:
+                    branches.append(line)
 
         return BranchesResponse(
             user_alias=user_alias,
@@ -1069,14 +1173,18 @@ async def list_branches(
     except HTTPException:
         raise
     except subprocess.CalledProcessError as e:
-        logger.error(f"Git command failed for {user_alias}: {e}")
+        # A git-mcp failure (GitMcpBackendError) may carry no stderr; its
+        # message then says what failed.
+        reason = redact_url_credentials(e.stderr or e)
+        logger.error(f"Git command failed for {user_alias}: {reason}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list branches: {redact_url_credentials(e.stderr)}",
+            detail=f"Failed to list branches: {reason}",
         )
     except Exception as e:
-        logger.error(f"Failed to list branches for {user_alias}: {e}")
+        reason = redact_url_credentials(e)
+        logger.error(f"Failed to list branches for {user_alias}: {reason}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list branches: {str(e)}",
+            detail=f"Failed to list branches: {reason}",
         )
