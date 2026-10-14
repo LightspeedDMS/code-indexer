@@ -108,7 +108,7 @@ def _delegate(w: SimpleNamespace) -> _Registry:
 
 def _listing_service(w: SimpleNamespace, root: Path) -> FileListingService:
     service = FileListingService()
-    service.activated_repo_manager = _Registry(root)  # type: ignore[assignment]
+    setattr(service, "activated_repo_manager", _Registry(root))
     return service
 
 
