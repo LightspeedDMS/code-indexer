@@ -487,6 +487,29 @@ def test_conflict_text_only_in_the_error_still_names_the_conflicts(
     assert result.stdout == "CONFLICT (content): Merge conflict in a.txt\n"
 
 
+def test_diffstat_failure_after_a_successful_pull_still_reports_success(
+    world: SimpleNamespace,
+) -> None:
+    """A transport error on the follow-up ``git diff --shortstat`` must not
+    mask a pull that already succeeded."""
+    from code_indexer.server.services.git_tools_seam import DelegatedGitTools
+
+    class DiffstatFails:
+        def run(self, repo: str, args: Sequence[str], **kw: Any) -> Any:
+            if args and args[0] == "rev-parse":
+                return subprocess.CompletedProcess(args, 0, "abc123\n", "")
+            raise subprocess.CalledProcessError(1, "git-mcp", output=None, stderr="transport error")
+
+        def pull(self, repo: str, **kw: Any) -> None:
+            pass
+
+    result = DelegatedGitTools(DiffstatFails()).run(
+        ["git", "pull", "origin", "main"], world.pod, check=False
+    )
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
 @pytest.mark.parametrize("set_upstream", [True, False])
 def test_pat_push_sets_upstream_only_when_asked(
     world: SimpleNamespace, set_upstream: bool

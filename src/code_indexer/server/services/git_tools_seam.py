@@ -97,7 +97,10 @@ class DelegatedGitTools:
             elif verb == "pull":
                 before = self._head(repo, timeout)
                 self._backend.pull(repo, remote=remote, branch=branch, timeout=timeout)
-                stdout = self._changed_summary(repo, before, timeout)
+                try:
+                    stdout = self._changed_summary(repo, before, timeout)
+                except subprocess.CalledProcessError:
+                    pass
             else:
                 self._backend.fetch(repo, remote, timeout=timeout)
         except subprocess.CalledProcessError as e:
