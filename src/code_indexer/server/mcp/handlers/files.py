@@ -223,6 +223,20 @@ def _start_auto_watch_if_needed(
         )
 
 
+def _reindex_after_write(
+    result: Dict[str, Any], repository_alias: str, user: User, file_path: str
+) -> None:
+    """Under a delegated content backend no watcher sees the write (the copy
+    is not on this pod): enqueue the activated copy's reindex and add the
+    outcome to ``result`` as ``reindex``. A no-op under the local backend,
+    where ``_start_auto_watch_if_needed`` re-indexes."""
+    from code_indexer.server.services.activated_write_reindex import (
+        attach_reindex_outcome,
+    )
+
+    attach_reindex_outcome(result, user.username, repository_alias, [file_path])
+
+
 def _invalidate_wiki_cache(repository_alias: str, file_path: str) -> None:
     """Fire-and-forget wiki cache invalidation for file changes (Story #304)."""
     try:
@@ -1376,6 +1390,7 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
+        _reindex_after_write(result, repository_alias, user, file_path)
         return _mcp_response(result)
     except Exception as e:
         return _handle_crud_exception(e, "create", "handle_create_file")
@@ -1419,6 +1434,7 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
+        _reindex_after_write(result, repository_alias, user, file_path)
         return _mcp_response(result)
     except Exception as e:
         return _handle_crud_exception(e, "edit", "handle_edit_file")
@@ -1446,6 +1462,7 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
+        _reindex_after_write(result, repository_alias, user, file_path)
         return _mcp_response(result)
     except Exception as e:
         return _handle_crud_exception(e, "delete", "handle_delete_file")

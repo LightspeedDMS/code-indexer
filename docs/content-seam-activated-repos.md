@@ -34,6 +34,31 @@ Refused under delegated (fail loud): composite activation; a bare golden clone;
 a `clone_backend` other than `delegated`; `git_backend: local`. An unreachable
 workspace-mcp raises -- it is never "repository not found".
 
+## Reindex after edits (no change feed)
+
+| Edit | Local | Delegated |
+|---|---|---|
+| cidx file tools: MCP `create_file`/`edit_file`/`delete_file`, REST `/api/v1/repos/{alias}/files` | auto-watch, started before the write, re-indexes | after a successful write, an incremental reindex (`semantic`, `fts`; `clear=False`) of the copy is enqueued through `trigger_reindex` (`server/services/activated_write_reindex.py`) |
+| cidx git tools that move the working tree: merge, merge abort, branch switch, checkout file, reset, clean, pull, stash push/pop/apply (MCP and REST) | an already-running auto-watch re-indexes; otherwise nothing | the same enqueue (paths `["*"]`), also after a merge or pull that stops on conflicts (git has rewritten the tree) and after a failed stash pop/apply (it may have) |
+| Anything outside cidx: a process writing workspace-mcp's storage, a commit landing on the remote (the copy changes only when cidx pulls) | the watcher sees local writes only while auto-watch runs | **not seen** -- no change feed. Indexed only by `trigger_reindex`, `sync_repository`, or the incremental pass of the next reindex a cidx write enqueues |
+
+Per copy the enqueue coalesces: a PENDING reindex of the copy has not read it
+yet, so the write joins it (`coalesced`); a RUNNING reindex (of the copy, or any
+of the user's copies -- `trigger_reindex` allows one per user) may have read past
+the written paths, so one follow-up is scheduled for when it is done
+(`deferred`); otherwise a new job (`queued`). The MCP response carries the outcome
+as `reindex` (REST response models drop it). Fail loud: `failed` (with `error`)
+is also logged at ERROR as SVC-REINDEX-001, a follow-up that never gets a slot
+as SVC-REINDEX-002. Every enqueue is gated on the registry
+(`user_has_activated_repo`) for the calling user; golden repositories in write
+mode (`-global`, write exceptions) are re-indexed by their refresh on
+`exit_write_mode`, not here. Under `content_backend: local` none of this runs and
+responses are unchanged.
+
+Follow-ups waiting for a slot are in-memory timers: a pod restart drops them.
+The written paths are then indexed by the next reindex of the copy --
+`trigger_reindex`, `sync_repository`, or the next cidx write's enqueue.
+
 ## Deployment
 
 * `content_backend: delegated`, `clone_backend: delegated` (`workspace_mcp.endpoint`, `api_key` = `WSM_CLONE_SHARED_SECRET`), `git_backend: delegated`.

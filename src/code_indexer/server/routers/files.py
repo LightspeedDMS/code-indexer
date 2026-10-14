@@ -17,6 +17,9 @@ from code_indexer.server.services.file_crud_service import (
     file_crud_service,
 )
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.activated_write_reindex import (
+    attach_reindex_outcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +125,7 @@ def create_file(
             content=request.content,
             username=user.username,
         )
+        attach_reindex_outcome(result, user.username, alias, [request.file_path])
         return CreateFileResponse(**result)
 
     except FileExistsError as e:
@@ -217,6 +221,7 @@ def edit_file(
             replace_all=request.replace_all,
             username=user.username,
         )
+        attach_reindex_outcome(result, user.username, alias, [file_path])
         return EditFileResponse(**result)
 
     except HashMismatchError as e:
@@ -309,6 +314,7 @@ def delete_file(
             content_hash=content_hash,
             username=user.username,
         )
+        attach_reindex_outcome(result, user.username, alias, [file_path])
         return DeleteFileResponse(**result)
 
     except PermissionError as e:

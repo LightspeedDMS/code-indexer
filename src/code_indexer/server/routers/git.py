@@ -14,6 +14,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from code_indexer.server.auth.dependencies import require_permission
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.git_operations_service import git_operations_service
+from code_indexer.server.services.activated_write_reindex import (
+    attach_reindex_outcome,
+)
 from code_indexer.server.services.git_argv_safety import (
     GitArgumentValidationError,
     validate_revision,
@@ -601,6 +604,7 @@ def git_pull(
             remote=request.remote,
             branch=request.branch,
         )
+        attach_reindex_outcome(result, user.username, alias, None)
         return GitPullResponse(**result)
     except FileNotFoundError as e:
         logger.warning(
@@ -722,6 +726,7 @@ def git_reset(
             commit_hash=request.commit_hash,
             confirmation_token=request.confirmation_token,
         )
+        attach_reindex_outcome(result, user.username, alias, None)
         return GitResetResponse(**result)
     except PermissionError as e:
         logger.warning(
@@ -787,6 +792,7 @@ def git_clean(
             username=user.username,
             confirmation_token=request.confirmation_token,
         )
+        attach_reindex_outcome(result, user.username, alias, None)
         return GitCleanResponse(**result)
     except PermissionError as e:
         logger.warning(
@@ -837,6 +843,7 @@ def git_merge_abort(
     try:
         service = git_operations_service
         result = service.abort_merge(repo_alias=alias, username=user.username)
+        attach_reindex_outcome(result, user.username, alias, None)
         return GitMergeAbortResponse(**result)
     except FileNotFoundError as e:
         logger.warning(
@@ -883,6 +890,7 @@ def git_checkout_file(
         result = service.checkout_file(
             repo_alias=alias, file_path=request.file_path, username=user.username
         )
+        attach_reindex_outcome(result, user.username, alias, [request.file_path])
         return GitCheckoutFileResponse(**result)
     except FileNotFoundError as e:
         logger.warning(
@@ -1036,6 +1044,7 @@ def git_branch_switch(
         result = service.switch_branch(
             repo_alias=alias, branch_name=name, username=user.username
         )
+        attach_reindex_outcome(result, user.username, alias, None)
         return GitBranchSwitchResponse(**result)
     except FileNotFoundError as e:
         logger.warning(
