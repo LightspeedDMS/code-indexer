@@ -79,6 +79,7 @@ def real_pv1_cache(tmp_path: Path):
             cache,
             ["items"],
             [{"items": ["page-one-content"]}, {"items": ["page-two-content"]}],
+            owner="testuser",
         )
         yield cache, handle, total_pages
     finally:

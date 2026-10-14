@@ -697,8 +697,13 @@ def _validate_xray_search_patterns(
 # inline budget = payload_max_fetch_size_chars; inline_entry_truncated).
 
 
-def _truncate_xray_result(result: Dict[str, Any]) -> Dict[str, Any]:
+def _truncate_xray_result(
+    result: Dict[str, Any], *, owner: Optional[str] = None
+) -> Dict[str, Any]:
     """Apply PayloadCache truncation to matches[]/evaluation_errors[].
+
+    `owner` is the username of the requesting user; only that user can
+    fetch the cached pages.
 
     See xray_truncation.truncate_result_fields() for the shared
     mechanics -- INCLUDING its own `payload_cache is None -> return a
@@ -720,7 +725,7 @@ def _truncate_xray_result(result: Dict[str, Any]) -> Dict[str, Any]:
     )
     try:
         return xray_truncation.truncate_result_fields(
-            result, payload_cache, ["matches", "evaluation_errors"]
+            result, payload_cache, ["matches", "evaluation_errors"], owner=owner
         )
     except xray_truncation.PageSetStoreError as exc:
         logger.error("xray_search truncation: page-set store failed: %s", exc)

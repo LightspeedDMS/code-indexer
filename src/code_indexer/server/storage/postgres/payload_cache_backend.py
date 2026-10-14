@@ -5,7 +5,9 @@ Drop-in replacement for PayloadCacheSqliteBackend using psycopg v3 sync connecti
 via ConnectionPool.  Satisfies the PayloadCacheBackend Protocol (protocols.py).
 
 Table created on first use (CREATE TABLE IF NOT EXISTS) so no separate
-migration step is required for the payload_cache table.
+migration step is required for the payload_cache table. The nullable
+``owner`` column (the username of an entry's creator) is added in place on a
+table that predates it, and by migration 075.
 """
 
 from __future__ import annotations
@@ -19,6 +21,35 @@ from .connection_pool import ConnectionPool
 logger = logging.getLogger(__name__)
 
 _PG_NOW = "NOW()"
+
+# One upsert statement for every write path, so each path writes (and on
+# conflict replaces) the same columns, owner included.
+_UPSERT_SQL = """
+    INSERT INTO payload_cache
+        (cache_handle, content, preview, created_at, ttl_seconds, node_id, owner)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (cache_handle) DO UPDATE SET
+        content = EXCLUDED.content,
+        preview = EXCLUDED.preview,
+        created_at = EXCLUDED.created_at,
+        ttl_seconds = EXCLUDED.ttl_seconds,
+        node_id = EXCLUDED.node_id,
+        owner = EXCLUDED.owner
+"""
+
+# Entry reads. The owner-filtered one matches no row for a missing handle,
+# an owner-less entry or another user's entry, so their content is never
+# transferred (same cost as a missing handle).
+_SELECT_BY_HANDLE = """
+    SELECT content, preview, created_at, ttl_seconds, node_id, owner
+    FROM payload_cache
+    WHERE cache_handle = %s
+"""
+_SELECT_BY_HANDLE_AND_OWNER = """
+    SELECT content, preview, created_at, ttl_seconds, node_id, owner
+    FROM payload_cache
+    WHERE cache_handle = %s AND owner = %s
+"""
 
 
 def _live_predicate(now_sql: str) -> str:
@@ -49,7 +80,9 @@ class PayloadCachePostgresBackend:
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
-        """Create the payload_cache table and indexes if they do not already exist."""
+        """Create the payload_cache table if it does not already exist, and
+        add the nullable owner column to a table that predates it (its old
+        rows read NULL: no creator)."""
         try:
             with self._pool.connection() as conn:
                 conn.execute(
@@ -60,9 +93,13 @@ class PayloadCachePostgresBackend:
                         preview TEXT NOT NULL,
                         created_at TEXT NOT NULL,
                         ttl_seconds INTEGER NOT NULL,
-                        node_id TEXT
+                        node_id TEXT,
+                        owner TEXT
                     )
                     """
+                )
+                conn.execute(
+                    "ALTER TABLE payload_cache ADD COLUMN IF NOT EXISTS owner TEXT"
                 )
                 conn.commit()
         except Exception as exc:
@@ -75,6 +112,7 @@ class PayloadCachePostgresBackend:
         preview: str,
         ttl_seconds: int,
         node_id: Optional[str] = None,
+        owner: Optional[str] = None,
     ) -> None:
         """Store a payload cache entry, replacing any existing entry with the same handle.
 
@@ -84,6 +122,7 @@ class PayloadCachePostgresBackend:
             preview: Truncated preview of the content.
             ttl_seconds: Time-to-live in seconds.
             node_id: Optional cluster node identifier (NULL in standalone).
+            owner: Username of the entry's creator (NULL: no creator).
         """
         now = datetime.now(timezone.utc).isoformat()
         try:
@@ -92,18 +131,8 @@ class PayloadCachePostgresBackend:
                 # SET LOCAL is per-transaction; does not affect users/jobs/migrations.
                 conn.execute("SET LOCAL synchronous_commit = off")
                 conn.execute(
-                    """
-                    INSERT INTO payload_cache
-                        (cache_handle, content, preview, created_at, ttl_seconds, node_id)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (cache_handle) DO UPDATE SET
-                        content = EXCLUDED.content,
-                        preview = EXCLUDED.preview,
-                        created_at = EXCLUDED.created_at,
-                        ttl_seconds = EXCLUDED.ttl_seconds,
-                        node_id = EXCLUDED.node_id
-                    """,
-                    (cache_handle, content, preview, now, ttl_seconds, node_id),
+                    _UPSERT_SQL,
+                    (cache_handle, content, preview, now, ttl_seconds, node_id, owner),
                 )
                 conn.commit()
         except Exception as exc:
@@ -113,15 +142,17 @@ class PayloadCachePostgresBackend:
         self,
         entries: List[Tuple[str, str, str, int]],
         node_id: Optional[str],
+        owner: Optional[str],
     ) -> None:
         """Build rows and run the ONE-transaction batch INSERT. Shared by
         store_batch() (which catches and warning-logs a failure) and
         store_batch_strict() (Bug #1928 round-3 P1, which lets a failure
         propagate) so the SQL/transaction logic is defined exactly once.
+        The owner is a column of each row, written by the same statement.
         """
         now = datetime.now(timezone.utc).isoformat()
         rows = [
-            (handle, content, preview, now, ttl_secs, node_id)
+            (handle, content, preview, now, ttl_secs, node_id, owner)
             for handle, content, preview, ttl_secs in entries
         ]
         with self._pool.connection() as conn:
@@ -132,26 +163,14 @@ class PayloadCachePostgresBackend:
             # Using the cursor keeps this in the SAME transaction as the
             # SET LOCAL above and the single commit() below.
             with conn.cursor() as cur:
-                cur.executemany(
-                    """
-                    INSERT INTO payload_cache
-                        (cache_handle, content, preview, created_at, ttl_seconds, node_id)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (cache_handle) DO UPDATE SET
-                        content = EXCLUDED.content,
-                        preview = EXCLUDED.preview,
-                        created_at = EXCLUDED.created_at,
-                        ttl_seconds = EXCLUDED.ttl_seconds,
-                        node_id = EXCLUDED.node_id
-                    """,
-                    rows,
-                )
+                cur.executemany(_UPSERT_SQL, rows)
             conn.commit()
 
     def store_batch(
         self,
         entries: List[Tuple[str, str, str, int]],
         node_id: Optional[str] = None,
+        owner: Optional[str] = None,
     ) -> None:
         """Store multiple payload cache entries in ONE transaction/commit.
 
@@ -165,11 +184,12 @@ class PayloadCachePostgresBackend:
         Args:
             entries: List of (cache_handle, content, preview, ttl_seconds) tuples.
             node_id: Optional cluster node identifier (NULL in standalone).
+            owner: Username of the creator of every entry in the batch.
         """
         if not entries:
             return
         try:
-            self._execute_batch_insert(entries, node_id)
+            self._execute_batch_insert(entries, node_id, owner)
         except Exception as exc:
             logger.warning("PayloadCachePostgresBackend: store_batch failed: %s", exc)
 
@@ -177,6 +197,7 @@ class PayloadCachePostgresBackend:
         self,
         entries: List[Tuple[str, str, str, int]],
         node_id: Optional[str] = None,
+        owner: Optional[str] = None,
     ) -> None:
         """Bug #1928 (round 3, P1 -- Codex REJECT): identical write to
         store_batch() above, but PROPAGATES any failure instead of
@@ -188,13 +209,14 @@ class PayloadCachePostgresBackend:
         Args:
             entries: List of (cache_handle, content, preview, ttl_seconds) tuples.
             node_id: Optional cluster node identifier (NULL in standalone).
+            owner: Username of the creator of every entry in the batch.
 
         Raises:
             Whatever the underlying psycopg connection/transaction raises.
         """
         if not entries:
             return
-        self._execute_batch_insert(entries, node_id)
+        self._execute_batch_insert(entries, node_id, owner)
 
     def retrieve(self, cache_handle: str) -> Optional[Dict[str, Any]]:
         """Retrieve a cache entry by handle, or None if missing or expired.
@@ -203,19 +225,29 @@ class PayloadCachePostgresBackend:
             cache_handle: Unique identifier for the cache entry.
 
         Returns:
-            Dict with keys: content, preview, created_at, node_id — or None
-            if the entry does not exist or has exceeded its TTL.
+            Dict with keys: content, preview, created_at, node_id, owner --
+            or None if the entry does not exist or has exceeded its TTL.
         """
+        return self._fetch_live(_SELECT_BY_HANDLE, (cache_handle,))
+
+    def retrieve_owned(self, cache_handle: str, owner: str) -> Optional[Dict[str, Any]]:
+        """Retrieve an entry only when `owner` created it, in ONE query that
+        filters by owner: a missing handle, an owner-less entry and another
+        user's entry all match no row, so their content is never transferred.
+
+        Returns:
+            Same dict as retrieve(), or None (missing, not owned, expired).
+        """
+        return self._fetch_live(_SELECT_BY_HANDLE_AND_OWNER, (cache_handle, owner))
+
+    def _fetch_live(
+        self, sql: str, params: Tuple[str, ...]
+    ) -> Optional[Dict[str, Any]]:
+        """Run one entry SELECT and return the live entry, or None when no
+        row matched, the row has exceeded its TTL, or the read failed."""
         try:
             with self._pool.connection() as conn:
-                row = conn.execute(
-                    """
-                    SELECT content, preview, created_at, ttl_seconds, node_id
-                    FROM payload_cache
-                    WHERE cache_handle = %s
-                    """,
-                    (cache_handle,),
-                ).fetchone()
+                row = conn.execute(sql, params).fetchone()
         except Exception as exc:
             logger.warning("PayloadCachePostgresBackend: retrieve failed: %s", exc)
             return None
@@ -243,29 +275,32 @@ class PayloadCachePostgresBackend:
             "preview": row[1],
             "created_at": created_at_str,
             "node_id": row[4],
+            "owner": row[5],
         }
 
     def store_expiring(self, cache_handle: str, content: str, ttl_seconds: int) -> None:
         """Insert or replace one entry living exactly `ttl_seconds`, stamped
         by the database clock (see PayloadCacheBackend.store_expiring).
-        Errors propagate."""
+        The entry has no creator (owner NULL). Errors propagate."""
         with self._pool.connection() as conn:
             conn.execute(
                 """
                 INSERT INTO payload_cache
-                    (cache_handle, content, preview, created_at, ttl_seconds, node_id)
+                    (cache_handle, content, preview, created_at, ttl_seconds,
+                     node_id, owner)
                 VALUES (
                     %s, %s, '',
                     to_char(now() AT TIME ZONE 'UTC',
                             'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'),
-                    %s, NULL
+                    %s, NULL, NULL
                 )
                 ON CONFLICT (cache_handle) DO UPDATE SET
                     content = EXCLUDED.content,
                     preview = EXCLUDED.preview,
                     created_at = EXCLUDED.created_at,
                     ttl_seconds = EXCLUDED.ttl_seconds,
-                    node_id = EXCLUDED.node_id
+                    node_id = EXCLUDED.node_id,
+                    owner = EXCLUDED.owner
                 """,
                 (cache_handle, content, ttl_seconds),
             )

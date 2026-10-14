@@ -139,6 +139,8 @@ def resolve_batch_evaluator(
 def _truncate_xray_batch_result(
     result: Dict[str, Any],
     payload_cache: Any,
+    *,
+    owner: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Apply PayloadCache truncation to matches[]/errors[]/
     evaluation_errors[] -- see xray_truncation.truncate_result_fields()
@@ -148,7 +150,8 @@ def _truncate_xray_batch_result(
     preview field). Called from `_job_fn`, which already runs inside the
     BackgroundJobManager worker thread pool -- off the event loop -- so
     no additional offload is needed here (unlike xray_graph.py's `async
-    def` handlers).
+    def` handlers). `owner` is the username of the requesting user; only
+    that user can fetch the cached pages.
 
     When payload_cache is None, xray_truncation.truncate_result_fields()'s
     own guard (Bug #1928 P3) returns a bounded, cache_unavailable=True
@@ -161,7 +164,10 @@ def _truncate_xray_batch_result(
     """
     try:
         return xray_truncation.truncate_result_fields(
-            result, payload_cache, ["matches", "errors", "evaluation_errors"]
+            result,
+            payload_cache,
+            ["matches", "errors", "evaluation_errors"],
+            owner=owner,
         )
     except xray_truncation.PageSetStoreError as exc:
         logger.error("xray_search_batch truncation: page-set store failed: %s", exc)
@@ -860,7 +866,9 @@ def handle_xray_search_batch(
         payload_cache = (
             getattr(payload_cache, "payload_cache", None) if payload_cache else None
         )
-        return _truncate_xray_batch_result(raw_result, payload_cache)
+        return _truncate_xray_batch_result(
+            raw_result, payload_cache, owner=user.username
+        )
 
     # Deferred job_id capture: submit_job requires `func` before it returns the
     # job_id, but the worker (_job_fn) needs the job_id for between-cell

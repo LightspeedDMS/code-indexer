@@ -18,6 +18,7 @@ from code_indexer.server.cache.payload_cache import PayloadCache, PayloadCacheCo
 from code_indexer.server.mcp.handlers import xray_truncation as xt
 
 from ._xray_truncation_test_helpers import (
+    OWNER,
     cache_factory,  # noqa: F401 -- pytest fixture, used via injection
     fetch_all_pages,
     make_error,
@@ -53,7 +54,7 @@ class TestEveryPageIndependentlyParseable:
         }
 
         truncated = xt.truncate_result_fields(
-            result, cache, ["matches", "evaluation_errors"]
+            result, cache, ["matches", "evaluation_errors"], owner=OWNER
         )
 
         pages = fetch_all_pages(cache, truncated["cache_handle"])
@@ -85,7 +86,7 @@ class TestEveryPageIndependentlyParseable:
         }
 
         truncated = xt.truncate_result_fields(
-            result, cache, ["matches", "evaluation_errors"]
+            result, cache, ["matches", "evaluation_errors"], owner=OWNER
         )
         assert truncated["truncated"] is True
         total_pages = truncated["total_pages"]
@@ -123,7 +124,7 @@ class TestConfigChangeBetweenStoreAndFetch:
         }
         try:
             truncated = xt.truncate_result_fields(
-                result, store_cache, ["matches", "evaluation_errors"]
+                result, store_cache, ["matches", "evaluation_errors"], owner=OWNER
             )
             cache_handle = truncated["cache_handle"]
         finally:
@@ -154,9 +155,9 @@ class TestLegacyHandleStillFetchable:
     ) -> None:
         cache = cache_factory(max_fetch_size_chars=TINY_LEGACY_BUDGET_CHARS)
         raw_content = json_module.dumps({"matches": [make_match(0)]})
-        legacy_handle = cache.store(raw_content)
+        legacy_handle = cache.store(raw_content, owner=OWNER)
 
-        result = xt.fetch_cached_page(cache, legacy_handle, FIRST_PAGE_NUMBER)
+        result = xt.fetch_cached_page(cache, legacy_handle, FIRST_PAGE_NUMBER, OWNER)
 
         assert result["content"] == raw_content[:TINY_LEGACY_BUDGET_CHARS]
         assert result["total_pages"] == -(-len(raw_content) // TINY_LEGACY_BUDGET_CHARS)

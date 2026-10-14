@@ -388,7 +388,7 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
                     bjm.unregister_child_processes(jid)
                     if _slot and _limiter is not None:
                         _limiter.release()
-                return _truncate_xray_result(result)
+                return _truncate_xray_result(result, owner=user.username)
 
             return _job
 
@@ -593,7 +593,7 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
             bjm.unregister_child_processes(job_id)
             if _slot and _limiter is not None:
                 _limiter.release()
-        return _truncate_xray_result(result)
+        return _truncate_xray_result(result, owner=user.username)
 
     future = loop.run_in_executor(xray_executor, job_fn)
 

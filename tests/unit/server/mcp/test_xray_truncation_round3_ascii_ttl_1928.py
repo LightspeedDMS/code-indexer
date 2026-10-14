@@ -17,6 +17,7 @@ from code_indexer.server.cache.payload_cache import CacheNotFoundError
 from code_indexer.server.mcp.handlers import xray_truncation as xt
 
 from ._xray_truncation_test_helpers import (  # noqa: F401
+    OWNER,
     cache_factory,
     fetch_all_pages,
     make_match,
@@ -45,7 +46,7 @@ class TestNonAsciiRoundTrip:
         result = {"matches": matches, "evaluation_errors": []}
 
         truncated = xt.truncate_result_fields(
-            result, cache, ["matches", "evaluation_errors"]
+            result, cache, ["matches", "evaluation_errors"], owner=OWNER
         )
         pages = fetch_all_pages(cache, truncated["cache_handle"])
         reconstructed = [m for p in pages for m in p["matches"]]
@@ -64,6 +65,7 @@ class TestTtlBoundaryAllRowsExpireTogether:
             {"matches": matches, "evaluation_errors": []},
             cache,
             ["matches", "evaluation_errors"],
+            owner=OWNER,
         )
         cache_handle = truncated["cache_handle"]
         total_pages = truncated["total_pages"]
@@ -116,4 +118,4 @@ class TestTtlBoundaryAllRowsExpireTogether:
         assert row_count_after == 0, "no page or manifest rows should survive"
 
         with pytest.raises(CacheNotFoundError):
-            xt.fetch_cached_page(cache, cache_handle, 1)
+            xt.fetch_cached_page(cache, cache_handle, 1, OWNER)

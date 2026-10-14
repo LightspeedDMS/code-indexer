@@ -4,6 +4,15 @@ Story #679: S1 - Semantic Search with Payload Control (Foundation)
 Story #50: Converted from async to sync for FastAPI thread pool execution.
 
 Provides SQLite-based caching for large content with TTL-based eviction.
+
+Cached content is served only to its creator: every handle-producing store
+(store, store_batch, store_batch_with_keys, truncate_result) records the
+creating user (``owner``) with the entry, in the same write, and the generic
+retrieval doors read through retrieve_owned()/retrieve_full_owned(), which
+answer a missing handle, an entry with no recorded creator and another
+user's entry identically (CacheNotFoundError). Key-addressed entries
+(store_with_key, store_expiring_key) have no creator and are read only by
+the route that wrote them, through retrieve()/retrieve_full().
 """
 
 import logging
@@ -14,7 +23,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple, TYPE_CHECKING, cast
+from typing import List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import CacheConfig
@@ -136,6 +145,12 @@ class PayloadCache:
             self._initialized.set()
             return
 
+        # Lazy: only the backend-less (CLI/daemon/test) path needs it, and the
+        # sqlite_backends package import is not free.
+        from code_indexer.server.storage.sqlite_backends.payload_cache_backend import (
+            ensure_owner_column,
+        )
+
         # Ensure parent directory exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -153,10 +168,14 @@ class PayloadCache:
                     handle TEXT PRIMARY KEY,
                     content TEXT NOT NULL,
                     created_at REAL NOT NULL,
-                    total_size INTEGER NOT NULL
+                    total_size INTEGER NOT NULL,
+                    owner TEXT
                 )
                 """
             )
+            # A table created before entries recorded their creator gains
+            # the column in place; its old rows read NULL (no creator).
+            ensure_owner_column(c)
 
             # Create index for TTL cleanup
             c.execute(
@@ -217,14 +236,42 @@ class PayloadCache:
                     format_error_log("GIT-GENERAL-014", f"Cleanup failed: {e}")
                 )
 
-    def store(self, content: str) -> str:
+    def _require_conn_manager(self) -> DatabaseConnectionManager:
+        if self._conn_manager is None:
+            raise RuntimeError("PayloadCache not initialized - call initialize() first")
+        return self._conn_manager
+
+    def _insert_owned_rows(
+        self, rows: List[Tuple[str, str]], owner: Optional[str]
+    ) -> None:
+        """Facade-SQLite path: insert (handle, content) rows sharing one
+        timestamp and one owner in ONE execute_atomic transaction (rolls
+        back and re-raises on any failure)."""
+        conn_manager = self._require_conn_manager()
+        now = time.time()
+        params = [(h, c, now, len(c), owner) for h, c in rows]
+
+        def _do_batch_insert(conn: sqlite3.Connection) -> None:
+            conn.executemany(
+                """
+                INSERT INTO payload_cache
+                    (handle, content, created_at, total_size, owner)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                params,
+            )
+
+        conn_manager.execute_atomic(_do_batch_insert)
+
+    def store(self, content: str, *, owner: Optional[str] = None) -> str:
         """Store content and return a UUID4 handle.
 
         Story #50: Converted from async to sync for FastAPI thread pool execution.
-        Uses connection-per-operation pattern for thread safety.
 
         Args:
             content: Content to cache
+            owner: Username of the caller whose request created the entry;
+                only that user can read it through the generic doors.
 
         Returns:
             UUID4 handle for retrieving the content
@@ -234,35 +281,30 @@ class PayloadCache:
         if self._backend is not None:
             # PG/cluster mode: delegate to backend
             preview = content[: self.config.preview_size_chars]
-            self._backend.store(handle, content, preview, self.config.cache_ttl_seconds)
+            self._backend.store(
+                handle,
+                content,
+                preview,
+                self.config.cache_ttl_seconds,
+                owner=owner,
+            )
             return handle
 
-        if self._conn_manager is None:
-            raise RuntimeError("PayloadCache not initialized - call initialize() first")
-        created_at = time.time()
-        total_size = len(content)
-
-        def _do_insert(conn: sqlite3.Connection) -> None:
-            conn.execute(
-                """
-                INSERT INTO payload_cache (handle, content, created_at, total_size)
-                VALUES (?, ?, ?, ?)
-                """,
-                (handle, content, created_at, total_size),
-            )
-
-        self._conn_manager.execute_atomic(_do_insert)
-
+        self._insert_owned_rows([(handle, content)], owner)
         return handle
 
-    def store_batch(self, contents: List[str]) -> List[str]:
+    def store_batch(
+        self, contents: List[str], *, owner: Optional[str] = None
+    ) -> List[str]:
         """Store multiple content strings and return their handles in order.
 
         Bug #1181: Batch all per-query stores into ONE transaction/commit to avoid
         N fsync'd commits per query saturating the PostgreSQL WAL write lock.
+        The owner is a column of every row, written by that same transaction.
 
         Args:
             contents: List of content strings to cache.
+            owner: Username of the caller whose request created the entries.
 
         Returns:
             List of UUID4 handles in the same order as contents.
@@ -281,34 +323,19 @@ class PayloadCache:
             # backend.store_batch() — ONE transaction/commit. The facade is the
             # sole handle authority; the backend accepts pre-built handles.
             entries = [(h, c, c[:preview_size], ttl) for h, c in zip(handles, contents)]
-            self._backend.store_batch(entries)
+            self._backend.store_batch(entries, owner=owner)
             return handles
 
-        # CLI/daemon mode: no backend, use this facade's own _conn_manager
-        # (legacy per-facade SQLite schema: handle, content, created_at, total_size).
-        # This path does NOT call the backend — it owns its own connection directly.
-        if self._conn_manager is None:
-            raise RuntimeError("PayloadCache not initialized - call initialize() first")
-
-        now = time.time()
-        rows = [(h, c, now, len(c)) for h, c in zip(handles, contents)]
-
-        def _do_batch_insert(conn: sqlite3.Connection) -> None:
-            conn.executemany(
-                """
-                INSERT INTO payload_cache (handle, content, created_at, total_size)
-                VALUES (?, ?, ?, ?)
-                """,
-                rows,
-            )
-
-        self._conn_manager.execute_atomic(_do_batch_insert)
+        # CLI/daemon mode: no backend, use this facade's own _conn_manager.
+        self._insert_owned_rows(list(zip(handles, contents)), owner)
         return handles
 
-    def store_batch_with_keys(self, items: List[Tuple[str, str]]) -> None:
+    def store_batch_with_keys(
+        self, items: List[Tuple[str, str]], *, owner: Optional[str] = None
+    ) -> None:
         """Store multiple (handle, content) pairs -- handles PRE-ASSIGNED
         by the caller -- in ONE atomic transaction sharing a single
-        timestamp/TTL, PROPAGATING any write failure.
+        timestamp/TTL and owner, PROPAGATING any write failure.
 
         Bug #1928 (round 3, P1 -- Codex REJECT): a page-set write (e.g.
         xray_truncation's N whole-entry pages plus a pages-v1 manifest
@@ -328,6 +355,7 @@ class PayloadCache:
 
         Args:
             items: List of (handle, content) pairs. Empty list is a no-op.
+            owner: Username of the caller whose request created the entries.
 
         Raises:
             RuntimeError: not initialized (plain-SQLite path).
@@ -337,29 +365,14 @@ class PayloadCache:
         if not items:
             return
 
-        ttl = self.config.cache_ttl_seconds
-
         if self._backend is not None:
             preview_size = self.config.preview_size_chars
+            ttl = self.config.cache_ttl_seconds
             entries = [(h, c, c[:preview_size], ttl) for h, c in items]
-            self._backend.store_batch_strict(entries)
+            self._backend.store_batch_strict(entries, owner=owner)
             return
 
-        if self._conn_manager is None:
-            raise RuntimeError("PayloadCache not initialized - call initialize() first")
-        now = time.time()
-        rows = [(h, c, now, len(c)) for h, c in items]
-
-        def _do_batch_insert_with_keys(conn: sqlite3.Connection) -> None:
-            conn.executemany(
-                """
-                INSERT INTO payload_cache (handle, content, created_at, total_size)
-                VALUES (?, ?, ?, ?)
-                """,
-                rows,
-            )
-
-        self._conn_manager.execute_atomic(_do_batch_insert_with_keys)
+        self._insert_owned_rows(list(items), owner)
 
     def store_with_key(self, key: str, content: str) -> None:
         """Store content with explicit key.
@@ -368,7 +381,9 @@ class PayloadCache:
         Story #50: Converted from async to sync for FastAPI thread pool execution.
 
         Unlike store() which generates UUID4, this uses the provided key.
-        If key already exists, updates the content and timestamp.
+        If key already exists, updates the content and timestamp. The entry
+        has no creator: it is read only by the route that wrote it, never
+        by the generic retrieval doors.
 
         Args:
             key: Explicit key for storage (e.g., "query:abc-123")
@@ -380,13 +395,12 @@ class PayloadCache:
             self._backend.store(key, content, preview, self.config.cache_ttl_seconds)
             return
 
-        if self._conn_manager is None:
-            raise RuntimeError("PayloadCache not initialized - call initialize() first")
+        conn_manager = self._require_conn_manager()
         created_at = time.time()
         total_size = len(content)
 
         def _do_insert(conn: sqlite3.Connection) -> None:
-            # Use INSERT OR REPLACE to handle updates
+            # Use INSERT OR REPLACE to handle updates (owner reads NULL)
             conn.execute(
                 """
                 INSERT OR REPLACE INTO payload_cache (handle, content, created_at, total_size)
@@ -395,7 +409,7 @@ class PayloadCache:
                 (key, content, created_at, total_size),
             )
 
-        self._conn_manager.execute_atomic(_do_insert)
+        conn_manager.execute_atomic(_do_insert)
 
     def _expiring_backend(self) -> "PayloadCacheBackend":
         """Expiring entries need a storage backend: only a backend records
@@ -439,11 +453,10 @@ class PayloadCache:
             # PG/cluster mode: delegate to backend (retrieve returns None if missing)
             return self._backend.retrieve(key) is not None
 
-        if self._conn_manager is None:
-            raise RuntimeError("PayloadCache not initialized - call initialize() first")
+        conn_manager = self._require_conn_manager()
         # Bug #1532 follow-up: route the raw connection through
         # guarded_connection() so close_all() cannot close it mid-read.
-        with self._conn_manager.guarded_connection() as conn:
+        with conn_manager.guarded_connection() as conn:
             cursor = conn.execute(
                 "SELECT COUNT(*) FROM payload_cache WHERE handle = ?",
                 (key,),
@@ -451,9 +464,84 @@ class PayloadCache:
             row = cursor.fetchone()
         return row[0] > 0 if row else False
 
+    def _read_entry(self, handle: str) -> Optional[str]:
+        """Content of a stored entry (any creator), or None when absent.
+        Used only by the keyed reads of the route that wrote the entry.
+
+        The `_backend` (PG) path independently verifies TTL inside
+        `_backend.retrieve()`; the facade-SQLite path relies on the
+        background `cleanup_expired()` thread to have deleted a stale row.
+        """
+        if self._backend is not None:
+            row = self._backend.retrieve(handle)
+            return None if row is None else str(row["content"])
+        return self._select_content(
+            "SELECT content FROM payload_cache WHERE handle = ?", (handle,)
+        )
+
+    def _read_owned_entry(self, handle: str, owner: str) -> Optional[str]:
+        """Content of `handle` only when `owner` created it, from ONE query
+        filtered by owner: a missing handle, an owner-less entry and another
+        user's entry all match no row, so their content is never read."""
+        if not owner:
+            return None
+        if self._backend is not None:
+            row = self._backend.retrieve_owned(handle, owner)
+            return None if row is None else str(row["content"])
+        return self._select_content(
+            "SELECT content FROM payload_cache WHERE handle = ? AND owner = ?",
+            (handle, owner),
+        )
+
+    def _select_content(self, sql: str, params: Tuple[str, ...]) -> Optional[str]:
+        """Facade-SQLite path: the content column of the one matching row."""
+        conn_manager = self._require_conn_manager()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with conn_manager.guarded_connection() as conn:
+            sqlite_row = conn.execute(sql, params).fetchone()
+        return None if sqlite_row is None else str(sqlite_row[0])
+
+    def _content_or_raise(self, handle: str) -> str:
+        content = self._read_entry(handle)
+        if content is None:
+            raise CacheNotFoundError(f"Cache handle not found: {handle}")
+        return content
+
+    def _owned_content_or_raise(self, handle: str, owner: str) -> str:
+        """Content of `handle` only when `owner` created it. A missing
+        handle, an entry with no recorded creator and another user's entry
+        raise the SAME error from the same query, so neither the answer nor
+        its cost reveals that a handle exists."""
+        content = self._read_owned_entry(handle, owner)
+        if content is None:
+            raise CacheNotFoundError(f"Cache handle not found: {handle}")
+        return content
+
+    def _page_of(self, handle: str, content: str, page: int) -> CacheRetrievalResult:
+        """Window `content` into `max_fetch_size_chars` pages (0-indexed)."""
+        page_size = self.config.max_fetch_size_chars
+        total_pages = max(1, math.ceil(len(content) / page_size))
+
+        if page >= total_pages:
+            raise CacheNotFoundError(
+                f"Page {page} out of range for handle {handle} (total: {total_pages})"
+            )
+
+        start = page * page_size
+        return CacheRetrievalResult(
+            content=content[start : start + page_size],
+            page=page,
+            total_pages=total_pages,
+            has_more=page < total_pages - 1,
+        )
+
     def retrieve_full(self, handle: str) -> str:
         """Return the COMPLETE stored content for handle, bypassing the
         `max_fetch_size_chars` char-window slicing `retrieve()` applies.
+
+        For key-addressed entries read by the route that wrote them; the
+        generic retrieval doors use retrieve_full_owned().
 
         Bug #1928: a caller that stores its OWN pre-chunked pages (each
         page a whole PayloadCache row) needs to read a page back EXACTLY
@@ -462,43 +550,34 @@ class PayloadCache:
         at store time -- e.g. after a Web UI config change or a
         restart). `retrieve()`'s windowing would otherwise re-slice
         already-complete page content using the CURRENT config, silently
-        corrupting it. Both backends already fetch the full row before
-        `retrieve()` slices it (see that method below) -- this simply
-        skips the slicing step; it has IDENTICAL memory/IO cost AND
-        IDENTICAL TTL semantics to `retrieve()`: the `_backend` (PG)
-        path independently verifies TTL inside `_backend.retrieve()`;
-        the SQLite path, exactly like `retrieve()` below, does NOT
-        independently check TTL -- it relies on the background
-        `cleanup_expired()` thread to have already deleted a stale row,
-        so a handle whose entry has not yet been swept could still be
-        read (unchanged from `retrieve()`'s own existing behavior).
+        corrupting it. Identical memory/IO cost AND TTL semantics to
+        `retrieve()` (see `_read_entry`).
 
         Raises:
             CacheNotFoundError: If handle not found (row missing/already
                 evicted by cleanup for SQLite; missing OR TTL-expired for
                 the PG `_backend` path).
         """
-        if self._backend is not None:
-            row = self._backend.retrieve(handle)
-            if row is None:
-                raise CacheNotFoundError(f"Cache handle not found: {handle}")
-            return cast(str, row["content"])
+        return self._content_or_raise(handle)
 
-        if self._conn_manager is None:
-            raise RuntimeError("PayloadCache not initialized - call initialize() first")
-        with self._conn_manager.guarded_connection() as conn:
-            cursor = conn.execute(
-                "SELECT content FROM payload_cache WHERE handle = ?", (handle,)
-            )
-            sqlite_row = cursor.fetchone()
-        if sqlite_row is None:
-            raise CacheNotFoundError(f"Cache handle not found: {handle}")
-        return cast(str, sqlite_row[0])
+    def retrieve_full_owned(self, handle: str, owner: str) -> str:
+        """retrieve_full() for the generic retrieval doors: the content is
+        returned only to the user who created the entry.
+
+        Raises:
+            CacheNotFoundError: handle missing or expired, entry has no
+                recorded creator, or `owner` did not create it (one error
+                for all three).
+        """
+        return self._owned_content_or_raise(handle, owner)
 
     def retrieve(self, handle: str, page: int = 0) -> CacheRetrievalResult:
         """Retrieve cached content by handle with pagination.
 
         Story #50: Converted from async to sync for FastAPI thread pool execution.
+
+        For key-addressed entries read by the route that wrote them; the
+        generic retrieval doors use retrieve_owned().
 
         Args:
             handle: UUID4 handle from store()
@@ -512,76 +591,25 @@ class PayloadCache:
         """
         if page < 0:
             raise CacheNotFoundError(f"Invalid page number: {page}")
+        return self._page_of(handle, self._content_or_raise(handle), page)
 
-        if self._backend is not None:
-            # PG/cluster mode: delegate retrieval, then apply pagination logic
-            row = self._backend.retrieve(handle)
-            if row is None:
-                raise CacheNotFoundError(f"Cache handle not found: {handle}")
+    def retrieve_owned(
+        self, handle: str, owner: str, page: int = 0
+    ) -> CacheRetrievalResult:
+        """retrieve() for the generic retrieval doors: the content is served
+        only to the user who created the entry.
 
-            content = row["content"]
-            total_size = len(content)
-            page_size = self.config.max_fetch_size_chars
+        Raises:
+            CacheNotFoundError: handle missing or expired, entry has no
+                recorded creator, `owner` did not create it (one error for
+                all three), or page out of range.
+        """
+        if page < 0:
+            raise CacheNotFoundError(f"Invalid page number: {page}")
+        content = self._owned_content_or_raise(handle, owner)
+        return self._page_of(handle, content, page)
 
-            total_pages = max(1, math.ceil(total_size / page_size))
-
-            if page >= total_pages:
-                raise CacheNotFoundError(
-                    f"Page {page} out of range for handle {handle} (total: {total_pages})"
-                )
-
-            start = page * page_size
-            end = start + page_size
-            page_content = content[start:end]
-
-            return CacheRetrievalResult(
-                content=page_content,
-                page=page,
-                total_pages=total_pages,
-                has_more=page < total_pages - 1,
-            )
-
-        if self._conn_manager is None:
-            raise RuntimeError("PayloadCache not initialized - call initialize() first")
-        # Bug #1532 follow-up: route the raw connection through
-        # guarded_connection() so close_all() cannot close it mid-read.
-        with self._conn_manager.guarded_connection() as conn:
-            cursor = conn.execute(
-                "SELECT content, total_size FROM payload_cache WHERE handle = ?",
-                (handle,),
-            )
-            sqlite_row = cursor.fetchone()
-
-        if sqlite_row is None:
-            raise CacheNotFoundError(f"Cache handle not found: {handle}")
-
-        content = sqlite_row[0]
-        total_size = sqlite_row[1]
-        page_size = self.config.max_fetch_size_chars
-
-        # Calculate pagination
-        total_pages = max(1, math.ceil(total_size / page_size))
-
-        if page >= total_pages:
-            raise CacheNotFoundError(
-                f"Page {page} out of range for handle {handle} (total: {total_pages})"
-            )
-
-        # Extract page content
-        start = page * page_size
-        end = start + page_size
-        page_content = content[start:end]
-
-        has_more = page < total_pages - 1
-
-        return CacheRetrievalResult(
-            content=page_content,
-            page=page,
-            total_pages=total_pages,
-            has_more=has_more,
-        )
-
-    def truncate_result(self, content: str) -> dict:
+    def truncate_result(self, content: str, *, owner: Optional[str] = None) -> dict:
         """Truncate content for semantic search response (AC3).
 
         Story #50: Converted from async to sync for FastAPI thread pool execution.
@@ -594,6 +622,7 @@ class PayloadCache:
 
         Args:
             content: Full content to potentially truncate
+            owner: Username of the caller whose request created the entry.
 
         Returns:
             Dict with appropriate keys based on content size
@@ -602,7 +631,7 @@ class PayloadCache:
 
         if len(content) > preview_size:
             # Large content: store full content and return preview
-            cache_handle = self.store(content)
+            cache_handle = self.store(content, owner=owner)
             return {
                 "preview": content[:preview_size],
                 "cache_handle": cache_handle,
@@ -629,13 +658,12 @@ class PayloadCache:
             # PG/cluster mode: delegate to backend
             return self._backend.cleanup_expired()  # type: ignore[no-any-return]
 
-        if self._conn_manager is None:
-            raise RuntimeError("PayloadCache not initialized - call initialize() first")
+        conn_manager = self._require_conn_manager()
         cutoff_time = time.time() - self.config.cache_ttl_seconds
 
         # Bug #1532 follow-up: route the raw connection through
         # guarded_connection() so close_all() cannot close it mid-read.
-        with self._conn_manager.guarded_connection() as conn:
+        with conn_manager.guarded_connection() as conn:
             cursor = conn.execute(
                 "SELECT COUNT(*) FROM payload_cache WHERE created_at < ?",
                 (cutoff_time,),
@@ -649,6 +677,6 @@ class PayloadCache:
                 (cutoff_time,),
             )
 
-        self._conn_manager.execute_atomic(_do_delete)
+        conn_manager.execute_atomic(_do_delete)
 
         return count

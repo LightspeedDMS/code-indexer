@@ -356,7 +356,7 @@ async def test_analyze_graph_large_result_is_routed_through_payload_cache_trunca
     finally:
         cache.close()
 
-    truncate_spy.assert_called_once_with(large_result)
+    truncate_spy.assert_called_once_with(large_result, owner="testuser")
 
     parsed = _parse_response(result)
     assert parsed["cache_handle"] is not None, (

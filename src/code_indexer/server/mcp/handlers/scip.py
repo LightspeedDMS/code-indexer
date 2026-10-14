@@ -384,7 +384,9 @@ def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #685: Apply SCIP payload truncation to context fields
         # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
+        results_dicts = _apply_scip_payload_truncation(
+            results_dicts, owner=user.username
+        )
 
         return _scip_response(
             {
@@ -502,7 +504,9 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #685: Apply SCIP payload truncation to context fields
         # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
+        results_dicts = _apply_scip_payload_truncation(
+            results_dicts, owner=user.username
+        )
 
         # Story #659: Apply cross-encoder reranking after retrieval, before return.
         # Guard: skip entirely when no rerank_query to avoid overhead.
@@ -655,7 +659,9 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #685: Apply SCIP payload truncation to context fields
         # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
+        results_dicts = _apply_scip_payload_truncation(
+            results_dicts, owner=user.username
+        )
 
         return _scip_response(
             {
@@ -785,7 +791,9 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #685: Apply SCIP payload truncation to context fields
         # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
+        results_dicts = _apply_scip_payload_truncation(
+            results_dicts, owner=user.username
+        )
 
         return _scip_response(
             {

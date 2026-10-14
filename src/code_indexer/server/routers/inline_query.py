@@ -1089,10 +1089,14 @@ def register_query_routes(
                 # Apply payload truncation for consistency with MCP handlers
                 _payload_cache = getattr(app.state, "payload_cache", None)
                 truncated_fts = _apply_rest_fts_truncation(
-                    fts_dicts, payload_cache=_payload_cache
+                    fts_dicts,
+                    payload_cache=_payload_cache,
+                    owner=current_user.username,
                 )
                 truncated_semantic = _apply_rest_semantic_truncation(
-                    semantic_dicts, payload_cache=_payload_cache
+                    semantic_dicts,
+                    payload_cache=_payload_cache,
+                    owner=current_user.username,
                 )
 
                 # Return as JSONResponse to support truncated fields
@@ -1238,6 +1242,7 @@ def register_query_routes(
             truncated_results = _apply_rest_semantic_truncation(
                 results["results"],
                 payload_cache=getattr(app.state, "payload_cache", None),
+                owner=current_user.username,
             )
 
             # Return as JSONResponse to support truncated fields

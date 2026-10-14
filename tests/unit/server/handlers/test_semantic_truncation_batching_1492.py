@@ -49,13 +49,13 @@ def _spy_counts(monkeypatch, cache):
     real_store = cache.store
     real_store_batch = cache.store_batch
 
-    def counting_store(content):
+    def counting_store(content, owner=None):
         counts["store"] += 1
-        return real_store(content)
+        return real_store(content, owner=owner)
 
-    def counting_store_batch(contents):
+    def counting_store_batch(contents, owner=None):
         counts["store_batch"] += 1
-        return real_store_batch(contents)
+        return real_store_batch(contents, owner=owner)
 
     monkeypatch.setattr(cache, "store", counting_store)
     monkeypatch.setattr(cache, "store_batch", counting_store_batch)

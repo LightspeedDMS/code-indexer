@@ -80,7 +80,7 @@ class TestOmniSearchAppliesTruncation:
         original_fn = handlers._apply_payload_truncation
 
         # Story #50: Tracking function is now sync (truncation helpers are sync)
-        def tracking_fn(results):
+        def tracking_fn(results, owner=None):
             truncation_calls.append(len(results))
             return original_fn(results)
 
@@ -143,7 +143,7 @@ class TestOmniSearchAppliesTruncation:
         original_fn = handlers._apply_fts_payload_truncation
 
         # Story #50: Tracking function is now sync (truncation helpers are sync)
-        def tracking_fn(results):
+        def tracking_fn(results, owner=None):
             truncation_calls.append(len(results))
             return original_fn(results)
 

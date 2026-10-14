@@ -322,7 +322,7 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     fts_truncation_meta: Dict[str, Any] = {}
     if final_results:
         final_results, fts_truncation_meta = _apply_search_truncation(
-            final_results, search_mode, params
+            final_results, search_mode, params, owner=user.username
         )
 
     access_filtering_service = _get_access_filtering_service()

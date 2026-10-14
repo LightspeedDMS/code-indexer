@@ -502,6 +502,8 @@ async def _run_multi_repo_analyze_graph(
     exclude_patterns: List[str],
     timeout_seconds: int,
     refine: bool = False,
+    *,
+    owner: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Issue #1902 (Epic #1906 P9): runs the existing single-repo
     `_run_analyze_graph_pipeline` once PER alias, sequentially, and returns
@@ -685,7 +687,7 @@ async def _run_multi_repo_analyze_graph(
             # DB I/O (PayloadCache.store_batch()/store()) plus JSON
             # serialization, which must never block the loop.
             truncated = await anyio.to_thread.run_sync(
-                _truncate_graph_result, repo_result
+                lambda: _truncate_graph_result(repo_result, owner=owner)
             )
             # Bug #1928 final round (Opus P3.2): _truncate_graph_result can
             # itself fail (a page-set write failure surfaced as
@@ -859,6 +861,7 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
             exclude_patterns,
             timeout_seconds,
             refine,
+            owner=user.username,
         )
         return _mcp_response(multi_result)
 
@@ -877,7 +880,9 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
     # Bug #1928 P2: offloaded via anyio.to_thread.run_sync -- see
     # _truncate_graph_result's own docstring for why (real DB I/O +
     # serialization must never block this async handler's event loop).
-    truncated = await anyio.to_thread.run_sync(_truncate_graph_result, result)
+    truncated = await anyio.to_thread.run_sync(
+        lambda: _truncate_graph_result(result, owner=user.username)
+    )
     return _mcp_response(truncated)
 
 

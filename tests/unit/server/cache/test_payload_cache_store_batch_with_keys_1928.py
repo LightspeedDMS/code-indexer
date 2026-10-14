@@ -91,6 +91,7 @@ class _FakeStrictBackend:
         self,
         entries: List[Tuple[str, str, str, int]],
         node_id: Optional[str] = None,
+        owner: Optional[str] = None,
     ) -> None:
         if self._raise_on_call is not None:
             raise self._raise_on_call
@@ -106,6 +107,7 @@ class _FakeStrictBackend:
         preview: str,
         ttl_seconds: int,
         node_id: Optional[str] = None,
+        owner: Optional[str] = None,
     ) -> None:
         raise NotImplementedError
 
@@ -113,10 +115,14 @@ class _FakeStrictBackend:
         self,
         entries: List[Tuple[str, str, str, int]],
         node_id: Optional[str] = None,
+        owner: Optional[str] = None,
     ) -> None:
         raise NotImplementedError
 
     def retrieve(self, cache_handle: str) -> Optional[Dict[str, Any]]:
+        raise NotImplementedError
+
+    def retrieve_owned(self, cache_handle: str, owner: str) -> Optional[Dict[str, Any]]:
         raise NotImplementedError
 
     def cleanup_expired(self) -> int:

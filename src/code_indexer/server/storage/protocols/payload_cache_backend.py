@@ -15,6 +15,9 @@ class PayloadCacheBackend(Protocol):
 
     Supports both SQLite (standalone) and PostgreSQL (cluster) backends.
     Stores large content with TTL-based eviction, keyed by a cache handle.
+    Each entry may record its creator (``owner``, a username); an entry with
+    no owner has no creator and is never served by the generic retrieval
+    doors.
     """
 
     def store(
@@ -24,6 +27,7 @@ class PayloadCacheBackend(Protocol):
         preview: str,
         ttl_seconds: int,
         node_id: Optional[str] = None,
+        owner: Optional[str] = None,
     ) -> None:
         """Store a payload cache entry.
 
@@ -33,6 +37,7 @@ class PayloadCacheBackend(Protocol):
             preview: Truncated preview of the content.
             ttl_seconds: Time-to-live in seconds.
             node_id: Optional cluster node identifier (NULL in standalone).
+            owner: Username of the entry's creator (NULL: no creator).
         """
         ...
 
@@ -40,6 +45,7 @@ class PayloadCacheBackend(Protocol):
         self,
         entries: List[Tuple[str, str, str, int]],
         node_id: Optional[str] = None,
+        owner: Optional[str] = None,
     ) -> None:
         """Store multiple payload cache entries in ONE atomic transaction.
 
@@ -50,6 +56,8 @@ class PayloadCacheBackend(Protocol):
         Args:
             entries: List of (cache_handle, content, preview, ttl_seconds) tuples.
             node_id: Optional cluster node identifier (NULL in standalone).
+            owner: Username of the creator of every entry in the batch,
+                written by the same statement (NULL: no creator).
         """
         ...
 
@@ -57,6 +65,7 @@ class PayloadCacheBackend(Protocol):
         self,
         entries: List[Tuple[str, str, str, int]],
         node_id: Optional[str] = None,
+        owner: Optional[str] = None,
     ) -> None:
         """Store multiple payload cache entries in ONE atomic transaction,
         PROPAGATING any write failure instead of swallowing it.
@@ -72,6 +81,7 @@ class PayloadCacheBackend(Protocol):
         Args:
             entries: List of (cache_handle, content, preview, ttl_seconds) tuples.
             node_id: Optional cluster node identifier (NULL in standalone).
+            owner: Username of the creator of every entry in the batch.
 
         Raises:
             Whatever the underlying connection/transaction raises on
@@ -87,8 +97,20 @@ class PayloadCacheBackend(Protocol):
             cache_handle: Unique identifier for the cache entry.
 
         Returns:
-            Dict with keys: content, preview, created_at, node_id — or None
-            if the entry does not exist or has exceeded its TTL.
+            Dict with keys: content, preview, created_at, node_id, owner —
+            or None if the entry does not exist or has exceeded its TTL.
+        """
+        ...
+
+    def retrieve_owned(self, cache_handle: str, owner: str) -> Optional[Dict[str, Any]]:
+        """Retrieve an entry only when `owner` created it.
+
+        ONE query filtered by handle AND owner: a missing handle, an
+        owner-less entry and another user's entry all match no row, so
+        their content is never read (same cost as a missing handle).
+
+        Returns:
+            Same dict as retrieve(), or None (missing, not owned, expired).
         """
         ...
 
@@ -97,7 +119,8 @@ class PayloadCacheBackend(Protocol):
 
         The entry's creation time comes from the store's own clock (the
         database clock), never the caller's, so every node agrees on when
-        it expires. Failures propagate.
+        it expires. The entry has no creator (owner NULL). Failures
+        propagate.
         """
         ...
 

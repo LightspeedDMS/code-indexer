@@ -120,7 +120,7 @@ def _patch_regex_search_infrastructure(
                     ):
                         with patch(
                             "code_indexer.server.mcp.handlers._apply_regex_payload_truncation",
-                            side_effect=lambda x: x,
+                            side_effect=lambda x, **kw: x,
                         ):
                             with patch(
                                 "code_indexer.server.services.config_service.get_config_service"
