@@ -24,6 +24,7 @@ from code_indexer.server.services.repository_health_aggregator import (
 from code_indexer.server.startup.content_backend_wiring import (
     is_content_seam_delegated,
 )
+from code_indexer.server.storage.shared.git_backend import head_branch
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
@@ -180,8 +181,11 @@ def _activated_copy_present(
 
 def _delegated_branches(repo_path: str) -> Tuple[str, List[str]]:
     """``git branch`` of a copy that is not on this pod, through the git seam
-    (git-mcp): (current branch, local branches). No delegated git backend is
-    an error -- never a local git run against a path this pod does not hold."""
+    (git-mcp): (current branch, local branches), in the shape the local
+    ``git branch`` parse gives -- including a detached HEAD, which is reported
+    as ``(HEAD detached at|from <ref>)`` and listed first. No delegated git
+    backend is an error -- never a local git run against a path this pod does
+    not hold. Any git-mcp failure other than a detached HEAD propagates."""
     from code_indexer.server.startup.git_backend_wiring import (
         server_delegated_git_backend,
     )
@@ -192,12 +196,57 @@ def _delegated_branches(repo_path: str) -> Tuple[str, List[str]]:
             "Repositories are not on this server (content_backend='delegated') "
             "but git runs locally; set git_backend='delegated'."
         )
-    branches = backend.list_branches(repo_path, fmt="%(refname:short)")
-    try:
-        current = backend.current_branch(repo_path)
-    except subprocess.CalledProcessError:
-        current = ""  # detached HEAD: `git branch` marks no branch
-    return current, sorted(branches)
+    names = backend.list_branches(repo_path, fmt="%(refname:short)")
+    current = head_branch(backend, repo_path)
+    if current is not None:
+        return current, sorted(names)
+    heads = _local_heads(backend, repo_path)
+    label = _detached_head_label(backend, repo_path, names, heads)
+    # `git branch` lists the detached HEAD before every branch.
+    return label, [label, *sorted(heads)]
+
+
+def _local_heads(backend: Any, repo_path: str) -> List[str]:
+    """Local branch names from ``git show-ref --heads`` (no branches: rc 1)."""
+    result = backend.show_ref(repo_path, "--heads")
+    if result.returncode != 0:
+        return []
+    return [
+        line.split(" ", 1)[1][len(_HEADS_PREFIX) :]
+        for line in str(result.stdout).splitlines()
+        if " " + _HEADS_PREFIX in line
+    ]
+
+
+def _detached_head_label(
+    backend: Any, repo_path: str, names: List[str], heads: List[str]
+) -> str:
+    """``(HEAD detached at|from <ref>)`` as ``git branch`` prints it.
+
+    git-mcp's branch list carries the detached HEAD as a bare ``<ref>`` entry
+    (the ref it was detached at), so ``<ref>`` is the one listed name that is
+    not a local branch. It is ``at`` while HEAD still points at ``<ref>``,
+    ``from`` once HEAD has moved -- the rule git applies. With no such name
+    (the ref is also a branch name) the label falls back to the short commit;
+    more than one means the two listings disagree, which is an error, never a
+    guess."""
+    extra = [n for n in names if n not in set(heads)]
+    if len(extra) > 1:
+        raise RuntimeError(
+            "git-mcp's branch list and show-ref disagree about the local "
+            f"branches of a detached HEAD ({len(extra)} unknown names)"
+        )
+    if not extra:
+        short = backend.rev_parse(repo_path, "--short", "HEAD")
+        return f"(HEAD detached at {short})"
+    ref = extra[0]
+    head, target = backend.rev_parse(
+        repo_path, "HEAD", f"{ref}^{{commit}}"
+    ).splitlines()
+    return f"(HEAD detached {'at' if head == target else 'from'} {ref})"
+
+
+_HEADS_PREFIX = "refs/heads/"
 
 
 def _get_background_job_manager():
@@ -1124,14 +1173,18 @@ async def list_branches(
     except HTTPException:
         raise
     except subprocess.CalledProcessError as e:
-        logger.error(f"Git command failed for {user_alias}: {e}")
+        # A git-mcp failure (GitMcpBackendError) may carry no stderr; its
+        # message then says what failed.
+        reason = redact_url_credentials(e.stderr or e)
+        logger.error(f"Git command failed for {user_alias}: {reason}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list branches: {redact_url_credentials(e.stderr)}",
+            detail=f"Failed to list branches: {reason}",
         )
     except Exception as e:
-        logger.error(f"Failed to list branches for {user_alias}: {e}")
+        reason = redact_url_credentials(e)
+        logger.error(f"Failed to list branches for {user_alias}: {reason}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list branches: {str(e)}",
+            detail=f"Failed to list branches: {reason}",
         )
