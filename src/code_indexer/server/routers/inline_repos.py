@@ -21,6 +21,7 @@ Zero behavior change: same paths, methods, response models, and handler logic.
 Large method sizes are pre-existing in the source inline_routes.py (3221 lines).
 """
 
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -99,6 +100,31 @@ from ..app_helpers import (
 logger = logging.getLogger(__name__)
 
 
+def _load_copy_index_config(repo_path: str) -> Any:
+    """The copy's own config, from its index state on THIS pod.
+
+    Under a delegated content backend the copy's working tree is on
+    workspace-mcp. ``load_verified_config`` (and ``ConfigManager.load``)
+    resolve -- stat -- the copy's directory, backtrack through its ancestors
+    and look for an override file in the working tree, none of which this pod
+    holds. So the config is read where the IndexStore keeps it and verified
+    lexically: it must describe this very copy. Raises
+    ``ConfigVerificationError`` otherwise, as ``load_verified_config`` does.
+    """
+    from ...config import Config, ConfigVerificationError
+    from code_indexer.utils.index_store import index_root
+
+    config_path = index_root(repo_path) / "config.json"
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or Path(str(data.get("codebase_dir"))) != Path(
+        repo_path
+    ):
+        raise ConfigVerificationError(
+            f"Index config at {config_path} does not describe '{repo_path}'"
+        )
+    return Config(**data)
+
+
 def _check_filesystem_backend_health(repo_path: str) -> Dict[str, Any]:
     """Determine filesystem-backend health/status fields for a single
     activated repo (extracted from get_repository_info's inline health
@@ -138,8 +164,14 @@ def _check_filesystem_backend_health(repo_path: str) -> Dict[str, Any]:
     # Filesystem backend is always ready
     try:
         from ...config import ConfigManager
+        from code_indexer.server.startup.content_backend_wiring import (
+            is_content_seam_delegated,
+        )
 
-        config = ConfigManager.load_verified_config(Path(repo_path))
+        if is_content_seam_delegated():
+            config = _load_copy_index_config(repo_path)
+        else:
+            config = ConfigManager.load_verified_config(Path(repo_path))
 
         # Check if using filesystem backend
         is_filesystem = (
@@ -1681,6 +1713,13 @@ def register_repo_routes(
                 )
                 result["current_branch"] = current_branch
             except Exception:
+                from code_indexer.server.startup.content_backend_wiring import (
+                    is_content_seam_delegated,
+                )
+
+                if is_content_seam_delegated():
+                    # git-mcp failed: the route's 500, never "unknown".
+                    raise
                 result["current_branch"] = "unknown"
 
             # Add basic status information
@@ -1764,6 +1803,13 @@ def register_repo_routes(
 
                     result["branches"] = formatted_branches
                 except Exception as exc:
+                    from code_indexer.server.startup.content_backend_wiring import (
+                        is_content_seam_delegated,
+                    )
+
+                    if is_content_seam_delegated():
+                        # git-mcp failed: the route's 500, never no branches.
+                        raise
                     logger.warning(
                         "get_repository_info: swallowed %s: %s",
                         type(exc).__name__,

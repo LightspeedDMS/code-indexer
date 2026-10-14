@@ -14,7 +14,11 @@ from code_indexer.server.repositories.user_dir_permissions import (
 from code_indexer.server.utils.cancellable_subprocess import (
     SubprocessCancelledError,
 )
-from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
+from code_indexer.server.storage.shared.git_backend import (
+    DETACHED_HEAD_MARKER,
+    GitBackend,
+    LocalGitBackend,
+)
 from code_indexer.server.storage.shared.snapshot_manager import (
     _ensure_source_tree_readable_for_clone,
 )
@@ -1792,8 +1796,16 @@ class ActivatedRepoManager:
                     repo_dir, timeout=30
                 )
                 return current_branch
-            except subprocess.CalledProcessError:
-                pass
+            except subprocess.CalledProcessError as exc:
+                # Delegated: git-mcp reports a transport or tool failure as
+                # CalledProcessError too. Only a detached HEAD reads the
+                # metadata branch; anything else is the caller's error.
+                if self._working_copies().is_delegated and (
+                    DETACHED_HEAD_MARKER not in str(exc.stderr or "")
+                ):
+                    raise GitOperationError(
+                        f"Failed to get current branch: {exc.stderr or exc}"
+                    ) from exc
 
             # Fallback to metadata if git command fails
             repo_data = self._load_metadata(username, user_alias)
@@ -1803,7 +1815,15 @@ class ActivatedRepoManager:
 
         except subprocess.TimeoutExpired:
             raise GitOperationError("Git operation timed out")
+        except GitOperationError:
+            raise
         except Exception as e:
+            if self._working_copies().is_delegated:
+                # The copy is not on this pod: the registry's branch is not an
+                # answer to "git-mcp failed".
+                raise GitOperationError(
+                    f"Failed to get current branch: {type(e).__name__}: {e}"
+                ) from e
             # Final fallback to metadata
             try:
                 repo_data = self._load_metadata(username, user_alias)

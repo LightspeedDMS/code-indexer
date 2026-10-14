@@ -206,6 +206,7 @@ smoke:
       tests/unit/server/auto_update/test_operator_tooling_content_seam.py
       tests/unit/server/repositories/test_activated_composite_content_seam.py
       tests/unit/server/test_activated_rest_surfaces_content_seam.py
+      tests/unit/server/test_activated_branch_health_fail_loud.py
       tests/unit/services/test_index_git_seam.py
       tests/unit/services/test_reconcile_git_seam_mountless.py
       tests/unit/services/test_delegated_max_file_size.py
