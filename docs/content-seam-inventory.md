@@ -8,12 +8,12 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | Class | Rows |
 |---|---|
 | unclassified | 0 |
-| repo-read | 369 |
-| repo-write | 78 |
+| repo-read | 355 |
+| repo-write | 67 |
 | cidx-state-in-repo | 1020 |
-| migrated | 317 |
+| migrated | 342 |
 | local-only | 324 |
-| cidx-state | 560 |
+| cidx-state | 575 |
 | not-repo | 422 |
 
 ## Modules with open rows
@@ -82,9 +82,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/managers/composite_file_listing.py` | 0 | 6 | 0 | 0 |
 | `server/mcp/handlers/_legacy.py` | 0 | 3 | 0 | 3 |
 | `server/mcp/handlers/_provider_temporal_job.py` | 0 | 0 | 0 | 1 |
-| `server/mcp/handlers/files.py` | 0 | 1 | 0 | 0 |
 | `server/mcp/handlers/repos.py` | 0 | 5 | 0 | 4 |
-| `server/mcp/handlers/search/regex_search.py` | 0 | 1 | 0 | 0 |
 | `server/mcp/handlers/search/repo_search.py` | 0 | 1 | 0 | 0 |
 | `server/mcp/memory_retrieval_pipeline.py` | 0 | 0 | 0 | 2 |
 | `server/multi/multi_search_service.py` | 0 | 1 | 0 | 1 |
@@ -112,8 +110,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/services/dependency_map_service.py` | 0 | 4 | 0 | 0 |
 | `server/services/description_refresh_scheduler.py` | 0 | 0 | 0 | 9 |
 | `server/services/diagnostics_service.py` | 0 | 1 | 0 | 5 |
-| `server/services/file_crud_service.py` | 0 | 1 | 11 | 0 |
-| `server/services/file_service.py` | 0 | 11 | 0 | 1 |
+| `server/services/file_service.py` | 0 | 0 | 0 | 1 |
 | `server/services/fleet_migration/completion_gate.py` | 0 | 0 | 0 | 12 |
 | `server/services/fleet_migration/discovery.py` | 0 | 2 | 0 | 4 |
 | `server/services/fleet_migration/orchestrator.py` | 0 | 1 | 0 | 4 |
