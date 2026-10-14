@@ -39,7 +39,6 @@ from code_indexer.utils.git_runner import (
     run_git_command,
     run_git_command_with_retry,
 )
-from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -113,12 +112,7 @@ class GitBackend(Protocol):
         timeout: Timeout = None,
         retry: bool = False,
     ) -> None:
-        """``git pull [<remote> <branch>]``; mode = default|ff-only|no-ff|rebase.
-
-        A failed pull raises ``CalledProcessError``. A pull that stops on merge
-        conflicts raises it with ``output`` carrying one git-style
-        ``CONFLICT (content): Merge conflict in <path>`` line per conflicted
-        path, as git's own stdout does -- callers read the conflicts from it."""
+        """``git pull [<remote> <branch>]``; mode = default|ff-only|no-ff|rebase."""
         ...  # pragma: no cover
 
     def merge(self, repo_path: str, ref: str, timeout: Timeout = None) -> None:
@@ -339,11 +333,9 @@ class GitCommandRunner(Protocol):
         remote: str,
         branch: Optional[str] = None,
         timeout: Timeout = None,
-        set_upstream: bool = False,
     ) -> subprocess.CompletedProcess:
-        """``git push [--set-upstream] <remote> [<branch>]`` with the backend's
-        own credentials; raises ``CalledProcessError`` on failure. Upstream
-        tracking is set only when *set_upstream* asks for it, as git does."""
+        """``git push <remote> [<branch>]`` with the backend's own credentials;
+        raises ``CalledProcessError`` on failure."""
         ...  # pragma: no cover
 
 
@@ -412,17 +404,8 @@ class LocalGitBackend:
         result = cls._run(cmd, cwd, check=False, timeout=timeout, text=False)
         stderr = bytes(result.stderr or b"").decode("utf-8", "replace")
         if check and result.returncode != 0:
-            # The error travels into messages: git echoes a credentialed URL
-            # back on failure, so both streams are redacted here. stdout
-            # round-trips through ``surrogateescape`` so every byte other than
-            # a redacted credential comes back exactly as git wrote it.
             raise subprocess.CalledProcessError(
-                result.returncode,
-                list(cmd),
-                output=redact_url_credentials(
-                    bytes(result.stdout or b"").decode("utf-8", "surrogateescape")
-                ).encode("utf-8", "surrogateescape"),
-                stderr=redact_url_credentials(stderr),
+                result.returncode, list(cmd), output=result.stdout, stderr=stderr
             )
         return subprocess.CompletedProcess(
             list(cmd), result.returncode, stdout=result.stdout, stderr=stderr
@@ -534,12 +517,8 @@ class LocalGitBackend:
         remote: str,
         branch: Optional[str] = None,
         timeout: Timeout = None,
-        set_upstream: bool = False,
     ) -> subprocess.CompletedProcess:
-        cmd = ["git", "push"]
-        if set_upstream:
-            cmd.append("--set-upstream")
-        cmd += ["--end-of-options", remote]
+        cmd = ["git", "push", "--end-of-options", remote]
         if branch:
             cmd.append(branch)
         return self._run(cmd, Path(repo_path), timeout=timeout)

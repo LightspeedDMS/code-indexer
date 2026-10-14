@@ -44,24 +44,6 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
-import socket
-
-
-def _is_timeout(exc: BaseException) -> bool:
-    """True when *exc* is a transport-level timeout (socket or urllib)."""
-    if isinstance(exc, socket.timeout):
-        return True
-    if isinstance(exc, TimeoutError):
-        return True
-    if isinstance(exc, urllib.error.URLError) and isinstance(
-        exc.reason, (socket.timeout, TimeoutError)
-    ):
-        return True
-    if isinstance(exc, urllib.error.URLError) and "timed out" in str(exc.reason):
-        return True
-    return False
-
-
 def _decode_like_text_mode(raw: bytes) -> str:
     """*raw* git stdout exactly as a local ``subprocess.run(text=True)`` (cidx's
     ``run_git_command``) returns it: the locale encoding, strict errors (an
@@ -69,23 +51,6 @@ def _decode_like_text_mode(raw: bytes) -> str:
     universal newlines (``\\r\\n`` / ``\\r`` -> ``\\n``)."""
     with io.TextIOWrapper(io.BytesIO(raw), encoding=None) as text:
         return text.read()
-
-
-def _pull_conflict_error(conflicts: Any) -> "GitMcpBackendError":
-    """git-mcp's ``git_pull`` result ``{status: 'conflicts', conflicts: [...]}``
-    -- a NORMAL tool result, not an error -- as the failure a local
-    ``git pull`` is: a ``CalledProcessError`` whose ``output`` names each
-    conflicted path in git's own ``CONFLICT ... Merge conflict in <path>``
-    form, which is what cidx's callers parse."""
-    paths = [
-        str(entry["path"])
-        for entry in (conflicts if isinstance(conflicts, list) else [])
-        if isinstance(entry, dict) and entry.get("path")
-    ]
-    lines = [f"CONFLICT (content): Merge conflict in {path}" for path in paths]
-    lines.append("Automatic merge failed; fix conflicts and then commit the result.")
-    message = f"git-mcp git_pull stopped on merge conflicts in {paths}"
-    return GitMcpBackendError(message, output="\n".join(lines) + "\n")
 
 
 _DEFAULT_URL = "http://git-mcp.agent-orchestrator.svc.cluster.local:3000"
@@ -117,28 +82,17 @@ class GitMcpBackendError(subprocess.CalledProcessError):
         stderr: Optional[str] = None,
         returncode: int = 1,
         cmd: str = "git-mcp",
-        output: Optional[str] = None,
     ) -> None:
         super().__init__(
             returncode,
             cmd,
-            output=output,
+            output=None,
             stderr=stderr if stderr is not None else message,
         )
         self.message = message
 
     def __str__(self) -> str:
         return self.message
-
-
-class GitMcpTimeoutError(GitMcpBackendError):
-    """A git-mcp call failed because of a transport or git-level timeout."""
-
-
-# simple-git's timeout plugin kills the subprocess with this exact message.
-# git itself (via GIT_HTTP_LOW_SPEED_TIME) produces curl errors that vary by
-# libcurl version, so "timed out" is kept as a broad fallback.
-_TOOL_TIMEOUT_PATTERNS = ("block timeout reached", "timed out")
 
 
 class GitMcpBackend:
@@ -200,11 +154,6 @@ class GitMcpBackend:
             with urllib.request.urlopen(req, timeout=http_timeout) as resp:
                 raw = resp.read().decode("utf-8")
         except (urllib.error.URLError, OSError) as exc:
-            if _is_timeout(exc):
-                raise GitMcpTimeoutError(
-                    f"git-mcp {tool} request to {self._url} timed out: {exc}",
-                    stderr=str(exc),
-                ) from exc
             raise GitMcpBackendError(
                 f"git-mcp {tool} request to {self._url} failed: {exc}", stderr=str(exc)
             ) from exc
@@ -217,10 +166,8 @@ class GitMcpBackend:
         result = payload.get("result", {}) or {}
         text = self._text(result)
         if result.get("isError"):
-            if any(pattern in text for pattern in _TOOL_TIMEOUT_PATTERNS):
-                raise GitMcpTimeoutError(
-                    f"git-mcp {tool} tool error: {text}", stderr=text
-                )
+            # git-mcp surfaces the underlying git stderr as the tool's text, so
+            # feed it to .stderr — the recovery handlers pattern-match on it.
             raise GitMcpBackendError(f"git-mcp {tool} tool error: {text}", stderr=text)
         return self._parse(tool, text)
 
@@ -325,9 +272,7 @@ class GitMcpBackend:
             if flag is None:
                 raise GitMcpBackendError(f"git-mcp pull: unsupported mode {mode!r}")
             args[flag] = True
-        result = self._call("git_pull", args, timeout)
-        if result.get("status") == "conflicts":
-            raise _pull_conflict_error(result.get("conflicts"))
+        self._call("git_pull", args, timeout)
 
     def merge(self, repo_path: str, ref: str, timeout: Any = None) -> None:
         self._call("git_merge", self._cow(repo_path, branch=ref), timeout)
@@ -680,21 +625,10 @@ class GitMcpBackend:
         remote: str,
         branch: Optional[str] = None,
         timeout: Any = None,
-        set_upstream: bool = False,
     ) -> subprocess.CompletedProcess:
-        """git-mcp ``git_push`` with git-mcp's credentials; raises on failure.
-
-        ``set_upstream`` is always sent: git-mcp's own default is to set the
-        tracking branch, which a plain ``git push`` does not do."""
+        """git-mcp ``git_push`` with git-mcp's credentials; raises on failure."""
         result = self._call(
-            "git_push",
-            self._cow(
-                repo_path,
-                remote=remote,
-                branch=branch,
-                set_upstream=bool(set_upstream),
-            ),
-            timeout,
+            "git_push", self._cow(repo_path, remote=remote, branch=branch), timeout
         )
         guidance = result.get("_guidance") or {}
         message = str(guidance.get("message", "")) if isinstance(guidance, dict) else ""

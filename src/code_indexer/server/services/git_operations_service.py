@@ -68,14 +68,6 @@ logger = logging.getLogger(__name__)
 # Token expiry constant (not configurable - internal security setting)
 TOKEN_EXPIRY = 300  # 5 minutes for confirmation tokens
 
-#: ``git for-each-ref`` record for :meth:`GitOperationsService.git_branch_list`
-#: through the git seam: current-branch marker, full refname, symbolic target.
-_BRANCH_LIST_REF_FORMAT = "%(HEAD)%00%(refname)%00%(symref)%00"
-_BRANCH_LIST_REF_FIELDS = 3
-_BRANCH_LIST_REF_PATTERNS = ("refs/heads", "refs/remotes")
-_LOCAL_BRANCH_PREFIX = "refs/heads/"
-_REMOTE_BRANCH_PREFIX = "refs/remotes/"
-
 
 class GitCommandError(Exception):
     """Exception raised when a git command fails."""
@@ -1796,12 +1788,7 @@ class GitOperationsService:
         return 0
 
     def git_push(
-        self,
-        repo_path: Path,
-        remote: str = "origin",
-        branch: Optional[str] = None,
-        *,
-        set_upstream: bool = False,
+        self, repo_path: Path, remote: str = "origin", branch: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Push commits to remote repository.
@@ -1810,8 +1797,6 @@ class GitOperationsService:
             repo_path: Path to git repository
             remote: Remote name (default: "origin")
             branch: Optional branch name
-            set_upstream: Push with ``--set-upstream`` (default: no tracking
-                change, as a plain ``git push``)
 
         Returns:
             Dict with success flag and pushed_commits count
@@ -1837,10 +1822,7 @@ class GitOperationsService:
 
             # Defense in depth: hard option boundary right after the
             # subcommand, before remote/branch.
-            cmd = ["git", "push"]
-            if set_upstream:
-                cmd.append("--set-upstream")
-            cmd += ["--end-of-options", remote]
+            cmd = ["git", "push", "--end-of-options", remote]
             if branch:
                 cmd.append(branch)
 
@@ -1928,11 +1910,7 @@ class GitOperationsService:
             # Content seam: the copy is not on this pod and git-mcp holds the
             # git credentials (cidx's PAT never leaves cidx). The push runs as
             # git-mcp's git_push -- its own credential and branch policy.
-            # Tracking is set exactly when asked, as the local path's
-            # --set-upstream-to after the push.
-            return self.git_push(
-                repo_path, remote=remote, branch=branch, set_upstream=set_upstream
-            )
+            return self.git_push(repo_path, remote=remote, branch=branch)
 
         from code_indexer.server.services.git_credential_helper import (
             GitCredentialHelper,
@@ -2775,7 +2753,13 @@ class GitOperationsService:
         """
         try:
             if git_backend is not None:
-                return self._branch_list_through_backend(repo_path, git_backend)
+                # `git branch -a`, its lines already stripped and non-empty --
+                # what the loop below reduces each local line to.
+                lines = git_backend.list_branches(
+                    str(repo_path),
+                    all_refs=True,
+                    timeout=self._git_timeouts.git_local_timeout,
+                )
             else:
                 lines = self._git_run(
                     ["git", "branch", "-a"],
@@ -2818,69 +2802,6 @@ class GitOperationsService:
             raise GitCommandError(
                 f"git branch list timed out after {e.timeout}s", stderr=""
             )
-
-    def _branch_list_through_backend(
-        self, repo_path: Path, git_backend: "GitBackend"
-    ) -> Dict[str, Any]:
-        """:meth:`git_branch_list` through the git seam, from ``for-each-ref``.
-
-        Not ``list_branches``: git-mcp answers that in ``%(refname:short)``
-        shape (no ``*`` marker, remotes without ``remotes/``), which the
-        ``git branch -a`` parser would misread -- current branch lost, remote
-        branches reported as local. ``for-each-ref`` returns git's own bytes
-        through either backend: ``%(HEAD)`` marks the current branch, the full
-        refname says local or remote, ``%(symref)`` renders ``origin/HEAD`` as
-        ``git branch -a`` does. A detached HEAD (no ``*`` ref) reads as local
-        git prints it, ``(HEAD detached at <short sha>)``.
-        """
-        from code_indexer.global_repos.git_operations import (
-            decode_like_run_git_command,
-        )
-        from code_indexer.server.storage.shared.git_backend import head_branch
-
-        repo = str(repo_path)
-        timeout = self._git_timeouts.git_local_timeout
-        raw = git_backend.for_each_ref(
-            repo, _BRANCH_LIST_REF_FORMAT, _BRANCH_LIST_REF_PATTERNS, timeout=timeout
-        )
-        tokens = decode_like_run_git_command(bytes(raw)).split("\x00")
-        # Every record ends with a NUL then git's newline, which leads the
-        # next record's first field (and is the whole trailing token).
-        tail = tokens.pop()
-        if tail.strip() or len(tokens) % _BRANCH_LIST_REF_FIELDS:
-            raise GitCommandError(
-                f"git branch list: unexpected for-each-ref output from the git "
-                f"backend ({len(tokens)} fields, trailing {tail[:40]!r})",
-                stderr="",
-            )
-        current_branch = ""
-        local_branches: List[str] = []
-        remote_branches: List[str] = []
-        for start in range(0, len(tokens), _BRANCH_LIST_REF_FIELDS):
-            head, refname, symref = tokens[start : start + _BRANCH_LIST_REF_FIELDS]
-            head = head.lstrip("\n")
-            if refname.startswith(_LOCAL_BRANCH_PREFIX):
-                name = refname[len(_LOCAL_BRANCH_PREFIX) :]
-                local_branches.append(name)
-                if head.strip() == "*":
-                    current_branch = name
-            elif refname.startswith(_REMOTE_BRANCH_PREFIX):
-                name = refname[len(_REMOTE_BRANCH_PREFIX) :]
-                if symref.startswith(_REMOTE_BRANCH_PREFIX):
-                    name = f"{name} -> {symref[len(_REMOTE_BRANCH_PREFIX) :]}"
-                remote_branches.append(name)
-        if not current_branch and head_branch(git_backend, repo, timeout) is None:
-            # Detached: `git branch -a` lists it first, as the current entry.
-            short = str(
-                git_backend.rev_parse(repo, "--short", "HEAD", timeout=timeout)
-            ).strip()
-            current_branch = f"(HEAD detached at {short})"
-            local_branches.insert(0, current_branch)
-        return {
-            "current": current_branch,
-            "local": local_branches,
-            "remote": remote_branches,
-        }
 
     def git_branch_create(self, repo_path: Path, branch_name: str) -> Dict[str, Any]:
         """

@@ -62,7 +62,10 @@ from code_indexer.server.services.cidx_meta_backup import (
 from code_indexer.server.services import cidx_meta_content
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.constants import CIDX_META_REPO_GLOBAL
-from code_indexer.server.utils.index_command_layout import repo_layout_kwargs
+from code_indexer.server.utils.index_command_layout import (
+    repo_layout_kwargs,
+    server_backend_args,
+)
 from code_indexer.server.startup.content_backend_wiring import (
     configured_content_backend_name,
     content_backend_name_or_none,
@@ -241,7 +244,10 @@ _REFRESH_PUBLISH_LOCK_TTL_SECONDS = 24 * 60 * 60
 
 
 def has_files_with_extensions(
-    repo_path: str, extensions: set, exclude_dirs: set
+    repo_path: str,
+    extensions: set,
+    exclude_dirs: set,
+    backend: Optional[Any] = None,
 ) -> bool:
     """Return True as soon as a file with a matching extension is found (short-circuit).
 
@@ -252,12 +258,19 @@ def has_files_with_extensions(
         repo_path: Root directory to scan.
         extensions: Set of bare extension names to match (without leading dots, e.g. 'py').
         exclude_dirs: Set of directory names to skip (e.g. {'.git', 'node_modules'}).
+        backend: A NON-local content backend holding the repository (delegated
+            content): the tree is its manifest, not this pod's disk. A listing
+            failure raises -- it is never "no matching files".
 
     Returns:
         True if any file with a matching extension is found, False otherwise.
     """
     if not extensions:
         return False
+    if backend is not None:
+        return _manifest_has_files_with_extensions(
+            backend, repo_path, extensions, exclude_dirs
+        )
     for dirpath, dirnames, filenames in os.walk(repo_path, topdown=True):
         dirnames[:] = [
             d for d in dirnames if d not in exclude_dirs and not d.startswith(".")
@@ -267,6 +280,43 @@ def has_files_with_extensions(
             if ext in extensions:
                 return True
     return False
+
+
+def _manifest_has_files_with_extensions(
+    backend: Any, repo_path: str, extensions: set, exclude_dirs: set
+) -> bool:
+    """``has_files_with_extensions`` over a content backend's manifest: the same
+    pruning (excluded or hidden directories at any depth), short-circuiting."""
+    cursor: Optional[str] = None
+    prune = sorted(exclude_dirs)
+    while True:
+        page = backend.manifest(repo_path, cursor=cursor, prune_dirs=prune)
+        for entry in page.entries:
+            *dirs, name = entry.path.split("/")
+            if any(d in exclude_dirs or d.startswith(".") for d in dirs):
+                continue
+            if os.path.splitext(name)[1].lstrip(".") in extensions:
+                return True
+        if page.next_cursor is None:
+            return False
+        if page.next_cursor == cursor:
+            raise RuntimeError(f"manifest cursor did not advance for {repo_path}")
+        cursor = page.next_cursor
+
+
+def _delegated_repository_backend(pod_local: bool) -> Optional[Any]:
+    """The content backend holding a golden repo's files, or None when they are
+    on this pod (the local backend, the CLI, or a pod-local ``local://`` repo)."""
+    if pod_local:
+        return None
+    from code_indexer.server.startup.content_backend_wiring import (
+        server_content_backend,
+    )
+
+    backend = server_content_backend()
+    if backend is None or backend.is_local:
+        return None
+    return backend
 
 
 def _read_max_commits_from_temporal_meta(source_path: Path) -> Optional[int]:
@@ -389,6 +439,16 @@ def _repository_is_elsewhere() -> bool:
     it to skip local-disk work, and skipping is the safe side of not knowing.
     """
     return content_backend_name_or_none() in (None, "delegated")
+
+
+def _repository_is_delegated() -> bool:
+    """True when the running server's content backend is delegated: the golden
+    repos' clones live with workspace-mcp, not on this pod (False in the CLI)."""
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    return is_content_seam_delegated()
 
 
 def _history_through_git_seam() -> bool:
@@ -3027,7 +3087,9 @@ class RefreshScheduler:
                                         # _check_extension_drift can scan the right directory.
                                         source_path = master_path
                                         force_reconcile = self._check_extension_drift(
-                                            source_path, alias_name
+                                            source_path,
+                                            alias_name,
+                                            pod_local=is_meta_repo,
                                         )
                                         if not force_reconcile:
                                             # Bug #1508: has_changes() is a pure git-ref
@@ -3082,7 +3144,9 @@ class RefreshScheduler:
                     # it writes config on the first call and returns None on subsequent calls).
                     if not force_reconcile:
                         force_reconcile = self._check_extension_drift(
-                            source_path, alias_name
+                            source_path,
+                            alias_name,
+                            pod_local=is_local_repo or is_meta_repo,
                         )
 
                     # Bug #1506 third-pass review Item 1: the quarantine
@@ -4354,6 +4418,22 @@ class RefreshScheduler:
                 f"Failed to create snapshot for {alias_name}: {type(e).__name__}: {e}"
             )
 
+    def _fix_config_backend_args(self, alias_name: str) -> List[str]:
+        """The backend args ``cidx fix-config`` on this repository carries.
+
+        Stamped exactly like this repository's ``cidx index`` spawn: on a pod
+        that does not hold the repository, an unstamped fix-config would answer
+        git questions with the pod's own git and overwrite the git state and
+        project id the index run recorded through the backends. Pod-local
+        repositories stay unstamped (``repo_layout_kwargs``).
+        """
+        source_info = self.registry.get_global_repo(alias_name)
+        return server_backend_args(
+            **repo_layout_kwargs(
+                source_info.get("repo_url") if source_info else None, alias_name
+            )
+        )
+
     def _fix_snapshot_config(
         self, alias_name: str, versioned_path: Path, timeout: int
     ) -> None:
@@ -4362,7 +4442,12 @@ class RefreshScheduler:
         logger.info("Running cidx fix-config --force on clone to update paths")
         try:
             self._run_subprocess(
-                ["cidx", "fix-config", "--force"],
+                [
+                    "cidx",
+                    "fix-config",
+                    "--force",
+                    *self._fix_config_backend_args(alias_name),
+                ],
                 cwd=str(versioned_path),
                 capture_output=True,
                 text=True,
@@ -4975,7 +5060,9 @@ class RefreshScheduler:
         )
         return has_changes
 
-    def _check_extension_drift(self, source_path: str, alias_name: str) -> bool:
+    def _check_extension_drift(
+        self, source_path: str, alias_name: str, *, pod_local: bool = True
+    ) -> bool:
         """Check for extension drift and return True if --reconcile is needed.
 
         Calls sync_repo_extensions_if_drifted() on the config service.  If drift
@@ -4987,9 +5074,19 @@ class RefreshScheduler:
         calls within the same refresh cycle, so calling this helper both before
         an early-return and again at the shared drift-check site is harmless.
 
+        Where the files are listed: cidx-meta's shared content, or -- for a git
+        golden repo (``pod_local=False``) under a delegated content backend --
+        the backend's manifest of the clone (``_delegated_repository_backend``),
+        never this pod's index-state directory, where a walk finds nothing. A
+        listing failure there RAISES (fails the refresh): "could not list" is
+        never "no matching files". A failure to sync the config is still only
+        logged, as before.
+
         Args:
             source_path: Absolute path to the live repo directory.
             alias_name: Global alias name used only for logging.
+            pod_local: The repo's files are on this pod by design (``local://``
+                repos, meta directories); False for a git golden repo.
 
         Returns:
             True if drift detected and matching files found, False otherwise.
@@ -4997,42 +5094,47 @@ class RefreshScheduler:
         try:
             config_service = get_config_service()
             drift = config_service.sync_repo_extensions_if_drifted(source_path)
-            if drift is not None and (drift.added or drift.removed):
-                drifted_exts = drift.added | drift.removed
-                _exclude = {
-                    ".git",
-                    "node_modules",
-                    "__pycache__",
-                    ".code-indexer",
-                    ".versioned",
-                }
-                shared = self._shared_cidx_meta(alias_name, source_path)
-                if (
-                    cidx_meta_content.has_files_with_extensions(
-                        shared, drifted_exts, _exclude
-                    )
-                    if shared is not None
-                    else has_files_with_extensions(source_path, drifted_exts, _exclude)
-                ):
-                    logger.info(
-                        "Extension drift detected (%d added, %d removed) "
-                        "and matching files found for %s -- triggering reconcile",
-                        len(drift.added),
-                        len(drift.removed),
-                        alias_name,
-                    )
-                    return True
-                logger.info(
-                    "Extension drift detected for %s but no matching files "
-                    "found -- using normal incremental index",
-                    alias_name,
-                )
         except Exception as e:
             logger.warning(
                 "Could not sync extensions before index for %s: %s",
                 alias_name,
                 e,
             )
+            return False
+        if drift is None or not (drift.added or drift.removed):
+            return False
+        drifted_exts = drift.added | drift.removed
+        _exclude = {
+            ".git",
+            "node_modules",
+            "__pycache__",
+            ".code-indexer",
+            ".versioned",
+        }
+        shared = self._shared_cidx_meta(alias_name, source_path)
+        if (
+            cidx_meta_content.has_files_with_extensions(shared, drifted_exts, _exclude)
+            if shared is not None
+            else has_files_with_extensions(
+                source_path,
+                drifted_exts,
+                _exclude,
+                backend=_delegated_repository_backend(pod_local),
+            )
+        ):
+            logger.info(
+                "Extension drift detected (%d added, %d removed) "
+                "and matching files found for %s -- triggering reconcile",
+                len(drift.added),
+                len(drift.removed),
+                alias_name,
+            )
+            return True
+        logger.info(
+            "Extension drift detected for %s but no matching files "
+            "found -- using normal incremental index",
+            alias_name,
+        )
         return False
 
     def _refresh_admission_allowed(self) -> bool:
@@ -5445,7 +5547,12 @@ class RefreshScheduler:
         # Fix .code-indexer/ paths — non-fatal if cidx is not available
         try:
             subprocess.run(
-                ["cidx", "fix-config", "--force"],
+                [
+                    "cidx",
+                    "fix-config",
+                    "--force",
+                    *self._fix_config_backend_args(alias_name),
+                ],
                 cwd=str(master_path),
                 capture_output=True,
                 text=True,
@@ -5497,6 +5604,18 @@ class RefreshScheduler:
             if shared is not None
             else description_file.exists()
         ):
+            return False
+
+        refusal = _description_generation_refusal()
+        if refusal is not None:
+            # Generating it means an agent reading master_path, which on this
+            # pod holds index state only: a "success" here would describe an
+            # empty tree. Said once per alias per reconcile, not queued.
+            logger.warning(
+                "Reconciliation: description for %s is missing and was NOT queued: %s",
+                alias_name,
+                refusal,
+            )
             return False
 
         logger.info(
@@ -5558,6 +5677,17 @@ class RefreshScheduler:
             return
 
         logger.info("Starting startup reconciliation of golden repos (Story #236)")
+        # Under a delegated content backend the clones are workspace-mcp's and
+        # this pod's golden-repos/<alias> holds index state only: its absence
+        # here says nothing about the repository, and a reverse clone of a
+        # snapshot into master_path is no repository restore. AC4 is skipped
+        # (never decided by a local "absent"); AC5 still runs.
+        restore_masters = not _repository_is_delegated()
+        if not restore_masters:
+            logger.info(
+                "Reconciliation: content_backend='delegated' -- the golden "
+                "repos' clones are not on this pod; skipping master restore"
+            )
         restored_count = 0
         description_queued_count = 0
 
@@ -5586,7 +5716,7 @@ class RefreshScheduler:
             master_path = self.golden_repos_dir / repo_name
 
             # AC4: Restore missing master via reverse CoW clone
-            if not master_path.exists():
+            if restore_masters and not master_path.exists():
                 # Bug #239: Acquire write lock before restoring to prevent
                 # RefreshScheduler from creating a CoW snapshot of a
                 # partially-restored master directory.
@@ -5821,3 +5951,15 @@ def _record_fts_build_commit(source_path: Path) -> None:
         )
     except Exception as exc:  # noqa: BLE001 - never fail a completed index for this
         logger.debug("could not record FTS build commit for %s: %s", source_path, exc)
+
+
+def _description_generation_refusal() -> Optional[str]:
+    """Why golden-repo description generation cannot run on this server, or
+    None. The queued work runs through ClaudeCliManager's CliDispatcher, so it
+    runs under a delegated content backend exactly when the configured invoker
+    provisions golden repositories itself (see lifecycle_claude_cli_invoker)."""
+    from code_indexer.global_repos.lifecycle_claude_cli_invoker import (
+        lifecycle_analysis_refusal,
+    )
+
+    return lifecycle_analysis_refusal()

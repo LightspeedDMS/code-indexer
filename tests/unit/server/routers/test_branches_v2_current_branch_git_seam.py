@@ -159,11 +159,7 @@ def _client(clone_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(repo_access_http, "enforce_repo_access", lambda *a: None)
     monkeypatch.setattr(inline_repos_v2, "BranchService", _NoBranches)
     listing = MagicMock()
-    listing.get_golden_clone_path.return_value = str(clone_path)
-    # The endpoint needs only the path: no statistics, no manifest listing.
-    listing.get_repository_details.side_effect = AssertionError(
-        "branches route computed the repository details"
-    )
+    listing.get_repository_details.return_value = {"clone_path": str(clone_path)}
     app = FastAPI()
     register_repos_v2_routes(
         app,

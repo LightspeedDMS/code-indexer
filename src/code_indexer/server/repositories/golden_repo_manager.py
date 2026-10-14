@@ -994,30 +994,8 @@ class GoldenRepoManager:
                 "local://"
             ):
                 # The clone is with git-mcp/workspace-mcp; its index state is
-                # here. Remove both, and only while no registry row names the
-                # alias: a row means a registered repository (a reclaimed
-                # re-run of an add whose first executor committed it), whose
-                # index state and clone are live, not this failure's debris.
-                try:
-                    registered = self.get_golden_repo(alias) is not None
-                except Exception as lookup_exc:
-                    logging.error(
-                        "Bug #1218: registration of '%s' failed and its registry "
-                        "row could not be read (%s); its index state and clone "
-                        "at %s are kept",
-                        alias,
-                        lookup_exc,
-                        clone_path,
-                    )
-                    return
-                if registered:
-                    logging.warning(
-                        "Bug #1218: registration of '%s' failed; its index state "
-                        "and clone at %s are kept: a registry row still names it",
-                        alias,
-                        clone_path,
-                    )
-                    return
+                # here. Remove both -- the clone only while no registry row
+                # names it (see _discard_failed_delegated_clone).
                 try:
                     self._remove_pod_index_state(clone_path)
                 except OSError as cleanup_exc:
@@ -1076,10 +1054,9 @@ class GoldenRepoManager:
                     repo_url
                 ):
                     # git-mcp can fail a clone partway (or the visibility wait
-                    # can time out) and leave a partial clone there, so track
-                    # the path from here. _cleanup_failed_clone removes nothing
-                    # while a registry row names the alias (a reclaimed re-run
-                    # of an add whose first executor committed it).
+                    # can time out) and leave a partial clone there. The step
+                    # above proved nothing was there and no row names it, so
+                    # the path is this job's to clean if it fails from here.
                     _clone_path_for_cleanup = os.path.join(self.golden_repos_dir, alias)
                 # Clone repository
                 clone_path = self._clone_repository(repo_url, alias, default_branch)
@@ -1182,17 +1159,12 @@ class GoldenRepoManager:
                     )
 
                     global_activator = GlobalActivator(self.golden_repos_dir)
-                    published = self._publish_added_index(clone_path)
-                    activation_kwargs: Dict[str, Any] = (
-                        {"alias_extra": published} if published else {}
-                    )
                     global_activator.activate_golden_repo(
                         repo_name=alias,
                         repo_url=repo_url,
                         clone_path=clone_path,
                         enable_temporal=enable_temporal,
                         temporal_options=temporal_options,
-                        **activation_kwargs,
                     )
                     logging.info(
                         f"Golden repository '{alias}' automatically activated globally as '{alias}-global'"
@@ -1410,22 +1382,12 @@ class GoldenRepoManager:
                 reason,
             )
             return removed
-        copies = self._delegated_working_copies_if_wired()
-        if copies is None:
-            # Nothing reaches workspace-mcp, so a leftover clone can be neither
-            # seen nor removed. A clean add has none and proceeds; if one is
-            # there, git-mcp's clone fails loud with "destination exists".
-            logging.warning(
-                "add_golden_repo for '%s': no workspace-mcp clone backend "
-                "(clone_backend='delegated') is wired, so a partial clone an "
-                "interrupted add may have left at %s cannot be removed; if one "
-                "is there, the clone fails with 'destination exists'",
-                alias,
-                clone_path,
-            )
-            return removed
         try:
-            deleted = copies.remove(clone_path)
+            deleted = self._delegated_working_copies(
+                f"add_golden_repo retry for '{alias}'"
+            ).remove(clone_path)
+        except GitOperationError:
+            raise
         except Exception as exc:  # workspace-mcp transport / HTTP error
             raise GitOperationError(
                 f"Failed orphan cleanup for '{alias}': the partial clone at "
@@ -3026,20 +2988,6 @@ class GoldenRepoManager:
         (``/clone-path/stat`` and ``/clone-path/delete``). Raises -- never a
         fallback to this pod's disk -- when no such backend is wired.
         """
-        copies = self._delegated_working_copies_if_wired()
-        if copies is None:
-            clone_backend = getattr(self._snapshot_manager, "_clone_backend", None)
-            raise GitOperationError(
-                f"{feature}: content_backend='delegated' keeps golden clones on "
-                "workspace-mcp, which this server reaches only through "
-                "clone_backend='delegated' (workspace_mcp.endpoint); its clone "
-                f"backend is {type(clone_backend).__name__}"
-            )
-        return copies
-
-    def _delegated_working_copies_if_wired(self) -> Any:
-        """:meth:`_delegated_working_copies`, or None when no DelegatedCloneBackend
-        is wired -- for a step that may proceed without workspace-mcp."""
         from code_indexer.server.repositories.activated_working_copy import (
             DelegatedWorkingCopies,
         )
@@ -3049,7 +2997,12 @@ class GoldenRepoManager:
 
         clone_backend = getattr(self._snapshot_manager, "_clone_backend", None)
         if not isinstance(clone_backend, DelegatedCloneBackend):
-            return None
+            raise GitOperationError(
+                f"{feature}: content_backend='delegated' keeps golden clones on "
+                "workspace-mcp, which this server reaches only through "
+                "clone_backend='delegated' (workspace_mcp.endpoint); its clone "
+                f"backend is {type(clone_backend).__name__}"
+            )
         return DelegatedWorkingCopies(clone_backend)
 
     def _delegated_clone_retain_reason(
@@ -5506,38 +5459,6 @@ class GoldenRepoManager:
                 f"[change_branch] HNSW post-CoW cleanup failed (non-fatal): {e}"
             )
 
-    def _publish_added_index(self, clone_path: str) -> Optional[Dict[str, str]]:
-        """Publish a newly added repository's index under a delegated IndexStore.
-
-        The add builds the index on this pod only; the alias points at the
-        clone path until the first refresh snapshots it. Publishing here and
-        recording the version with the pointer lets any other pod check the
-        same index out (``server/services/index_materializer.py``). None under
-        the local store (nothing to publish: today's add). Raises on failure,
-        which rolls the registration back like any activation failure.
-        """
-        return self._publish_index(clone_path, clone_path)
-
-    def _publish_index(
-        self, repo_path: str, built_from: str
-    ) -> Optional[Dict[str, str]]:
-        """Publish the index under ``built_from`` as ``repo_path``'s next
-        version (``utils.index_store.publish_index_fields``) with the store
-        the running server built. None under the local store."""
-        from code_indexer.server.startup.index_store_wiring import (
-            server_index_store,
-        )
-        from code_indexer.utils.index_store import publish_index_fields
-
-        fields = publish_index_fields(server_index_store(), repo_path, built_from)
-        if fields is not None:
-            from code_indexer.server.services.index_materializer import (
-                mark_published_here,
-            )
-
-            mark_published_here(built_from, fields)
-        return fields
-
     def _is_versioned_snapshot(self, path: Optional[str]) -> bool:
         """Return True when *path* is a versioned snapshot (Bug #1084 Phase A4).
 
@@ -5558,34 +5479,16 @@ class GoldenRepoManager:
 
         return bool(is_versioned_snapshot(path))
 
-    def _cb_swap_alias(
-        self,
-        alias: str,
-        new_snapshot_path: str,
-        published: Optional[Dict[str, str]] = None,
-    ) -> None:
-        """Atomically swap alias JSON to new snapshot; schedule old snapshot cleanup.
-
-        ``published``: the alias-document fields of the snapshot's published
-        index (delegated IndexStore), written with the pointer. The recorded
-        temporal-shard version is carried over: the shards live outside the
-        snapshot and a branch change does not rebuild them.
-        """
+    def _cb_swap_alias(self, alias: str, new_snapshot_path: str) -> None:
+        """Atomically swap alias JSON to new snapshot; schedule old snapshot cleanup."""
         # Import here to avoid circular dependency (alias_manager imports from server)
         from code_indexer.global_repos.alias_manager import AliasManager
-        from code_indexer.utils.index_store import recorded_temporal_fields
 
         global_alias = f"{alias}-global"
         alias_manager = AliasManager(os.path.join(self.golden_repos_dir, "aliases"))
 
         current_target = alias_manager.read_alias(global_alias)
-        extra = {
-            **recorded_temporal_fields(alias_manager.read_record(global_alias)),
-            **(published or {}),
-        }
-        alias_manager.create_alias(
-            global_alias, new_snapshot_path, repo_name=alias, extra=extra or None
-        )
+        alias_manager.create_alias(global_alias, new_snapshot_path, repo_name=alias)
 
         # Evict stale HNSW + chunk-store cache entries for the old
         # versioned path (Bug #994 AC11, Bug #1775). Shared helper --
@@ -5756,12 +5659,7 @@ class GoldenRepoManager:
                     scheduler.raise_if_write_lock_ownership_lost(
                         alias, owner_name="branch_change"
                     )
-                # Under a delegated IndexStore the snapshot is published (after
-                # the branch cleanups above, so the published index is the one
-                # served) and its version recorded with the pointer: any pod
-                # can then check the new branch out. None under the local store.
-                published = self._publish_index(base, snapshot)
-                self._cb_swap_alias(alias, snapshot, published)
+                self._cb_swap_alias(alias, snapshot)
                 if progress_callback is not None:
                     progress_callback(
                         100,
@@ -6352,12 +6250,6 @@ class GoldenRepoManager:
                         # data lives at {golden_repos_dir}/.temporal/{alias}/ --
                         # so --clear was always appended and the real shards were
                         # destroyed on the first admin reindex.
-                        # Delegated IndexStore: the --clear decision and the
-                        # build both need the published shards on this pod
-                        # (the child's result is published with this job's
-                        # snapshot, via note_temporal_indexed below).
-                        if scheduler is not None:
-                            scheduler.serve_temporal_shards(f"{alias}-global")
                         _index_dir = Path(repo_path) / ".code-indexer" / "index"
                         _clear_flags = (
                             ["--clear"]
@@ -6469,8 +6361,6 @@ class GoldenRepoManager:
                             error_label="create temporal index",
                             env=_temporal_env,
                         )
-                        if scheduler is not None:
-                            scheduler.note_temporal_indexed(f"{alias}-global")
 
                         # Bug #131: Update enable_temporal flag in BOTH tables
                         if self._sqlite_backend.update_enable_temporal(alias, True):
@@ -6571,7 +6461,6 @@ class GoldenRepoManager:
                         alias_name=global_alias,
                         new_target=new_snapshot,
                         old_target=current_target,
-                        **scheduler.published_swap_extra(global_alias, new_snapshot),
                     )
 
                     # Bug #1775: evict stale HNSW + chunk-store cache

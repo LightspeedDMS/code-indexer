@@ -115,10 +115,8 @@ class BranchService:
         ``content_backend: delegated`` that is because the repository is with
         git-mcp: its answer is asked instead (only git's own "not a git
         repository" makes the path non-git). With no git seam to ask, branch
-        listing REFUSES rather than answer "no branches". A pod-local
-        (``local://``) golden repository is on this pod: local git answered.
-        Elsewhere (local backend, CLI, tests) nothing changes: the path is
-        simply not a repo.
+        listing REFUSES rather than answer "no branches". Elsewhere (local
+        backend, CLI, tests) nothing changes: the path is simply not a repo.
         """
         from code_indexer.server.services.delegated_refusal import (
             refuse_when_delegated,
@@ -126,14 +124,9 @@ class BranchService:
         from code_indexer.server.startup.content_backend_wiring import (
             golden_repo_content_root,
             is_content_seam_delegated,
-            is_pod_local_golden_path,
         )
 
         if not is_content_seam_delegated():
-            return False
-        if is_pod_local_golden_path(self.git_topology_service.codebase_dir):
-            # A local:// repository's files are on this pod, never with
-            # git-mcp: local git's "not a repository" is the answer.
             return False
         from code_indexer.server.startup.git_backend_wiring import (
             server_delegated_git_backend,

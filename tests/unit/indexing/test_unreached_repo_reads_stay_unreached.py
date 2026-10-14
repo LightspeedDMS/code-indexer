@@ -79,9 +79,7 @@ def test_the_text_sniff_never_opens_a_file(tmp_path: Path, monkeypatch: Any) -> 
     assert finder._get_base_filtering_result(tmp_path / "x.bin") is False
 
 
-def test_a_confined_resume_never_follows_a_symlink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_confined_resume_never_follows_a_symlink(tmp_path: Path) -> None:
     """Every server-spawned `cidx index` is confined (--ignore-resume-state);
     a candidate outside the root is rejected before is_symlink()."""
     indexer: Any = SmartIndexer.__new__(SmartIndexer)
@@ -92,8 +90,12 @@ def test_a_confined_resume_never_follows_a_symlink(
     candidate.is_symlink.side_effect = AssertionError("is_symlink() reached")
     import code_indexer.services.smart_indexer as module
 
-    monkeypatch.setattr(module, "resolve_if_within_root", lambda *a: None)
-    assert not indexer._resume_candidate_is_safe(candidate, tmp_path / "repo")
+    original = module.resolve_if_within_root
+    module.resolve_if_within_root = lambda *a: None  # type: ignore[assignment]
+    try:
+        assert not indexer._resume_candidate_is_safe(candidate, tmp_path / "repo")
+    finally:
+        module.resolve_if_within_root = original  # type: ignore[assignment]
 
 
 @pytest.mark.parametrize(
@@ -104,15 +106,13 @@ def test_a_confined_resume_never_follows_a_symlink(
     ],
 )
 def test_a_non_git_chunk_never_asks_the_content_seam(
-    vector_data: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    vector_data: Dict[str, Any],
 ) -> None:
     """Pod-local local:// repositories (langfuse trace folders) are not git
     repositories: their chunks carry their text and are answered before the
     delegated content-backend branch, so they are never sent to a backend that
     does not hold them."""
     store = FilesystemVectorStore.__new__(FilesystemVectorStore)
-    monkeypatch.setattr(
-        store, "_content_backend_source", lambda: pytest.fail("asked the seam")
-    )
+    store._content_backend_source = lambda: pytest.fail("asked the seam")  # type: ignore[method-assign]
     content, staleness = store._get_chunk_content_with_staleness(vector_data)
     assert content == "body" and staleness["is_stale"] is False

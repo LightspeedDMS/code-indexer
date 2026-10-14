@@ -42,6 +42,10 @@ from typing import Any, Dict, Mapping, Optional, Protocol, Union
 INDEX_DIRNAME = ".code-indexer"
 
 
+class IndexStoreDeleteUnsupportedError(RuntimeError):
+    """The index store's artifact client cannot delete published versions."""
+
+
 class IndexStore(Protocol):
     """Answers where a repository's cidx state is, for this process to use.
 
@@ -69,6 +73,15 @@ class IndexStore(Protocol):
         """Make a version readable under ``into``; the index root to read."""
         ...
 
+    def delete(self, repo_path: Union[str, Path]) -> Optional[int]:
+        """Delete every published version of ``repo_path``'s index.
+
+        The number of versions deleted (0 when there were none: idempotent),
+        or None when this store publishes nothing. Raises when the versions
+        could not be deleted -- never reports a deletion that did not happen.
+        """
+        ...
+
 
 class LocalIndexStore:
     """Today's layout: the index lives inside the repository it describes."""
@@ -87,6 +100,11 @@ class LocalIndexStore:
     ) -> Path:
         """Nothing to fetch: the built index IS the readable one."""
         return self.index_root(repo_path)
+
+    def delete(self, repo_path: Union[str, Path]) -> Optional[int]:
+        """Nothing published: the index is inside the repository directory,
+        so deleting that directory (golden-repo removal does) deletes it."""
+        return None
 
 
 #: What the artifact service accepts as an alias (workspace-mcp's index store).
@@ -221,7 +239,7 @@ class DelegatedIndexStore:
     service as an immutable version; ``checkout`` fetches a version, verified,
     into a directory a reader opens. ``artifacts`` is the plugin's client
     (``code_indexer.index_artifacts``): ``current_version``, ``publish``,
-    ``checkout``.
+    ``checkout`` and, for ``delete``, ``delete_alias``.
     """
 
     is_local = False
@@ -274,6 +292,25 @@ class DelegatedIndexStore:
         dest = Path(into) / INDEX_DIRNAME
         self._artifacts.checkout(store_alias, str(dest), version)
         return dest
+
+    def delete(self, repo_path: Union[str, Path]) -> Optional[int]:
+        """Delete every published version of the alias ``publish`` writes.
+
+        The artifact client's ``delete_alias`` (idempotent: 0 for an alias
+        with no versions); its errors propagate. A client without it (a plugin
+        older than delete support) raises: the versions would otherwise stay
+        published while the caller believed them gone.
+        """
+        alias = index_store_alias(Path(repo_path).name)
+        delete_alias = getattr(self._artifacts, "delete_alias", None)
+        if not callable(delete_alias):
+            raise IndexStoreDeleteUnsupportedError(
+                f"cannot delete the published index versions of {alias!r}: the "
+                f"index-artifacts client {type(self._artifacts).__name__} has no "
+                "delete_alias (the code_indexer.index_artifacts plugin predates "
+                "it; upgrade it to a version with index deletion)"
+            )
+        return int(delete_alias(alias))
 
 
 _DEFAULT: IndexStore = LocalIndexStore()

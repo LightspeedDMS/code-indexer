@@ -556,15 +556,11 @@ def register_repos_v2_routes(
                 # Also check golden repositories
                 _enforce_golden_access(current_user.username, cleaned_repo_id)
                 try:
-                    # Only the clone path: the details call would also compute
-                    # the repository's statistics (a content-backend manifest
-                    # under `delegated`) that this endpoint never reports.
-                    repo_path = Path(
-                        repository_listing_manager.get_golden_clone_path(
-                            cleaned_repo_id
-                        )
+                    repo_details = repository_listing_manager.get_repository_details(
+                        alias=cleaned_repo_id, username=current_user.username
                     )
                     repo_found = True
+                    repo_path = Path(repo_details["clone_path"])
                     is_golden = True
                 except RepositoryListingError:
                     pass

@@ -554,100 +554,13 @@ def test_delegated_failed_add_keeps_a_clone_a_registry_row_still_names(
     def setup(path: str) -> None:
         clones.present.add(path)
         clones.calls.clear()  # the add's up-front orphan check ran before this
-        _index_state(path)
         _register(mgr)  # e.g. the activation rollback could not remove it
 
     _failing_add(mgr, setup, monkeypatch)
 
-    clone = os.path.join(mgr.golden_repos_dir, ALIAS)
     assert clones.calls == []
-    assert clone in clones.present
-    assert (Path(clone) / ".code-indexer" / "config.json").exists()
+    assert os.path.join(mgr.golden_repos_dir, ALIAS) in clones.present
     assert "a registry row still names it" in caplog.text
-
-
-def test_delegated_rerun_of_a_registered_add_keeps_its_index_state(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A pod-pull reclaim re-runs an add whose first executor had committed
-    the row: its clone fails ("destination exists"), and the live repository's
-    index state and clone must survive that failure."""
-    mgr, clones = _delegated(tmp_path)
-    clone = _register(mgr)
-    state = _index_state(clone)
-    clones.present.add(clone)
-
-    def clone_into_existing(repo_url: str, alias: str, branch: Optional[str]) -> str:
-        raise GitOperationError(f"destination path '{clone}' already exists")
-
-    monkeypatch.setattr(mgr, "_clone_repository", clone_into_existing)
-    with _forbid_local_repository_io(mgr.golden_repos_dir):
-        with pytest.raises(GitOperationError, match="already exists"):
-            mgr.execute_add_golden_repo_work(
-                repo_url=REMOTE_URL,
-                alias=ALIAS,
-                default_branch="main",
-                submitter_username="admin",
-            )
-
-    assert (state / "config.json").exists()
-    assert (state / "index" / "coll" / "hnsw_index.bin").exists()
-    assert clone in clones.present
-    assert (DELETE, clone) not in clones.calls
-
-
-def test_delegated_failed_add_keeps_everything_when_the_registry_is_unreadable(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    mgr, clones = _delegated(tmp_path)
-    clone = os.path.join(mgr.golden_repos_dir, ALIAS)
-    registry_down = {"now": False}
-    real_lookup = mgr.get_golden_repo
-
-    def lookup(alias: str) -> Any:
-        if registry_down["now"]:
-            raise RuntimeError("database is locked")
-        return real_lookup(alias)
-
-    def setup(path: str) -> None:
-        clones.present.add(path)
-        clones.calls.clear()
-        _index_state(path)
-        registry_down["now"] = True
-
-    monkeypatch.setattr(mgr, "get_golden_repo", lookup)
-    _failing_add(mgr, setup, monkeypatch)
-
-    assert clones.calls == []
-    assert (Path(clone) / ".code-indexer" / "config.json").exists()
-    assert "database is locked" in caplog.text
-
-
-def test_delegated_clean_add_needs_no_workspace_mcp_clone_backend(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """content and git delegated, clone_backend not: a clean add reaches its
-    clone instead of failing on a cleanup step that has nothing to clean."""
-    mgr = _manager(tmp_path, delegated=True)
-    cloned: List[str] = []
-
-    _failing_add(mgr, cloned.append, monkeypatch)
-
-    assert cloned == [os.path.join(mgr.golden_repos_dir, ALIAS)]
-    assert "no workspace-mcp clone backend" in caplog.text
-
-
-def test_delegated_retry_without_a_clone_backend_removes_only_index_state(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    mgr = _manager(tmp_path, delegated=True)
-    clone = os.path.join(mgr.golden_repos_dir, ALIAS)
-    _index_state(clone)
-
-    assert mgr._remove_orphan_clone_for_retry(REMOTE_URL, ALIAS) is True
-    assert not (Path(clone) / ".code-indexer").exists()
-    assert mgr._remove_orphan_clone_for_retry(REMOTE_URL, ALIAS) is False
-    assert "destination exists" in caplog.text
 
 
 def test_delegated_failed_add_keeps_an_in_place_registration(

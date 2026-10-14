@@ -31,7 +31,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 from code_indexer.server.storage.shared.git_backend import GitCommandRunner
 
@@ -48,21 +48,6 @@ _NETWORK = ("fetch", "pull", "push")
 _END_OF_OPTIONS = "--end-of-options"
 
 PathLike = Union[str, Path]
-
-
-def _is_typed_timeout(exc: BaseException) -> bool:
-    """True when *exc* is a backend-typed timeout (``GitMcpTimeoutError``) or
-    its ``__cause__`` chain contains a transport timeout. The typed check avoids
-    substring matching on arbitrary error text."""
-    cls_name = type(exc).__name__
-    if cls_name == "GitMcpTimeoutError":
-        return True
-    cause = exc.__cause__
-    while cause is not None:
-        if type(cause).__name__ in ("GitMcpTimeoutError", "timeout", "TimeoutError"):
-            return True
-        cause = cause.__cause__
-    return False
 
 
 class GitToolsUnavailableError(RuntimeError):
@@ -210,9 +195,9 @@ class GoldenGitReader:
                 str(cwd), list(cmd[1:]), timeout=timeout
             )
         except subprocess.CalledProcessError as e:
-            if timeout is not None and _is_typed_timeout(e):
-                raise subprocess.TimeoutExpired(list(cmd), timeout) from e
             detail = str(e.stderr or e)
+            if timeout is not None and "timed out after" in detail:
+                raise subprocess.TimeoutExpired(list(cmd), timeout) from e
             raise GitToolsUnavailableError(
                 f"git-mcp could not run git {cmd[1]} on {cwd}: {detail}"
             ) from e
@@ -275,53 +260,30 @@ class DelegatedGitTools:
         self, cmd: List[str], repo: str, *, check: bool, timeout: Optional[float]
     ) -> "subprocess.CompletedProcess[str]":
         verb = cmd[1]
-        set_upstream, positionals = _network_operands(verb, cmd[2:])
+        positionals = [a for a in cmd[2:] if a != _END_OF_OPTIONS]
+        if any(a.startswith("-") for a in positionals):
+            raise GitToolsUnavailableError(
+                f"git {verb} with options cannot run through the git seam: {cmd[2:]}"
+            )
         remote = positionals[0] if positionals else "origin"
         branch = positionals[1] if len(positionals) > 1 else None
-        stdout = ""
         try:
             if verb == "push":
                 pushed: "subprocess.CompletedProcess[str]" = self._backend.push(
-                    repo, remote, branch, timeout=timeout, set_upstream=set_upstream
+                    repo, remote, branch, timeout=timeout
                 )
-                stdout = pushed.stdout or ""
-            elif verb == "pull":
-                before = self._head(repo, timeout)
+                return subprocess.CompletedProcess(cmd, 0, pushed.stdout or "", "")
+            if verb == "pull":
                 self._backend.pull(repo, remote=remote, branch=branch, timeout=timeout)
-                stdout = self._changed_summary(repo, before, timeout)
             else:
                 self._backend.fetch(repo, remote, timeout=timeout)
         except subprocess.CalledProcessError as e:
             if check:
                 raise
-            stderr = str(e.stderr or "")
-            # git's conflicts are on stdout; a backend that only had them as
-            # error text still reports them where the callers read them.
-            out = str(e.output or "") or _conflict_lines(stderr)
-            return subprocess.CompletedProcess(cmd, e.returncode or 1, out, stderr)
-        return subprocess.CompletedProcess(cmd, 0, stdout, "")
-
-    def _head(self, repo: str, timeout: Optional[float]) -> Optional[str]:
-        """HEAD's commit, or None (an unborn branch has none)."""
-        head = self._backend.run(
-            repo, ["rev-parse", "-q", "--verify", "HEAD"], timeout=timeout
-        )
-        if head.returncode != 0:
-            return None
-        return head.stdout.strip() or None
-
-    def _changed_summary(
-        self, repo: str, before: Optional[str], timeout: Optional[float]
-    ) -> str:
-        """What a local pull prints about the files it changed (git's
-        ``N files changed`` diffstat summary), read from the copy: git-mcp's
-        ``git_pull`` reports a status, not git's output."""
-        if before is None:
-            return ""
-        stat = self._backend.run(
-            repo, ["diff", "--shortstat", before, "HEAD"], timeout=timeout
-        )
-        return stat.stdout if stat.returncode == 0 else ""
+            return subprocess.CompletedProcess(
+                cmd, e.returncode or 1, str(e.output or ""), str(e.stderr or "")
+            )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
 
     def merge_in_progress(self, repo_path: PathLike) -> bool:
         """Whether a merge is in progress (``.git/MERGE_HEAD`` exists)."""
@@ -369,38 +331,6 @@ class DelegatedGitTools:
         if fetched.error in UNREADABLE_FETCH_ERRORS:
             raise OSError(f"Cannot read '{file_path}': {fetched.error}")
         return None
-
-
-_SET_UPSTREAM = ("-u", "--set-upstream")
-
-
-def _network_operands(verb: str, args: Sequence[str]) -> Tuple[bool, List[str]]:
-    """(set_upstream, positionals) of a network command's arguments.
-
-    The structured operations take a remote and a branch; the one option that
-    crosses is push's ``--set-upstream`` (before ``--end-of-options``). Any
-    other option is refused rather than silently dropped."""
-    set_upstream = False
-    positionals: List[str] = []
-    options_ended = False
-    for arg in args:
-        if not options_ended and arg == _END_OF_OPTIONS:
-            options_ended = True
-        elif not options_ended and verb == "push" and arg in _SET_UPSTREAM:
-            set_upstream = True
-        elif arg.startswith("-"):
-            raise GitToolsUnavailableError(
-                f"git {verb} with options cannot run through the git seam: {list(args)}"
-            )
-        else:
-            positionals.append(arg)
-    return set_upstream, positionals
-
-
-def _conflict_lines(text: str) -> str:
-    """git's ``CONFLICT ...`` lines in *text* (empty when there are none)."""
-    lines = [line for line in text.splitlines() if line.startswith("CONFLICT")]
-    return "".join(line + "\n" for line in lines)
 
 
 def _identity(env: Optional[Mapping[str, str]]) -> Optional[Dict[str, str]]:

@@ -77,30 +77,6 @@ def decode_like_run_git_command(raw: bytes) -> str:
         return text.read()
 
 
-#: git's own words for "no such revision / no commits": what a local run's
-#: non-zero exit means for log, rev-parse and show. Through git-mcp a failure
-#: is also a transport, JSON-RPC or tool error, or "not a git repository" for
-#: a clone that is not there -- none of which may read as "no history".
-_REVISION_MISS_MARKERS = (
-    "does not have any commits yet",
-    "bad default revision",
-    "unknown revision",
-    "bad revision",
-    "bad object",
-    "invalid object name",
-    "Needed a single revision",
-)
-
-
-def is_revision_miss(exc: subprocess.CalledProcessError) -> bool:
-    """True when *exc* is git saying the revision (or any commit) does not
-    exist -- the only failure the seam may answer as empty or not found."""
-    stderr = exc.stderr
-    if isinstance(stderr, bytes):
-        stderr = stderr.decode("utf-8", errors="replace")
-    return any(marker in str(stderr or "") for marker in _REVISION_MISS_MARKERS)
-
-
 # Timeout for git blame on repos with deep history (Bug #1008)
 BLAME_TIMEOUT_SECONDS = 30
 
@@ -425,12 +401,8 @@ class GitOperationsService:
                     since=since,
                     max_count=limit + 1,
                 )
-            except subprocess.CalledProcessError as exc:
-                # As local: empty repository or no matching revision. Any other
-                # failure (git-mcp down, clone missing) is an error, not "no
-                # history".
-                if not is_revision_miss(exc):
-                    raise
+            except subprocess.CalledProcessError:
+                # As local: empty repository or no matching commits.
                 return GitLogResult(commits=[], total_count=0, truncated=False)
             return self._log_result(output, limit)
 
@@ -617,21 +589,22 @@ class GitOperationsService:
         """
         assert self._git_backend is not None
         repo = str(self.repo_path)
-        not_found = f"Commit not found: {commit_hash}"
         try:
             full_hash = str(self._git_backend.rev_parse(repo, commit_hash)).strip()
+        except subprocess.CalledProcessError:
+            raise ValueError(f"Commit not found: {commit_hash}")
+        try:
             commits = self._parse_log_output(
                 self._backend_log(self.LOG_FORMAT, [full_hash], max_count=1)
             )
-        except subprocess.CalledProcessError as exc:
-            if is_revision_miss(exc):
-                raise ValueError(not_found) from exc
-            raise
+        except subprocess.CalledProcessError:
+            raise ValueError(f"Commit not found: {commit_hash}")
         if not commits:
-            raise ValueError(not_found)
-        # A resolved commit's `<sha>^@` always succeeds (a root commit has no
-        # parents: empty output), so a failure here is the seam's, and raises.
-        parent_output = str(self._git_backend.rev_parse(repo, f"{full_hash}^@"))
+            raise ValueError(f"Commit not found: {commit_hash}")
+        try:
+            parent_output = str(self._git_backend.rev_parse(repo, f"{full_hash}^@"))
+        except subprocess.CalledProcessError:
+            parent_output = ""  # as local, whose check=False reads no parents
         parents = [p.strip() for p in parent_output.strip().split("\n") if p.strip()]
         return CommitDetail(
             commit=commits[0],
@@ -881,10 +854,8 @@ class GitOperationsService:
             resolved_revision = str(
                 self._git_backend.rev_parse(repo, "--verify", f"{revision}^{{commit}}")
             ).strip()
-        except subprocess.CalledProcessError as exc:
-            if is_revision_miss(exc):
-                raise ValueError(f"Invalid revision: {revision}") from exc
-            raise
+        except subprocess.CalledProcessError:
+            raise ValueError(f"Invalid revision: {revision}")
         shown = self._git_backend.show_objects(repo, [(resolved_revision, path)])
         if len(shown) != 1:
             raise RuntimeError(

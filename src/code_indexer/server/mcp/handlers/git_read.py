@@ -107,6 +107,22 @@ def _git_seam_kwargs(repository_alias: Any) -> Dict[str, Any]:
     return {} if backend is None else {"git_backend": backend}
 
 
+def _history_seam_kwargs(repository_alias: Any) -> Dict[str, Any]:
+    """``git_backend=`` for the history service (global_repos
+    ``GitOperationsService``) on a pod that does not hold the repository.
+
+    Unlike :func:`_git_seam_kwargs`, for ANY alias: a golden repo and a user's
+    activated copy alike are where git-mcp sees them (the path
+    :func:`_resolve_through_git_seam` returned after the registry and access
+    checks), and the history service reads them read-only through it. Nothing
+    on a pod that holds its repositories, so the local call is unchanged.
+    """
+    if not isinstance(repository_alias, str):
+        return {}
+    backend = delegated_golden_git_backend()
+    return {} if backend is None else {"git_backend": backend}
+
+
 def _resolve_through_git_seam(
     resolve: Callable[..., Tuple[Optional[str], Optional[str]]],
     repository_alias: Any,
@@ -253,7 +269,7 @@ def handle_git_file_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         rerank_query = args.get("rerank_query") or None
         fetch_limit = _compute_file_history_fetch_limit(requested_limit, rerank_query)
         service = GitOperationsService(
-            Path(repo_path), **_git_seam_kwargs(repository_alias)
+            Path(repo_path), **_history_seam_kwargs(repository_alias)
         )
         result = service.get_file_history(
             path=path,
@@ -452,7 +468,7 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         from code_indexer.global_repos.git_operations import GitOperationsService
 
         service = GitOperationsService(
-            Path(repo_path), **_git_seam_kwargs(repository_alias)
+            Path(repo_path), **_history_seam_kwargs(repository_alias)
         )
         result = service.get_log(
             limit=fetch_limit,
@@ -586,7 +602,7 @@ def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         from code_indexer.global_repos.git_operations import GitOperationsService
 
         service = GitOperationsService(
-            Path(repo_path), **_git_seam_kwargs(repository_alias)
+            Path(repo_path), **_history_seam_kwargs(repository_alias)
         )
         result = service.show_commit(
             commit_hash=commit_hash,
@@ -701,7 +717,7 @@ def handle_git_file_at_revision(args: Dict[str, Any], user: User) -> Dict[str, A
         from code_indexer.global_repos.git_operations import GitOperationsService
 
         service = GitOperationsService(
-            Path(repo_path), **_git_seam_kwargs(repository_alias)
+            Path(repo_path), **_history_seam_kwargs(repository_alias)
         )
         result = service.get_file_at_revision(path=path, revision=revision)
 
@@ -863,7 +879,7 @@ def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         result = GitOperationsService(
-            Path(repo_path), **_git_seam_kwargs(repository_alias)
+            Path(repo_path), **_history_seam_kwargs(repository_alias)
         ).get_blame(
             path=path,
             revision=args.get("revision"),
@@ -1061,7 +1077,7 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
         from code_indexer.global_repos.git_operations import GitOperationsService
 
         service = GitOperationsService(
-            Path(repo_path), **_git_seam_kwargs(repository_alias)
+            Path(repo_path), **_history_seam_kwargs(repository_alias)
         )
         result = service.search_commits(
             query=query,
@@ -1192,7 +1208,7 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Create service and execute search
         service = GitOperationsService(
-            Path(repo_path), **_git_seam_kwargs(repository_alias)
+            Path(repo_path), **_history_seam_kwargs(repository_alias)
         )
         is_regex = args.get("is_regex", False)
         if is_regex:

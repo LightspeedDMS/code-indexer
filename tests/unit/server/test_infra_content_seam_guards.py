@@ -314,5 +314,6 @@ def test_golden_repos_root_is_under_cidx_data_dir() -> None:
     repository: GoldenRepoManager roots it at ``<data_dir>/golden-repos``."""
     source = (_SRC / "server/repositories/golden_repo_manager.py").read_text()
     assert (
-        'self.golden_repos_dir = os.path.join(self.data_dir, "golden-repos")' in source
+        'self.golden_repos_dir = os.path.join(self.data_dir, "golden-repos")'
+        in source
     )
