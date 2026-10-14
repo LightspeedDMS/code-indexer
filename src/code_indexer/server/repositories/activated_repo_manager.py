@@ -2625,11 +2625,53 @@ class ActivatedRepoManager:
         facade.serve(username, user_alias, repo_path, metadata)
         return repo_path
 
-    def publish_index(self, username: str, user_alias: str) -> None:
+    def _clone_timeout(self) -> int:
+        """The CoW/seed deadline: ``resource_config.cow_clone_timeout``."""
+        rc = getattr(self.golden_repo_manager, "resource_config", None)
+        timeout: int = (
+            getattr(rc, "cow_clone_timeout", self._COW_CLONE_TIMEOUT_DEFAULT)
+            if rc is not None
+            else self._COW_CLONE_TIMEOUT_DEFAULT
+        )
+        return timeout
+
+    def registration(self, username: str, user_alias: str) -> Optional[Dict[str, Any]]:
+        """The copy's registry entry as stored (no side effects), or None."""
+        return self._load_metadata(username, user_alias)
+
+    def seed_index_from_golden(self, username: str, user_alias: str) -> None:
+        """Re-create this pod's index state for a registered (single) copy from
+        its golden repository's served index, as activation does -- for a copy
+        whose own index is held nowhere (IndexStore backfill). Raises."""
+        metadata = self._load_metadata(username, user_alias)
+        if metadata is None:
+            raise ActivatedRepoError(
+                f"Repository '{user_alias}' not found for user '{username}'"
+            )
+        golden_alias = metadata.get("golden_repo_alias")
+        if not golden_alias:
+            raise ActivatedRepoError(
+                f"Repository '{user_alias}' records no golden repository"
+            )
+        golden_path = self._serve_golden_index_here(
+            golden_alias
+        ) or self.golden_repo_manager.get_actual_repo_path(golden_alias)
+        self._seed_index_state(
+            golden_path,
+            self.get_activated_repo_path(username, user_alias),
+            timeout=self._clone_timeout(),
+            cancel_check=None,
+        )
+
+    def publish_index(
+        self, username: str, user_alias: str, *, fresh: bool = False
+    ) -> None:
         """Publish the index this pod just built for the copy (a reindex, a
         branch switch or sync) on top of the version it was built from, and
-        record the new version in the registry. No-op under the local store.
-        Raises on failure -- including another pod publishing in between."""
+        record the new version in the registry. ``fresh``: over whatever the
+        store holds (an index from before publishing existed). No-op under the
+        local store. Raises on failure -- including another pod publishing in
+        between."""
         facade = self._activated_index()
         if not facade.is_delegated():
             return
@@ -2648,7 +2690,9 @@ class ActivatedRepoManager:
             marker_version = None
         if marker_version:
             metadata[INDEX_VERSION_FIELD] = marker_version
-        metadata.update(facade.publish(username, user_alias, repo_path, metadata))
+        metadata.update(
+            facade.publish(username, user_alias, repo_path, metadata, fresh=fresh)
+        )
         try:
             self._save_metadata(username, user_alias, metadata)
         except Exception:
@@ -4394,12 +4438,7 @@ class ActivatedRepoManager:
             # (default 3600s / 1 hour, sized for very large repos e.g.
             # evolution ~1M files, phoenix 40GB) instead of a fixed low
             # literal.
-            rc = getattr(self.golden_repo_manager, "resource_config", None)
-            clone_timeout = (
-                getattr(rc, "cow_clone_timeout", self._COW_CLONE_TIMEOUT_DEFAULT)
-                if rc is not None
-                else self._COW_CLONE_TIMEOUT_DEFAULT
-            )
+            clone_timeout = self._clone_timeout()
             # Issue #1511 (second call site): the CoW daemon runs as a
             # different OS user (on a different host) than the process that
             # wrote the golden-repo's index files, which commonly end up at

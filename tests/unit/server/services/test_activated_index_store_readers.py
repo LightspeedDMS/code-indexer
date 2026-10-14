@@ -115,10 +115,9 @@ def test_local_reindex_keeps_todays_disk_check_and_job_args(
 
 def _job(manager: Any, owner: Any, results: Dict[str, Any]) -> Dict[str, Any]:
     manager._execute_all_index_types = lambda *a, **k: results
-    job: Dict[str, Any] = manager._execute_indexing_job(
+    return manager._execute_indexing_job(
         ALIAS, "/nonexistent/pod/path", ["semantic"], False, owner
     )
-    return job
 
 
 @pytest.fixture
@@ -187,12 +186,7 @@ def test_delegated_status_serves_first(tmp_path: Path, delegated: None) -> None:
     (served / ".code-indexer").mkdir(parents=True)
     manager.activated_repo_manager.serve_index_here.return_value = str(served)
     seen: List[Path] = []
-
-    def status_for(path: Path, **kwargs: Any) -> Dict[str, Any]:
-        seen.append(path)
-        return {}
-
-    manager.get_index_status_for_path = status_for
+    manager.get_index_status_for_path = lambda p, **k: seen.append(p) or {}
     manager.get_index_status(ALIAS, USER)
     manager.activated_repo_manager.serve_index_here.assert_called_once_with(USER, ALIAS)
     assert seen == [served]
@@ -228,12 +222,6 @@ def test_local_status_does_not_serve(tmp_path: Path, local: None) -> None:
 # ── HNSW orphan sweep ───────────────────────────────────────────────────────
 
 
-def _recorded(order: List[str], step: str, result: Any) -> Any:
-    """A side effect that records ``step`` and returns ``result``."""
-    order.append(step)
-    return result
-
-
 class _Candidate:
     def __init__(self, kind: str, alias: str) -> None:
         self.kind = kind
@@ -242,7 +230,7 @@ class _Candidate:
 
 
 def _scheduler(outcome: SweepOutcome) -> Any:
-    instance: Any = sweep.HNSWOrphanRepairSweepScheduler.__new__(
+    instance = sweep.HNSWOrphanRepairSweepScheduler.__new__(
         sweep.HNSWOrphanRepairSweepScheduler
     )
     instance._activated_repo_manager = MagicMock()
@@ -327,12 +315,9 @@ def _health_resolve(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arm: Any) -
 def _arm_serving_into(path: Path) -> Any:
     arm = MagicMock()
     arm.get_activated_repo_path.return_value = str(path)
-
-    def serve(username: str, user_alias: str) -> str:
-        (path / ".code-indexer").mkdir(parents=True)
-        return str(path)
-
-    arm.serve_index_here.side_effect = serve
+    arm.serve_index_here.side_effect = lambda u, a: (
+        (path / ".code-indexer").mkdir(parents=True) or str(path)
+    )
     return arm
 
 
@@ -393,12 +378,9 @@ def test_delegated_fts_availability_is_judged_after_serving(
         {"user_alias": ALIAS, "username": USER, "is_global": False}
     ]
     arm.get_activated_repo_path.return_value = str(copy)
-
-    def serve(username: str, user_alias: str) -> str:
-        (copy / ".code-indexer" / "tantivy_index").mkdir(parents=True)
-        return str(copy)
-
-    arm.serve_index_here.side_effect = serve
+    arm.serve_index_here.side_effect = lambda u, a: (
+        (copy / ".code-indexer" / "tantivy_index").mkdir(parents=True) or str(copy)
+    )
     app = FastAPI()
     app.state.payload_cache = None
     app.state.access_filtering_service = None
@@ -453,12 +435,7 @@ def test_a_delegated_activated_search_serves_the_copy_first(
     arm.get_activated_repo_path.return_value = "/nonexistent/pod/copy"
     arm.get_activation_id.return_value = "act-1"
     order: List[str] = []
-
-    def serve(username: str, user_alias: str) -> str:
-        order.append("serve")
-        return ""
-
-    arm.serve_index_here.side_effect = serve
+    arm.serve_index_here.side_effect = lambda u, a: order.append("serve") or ""
     manager = SemanticQueryManager(
         data_dir=str(tmp_path / "data"),
         activated_repo_manager=arm,
@@ -467,7 +444,7 @@ def test_a_delegated_activated_search_serves_the_copy_first(
     with patch.object(
         manager,
         "_search_single_repository",
-        side_effect=lambda *a, **k: _recorded(order, "search", []),
+        side_effect=lambda *a, **k: order.append("search") or [],
     ):
         manager._perform_search(
             username=USER,

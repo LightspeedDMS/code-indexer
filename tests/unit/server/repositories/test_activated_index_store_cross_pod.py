@@ -81,13 +81,6 @@ def _manager(world: ActivatedWorld) -> ActivatedRepoManager:
     return manager
 
 
-def _meta(manager: ActivatedRepoManager) -> Dict[str, Any]:
-    """The copy's metadata, which these tests require to exist."""
-    meta = manager._load_metadata(USER, ALIAS)
-    assert meta is not None, "the activated copy has no metadata"
-    return meta
-
-
 def _activate(manager: ActivatedRepoManager, user_alias: str = ALIAS) -> Any:
     return manager._do_activate_repository(
         username=USER,
@@ -120,7 +113,7 @@ def test_activation_publishes_and_records_the_version(
     manager = _manager(world)
     with world.forbid_local_io():
         _activate(manager)
-    meta = _meta(manager)
+    meta = manager._load_metadata(USER, ALIAS)
     assert meta[INDEX_STORE_ALIAS_FIELD] == COPY_ALIAS
     assert meta[INDEX_VERSION_FIELD] == artifacts.current_version(COPY_ALIAS)
     published = artifacts.root / COPY_ALIAS / meta[INDEX_VERSION_FIELD]
@@ -201,7 +194,7 @@ def test_an_older_checkout_is_swapped_for_the_recorded_version(
     other = world.tmp / "pod-c" / ALIAS
     shutil.copytree(world.pod_copy() / INDEX_DIR, other / INDEX_DIR)
     (other / INDEX_DIR / "index" / "collection" / "chunks.db").write_bytes(b"v2")
-    meta = _meta(manager)
+    meta = manager._load_metadata(USER, ALIAS)
     meta.update(ActivatedIndexStore().publish(USER, ALIAS, other, meta))
     manager._save_metadata(USER, ALIAS, meta)
     assert _index_bytes(world.pod_copy()) == old
@@ -220,7 +213,7 @@ def test_a_failed_swap_keeps_the_older_index(
     manager = _manager(world)
     _activate(manager)
     old = _index_bytes(world.pod_copy())
-    meta = _meta(manager)
+    meta = manager._load_metadata(USER, ALIAS)
     meta.update(ActivatedIndexStore().publish(USER, ALIAS, world.pod_copy(), meta))
     manager._save_metadata(USER, ALIAS, meta)
     (world.pod_copy() / im.CHECKED_OUT_MARKER).write_text("an older version")
@@ -239,7 +232,7 @@ def test_a_failure_after_the_swap_restores_the_older_index(
     other = world.tmp / "pod-c" / ALIAS
     shutil.copytree(world.pod_copy() / INDEX_DIR, other / INDEX_DIR)
     (other / INDEX_DIR / "index" / "collection" / "chunks.db").write_bytes(b"v2")
-    meta = _meta(manager)
+    meta = manager._load_metadata(USER, ALIAS)
     meta.update(ActivatedIndexStore().publish(USER, ALIAS, other, meta))
     manager._save_metadata(USER, ALIAS, meta)
 
@@ -269,7 +262,7 @@ def test_an_activation_from_before_publishing_is_served_only_where_it_is(
 ) -> None:
     manager = _manager(world)
     _activate(manager)
-    meta = _meta(manager)
+    meta = manager._load_metadata(USER, ALIAS)
     for field in (INDEX_STORE_ALIAS_FIELD, INDEX_VERSION_FIELD):
         meta.pop(field)
     manager._save_metadata(USER, ALIAS, meta)
@@ -287,13 +280,13 @@ def test_a_reindex_publishes_on_top_of_the_version_it_was_built_from(
 ) -> None:
     manager = _manager(world)
     _activate(manager)
-    first = _meta(manager)[INDEX_VERSION_FIELD]
+    first = manager._load_metadata(USER, ALIAS)[INDEX_VERSION_FIELD]
     (world.pod_copy() / INDEX_DIR / "index" / "collection" / "chunks.db").write_bytes(
         b"re"
     )
     with world.forbid_local_io():
         manager.publish_index(USER, ALIAS)
-    second = _meta(manager)[INDEX_VERSION_FIELD]
+    second = manager._load_metadata(USER, ALIAS)[INDEX_VERSION_FIELD]
     assert second != first and second == artifacts.current_version(COPY_ALIAS)
     assert (
         "publish",
@@ -328,12 +321,9 @@ def test_a_branch_delta_serves_first_and_publishes_after(
             order.append("index")
 
     manager._index_manager = IndexManager()
-
-    def serve(username: str, user_alias: str) -> str:
-        order.append("serve")
-        return ""
-
-    monkeypatch.setattr(manager, "serve_index_here", serve)
+    monkeypatch.setattr(
+        manager, "serve_index_here", lambda u, a: order.append("serve") or ""
+    )
     monkeypatch.setattr(manager, "publish_index", lambda u, a: order.append("publish"))
     manager._run_branch_delta_index(
         str(world.pod_copy()), ALIAS, **manager._publishing_owner(USER)
@@ -393,7 +383,7 @@ def test_an_entry_naming_another_alias_is_refused(
 ) -> None:
     manager = _manager(world)
     _activate(manager)
-    meta = _meta(manager)
+    meta = manager._load_metadata(USER, ALIAS)
     meta[INDEX_STORE_ALIAS_FIELD] = activated_index_store_alias("bob", ALIAS)
     manager._save_metadata(USER, ALIAS, meta)
     _forget_pod(world)
@@ -446,7 +436,7 @@ def test_local_activation_writes_todays_document(
     )
     manager = _manager(world)
     _activate(manager)
-    meta = _meta(manager)
+    meta = manager._load_metadata(USER, ALIAS)
     assert INDEX_STORE_ALIAS_FIELD not in meta and INDEX_VERSION_FIELD not in meta
     assert sorted(p.name for p in world.pod_copy().iterdir()) == [INDEX_DIR]
     assert manager._publishing_owner(USER) == {}
@@ -513,6 +503,6 @@ def test_an_activation_over_a_leftover_published_index_replaces_it(
     DelegatedIndexStore(artifacts).publish_as(COPY_ALIAS, leftover / INDEX_DIR)
     manager = _manager(world)
     _activate(manager)
-    meta = _meta(manager)
+    meta = manager._load_metadata(USER, ALIAS)
     assert meta[INDEX_VERSION_FIELD] == artifacts.current_version(COPY_ALIAS)
     assert len(artifacts.versions[COPY_ALIAS]) == 2

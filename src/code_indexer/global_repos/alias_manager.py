@@ -146,6 +146,11 @@ class AliasManager:
         no write-mode redirection (Bug #1567 Gap 1 holes A/B)."""
         return pointer_from_document(self.read_record(alias_name))
 
+    def list_records(self, prefix: str = "") -> Dict[str, Dict[str, Any]]:
+        """Every alias document whose name starts with *prefix*, whole (no
+        write-mode redirection). Raises when the store cannot be read."""
+        return dict(self._metadata.list_all(KIND_ALIAS, prefix))
+
     def list_pointers(self, prefix: str = "") -> Dict[str, Tuple[str, Optional[str]]]:
         """Every alias whose name starts with *prefix*, as ``read_pointer``
         would return it; aliases with no usable target_path are absent."""

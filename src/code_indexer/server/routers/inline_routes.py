@@ -64,6 +64,7 @@ from ..routers.hnsw_orphan_sweep_admin import router as hnsw_orphan_sweep_admin_
 from ..routers.embedding_stats_admin import router as embedding_stats_admin_router
 from ..routers.dedup_warnings_admin import router as dedup_warnings_admin_router
 from ..routers.metadata_outbox_admin import router as metadata_outbox_admin_router
+from ..routers.index_store_admin import router as index_store_admin_router
 from ..routers.llm_creds import router as llm_creds_router
 from ..routers.debug_routes import debug_router
 from ..routers.groups import (
@@ -281,6 +282,7 @@ def register_inline_routes(
     app.include_router(embedding_stats_admin_router)  # Story #1418 Phase 3
     app.include_router(dedup_warnings_admin_router)  # Story #1589
     app.include_router(metadata_outbox_admin_router)  # content seam step 5a
+    app.include_router(index_store_admin_router)  # IndexStore rollout backfill
     app.include_router(debug_router)
     app.include_router(reaper_router, prefix="/api/admin")  # Story #967
     app.include_router(xray_router)  # Story #974

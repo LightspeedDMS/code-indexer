@@ -242,6 +242,7 @@ smoke:
       tests/unit/server/routers/test_repository_health_golden_served.py
       tests/unit/server/services/test_checkout_sweep.py
       tests/unit/server/services/hnsw_orphan_sweep/test_golden_repair_publishes.py
+      tests/unit/server/services/test_index_store_backfill.py
       tests/unit/server/startup/test_content_writer_wiring.py
       tests/unit/server/services/test_golden_repo_writes_through_content_writer.py
       tests/unit/server/services/test_activated_file_tools_content_seam.py
