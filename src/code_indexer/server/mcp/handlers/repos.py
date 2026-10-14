@@ -1502,9 +1502,13 @@ def _resolve_golden_repo_path(alias: str) -> Optional[str]:
     """
     golden_repos_dir = _get_golden_repos_dir()
     alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
+    resolved_alias = alias
     resolved: Optional[str] = alias_manager.read_alias(alias)
     if resolved is None and not alias.endswith("-global"):
-        resolved = alias_manager.read_alias(alias + "-global")
+        resolved_alias = alias + "-global"
+        resolved = alias_manager.read_alias(resolved_alias)
+    if resolved is not None:
+        alias_manager.ensure_served_here(resolved_alias, resolved)
     return resolved
 
 
@@ -1786,6 +1790,7 @@ def _post_provider_index_snapshot(
                 alias_name=repo_alias,
                 new_target=new_snapshot,
                 old_target=old_snapshot_path,
+                **scheduler.published_swap_extra(repo_alias, new_snapshot),
             )
         except ValueError as swap_exc:
             import shutil as _shutil

@@ -13,7 +13,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | cidx-state-in-repo | 1020 |
 | migrated | 326 |
 | local-only | 324 |
-| cidx-state | 560 |
+| cidx-state | 575 |
 | not-repo | 422 |
 
 ## Modules with open rows

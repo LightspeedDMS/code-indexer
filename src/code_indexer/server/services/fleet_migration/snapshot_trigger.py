@@ -22,11 +22,18 @@ scheduler path itself runs immediately after its own swap --
 ``RefreshScheduler._enforce_retention`` -- via the REAL ``RefreshScheduler``
 reference migration already holds (AC2's ``RefreshScheduler.
 acquire_write_lock``). Retention is never reimplemented here.
+
+Under a delegated IndexStore the new snapshot's index is published (with the
+scheduler's store) and its version recorded with the pointer, as every other
+swap site does, so a pod that did not build the snapshot checks it out instead
+of failing (``docs/index-store-cross-pod.md``).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+from code_indexer.utils.index_store import publish_index_fields
 
 if TYPE_CHECKING:
     from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
@@ -62,6 +69,9 @@ def trigger_post_consolidation_snapshot(
     new_target: str = refresh_scheduler._snapshot_manager.create_snapshot(
         bare_alias, source_path
     )
+    published = publish_index_fields(
+        refresh_scheduler._index_store, source_path, new_target
+    )
 
     if refresh_scheduler.alias_manager.alias_exists(alias_name):
         current_target = refresh_scheduler.alias_manager.read_alias(alias_name)
@@ -69,6 +79,7 @@ def trigger_post_consolidation_snapshot(
             alias_name=alias_name,
             new_target=new_target,
             old_target=current_target,
+            extra=published,
         )
 
         # Bug #1775: evict stale HNSW + chunk-store cache entries for
@@ -86,7 +97,9 @@ def trigger_post_consolidation_snapshot(
             is_versioned_snapshot_check=refresh_scheduler._is_versioned_snapshot,
         )
     else:
-        refresh_scheduler.alias_manager.create_alias(alias_name, new_target)
+        refresh_scheduler.alias_manager.create_alias(
+            alias_name, new_target, extra=published
+        )
 
     refresh_scheduler._enforce_retention(alias_name, new_target)
 

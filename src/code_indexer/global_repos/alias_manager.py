@@ -22,6 +22,7 @@ from code_indexer.global_repos.control_plane_metadata import (
     pointer_from_document,
 )
 from code_indexer.global_repos.write_mode_markers import WriteModeMarkers
+from code_indexer.utils.index_store import INDEX_STORE_ALIAS_FIELD, INDEX_VERSION_FIELD
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ def resolve_alias_or_index_path(
     """
     target_path = alias_manager.read_alias(alias_name)
     if target_path:
+        alias_manager.ensure_served_here(alias_name, target_path)
         return target_path
 
     index_path = repo_entry.get("index_path") if repo_entry else None
@@ -216,6 +218,34 @@ class AliasManager:
         pointer = self.read_pointer(alias_name)
         return pointer[0] if pointer is not None else None
 
+    def ensure_served_here(self, alias_name: str, target_path: str) -> None:
+        """Make the index at ``target_path`` (just read from ``alias_name``)
+        readable on this pod before a caller READS it.
+
+        Under a delegated IndexStore the target may have been published by
+        another pod: its recorded version is checked out here first
+        (``server/services/index_materializer.py``), and a failure raises
+        ``PublishedIndexUnavailableError`` rather than reading as "not found".
+        A write-mode redirect (a live source path) is left untouched. Under
+        the local store this does nothing (no metadata read).
+        """
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+
+        store = server_index_store()
+        if store.is_local:
+            return
+        record = self.read_record(alias_name)
+        pointer = pointer_from_document(record)
+        if pointer is None or pointer[0] != target_path:
+            return
+        from code_indexer.server.services.index_materializer import (
+            ensure_published_index,
+        )
+
+        ensure_published_index(target_path, record, store=store)
+
     def delete_alias(self, alias_name: str) -> None:
         """
         Delete an alias pointer. A failure is logged, not raised.
@@ -280,7 +310,12 @@ class AliasManager:
             old_target: Expected current target (for validation)
             extra: Optional fields describing what is published, written in
                 the SAME document write as the new pointer (so a reader never
-                sees one without the other). Fields not named are kept.
+                sees one without the other). Fields not named are kept, except
+                the published-index fields (``index_store_alias``,
+                ``index_version``): they describe the OLD target, so a swap
+                that does not name them drops them and a pod that does not
+                hold the new target fails loud instead of checking the old
+                version out into it.
 
         Raises:
             RuntimeError: If the swap fails
@@ -322,6 +357,8 @@ class AliasManager:
         alias_data["previous_path"] = old_target
         alias_data["swapped_at"] = now
         alias_data["last_refresh"] = now
+        alias_data.pop(INDEX_STORE_ALIAS_FIELD, None)
+        alias_data.pop(INDEX_VERSION_FIELD, None)
         if extra:
             alias_data.update(extra)
         try:

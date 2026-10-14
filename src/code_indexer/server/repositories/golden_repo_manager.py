@@ -1092,12 +1092,17 @@ class GoldenRepoManager:
                     )
 
                     global_activator = GlobalActivator(self.golden_repos_dir)
+                    published = self._publish_added_index(clone_path)
+                    activation_kwargs: Dict[str, Any] = (
+                        {"alias_extra": published} if published else {}
+                    )
                     global_activator.activate_golden_repo(
                         repo_name=alias,
                         repo_url=repo_url,
                         clone_path=clone_path,
                         enable_temporal=enable_temporal,
                         temporal_options=temporal_options,
+                        **activation_kwargs,
                     )
                     logging.info(
                         f"Golden repository '{alias}' automatically activated globally as '{alias}-global'"
@@ -4787,6 +4792,31 @@ class GoldenRepoManager:
                 f"[change_branch] HNSW post-CoW cleanup failed (non-fatal): {e}"
             )
 
+    def _publish_added_index(self, clone_path: str) -> Optional[Dict[str, str]]:
+        """Publish a newly added repository's index under a delegated IndexStore.
+
+        The add builds the index on this pod only; the alias points at the
+        clone path until the first refresh snapshots it. Publishing here and
+        recording the version with the pointer lets any other pod check the
+        same index out (``server/services/index_materializer.py``). None under
+        the local store (nothing to publish: today's add). Raises on failure,
+        which rolls the registration back like any activation failure.
+        """
+        return self._publish_index(clone_path, clone_path)
+
+    def _publish_index(
+        self, repo_path: str, built_from: str
+    ) -> Optional[Dict[str, str]]:
+        """Publish the index under ``built_from`` as ``repo_path``'s next
+        version (``utils.index_store.publish_index_fields``) with the store
+        the running server built. None under the local store."""
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+        from code_indexer.utils.index_store import publish_index_fields
+
+        return publish_index_fields(server_index_store(), repo_path, built_from)
+
     def _is_versioned_snapshot(self, path: Optional[str]) -> bool:
         """Return True when *path* is a versioned snapshot (Bug #1084 Phase A4).
 
@@ -4807,8 +4837,17 @@ class GoldenRepoManager:
 
         return bool(is_versioned_snapshot(path))
 
-    def _cb_swap_alias(self, alias: str, new_snapshot_path: str) -> None:
-        """Atomically swap alias JSON to new snapshot; schedule old snapshot cleanup."""
+    def _cb_swap_alias(
+        self,
+        alias: str,
+        new_snapshot_path: str,
+        published: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Atomically swap alias JSON to new snapshot; schedule old snapshot cleanup.
+
+        ``published``: the alias-document fields of the snapshot's published
+        index (delegated IndexStore), written with the pointer.
+        """
         # Import here to avoid circular dependency (alias_manager imports from server)
         from code_indexer.global_repos.alias_manager import AliasManager
 
@@ -4816,7 +4855,9 @@ class GoldenRepoManager:
         alias_manager = AliasManager(os.path.join(self.golden_repos_dir, "aliases"))
 
         current_target = alias_manager.read_alias(global_alias)
-        alias_manager.create_alias(global_alias, new_snapshot_path, repo_name=alias)
+        alias_manager.create_alias(
+            global_alias, new_snapshot_path, repo_name=alias, extra=published
+        )
 
         # Evict stale HNSW + chunk-store cache entries for the old
         # versioned path (Bug #994 AC11, Bug #1775). Shared helper --
@@ -4987,7 +5028,12 @@ class GoldenRepoManager:
                     scheduler.raise_if_write_lock_ownership_lost(
                         alias, owner_name="branch_change"
                     )
-                self._cb_swap_alias(alias, snapshot)
+                # Under a delegated IndexStore the snapshot is published (after
+                # the branch cleanups above, so the published index is the one
+                # served) and its version recorded with the pointer: any pod
+                # can then check the new branch out. None under the local store.
+                published = self._publish_index(base, snapshot)
+                self._cb_swap_alias(alias, snapshot, published)
                 if progress_callback is not None:
                     progress_callback(
                         100,
@@ -5789,6 +5835,7 @@ class GoldenRepoManager:
                         alias_name=global_alias,
                         new_target=new_snapshot,
                         old_target=current_target,
+                        **scheduler.published_swap_extra(global_alias, new_snapshot),
                     )
 
                     # Bug #1775: evict stale HNSW + chunk-store cache
