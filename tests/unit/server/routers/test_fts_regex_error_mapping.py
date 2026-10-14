@@ -25,12 +25,12 @@ from code_indexer.server.auth import dependencies
 from code_indexer.server.routers.inline_query import register_query_routes
 
 
-def _build_client(monkeypatch, tmp_path: Path, search_side_effect):
+def _build_client(monkeypatch, tmp_path: Path, search_side_effect, results=None):
     """Build a TestClient wired to reach the FTS search branch.
 
     ``search_side_effect`` is raised by the stubbed
     ``TantivyIndexManager.search`` so we can exercise the error mapping without
-    a real index.
+    a real index; with None, the stub returns ``results`` instead.
     """
     app = FastAPI()
 
@@ -73,6 +73,8 @@ def _build_client(monkeypatch, tmp_path: Path, search_side_effect):
             return None
 
         def search(self, *_args, **_kwargs):
+            if search_side_effect is None:
+                return results or []
             raise search_side_effect
 
     monkeypatch.setattr(
@@ -163,6 +165,52 @@ def test_genuine_server_error_still_maps_to_500(monkeypatch, tmp_path):
 
     assert resp.status_code == 500, resp.text
     assert "FTS search failed" in resp.json()["detail"]
+
+
+def test_a_value_error_building_the_response_is_a_server_error(monkeypatch, tmp_path):
+    """Only the search call's ValueError is the client's fault.
+
+    A result the index returned that does not validate as ``FTSResultItem``
+    (pydantic's ``ValidationError`` is a ``ValueError``) is a server fault:
+    500 "FTS search failed", never 400 "Invalid FTS query".
+    """
+    client, repo_alias = _build_client(
+        monkeypatch, tmp_path, None, results=[{"path": None, "line_start": 1}]
+    )
+
+    resp = client.post(
+        "/api/query",
+        json={
+            "query_text": "config",
+            "repository_alias": repo_alias,
+            "search_mode": "fts",
+        },
+    )
+
+    assert resp.status_code == 500, resp.text
+    assert "FTS search failed" in resp.json()["detail"]
+
+
+def test_a_valid_result_is_returned(monkeypatch, tmp_path):
+    """The stub's happy path: the narrowed try still serves results."""
+    client, repo_alias = _build_client(
+        monkeypatch,
+        tmp_path,
+        None,
+        results=[{"path": "src/a.py", "line_start": 1, "line_end": 2}],
+    )
+
+    resp = client.post(
+        "/api/query",
+        json={
+            "query_text": "config",
+            "repository_alias": repo_alias,
+            "search_mode": "fts",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert [r["path"] for r in resp.json()["fts_results"]] == ["src/a.py"]
 
 
 @pytest.mark.slow

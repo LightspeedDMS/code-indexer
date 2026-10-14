@@ -73,6 +73,14 @@ _REST_DEFAULT_OVERFETCH_MULTIPLIER = 5
 # Module-level logger
 logger = logging.getLogger(__name__)
 
+
+class _InvalidFTSQuery(Exception):
+    """``TantivyIndexManager.search()`` rejected the request's input (its
+    ``ValueError``): a bad request, not a server fault. Raised for the search
+    call ONLY, so a ``ValueError`` elsewhere in the FTS block (e.g. pydantic
+    validation while building a result) stays a server error."""
+
+
 # Story #1400: temporal-query detector for the REST SemanticQueryRequest
 # shape -- mirrors mcp/handlers/_utils.py's _is_temporal_query exactly
 # (same field set, same "any truthy" semantics), kept as a separate
@@ -782,22 +790,25 @@ def register_query_routes(
                             )
 
                             # Execute FTS query
-                            fts_raw_results = tantivy_manager.search(
-                                query_text=request.query_text,
-                                case_sensitive=request.case_sensitive,
-                                edit_distance=edit_dist,
-                                snippet_lines=request.snippet_lines,
-                                limit=request.limit,
-                                language_filter=request.language,
-                                path_filters=_path_filters,  # GAP-6: list, OR semantics
-                                exclude_languages=(
-                                    [request.exclude_language]
-                                    if request.exclude_language
-                                    else None
-                                ),  # Story #503 Phase 1
-                                exclude_paths=_exclude_paths,  # Story #503 Phase 1
-                                use_regex=request.regex,  # Story #503 Phase 1
-                            )
+                            try:
+                                fts_raw_results = tantivy_manager.search(
+                                    query_text=request.query_text,
+                                    case_sensitive=request.case_sensitive,
+                                    edit_distance=edit_dist,
+                                    snippet_lines=request.snippet_lines,
+                                    limit=request.limit,
+                                    language_filter=request.language,
+                                    path_filters=_path_filters,  # GAP-6: list, OR semantics
+                                    exclude_languages=(
+                                        [request.exclude_language]
+                                        if request.exclude_language
+                                        else None
+                                    ),  # Story #503 Phase 1
+                                    exclude_paths=_exclude_paths,  # Story #503 Phase 1
+                                    use_regex=request.regex,  # Story #503 Phase 1
+                                )
+                            except ValueError as e:
+                                raise _InvalidFTSQuery(str(e)) from e
 
                             # Convert to API response format
                             for result in fts_raw_results:
@@ -823,7 +834,7 @@ def register_query_routes(
                             _fts_status = "success"
                             _fts_matches_count = len(fts_raw_results)
 
-                        except ValueError as e:
+                        except _InvalidFTSQuery as e:
                             # Client-side input errors from tantivy_manager.search():
                             # an unbuildable regex (anchors ^ $, word boundaries \b
                             # and other constructs the term-level DFA engine
