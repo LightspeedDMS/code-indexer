@@ -55,9 +55,16 @@ class TestAdminListAllActivatedRepos:
         usernames = {r["username"] for r in data["activated_repositories"]}
         assert usernames == {"alice", "bob"}
 
-    def test_non_admin_403(self, user_client):  # noqa: F811
+    def test_non_admin_is_refused_before_the_handler_on_list(
+        self,
+        user_client,  # noqa: F811
+    ):
+        # The route's elevation gate authenticates the caller itself, and this
+        # fixture overrides only get_current_user, so the gate finds no
+        # credentials (401).  A real non-admin token is refused with 403:
+        # tests/unit/server/routers/test_admin_reads_require_elevation.py.
         response = user_client.get("/api/admin/activated-repos")
-        assert response.status_code == 403
+        assert response.status_code == 401
 
 
 # ---------------------------------------------------------------------------

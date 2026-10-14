@@ -142,8 +142,15 @@
     </div>
 
     <!-- Users List Section -->
-    <section id="groups-users-section">
-        {% include "partials/groups_users_list.html" %}
+    <!-- Group membership is elevation-gated: loaded from the partial when
+         this tab is shown (the elevation interceptor opens the TOTP modal). -->
+    <section
+        id="groups-users-section"
+        hx-get="/admin/partials/groups-users-list"
+        hx-trigger="intersect once"
+        hx-swap="innerHTML"
+    >
+        <p aria-busy="true">Loading user assignments…</p>
     </section>
 </section>
 

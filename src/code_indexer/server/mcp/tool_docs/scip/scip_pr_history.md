@@ -29,4 +29,7 @@ INPUTS:
 RETURNS:
 - history: Array of PR history entries with pr_number, repo, indexed_at, and status fields
 
-PERMISSIONS: Requires manage_users (admin only).
+PERMISSIONS: Requires manage_users (admin only) and, when elevation enforcement is on, an active elevation window (TOTP step-up via `elevate_session`).
+
+ERRORS:
+- elevation_required: TOTP step-up needed (only when elevation enforcement is on)

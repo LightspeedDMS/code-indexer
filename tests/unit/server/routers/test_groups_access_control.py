@@ -235,12 +235,19 @@ class TestGetGroupEndpoint:
         assert data["accessible_repos"] == ["repo-a", "repo-b"]
 
     def test_get_group_non_admin_rejected(self, non_admin_client):
-        """Non-admin user receives 403 when fetching group details (AC1, AC2, AC3)."""
+        """Non-admin user is refused group details before the handler (AC1-AC3).
+
+        The route's elevation gate authenticates the caller itself, and this
+        fixture overrides only get_current_user, so the gate finds no
+        credentials (401).  A real non-admin token is refused with 403:
+        tests/unit/server/routers/test_admin_reads_require_elevation.py.
+        """
         response = non_admin_client.get("/api/v1/groups/1")
-        assert response.status_code == 403, (
-            f"Expected 403 for non-admin user, got {response.status_code}. "
+        assert response.status_code == 401, (
+            f"Expected 401 for the stub non-admin, got {response.status_code}. "
             "get_group endpoint must restrict member/repo info to admins only."
         )
+        assert "alice" not in response.text and "bob" not in response.text
 
     def test_get_group_unauthenticated_rejected(self):
         """Unauthenticated request is rejected (4xx or 5xx — never 200)."""

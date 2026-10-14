@@ -1622,6 +1622,34 @@ def _create_login_redirect(request: Request) -> RedirectResponse:
     return RedirectResponse(url=redirect_url, status_code=status.HTTP_303_SEE_OTHER)
 
 
+def _elevation_page_redirect(
+    request: Request, username: str
+) -> Optional[RedirectResponse]:
+    """Elevation gate for full Web pages.
+
+    With enforcement on and no valid elevation window owned by `username`,
+    return a redirect to the elevation page, which returns here afterwards
+    (query string kept; the elevate page's ``_sanitize_next`` bounds the
+    target). Returns None when the page may render. Enforcement off passes
+    through. (`quote` is the module-level urllib.parse import.)
+    """
+    if not dependencies._is_elevation_enforcement_enabled():
+        return None
+    from . import mfa_routes
+
+    # Error dict when no valid window exists; None when the window is valid.
+    elev_err = mfa_routes._check_elevation_window(request, username)
+    if elev_err is None:
+        return None
+    return_to = request.url.path
+    if request.url.query:
+        return_to = f"{return_to}?{request.url.query}"
+    return RedirectResponse(
+        f"{mfa_routes._ELEVATE_PAGE}?next={quote(return_to, safe='')}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
 def _require_admin_session(request: Request) -> Optional[SessionData]:
     """Check for valid admin session, return None if not authenticated."""
     try:
@@ -2241,35 +2269,8 @@ def _create_groups_page_response(
     # Get groups data with counts
     groups_data = _get_groups_data()
 
-    # Get users with their group assignments
-    # First get all users from user manager
-    all_system_users = _get_users_list()
-    assigned_users, _ = group_manager.get_all_users_with_groups()
-
-    # Create a map of assigned users by user_id
-    assigned_map = {u["user_id"]: u for u in assigned_users}
-
-    # Merge: all system users with their group info (or None if unassigned)
-    users_with_groups = []
-    for user in all_system_users:
-        username = user.username
-        if username in assigned_map:
-            user_data = assigned_map[username]
-            user_data["assigned_at"] = _format_datetime_display(
-                user_data.get("assigned_at")
-            )
-            users_with_groups.append(user_data)
-        else:
-            # Unassigned user
-            users_with_groups.append(
-                {
-                    "user_id": username,
-                    "group_id": None,
-                    "group_name": None,
-                    "assigned_at": None,
-                    "assigned_by": None,
-                }
-            )
+    # Users' group assignments are user data: the User Assignments tab loads
+    # them from the elevation-gated groups-users-list partial, never here.
 
     # Get all groups for the dropdown
     all_groups = [
@@ -2333,7 +2334,6 @@ def _create_groups_page_response(
             "active_tab": active_tab,
             "csrf_token": csrf_token,
             "groups": groups_data,
-            "users_with_groups": users_with_groups,
             "all_groups": all_groups,
             "golden_repos": golden_repos,
             "repo_access_map": repo_access_map,
@@ -2591,26 +2591,13 @@ def groups_list_partial(request: Request):
     return response
 
 
-@web_router.get("/partials/groups-users-list", response_class=HTMLResponse)
-def groups_users_list_partial(request: Request):
-    """Partial refresh endpoint for users group assignments section."""
-    session = _require_admin_session(request)
-    if not session:
-        return HTMLResponse(content="", status_code=401)
-
-    csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
-    group_manager = _get_group_manager()
-
-    # Get all users from user manager
-    all_system_users = _get_users_list()
+def _get_users_with_groups(group_manager: Any) -> List[Dict[str, Any]]:
+    """Every system user with their group assignment (None when unassigned)."""
     assigned_users, _ = group_manager.get_all_users_with_groups()
-
-    # Create a map of assigned users by user_id
     assigned_map = {u["user_id"]: u for u in assigned_users}
 
-    # Merge: all system users with their group info (or None if unassigned)
-    users_with_groups = []
-    for user in all_system_users:
+    users_with_groups: List[Dict[str, Any]] = []
+    for user in _get_users_list():
         username = user.username
         if username in assigned_map:
             user_data = assigned_map[username]
@@ -2619,7 +2606,6 @@ def groups_users_list_partial(request: Request):
             )
             users_with_groups.append(user_data)
         else:
-            # Unassigned user
             users_with_groups.append(
                 {
                     "user_id": username,
@@ -2629,6 +2615,30 @@ def groups_users_list_partial(request: Request):
                     "assigned_by": None,
                 }
             )
+    return users_with_groups
+
+
+@web_router.get(
+    "/partials/groups-users-list",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def groups_users_list_partial(request: Request):
+    """Partial for the users' group assignments (the groups page's User
+    Assignments tab).
+
+    Group membership is user data: elevation-gated like the users-list
+    partial, REST ``GET /api/v1/groups/{group_id}`` and MCP ``get_group``.
+    Without a window it answers 403 ``elevation_required``, which the shared
+    elevation interceptor turns into the TOTP modal.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
+    group_manager = _get_group_manager()
+    users_with_groups = _get_users_with_groups(group_manager)
 
     all_groups = [
         {"id": g.id, "name": g.name, "is_default": g.is_default}
@@ -8709,10 +8719,18 @@ def auto_discovery_page(request: Request):
 
 @web_router.get("/analytics-export", response_class=HTMLResponse)
 def analytics_export_page(request: Request):
-    """Query Analytics Export page — filter and export search event data to Excel."""
+    """Query Analytics Export page — filter and export search event data to Excel.
+
+    Every user's search history is user data: like the elevation-gated
+    ``/api/admin/search-events*`` routes the page calls, it requires the
+    caller's own elevation window.
+    """
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
+    elevate = _elevation_page_redirect(request, session.username)
+    if elevate is not None:
+        return elevate
 
     # Bug #2110: the Search Type options are the one list writers record.
     from code_indexer.server.services.search_event_health import (
@@ -11262,20 +11280,9 @@ def ssh_keys_page(request: Request):
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
-
-    if dependencies._is_elevation_enforcement_enabled():
-        from . import mfa_routes
-
-        # Error dict when no valid window exists; None when the window is valid.
-        elev_err = mfa_routes._check_elevation_window(request, session.username)
-        if elev_err is not None:
-            return_to = request.url.path
-            if request.url.query:
-                return_to = f"{return_to}?{request.url.query}"
-            return RedirectResponse(
-                f"{mfa_routes._ELEVATE_PAGE}?next={quote(return_to, safe='')}",
-                status_code=status.HTTP_303_SEE_OTHER,
-            )
+    elevate = _elevation_page_redirect(request, session.username)
+    if elevate is not None:
+        return elevate
 
     # Generate fresh CSRF token
     csrf_token = generate_csrf_token()
@@ -11573,20 +11580,9 @@ def logs_page(
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
-
-    if dependencies._is_elevation_enforcement_enabled():
-        from . import mfa_routes
-
-        # Error dict when no valid window exists; None when the window is valid.
-        elev_err = mfa_routes._check_elevation_window(request, session.username)
-        if elev_err is not None:
-            return_to = request.url.path
-            if request.url.query:
-                return_to = f"{return_to}?{request.url.query}"
-            return RedirectResponse(
-                f"{mfa_routes._ELEVATE_PAGE}?next={quote(return_to, safe='')}",
-                status_code=status.HTTP_303_SEE_OTHER,
-            )
+    elevate = _elevation_page_redirect(request, session.username)
+    if elevate is not None:
+        return elevate
 
     # Generate CSRF token for forms
     csrf_token = generate_csrf_token()

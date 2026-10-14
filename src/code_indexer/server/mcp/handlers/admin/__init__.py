@@ -1080,8 +1080,13 @@ def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 
 @_admin_role_first
+@require_mcp_elevation()
 def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get detailed information about a specific group."""
+    """Get detailed information about a specific group.
+
+    Member usernames are user data: the caller's own elevation window is
+    required, like REST ``GET /api/v1/groups/{group_id}``.
+    """
     try:
         group_manager = _get_group_manager()
         if not group_manager:

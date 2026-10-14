@@ -14,7 +14,7 @@ inputSchema:
   - group_id
 ---
 
-TL;DR: Get a group's details, including its members and the repositories it can access. Requires the admin role.
+TL;DR: Get a group's details, including its members and the repositories it can access. Requires the admin role and, when elevation enforcement is on, an active elevation window (TOTP step-up via `elevate_session`).
 
 INPUTS:
 - group_id (required): Numeric group id as a string (for example `"3"`), as returned by `list_groups`
@@ -28,6 +28,7 @@ RETURNS:
 
 ERRORS (returned as `{"success": false, "error": "..."}`):
 - `Permission denied: admin role required`
+- `elevation_required`: TOTP step-up needed (only when elevation enforcement is on)
 - `Missing required parameter: group_id` / `Invalid group_id: <value>` (not an integer)
 - `Group not found: <id>`
 
