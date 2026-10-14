@@ -125,6 +125,26 @@ from typing import Any, Callable, List, Sequence, cast
 #   request-validation failures; a 500 or other unexpected server error would
 #   use a different message/code and would not be suppressed.
 #
+# "[AUTH-GENERAL-003] Hybrid auth (admin): No valid authentication found"
+#   Emitted at WARNING by auth.dependencies.get_current_admin_user_hybrid when
+#   a request to an admin route has neither a valid session nor a bearer
+#   token (an invalid or expired bearer token is rejected earlier, through
+#   get_current_user, without this line).  GET
+#   /api/admin/users is elevation-gated (require_elevation() chains
+#   get_current_admin_user_hybrid), so an unauthenticated call to it logs this
+#   line.  Produced by:
+#     - test_08_auth_negative.py: test_admin_endpoint_requires_auth, which calls
+#       GET /api/admin/users with no token and asserts HTTP 401.
+#   This is a deliberate unauthenticated negative test of an elevation-gated
+#   admin route; the WARNING is intended production behaviour (every
+#   elevation-gated route logs unauthenticated attempts) and must stay at
+#   WARNING.  The gate is not the only detector of a genuine credential-wiring
+#   failure: such a failure would also break the calling tests themselves,
+#   whose 401/403 (and authenticated-success) assertions would fail.  The
+#   pattern is anchored on the "(admin)" auth type and the no-credentials
+#   wording; the non-admin variant ("Hybrid auth (user): ...") and every other
+#   hybrid-auth WARNING/ERROR use different text and are still audited.
+#
 # "Global repo 'test-global' not found"
 #   Emitted by mcp.handlers.repos when repository_status is called with alias
 #   "test-global" which is not registered in the test server's golden-repo
@@ -174,6 +194,10 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # test_07 + test_08: deliberate negative tests send invalid/empty request bodies;
     # server returns 422 and logs REPO-GENERAL-017 ValidationError.
     "[REPO-GENERAL-017] ValidationError",
+    # test_08 (test_admin_endpoint_requires_auth): deliberate unauthenticated call
+    # to the elevation-gated GET /api/admin/users, asserted 401; the hybrid admin
+    # auth WARNING is intended production behaviour (see header comment).
+    "[AUTH-GENERAL-003] Hybrid auth (admin): No valid authentication found",
     # test_epic985: repository_status called with non-existent "test-global" sentinel alias.
     "Global repo 'test-global' not found",
     # test_epic985: repository_status called with non-existent "test-activated" sentinel alias.
