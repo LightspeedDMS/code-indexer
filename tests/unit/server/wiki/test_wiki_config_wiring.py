@@ -26,7 +26,10 @@ from code_indexer.server.wiki.routes import (
     wiki_router,
 )
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
-from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
+from tests.unit.server.wiki.wiki_test_helpers import (
+    app_golden_repos_dir,
+    make_aliases_dir,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -62,8 +65,7 @@ def _make_wiki_app(actual_repo_path: str, wiki_config=None):
     app.state.golden_repo_manager.get_wiki_enabled.return_value = True
     app.state.golden_repo_manager.db_path = _db_path
 
-    golden_repos_dir = Path(actual_repo_path).parent / "golden-repos-wiring-test"
-    golden_repos_dir.mkdir(parents=True, exist_ok=True)
+    golden_repos_dir = app_golden_repos_dir(app)
     make_aliases_dir(str(golden_repos_dir), "test-repo", actual_repo_path)
     app.state.golden_repo_manager.golden_repos_dir = str(golden_repos_dir)
 

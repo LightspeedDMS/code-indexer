@@ -26,9 +26,19 @@ from code_indexer.global_repos.cleanup_manager import CleanupManager
 
 @pytest.fixture
 def temp_golden_repos_dir():
-    """Create temporary golden repos directory."""
+    """Create temporary golden repos directory.
+
+    Nested one level down: RefreshScheduler keeps its per-node SQLite state
+    (golden_repos_metadata, local-repo repair quarantine, ...) in
+    ``<golden_repos_dir>.parent/cidx_server.db``. A golden-repos dir directly
+    under /tmp put that database at /tmp/cidx_server.db -- shared by every run
+    on the host, so one run's recorded repair failures quarantined
+    cidx-meta-global for all later runs.
+    """
     temp_dir = tempfile.mkdtemp()
-    yield temp_dir
+    golden_repos_dir = Path(temp_dir) / "golden-repos"
+    golden_repos_dir.mkdir()
+    yield str(golden_repos_dir)
     shutil.rmtree(temp_dir, ignore_errors=True)
 
 

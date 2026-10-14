@@ -476,30 +476,29 @@ class TestWriteModeExitInvalidationHookAC9:
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
-        with patch(
-            "code_indexer.server.services.file_crud_service.file_crud_service"
-        ) as mock_crud:
-            mock_crud.is_write_exception.return_value = True
-            with patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-                return_value="/fake/golden",
-            ):
-                with patch(
-                    "code_indexer.server.mcp.handlers._write_mode_strip_global",
-                    return_value="my-repo",
-                ):
-                    with patch("pathlib.Path.exists", return_value=True):
-                        with patch(
-                            "code_indexer.server.mcp.handlers._get_app_refresh_scheduler"
-                        ) as mock_get_scheduler:
-                            mock_scheduler = MagicMock()
-                            mock_get_scheduler.return_value = mock_scheduler
-                            with patch(
-                                "code_indexer.server.mcp.handlers._write_mode_run_refresh"
-                            ):
-                                handle_exit_write_mode(
-                                    {"repo_alias": "my-repo-global"},
-                                    mock_user,
-                                )
+        # handle_exit_write_mode lives in handlers.files and binds its
+        # collaborators there; the write-mode marker is read through
+        # WriteModeMarkers (registry-backed since content seam step 5a), not a
+        # Path.exists() of a marker file -- patch those, where they are used.
+        from code_indexer.server.mcp.handlers import files as files_handlers
 
+        with (
+            patch(
+                "code_indexer.server.services.file_crud_service.file_crud_service"
+            ) as mock_crud,
+            patch.object(
+                files_handlers, "_get_golden_repos_dir", return_value="/fake/golden"
+            ),
+            patch.object(files_handlers.WriteModeMarkers, "exists", return_value=True),
+            patch.object(
+                files_handlers,
+                "_get_app_refresh_scheduler",
+                return_value=MagicMock(),
+            ),
+            patch.object(files_handlers, "_write_mode_run_refresh") as mock_refresh,
+        ):
+            mock_crud.is_write_exception.return_value = True
+            handle_exit_write_mode({"repo_alias": "my-repo-global"}, mock_user)
+
+        mock_refresh.assert_called_once()
         mock_cache.invalidate_repo.assert_called_with("my-repo-global")

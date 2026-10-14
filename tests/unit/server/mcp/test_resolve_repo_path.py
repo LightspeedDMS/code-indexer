@@ -46,7 +46,14 @@ class TestResolveRepoPathAliasJson:
         alias_file.write_text(json.dumps(alias_data))
 
         golden_repos_dir = str(tmp_path / "golden-repos")
-        result = _resolve_repo_path("my-repo-global", golden_repos_dir)
+        # Bug #1315: _resolve_repo_path also reads the registry row (index_path
+        # fallback) from app.state.backend_registry; this test is about the
+        # alias pointer alone -- no registry row, independent of app state.
+        with patch(
+            "code_indexer.server.mcp.handlers._legacy._get_global_repo",
+            return_value=None,
+        ):
+            result = _resolve_repo_path("my-repo-global", golden_repos_dir)
 
         assert result == str(target_dir)
 
@@ -71,7 +78,14 @@ class TestResolveRepoPathAliasJson:
 
         golden_repos_dir = str(tmp_path / "golden-repos")
         # Pass non-global identifier 'cidx-meta' — should find 'cidx-meta-global' alias
-        result = _resolve_repo_path("cidx-meta", golden_repos_dir)
+        # Bug #1315: _resolve_repo_path also reads the registry row (index_path
+        # fallback) from app.state.backend_registry; this test is about the
+        # alias pointer alone -- no registry row, independent of app state.
+        with patch(
+            "code_indexer.server.mcp.handlers._legacy._get_global_repo",
+            return_value=None,
+        ):
+            result = _resolve_repo_path("cidx-meta", golden_repos_dir)
 
         assert result == str(target_dir)
 

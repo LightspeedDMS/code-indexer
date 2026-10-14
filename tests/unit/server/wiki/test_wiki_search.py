@@ -21,7 +21,11 @@ from code_indexer.server.wiki.routes import (
     get_wiki_user_hybrid,
     get_current_user_hybrid,
 )
-from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
+from tests.unit.server.wiki.wiki_test_helpers import (
+    app_golden_repos_dir,
+    install_unauthenticated_auth,
+    make_aliases_dir,
+)
 
 
 def _make_user(username: str):
@@ -56,13 +60,11 @@ def _make_search_app(
     app.state.golden_repo_manager.db_path = _db_path
 
     if actual_repo_path:
-        golden_repos_dir = Path(actual_repo_path).parent / "golden-repos-search-test"
-        golden_repos_dir.mkdir(parents=True, exist_ok=True)
+        golden_repos_dir = app_golden_repos_dir(app)
         make_aliases_dir(str(golden_repos_dir), "test-repo", actual_repo_path)
         app.state.golden_repo_manager.golden_repos_dir = str(golden_repos_dir)
     else:
-        _tmp_golden = tempfile.mkdtemp(suffix="-golden-repos")
-        (Path(_tmp_golden) / "aliases").mkdir(parents=True, exist_ok=True)
+        _tmp_golden = str(app_golden_repos_dir(app, suffix="-golden-repos"))
         app.state.golden_repo_manager.golden_repos_dir = _tmp_golden
 
     app.state.access_filtering_service = MagicMock()
@@ -194,8 +196,9 @@ class TestSearchEndpointBasic:
 class TestSearchEndpointAuth:
     """Authentication requirements for the search endpoint."""
 
-    def test_search_endpoint_requires_auth(self):
+    def test_search_endpoint_requires_auth(self, monkeypatch):
         """Search endpoint returns 401/403 without authentication."""
+        install_unauthenticated_auth(monkeypatch)
         app = FastAPI()
         app.include_router(wiki_router, prefix="/wiki")
         app.state.golden_repo_manager = MagicMock()

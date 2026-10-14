@@ -222,10 +222,17 @@ class TestSite2GoldenRepoManagerLifecycleHook:
         self._register_repo(manager, "wiki-cluster-repo")
         fake_backend = MagicMock(name="fake_wiki_backend")
 
-        with patch("code_indexer.server.wiki.wiki_cache.WikiCache") as MockWikiCache:
-            with _app_state_wiki_context(
-                postgres_mode=True, wiki_cache_backend=fake_backend
-            ):
+        # The context is entered FIRST: it reads the real app's state, and on
+        # the first access in a process that builds the app -- whose startup
+        # constructs its own WikiCache. Inside the WikiCache patch that build
+        # was counted as a second call, so the test failed whenever no earlier
+        # test in the run had built the app (alone, or on an xdist worker).
+        with _app_state_wiki_context(
+            postgres_mode=True, wiki_cache_backend=fake_backend
+        ):
+            with patch(
+                "code_indexer.server.wiki.wiki_cache.WikiCache"
+            ) as MockWikiCache:
                 self._run_removal_worker(manager, "wiki-cluster-repo")
 
         MockWikiCache.assert_called_once_with(

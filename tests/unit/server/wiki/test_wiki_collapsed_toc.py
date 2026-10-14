@@ -17,7 +17,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from code_indexer.server.wiki.wiki_service import WikiService
-from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
+from tests.unit.server.wiki.wiki_test_helpers import (
+    app_golden_repos_dir,
+    make_aliases_dir,
+)
 
 
 @pytest.fixture
@@ -226,13 +229,11 @@ def _make_app_for_toc(actual_repo_path=None, user_accessible_repos=None):
     app.state.golden_repo_manager.db_path = _db_path
 
     if actual_repo_path:
-        golden_repos_dir = Path(actual_repo_path).parent / "golden-repos-test-toc"
-        golden_repos_dir.mkdir(parents=True, exist_ok=True)
+        golden_repos_dir = app_golden_repos_dir(app)
         make_aliases_dir(str(golden_repos_dir), "test-repo", actual_repo_path)
         app.state.golden_repo_manager.golden_repos_dir = str(golden_repos_dir)
     else:
-        _tmp_golden = tempfile.mkdtemp(suffix="-golden-repos-toc")
-        (Path(_tmp_golden) / "aliases").mkdir(parents=True, exist_ok=True)
+        _tmp_golden = str(app_golden_repos_dir(app, suffix="-golden-repos-toc"))
         app.state.golden_repo_manager.golden_repos_dir = _tmp_golden
 
     app.state.access_filtering_service = MagicMock()
