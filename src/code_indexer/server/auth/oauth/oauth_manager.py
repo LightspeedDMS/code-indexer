@@ -47,6 +47,46 @@ def check_code_account(
         )
 
 
+def is_registered_redirect_uri(
+    client: Optional[Dict[str, Any]], redirect_uri: Optional[str]
+) -> bool:
+    """True only when *redirect_uri* is exactly one of the URIs registered for
+    *client* (RFC 6749 sections 3.1.2.3 and 4.1.2.1: simple string
+    comparison).  The authorization endpoint never redirects to, or renders
+    consent for, any other value."""
+    if not client or not redirect_uri:
+        return False
+    return redirect_uri in client.get("redirect_uris", [])
+
+
+def authorization_response_url(
+    redirect_uri: str, params: Dict[str, Optional[str]]
+) -> str:
+    """The authorization response for a registered *redirect_uri*: the
+    non-None *params* appended form-encoded, keeping any query component the
+    URI already has (RFC 6749 section 4.1.2).  Callers pass only a value
+    accepted by ``is_registered_redirect_uri`` or by code issuance."""
+    from urllib.parse import urlencode, urlsplit, urlunsplit
+
+    present = {k: v for k, v in params.items() if v is not None}
+    if not present:
+        return redirect_uri
+    parts = urlsplit(redirect_uri)
+    added = urlencode(present)
+    query = f"{parts.query}&{added}" if parts.query else added
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+
+
+def redirect_host(redirect_uri: str) -> str:
+    """Where an authorization for *redirect_uri* is sent, as the consent page
+    shows it: host[:port] with any userinfo removed, or the whole URI when it
+    has no authority (a custom-scheme native redirect)."""
+    from urllib.parse import urlsplit
+
+    host = urlsplit(redirect_uri).netloc.rpartition("@")[2]
+    return host or redirect_uri
+
+
 class OAuthManager:
     ACCESS_TOKEN_LIFETIME_HOURS = 8
     REFRESH_TOKEN_LIFETIME_DAYS = 30
@@ -386,47 +426,21 @@ class OAuthManager:
     def refresh_access_token(
         self, refresh_token: str, client_id: str
     ) -> Dict[str, Any]:
-        """Exchange refresh token for new access and refresh tokens."""
+        """Exchange a refresh token for new access and refresh tokens; the
+        token is redeemable only by the client it was issued to."""
         if self._backend:
             return self._backend.refresh_access_token(  # type: ignore[no-any-return]
                 refresh_token=refresh_token, client_id=client_id
             )
-        new_access_token = secrets.token_urlsafe(48)
-        new_refresh_token = secrets.token_urlsafe(48)
-        now = datetime.now(timezone.utc)
-        new_expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
+        # No storage backend: the same SQLite store implementation over this
+        # manager's database (one refresh implementation, not two copies).
+        from code_indexer.server.storage.sqlite_backends.oauth_backend import (
+            OAuthSqliteBackend,
+        )
 
-        def _do_refresh(conn: sqlite3.Connection) -> None:
-            cursor = conn.cursor()
-            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
-            cursor.execute(
-                "SELECT * FROM oauth_tokens WHERE refresh_token = ?", (refresh_token,)
-            )
-            row = cursor.fetchone()
-            if not row:
-                raise OAuthError("Invalid refresh token")
-
-            conn.execute(
-                """UPDATE oauth_tokens
-                   SET access_token = ?, refresh_token = ?, expires_at = ?, last_activity = ?
-                   WHERE refresh_token = ?""",
-                (
-                    new_access_token,
-                    new_refresh_token,
-                    new_expires_at.isoformat(),
-                    now.isoformat(),
-                    refresh_token,
-                ),
-            )
-
-        self._conn_manager.execute_atomic(_do_refresh)  # type: ignore[union-attr]
-
-        return {
-            "access_token": new_access_token,
-            "token_type": "Bearer",
-            "expires_in": int(self.ACCESS_TOKEN_LIFETIME_HOURS * 3600),
-            "refresh_token": new_refresh_token,
-        }
+        return OAuthSqliteBackend(str(self.db_path)).refresh_access_token(
+            refresh_token=refresh_token, client_id=client_id
+        )
 
     def revoke_token(
         self, token: str, token_type_hint: Optional[str] = None
