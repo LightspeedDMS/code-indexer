@@ -16,6 +16,7 @@ mount-independence proof.
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -37,6 +38,26 @@ _DATES = {
     "GIT_AUTHOR_DATE": "2024-01-01T00:00:00Z",
     "GIT_COMMITTER_DATE": "2024-01-01T00:00:00Z",
 }
+
+
+def _load_git_mcp_plugin() -> Any:
+    """The git-mcp plugin (its own distribution, not installed with cidx),
+    loaded from the repository so the fake drives its real translation."""
+    path = (
+        Path(__file__).resolve().parents[4]
+        / "plugins"
+        / "cidx_git_backend"
+        / "cidx_git_backend"
+        / "__init__.py"
+    )
+    spec = importlib.util.spec_from_file_location("_cidx_git_backend_plugin", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_PLUGIN = _load_git_mcp_plugin()
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -73,6 +94,7 @@ class FakeGitMcp:
         self._map = mapping
         self._git = LocalGitBackend()
         self.calls: List[Tuple[str, List[str]]] = []
+        self.set_upstream: List[bool] = []
         self.fail_run: Optional[Exception] = None
 
     def run(
@@ -98,9 +120,17 @@ class FakeGitMcp:
         remote: str,
         branch: Optional[str] = None,
         timeout: Any = None,
+        set_upstream: bool = False,
     ) -> "subprocess.CompletedProcess[str]":
         self.calls.append(("push", [remote, branch or ""]))
-        return self._git.push(self._map(repo_path), remote, branch, timeout=timeout)
+        self.set_upstream.append(set_upstream)
+        return self._git.push(
+            self._map(repo_path),
+            remote,
+            branch,
+            timeout=timeout,
+            set_upstream=set_upstream,
+        )
 
     def pull(
         self,
@@ -109,8 +139,45 @@ class FakeGitMcp:
         branch: Optional[str] = None,
         **kw: Any,
     ) -> None:
+        """The REAL plugin's ``pull`` over :meth:`_git_mcp_pull`: what cidx
+        sees is the plugin's translation of git-mcp's result, not git's own
+        output (which git-mcp never forwards)."""
         self.calls.append(("pull", [remote or "", branch or ""]))
-        self._git.pull(self._map(repo_path), remote=remote, branch=branch)
+        backend = _PLUGIN.GitMcpBackend(base_url="http://git-mcp.invalid")
+        setattr(
+            backend,
+            "_call",
+            lambda tool, arguments, timeout=None: self._git_mcp_pull(arguments),
+        )
+        backend.pull(repo_path, remote=remote, branch=branch)
+
+    def _git_mcp_pull(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """git-mcp's ``gitPull`` (git-api.service.ts): ``git pull``; on failure
+        a conflicted tree is RETURNED as ``{status: 'conflicts'}`` and any other
+        failure is thrown -- a tool error, git's stderr as its text."""
+        repo = self._map(arguments["cow_path"])
+        argv = [arguments.get("remote"), arguments.get("branch")]
+        pulled = subprocess.run(
+            ["git", "pull", *[a for a in argv if a]],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        if pulled.returncode == 0:
+            return {"status": "merged", "commits_pulled": 1, "conflicts": None}
+        conflicted = _git(Path(repo), "diff", "--name-only", "--diff-filter=U")
+        if conflicted:
+            return {
+                "status": "conflicts",
+                "commits_pulled": 0,
+                "conflicts": [
+                    {"path": path, "conflict_type": "both_modified"}
+                    for path in conflicted.splitlines()
+                ],
+            }
+        raise _PLUGIN.GitMcpBackendError(
+            f"git-mcp git_pull tool error: {pulled.stderr}", stderr=pulled.stderr
+        )
 
     def fetch(self, repo_path: str, remote: str = "origin", **kw: Any) -> None:
         self.calls.append(("fetch", [remote]))
@@ -331,6 +398,143 @@ def test_pat_push_uses_git_mcp_credentials_not_cidx_s(world: SimpleNamespace) ->
     assert ("push", ["origin", "work"]) in world.git.calls
 
 
+def _advance_upstream(world: SimpleNamespace, name: str, text: str) -> None:
+    """One new commit on the upstream's main (both copies pull the same one)."""
+    scratch = world.upstream.parent / "upstream-writer"
+    subprocess.run(
+        ["git", "clone", "-q", str(world.upstream), str(scratch)], check=True
+    )
+    (scratch / name).write_text(text)
+    _git(
+        scratch,
+        "-c",
+        "user.email=u@example.com",
+        "-c",
+        "user.name=U",
+        "commit",
+        "-qam",
+        "upstream",
+    )
+    _git(scratch, "push", "-q", "origin", "main")
+
+
+def test_a_pull_reports_the_files_it_changed_like_local(
+    world: SimpleNamespace,
+) -> None:
+    _advance_upstream(world, "b.txt", "BEE\n")
+    local = svc.git_pull(world.local, "origin", "main")
+
+    _delegate(world)
+    delegated = svc.git_pull(world.pod, "origin", "main")
+
+    assert local == {"success": True, "updated_files": 1, "conflicts": []}
+    assert delegated == local
+    assert _state(world.remote) == _state(world.local)
+
+
+def test_a_conflicting_pull_reports_its_conflicts_like_local(
+    world: SimpleNamespace,
+) -> None:
+    """git-mcp RETURNS a conflicted pull as {status: 'conflicts'}; it must reach
+    the caller as a failed pull with the conflicted paths, not as success."""
+    _advance_upstream(world, "a.txt", "one\nUPSTREAM\n")
+    for repo in (world.local, world.remote):
+        # git >= 2.27 refuses a divergent pull until told how to reconcile.
+        _git(repo, "config", "pull.rebase", "false")
+        (repo / "a.txt").write_text("one\nWORK\n")
+        _git(repo, "commit", "-qam", "work")
+    local = svc.git_pull(world.local, "origin", "main")
+
+    _delegate(world)
+    delegated = svc.git_pull(world.pod, "origin", "main")
+
+    assert local == {"success": False, "updated_files": 0, "conflicts": ["a.txt"]}
+    assert delegated == local
+    assert svc.git_conflict_status(world.pod)["in_merge"] is True
+    assert not world.pod.exists()
+
+
+def test_a_failed_pull_that_is_not_a_conflict_still_fails(
+    world: SimpleNamespace,
+) -> None:
+    _delegate(world)
+    result = svc.git_pull(world.pod, "origin", "no-such-branch")
+    assert result["success"] is False and result["conflicts"] == []
+
+
+def test_conflict_text_only_in_the_error_still_names_the_conflicts(
+    world: SimpleNamespace,
+) -> None:
+    """A backend that raises with git's CONFLICT lines only in stderr."""
+    from code_indexer.server.services.git_tools_seam import DelegatedGitTools
+
+    class StderrOnly:
+        def run(self, repo: str, args: Sequence[str], **kw: Any) -> Any:
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        def pull(self, repo: str, **kw: Any) -> None:
+            raise subprocess.CalledProcessError(
+                1,
+                "git-mcp",
+                output=None,
+                stderr="Auto-merging a.txt\nCONFLICT (content): Merge conflict in a.txt\n",
+            )
+
+    result = DelegatedGitTools(StderrOnly()).run(
+        ["git", "pull", "origin", "main"], world.pod, check=False
+    )
+    assert result.returncode == 1
+    assert result.stdout == "CONFLICT (content): Merge conflict in a.txt\n"
+
+
+@pytest.mark.parametrize("set_upstream", [True, False])
+def test_pat_push_sets_upstream_only_when_asked(
+    world: SimpleNamespace, set_upstream: bool
+) -> None:
+    """git-mcp's git_push tracks by default; the seam asks for exactly what
+    the caller asked for."""
+    _delegate(world)
+    svc.git_push_with_pat(
+        world.pod, "origin", "work", {"token": "unused"}, set_upstream=set_upstream
+    )
+    assert world.git.set_upstream == [set_upstream]
+    tracked = subprocess.run(
+        ["git", "config", "--get", "branch.work.remote"],
+        cwd=world.remote,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert tracked == ("origin" if set_upstream else "")
+
+
+def test_a_plain_push_does_not_set_upstream(world: SimpleNamespace) -> None:
+    _delegate(world)
+    svc.git_push(world.pod, "origin", "work")
+    assert world.git.set_upstream == [False]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["git", "push", "--force", "origin", "work"],
+        ["git", "push", "--end-of-options", "-u", "origin"],
+        ["git", "pull", "--set-upstream", "origin", "main"],
+        ["git", "fetch", "-u", "origin"],
+    ],
+)
+def test_other_network_options_are_refused(
+    world: SimpleNamespace, argv: List[str]
+) -> None:
+    from code_indexer.server.services.git_tools_seam import (
+        DelegatedGitTools,
+        GitToolsUnavailableError,
+    )
+
+    with pytest.raises(GitToolsUnavailableError, match="with options"):
+        DelegatedGitTools(world.git).run(argv, world.pod)
+    assert world.git.calls == []
+
+
 def test_conflicts_are_read_through_the_seams(world: SimpleNamespace) -> None:
     def make_conflict(repo: Path) -> None:
         _git(repo, "checkout", "-q", "-b", "other")
@@ -446,6 +650,24 @@ def test_mcp_git_resolution_uses_registry_and_seam(world: SimpleNamespace) -> No
     path, error = _legacy._resolve_git_repo_path("repo", "mallory")
     assert path is None and error is not None and "not found" in error
     assert not world.pod.exists()
+
+
+def test_local_git_dir_check_never_reaches_the_seam(
+    world: SimpleNamespace, tmp_path: Path
+) -> None:
+    from code_indexer.server.mcp.handlers import _legacy
+
+    assert _legacy._has_git_dir(str(world.local)) is True
+    assert _legacy._has_git_dir(str(tmp_path)) is False
+    assert world.git.calls == []
+
+
+def test_delegated_git_dir_check_asks_the_seam(world: SimpleNamespace) -> None:
+    from code_indexer.server.mcp.handlers import _legacy
+
+    _delegate(world)
+    assert _legacy._has_git_dir(str(world.pod)) is True
+    assert ("exec", ["rev-parse", "--git-dir"]) in world.git.calls
 
 
 def test_mcp_git_resolution_refuses_a_copy_without_git(

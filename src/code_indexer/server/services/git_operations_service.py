@@ -1694,7 +1694,12 @@ class GitOperationsService:
         return 0
 
     def git_push(
-        self, repo_path: Path, remote: str = "origin", branch: Optional[str] = None
+        self,
+        repo_path: Path,
+        remote: str = "origin",
+        branch: Optional[str] = None,
+        *,
+        set_upstream: bool = False,
     ) -> Dict[str, Any]:
         """
         Push commits to remote repository.
@@ -1703,6 +1708,8 @@ class GitOperationsService:
             repo_path: Path to git repository
             remote: Remote name (default: "origin")
             branch: Optional branch name
+            set_upstream: Push with ``--set-upstream`` (default: no tracking
+                change, as a plain ``git push``)
 
         Returns:
             Dict with success flag and pushed_commits count
@@ -1728,7 +1735,10 @@ class GitOperationsService:
 
             # Defense in depth: hard option boundary right after the
             # subcommand, before remote/branch.
-            cmd = ["git", "push", "--end-of-options", remote]
+            cmd = ["git", "push"]
+            if set_upstream:
+                cmd.append("--set-upstream")
+            cmd += ["--end-of-options", remote]
             if branch:
                 cmd.append(branch)
 
@@ -1816,7 +1826,11 @@ class GitOperationsService:
             # Content seam: the copy is not on this pod and git-mcp holds the
             # git credentials (cidx's PAT never leaves cidx). The push runs as
             # git-mcp's git_push -- its own credential and branch policy.
-            return self.git_push(repo_path, remote=remote, branch=branch)
+            # Tracking is set exactly when asked, as the local path's
+            # --set-upstream-to after the push.
+            return self.git_push(
+                repo_path, remote=remote, branch=branch, set_upstream=set_upstream
+            )
 
         from code_indexer.server.services.git_credential_helper import (
             GitCredentialHelper,

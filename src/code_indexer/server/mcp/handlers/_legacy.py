@@ -284,12 +284,11 @@ def _resolve_repo_path(repo_identifier: str, golden_repos_dir: str) -> Optional[
 def _has_git_dir(repo_path: str) -> bool:
     """Whether *repo_path* is a git working copy: ``.git`` on this pod, or --
     when the repository is not on this pod -- asked of the git seam."""
-    if not is_content_seam_delegated():
-        return (Path(repo_path) / ".git").exists()
     from code_indexer.server.services.git_tools_seam import delegated_git_tools
 
     tools = delegated_git_tools()
-    assert tools is not None  # delegated content seam
+    if tools is None:
+        return (Path(repo_path) / ".git").exists()
     probe = tools.run(["git", "rev-parse", "--git-dir"], repo_path, check=False)
     return probe.returncode == 0
 

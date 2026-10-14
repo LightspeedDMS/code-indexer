@@ -53,6 +53,23 @@ def _decode_like_text_mode(raw: bytes) -> str:
         return text.read()
 
 
+def _pull_conflict_error(conflicts: Any) -> "GitMcpBackendError":
+    """git-mcp's ``git_pull`` result ``{status: 'conflicts', conflicts: [...]}``
+    -- a NORMAL tool result, not an error -- as the failure a local
+    ``git pull`` is: a ``CalledProcessError`` whose ``output`` names each
+    conflicted path in git's own ``CONFLICT ... Merge conflict in <path>``
+    form, which is what cidx's callers parse."""
+    paths = [
+        str(entry["path"])
+        for entry in (conflicts if isinstance(conflicts, list) else [])
+        if isinstance(entry, dict) and entry.get("path")
+    ]
+    lines = [f"CONFLICT (content): Merge conflict in {path}" for path in paths]
+    lines.append("Automatic merge failed; fix conflicts and then commit the result.")
+    message = f"git-mcp git_pull stopped on merge conflicts in {paths}"
+    return GitMcpBackendError(message, output="\n".join(lines) + "\n")
+
+
 _DEFAULT_URL = "http://git-mcp.agent-orchestrator.svc.cluster.local:3000"
 
 #: Items git-mcp accepts in one git_diff_commits / git_show_objects call. A
@@ -82,11 +99,12 @@ class GitMcpBackendError(subprocess.CalledProcessError):
         stderr: Optional[str] = None,
         returncode: int = 1,
         cmd: str = "git-mcp",
+        output: Optional[str] = None,
     ) -> None:
         super().__init__(
             returncode,
             cmd,
-            output=None,
+            output=output,
             stderr=stderr if stderr is not None else message,
         )
         self.message = message
@@ -272,7 +290,9 @@ class GitMcpBackend:
             if flag is None:
                 raise GitMcpBackendError(f"git-mcp pull: unsupported mode {mode!r}")
             args[flag] = True
-        self._call("git_pull", args, timeout)
+        result = self._call("git_pull", args, timeout)
+        if result.get("status") == "conflicts":
+            raise _pull_conflict_error(result.get("conflicts"))
 
     def merge(self, repo_path: str, ref: str, timeout: Any = None) -> None:
         self._call("git_merge", self._cow(repo_path, branch=ref), timeout)
@@ -594,10 +614,21 @@ class GitMcpBackend:
         remote: str,
         branch: Optional[str] = None,
         timeout: Any = None,
+        set_upstream: bool = False,
     ) -> subprocess.CompletedProcess:
-        """git-mcp ``git_push`` with git-mcp's credentials; raises on failure."""
+        """git-mcp ``git_push`` with git-mcp's credentials; raises on failure.
+
+        ``set_upstream`` is always sent: git-mcp's own default is to set the
+        tracking branch, which a plain ``git push`` does not do."""
         result = self._call(
-            "git_push", self._cow(repo_path, remote=remote, branch=branch), timeout
+            "git_push",
+            self._cow(
+                repo_path,
+                remote=remote,
+                branch=branch,
+                set_upstream=bool(set_upstream),
+            ),
+            timeout,
         )
         guidance = result.get("_guidance") or {}
         message = str(guidance.get("message", "")) if isinstance(guidance, dict) else ""
