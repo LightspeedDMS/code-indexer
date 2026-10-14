@@ -527,3 +527,96 @@ class TestHistoryOps:
         )
         with pytest.raises(GitMcpBackendError, match="not base64"):
             backend.log_raw(REPO, "%H")
+
+
+class TestGitToolsRunner:
+    """cidx's git tools on an activated copy: git_exec (raw, exit code
+    returned) and git_push (git-mcp's credentials)."""
+
+    @staticmethod
+    def _raw(stdout: bytes, exit_code: int = 0, stderr: str = "") -> dict:
+        import base64
+
+        return {
+            "exit_code": exit_code,
+            "stdout_b64": base64.b64encode(stdout).decode(),
+            "stderr": stderr,
+        }
+
+    def test_backend_is_a_git_command_runner(self, backend):
+        from code_indexer.server.storage.shared.git_backend import GitCommandRunner
+
+        assert isinstance(backend, GitCommandRunner)
+
+    def test_run_sends_git_exec_and_returns_text(self, backend, monkeypatch):
+        calls = _install(
+            monkeypatch, lambda b: _rpc(_content(self._raw(" M a.txt\n".encode())))
+        )
+        out = backend.run(
+            REPO,
+            ["status", "--porcelain"],
+            timeout=30,
+            identity={"author_name": "A", "author_email": "a@example.com"},
+        )
+        assert (out.returncode, out.stdout, out.args) == (
+            0,
+            " M a.txt\n",
+            ["git", "status", "--porcelain"],
+        )
+        params = calls[0]["body"]["params"]
+        assert params["name"] == "git_exec"
+        assert params["arguments"] == {
+            "cow_path": REPO,
+            "args": ["status", "--porcelain"],
+            "timeout_seconds": 30,
+            "identity": {"author_name": "A", "author_email": "a@example.com"},
+        }
+
+    def test_run_returns_a_git_failure_instead_of_raising(self, backend, monkeypatch):
+        _install(monkeypatch, lambda b: _rpc(_content(self._raw(b"", 1, "fatal: x"))))
+        out = backend.run(REPO, ["checkout", "nope"])
+        assert (out.returncode, out.stderr) == (1, "fatal: x")
+
+    def test_run_omits_unset_options(self, backend, monkeypatch):
+        calls = _install(monkeypatch, lambda b: _rpc(_content(self._raw(b""))))
+        backend.run(REPO, ["log"])
+        assert calls[0]["body"]["params"]["arguments"] == {
+            "cow_path": REPO,
+            "args": ["log"],
+        }
+
+    def test_run_transport_error_raises(self, backend, monkeypatch):
+        def boom(req, timeout=None):
+            raise urllib.error.URLError("refused")
+
+        monkeypatch.setattr(plugin.urllib.request, "urlopen", boom)
+        with pytest.raises(GitMcpBackendError):
+            backend.run(REPO, ["status"])
+
+    def test_push_sends_git_push(self, backend, monkeypatch):
+        calls = _install(
+            monkeypatch,
+            lambda b: _rpc(
+                _content({"branch": "w", "_guidance": {"message": "Pushed w"}})
+            ),
+        )
+        out = backend.push(REPO, "origin", "w")
+        assert (out.returncode, out.stdout) == (0, "Pushed w")
+        params = calls[0]["body"]["params"]
+        assert params["name"] == "git_push"
+        assert params["arguments"] == {
+            "cow_path": REPO,
+            "remote": "origin",
+            "branch": "w",
+        }
+
+    def test_push_tool_error_raises(self, backend, monkeypatch):
+        _install(
+            monkeypatch,
+            lambda b: _rpc(
+                {"isError": True, "content": [{"type": "text", "text": "rejected"}]}
+            ),
+        )
+        with pytest.raises(GitMcpBackendError) as exc:
+            backend.push(REPO, "origin", "main")
+        assert exc.value.stderr == "rejected"

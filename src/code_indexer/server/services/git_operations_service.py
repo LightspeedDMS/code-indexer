@@ -33,6 +33,11 @@ from cachetools import TTLCache
 from code_indexer.server.utils.config_manager import ServerConfigManager
 from code_indexer.utils.git_runner import run_git_command
 from code_indexer.server.logging_utils import format_error_log, mask_url_credentials
+from code_indexer.server.services.git_tools_seam import (
+    DelegatedGitTools,
+    GitToolsUnavailableError,
+    delegated_git_tools,
+)
 from code_indexer.server.services.git_argv_safety import (
     validate_branch_name,
     validate_pathspecs,
@@ -414,6 +419,60 @@ class GitOperationsService:
                 )
             )
 
+    # -- the one funnel for this service's git (content seam) ----------------
+
+    def _git_run(
+        self,
+        cmd: List[str],
+        cwd: Any,
+        check: bool = True,
+        timeout: Optional[float] = None,
+        **kwargs: Any,
+    ) -> "subprocess.CompletedProcess[str]":
+        """``run_git_command``, or -- when the repository is not on this pod
+        (delegated content backend) -- the same git through the git seam."""
+        tools = self._delegated_tools()
+        if tools is None:
+            result: "subprocess.CompletedProcess[str]" = run_git_command(
+                cmd, cwd=cwd, check=check, timeout=timeout, **kwargs
+            )
+            return result
+        try:
+            return tools.run(
+                cmd, cwd, check=check, timeout=timeout, env=kwargs.get("env")
+            )
+        except GitToolsUnavailableError as e:
+            raise GitCommandError(str(e), stderr="", command=list(cmd), cwd=cwd)
+
+    @staticmethod
+    def _delegated_tools() -> Optional[DelegatedGitTools]:
+        """The delegated git tools, or None (local default)."""
+        try:
+            return delegated_git_tools()
+        except GitToolsUnavailableError as e:
+            raise GitCommandError(str(e), stderr="")
+
+    def _git_config_value(self, repo_path: str, key: str) -> str:
+        """``git config <key>`` in the repository (CalledProcessError if unset)."""
+        if self._delegated_tools() is None:
+            return subprocess.check_output(
+                ["git", "config", key], cwd=repo_path, text=True
+            ).strip()
+        return self._git_run(
+            ["git", "config", "--get", key], cwd=repo_path
+        ).stdout.strip()
+
+    def _worktree_text(self, repo_path: Path, file_path: str) -> Optional[str]:
+        """A working-tree file's text, confined to the repository; None if absent.
+        UnicodeDecodeError for binary content, OSError if unreadable."""
+        tools = self._delegated_tools()
+        if tools is not None:
+            return tools.read_worktree_text(repo_path, file_path)
+        full_path = self._safe_repo_file_path(repo_path, file_path)
+        if not full_path.exists():
+            return None
+        return full_path.read_text(encoding="utf-8", errors="strict")
+
     def get_status(self, repo_alias: str, username: str) -> Dict[str, Any]:
         """
         Get git status for an activated repository (REST API wrapper).
@@ -582,17 +641,13 @@ class GitOperationsService:
         if not user_email or not user_name:
             try:
                 if not user_email:
-                    user_email = subprocess.check_output(
-                        ["git", "config", "user.email"], cwd=repo_path, text=True
-                    ).strip()
+                    user_email = self._git_config_value(repo_path, "user.email")
                     logger.debug(
                         f"Using git config user.email: {user_email}",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 if not user_name:
-                    user_name = subprocess.check_output(
-                        ["git", "config", "user.name"], cwd=repo_path, text=True
-                    ).strip()
+                    user_name = self._git_config_value(repo_path, "user.name")
                     logger.debug(
                         f"Using git config user.name: {user_name}",
                         extra={"correlation_id": get_correlation_id()},
@@ -968,7 +1023,7 @@ class GitOperationsService:
         """
         try:
             cmd = ["git", "status", "--porcelain=v1"]
-            result = run_git_command(
+            result = self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1114,7 +1169,7 @@ class GitOperationsService:
                 cmd.append("--")
                 cmd.extend(file_paths)
 
-            result = run_git_command(
+            result = self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1243,7 +1298,7 @@ class GitOperationsService:
                 count_cmd.append("--")
                 count_cmd.append(path)
 
-            count_result = run_git_command(
+            count_result = self._git_run(
                 count_cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1278,7 +1333,7 @@ class GitOperationsService:
                 cmd.append("--")
                 cmd.append(path)
 
-            result = run_git_command(
+            result = self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1376,7 +1431,7 @@ class GitOperationsService:
 
             cmd = ["git", "add", "--"] + validated_paths
 
-            run_git_command(
+            self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1417,7 +1472,7 @@ class GitOperationsService:
             file_paths = validate_pathspecs(file_paths) or []
             cmd = ["git", "reset", "HEAD", "--"] + file_paths
 
-            run_git_command(
+            self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1496,7 +1551,7 @@ class GitOperationsService:
                 raise ValueError(f"Invalid user name format: {user_name}")
 
             # Check for staged .code-indexer files before committing
-            staged_result = run_git_command(
+            staged_result = self._git_run(
                 ["git", "diff", "--cached", "--name-only"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1550,7 +1605,7 @@ class GitOperationsService:
 
             cmd = ["git", "commit", "-m", attributed_message]
 
-            run_git_command(
+            self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1560,7 +1615,7 @@ class GitOperationsService:
 
             # Get full commit hash using git rev-parse HEAD
             # (git commit output only shows short hash)
-            hash_result = run_git_command(
+            hash_result = self._git_run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1569,7 +1624,7 @@ class GitOperationsService:
             commit_hash = hash_result.stdout.strip()
 
             # Get actual committer email from the commit
-            committer_result = run_git_command(
+            committer_result = self._git_run(
                 ["git", "show", "-s", "--format=%ce", "HEAD"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1611,7 +1666,7 @@ class GitOperationsService:
         match = re.search(r"([0-9a-f]{7,40})\.\.\.?([0-9a-f]{7,40})", stderr_text)
         if match:
             try:
-                count_result = run_git_command(
+                count_result = self._git_run(
                     [
                         "git",
                         "rev-list",
@@ -1661,7 +1716,7 @@ class GitOperationsService:
             # whole element is checked and its '+'/'src:dst' contents reach
             # git unchanged. See git_argv_safety module docstring for
             # the invariant.
-            remote = validate_remote_name(remote, repo_path)
+            remote = validate_remote_name(remote, repo_path, runner=self._git_run)
             branch = validate_branch_name(branch, param_name="branch")
 
             # Defense in depth: hard option boundary right after the
@@ -1670,7 +1725,7 @@ class GitOperationsService:
             if branch:
                 cmd.append(branch)
 
-            result = run_git_command(
+            result = self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_remote_timeout,
@@ -1747,8 +1802,14 @@ class GitOperationsService:
         # call below, so the whole value is checked the same way as every
         # other branch site. See git_argv_safety module docstring for the
         # invariant.
-        remote = validate_remote_name(remote, repo_path)
+        remote = validate_remote_name(remote, repo_path, runner=self._git_run)
         branch = validate_branch_name(branch, param_name="branch")
+
+        if self._delegated_tools() is not None:
+            # Content seam: the copy is not on this pod and git-mcp holds the
+            # git credentials (cidx's PAT never leaves cidx). The push runs as
+            # git-mcp's git_push -- its own credential and branch policy.
+            return self.git_push(repo_path, remote=remote, branch=branch)
 
         from code_indexer.server.services.git_credential_helper import (
             GitCredentialHelper,
@@ -1759,7 +1820,7 @@ class GitOperationsService:
         # Use provided URL or fetch it
         if remote_url is None:
             try:
-                url_result = run_git_command(
+                url_result = self._git_run(
                     ["git", "remote", "get-url", remote],
                     cwd=repo_path,
                     check=True,
@@ -1793,7 +1854,7 @@ class GitOperationsService:
 
             # Auto-detect branch when not provided (Story #445)
             if not branch:
-                rev_result = run_git_command(
+                rev_result = self._git_run(
                     ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                     cwd=repo_path,
                     check=True,
@@ -1812,7 +1873,7 @@ class GitOperationsService:
             # HEAD:refs/heads/<branch> works even when no upstream tracking exists
             cmd = ["git", "push", https_url, f"HEAD:refs/heads/{branch}"]
 
-            result = run_git_command(
+            result = self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_remote_timeout,
@@ -1824,7 +1885,7 @@ class GitOperationsService:
             upstream_warning = None
             if set_upstream:
                 try:
-                    run_git_command(
+                    self._git_run(
                         [
                             "git",
                             "branch",
@@ -1901,7 +1962,7 @@ class GitOperationsService:
             # whole element is checked and its '+'/'src:dst' contents reach
             # git unchanged. See git_argv_safety module docstring for
             # the invariant.
-            remote = validate_remote_name(remote, repo_path)
+            remote = validate_remote_name(remote, repo_path, runner=self._git_run)
             branch = validate_branch_name(branch, param_name="branch")
 
             # NOTE: unlike push/fetch below, `--end-of-options` is not a
@@ -1919,7 +1980,7 @@ class GitOperationsService:
             if branch:
                 cmd.append(branch)
 
-            result = run_git_command(
+            result = self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_remote_timeout,
@@ -1967,9 +2028,9 @@ class GitOperationsService:
             # remote must be a configured remote name; it never reaches
             # argv with a leading '-'. See git_argv_safety module docstring
             # for the invariant.
-            remote = validate_remote_name(remote, repo_path)
+            remote = validate_remote_name(remote, repo_path, runner=self._git_run)
 
-            result = run_git_command(
+            result = self._git_run(
                 # Defense in depth: hard option boundary right after the
                 # subcommand, before remote.
                 ["git", "fetch", "--end-of-options", remote],
@@ -2052,7 +2113,7 @@ class GitOperationsService:
             target = commit_hash or "HEAD"
             cmd = ["git", "reset", f"--{mode}", target]
 
-            run_git_command(
+            self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2095,7 +2156,7 @@ class GitOperationsService:
             raise ValueError("Invalid or expired confirmation token")
 
         try:
-            result = run_git_command(
+            result = self._git_run(
                 ["git", "clean", "-fd"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2133,7 +2194,7 @@ class GitOperationsService:
             GitCommandError: If git merge --abort fails
         """
         try:
-            run_git_command(
+            self._git_run(
                 ["git", "merge", "--abort"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2186,7 +2247,7 @@ class GitOperationsService:
         assert source_branch is not None  # required parameter, never None here
 
         try:
-            result = run_git_command(
+            result = self._git_run(
                 ["git", "merge", source_branch],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2264,7 +2325,7 @@ class GitOperationsService:
         # Phase 2: git status --porcelain for definitive conflict list
         conflicts: List[Dict[str, Any]] = []
         try:
-            status_result = run_git_command(
+            status_result = self._git_run(
                 ["git", "status", "--porcelain"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2317,6 +2378,11 @@ class GitOperationsService:
             text conflict markers
         """
         try:
+            if self._delegated_tools() is not None:
+                text = self._worktree_text(repo_path, file_path)
+                if text is None:
+                    return True  # Absent -- nothing to read as text
+                return "<<<<<<< " not in text
             full_path = repo_path / file_path
             content = full_path.read_text(encoding="utf-8", errors="strict")
             return "<<<<<<< " not in content
@@ -2341,11 +2407,15 @@ class GitOperationsService:
               - total_conflicts: int
         """
         # Check if merge is in progress
-        merge_head = repo_path / ".git" / "MERGE_HEAD"
-        in_merge = merge_head.exists()
+        tools = self._delegated_tools()
+        if tools is not None:
+            in_merge = tools.merge_in_progress(repo_path)
+        else:
+            merge_head = repo_path / ".git" / "MERGE_HEAD"
+            in_merge = merge_head.exists()
 
         # Get conflicted files from git status
-        result = run_git_command(
+        result = self._git_run(
             ["git", "status", "--porcelain"],
             cwd=repo_path,
             timeout=self._git_timeouts.git_local_timeout,
@@ -2402,8 +2472,11 @@ class GitOperationsService:
           - theirs_content: str
         """
         try:
-            full_path = self._safe_repo_file_path(repo_path, file_path)
-            content = full_path.read_text(encoding="utf-8", errors="strict")
+            if self._delegated_tools() is not None:
+                content = self._worktree_text(repo_path, file_path) or ""
+            else:
+                full_path = self._safe_repo_file_path(repo_path, file_path)
+                content = full_path.read_text(encoding="utf-8", errors="strict")
             lines = content.split("\n")
         except (UnicodeDecodeError, OSError):
             return []
@@ -2454,7 +2527,7 @@ class GitOperationsService:
             ValueError: If file is not conflicted or still has markers
         """
         # Verify file is currently conflicted
-        status_result = run_git_command(
+        status_result = self._git_run(
             ["git", "status", "--porcelain", "--", file_path],
             cwd=repo_path,
             timeout=self._git_timeouts.git_local_timeout,
@@ -2474,20 +2547,18 @@ class GitOperationsService:
             raise ValueError(f"File '{file_path}' is not in a conflicted state.")
 
         # Check that conflict markers are removed (for text files)
-        full_path = self._safe_repo_file_path(repo_path, file_path)
-        if full_path.exists():
-            try:
-                content = full_path.read_text(encoding="utf-8", errors="strict")
-                if "<<<<<<< " in content:
-                    raise ValueError(
-                        "File still contains conflict markers. "
-                        "Edit the file to resolve conflicts before marking as resolved."
-                    )
-            except UnicodeDecodeError:
-                pass  # Binary file — no markers to check
+        try:
+            content = self._worktree_text(repo_path, file_path)
+        except UnicodeDecodeError:
+            content = None  # Binary file — no markers to check
+        if content is not None and "<<<<<<< " in content:
+            raise ValueError(
+                "File still contains conflict markers. "
+                "Edit the file to resolve conflicts before marking as resolved."
+            )
 
         # Stage the resolved file
-        run_git_command(
+        self._git_run(
             ["git", "add", "--", file_path],
             cwd=repo_path,
             timeout=self._git_timeouts.git_local_timeout,
@@ -2495,7 +2566,7 @@ class GitOperationsService:
         )
 
         # Count remaining conflicts
-        remaining_result = run_git_command(
+        remaining_result = self._git_run(
             ["git", "status", "--porcelain"],
             cwd=repo_path,
             timeout=self._git_timeouts.git_local_timeout,
@@ -2540,7 +2611,7 @@ class GitOperationsService:
             GitCommandError: If git checkout fails
         """
         try:
-            run_git_command(
+            self._git_run(
                 ["git", "checkout", "HEAD", "--", file_path],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2576,7 +2647,7 @@ class GitOperationsService:
             GitCommandError: If git branch fails
         """
         try:
-            result = run_git_command(
+            result = self._git_run(
                 ["git", "branch", "-a"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2643,7 +2714,7 @@ class GitOperationsService:
             branch_name = validate_branch_name(branch_name, param_name="branch_name")
             assert branch_name is not None  # required parameter, never None here
 
-            run_git_command(
+            self._git_run(
                 ["git", "branch", branch_name],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2689,7 +2760,7 @@ class GitOperationsService:
             assert branch_name is not None  # required parameter, never None here
 
             # Get current branch first
-            current_result = run_git_command(
+            current_result = self._git_run(
                 ["git", "branch", "--show-current"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2698,7 +2769,7 @@ class GitOperationsService:
             previous_branch = current_result.stdout.strip()
 
             # Switch branch
-            run_git_command(
+            self._git_run(
                 ["git", "checkout", branch_name],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2763,7 +2834,7 @@ class GitOperationsService:
             raise ValueError("Invalid or expired confirmation token")
 
         try:
-            run_git_command(
+            self._git_run(
                 ["git", "branch", "-d", branch_name],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2890,7 +2961,7 @@ class GitOperationsService:
             if message:
                 cmd.extend(["-m", message])
 
-            result = run_git_command(
+            result = self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2934,7 +3005,7 @@ class GitOperationsService:
             GitCommandError: If git stash pop fails
         """
         try:
-            result = run_git_command(
+            result = self._git_run(
                 ["git", "stash", "pop", f"stash@{{{index}}}"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2977,7 +3048,7 @@ class GitOperationsService:
             GitCommandError: If git stash apply fails
         """
         try:
-            result = run_git_command(
+            result = self._git_run(
                 ["git", "stash", "apply", f"stash@{{{index}}}"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -3019,7 +3090,7 @@ class GitOperationsService:
             GitCommandError: If git stash list fails
         """
         try:
-            result = run_git_command(
+            result = self._git_run(
                 ["git", "stash", "list", "--format=%gd|||%gs|||%ci"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -3087,7 +3158,7 @@ class GitOperationsService:
             GitCommandError: If git stash drop fails
         """
         try:
-            result = run_git_command(
+            result = self._git_run(
                 ["git", "stash", "drop", f"stash@{{{index}}}"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -3152,10 +3223,10 @@ class GitOperationsService:
             if env is not None:
                 run_kwargs["env"] = env
 
-            run_git_command(cmd, **run_kwargs)
+            self._git_run(cmd, **run_kwargs)
 
             # Get the new commit hash via rev-parse HEAD
-            hash_result = run_git_command(
+            hash_result = self._git_run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,

@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Any, Callable, Iterable, List, Optional
 
 from code_indexer.utils.git_runner import run_git_command
 
@@ -86,7 +86,9 @@ def validate_remote_syntax(remote: str) -> str:
     return remote
 
 
-def validate_remote_name(remote: str, repo_path: Path) -> str:
+def validate_remote_name(
+    remote: str, repo_path: Path, runner: Callable[..., Any] = run_git_command
+) -> str:
     """Validate `remote` is a safe, actually-configured remote name.
 
     An empty string is not one of the two hazards this module checks (it
@@ -110,7 +112,9 @@ def validate_remote_name(remote: str, repo_path: Path) -> str:
     validate_remote_syntax(remote)
 
     try:
-        result = run_git_command(["git", "remote"], cwd=repo_path, check=True)
+        # *runner*: run_git_command, or the git tools' seam runner on a pod
+        # that does not hold the repository (same signature).
+        result = runner(["git", "remote"], cwd=repo_path, check=True)
     except subprocess.CalledProcessError as e:
         raise GitArgumentValidationError(
             f"Unable to list configured remotes for repository: {e}"

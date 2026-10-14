@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Protocol, Sequence, Tuple, runtime_checkable
+from typing import Dict, List, Optional, Protocol, Sequence, Tuple, runtime_checkable
 
 from code_indexer.utils.git_runner import (
     run_git_command,
@@ -287,6 +287,51 @@ class GitBackend(Protocol):
         ...  # pragma: no cover
 
 
+@runtime_checkable
+class GitCommandRunner(Protocol):
+    """A git backend that also runs cidx's git TOOLS (``GitOperationsService``).
+
+    Separate from :class:`GitBackend` on purpose: GitBackend is checked with
+    ``isinstance`` when the server parks it, and a plugin built before these
+    methods existed must keep satisfying it. A caller that needs to run the
+    git tools through the seam checks THIS protocol and fails loud without it.
+    """
+
+    def run(
+        self,
+        repo_path: str,
+        args: Sequence[str],
+        timeout: Timeout = None,
+        identity: Optional[Dict[str, str]] = None,
+    ) -> subprocess.CompletedProcess:
+        """``git <args>`` in the repository -> CompletedProcess with TEXT
+        stdout/stderr; a non-zero exit is returned, never raised. Local
+        subcommands only: network operations use push/pull/fetch. *identity*
+        (author_name/author_email/committer_name/committer_email) attributes a
+        commit through git's GIT_AUTHOR_* / GIT_COMMITTER_* variables."""
+        ...  # pragma: no cover
+
+    def push(
+        self,
+        repo_path: str,
+        remote: str,
+        branch: Optional[str] = None,
+        timeout: Timeout = None,
+    ) -> subprocess.CompletedProcess:
+        """``git push <remote> [<branch>]`` with the backend's own credentials;
+        raises ``CalledProcessError`` on failure."""
+        ...  # pragma: no cover
+
+
+#: GitCommandRunner identity fields -> git's commit-identity variables.
+_IDENTITY_ENV_NAMES = {
+    "author_name": "GIT_AUTHOR_NAME",
+    "author_email": "GIT_AUTHOR_EMAIL",
+    "committer_name": "GIT_COMMITTER_NAME",
+    "committer_email": "GIT_COMMITTER_EMAIL",
+}
+
+
 # ---------------------------------------------------------------------------
 # LocalGitBackend — current behavior, via utils.git_runner
 # ---------------------------------------------------------------------------
@@ -431,6 +476,45 @@ class LocalGitBackend:
 
     def merge(self, repo_path: str, ref: str, timeout: Timeout = None) -> None:
         self._run(["git", "merge", ref], Path(repo_path), timeout=timeout)
+
+    # -- the git tools' runner (GitCommandRunner) ------------------------------
+    def run(
+        self,
+        repo_path: str,
+        args: Sequence[str],
+        timeout: Timeout = None,
+        identity: Optional[Dict[str, str]] = None,
+    ) -> subprocess.CompletedProcess:
+        env = {
+            name: identity[field]
+            for field, name in _IDENTITY_ENV_NAMES.items()
+            if identity and identity.get(field)
+        }
+        if env:
+            result: subprocess.CompletedProcess = run_git_command(
+                ["git", *args],
+                cwd=Path(repo_path),
+                check=False,
+                timeout=timeout,
+                env=env,
+            )
+        else:
+            result = run_git_command(
+                ["git", *args], cwd=Path(repo_path), check=False, timeout=timeout
+            )
+        return result
+
+    def push(
+        self,
+        repo_path: str,
+        remote: str,
+        branch: Optional[str] = None,
+        timeout: Timeout = None,
+    ) -> subprocess.CompletedProcess:
+        cmd = ["git", "push", "--end-of-options", remote]
+        if branch:
+            cmd.append(branch)
+        return self._run(cmd, Path(repo_path), timeout=timeout)
 
     # -- checkout / branch ----------------------------------------------------
     def checkout(

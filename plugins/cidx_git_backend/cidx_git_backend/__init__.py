@@ -547,6 +547,56 @@ class GitMcpBackend:
                 returncode=out.returncode,
             )
 
+    # ── cidx's git tools on an activated working copy (GitCommandRunner) ─────
+
+    def run(
+        self,
+        repo_path: str,
+        args: Sequence[str],
+        timeout: Any = None,
+        identity: Optional[Dict[str, str]] = None,
+    ) -> subprocess.CompletedProcess:
+        """``git <args>`` through git-mcp ``git_exec``: git's own output, the
+        exit code returned (not raised) exactly as a local ``check=False`` run."""
+        seconds = int(timeout) if isinstance(timeout, (int, float)) else None
+        result = self._call(
+            "git_exec",
+            self._cow(
+                repo_path,
+                args=list(args),
+                timeout_seconds=seconds,
+                identity=dict(identity) if identity else None,
+            ),
+            None if seconds is None else seconds + 30,
+        )
+        out = self._raw_output("git_exec", result)
+        return subprocess.CompletedProcess(
+            args=["git", *args],
+            returncode=out.returncode,
+            stdout=bytes(out.stdout).decode("utf-8", "replace"),
+            stderr=out.stderr,
+        )
+
+    def push(
+        self,
+        repo_path: str,
+        remote: str,
+        branch: Optional[str] = None,
+        timeout: Any = None,
+    ) -> subprocess.CompletedProcess:
+        """git-mcp ``git_push`` with git-mcp's credentials; raises on failure."""
+        result = self._call(
+            "git_push", self._cow(repo_path, remote=remote, branch=branch), timeout
+        )
+        guidance = result.get("_guidance") or {}
+        message = str(guidance.get("message", "")) if isinstance(guidance, dict) else ""
+        return subprocess.CompletedProcess(
+            args=["git", "push", remote] + ([branch] if branch else []),
+            returncode=0,
+            stdout=message,
+            stderr="",
+        )
+
     # ── remotes ──────────────────────────────────────────────────────────────
 
     def remote_list(
