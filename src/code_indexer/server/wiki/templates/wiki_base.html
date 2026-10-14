@@ -6,13 +6,7 @@
     <title>{{ title }} - Wiki</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
     <link rel="stylesheet" href="/wiki/_static/wiki.css?v=7">
-    <script>
-        // Apply saved theme immediately to prevent flash
-        (function() {
-            var saved = localStorage.getItem('wiki_theme');
-            if (saved) document.documentElement.setAttribute('data-theme', saved);
-        })();
-    </script>
+    <script src="/wiki/_static/wiki-theme.js?v=1"></script>
 </head>
 <body data-repo-alias="{{ repo_alias | default('') }}">
     <main class="wiki-layout">

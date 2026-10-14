@@ -63,6 +63,8 @@ AUTO_UPDATE_SERVICE_NAME = "cidx-auto-update"
 # Systemd unit directory — configurable for testing or non-standard deployments.
 # Default is the Linux standard /etc/systemd/system.
 SYSTEMD_UNIT_DIR = Path(os.environ.get("SYSTEMD_UNIT_DIR", "/etc/systemd/system"))
+# uvicorn flag the installer renders; _ensure_no_server_header heals old units.
+_NO_SERVER_HEADER_FLAG = "--no-server-header"
 
 # Bug #1320 Part B: fixed, documented installation location of the co-located
 # CoW Storage Daemon's own config file. This is a stable install-location
@@ -3214,6 +3216,93 @@ class DeploymentExecutor:
             )
             return None
 
+    def _ensure_no_server_header(self) -> bool:
+        """Self-heal: add --no-server-header to a deployed uvicorn ExecStart.
+
+        Already-deployed units predate the installer flag and nothing else
+        re-renders them.  Only uvicorn-shape cidx ExecStart lines are
+        touched: an installer-shape ``code_indexer.server.main`` line is left
+        as is (main.py passes ``server_header=False`` itself and its argparse
+        rejects unknown flags).  The flag is appended only when absent, so a
+        second run writes nothing.  A rewrite takes effect at the restart
+        that ends the deploy, like the other unit self-heals.
+
+        Each ExecStart is read as its logical command (physical lines joined
+        across a trailing backslash), so a flag on a continuation line is
+        seen.  The flag is only ever appended to a single-line ExecStart; a
+        continued uvicorn ExecStart without it is refused with a WARNING and
+        the unit is left byte-identical (the installer renders one line).
+
+        Returns True when every uvicorn ExecStart carries the flag (already or
+        after the rewrite); False when the unit is missing, has no cidx
+        ExecStart, needs a refused continued-line edit, or the write fails.
+        """
+        try:
+            service_path = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+            if not service_path.exists():
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-017",
+                        f"Service file not found: {service_path}",
+                    )
+                )
+                return False
+            lines = service_path.read_text().split("\n")
+            updated = list(lines)
+            has_cidx_execstart = False
+            start = 0
+            while start < len(lines):
+                end = start
+                if lines[start].startswith("ExecStart="):
+                    while end + 1 < len(lines) and lines[end].rstrip().endswith("\\"):
+                        end += 1
+                    logical = " ".join(
+                        ln.rstrip().rstrip("\\") for ln in lines[start : end + 1]
+                    )
+                    if self._is_cidx_execstart(logical):
+                        has_cidx_execstart = True
+                        if (
+                            "code_indexer.server.main" not in logical
+                            and _NO_SERVER_HEADER_FLAG not in logical.split()
+                        ):
+                            if end > start:
+                                logger.warning(
+                                    format_error_log(
+                                        "DEPLOY-GENERAL-229",
+                                        f"{service_path} ExecStart spans continuation "
+                                        f"lines; not adding {_NO_SERVER_HEADER_FLAG} "
+                                        "automatically -- add it by hand",
+                                    )
+                                )
+                                return False
+                            updated[start] = (
+                                f"{lines[start].rstrip()} {_NO_SERVER_HEADER_FLAG}"
+                            )
+                start = end + 1
+            if not has_cidx_execstart:
+                logger.debug(
+                    "No cidx ExecStart found; skipping --no-server-header self-heal",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return False
+            if updated == lines:
+                return True
+            if not self._write_and_reload_service(service_path, updated):
+                return False
+            logger.info(
+                f"Added {_NO_SERVER_HEADER_FLAG} to {service_path} ExecStart",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+        except Exception as exc:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-227",
+                    f"Error in _ensure_no_server_header: {exc}",
+                )
+            )
+            return False
+
     def _extract_service_user(self, content: str) -> Optional[str]:
         """Extract User= value from service file content.
 
@@ -4257,6 +4346,18 @@ class DeploymentExecutor:
         # Uses the broadened ExecStart predicate (CRITICAL-D) that covers both installer-shape
         # (code_indexer.server.main) and uvicorn-shape units.
         self._ensure_launch_config("DEPLOY")
+
+        # Step 3.5: drop uvicorn's Server header on already-deployed units
+        # (installer renders --no-server-header; this heals older units).
+        if not self._ensure_no_server_header():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-228",
+                    "--no-server-header could not be verified/added to the "
+                    "cidx-server unit -- responses may still carry a Server header",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
 
         # Step 4: Bug #87 - Ensure CIDX_REPO_ROOT environment variable
         self._ensure_cidx_repo_root()

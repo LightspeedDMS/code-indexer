@@ -970,7 +970,7 @@ def user_mfa_status(request: Request):
 def render_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
     """Render the TOTP challenge page shown after password verification.
 
-    Returns HTMLResponse with X-Frame-Options: DENY to prevent clickjacking.
+    Framing is refused by the headers SecurityHeadersMiddleware adds.
     """
     safe_error = html_module.escape(error) if error else ""
     safe_token = html_module.escape(token)
@@ -1030,10 +1030,7 @@ def render_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
         "<a href='/login' class='back'>Cancel and return to login</a>"
         "</div></body></html>"
     )
-    response = HTMLResponse(html)
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
-    return response
+    return HTMLResponse(html)
 
 
 def render_oauth_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
@@ -1041,7 +1038,7 @@ def render_oauth_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse
 
     Posts to /oauth/mfa/verify instead of /admin/mfa/challenge/verify so
     the OAuth authorization completes after TOTP verification.
-    Returns HTMLResponse with X-Frame-Options: DENY to prevent clickjacking.
+    Framing is refused by the headers SecurityHeadersMiddleware adds.
     """
     safe_error = html_module.escape(error) if error else ""
     safe_token = html_module.escape(token)
@@ -1101,10 +1098,7 @@ def render_oauth_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse
         "<a href='/login' class='back'>Cancel and return to login</a>"
         "</div></body></html>"
     )
-    response = HTMLResponse(html)
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
-    return response
+    return HTMLResponse(html)
 
 
 if TYPE_CHECKING:
