@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.89.0] - 2026-10-14
+
+### Upgrade notes
+
+- Server: wiki pages no longer pass through scripts, event handlers, embedded frames, objects, forms, SVG markup or `style` attributes from repository Markdown; ordinary Markdown (headings, links, code, tables, images, details) renders as before. Table column alignment set through inline styles is dropped. Wiki pages cached before the upgrade are rendered again on first view.
+- Server: wiki asset routes serve images, stylesheets, fonts and PDFs only; `.js` files are no longer served as wiki assets.
+- Server: every response carries `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, so Web UI pages can no longer be shown inside a frame on another site. `Strict-Transport-Security` is sent only when the server itself sees an HTTPS request; behind a TLS-terminating proxy on another host, configure HSTS on that proxy.
+- Server: the `Server: uvicorn` response header is no longer sent. The auto-updater adds `--no-server-header` to installed single-line uvicorn service units at the next deploy; a unit whose `ExecStart` spans several lines is left unchanged and the deploy logs a warning.
+
+### Security
+
+- Server: memories returned alongside MCP `search_code` results are limited to those the caller may see: global memories, and repository or file memories whose repository the caller can access. A memory's scope is read from the memory itself at query time, and a memory whose scope cannot be read is not returned.
+- Server: wiki HTML from repository content is sanitised with an allowlist before it is served, links that open a new window carry `rel="noopener noreferrer"`, the wiki index pages escape file names, and wiki asset responses carry a sandbox `Content-Security-Policy` and `X-Content-Type-Options: nosniff` with a fixed content type per file extension. Wiki pages are served with a strict `Content-Security-Policy` (scripts from the server only).
+- Server: every response carries `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin` and framing protection.
+- Server: the administrator MFA setup page and the "No MFA configured" responses escape the user name and every other value they display.
+
 ## [12.88.0] - 2026-10-14
 
 ### Upgrade notes
