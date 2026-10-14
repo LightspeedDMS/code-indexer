@@ -21,7 +21,10 @@ from code_indexer.server.wiki.routes import (
     get_wiki_user_hybrid,
     get_current_user_hybrid,
 )
-from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
+from tests.unit.server.wiki.wiki_test_helpers import (
+    install_unauthenticated_auth,
+    make_aliases_dir,
+)
 
 
 def _make_user(username: str):
@@ -194,8 +197,9 @@ class TestSearchEndpointBasic:
 class TestSearchEndpointAuth:
     """Authentication requirements for the search endpoint."""
 
-    def test_search_endpoint_requires_auth(self):
+    def test_search_endpoint_requires_auth(self, monkeypatch):
         """Search endpoint returns 401/403 without authentication."""
+        install_unauthenticated_auth(monkeypatch)
         app = FastAPI()
         app.include_router(wiki_router, prefix="/wiki")
         app.state.golden_repo_manager = MagicMock()

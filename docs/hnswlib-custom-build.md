@@ -314,3 +314,19 @@ If upgrading from a version that used PyPI hnswlib:
 - hnswlib GitHub: https://github.com/nmslib/hnswlib
 - Custom commits: 8972063 (checkIntegrity method), 57e9453 (repair_orphans method, Story #1358 / Epic #1333), 878cfbe (repairOrphans bounds-check guards), e03aa23 + 8155cfc (GIL release in native calls, #1490); current submodule/pyproject.toml pin: 8155cfc9d02a5a46528a3faab697555952ed40c6
 - Orphan repair background: `docs/research/hnsw-temporal-orphans-1330.md`
+
+## Symptom: ~18 HNSW tests fail locally but pass in CI
+
+`tests/unit/server/services/hnsw_orphan_sweep/*` and
+`test_refresh_scheduler_hnsw_orphan_forwarding_1388.py` fail with assertions on
+repair outcomes, and the log says `installed hnswlib lacks
+check_integrity()/repair_orphans()`. The Python environment running the tests
+has stock PyPI hnswlib 0.8.0 (often in the user site, which shadows the
+project's dependency). CI installs the fork through `pip install ".[dev]"`.
+Install the pinned fork into the same environment:
+
+```bash
+pip install --user --no-deps --force-reinstall \
+  "hnswlib @ git+https://github.com/LightspeedDMS/hnswlib.git@8155cfc9d02a5a46528a3faab697555952ed40c6"
+python3 -c "import hnswlib; assert hasattr(hnswlib.Index, 'repair_orphans')"
+```

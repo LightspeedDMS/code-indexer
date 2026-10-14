@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 import math
 from pathlib import Path
 from typing import Any, List, Tuple, cast
@@ -169,6 +170,30 @@ async def _invoke(module: Any, name: str, params: dict, user: Any) -> dict:
     if asyncio.iscoroutine(result):
         result = await result
     return cast(dict, result)
+
+
+@pytest.fixture(autouse=True)
+def _no_lazy_app_construction(monkeypatch):
+    """Hermetic stand-ins for the lazy app singleton's attributes these tests
+    patch (``app.state.*``, ``activated_repo_manager``).
+
+    ``code_indexer.server.app`` builds the whole server on first access to
+    any lazy attribute (PEP 562 ``__getattr__``, Bug #1693). ``patch.object``
+    reads the original value first, so in a run where no earlier test had
+    built the app, the build ran here -- against this module's stub config
+    service -- and failed. Writing the stand-ins straight into the module
+    dict never calls ``__getattr__``; monkeypatch restores whatever was there.
+    """
+    from starlette.datastructures import State
+
+    module_dict = vars(_handlers_utils.app_module)
+    monkeypatch.setitem(module_dict, "app", SimpleNamespace(state=State()))
+    # No activated repos and no golden-repo manager: aliases resolve through
+    # the golden path each test patches (as a freshly started server would).
+    arm = MagicMock()
+    arm.user_has_activated_repo.return_value = False
+    monkeypatch.setitem(module_dict, "activated_repo_manager", arm)
+    monkeypatch.setitem(module_dict, "golden_repo_manager", None)
 
 
 @pytest.fixture(autouse=True)
@@ -486,9 +511,10 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
         mock_access_service = MagicMock()
         mock_access_service.is_admin_user.return_value = True
         with (
-            patch(
-                "code_indexer.server.mcp.handlers.repos._resolve_golden_repo_path",
-                return_value=_FAKE_REPO_PATH,
+            # xray_batch resolves through its own registry-backed
+            # _resolve_repo_path (Bug #1315), no longer repos._resolve_golden_repo_path.
+            patch.object(
+                xray_batch, "_resolve_repo_path", return_value=_FAKE_REPO_PATH
             ),
             patch.object(
                 xray_batch, "_get_background_job_manager", return_value=mock_bjm

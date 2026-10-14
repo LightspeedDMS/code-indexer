@@ -43,7 +43,10 @@ def _make_app(authenticated_user, actual_repo_path, user_accessible_repos=None):
     app.state.golden_repo_manager.db_path = _db_path
 
     # Create alias infrastructure for AliasManager resolution (Story #286)
-    golden_repos_dir = Path(actual_repo_path).parent / "golden-repos-test"
+    # A fresh directory per app: "<repo>.parent / golden-repos-test" was
+    # /tmp/golden-repos-test for every TemporaryDirectory repo -- shared
+    # by concurrent xdist workers, whose alias files overwrote each other.
+    golden_repos_dir = Path(tempfile.mkdtemp(suffix="-golden-repos"))
     golden_repos_dir.mkdir(parents=True, exist_ok=True)
     make_aliases_dir(str(golden_repos_dir), "test-repo", actual_repo_path)
     app.state.golden_repo_manager.golden_repos_dir = str(golden_repos_dir)
