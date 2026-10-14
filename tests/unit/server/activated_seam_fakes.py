@@ -223,6 +223,12 @@ class ActivatedWorld:
     def _clone_golden(self, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         _git(self.tmp, "clone", "-q", str(self.upstream), str(dest))
+        # Locally the index lives INSIDE the copy and git status reports it
+        # as untracked (unless the host's global excludes hide it); delegated
+        # it is pod state outside the copy. Exclude it in the repository so
+        # the comparison is about the files, on any host.
+        (dest / ".git" / "info").mkdir(parents=True, exist_ok=True)
+        (dest / ".git" / "info" / "exclude").write_text(f"{INDEX_DIR}/\n")
 
     @staticmethod
     def _write_index(index: Path) -> None:
