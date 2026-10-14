@@ -21,8 +21,12 @@ Code: `src/code_indexer/server/wiki/` (`routes.py`, `wiki_service.py`, `wiki_cac
 - **Articles** are files ending in `.md`, `.markdown` or `.txt`. An article path without an extension is served
   from the matching `.md` file. Any other extension, a missing file, or a path that resolves outside the repository
   directory returns 404.
-- **Assets** are served only for `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.webp`, `.ico`, `.css`, `.js`, `.woff`,
-  `.woff2`, `.ttf`, `.eot` and `.pdf`, under the same containment rule.
+- **Assets** are served only for `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.webp`, `.ico`, `.css`, `.woff`,
+  `.woff2`, `.ttf`, `.eot` and `.pdf`, under the same containment rule. Script and document types (`.js`, `.html`,
+  `.xml` and the like) are never served. Every asset response carries
+  `Content-Security-Policy: sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'` and
+  `X-Content-Type-Options: nosniff`, so an SVG opened directly cannot run script; images embedded in articles are
+  unaffected.
 - **Root page.** `home.md` in the repository root when it exists; otherwise an index of every `.md` file.
 - **Sidebar.** Every `.md` file outside directories whose name starts with `.`, grouped by top-level directory and
   then by the front-matter `category` field (articles without one go under `Uncategorized`), sorted by title.
@@ -62,6 +66,17 @@ Pages are rendered when requested, not by a background job:
    removed from the body (their values go to the metadata panel).
 3. The body is rendered with markdown-it-py (CommonMark, plus tables and strikethrough), and anchor ids are added to
    headings.
+
+When a page is rendered, inter-article links are rewritten and the HTML is then reduced to an allowlist
+(`WIKI_ARTICLE_ALLOWLIST` in `server/utils/html_sanitizer.py`). This happens once per file version: the final page is
+cached in `wiki_cache` under an article key prefixed with `/sanitized-page-v1/` and served from there as is. Rows under
+the bare article path (written by servers before 12.89.0) are never served; they are removed by the same invalidation
+as every other row of the repository. Every link with a `target` carries `rel="noopener noreferrer"`, whatever `rel`
+the source gave it. Inline HTML in Markdown is kept only for elements
+Markdown itself produces (plus `details`/`summary`, `kbd`, `sup`/`sub`, `div`/`span` with a class). Script, style,
+frame, form and other disallowed elements are removed, as are event-handler and `style` attributes and any URL whose
+scheme is not `http`, `https` or `mailto`. Relative URLs are kept. Table column alignment set via `style` is not kept.
+Article names and paths on the index pages are escaped and URL-encoded.
 
 Rendered output is cached in two tables, keyed by the repository (golden: `<alias>`; user wiki:
 `u:<username>:<alias>`):

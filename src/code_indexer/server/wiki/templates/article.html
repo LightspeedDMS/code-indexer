@@ -95,7 +95,19 @@
                 </dl>
             </details>
             {% endif %}
+            {% if index_articles is defined %}
+            {% if index_articles %}
+            <ul>
+                {% for article in index_articles %}
+                <li><a href="/wiki/{{ repo_alias }}/{{ article.path | urlencode }}">{{ article.title }}</a></li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p>No articles found in this wiki.</p>
+            {% endif %}
+            {% else %}
             {{ content | safe }}
+            {% endif %}
         </div>
     </div>
 </div>
