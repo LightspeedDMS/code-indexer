@@ -9,7 +9,7 @@ import logging
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -20,6 +20,9 @@ from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.services.repository_health_aggregator import (
     compute_repository_health,
     get_shared_health_service,
+)
+from code_indexer.server.startup.content_backend_wiring import (
+    is_content_seam_delegated,
 )
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
@@ -160,6 +163,41 @@ def _get_activated_repo_manager():
             "Server must set app.state.activated_repo_manager during startup."
         )
     return manager
+
+
+def _activated_copy_present(
+    activated_manager: Any, username: str, user_alias: str, repo_path: Path
+) -> bool:
+    """Whether the user's activated copy is there: its directory on this pod,
+    or -- when the repositories are not on this pod (delegated content
+    backend) -- the registry's record of the activation for THIS user. The
+    operation that follows reaches the copy through its seam and fails loudly
+    if it is gone; a pod-path probe would only see this pod's index state."""
+    if not is_content_seam_delegated():
+        return repo_path.exists()
+    return bool(activated_manager.user_has_activated_repo(username, user_alias))
+
+
+def _delegated_branches(repo_path: str) -> Tuple[str, List[str]]:
+    """``git branch`` of a copy that is not on this pod, through the git seam
+    (git-mcp): (current branch, local branches). No delegated git backend is
+    an error -- never a local git run against a path this pod does not hold."""
+    from code_indexer.server.startup.git_backend_wiring import (
+        server_delegated_git_backend,
+    )
+
+    backend = server_delegated_git_backend()
+    if backend is None:
+        raise RuntimeError(
+            "Repositories are not on this server (content_backend='delegated') "
+            "but git runs locally; set git_backend='delegated'."
+        )
+    branches = backend.list_branches(repo_path, fmt="%(refname:short)")
+    try:
+        current = backend.current_branch(repo_path)
+    except subprocess.CalledProcessError:
+        current = ""  # detached HEAD: `git branch` marks no branch
+    return current, sorted(branches)
 
 
 def _get_background_job_manager():
@@ -306,7 +344,9 @@ async def get_indexes_status(
 
         # Check if repository exists
         repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
+        if not _activated_copy_present(
+            activated_manager, target_username, user_alias, repo_path_obj
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Activated repository '{user_alias}' not found",
@@ -491,7 +531,9 @@ async def trigger_reindex(
 
         # Check if repository exists
         repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
+        if not _activated_copy_present(
+            activated_manager, current_user.username, user_alias, repo_path_obj
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Activated repository '{user_alias}' not found",
@@ -615,7 +657,9 @@ async def add_index_type(
 
         # Check if repository exists
         repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
+        if not _activated_copy_present(
+            activated_manager, current_user.username, user_alias, repo_path_obj
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Activated repository '{user_alias}' not found",
@@ -717,7 +761,9 @@ async def check_activated_repo_health_async(
         )
 
         repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
+        if not _activated_copy_present(
+            activated_manager, current_user.username, user_alias, repo_path_obj
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Activated repository '{user_alias}' not found",
@@ -806,7 +852,9 @@ async def sync_repository(
 
         # Check if repository exists
         repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
+        if not _activated_copy_present(
+            activated_manager, current_user.username, user_alias, repo_path_obj
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Activated repository '{user_alias}' not found",
@@ -937,7 +985,9 @@ async def switch_branch(
 
         # Check if repository exists
         repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
+        if not _activated_copy_present(
+            activated_manager, current_user.username, user_alias, repo_path_obj
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Activated repository '{user_alias}' not found",
@@ -1032,33 +1082,38 @@ async def list_branches(
 
         # Check if repository exists
         repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
+        if not _activated_copy_present(
+            activated_manager, current_user.username, user_alias, repo_path_obj
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Activated repository '{user_alias}' not found",
             )
 
-        # Get branches using git
-        result = subprocess.run(
-            ["git", "branch"],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        if is_content_seam_delegated():
+            current_branch, branches = _delegated_branches(repo_path)
+        else:
+            # Get branches using git
+            result = subprocess.run(
+                ["git", "branch"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
 
-        # Parse git branch output
-        branches = []
-        current_branch = ""
+            # Parse git branch output
+            branches = []
+            current_branch = ""
 
-        for line in result.stdout.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("* "):
-                # Current branch
-                current_branch = line[2:]
-                branches.append(current_branch)
-            else:
-                branches.append(line)
+            for line in result.stdout.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("* "):
+                    # Current branch
+                    current_branch = line[2:]
+                    branches.append(current_branch)
+                else:
+                    branches.append(line)
 
         return BranchesResponse(
             user_alias=user_alias,

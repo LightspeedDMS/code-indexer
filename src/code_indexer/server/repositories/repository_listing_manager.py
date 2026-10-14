@@ -380,6 +380,21 @@ class RepositoryListingManager:
         """
         activation_count = 0
 
+        from code_indexer.server.startup.content_backend_wiring import (
+            is_content_seam_delegated,
+        )
+
+        if is_content_seam_delegated():
+            # The per-user directories are not on this pod: the registry names
+            # who activated what (a directory scan would count nobody).
+            return len(
+                {
+                    repo.get("username")
+                    for repo in self.activated_repo_manager.list_all_activated_repositories()
+                    if repo.get("golden_repo_alias") == golden_repo_alias
+                }
+            )
+
         # Check all users' activated repositories
         activated_repos_dir = os.path.join(
             self.activated_repo_manager.data_dir, "activated-repos"
