@@ -121,6 +121,11 @@ smoke:
       tests/unit/server/routers/test_fts_regex_error_mapping.py
       tests/unit/server/services/test_file_service_index_serve_evo66189.py
       tests/unit/server/mcp/test_browse_directory_absolute_pattern_and_leading_slash_1886_r1_r2.py
+      tests/unit/server/services/hnsw_orphan_sweep/test_repair_executor_1360.py
+      tests/unit/server/services/hnsw_orphan_sweep/test_scheduler_1360.py
+      tests/unit/global_repos/test_refresh_scheduler_hnsw_orphan_forwarding_1388.py
+      tests/unit/global_repos/test_refresh_scheduler_local_detection.py
+      tests/unit/server/wiki/test_wiki_routes.py
       tests/unit/server/services/test_scheduled_catchup_single_flight.py
       tests/unit/server/repositories/test_background_jobs_worker_budget.py
       tests/unit/server/repositories/test_background_jobs_pod_pull_submit.py
@@ -144,7 +149,6 @@ smoke:
       tests/unit/server/services/dep_map_tracking/test_conflict.py
       tests/unit/server/services/fleet_migration/test_scheduler_1458.py
       tests/unit/server/services/fleet_migration/test_scheduler_canary_gate_1461.py
-      tests/unit/server/services/hnsw_orphan_sweep/test_scheduler_1360.py
       tests/unit/server/services/semantic_backfill/test_policy.py
       tests/unit/server/services/test_bug1235_pg_duplicate_claim_race.py
       tests/unit/server/services/test_cross_worker_dedup_1184.py
