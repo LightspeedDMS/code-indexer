@@ -141,9 +141,11 @@ def env(
     running_app = SimpleNamespace(
         state=SimpleNamespace(golden_repos_dir=str(golden), snapshot_manager=None)
     )
-    monkeypatch.setitem(
-        vars(sys.modules["code_indexer.server.app"]), "app", running_app
-    )
+    server_app = sys.modules["code_indexer.server.app"]
+    monkeypatch.setitem(vars(server_app), "app", running_app)
+    # The write-mode gate reads git_write's own app_module binding; point it
+    # at the module patched above so the gate always sees this running app.
+    monkeypatch.setattr(git_write, "app_module", server_app)
 
     with (
         patch.object(git_operations_service, "payload_cache", shared_store.new_cache()),

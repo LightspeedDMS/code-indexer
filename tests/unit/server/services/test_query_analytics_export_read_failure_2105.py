@@ -186,7 +186,42 @@ def _client(store: RealStore, tmp_path, bgm: Any, monkeypatch):
     admin.username = "admin"
     admin.role = UserRole.ADMIN
     app.dependency_overrides[auth_deps.get_current_admin_user_hybrid] = lambda: admin
-    return TestClient(app, raise_server_exceptions=False)
+    client = TestClient(app, raise_server_exceptions=False)
+    _elevate(client, admin.username, tmp_path, monkeypatch)
+    return client
+
+
+def _elevate(client: Any, username: str, tmp_path, monkeypatch) -> None:
+    """Give `client` an elevated admin session: these reads require elevation.
+
+    Real TOTP and elevation-window stores on this test's files: the admin has
+    MFA enrolled and a full-scope window bound to the client's session cookie.
+    """
+    import pyotp
+
+    from code_indexer.server.auth import dependencies as auth_deps
+    from code_indexer.server.auth.elevated_session_manager import (
+        ElevatedSessionManager,
+    )
+    from code_indexer.server.auth.totp_service import TOTPService
+    from code_indexer.server.web import mfa_routes
+
+    totp = TOTPService(db_path=str(tmp_path / "mfa.db"))
+    secret = totp.generate_secret(username)
+    assert totp.activate_mfa(username, pyotp.TOTP(secret).now())
+    esm = ElevatedSessionManager(
+        idle_timeout_seconds=300,
+        max_age_seconds=1800,
+        db_path=str(tmp_path / "elevated.db"),
+    )
+    session_key = f"session-{uuid.uuid4()}"
+    esm.create(
+        session_key=session_key, username=username, elevated_from_ip=None, scope="full"
+    )
+    monkeypatch.setattr(mfa_routes, "_totp_service", totp)
+    monkeypatch.setattr(auth_deps, "elevated_session_manager", esm)
+    monkeypatch.setattr(auth_deps, "_is_elevation_enforcement_enabled", lambda: True)
+    client.cookies.set(auth_deps.CIDX_SESSION_COOKIE, session_key)
 
 
 class TestFrontDoor2105:
