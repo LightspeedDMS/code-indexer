@@ -41,6 +41,15 @@ from ..services.repository_discovery_service import (
 )  # noqa: E402
 from . import repo_access_http
 from ..validators.composite_repo_validator import CompositeRepoValidator  # noqa: E402
+from ..services.activated_copy_content import (
+    CopyContentUnavailableError,
+    CopyPathError,
+    delegated_copy_source,
+    list_copy_directory,
+    recent_commits,
+    storage_info_mb,
+)
+from code_indexer.utils.path_confinement import confine_relative_path
 from ..logging_utils import mask_url_credentials  # noqa: E402
 from ..repositories.golden_repo_manager import GitOperationError  # noqa: E402
 
@@ -1681,7 +1690,12 @@ def register_repo_routes(
 
             # Add storage information
             storage_info = {}
-            if os.path.exists(repo_path):
+            copy_source = delegated_copy_source(repo_path)
+            if copy_source is not None:
+                # Content seam: the copy is on workspace-mcp, its index state
+                # on this pod. A backend failure is the route's 500, never 0.
+                storage_info = storage_info_mb(copy_source, repo_path)
+            elif os.path.exists(repo_path):
                 try:
                     # Calculate repository size
                     total_size = 0
@@ -1805,40 +1819,53 @@ def register_repo_routes(
                 }
 
                 # Try to get real git commit history
-                try:
-                    import subprocess
+                if copy_source is not None:
+                    # Git seam: git-mcp holds the copy. Its failure is the
+                    # route's 500, never an empty history.
+                    activity_info["recent_commits"] = [
+                        {
+                            "commit_hash": commit_hash,
+                            "message": message,
+                            "author": "unknown",
+                            "timestamp": "unknown",
+                        }
+                        for commit_hash, message in recent_commits(repo_path, 5)
+                    ]
+                else:
+                    try:
+                        import subprocess
 
-                    git_log = subprocess.run(
-                        ["git", "log", "--oneline", "-5"],
-                        cwd=repo_path,
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                    )
+                        git_log = subprocess.run(
+                            ["git", "log", "--oneline", "-5"],
+                            cwd=repo_path,
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                        )
 
-                    if git_log.returncode == 0:
-                        for line in git_log.stdout.strip().split("\n"):
-                            if line.strip():
-                                parts = line.split(" ", 1)
-                                if len(parts) >= 2:
-                                    commit_hash = parts[0]
-                                    message = parts[1]
-                                    activity_info["recent_commits"].append(
-                                        {
-                                            "commit_hash": commit_hash,
-                                            "message": message,
-                                            "author": "unknown",
-                                            "timestamp": "unknown",
-                                        }
-                                    )
-                except Exception as exc:
-                    logger.warning(
-                        "get_repository_info: swallowed %s: %s",
-                        type(exc).__name__,
-                        exc,
-                        exc_info=True,
-                    )
-                    pass  # Git history unavailable
+                        if git_log.returncode == 0:
+                            for line in git_log.stdout.strip().split("\n"):
+                                if line.strip():
+                                    parts = line.split(" ", 1)
+                                    if len(parts) >= 2:
+                                        commit_hash = parts[0]
+                                        message = parts[1]
+                                        activity_info["recent_commits"].append(
+                                            {
+                                                "commit_hash": commit_hash,
+                                                "message": message,
+                                                "author": "unknown",
+                                                "timestamp": "unknown",
+                                            }
+                                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "get_repository_info: swallowed %s: %s",
+                            type(exc).__name__,
+                            exc,
+                            exc_info=True,
+                        )
+                        pass  # Git history unavailable
 
                 # Add sync history from repository metadata
                 if repo_found.get("last_sync"):
@@ -1919,6 +1946,41 @@ def register_repo_routes(
             )
 
         repo_path = Path(arm.get_activated_repo_path(current_user.username, user_alias))
+        copy_source = delegated_copy_source(repo_path)
+        if copy_source is not None:
+            # Content seam: the copy is on workspace-mcp, listed from its
+            # manifest. Confinement is lexical (nothing here to resolve).
+            try:
+                rel_dir = confine_relative_path(path) if path else ""
+            except PermissionError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid path: must be a relative path within the repository",
+                )
+            try:
+                return list_copy_directory(
+                    copy_source,
+                    rel_dir,
+                    recursive=recursive,
+                    max_depth=max_depth,
+                    limit=limit,
+                )
+            except CopyPathError as e:
+                if e.kind == "missing":
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Path '{path}' does not exist in repository '{user_alias}'",
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Path '{path}' is not a directory",
+                )
+            except CopyContentUnavailableError as e:
+                logger.error("Failed to list files for %s: %s", user_alias, e)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to list files: {str(e)}",
+                )
         repo_resolved = repo_path.resolve()
         scan_root = (repo_path / path).resolve() if path else repo_resolved
 

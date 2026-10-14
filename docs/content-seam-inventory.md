@@ -8,12 +8,12 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | Class | Rows |
 |---|---|
 | unclassified | 0 |
-| repo-read | 381 |
-| repo-write | 76 |
-| cidx-state-in-repo | 1010 |
-| migrated | 340 |
-| local-only | 328 |
-| cidx-state | 573 |
+| repo-read | 369 |
+| repo-write | 78 |
+| cidx-state-in-repo | 1019 |
+| migrated | 351 |
+| local-only | 326 |
+| cidx-state | 563 |
 | not-repo | 422 |
 
 ## Modules with open rows
@@ -51,6 +51,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `indexing/processor.py` | 0 | 1 | 0 | 0 |
 | `mode_detection/command_mode_detector.py` | 0 | 0 | 0 | 6 |
 | `mode_specific_handlers.py` | 0 | 0 | 0 | 1 |
+| `proxy/config_manager.py` | 0 | 3 | 0 | 1 |
 | `proxy/proxy_initializer.py` | 0 | 4 | 0 | 6 |
 | `proxy/repository_formatter.py` | 0 | 2 | 0 | 0 |
 | `scip/database/builder.py` | 0 | 0 | 0 | 3 |
@@ -71,12 +72,14 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `scip/query/loader.py` | 0 | 0 | 0 | 3 |
 | `scip/query/primitives.py` | 0 | 0 | 0 | 3 |
 | `scip/status.py` | 0 | 0 | 0 | 4 |
+| `server/app_helpers.py` | 0 | 4 | 0 | 2 |
 | `server/auto_update/deployment_executor.py` | 0 | 4 | 16 | 0 |
 | `server/cache/fts_index_cache.py` | 0 | 0 | 0 | 5 |
 | `server/cache/hnsw_index_cache.py` | 0 | 0 | 0 | 4 |
 | `server/cache/id_index_cache.py` | 0 | 0 | 0 | 3 |
 | `server/git/git_sync_executor.py` | 0 | 11 | 9 | 0 |
 | `server/lifecycle/global_repos_lifecycle.py` | 0 | 0 | 1 | 0 |
+| `server/managers/composite_file_listing.py` | 0 | 6 | 0 | 0 |
 | `server/mcp/handlers/_legacy.py` | 0 | 4 | 0 | 3 |
 | `server/mcp/handlers/_provider_temporal_job.py` | 0 | 0 | 0 | 1 |
 | `server/mcp/handlers/files.py` | 0 | 1 | 0 | 0 |
@@ -86,15 +89,13 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/mcp/memory_retrieval_pipeline.py` | 0 | 0 | 0 | 2 |
 | `server/multi/multi_search_service.py` | 0 | 1 | 0 | 1 |
 | `server/multi/scip_multi_service.py` | 0 | 1 | 0 | 1 |
-| `server/query/semantic_query_manager.py` | 0 | 0 | 0 | 2 |
-| `server/repositories/activated_repo_manager.py` | 0 | 0 | 0 | 5 |
+| `server/query/semantic_query_manager.py` | 0 | 0 | 0 | 4 |
+| `server/repositories/activated_repo_manager.py` | 0 | 1 | 2 | 8 |
 | `server/repositories/golden_repo_manager.py` | 0 | 23 | 9 | 31 |
 | `server/repositories/repository_listing_manager.py` | 0 | 8 | 0 | 0 |
 | `server/routers/activated_repos.py` | 0 | 8 | 0 | 7 |
 | `server/routers/git.py` | 0 | 4 | 0 | 0 |
 | `server/routers/inline_query.py` | 0 | 0 | 0 | 1 |
-| `server/routers/inline_repos.py` | 0 | 11 | 0 | 0 |
-| `server/routers/inline_repos_v2.py` | 0 | 8 | 0 | 0 |
 | `server/routers/repository_health.py` | 0 | 2 | 0 | 6 |
 | `server/services/activated_repo_index_manager.py` | 0 | 5 | 0 | 21 |
 | `server/services/alias_lock_store/factory.py` | 0 | 1 | 0 | 0 |
@@ -136,7 +137,6 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/services/scip_query_service.py` | 0 | 4 | 0 | 1 |
 | `server/services/search_service.py` | 0 | 4 | 0 | 0 |
 | `server/services/semantic_backfill/policy.py` | 0 | 3 | 0 | 8 |
-| `server/services/stats_service.py` | 0 | 7 | 0 | 1 |
 | `server/services/temporal_legacy_migration/discovery.py` | 0 | 3 | 0 | 0 |
 | `server/services/temporal_legacy_migration/mover.py` | 0 | 0 | 0 | 54 |
 | `server/services/temporal_legacy_migration/verification.py` | 0 | 0 | 0 | 15 |
@@ -150,6 +150,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/storage/migration_service.py` | 0 | 0 | 0 | 6 |
 | `server/storage/shared/nfs_validator.py` | 0 | 1 | 0 | 7 |
 | `server/utils/cow_utils.py` | 0 | 0 | 3 | 0 |
+| `server/validators/composite_repo_validator.py` | 0 | 0 | 0 | 2 |
 | `server/web/routes.py` | 0 | 0 | 0 | 9 |
 | `server/wiki/routes.py` | 0 | 19 | 0 | 0 |
 | `server/wiki/wiki_cache.py` | 0 | 4 | 0 | 0 |

@@ -92,6 +92,30 @@ Host-side tools that build or use the repository volume's topology refuse under
 | Auto-updater CoW-daemon symlink steps (`data/golden-repos`, `data/activated-repos` into the CoW mount) | With `clone_backend: delegated` (the supported setup): unchanged no-op. With `clone_backend: cow-daemon`: refused, `DEPLOY-GENERAL-226` names why, nothing is created or renamed. The updater reads `content_backend` from the config it loads; it runs outside the server. |
 | `cidx global activate` | Exit 1 with the reason: the alias it registers names this host's `.code-indexer/index`, which no other pod has. Add or refresh through the server instead. Reads the server config at `CIDX_SERVER_DATA_DIR` (default `~/.cidx-server`); no config = plain CLI host, unchanged; an unreadable one is refused. |
 
+## REST surfaces (`server/services/activated_copy_content.py`)
+
+Every route first checks the registry for THIS user (another user's alias is
+404 and nothing is read). Under delegated:
+
+| Route | Delegated |
+|---|---|
+| `GET /api/repos/{alias}` `storage_info` | manifest sizes + the copy's index state on this pod, same rules as the local walk (non-dot names; `index_size_mb` only when this pod holds index state) |
+| `GET /api/repos/{alias}?activity=true` | `git log --oneline -5` via the git seam (`log_raw "%h %s"`); no delegated git backend is a 500 |
+| `GET /api/repos/{alias}/files` | the manifest as a tree: same entries, sorted top-down walk, `max_depth`/`limit`/`truncated`; lexical confinement (`a/../b` is refused) |
+| `GET /api/repositories/{id}` statistics | as `storage_info`, counted per file with the same language map |
+| `GET /api/repositories/{id}/files?content=true` | one fetch; same binary sniff and `read_text` decoding (universal newlines) |
+| `GET /api/repositories/{id}/stats`, MCP `repository_status` stats | manifest + pod index state; `created_at` = the registry's `activated_at` (no copy directory to stat) |
+
+`GET /api/repositories/{id}/files` on a composite: a `path` that is absolute
+or has a `..` component is a 400 (local and delegated alike), and a failure to
+check or list the composite is a 500 -- never a fall-through to the regular
+listing.
+
+Differences from local, by design: `.git` is never listed (stats count it
+locally), empty directories do not appear (a manifest lists files), and
+listings share the 30 s manifest cache of the file tools. A backend failure is
+always a 500, never an empty repository or a degraded 200.
+
 ## Deployment
 
 * `content_backend: delegated`, `clone_backend: delegated` (`workspace_mcp.endpoint`, `api_key` = `WSM_CLONE_SHARED_SECRET`), `git_backend: delegated`.

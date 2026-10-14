@@ -23,6 +23,18 @@ from ..models.api_models import (
 from ...config import ConfigManager
 from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.activated_copy_content import (
+    activation_created_at,
+    copy_files_with_index,
+    delegated_copy_source,
+)
+from code_indexer.server.services.file_service import (
+    ContentSeamSource,
+    modified_at_from_ns,
+)
+from code_indexer.server.startup.content_backend_wiring import (
+    is_content_seam_delegated,
+)
 
 if TYPE_CHECKING:
     from ..repositories.activated_repo_manager import ActivatedRepoManager
@@ -305,17 +317,27 @@ class RepositoryStatsService:
             PermissionError: If repository access denied
         """
         repo_path = self._get_repository_path(repo_id, username)
+        copy_source = delegated_copy_source(repo_path)
 
-        if not os.path.exists(repo_path):
-            raise FileNotFoundError(f"Repository {repo_id} not found at {repo_path}")
+        if copy_source is not None:
+            # Content seam: the copy is on workspace-mcp (registry-gated in
+            # _get_repository_path); a missing copy fails in the manifest.
+            file_stats = self._collect_file_statistics_via_seam(repo_path, copy_source)
+        else:
+            if not os.path.exists(repo_path):
+                raise FileNotFoundError(
+                    f"Repository {repo_id} not found at {repo_path}"
+                )
 
-        # Collect file statistics
-        file_stats = self._collect_file_statistics(repo_path)
+            # Collect file statistics
+            file_stats = self._collect_file_statistics(repo_path)
 
         # Calculate aggregated statistics
         files_info = self._calculate_files_info(file_stats)
         storage_info = self._calculate_storage_info(repo_path, file_stats)
-        activity_info = self._calculate_activity_info(repo_id, repo_path)
+        activity_info = self._calculate_activity_info(
+            repo_id, repo_path, username=username
+        )
         health_info = self._calculate_health_info(file_stats, storage_info)
 
         return RepositoryStatsResponse(
@@ -354,6 +376,17 @@ class RepositoryStatsService:
             activated_path = repo_manager.get_activated_repo_path(
                 username=username, user_alias=repo_id
             )
+
+            if is_content_seam_delegated():
+                # The copy is not on this pod: the registry says whether THIS
+                # user activated it (never a pod-disk probe).
+                if activated_path and repo_manager.user_has_activated_repo(
+                    username, repo_id
+                ):
+                    return str(activated_path)
+                raise FileNotFoundError(
+                    f"Repository '{repo_id}' not found for user '{username}'"
+                )
 
             if activated_path and Path(activated_path).exists():
                 return activated_path
@@ -423,6 +456,25 @@ class RepositoryStatsService:
             raise
 
         return file_stats
+
+    def _collect_file_statistics_via_seam(
+        self, repo_path: str, source: ContentSeamSource
+    ) -> List[FileStats]:
+        """:meth:`_collect_file_statistics` for a copy on workspace-mcp: its
+        manifest's files (sizes, modification times) plus the copy's index
+        state on this pod -- what the local walk counts, except ``.git``,
+        which the manifest never lists. A backend failure raises."""
+        repo_root = Path(repo_path)
+        return [
+            FileStats(
+                path=copy_file.path,
+                size_bytes=copy_file.size,
+                language=self._detect_language(repo_root / copy_file.path),
+                is_indexed=self._is_file_indexed(repo_root / copy_file.path),
+                modified_at=modified_at_from_ns(copy_file.mtime_ns),
+            )
+            for copy_file in copy_files_with_index(source, repo_path)
+        ]
 
     def _detect_language(self, file_path: Path) -> Optional[str]:
         """
@@ -551,7 +603,7 @@ class RepositoryStatsService:
         )
 
     def _calculate_activity_info(
-        self, repo_id: str, repo_path: str
+        self, repo_id: str, repo_path: str, *, username: Optional[str] = None
     ) -> RepositoryActivityInfo:
         """
         Calculate activity-related statistics.
@@ -564,6 +616,19 @@ class RepositoryStatsService:
         Returns:
             Activity information summary
         """
+        if is_content_seam_delegated():
+            # No copy directory on this pod: the copy was created when it was
+            # activated, which the registry records.
+            created_at = activation_created_at(
+                self._activation_record(repo_id, username)
+            )
+            return RepositoryActivityInfo(
+                created_at=created_at,
+                last_sync_at=None,
+                last_accessed_at=None,
+                sync_count=0,
+            )
+
         # For now, use directory creation time as created_at
         # In real implementation, query database for actual creation time
         try:
@@ -577,6 +642,21 @@ class RepositoryStatsService:
             last_sync_at=None,  # Would query from database
             last_accessed_at=None,  # Would query from database
             sync_count=0,  # Would query from database
+        )
+
+    @staticmethod
+    def _activation_record(repo_id: str, username: Optional[str]) -> Dict[str, Any]:
+        """THIS user's registry record of the activation; FileNotFoundError
+        when there is none."""
+        if username is None:
+            raise ValueError("Username is required for activated repository lookup")
+        for record in _get_activated_repo_manager().list_activated_repositories(
+            username
+        ):
+            if record.get("user_alias") == repo_id:
+                return dict(record)
+        raise FileNotFoundError(
+            f"Repository '{repo_id}' not found for user '{username}'"
         )
 
     def _calculate_health_info(
