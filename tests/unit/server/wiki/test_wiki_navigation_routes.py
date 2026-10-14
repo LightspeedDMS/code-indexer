@@ -15,7 +15,10 @@ from code_indexer.server.wiki.routes import (
     get_wiki_user_hybrid,
     get_current_user_hybrid,
 )
-from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
+from tests.unit.server.wiki.wiki_test_helpers import (
+    app_golden_repos_dir,
+    make_aliases_dir,
+)
 
 
 def _make_user(username):
@@ -43,11 +46,7 @@ def _make_app(authenticated_user, actual_repo_path, user_accessible_repos=None):
     app.state.golden_repo_manager.db_path = _db_path
 
     # Create alias infrastructure for AliasManager resolution (Story #286)
-    # A fresh directory per app: "<repo>.parent / golden-repos-test" was
-    # /tmp/golden-repos-test for every TemporaryDirectory repo -- shared
-    # by concurrent xdist workers, whose alias files overwrote each other.
-    golden_repos_dir = Path(tempfile.mkdtemp(suffix="-golden-repos"))
-    golden_repos_dir.mkdir(parents=True, exist_ok=True)
+    golden_repos_dir = app_golden_repos_dir(app)
     make_aliases_dir(str(golden_repos_dir), "test-repo", actual_repo_path)
     app.state.golden_repo_manager.golden_repos_dir = str(golden_repos_dir)
 

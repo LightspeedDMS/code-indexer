@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from starlette import status
 
 from code_indexer.server.auth.user_manager import User
+from tests.unit.server.wiki.wiki_test_helpers import app_golden_repos_dir
 
 
 def _make_request(path: str, query: str = "") -> MagicMock:
@@ -308,7 +309,6 @@ class TestEndToEndRedirectBehavior:
         """Without any auth, wiki root must redirect to /login, not return JSON 401."""
         import os
         import tempfile
-        from pathlib import Path
         from fastapi import FastAPI, Request
         from fastapi.testclient import TestClient
         from code_indexer.server.wiki.routes import (
@@ -336,8 +336,7 @@ class TestEndToEndRedirectBehavior:
 
         app.state.golden_repo_manager = MagicMock()
         app.state.golden_repo_manager.get_wiki_enabled.return_value = True
-        _tmp_golden = tempfile.mkdtemp(suffix="-golden-repos")
-        (Path(_tmp_golden) / "aliases").mkdir(parents=True, exist_ok=True)
+        _tmp_golden = str(app_golden_repos_dir(app, suffix="-golden-repos"))
         app.state.golden_repo_manager.golden_repos_dir = _tmp_golden
         _db_fd, _db_path = tempfile.mkstemp(suffix=".db")
         os.close(_db_fd)

@@ -30,6 +30,7 @@ from code_indexer.server.wiki.routes import (
     get_current_user_hybrid,
     get_wiki_user_hybrid,
 )
+from tests.unit.server.wiki.wiki_test_helpers import app_golden_repos_dir
 
 
 # ---------------------------------------------------------------------------
@@ -93,9 +94,8 @@ def _make_user_wiki_app(
     app.state.golden_repo_manager = MagicMock()
     app.state.golden_repo_manager.db_path = _db_path
     app.state.golden_repo_manager.get_wiki_enabled.return_value = False
-    app.state.golden_repo_manager.golden_repos_dir = tempfile.mkdtemp(suffix="-golden")
-    (Path(app.state.golden_repo_manager.golden_repos_dir) / "aliases").mkdir(
-        parents=True, exist_ok=True
+    app.state.golden_repo_manager.golden_repos_dir = str(
+        app_golden_repos_dir(app, suffix="-golden")
     )
 
     # Access filtering service mock
