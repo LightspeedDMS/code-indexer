@@ -118,6 +118,9 @@ smoke:
       tests/unit/server/auth/test_token_bucket_pg_atomic_concurrency_1334.py
       tests/unit/server/startup/test_leader_gate.py
       tests/unit/server/services/hnsw_orphan_sweep/test_scheduler_leader_gate.py
+      tests/unit/server/routers/test_fts_regex_error_mapping.py
+      tests/unit/server/services/test_file_service_index_serve_evo66189.py
+      tests/unit/server/mcp/test_browse_directory_absolute_pattern_and_leading_slash_1886_r1_r2.py
       tests/unit/server/services/test_scheduled_catchup_single_flight.py
       tests/unit/server/repositories/test_background_jobs_worker_budget.py
       tests/unit/server/repositories/test_background_jobs_pod_pull_submit.py
