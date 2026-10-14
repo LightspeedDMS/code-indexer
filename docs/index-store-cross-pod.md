@@ -33,8 +33,7 @@ through those seams to the base clone (`golden_repo_content_root`).
 
 `AliasManager.ensure_served_here(alias, target)` runs after the alias is
 resolved by every golden read path (`resolve_alias_or_index_path`,
-`_resolve_golden_repo_path`, `SemanticQueryManager._perform_search`, the
-repository health check `repository_health._resolve_repository_path`):
+`_resolve_golden_repo_path`, `SemanticQueryManager._perform_search`):
 
 1. Local store, or `<target>/.code-indexer/index` present with no in-progress
    marker: nothing to do (the publisher, or a pod that checked it out before).
@@ -61,6 +60,26 @@ Same mechanism with a MUTABLE target (one path, re-published on every reindex):
 `ensure_current_index` serves only the recorded version and swaps an older one;
 `publish_index` publishes on top of the version the build started from. See
 [content-seam-activated-repos.md](content-seam-activated-repos.md#the-copys-index-on-every-pod-index_store_backend-delegated).
+
+## Leftover checkouts (`server/services/checkout_sweep.py`)
+
+A copy deactivated, or a golden repo removed, on ANOTHER pod leaves this pod's
+checkout behind. Every pod (pod-local state: not leader-gated) runs
+`CheckoutSweeper` every `resource_config.index_checkout_sweep_interval_seconds`
+(900) and removes, from targets carrying `.cidx-index-checked-out` only:
+
+| Target | Removed when |
+|---|---|
+| `activated-repos/<user>/<alias>` (and a composite's marked members) | the registry has no `(user, alias)`, or its entry names another IndexStore alias |
+| `golden-repos/.versioned/<repo>/v_*`, `golden-repos/<repo>` | no alias pointer exists for `<repo>` and none names the path (superseded snapshots of a live repo are pruned at checkout) |
+
+Only checkout state goes (index root, markers, swap dirs); the directory only
+once empty. Kept: unmarked targets (built here, never checked out or
+published), anything whose marker changed within
+`index_checkout_sweep_grace_seconds` (900; re-checked under the target's
+checkout lock), anything a query on this pod holds (marked quiescing, skipped
+while its refcount is non-zero). A registry or pointer read failure removes
+nothing (ERROR, reported). Local store: no sweeper.
 
 ## Not covered
 

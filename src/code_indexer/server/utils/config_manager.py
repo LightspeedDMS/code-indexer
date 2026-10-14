@@ -188,6 +188,10 @@ class ServerResourceConfig:
     git_update_index_timeout: int = 300  # 5 minutes for git update-index during refresh
     git_restore_timeout: int = 300  # 5 minutes for git restore during refresh
     cidx_fix_config_timeout: int = 60  # 1 minute for cidx fix-config
+    # IndexStore (delegated): every pod's sweep of leftover checkouts of
+    # deactivated copies / removed golden repos (server/services/checkout_sweep.py)
+    index_checkout_sweep_interval_seconds: int = 900
+    index_checkout_sweep_grace_seconds: int = 900  # never removes a younger checkout
     # Story #683 AC7: cidx_scip_generate_timeout removed — SCIP generate uses
     # ScipConfig.scip_generation_timeout_seconds (see scip_config in ServerConfig).
 

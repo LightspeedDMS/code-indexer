@@ -240,6 +240,7 @@ smoke:
       tests/unit/server/services/test_activated_index_store_readers.py
       tests/unit/server/repositories/test_activated_composite_index_store.py
       tests/unit/server/routers/test_repository_health_golden_served.py
+      tests/unit/server/services/test_checkout_sweep.py
       tests/unit/server/startup/test_content_writer_wiring.py
       tests/unit/server/services/test_golden_repo_writes_through_content_writer.py
       tests/unit/server/services/test_activated_file_tools_content_seam.py

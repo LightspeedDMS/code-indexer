@@ -22,7 +22,7 @@ content and ripgrep wiring:
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, cast
+from typing import Any, Optional
 
 from code_indexer.utils.index_store import (
     DelegatedIndexStore,
@@ -84,22 +84,46 @@ def build_configured_index_store(config: Any) -> IndexStore:
     return build_index_store(config, artifacts=artifacts)
 
 
-def server_index_store() -> Optional[IndexStore]:
-    """The running server's publishing IndexStore (parked on ``app.state``).
+def server_index_store() -> IndexStore:
+    """The store the running server built at startup (``app.state.index_store``).
 
-    None outside a server process (CLI, daemon, tests): there is no published
-    index to act on there. Read without importing the app, as
-    ``server_delegated_git_backend`` does.
+    ``LocalIndexStore`` outside a server process (CLI, tests) or before startup
+    built one: indexes are then read where they were built, as before. Read
+    without importing the app, so a CLI process never constructs a store.
     """
     from code_indexer.server.utils.registry_factory import (
         _running_server_app_state,
     )
 
     store = getattr(_running_server_app_state(), "index_store", None)
-    if store is None:
+    return store if store is not None else LocalIndexStore()
+
+
+def start_checkout_sweeper(app: Any, resource_config: Any) -> Optional[Any]:
+    """Start this pod's sweep of leftover IndexStore checkouts
+    (``server/services/checkout_sweep.py``) and park it on
+    ``app.state.checkout_sweeper``. Every pod runs one (the state is
+    pod-local). None -- and no thread -- under the local store."""
+    app.state.checkout_sweeper = None
+    if server_index_store().is_local:
         return None
-    if not (hasattr(store, "is_local") and callable(getattr(store, "delete", None))):
-        raise RuntimeError(
-            f"app.state.index_store is a {type(store).__name__}, not an IndexStore"
-        )
-    return cast(IndexStore, store)
+    from code_indexer.server.services.checkout_sweep import CheckoutSweeper
+
+    manager = app.state.activated_repo_manager
+    sweeper = CheckoutSweeper(
+        activated_repo_manager=manager,
+        activated_repos_dir=str(manager.activated_repos_dir),
+        golden_repos_dir=getattr(app.state, "golden_repos_dir", None),
+        query_tracker=getattr(app.state, "query_tracker", None),
+        grace_seconds=resource_config.index_checkout_sweep_grace_seconds,
+    )
+    sweeper.start(resource_config.index_checkout_sweep_interval_seconds)
+    app.state.checkout_sweeper = sweeper
+    logger.info("IndexStore checkout sweep started on this pod")
+    return sweeper
+
+
+def stop_checkout_sweeper(app: Any) -> None:
+    sweeper = getattr(app.state, "checkout_sweeper", None)
+    if sweeper is not None:
+        sweeper.stop()

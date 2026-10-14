@@ -5759,6 +5759,31 @@ def make_lifespan(
                 exc_info=True,
             )
 
+        # IndexStore (delegated): this pod's sweep of leftover checkouts of
+        # deactivated copies / removed golden repos. Every pod; none locally.
+        # Non-fatal: a failure leaves leftovers on disk, never removes more.
+        try:
+            from code_indexer.server.startup.index_store_wiring import (
+                start_checkout_sweeper,
+            )
+
+            from code_indexer.server.services.config_service import (
+                get_config_service as _sweep_config_service,
+            )
+
+            start_checkout_sweeper(
+                app, _sweep_config_service().get_config().resource_config
+            )
+        except Exception as e:
+            app.state.checkout_sweeper = None
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-IS01",
+                    f"IndexStore checkout sweep failed to start: {e}",
+                ),
+                exc_info=True,
+            )
+
         # Content seam step 5a: the control-plane metadata outbox sweeper.
         # Leader-gated (one sweeper per fleet); replays alias / write-mode
         # changes to the old files during the rollback window, and exports
@@ -6201,6 +6226,16 @@ def make_lifespan(
                     ),
                     exc_info=True,
                 )
+
+        # Shutdown: Stop the IndexStore checkout sweep.
+        try:
+            from code_indexer.server.startup.index_store_wiring import (
+                stop_checkout_sweeper,
+            )
+
+            stop_checkout_sweeper(app)
+        except Exception as e:
+            logger.error("Error stopping checkout sweep: %s", e, exc_info=True)
 
         # Shutdown: Stop the metadata outbox sweeper (content seam step 5a).
         try:
