@@ -358,3 +358,37 @@ def test_regex_search_locally_still_refuses_a_missing_copy(
 ) -> None:
     outcome = _run_regex(world, world.pod_copy)
     assert outcome == {"path": None, "success": False}
+
+
+# --------------------------------------------------------------------------
+# auto-watch after a write
+# --------------------------------------------------------------------------
+
+
+def test_auto_watch_is_skipped_before_any_probe_under_delegated(
+    world: SimpleNamespace, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Delegated: nothing on this pod to watch, so the handler returns before
+    asking the registry, probing the pod path or starting a watch -- and
+    without the MCP-GENERAL-223 "skipping" warning a probe would log."""
+    import logging
+    from unittest.mock import MagicMock
+
+    from code_indexer.server.mcp.handlers import _utils, files as files_handler
+    from code_indexer.server.services import auto_watch_manager as awm
+
+    _delegate(world)
+    registry = MagicMock()
+    start_watch = MagicMock()
+    world.monkeypatch.setattr(_utils, "_get_activated_repo_manager", lambda: registry)
+    world.monkeypatch.setattr(awm.auto_watch_manager, "start_watch", start_watch)
+    user = MagicMock()
+    user.username = USER
+
+    with caplog.at_level(logging.DEBUG):
+        files_handler._start_auto_watch_if_needed(ACT, user, "MCP-GENERAL-224")
+
+    start_watch.assert_not_called()
+    assert registry.mock_calls == []
+    assert "MCP-GENERAL-223" not in caplog.text
+    assert "MCP-GENERAL-224" not in caplog.text
