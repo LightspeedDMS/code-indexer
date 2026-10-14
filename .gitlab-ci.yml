@@ -213,6 +213,7 @@ smoke:
       tests/unit/server/repositories/test_add_index_swap_records_published_index.py
       tests/unit/server/mcp/test_swap_sites_record_published_index.py
       tests/unit/server/services/test_unpublished_swaps_fail_loud.py
+      tests/unit/global_repos/test_integrity_baseline_cross_pod.py
       tests/unit/server/startup/test_content_writer_wiring.py
       tests/unit/server/services/test_golden_repo_writes_through_content_writer.py
       tests/unit/server/startup/test_ripgrep_backend_wiring.py

@@ -176,6 +176,11 @@ class DelegatedIndexStore:
         """Check ``version`` (default: current) out to ``into/<index dir>``."""
         return self.checkout_as(index_store_alias(Path(repo_path).name), into, version)
 
+    def current_version_as(self, store_alias: str) -> Optional[str]:
+        """The store's current version of ``store_alias`` (None: nothing yet)."""
+        current = self._artifacts.current_version(store_alias)
+        return str(current) if current else None
+
     def publish_as(self, store_alias: str, built_dir: Path) -> str:
         """``publish`` under an explicit store alias (the caller derived it)."""
         base = self._artifacts.current_version(store_alias)

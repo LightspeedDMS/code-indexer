@@ -54,6 +54,23 @@ Fail loud: no recorded version (a pointer written before this existed -- refresh
 the repository), an unreachable store, a failed checkout or fix-config raise
 `PublishedIndexUnavailableError`; the query errors, never returns empty.
 
+## The refresh integrity gate on a pod that did not publish
+
+The gate compares the rebuilt index with the published one's point counts and
+self-heals from it (`RefreshScheduler._integrity_baseline`, read before
+indexing):
+
+| Situation | Baseline |
+|---|---|
+| Local store, no current target, or this pod holds the target | today's: the target's index on this pod |
+| Pointer records the published version | checked out to the target (`ensure_served_here`), counted there |
+| Pointer records no version (written before cross-pod publishing) | the store's current version, checked out to `<golden-repos>/.integrity-baseline/<store alias>`, counted, used for self-heal, removed after the gate |
+| Nothing published; target is the clone path (first refresh after an add) | no previous points -- a first publish, as today |
+| Nothing published; target is a snapshot | refresh fails: cannot be judged |
+
+A store or checkout failure fails the refresh; the gate never compares
+against nothing because a baseline could not be fetched.
+
 ## Not covered
 
 * A write-mode redirect (live source path) is served as before.
@@ -62,9 +79,6 @@ the repository), an unreachable store, a failed checkout or fix-config raise
 * The reconciler's missing-pointer repair (`golden_repo_reconciler.py`) writes
   a pointer with no recorded version: other pods fail loud until the next
   refresh publishes.
-* The refresh integrity gate reads the CURRENT target's point counts on the
-  refreshing pod; a pod that never checked that target out compares against
-  nothing (as on a first refresh).
 
 Tests: `tests/unit/server/services/test_index_materializer_cross_pod.py`,
 `tests/unit/server/repositories/test_golden_add_publishes_index.py`,
