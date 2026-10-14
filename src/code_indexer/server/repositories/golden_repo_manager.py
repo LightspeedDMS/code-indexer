@@ -25,6 +25,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Tuple,
     Any,
     TYPE_CHECKING,
     cast,
@@ -1636,9 +1637,11 @@ class GoldenRepoManager:
         :func:`code_indexer.scip.discovery.has_root_build_file` so the reconcile presence
         check and the funnel freshness check (``scip_lifecycle.scip_db_is_fresh``) stay in
         lockstep."""
-        from code_indexer.scip.discovery import has_root_build_file
+        from code_indexer.server.services.scip_repo_reads import (
+            repo_has_root_build_file,
+        )
 
-        return has_root_build_file(repo_dir)
+        return repo_has_root_build_file(repo_dir)
 
     def _scip_present(self, repo_dir: "Path") -> bool:
         """True if the repo already holds the SCIP index the CURRENT discovery produces.
@@ -1672,6 +1675,34 @@ class GoldenRepoManager:
             return age < cooldown_seconds
         except OSError:
             return False  # no marker → not on cooldown
+
+    def _scip_backfill_entries(self) -> Optional[List[Tuple[str, Path]]]:
+        """The ``(alias, repo_path)`` pairs the SCIP backfill scans; None = the
+        golden-repos directory.
+
+        With a local content backend the directory IS the set of golden repos
+        (each holds its clone), so the engine keeps scanning it, as before.
+
+        With a delegated one this pod holds only index-state dirs: one appears
+        when a repo is added or built HERE, so the directory misses repos
+        registered on another pod and keeps dirs of repos since removed. The
+        registry is the set of golden repos, so it is scanned instead, sorted by
+        alias like the directory scan, with each repo's registered alias and
+        clone path (which need not end in the alias: a versioned snapshot, or a
+        repo registered in place). ``local://`` repos (cidx-meta, uploads) are
+        cidx's own files on this pod, never SCIP-indexed, and the content
+        backend cannot see them, so they are left out.
+        """
+        if self._content_backend.is_local:
+            return None
+        repos = sorted(self.list_golden_repos(), key=lambda r: str(r.get("alias", "")))
+        return [
+            (str(r["alias"]), Path(r["clone_path"]))
+            for r in repos
+            if r.get("alias")
+            and r.get("clone_path")
+            and not str(r.get("repo_url") or "").startswith("local://")
+        ]
 
     def reconcile_scip_from_filesystem(self, max_enqueue: int = 5) -> Dict[str, int]:
         """EVO-65484: backfill SCIP indexes for SCIP-eligible golden repos that have
@@ -1737,9 +1768,16 @@ class GoldenRepoManager:
 
         cfg = get_config_service().get_config()
         policy = ScipBackfillPolicy(self, enabled_langs, cfg)
-        result = GoldenIndexBackfillReconciler(self.golden_repos_dir).run_cycle(
-            policy, max_enqueue=max_enqueue, cooldown_seconds=cooldown
-        )
+        from code_indexer.server.services.scip_repo_reads import head_memo
+
+        # One HEAD per repo per cycle: presence and freshness both ask it.
+        with head_memo():
+            result = GoldenIndexBackfillReconciler(self.golden_repos_dir).run_cycle(
+                policy,
+                max_enqueue=max_enqueue,
+                cooldown_seconds=cooldown,
+                entries=self._scip_backfill_entries(),
+            )
         # Map the engine's generic counts back to the SCIP reconcile's granular contract
         # (its callers/tests read scip_present / not_discoverable / language_skipped).
         counts["scanned"] = result.scanned

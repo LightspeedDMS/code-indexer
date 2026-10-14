@@ -24,7 +24,16 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from typing import Any, Callable, Dict, Optional, Protocol, runtime_checkable
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Optional,
+    Protocol,
+    Tuple,
+    runtime_checkable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +104,13 @@ def _index_is_outdated(policy: "IndexBackfillPolicy", repo_path: Path) -> bool:
     """
     try:
         return not policy.is_fresh(repo_path)
-    except Exception:  # noqa: BLE001 - a policy hook must never abort the sweep
+    except Exception as exc:  # noqa: BLE001 - a policy hook must never abort the sweep
+        logger.warning(
+            "golden_index_backfill[%s]: freshness check failed for %s: %s",
+            getattr(policy, "name", "?"),
+            repo_path,
+            exc,
+        )
         return False
 
 
@@ -129,22 +144,37 @@ class GoldenIndexBackfillReconciler:
         *,
         max_enqueue: int,
         cooldown_seconds: int,
+        entries: Optional[Iterable[Tuple[str, Path]]] = None,
     ) -> BackfillCounts:
         """Enqueue up to ``max_enqueue`` per-repo builds for repos missing this index.
 
         Idempotent + resumable WITHOUT a durable cursor: each cycle re-scans, so
         already-built repos drop out and the sweep converges. A single bad repo is
         counted and logged but never aborts the cycle.
+
+        ``entries`` replaces the golden-repos directory scan with the caller's
+        ``(alias, repo_path)`` pairs (e.g. from the registry), so the alias need
+        not be the directory's name -- a versioned snapshot or a repo registered
+        in place has a path whose last component is not its alias.
         """
         counts = BackfillCounts()
-        if not self._root.is_dir():
-            return counts
+        if entries is None:
+            if not self._root.is_dir():
+                return counts
+            candidates: Iterable[Tuple[str, Path]] = (
+                (e.name, e)
+                for e in sorted(self._root.iterdir(), key=lambda p: p.name)
+                if not e.name.startswith(".") and e.is_dir()
+            )
+        else:
+            # The caller's own list (e.g. the registry, on a pod that holds only
+            # index state): taken as given -- a repo's index-state dir need not
+            # exist on this pod yet, and a stray dir here is not a repo.
+            candidates = entries
         now = self._clock()
-        for entry in sorted(self._root.iterdir(), key=lambda p: p.name):
+        for alias, entry in candidates:
             if counts.enqueued >= max_enqueue:
                 break
-            if entry.name.startswith(".") or not entry.is_dir():
-                continue
             counts.scanned += 1
             try:
                 if policy.is_present(entry) and not _index_is_outdated(policy, entry):
@@ -162,19 +192,19 @@ class GoldenIndexBackfillReconciler:
                     continue
                 marker.parent.mkdir(parents=True, exist_ok=True)
                 marker.touch()
-                policy.enqueue(entry.name, entry, meta)
+                policy.enqueue(alias, entry, meta)
                 counts.enqueued += 1
                 logger.info(
                     "golden_index_backfill[%s]: enqueued build for '%s'",
                     policy.name,
-                    entry.name,
+                    alias,
                 )
             except Exception as exc:  # noqa: BLE001 — one bad repo never aborts the cycle
                 counts.errors += 1
                 logger.warning(
                     "golden_index_backfill[%s]: reconcile failed for '%s': %s",
                     policy.name,
-                    entry.name,
+                    alias,
                     exc,
                 )
         return counts

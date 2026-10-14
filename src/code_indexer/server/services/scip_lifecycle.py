@@ -58,6 +58,10 @@ from code_indexer.server.services.index_freshness import BUILD_COMMIT_MARKER
 from code_indexer.server.services.index_freshness import (
     current_commit as get_current_commit,
 )
+from code_indexer.server.services.scip_repo_reads import (
+    head_commit,
+    repo_has_root_build_file,
+)
 from code_indexer.server.services.scip_resolution_queue import (
     DelegatedScipBuild,
     DelegatedScipBuildQueue,
@@ -107,6 +111,12 @@ def _scip_db_exists(scip_dir: Path) -> bool:
     return False
 
 
+def _head_commit(repo_root: Path) -> Optional[str]:
+    """HEAD for freshness / dedupe: local read, or git-mcp on a pod without the
+    repository (raises there rather than answering None -- see scip_repo_reads)."""
+    return head_commit(repo_root, local_reader=lambda path: get_current_commit(path))
+
+
 def scip_db_is_fresh(repo_root: Path, scip_dir: Path) -> bool:
     """True iff the built SCIP DBs already match ``repo_root``'s current commit.
 
@@ -118,7 +128,7 @@ def scip_db_is_fresh(repo_root: Path, scip_dir: Path) -> bool:
     produced): that is fresh WITHOUT a DB, otherwise the repo re-enqueues a
     doomed rebuild every cycle. Any missing piece → not fresh (rebuild).
     """
-    commit = get_current_commit(repo_root)
+    commit = _head_commit(repo_root)
     if not commit:
         return False
     marker = scip_dir / _BUILD_COMMIT_MARKER
@@ -141,9 +151,7 @@ def scip_db_is_fresh(repo_root: Path, scip_dir: Path) -> bool:
     # funnel answers FRESH off the old partial build and skips the rebuild that the
     # reconcile's (now shape-aware) _scip_present correctly enqueues, silently no-op'ing it.
     # Mirror that shape-awareness here so both gates agree on when a top-level DB is required.
-    from code_indexer.scip.discovery import has_root_build_file
-
-    if has_root_build_file(repo_root):
+    if repo_has_root_build_file(repo_root, head=commit):
         return (scip_dir / "index.scip.db").is_file()
     # bool() guards warn_return_any: _scip_db_exists returns a plain bool.
     return bool(_scip_db_exists(scip_dir))
@@ -344,7 +352,7 @@ def funnel_scip_generation(
             record_scip_metric("delegated_skipped_builder_returned_none")
             return ScipDelegationOutcome.SKIPPED
 
-        commit = get_current_commit(repo_root) or ""
+        commit = _head_commit(repo_root) or ""
         dedupe_key = f"{alias}@{commit}"
         queue = build_queue or get_delegated_scip_build_queue()
 

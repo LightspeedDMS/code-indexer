@@ -54,7 +54,7 @@ from ..server.storage.shared.content_backend import (
 logger = logging.getLogger(__name__)
 
 
-def _accepts_prune_dirs(backend: Any) -> bool:
+def accepts_prune_dirs(backend: Any) -> bool:
     """Whether ``backend.manifest`` takes ``prune_dirs`` (or arbitrary kwargs)."""
     try:
         params = inspect.signature(backend.manifest).parameters
@@ -112,7 +112,7 @@ class RepoManifest:
         root = Path(repo_path)
         entries: Dict[str, ContentEntry] = {}
         cursor: Optional[str] = None
-        prune = list(prune_dirs) if _accepts_prune_dirs(chosen) else []
+        prune = list(prune_dirs) if accepts_prune_dirs(chosen) else []
         if prune_dirs and not prune:
             logger.info(
                 "content backend %s cannot prune directories; manifest walks them",

@@ -8,10 +8,10 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | Class | Rows |
 |---|---|
 | unclassified | 0 |
-| repo-read | 452 |
+| repo-read | 451 |
 | repo-write | 93 |
 | cidx-state-in-repo | 1022 |
-| migrated | 275 |
+| migrated | 278 |
 | local-only | 324 |
 | cidx-state | 534 |
 | not-repo | 422 |
@@ -58,7 +58,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `scip/database/migration.py` | 0 | 0 | 0 | 5 |
 | `scip/database/schema.py` | 0 | 0 | 0 | 5 |
 | `scip/database/verify.py` | 0 | 0 | 0 | 3 |
-| `scip/discovery.py` | 0 | 5 | 0 | 0 |
+| `scip/discovery.py` | 0 | 4 | 0 | 0 |
 | `scip/generator.py` | 0 | 0 | 0 | 5 |
 | `scip/indexers/csharp.py` | 0 | 0 | 0 | 1 |
 | `scip/indexers/delegated.py` | 0 | 1 | 0 | 3 |
