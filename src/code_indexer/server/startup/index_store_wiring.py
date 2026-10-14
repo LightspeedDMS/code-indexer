@@ -9,7 +9,13 @@ content and ripgrep wiring:
                   an unset or absent config behaves exactly as cidx does now.
 - ``delegated`` : each refresh publishes the built index to the artifact
                   service and reads back a checked-out, verified version. No
-                  silent fallback: an unusable plugin raises at startup.
+                  silent fallback: an unusable plugin raises at startup. A
+                  served snapshot then holds index state only (no working
+                  tree), so repository bytes must come through the content
+                  and ripgrep seams (``SEAMS_REQUIRED_BY_DELEGATED``), which
+                  map a snapshot path to the base clone; with either one
+                  local, file/regex/X-Ray reads of a snapshot would come back
+                  silently empty, so startup refuses that combination.
 - anything else : raises immediately.
 """
 
@@ -28,6 +34,9 @@ logger = logging.getLogger(__name__)
 
 VALID_INDEX_STORE_BACKENDS = ("local", "delegated")
 
+#: Server config fields that must also be ``delegated`` with a delegated store.
+SEAMS_REQUIRED_BY_DELEGATED = ("content_backend", "ripgrep_backend")
+
 
 def build_index_store(config: Any, *, artifacts: Optional[Any] = None) -> IndexStore:
     """Build the IndexStore configured by *config* (read via ``getattr``)."""
@@ -38,6 +47,18 @@ def build_index_store(config: Any, *, artifacts: Optional[Any] = None) -> IndexS
             f"Valid values are {VALID_INDEX_STORE_BACKENDS}."
         )
     if backend_type == "delegated":
+        local_seams = [
+            field
+            for field in SEAMS_REQUIRED_BY_DELEGATED
+            if (getattr(config, field, "local") or "local") != "delegated"
+        ]
+        if local_seams:
+            raise RuntimeError(
+                "index_store_backend='delegated' requires "
+                + " and ".join(f"{field}='delegated'" for field in local_seams)
+                + ": a served snapshot holds index state only, so reading "
+                "repository files from it locally would return nothing."
+            )
         if artifacts is None:
             raise RuntimeError(
                 "index_store_backend='delegated' selected but no index-artifact "

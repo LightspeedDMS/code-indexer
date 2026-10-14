@@ -26,9 +26,11 @@ Contract:
   it instead of trusting a partial tree.
 * A checked-out snapshot carries ``CHECKED_OUT_MARKER``. After a checkout,
   this pod's OTHER checked-out snapshots of the same repository that the alias
-  no longer names (target or previous) are removed -- only marked ones, so a
-  snapshot this pod built itself is left to the snapshot retention it always
-  had.
+  no longer names (target or previous) are scheduled for removal -- only
+  marked ones, so a snapshot this pod built itself is left to the snapshot
+  retention it always had. Removal goes through the server's
+  ``CleanupManager`` (query refcount, reader lease, minimum age), never a
+  direct delete: a query still reading an old checkout keeps its files.
 """
 
 from __future__ import annotations
@@ -217,9 +219,9 @@ def _checkout(
 
 
 def _prune_superseded(target: Path, document: Optional[Mapping[str, Any]]) -> None:
-    """Remove this pod's checked-out snapshots of the same repository that the
-    alias no longer names. Only ``.versioned/<ns>/v_<ts>`` siblings carrying
-    ``CHECKED_OUT_MARKER`` qualify; a failure is logged, never raised (the
+    """Schedule removal of this pod's checked-out snapshots of the same
+    repository that the alias no longer names (``_schedule_removal``). Only
+    ``.versioned/<ns>/v_<ts>`` siblings carrying ``CHECKED_OUT_MARKER`` qualify; a failure is logged, never raised (the
     read already succeeded and the startup snapshot sweep is the backstop)."""
     if not _SNAPSHOT_NAME_RE.match(target.name):
         return
@@ -239,8 +241,27 @@ def _prune_superseded(target: Path, document: Optional[Mapping[str, Any]]) -> No
             continue
         if not (sibling / CHECKED_OUT_MARKER).is_file():
             continue
-        try:
-            shutil.rmtree(sibling)
-            logger.info("Removed superseded checked-out snapshot %s", sibling)
-        except OSError as exc:
-            logger.warning("Could not remove superseded checkout %s: %s", sibling, exc)
+        _schedule_removal(sibling)
+
+
+def _schedule_removal(snapshot: Path) -> None:
+    """Hand a superseded checkout to the running server's ``CleanupManager``,
+    which deletes it only once no query holds it (refcount, reader lease,
+    minimum retention age). Without one (CLI, tests, before startup) the
+    checkout is left for the startup snapshot sweep. Never raises."""
+    from code_indexer.server.utils.registry_factory import (
+        _running_server_app_state,
+    )
+
+    lifecycle = getattr(_running_server_app_state(), "global_lifecycle_manager", None)
+    cleanup_manager = getattr(lifecycle, "cleanup_manager", None)
+    if cleanup_manager is None:
+        logger.debug("No cleanup manager to remove superseded checkout %s", snapshot)
+        return
+    try:
+        cleanup_manager.schedule_cleanup(str(snapshot))
+        logger.info(
+            "Scheduled superseded checked-out snapshot %s for removal", snapshot
+        )
+    except Exception as exc:
+        logger.warning("Could not schedule removal of checkout %s: %s", snapshot, exc)

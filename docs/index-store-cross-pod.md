@@ -13,10 +13,21 @@ With `index_store_backend: local` (the default) nothing here runs.
 |---|---|---|
 | Golden add (`GoldenRepoManager._publish_added_index`) | clone path `golden-repos/<alias>` | `index_store_alias`, `index_version` |
 | Refresh / add-index / provider-index swap (`RefreshScheduler.published_swap_extra`) | `.versioned/<alias>/v_<ts>` | `index_store_alias`, `index_version` (+ cidx-meta fingerprint) |
+| Branch change (`GoldenRepoManager.change_branch`, after its FTS/HNSW cleanup) | `.versioned/<alias>/v_<ts>` | `index_store_alias`, `index_version` |
+| Fleet-migration snapshot (`fleet_migration/snapshot_trigger.py`) | `.versioned/<alias>/v_<ts>` | `index_store_alias`, `index_version` |
 
+The sites outside the refresh publish through `utils.index_store.publish_index_fields`.
 A delegated swap to a snapshot with no publication, or to a path other than the
 one this refresh published, is refused. A failed publish fails the add (the
-registration rolls back) or the refresh.
+registration rolls back), the refresh, the branch change or the migration step
+before the pointer moves. `AliasManager.swap_alias` without those two fields
+DROPS the old ones (they describe the old target), so any swap that did not
+publish fails loud on other pods instead of serving the old version.
+
+Delegated requires `content_backend` and `ripgrep_backend` to be `delegated`
+too (startup refuses otherwise): a snapshot -- the publisher's and a checkout
+alike -- holds index state only, and file, regex and X-Ray reads of it go
+through those seams to the base clone (`golden_repo_content_root`).
 
 ## What a reader does (`server/services/index_materializer.py`)
 
@@ -34,8 +45,10 @@ resolved by every golden read path (`resolve_alias_or_index_path`,
    A `.code-indexer` without index and without that marker is refused, never
    replaced.
 4. Prune: this pod's other checked-out `v_*` of the same repository that are
-   neither the alias target nor its previous path are removed. Snapshots this
-   pod built itself are left to normal retention.
+   neither the alias target nor its previous path are handed to the
+   `CleanupManager` (deleted once no query or reader lease holds them, after
+   the minimum retention age). Snapshots this pod built itself are left to
+   normal retention.
 
 Fail loud: no recorded version (a pointer written before this existed -- refresh
 the repository), an unreachable store, a failed checkout or fix-config raise
@@ -46,6 +59,9 @@ the repository), an unreachable store, a failed checkout or fix-config raise
 * A write-mode redirect (live source path) is served as before.
 * `local://` repositories other than cidx-meta are pod-local by design and are
   not published at add; cidx-meta is published by its refresh.
+* The reconciler's missing-pointer repair (`golden_repo_reconciler.py`) writes
+  a pointer with no recorded version: other pods fail loud until the next
+  refresh publishes.
 * The refresh integrity gate reads the CURRENT target's point counts on the
   refreshing pod; a pod that never checked that target out compares against
   nothing (as on a first refresh).
@@ -53,4 +69,5 @@ the repository), an unreachable store, a failed checkout or fix-config raise
 Tests: `tests/unit/server/services/test_index_materializer_cross_pod.py`,
 `tests/unit/server/repositories/test_golden_add_publishes_index.py`,
 `tests/unit/server/repositories/test_add_index_swap_records_published_index.py`,
-`tests/unit/server/mcp/test_swap_sites_record_published_index.py`.
+`tests/unit/server/mcp/test_swap_sites_record_published_index.py`,
+`tests/unit/server/services/test_unpublished_swaps_fail_loud.py`.

@@ -11,7 +11,8 @@ disk. Pinned here, against a fake artifact service holding real trees:
 * fail loud: no recorded version, an unreachable store, a failed checkout or
   fix-config raise -- and leave no partial tree to be trusted later;
 * a crashed checkout is redone; an unexplained partial index is refused;
-* superseded checkouts are pruned, the alias's previous target kept;
+* superseded checkouts are scheduled for removal, the alias's previous
+  target kept;
 * the local store is today's behaviour: no metadata read, nothing touched,
   even for a path that does not exist on this pod.
 """
@@ -22,7 +23,7 @@ import shutil
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, cast
 
 import pytest
 
@@ -244,8 +245,16 @@ def test_a_store_without_alias_checkout_is_an_error(world: Dict[str, Any]) -> No
 # ── pruning ─────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture
+def scheduled(monkeypatch: pytest.MonkeyPatch) -> List[str]:
+    """What pruning hands the server's CleanupManager (it never deletes)."""
+    calls: List[str] = []
+    monkeypatch.setattr(im, "_schedule_removal", lambda p: calls.append(str(p)))
+    return calls
+
+
 def test_superseded_checkouts_are_pruned_previous_and_built_ones_kept(
-    world: Dict[str, Any],
+    world: Dict[str, Any], scheduled: List[str]
 ) -> None:
     ns = world["target"].parent
     old_checkout = ns / "v_1750000000"
@@ -257,12 +266,14 @@ def test_superseded_checkouts_are_pruned_previous_and_built_ones_kept(
     _build(built_here, b"built by this pod's refresh")
     doc = dict(world["doc"], previous_path=str(previous))
     _ensure(world, doc=doc)
-    assert not old_checkout.exists()
+    assert scheduled == [str(old_checkout)]
     assert previous.exists(), "pruned the alias's previous target"
     assert built_here.exists(), "pruned a snapshot this pod built"
 
 
-def test_a_clone_path_target_never_prunes_its_siblings(world: Dict[str, Any]) -> None:
+def test_a_clone_path_target_never_prunes_its_siblings(
+    world: Dict[str, Any], scheduled: List[str]
+) -> None:
     clone = world["golden"] / REPO
     other = world["golden"] / "v_1"
     _build(other, b"x")
@@ -271,7 +282,7 @@ def test_a_clone_path_target_never_prunes_its_siblings(world: Dict[str, Any]) ->
         clone, world["doc"], store=world["store"], fix_config=world["fix"]
     )
     assert _hnsw(clone) == b"version one"
-    assert other.exists()
+    assert other.exists() and scheduled == []
 
 
 # ── the local store: today's behaviour ──────────────────────────────────────
@@ -281,9 +292,11 @@ def test_the_local_store_touches_nothing_even_for_a_missing_path(
     tmp_path: Path,
 ) -> None:
     missing = tmp_path / "not-on-this-pod" / "v_1"
-    im.ensure_published_index(
-        missing, None, store=LocalIndexStore(), fix_config=lambda p: 1 / 0
-    )
+
+    def never(path: Path) -> None:
+        raise AssertionError(f"fix-config ran for {path} under the local store")
+
+    im.ensure_published_index(missing, None, store=LocalIndexStore(), fix_config=never)
     assert not missing.exists() and not missing.parent.exists()
 
 
@@ -331,9 +344,12 @@ def test_local_serving_read_is_exactly_read_alias(
     _serve_with(monkeypatch, LocalIndexStore())
     reads: List[str] = []
     real = aliases.read_record
-    monkeypatch.setattr(
-        aliases, "read_record", lambda name: reads.append(name) or real(name)
-    )
+
+    def counted(name: str) -> Any:
+        reads.append(name)
+        return real(name)
+
+    monkeypatch.setattr(aliases, "read_record", counted)
     aliases.ensure_served_here(ALIAS, str(world["target"]))
     assert reads == [], "the local path read the alias document"
     assert resolve_alias_or_index_path(aliases, ALIAS, None) == str(world["target"])
@@ -370,14 +386,14 @@ class _SnapshotManager:
 
 
 def _scheduler(world: Dict[str, Any], store: Any) -> rs.RefreshScheduler:
-    scheduler = rs.RefreshScheduler.__new__(rs.RefreshScheduler)
+    scheduler: Any = rs.RefreshScheduler.__new__(rs.RefreshScheduler)
     scheduler._index_store = store
     scheduler._snapshot_manager = _SnapshotManager(world["golden"].parent / "pod-a")
     scheduler.resource_config = None
     scheduler._pending_meta_fingerprints = {}
     scheduler._pending_index_publications = {}
     scheduler._run_subprocess = lambda *a, **k: None
-    return scheduler
+    return cast(rs.RefreshScheduler, scheduler)
 
 
 def test_a_refresh_swap_records_the_version_it_published(
@@ -466,7 +482,7 @@ def test_a_local_add_publishes_nothing(
 
 
 def test_a_v_named_target_outside_versioned_prunes_nothing(
-    world: Dict[str, Any],
+    world: Dict[str, Any], scheduled: List[str]
 ) -> None:
     target = world["golden"] / "elsewhere" / "v_2"
     sibling = target.parent / "v_1"
@@ -475,7 +491,7 @@ def test_a_v_named_target_outside_versioned_prunes_nothing(
     im.ensure_published_index(
         target, world["doc"], store=world["store"], fix_config=world["fix"]
     )
-    assert sibling.exists()
+    assert sibling.exists() and scheduled == []
 
 
 def test_a_publish_without_a_version_fails_the_snapshot(

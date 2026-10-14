@@ -124,6 +124,28 @@ def published_index_fields(store_alias: str, version: str) -> Dict[str, str]:
     return {INDEX_STORE_ALIAS_FIELD: store_alias, INDEX_VERSION_FIELD: version}
 
 
+def publish_index_fields(
+    store: IndexStore, repo_path: Union[str, Path], built_from: Union[str, Path]
+) -> Optional[Dict[str, str]]:
+    """Publish the index under ``built_from`` as ``repo_path``'s next version
+    and return the alias-document fields recording it.
+
+    For a pointer write that does not go through the refresh snapshot (an add,
+    a branch change, a migration snapshot): the caller passes the result as
+    the write's ``extra``. None under a local store (nothing is published).
+    Raises RuntimeError when the store answers no version.
+    """
+    if store.is_local:
+        return None
+    version = store.publish(repo_path, store.index_root(built_from))
+    if not version:
+        raise RuntimeError(
+            f"Publishing the index of {repo_path} (built at {built_from}) "
+            "returned no version"
+        )
+    return published_index_fields(index_store_alias(Path(repo_path).name), version)
+
+
 class DelegatedIndexStore:
     """Indexes as versioned artifacts held by another service (step 2).
 
