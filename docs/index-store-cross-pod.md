@@ -71,6 +71,13 @@ indexing):
 A store or checkout failure fails the refresh; the gate never compares
 against nothing because a baseline could not be fetched.
 
+## Activated copies
+
+Same mechanism with a MUTABLE target (one path, re-published on every reindex):
+`ensure_current_index` serves only the recorded version and swaps an older one;
+`publish_index` publishes on top of the version the build started from. See
+[content-seam-activated-repos.md](content-seam-activated-repos.md#the-copys-index-on-every-pod-index_store_backend-delegated).
+
 ## Not covered
 
 * A write-mode redirect (live source path) is served as before.

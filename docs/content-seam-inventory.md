@@ -8,13 +8,13 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | Class | Rows |
 |---|---|
 | unclassified | 0 |
-| repo-read | 369 |
+| repo-read | 389 |
 | repo-write | 78 |
-| cidx-state-in-repo | 1019 |
-| migrated | 351 |
-| local-only | 326 |
-| cidx-state | 563 |
-| not-repo | 422 |
+| cidx-state-in-repo | 1020 |
+| migrated | 328 |
+| local-only | 324 |
+| cidx-state | 582 |
+| not-repo | 425 |
 
 ## Modules with open rows
 
@@ -96,8 +96,10 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/routers/activated_repos.py` | 0 | 8 | 0 | 7 |
 | `server/routers/git.py` | 0 | 4 | 0 | 0 |
 | `server/routers/inline_query.py` | 0 | 0 | 0 | 1 |
+| `server/routers/inline_repos.py` | 0 | 11 | 0 | 0 |
+| `server/routers/inline_repos_v2.py` | 0 | 8 | 0 | 0 |
 | `server/routers/repository_health.py` | 0 | 2 | 0 | 6 |
-| `server/services/activated_repo_index_manager.py` | 0 | 5 | 0 | 21 |
+| `server/services/activated_repo_index_manager.py` | 0 | 0 | 0 | 21 |
 | `server/services/alias_lock_store/factory.py` | 0 | 1 | 0 | 0 |
 | `server/services/auto_watch_manager.py` | 0 | 1 | 0 | 1 |
 | `server/services/backfill_journal_service.py` | 0 | 0 | 0 | 6 |
@@ -123,7 +125,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/services/golden_index_backfill.py` | 0 | 2 | 0 | 4 |
 | `server/services/golden_repo_branch_service.py` | 0 | 5 | 0 | 0 |
 | `server/services/golden_repo_reconciler.py` | 0 | 4 | 0 | 0 |
-| `server/services/hnsw_orphan_sweep/discovery.py` | 0 | 2 | 0 | 3 |
+| `server/services/hnsw_orphan_sweep/discovery.py` | 0 | 1 | 0 | 3 |
 | `server/services/hnsw_orphan_sweep/repair_executor.py` | 0 | 0 | 0 | 5 |
 | `server/services/index_freshness.py` | 0 | 1 | 0 | 3 |
 | `server/services/langfuse_readme_generator.py` | 0 | 8 | 3 | 0 |
@@ -137,6 +139,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/services/scip_query_service.py` | 0 | 4 | 0 | 1 |
 | `server/services/search_service.py` | 0 | 4 | 0 | 0 |
 | `server/services/semantic_backfill/policy.py` | 0 | 3 | 0 | 8 |
+| `server/services/stats_service.py` | 0 | 7 | 0 | 1 |
 | `server/services/temporal_legacy_migration/discovery.py` | 0 | 3 | 0 | 0 |
 | `server/services/temporal_legacy_migration/mover.py` | 0 | 0 | 0 | 54 |
 | `server/services/temporal_legacy_migration/verification.py` | 0 | 0 | 0 | 15 |

@@ -57,7 +57,9 @@ __all__ = [
     "CHECKED_OUT_MARKER",
     "IN_PROGRESS_MARKER",
     "PublishedIndexUnavailableError",
+    "ensure_current_index",
     "ensure_published_index",
+    "publish_index",
     "is_served_here",
     "published_index_fields",
     "run_fix_config",
@@ -184,7 +186,11 @@ def _checkout(
 ) -> None:
     root = store.index_root(target)
     marker = target / IN_PROGRESS_MARKER
-    created = not target.exists()
+    try:
+        target.mkdir(parents=True)
+        created = True
+    except FileExistsError:
+        created = False
     if root.exists():
         if not marker.exists():
             raise PublishedIndexUnavailableError(
@@ -198,7 +204,6 @@ def _checkout(
             f"IndexStore {type(store).__name__} cannot check out by store alias"
         )
     try:
-        target.mkdir(parents=True, exist_ok=True)
         marker.write_text(version)
         checkout_as(store_alias, target, version)
         fix_config(target)
@@ -216,6 +221,158 @@ def _checkout(
             f"{type(exc).__name__}: {exc}"
         ) from exc
     logger.info("Checked out %s version %s to %s", store_alias, version, target)
+
+
+def _checked_out_version(target: Path) -> Optional[str]:
+    try:
+        return (target / CHECKED_OUT_MARKER).read_text()
+    except FileNotFoundError:
+        return None
+
+
+def _is_current(store: IndexStore, target: Path, version: str) -> bool:
+    return is_served_here(store, target) and _checked_out_version(target) == version
+
+
+def ensure_current_index(
+    target_path: Union[str, Path],
+    document: Optional[Mapping[str, Any]],
+    *,
+    store: IndexStore,
+    fix_config: Optional[FixConfig] = None,
+) -> None:
+    """``ensure_published_index`` for a target whose index CHANGES in place.
+
+    An activated copy keeps one path while its index is re-published (every
+    reindex, on whichever pod ran it). The pod serves the target only when it
+    holds the version ``document`` records -- its ``CHECKED_OUT_MARKER`` says
+    which one it holds; an older one is replaced (checked out beside it, then
+    swapped in by rename, so a reader never sees half of either). A document
+    recording nothing (an activation from before publishing existed) is
+    served from what this pod holds, or fails loud.
+    """
+    if store.is_local:
+        return
+    target = Path(target_path)
+    recorded = _fields(document)
+    if recorded is None:
+        if is_served_here(store, target):
+            return
+        _recorded(document, target)  # raises: nothing here, nothing published
+        return
+    store_alias, version = recorded
+    if _is_current(store, target, version):
+        return
+    with _exclusive(target):
+        if _is_current(store, target, version):
+            return
+        fix = fix_config or run_fix_config
+        if is_served_here(store, target):
+            _replace(store, target, store_alias, version, fix)
+        else:
+            _checkout(store, target, store_alias, version, fix)
+
+
+def _fields(document: Optional[Mapping[str, Any]]) -> Optional[Tuple[str, str]]:
+    try:
+        return _recorded(document, Path("."))
+    except PublishedIndexUnavailableError:
+        return None
+
+
+#: A replacement version is checked out here, beside the index it replaces.
+INCOMING_DIRNAME = ".cidx-index-incoming"
+#: The replaced index, until the swap succeeded (then removed).
+RETIRED_DIRNAME = ".cidx-index-retired"
+
+
+def _replace(
+    store: IndexStore,
+    target: Path,
+    store_alias: str,
+    version: str,
+    fix_config: FixConfig,
+) -> None:
+    """Swap the index this pod holds at ``target`` for ``version``."""
+    checkout_as = getattr(store, "checkout_as", None)
+    if checkout_as is None:
+        raise PublishedIndexUnavailableError(
+            f"IndexStore {type(store).__name__} cannot check out by store alias"
+        )
+    root = store.index_root(target)
+    incoming = target / INCOMING_DIRNAME
+    retired = target / RETIRED_DIRNAME
+    marker = target / IN_PROGRESS_MARKER
+    shutil.rmtree(incoming, ignore_errors=True)
+    shutil.rmtree(retired, ignore_errors=True)
+    try:
+        incoming.mkdir()
+        fresh = checkout_as(store_alias, incoming, version)
+        marker.write_text(version)
+        os.rename(root, retired)
+        os.rename(fresh, root)
+        fix_config(target)
+        if not _index_dir(store, target).is_dir():
+            raise RuntimeError(f"version {version} holds no index directory")
+        (target / CHECKED_OUT_MARKER).write_text(version)
+        marker.unlink()
+    except Exception as exc:
+        if retired.exists():
+            shutil.rmtree(root, ignore_errors=True)
+            os.rename(retired, root)
+            marker.unlink(missing_ok=True)
+        raise PublishedIndexUnavailableError(
+            f"Could not replace the index at {target} with {store_alias} "
+            f"version {version}: {type(exc).__name__}: {exc}"
+        ) from exc
+    finally:
+        shutil.rmtree(incoming, ignore_errors=True)
+        shutil.rmtree(retired, ignore_errors=True)
+    logger.info(
+        "Replaced the index at %s with %s version %s", target, store_alias, version
+    )
+    _evict_caches(target)
+
+
+def _evict_caches(target: Path) -> None:
+    """Drop this process's cached HNSW / chunk-store handles under ``target``:
+    the files behind them were just swapped for another version."""
+    from code_indexer.server.cache.snapshot_cache_invalidation import (
+        invalidate_snapshot_caches,
+    )
+
+    invalidate_snapshot_caches(
+        str(target),
+        log_context="[index-replace]",
+        is_versioned_snapshot_check=lambda _path: True,
+    )
+
+
+def publish_index(
+    target_path: Union[str, Path],
+    store_alias: str,
+    *,
+    store: IndexStore,
+    base_version: Optional[str],
+) -> Dict[str, str]:
+    """Publish the index this pod built at ``target_path`` on top of
+    ``base_version`` (the version it was built from; None for the first) and
+    mark the pod as holding the new version. Returns the fields to record
+    with the registry entry. Raises on any failure (a concurrent publish
+    since ``base_version`` included)."""
+    publish_on = getattr(store, "publish_on", None)
+    if publish_on is None:
+        raise PublishedIndexUnavailableError(
+            f"IndexStore {type(store).__name__} cannot publish by store alias"
+        )
+    target = Path(target_path)
+    version = publish_on(store_alias, store.index_root(target), base_version)
+    if not version:
+        raise PublishedIndexUnavailableError(
+            f"Publishing the index at {target} returned no version"
+        )
+    (target / CHECKED_OUT_MARKER).write_text(version)
+    return published_index_fields(store_alias, version)
 
 
 def _prune_superseded(target: Path, document: Optional[Mapping[str, Any]]) -> None:

@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.repositories.activated_repo_manager import ActivatedRepoError
+from code_indexer.server.services.activated_index_store import serve_activated_index
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.services import cidx_meta_content
 from code_indexer.server.services.repository_health_aggregator import (
@@ -550,6 +552,13 @@ def _resolve_repository_path(repo_alias: str, current_user: User) -> Tuple[str, 
         potential_path = activated_repo_manager.get_activated_repo_path(
             current_user.username, repo_alias
         )
+        try:
+            # Delegated IndexStore: the copy's index on this pod (no-op locally).
+            serve_activated_index(
+                activated_repo_manager, current_user.username, repo_alias
+            )
+        except ActivatedRepoError:
+            pass  # not this user's copy: answered "not found" just below
         if Path(potential_path).exists():
             repo_path = potential_path
 

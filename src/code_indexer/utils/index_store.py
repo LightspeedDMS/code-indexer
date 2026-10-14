@@ -113,21 +113,57 @@ _STORE_ALIAS_MAX = 128
 _ALIAS_HASH_CHARS = 8
 
 
+#: Store aliases of activated (per-user) copies start with this; a golden
+#: repo's store alias never does (``index_store_alias``), so the two
+#: namespaces cannot collide whatever a golden repo is called.
+ACTIVATED_STORE_ALIAS_PREFIX = "activated."
+_ACTIVATED_DIGEST_CHARS = 40
+_ACTIVATED_STORE_ALIAS_RE = re.compile(
+    r"^" + re.escape(ACTIVATED_STORE_ALIAS_PREFIX) + r"[0-9a-f]{40}$"
+)
+
+
 def index_store_alias(repo_name: str) -> str:
     """The artifact-store alias for a golden repo.
 
     cidx aliases allow upper case; the store's do not. Lower-casing alone
     would let ``MyRepo`` and ``myrepo`` share one version history, so any
     name the store would not accept as-is gets a short hash of the ORIGINAL
-    name appended: deterministic, and distinct per cidx alias.
+    name appended: deterministic, and distinct per cidx alias. A name in the
+    activated-copy namespace (``ACTIVATED_STORE_ALIAS_PREFIX``) is hashed and
+    moved out of it.
     """
-    if _STORE_ALIAS_RE.match(repo_name) and ".." not in repo_name:
+    reserved = repo_name.startswith(ACTIVATED_STORE_ALIAS_PREFIX)
+    if _STORE_ALIAS_RE.match(repo_name) and ".." not in repo_name and not reserved:
         return repo_name
     base = re.sub(r"[^a-z0-9._-]+", "-", repo_name.lower())
     base = re.sub(r"\.{2,}", ".", base)
     base = re.sub(r"^[^a-z0-9]+", "", base) or "repo"
+    if base.startswith(ACTIVATED_STORE_ALIAS_PREFIX):
+        base = "golden-" + base
     digest = hashlib.sha256(repo_name.encode("utf-8")).hexdigest()[:_ALIAS_HASH_CHARS]
     return f"{base[: _STORE_ALIAS_MAX - _ALIAS_HASH_CHARS - 1]}-{digest}"
+
+
+def activated_index_store_alias(username: str, user_alias: str) -> str:
+    """The artifact-store alias for ONE user's activated copy.
+
+    Derived server-side from the registry's ``(username, user_alias)`` pair --
+    never from a client value -- as a digest, so it carries no user data and
+    two copies (of the same or different users) never share a version
+    history. Always in the activated namespace, never a golden alias.
+    """
+    if not username or not user_alias:
+        raise ValueError("an activated copy needs a username and a user alias")
+    digest = hashlib.sha256(f"{username}\0{user_alias}".encode("utf-8")).hexdigest()[
+        :_ACTIVATED_DIGEST_CHARS
+    ]
+    return ACTIVATED_STORE_ALIAS_PREFIX + digest
+
+
+def is_activated_store_alias(store_alias: str) -> bool:
+    """True for exactly the aliases ``activated_index_store_alias`` produces."""
+    return bool(_ACTIVATED_STORE_ALIAS_RE.match(store_alias))
 
 
 #: Alias-document field: the store alias a target's index is published under.
@@ -202,7 +238,37 @@ class DelegatedIndexStore:
     def publish_as(self, store_alias: str, built_dir: Path) -> str:
         """``publish`` under an explicit store alias (the caller derived it)."""
         base = self._artifacts.current_version(store_alias)
-        return str(self._artifacts.publish(store_alias, base, str(built_dir)))
+        return self.publish_on(store_alias, built_dir, base)
+
+    def current_version_as(self, store_alias: str) -> Optional[str]:
+        """The store's current version of ``store_alias`` (None: nothing yet)."""
+        current = self._artifacts.current_version(store_alias)
+        return str(current) if current else None
+
+    def publish_on(
+        self, store_alias: str, built_dir: Path, base_version: Optional[str]
+    ) -> str:
+        """Publish on top of ``base_version`` exactly (None: the first version).
+
+        For an index built FROM a known version: if anyone published since,
+        the store refuses (compare-and-swap) instead of this build silently
+        replacing theirs.
+        """
+        return str(self._artifacts.publish(store_alias, base_version, str(built_dir)))
+
+    def delete_as(self, store_alias: str) -> int:
+        """Delete every published version of ``store_alias``; how many went.
+
+        Requires an index-artifacts client with ``delete_alias``
+        (cidx-content-backend >= 0.9.0). Idempotent; every failure raises.
+        """
+        delete_alias = getattr(self._artifacts, "delete_alias", None)
+        if delete_alias is None:
+            raise RuntimeError(
+                "The index-artifacts client cannot delete an alias; "
+                "cidx-content-backend >= 0.9.0 is required"
+            )
+        return int(delete_alias(store_alias))
 
     def checkout_as(
         self, store_alias: str, into: Path, version: Optional[str] = None

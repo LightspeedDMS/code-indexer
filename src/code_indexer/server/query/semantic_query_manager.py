@@ -8,6 +8,7 @@ background job integration, and proper resource management.
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.storage.filesystem_vector_store import LocalIndexNotFoundError
+from code_indexer.server.services.activated_index_store import serve_activated_index
 from code_indexer.utils.index_store import index_root
 
 import contextvars
@@ -1332,6 +1333,11 @@ class SemanticQueryManager:
                     # Fall back to activated repo manager for regular activated repos
                     repo_path = self.activated_repo_manager.get_activated_repo_path(
                         username, repo_alias
+                    )
+                    # Delegated IndexStore: this pod holds the copy's recorded
+                    # index version before it is searched (no-op locally).
+                    serve_activated_index(
+                        self.activated_repo_manager, username, repo_alias
                     )
                     # Story #1457 AC1/AC2: the UNDERLYING golden repo this
                     # activation was cloned from -- NEVER repo_alias itself

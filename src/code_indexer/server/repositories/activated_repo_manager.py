@@ -29,7 +29,8 @@ from code_indexer.server.repositories.activated_working_copy import (
     working_copies_for,
 )
 from code_indexer.server.storage.json_column import parse_json_column
-from code_indexer.utils.index_store import index_root
+from code_indexer.server.services.index_materializer import CHECKED_OUT_MARKER
+from code_indexer.utils.index_store import INDEX_VERSION_FIELD, index_root
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.utils.subprocess_diagnostics import (
     format_called_process_error_diagnostic,
@@ -1694,7 +1695,9 @@ class ActivatedRepoManager:
             if golden_repo_alias_sw:
                 _gr_sw = self.golden_repo_manager.get_golden_repo(golden_repo_alias_sw)
                 if _gr_sw is not None and branch_name != _gr_sw.default_branch:
-                    self._run_branch_delta_index(repo_dir, user_alias)
+                    self._run_branch_delta_index(
+                        repo_dir, user_alias, **self._publishing_owner(username)
+                    )
 
             # Step 5: Return success with detailed operation information
             message = f"Successfully switched to branch '{branch_name}' in repository '{user_alias}'"
@@ -2305,7 +2308,9 @@ class ActivatedRepoManager:
             if _gr_alias_sync:
                 _gr_sync = self.golden_repo_manager.get_golden_repo(_gr_alias_sync)
                 if _gr_sync is not None and current_branch != _gr_sync.default_branch:
-                    self._run_branch_delta_index(repo_dir, user_alias)
+                    self._run_branch_delta_index(
+                        repo_dir, user_alias, **self._publishing_owner(username)
+                    )
 
             # Step 5: Return success message with details
             # changed_files was computed from the diff above (EVO-64678: the seam
@@ -2547,6 +2552,76 @@ class ActivatedRepoManager:
                 f"Failed to load metadata for repository '{user_alias}': {str(e)}"
             )
 
+    def _activated_index(self) -> Any:
+        """The IndexStore facade for activated copies (``ActivatedIndexStore``)."""
+        facade = getattr(self, "_activated_index_store", None)
+        if facade is None:
+            from code_indexer.server.services.activated_index_store import (
+                ActivatedIndexStore,
+            )
+
+            facade = ActivatedIndexStore()
+            self._activated_index_store = facade
+        return facade
+
+    def serve_index_here(self, username: str, user_alias: str) -> str:
+        """The copy's path, with this pod holding the index version the
+        registry records for it (``index_store_backend: delegated``).
+
+        Checks the registry for THIS user first: no registration is
+        ``ActivatedRepoError`` ("not found"), before any copy or index is
+        touched. A failed checkout raises. Under the local store this is
+        ``get_activated_repo_path`` (no registry read, nothing fetched).
+        """
+        repo_path = self.get_activated_repo_path(username, user_alias)
+        facade = self._activated_index()
+        if not facade.is_delegated():
+            return repo_path
+        metadata = self._load_metadata(username, user_alias)
+        if metadata is None:
+            raise ActivatedRepoError(
+                f"Repository '{user_alias}' not found for user '{username}'"
+            )
+        facade.serve(username, user_alias, repo_path, metadata)
+        return repo_path
+
+    def publish_index(self, username: str, user_alias: str) -> None:
+        """Publish the index this pod just built for the copy (a reindex, a
+        branch switch or sync) on top of the version it was built from, and
+        record the new version in the registry. No-op under the local store.
+        Raises on failure -- including another pod publishing in between."""
+        facade = self._activated_index()
+        if not facade.is_delegated():
+            return
+        metadata = self._load_metadata(username, user_alias)
+        if metadata is None:
+            raise ActivatedRepoError(
+                f"Repository '{user_alias}' not found for user '{username}'"
+            )
+        repo_path = self.get_activated_repo_path(username, user_alias)
+        # Use the marker this pod wrote at checkout as the CAS base, not the
+        # registry's value (which another pod may have updated in between).
+        marker = Path(repo_path) / CHECKED_OUT_MARKER
+        try:
+            marker_version = marker.read_text()
+        except OSError:
+            marker_version = None
+        if marker_version:
+            metadata[INDEX_VERSION_FIELD] = marker_version
+        metadata.update(facade.publish(username, user_alias, repo_path, metadata))
+        try:
+            self._save_metadata(username, user_alias, metadata)
+        except Exception:
+            self.logger.warning(
+                "publish_index: first metadata-save attempt failed for "
+                "%s/%s (store version %s); retrying once",
+                username,
+                user_alias,
+                metadata.get(INDEX_VERSION_FIELD, "?"),
+                exc_info=True,
+            )
+            self._save_metadata(username, user_alias, metadata)
+
     def get_activated_repo_path(self, username: str, user_alias: str) -> str:
         """
         Get the filesystem path to an activated repository.
@@ -2727,6 +2802,45 @@ class ActivatedRepoManager:
                 "async clone may still be in flight.",
                 extra={"correlation_id": get_correlation_id()},
             )
+
+    def _serve_golden_index_here(self, golden_repo_alias: str) -> Optional[str]:
+        """The golden repository's served path, with this pod holding its
+        published index, for an activation to seed a copy from (the index may
+        have been published by another pod; a pod-local clone path can hold
+        an older build). Raises when it cannot; None for a golden repo with
+        no alias pointer (``get_actual_repo_path`` then reports it)."""
+        from code_indexer.global_repos.alias_manager import AliasManager
+
+        aliases = AliasManager(
+            os.path.join(self.golden_repo_manager.golden_repos_dir, "aliases")
+        )
+        global_alias = f"{golden_repo_alias}-global"
+        target = aliases.read_alias(global_alias)
+        if target:
+            aliases.ensure_served_here(global_alias, target)
+        return target
+
+    def _publish_activated_index(
+        self, username: str, user_alias: str, activated_repo_path: str
+    ) -> Dict[str, Any]:
+        """Publish a new activation's index; the registry fields to record.
+
+        Empty under the local store. A failure discards the copy (no
+        registration was written yet) and raises.
+        """
+        facade = self._activated_index()
+        if not facade.is_delegated():
+            return {}
+        try:
+            fields: Dict[str, Any] = facade.publish(
+                username, user_alias, activated_repo_path, None, fresh=True
+            )
+        except Exception as exc:
+            self._discard_failed_activation(activated_repo_path)
+            raise ActivatedRepoError(
+                f"Failed to publish the index of '{user_alias}': {exc}"
+            ) from exc
+        return fields
 
     def _discard_delegated_copy(
         self, working_copies: DelegatedWorkingCopies, activated_repo_path: str
@@ -2918,8 +3032,14 @@ class ActivatedRepoManager:
             update_progress(30, "Creating user directory structure")
 
             # Clone repository with CoW (use canonical path for versioned repos)
-            golden_repo_actual_path = self.golden_repo_manager.get_actual_repo_path(
-                golden_repo_alias
+            served_golden = (
+                self._serve_golden_index_here(golden_repo_alias)
+                if self._activated_index().is_delegated()
+                else None
+            )
+            golden_repo_actual_path = (
+                served_golden
+                or self.golden_repo_manager.get_actual_repo_path(golden_repo_alias)
             )
             update_progress(40, f"Cloning repository from {golden_repo_actual_path}")
             try:
@@ -3087,6 +3207,9 @@ class ActivatedRepoManager:
                 "ssh_key_used": ssh_key_used,
                 "activation_id": activation_id,
             }
+            metadata.update(
+                self._publish_activated_index(username, user_alias, activated_repo_path)
+            )
 
             self._save_metadata(username, user_alias, metadata)
 
@@ -3290,6 +3413,9 @@ class ActivatedRepoManager:
         finally:
             if self._query_tracker is not None:
                 self._query_tracker.clear_quiescing(repo_dir)
+        # The copy's published index goes next; a failure raises and keeps the
+        # registration, so deactivating again finishes the job.
+        self._activated_index().delete(username, user_alias)
         # A composite's members each have index state under it (a single
         # copy's own config names none, so this is _remove_pod_index_state).
         self._remove_pod_composite_index_state(repo_dir)
@@ -4916,11 +5042,20 @@ class ActivatedRepoManager:
         except Exception as e:
             raise ActivatedRepoError(f"Failed to migrate legacy remotes: {str(e)}")
 
+    def _publishing_owner(self, username: str) -> Dict[str, Any]:
+        """``_run_branch_delta_index`` keyword that makes the delta reindex of
+        a REGISTERED copy serve the recorded index first and publish after
+        (delegated IndexStore). Empty under the local store: today's call."""
+        if not self._activated_index().is_delegated():
+            return {}
+        return {"publish_for": username}
+
     def _run_branch_delta_index(
         self,
         repo_path: str,
         user_alias: str,
         cancel_check: Optional[Callable[[], bool]] = None,
+        publish_for: Optional[str] = None,
     ) -> None:
         """
         Run branch-aware delta semantic reindex on an activated repo (Bug #1203).
@@ -4962,9 +5097,13 @@ class ActivatedRepoManager:
             extra={"correlation_id": get_correlation_id()},
         )
         try:
+            if publish_for is not None:
+                self.serve_index_here(publish_for, user_alias)
             self._index_manager.run_branch_delta_index(
                 repo_path, cancel_check=cancel_check
             )
+            if publish_for is not None:
+                self.publish_index(publish_for, user_alias)
         except RuntimeError as exc:
             # Bug #1346: a user-initiated cancel (SubprocessCancelledError,
             # a RuntimeError subclass) is NOT a genuine reindex failure --

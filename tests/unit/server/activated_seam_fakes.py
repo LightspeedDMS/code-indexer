@@ -35,6 +35,7 @@ from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
 from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
+from code_indexer.server.services import index_materializer
 from code_indexer.server.startup import content_backend_wiring
 from code_indexer.server.storage.shared.clone_backend import (
     DelegatedCloneBackend,
@@ -46,6 +47,18 @@ from code_indexer.server.utils.config_manager import ServerResourceConfig
 ALIAS = "example-repo"
 USER = "alice"
 INDEX_DIR = ".code-indexer"
+
+
+#: Names directly under an activated copy's pod directory that are pod state.
+_POD_STATE_NAMES = frozenset(
+    {
+        INDEX_DIR,
+        index_materializer.CHECKED_OUT_MARKER,
+        index_materializer.IN_PROGRESS_MARKER,
+        index_materializer.INCOMING_DIRNAME,
+        index_materializer.RETIRED_DIRNAME,
+    }
+)
 
 
 class LocalIOForbidden(AssertionError):
@@ -354,12 +367,17 @@ class ActivatedWorld:
                 continue
             rel = Path(full).relative_to(root).parts
             if root == str(self.pod_golden):
-                return not (rel and rel[0] == INDEX_DIR)
+                return not (rel and rel[0] in _POD_STATE_NAMES)
             # activated-repos/<user>: <alias>/.code-indexer is pod state, and so
-            # is solo mode's <alias>_metadata.json registry beside the copies.
+            # is solo mode's <alias>_metadata.json registry beside the copies,
+            # and the IndexStore checkout's own markers and lock (only ever
+            # written under a delegated IndexStore, on the pod's state dir).
             if len(rel) <= 1:
-                return bool(rel) and not rel[0].endswith("_metadata.json")
-            return rel[1] != INDEX_DIR
+                return bool(rel) and not (
+                    rel[0].endswith("_metadata.json")
+                    or rel[0].endswith(".checkout.lock")
+                )
+            return rel[1] not in _POD_STATE_NAMES
         return False
 
     def _install_guards(self, patcher: pytest.MonkeyPatch) -> None:
