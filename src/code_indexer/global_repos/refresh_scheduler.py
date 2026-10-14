@@ -77,8 +77,6 @@ from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqlite
 from code_indexer.utils.index_store import (
     IndexStore,
     LocalIndexStore,
-    INDEX_STORE_ALIAS_FIELD,
-    INDEX_VERSION_FIELD,
     index_store_alias,
     published_index_fields,
 )
@@ -500,32 +498,6 @@ def _is_empty_meta_directory_index(
         and phase_name == "semantic"
         and _NO_FILES_TO_INDEX in output
     )
-
-
-#: Pod-local scratch (under golden-repos) for a delegated integrity baseline.
-INTEGRITY_BASELINE_DIRNAME = ".integrity-baseline"
-
-
-class IntegrityBaseline:
-    """The refresh integrity gate's baseline (``_integrity_baseline``):
-    ``points`` per collection, the index to self-heal from when it is not the
-    current target's, and the scratch to remove after the gate."""
-
-    def __init__(
-        self,
-        points: Dict[str, int],
-        healthy_index_dir: Optional[Path] = None,
-        *,
-        scratch: Optional[Path] = None,
-    ) -> None:
-        self.points = points
-        self.healthy_index_dir = healthy_index_dir
-        self._scratch = scratch
-
-    def close(self) -> None:
-        if self._scratch is not None:
-            shutil.rmtree(self._scratch, ignore_errors=True)
-            self._scratch = None
 
 
 class RefreshScheduler:
@@ -3154,37 +3126,31 @@ class RefreshScheduler:
                         # Reuses the SAME factory the golden-repo
                         # add/registration path already applies -- never a
                         # second, duplicated copy.
-                        baseline = self._integrity_baseline(
-                            alias_name, source_path, current_target
+                        previous_points = self._published_point_counts(current_target)
+                        self._index_source(
+                            alias_name=alias_name,
+                            source_path=source_path,
+                            progress_callback=progress_callback,
+                            orphan_event_callback=_make_hnsw_orphan_event_logger(
+                                alias_name
+                            ),
+                            force_reconcile=force_reconcile,
+                            job_id=job_id,
                         )
-                        try:
-                            self._index_source(
-                                alias_name=alias_name,
-                                source_path=source_path,
-                                progress_callback=progress_callback,
-                                orphan_event_callback=_make_hnsw_orphan_event_logger(
-                                    alias_name
-                                ),
-                                force_reconcile=force_reconcile,
-                                job_id=job_id,
-                            )
 
-                            # Bug #1506: run-boundary durability-flush +
-                            # integrity gate (still under the write lock
-                            # acquired above). _run_and_publish_integrity_gate
-                            # ALSO calls reset_refresh_integrity_failure() on
-                            # a pass and record_refresh_integrity_failure() on
-                            # a failure internally -- see its docstring; no
-                            # separate reset/record call is needed here.
-                            gate_result = self._run_and_publish_integrity_gate(
-                                alias_name=alias_name,
-                                source_path=source_path,
-                                current_target=current_target,
-                                previous_points=baseline.points,
-                                healthy_index_dir=baseline.healthy_index_dir,
-                            )
-                        finally:
-                            baseline.close()
+                        # Bug #1506: run-boundary durability-flush +
+                        # integrity gate (still under the write lock
+                        # acquired above). _run_and_publish_integrity_gate
+                        # ALSO calls reset_refresh_integrity_failure() on
+                        # a pass and record_refresh_integrity_failure() on
+                        # a failure internally -- see its docstring; no
+                        # separate reset/record call is needed here.
+                        gate_result = self._run_and_publish_integrity_gate(
+                            alias_name=alias_name,
+                            source_path=source_path,
+                            current_target=current_target,
+                            previous_points=previous_points,
+                        )
                         if not gate_result.passed:
                             detail_summary = "; ".join(
                                 f"{f.collection_dir}: {f.detail}"
@@ -3583,7 +3549,6 @@ class RefreshScheduler:
         source_path: str,
         current_target: Optional[str],
         previous_points: Optional[Dict[str, int]] = None,
-        healthy_index_dir: Optional[Path] = None,
     ) -> RefreshIntegrityGateResult:
         """
         Shared Bug #1506 run-boundary durability-flush + integrity gate
@@ -3600,17 +3565,12 @@ class RefreshScheduler:
         check) so each caller can apply its own failure-reporting
         convention (an early-return dict for ``_execute_refresh``, a
         raised ``RuntimeError`` for ``_create_new_index``).
-
-        *healthy_index_dir*: the last-known-good index to self-heal from,
-        when it is not the current target's (a delegated baseline checked
-        out to scratch -- ``_integrity_baseline``); None: today's choice.
         """
-        if healthy_index_dir is None:
-            healthy_index_dir = (
-                Path(current_target) / ".code-indexer" / "index"
-                if current_target and current_target != source_path
-                else None
-            )
+        healthy_index_dir = (
+            Path(current_target) / ".code-indexer" / "index"
+            if current_target and current_target != source_path
+            else None
+        )
         clone_backend = (
             getattr(self._snapshot_manager, "_clone_backend", None)
             if self._snapshot_manager is not None
@@ -3639,96 +3599,6 @@ class RefreshScheduler:
             return {}
         return count_collection_points(
             self._index_store.index_root(current_target) / "index"
-        )
-
-    def _integrity_baseline(
-        self, alias_name: str, source_path: str, current_target: Optional[str]
-    ) -> "IntegrityBaseline":
-        """The integrity gate's baseline: the published index's point counts
-        (and, where it is not at the current target, the index to self-heal
-        from). Read BEFORE indexing.
-
-        Local store, no current target, or a pod that holds the current
-        target's index: ``_published_point_counts`` -- today's baseline.
-
-        Delegated, the current target not on this pod (another pod
-        published it):
-
-        * the alias records the published version -> it is checked out to
-          the target first (``AliasManager.ensure_served_here``), then
-          counted there -- also the self-heal source, as on the publisher;
-        * no recorded version (a pointer written before cross-pod
-          publishing) -> the store's current version of this repository is
-          checked out to scratch (``<golden-repos>/.integrity-baseline``)
-          and counted; ``close()`` removes it;
-        * nothing was ever published for it: a clone-path target (the
-          first refresh after an add) has no published baseline, as on a
-          first refresh today; a snapshot target with nothing published
-          cannot be judged -- that raises.
-
-        A store or checkout failure raises: the gate never compares against
-        nothing because a baseline could not be fetched.
-        """
-        if self._index_store.is_local or not current_target:
-            return IntegrityBaseline(self._published_point_counts(current_target))
-        from code_indexer.server.services.index_materializer import is_served_here
-
-        if is_served_here(self._index_store, current_target):
-            return IntegrityBaseline(self._published_point_counts(current_target))
-        record = self.alias_manager.read_record(alias_name) or {}
-        if (
-            record.get("target_path") == current_target
-            and record.get(INDEX_VERSION_FIELD)
-            and record.get(INDEX_STORE_ALIAS_FIELD)
-        ):
-            self.alias_manager.ensure_served_here(alias_name, current_target)
-            return IntegrityBaseline(self._published_point_counts(current_target))
-        return self._unrecorded_baseline(alias_name, source_path, current_target)
-
-    def _unrecorded_baseline(
-        self, alias_name: str, source_path: str, current_target: str
-    ) -> "IntegrityBaseline":
-        """``_integrity_baseline`` for a target whose pointer records no
-        published version: the store's current version, from scratch."""
-        store_alias = index_store_alias(Path(source_path).name)
-        current_version_as = getattr(self._index_store, "current_version_as", None)
-        checkout_as = getattr(self._index_store, "checkout_as", None)
-        if current_version_as is None or checkout_as is None:
-            raise RuntimeError(
-                f"Cannot judge the refresh of {alias_name}: the IndexStore "
-                f"{type(self._index_store).__name__} cannot read a published version"
-            )
-        version = current_version_as(store_alias)
-        if version is None:
-            if current_target == source_path:
-                logger.info(
-                    "%s: nothing published yet and no index on this pod -- "
-                    "first publish, no previous points to compare",
-                    alias_name,
-                )
-                return IntegrityBaseline({})
-            raise RuntimeError(
-                f"Cannot judge the refresh of {alias_name}: its current target "
-                f"{current_target} is not on this pod and nothing is published "
-                f"for {store_alias}"
-            )
-        scratch = self.golden_repos_dir / INTEGRITY_BASELINE_DIRNAME / store_alias
-        shutil.rmtree(scratch, ignore_errors=True)
-        scratch.mkdir(parents=True)
-        try:
-            root = checkout_as(store_alias, scratch, version)
-        except Exception:
-            shutil.rmtree(scratch, ignore_errors=True)
-            raise
-        index_dir = Path(root) / "index"
-        logger.info(
-            "%s: integrity baseline = published version %s (checked out to %s)",
-            alias_name,
-            version,
-            scratch,
-        )
-        return IntegrityBaseline(
-            count_collection_points(index_dir), index_dir, scratch=scratch
         )
 
     def _index_source(
@@ -4209,6 +4079,9 @@ class RefreshScheduler:
 
                 _temporal_env.update(resolve_hnsw_sync_epoch_env_var())
 
+            # Delegated IndexStore: build on the published temporal shards,
+            # not on whatever this pod last held (no-op locally).
+            self.serve_temporal_shards(alias_name)
             logger.info(
                 f"Running cidx index (temporal) on source for {alias_name}: {' '.join(temporal_command)}"
             )
@@ -4218,6 +4091,7 @@ class RefreshScheduler:
                 error_label=f"temporal indexing on source for {alias_name}",
                 env=_temporal_env,
             )
+            self.note_temporal_indexed(alias_name)
             logger.info("cidx index (temporal) on source completed successfully")
 
         # Execute Step 3: SCIP indexing (coarse markers, subprocess.run stays — it has no --progress-json)
@@ -4557,6 +4431,13 @@ class RefreshScheduler:
                 f"Publishing the index for {alias_name} returned no version"
             )
         logger.info(f"Published the index for {alias_name} as version {version}")
+        try:
+            temporal_fields = self._publish_indexed_temporal(alias_name)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to publish the temporal shards for {alias_name}: "
+                f"{type(e).__name__}: {e}"
+            ) from e
 
         versioned_path = self._new_snapshot_path(repo_name)
         try:
@@ -4569,14 +4450,10 @@ class RefreshScheduler:
             raise RuntimeError(
                 f"Failed to create snapshot for {alias_name}: {type(e).__name__}: {e}"
             ) from e
-        from code_indexer.server.services.index_materializer import (
-            mark_published_here,
-        )
-
         fields = published_index_fields(
             index_store_alias(Path(source_path).name), version
         )
-        mark_published_here(versioned_path, fields)
+        fields.update(temporal_fields)
         if getattr(self, "_pending_index_publications", None) is None:
             self._pending_index_publications = {}
         self._pending_index_publications[alias_name] = (str(versioned_path), fields)
@@ -4584,6 +4461,52 @@ class RefreshScheduler:
             f"Versioned snapshot of {alias_name} version {version} at: {versioned_path}"
         )
         return str(versioned_path)
+
+    def serve_temporal_shards(self, alias_name: str) -> None:
+        """Under a delegated IndexStore, make this pod hold the alias's
+        recorded temporal shards before temporal indexing builds on them
+        (``temporal_index_store.served_temporal_index_root``). Raises on a
+        store failure; no-op under the local store."""
+        store = getattr(self, "_index_store", None)
+        if store is None or store.is_local:
+            return
+        from code_indexer.server.services.temporal_index_store import (
+            served_temporal_index_root,
+        )
+
+        served_temporal_index_root(self.golden_repos_dir, alias_name, store=store)
+
+    def note_temporal_indexed(self, alias_name: str) -> None:
+        """Record that temporal shards were (re)built for ``alias_name`` in this
+        job: its snapshot publish then publishes them too."""
+        store = getattr(self, "_index_store", None)
+        if store is None or store.is_local:
+            return
+        indexed = getattr(self, "_temporal_indexed", None)
+        if indexed is None:
+            indexed = set()
+            self._temporal_indexed = indexed
+        indexed.add(alias_name)
+
+    def _publish_indexed_temporal(self, alias_name: str) -> Dict[str, str]:
+        """Publish the temporal shards built in this job (delegated store);
+        the alias-document fields, or {} when none were built (the pointer
+        keeps the version it records). Raises on failure."""
+        indexed = getattr(self, "_temporal_indexed", None) or set()
+        if alias_name not in indexed:
+            return {}
+        indexed.discard(alias_name)
+        from code_indexer.server.services.temporal_index_store import (
+            publish_temporal_root,
+        )
+
+        return publish_temporal_root(
+            self.golden_repos_dir,
+            alias_name,
+            store=self._index_store,
+            base_version=None,
+            use_current_base=True,
+        )
 
     def _new_snapshot_path(self, repo_name: str) -> Path:
         """A ``v_<unix ts>`` snapshot path for ``repo_name`` that does not exist yet."""
@@ -4645,19 +4568,15 @@ class RefreshScheduler:
                 )
 
             current_target = self.alias_manager.read_alias(alias_name)
-            baseline = self._integrity_baseline(alias_name, source_path, current_target)
-            try:
-                self._index_source(alias_name=alias_name, source_path=source_path)
+            previous_points = self._published_point_counts(current_target)
+            self._index_source(alias_name=alias_name, source_path=source_path)
 
-                gate_result = self._run_and_publish_integrity_gate(
-                    alias_name=alias_name,
-                    source_path=source_path,
-                    current_target=current_target,
-                    previous_points=baseline.points,
-                    healthy_index_dir=baseline.healthy_index_dir,
-                )
-            finally:
-                baseline.close()
+            gate_result = self._run_and_publish_integrity_gate(
+                alias_name=alias_name,
+                source_path=source_path,
+                current_target=current_target,
+                previous_points=previous_points,
+            )
             if not gate_result.passed:
                 detail_summary = "; ".join(
                     f"{f.collection_dir}: {f.detail}" for f in gate_result.failures

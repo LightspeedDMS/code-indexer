@@ -3000,15 +3000,14 @@ class SemanticQueryManager:
         if not golden_repo_alias:
             return None
 
-        from ...services.temporal.temporal_server_paths import (
-            server_temporal_index_root,
-        )
+        from ..services.temporal_index_store import served_temporal_index_root
 
         golden_repos_dir = (
             Path(self.activated_repo_manager.activated_repos_dir).parent
             / "golden-repos"
         )
-        return server_temporal_index_root(golden_repos_dir, golden_repo_alias)
+        # Delegated IndexStore: this pod holds the recorded temporal version.
+        return served_temporal_index_root(golden_repos_dir, golden_repo_alias)
 
     def _execute_temporal_query(
         self,

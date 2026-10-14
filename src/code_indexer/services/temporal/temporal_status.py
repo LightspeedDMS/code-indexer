@@ -30,7 +30,7 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Set, Tuple
+from typing import Dict, List, Literal, Optional, Set, Tuple, Union
 
 from code_indexer.services.temporal.temporal_collection_naming import (
     LEGACY_TEMPORAL_COLLECTION,
@@ -38,9 +38,6 @@ from code_indexer.services.temporal.temporal_collection_naming import (
 )
 from code_indexer.services.temporal.temporal_row_existence import (
     temporal_shard_has_committed_rows,
-)
-from code_indexer.services.temporal.temporal_server_paths import (
-    server_temporal_index_root,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,6 +97,18 @@ _NO_TEMPORAL_DATA = TemporalRepoStatus(
 #: trailing hyphen, so any parsed name has at least one slug character -- so
 #: this can never collide with a genuine (embedder_slug, quarter) namespace.
 _BARE_MONOLITH_KEY: Tuple[str, Optional[str]] = ("", None)
+
+
+def _served_root(golden_repos_dir: Union[str, Path], repo_alias: str) -> Path:
+    """The fixed temporal root, held on this pod in its recorded published
+    version when the running server uses a delegated IndexStore
+    (``server/services/temporal_index_store.py``); exactly
+    ``server_temporal_index_root`` otherwise (CLI, local store)."""
+    from code_indexer.server.services.temporal_index_store import (
+        served_temporal_index_root,
+    )
+
+    return served_temporal_index_root(golden_repos_dir, repo_alias)
 
 
 def _scan_root(
@@ -186,7 +195,7 @@ def _discover_shards(
     """
     in_repo = _scan_root(Path(legacy_index_path), TemporalDataLocation.IN_REPO)
     fixed = _scan_root(
-        server_temporal_index_root(golden_repos_dir, repo_alias),
+        _served_root(golden_repos_dir, repo_alias),
         TemporalDataLocation.FIXED_SERVER_ROOT,
     )
 
@@ -238,7 +247,7 @@ def get_temporal_repo_status(
         Path(legacy_index_path), TemporalDataLocation.IN_REPO
     )
     fixed_candidates = _scan_root(
-        server_temporal_index_root(Path(golden_repos_dir), repo_alias),
+        _served_root(Path(golden_repos_dir), repo_alias),
         TemporalDataLocation.FIXED_SERVER_ROOT,
     )
     stranded = any(

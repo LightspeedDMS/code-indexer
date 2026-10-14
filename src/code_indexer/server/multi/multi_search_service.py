@@ -597,7 +597,6 @@ class MultiSearchService:
             # the store is what actually performs the search.
             from ...services.temporal.temporal_server_paths import (
                 resolve_golden_repo_coordinates,
-                server_temporal_index_root,
             )
 
             # Prefer deriving golden_repos_dir STRUCTURALLY from the repo path
@@ -612,7 +611,10 @@ class MultiSearchService:
                 if _coordinates is not None
                 else PathLib(_get_golden_repos_dir())
             )
-            index_dir = server_temporal_index_root(_golden_repos_dir, repo_id)
+            # Delegated IndexStore: this pod holds the recorded temporal version.
+            from ..services.temporal_index_store import served_temporal_index_root
+
+            index_dir = served_temporal_index_root(_golden_repos_dir, repo_id)
             id_index_cache = None
             if self.hnsw_index_cache is not None:
                 from ...server.cache.id_index_cache import get_global_id_index_cache

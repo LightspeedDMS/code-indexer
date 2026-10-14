@@ -10,9 +10,11 @@ window. Storage, read source and dual-write are decided by
 """
 
 import logging
+import threading
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, DefaultDict, Dict, Optional, Tuple
 
 from code_indexer.global_repos.control_plane_metadata import (
     KIND_ALIAS,
@@ -91,7 +93,25 @@ class AliasManager:
     Write-mode redirection (Story #231): ``read_alias`` of a ``-global`` alias
     whose repo has an open write session returns the live source path, read
     from the write-mode marker (``WriteModeMarkers``).
+
+    Per-alias write serialization: methods that read-then-write a document
+    (``swap_alias``, ``update_fields_if``) hold a per-alias
+    ``threading.Lock`` so they cannot interleave within the same process.
+    The lock is class-level (keyed by ``(aliases_dir, alias_name)``) so
+    that independently constructed ``AliasManager`` instances for the same
+    storage location share the lock.  Cross-process ordering remains the
+    caller's responsibility (e.g. the write lock held during a refresh).
     """
+
+    # Class-level per-alias write guards.  Keyed by (aliases_dir, alias_name)
+    # so independently constructed AliasManager instances for the SAME storage
+    # location share the lock.  Only serializes within a single process --
+    # cross-process ordering is the caller's responsibility (e.g. the write
+    # lock held during a refresh via AliasLockCoordinator).
+    _alias_write_locks: DefaultDict[
+        Tuple[str, str], threading.Lock
+    ] = defaultdict(threading.Lock)
+    _alias_write_locks_guard = threading.Lock()
 
     def __init__(
         self,
@@ -113,6 +133,14 @@ class AliasManager:
         self._write_mode = WriteModeMarkers(golden_repos_dir, metadata=self._metadata)
         if not self._metadata.is_registry_backed:
             self.aliases_dir.mkdir(parents=True, exist_ok=True)
+
+    def _get_alias_write_lock(self, alias_name: str) -> threading.Lock:
+        """Per-alias lock serializing read-then-write methods within this
+        process.  Different ``AliasManager`` instances for the same
+        ``aliases_dir`` get the SAME lock object."""
+        key = (str(self.aliases_dir), alias_name)
+        with AliasManager._alias_write_locks_guard:
+            return AliasManager._alias_write_locks[key]
 
     @classmethod
     def existing(cls, aliases_dir: PathLike) -> Optional["AliasManager"]:
@@ -145,11 +173,6 @@ class AliasManager:
         """``(target_path, previous_path)`` from ONE read of the document, with
         no write-mode redirection (Bug #1567 Gap 1 holes A/B)."""
         return pointer_from_document(self.read_record(alias_name))
-
-    def list_records(self, prefix: str = "") -> Dict[str, Dict[str, Any]]:
-        """Every alias document whose name starts with *prefix*, whole (no
-        write-mode redirection). Raises when the store cannot be read."""
-        return dict(self._metadata.list_all(KIND_ALIAS, prefix))
 
     def list_pointers(self, prefix: str = "") -> Dict[str, Tuple[str, Optional[str]]]:
         """Every alias whose name starts with *prefix*, as ``read_pointer``
@@ -251,55 +274,40 @@ class AliasManager:
 
         ensure_published_index(target_path, record, store=store)
 
-    def record_republished_index(
+    def update_fields_if(
         self,
         alias_name: str,
-        target_path: str,
-        expected_version: str,
-        fields: Dict[str, Any],
-    ) -> None:
-        """Record that the index at ``target_path`` was re-published in place
-        (an HNSW repair under a delegated IndexStore), replacing
-        ``expected_version``.
+        expected: Dict[str, Any],
+        updates: Dict[str, Any],
+    ) -> bool:
+        """Write *updates* into the alias document only when every field in
+        *expected* still has that value.  False when it did not apply.
 
-        Refuses (RuntimeError) when the alias no longer points at
-        ``target_path`` or records another version -- a swap or another
-        republish happened meanwhile, and the newer pointer wins.
+        The read-compare-put sequence is serialized against ``swap_alias``
+        (and other read-then-write methods) via a per-alias
+        ``threading.Lock``, so a concurrent ``swap_alias`` within the same
+        process cannot land between the read and the put.  Cross-process
+        ordering is the caller's responsibility (e.g. the write lock held
+        during a refresh); without it, a concurrent writer in a different
+        process could still interleave.
 
-        **Race window**: the read-check-write here is NOT atomic -- another
-        writer that slips between ``read_record`` and ``put`` will have its
-        update silently overwritten. The IndexStore's own CAS on the version
-        field (``base_version`` in ``publish_index``) is the primary
-        concurrency guard; this method is a secondary bookkeeping step whose
-        staleness window is small (the competing writer is a refresh or
-        ``swap_alias`` on any pod, not only this sweep tick).
+        Raises:
+            RuntimeError: If the write fails
         """
-        from code_indexer.utils.index_store import INDEX_VERSION_FIELD
-
-        record = self.read_record(alias_name)
-        pointer = pointer_from_document(record)
-        if record is None or pointer is None or pointer[0] != target_path:
-            raise RuntimeError(
-                f"Alias {alias_name} no longer points at {target_path}; "
-                "not recording the repaired index"
-            )
-        if record.get(INDEX_VERSION_FIELD) != expected_version:
-            raise RuntimeError(
-                f"Alias {alias_name} records version "
-                f"{record.get(INDEX_VERSION_FIELD)!r}, not {expected_version!r}; "
-                "not recording the repaired index"
-            )
-        record.update(fields)
-        try:
-            self._metadata.put(KIND_ALIAS, alias_name, record)
-        except Exception as e:
-            raise RuntimeError(f"Failed to update alias {alias_name}: {e}") from e
-        logger.info(
-            "Alias %s: index at %s re-published as %s",
-            alias_name,
-            target_path,
-            fields.get(INDEX_VERSION_FIELD),
-        )
+        with self._get_alias_write_lock(alias_name):
+            document = self.read_record(alias_name)
+            if document is None:
+                return False
+            if any(document.get(key) != value for key, value in expected.items()):
+                return False
+            document.update(updates)
+            try:
+                self._metadata.put(KIND_ALIAS, alias_name, document)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to update alias {alias_name}: {e}"
+                ) from e
+            return True
 
     def delete_alias(self, alias_name: str) -> None:
         """
@@ -357,7 +365,10 @@ class AliasManager:
         Swap alias to point to new target.
 
         Updates the alias pointer to the new index path while preserving
-        the old path for cleanup tracking.
+        the old path for cleanup tracking.  The read-check-put sequence is
+        serialized against ``update_fields_if`` via a per-alias
+        ``threading.Lock`` so neither can interleave within the same
+        process.
 
         Args:
             alias_name: Name of the alias to swap
@@ -376,51 +387,60 @@ class AliasManager:
             RuntimeError: If the swap fails
             ValueError: If old_target doesn't match current target
         """
-        alias_data = self.read_record(alias_name)
-        if alias_data is None:
-            # Self-heal rather than abort. The pointer is DERIVED state: the record
-            # that a repo is globally active lives in the global registry, and the
-            # caller has already built and validated the snapshot being published.
-            # Raising here fails the whole refresh AND leaves queries served from the
-            # previous snapshot, so a missing pointer degrades into permanently stale
-            # answers that look healthy -- observed on the fleet as every
-            # global_repo_refresh failing with "Alias <x>-global does not exist" while
-            # a freshly built snapshot sat unpublished beside the one being served.
-            #
-            # There is no old_target to validate against when no pointer exists, so
-            # the conflict check this method otherwise performs has nothing to protect.
-            logger.warning(
-                "Alias %s missing on publish; recreating it at %s "
-                "(pointer is derived state, rebuilt from the publish in progress)",
-                alias_name,
-                new_target,
-            )
-            self.create_alias(
-                alias_name=alias_name, target_path=new_target, extra=extra
-            )
-            return
+        with self._get_alias_write_lock(alias_name):
+            alias_data = self.read_record(alias_name)
+            if alias_data is None:
+                # Self-heal rather than abort. The pointer is DERIVED state:
+                # the record that a repo is globally active lives in the global
+                # registry, and the caller has already built and validated the
+                # snapshot being published.  Raising here fails the whole
+                # refresh AND leaves queries served from the previous snapshot,
+                # so a missing pointer degrades into permanently stale answers
+                # that look healthy -- observed on the fleet as every
+                # global_repo_refresh failing with
+                # "Alias <x>-global does not exist" while a freshly built
+                # snapshot sat unpublished beside the one being served.
+                #
+                # There is no old_target to validate against when no pointer
+                # exists, so the conflict check this method otherwise performs
+                # has nothing to protect.
+                logger.warning(
+                    "Alias %s missing on publish; recreating it at %s "
+                    "(pointer is derived state, rebuilt from the publish "
+                    "in progress)",
+                    alias_name,
+                    new_target,
+                )
+                self.create_alias(
+                    alias_name=alias_name, target_path=new_target, extra=extra
+                )
+                return
 
-        current_target = alias_data.get("target_path")
-        if current_target != old_target:
-            raise ValueError(
-                f"Current target '{current_target}' does not match "
-                f"expected old target '{old_target}'"
-            )
+            current_target = alias_data.get("target_path")
+            if current_target != old_target:
+                raise ValueError(
+                    f"Current target '{current_target}' does not match "
+                    f"expected old target '{old_target}'"
+                )
 
-        now = datetime.now(timezone.utc).isoformat()
-        alias_data["target_path"] = new_target
-        alias_data["previous_path"] = old_target
-        alias_data["swapped_at"] = now
-        alias_data["last_refresh"] = now
-        alias_data.pop(INDEX_STORE_ALIAS_FIELD, None)
-        alias_data.pop(INDEX_VERSION_FIELD, None)
-        if extra:
-            alias_data.update(extra)
-        try:
-            self._metadata.put(KIND_ALIAS, alias_name, alias_data)
-        except Exception as e:
-            raise RuntimeError(f"Failed to swap alias {alias_name}: {e}") from e
-        logger.info(f"Swapped alias {alias_name}: {old_target} -> {new_target}")
+            now = datetime.now(timezone.utc).isoformat()
+            alias_data["target_path"] = new_target
+            alias_data["previous_path"] = old_target
+            alias_data["swapped_at"] = now
+            alias_data["last_refresh"] = now
+            alias_data.pop(INDEX_STORE_ALIAS_FIELD, None)
+            alias_data.pop(INDEX_VERSION_FIELD, None)
+            if extra:
+                alias_data.update(extra)
+            try:
+                self._metadata.put(KIND_ALIAS, alias_name, alias_data)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to swap alias {alias_name}: {e}"
+                ) from e
+            logger.info(
+                f"Swapped alias {alias_name}: {old_target} -> {new_target}"
+            )
 
     def get_previous_path(self, alias_name: str) -> Optional[str]:
         """

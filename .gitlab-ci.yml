@@ -230,6 +230,7 @@ smoke:
       tests/unit/server/routers/test_metadata_outbox_admin.py
       tests/unit/global_repos/test_index_store_snapshot.py
       tests/unit/server/startup/test_index_store_wiring.py
+      tests/unit/server/services/test_temporal_shards_cross_pod.py
       tests/unit/server/services/test_index_materializer_cross_pod.py
       tests/unit/server/repositories/test_golden_add_publishes_index.py
       tests/unit/server/repositories/test_add_index_swap_records_published_index.py

@@ -25,8 +25,9 @@ from __future__ import annotations
 
 import logging
 import threading
+from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional, Tuple, cast
+from typing import Any, Callable, Dict, Optional, cast
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.services.hnsw_orphan_sweep.discovery import (
@@ -418,41 +419,62 @@ class HNSWOrphanRepairSweepScheduler:
         test fakes that don't opt in (plain functions/lambdas with no such
         attribute) fall through to the plain single-argument call below.
         """
-        owner = self._published_activated_owner(candidate)
-        if owner is not None:
-            return self._process_published_activated(candidate, owner)
+        if self._is_published_temporal(candidate):
+            return self._process_published_temporal(candidate)
         return self._process_in_place(candidate)
 
-    def _published_activated_owner(self, candidate: Any) -> Optional[Tuple[str, str]]:
-        """``(username, user_alias)`` of an activated candidate whose index is
-        a PUBLISHED artifact (``index_store_backend: delegated``); None for
-        every other candidate, and always None under the local store."""
-        if getattr(candidate, "kind", None) != "activated":
-            return None
+    @staticmethod
+    def _is_published_temporal(candidate: Any) -> bool:
+        """A golden repo's temporal shards under a delegated IndexStore: a
+        published artifact every pod checks out, so a repair must be
+        published, not left on this pod. Always False under the local store."""
+        if getattr(candidate, "kind", None) != "golden_temporal":
+            return False
         from code_indexer.server.startup.index_store_wiring import (
             server_index_store,
         )
 
-        if server_index_store().is_local:
-            return None
-        username, _, user_alias = str(candidate.alias).partition("/")
-        return (username, user_alias) if username and user_alias else None
+        return not server_index_store().is_local
 
-    def _process_published_activated(
-        self, candidate: Any, owner: Tuple[str, str]
-    ) -> SweepOutcome:
-        """An activated copy's index under a delegated IndexStore: repair the
-        version the registry records (fetched first, so an older checkout is
-        never repaired and then published over a newer one) and publish the
-        repair on top of it -- otherwise the repair would live on this pod
-        only and the next checkout would bring the orphans back."""
-        username, user_alias = owner
+    def _process_published_temporal(self, candidate: Any) -> SweepOutcome:
+        """Repair the RECORDED temporal version and publish the repair.
+
+        This pod first holds exactly the version the alias records (an older
+        checkout is swapped, so a stale copy is never repaired and published
+        over a newer one); a repair is published on top of that version
+        and recorded only while the alias still records it
+        (``update_fields_if``: serialized against ``swap_alias`` within a
+        process via a per-alias lock, so a refresh landing in the same
+        process cannot interleave; a stale write from a different process
+        is corrected by the next refresh).  Shards no pointer records were
+        never published: repaired in place, as before.
+        """
+        from code_indexer.global_repos.alias_manager import AliasManager
+        from code_indexer.server.services.temporal_index_store import (
+            ensure_temporal_root,
+            publish_temporal_root,
+            recorded_temporal,
+        )
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+        from code_indexer.utils.index_store import TEMPORAL_INDEX_VERSION_FIELD
+
+        root = Path(candidate.repo_root)
+        golden_repos_dir, bare_alias = root.parent.parent, root.name
+        global_alias = f"{bare_alias}-global"
+        store = server_index_store()
         try:
-            self._activated_repo_manager.serve_index_here(username, user_alias)
+            aliases = AliasManager(str(golden_repos_dir / "aliases"))
+            document = aliases.read_record(global_alias)
+            recorded = recorded_temporal(document)
+            if recorded is None:
+                return self._process_in_place(candidate)
+            ensure_temporal_root(root, document, bare_alias, store=store)
         except Exception:
             logger.error(
                 "HNSWOrphanRepairSweepScheduler: could not fetch the published "
-                "index of %s before repairing it",
+                "temporal shards of %s before repairing them",
                 candidate.sort_key,
                 exc_info=True,
             )
@@ -460,8 +482,20 @@ class HNSWOrphanRepairSweepScheduler:
         outcome = self._process_in_place(candidate)
         if outcome != SweepOutcome.REPAIRED:
             return outcome
+        base = recorded[1]
         try:
-            self._activated_repo_manager.publish_index(username, user_alias)
+            fields = publish_temporal_root(
+                golden_repos_dir, bare_alias, store=store, base_version=base
+            )
+            if not aliases.update_fields_if(
+                global_alias, {TEMPORAL_INDEX_VERSION_FIELD: base}, fields
+            ):
+                logger.warning(
+                    "HNSWOrphanRepairSweepScheduler: %s moved past version %s "
+                    "while it was repaired; the repair was not recorded",
+                    global_alias,
+                    base,
+                )
         except Exception:
             logger.error(
                 "HNSWOrphanRepairSweepScheduler: repaired %s but could not "

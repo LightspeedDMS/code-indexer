@@ -5567,17 +5567,24 @@ class GoldenRepoManager:
         """Atomically swap alias JSON to new snapshot; schedule old snapshot cleanup.
 
         ``published``: the alias-document fields of the snapshot's published
-        index (delegated IndexStore), written with the pointer.
+        index (delegated IndexStore), written with the pointer. The recorded
+        temporal-shard version is carried over: the shards live outside the
+        snapshot and a branch change does not rebuild them.
         """
         # Import here to avoid circular dependency (alias_manager imports from server)
         from code_indexer.global_repos.alias_manager import AliasManager
+        from code_indexer.utils.index_store import recorded_temporal_fields
 
         global_alias = f"{alias}-global"
         alias_manager = AliasManager(os.path.join(self.golden_repos_dir, "aliases"))
 
         current_target = alias_manager.read_alias(global_alias)
+        extra = {
+            **recorded_temporal_fields(alias_manager.read_record(global_alias)),
+            **(published or {}),
+        }
         alias_manager.create_alias(
-            global_alias, new_snapshot_path, repo_name=alias, extra=published
+            global_alias, new_snapshot_path, repo_name=alias, extra=extra or None
         )
 
         # Evict stale HNSW + chunk-store cache entries for the old
@@ -6345,6 +6352,12 @@ class GoldenRepoManager:
                         # data lives at {golden_repos_dir}/.temporal/{alias}/ --
                         # so --clear was always appended and the real shards were
                         # destroyed on the first admin reindex.
+                        # Delegated IndexStore: the --clear decision and the
+                        # build both need the published shards on this pod
+                        # (the child's result is published with this job's
+                        # snapshot, via note_temporal_indexed below).
+                        if scheduler is not None:
+                            scheduler.serve_temporal_shards(f"{alias}-global")
                         _index_dir = Path(repo_path) / ".code-indexer" / "index"
                         _clear_flags = (
                             ["--clear"]
@@ -6456,6 +6469,8 @@ class GoldenRepoManager:
                             error_label="create temporal index",
                             env=_temporal_env,
                         )
+                        if scheduler is not None:
+                            scheduler.note_temporal_indexed(f"{alias}-global")
 
                         # Bug #131: Update enable_temporal flag in BOTH tables
                         if self._sqlite_backend.update_enable_temporal(alias, True):

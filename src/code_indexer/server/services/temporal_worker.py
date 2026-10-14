@@ -238,8 +238,8 @@ def _resolve_golden_temporal_context(
         ValueError: the alias is known but its fixed root cannot be derived.
         Exception: any lineage-lookup failure propagates unchanged.
     """
-    from code_indexer.services.temporal.temporal_server_paths import (
-        server_temporal_index_root,
+    from code_indexer.server.services.temporal_index_store import (
+        served_temporal_index_root,
     )
 
     manager = _resolve_lineage_repo_manager(activated_repo_manager)
@@ -254,7 +254,7 @@ def _resolve_golden_temporal_context(
     return _GoldenTemporalContext(
         golden_repo_alias,
         manager,
-        server_temporal_index_root(golden_repos_dir, golden_repo_alias),
+        served_temporal_index_root(golden_repos_dir, golden_repo_alias),
     )
 
 
