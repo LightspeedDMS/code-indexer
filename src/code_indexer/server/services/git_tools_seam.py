@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from code_indexer.server.storage.shared.git_backend import GitCommandRunner
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 #: git's commit-identity variables -> git-mcp ``git_exec`` identity fields.
 _IDENTITY_ENV = {
@@ -76,7 +77,10 @@ class DelegatedGitTools:
         )
         if check and result.returncode != 0:
             raise subprocess.CalledProcessError(
-                result.returncode, list(cmd), output=result.stdout, stderr=result.stderr
+                result.returncode,
+                list(cmd),
+                output=redact_url_credentials(result.stdout),
+                stderr=redact_url_credentials(result.stderr),
             )
         return result
 
