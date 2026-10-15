@@ -383,11 +383,13 @@ class TestHotReloadThreadSafety:
 
         # Issue a bounded sequence of hot-reload updates on the main thread.
         deadline = time.monotonic() + MAIN_THREAD_DEADLINE_SECONDS
+        applied: list[int] = []
         try:
             for cap in CAP_SEQUENCE_MB:
                 if time.monotonic() > deadline:
                     break
                 service.update_setting("cache", "index_cache_max_size_mb", cap)
+                applied.append(cap)
                 time.sleep(MAIN_UPDATE_INTERVAL_SECONDS)
         finally:
             stop_flag.set()
@@ -401,7 +403,10 @@ class TestHotReloadThreadSafety:
             "Background churn thread must exit cleanly within "
             f"{WORKER_JOIN_TIMEOUT_SECONDS}s after stop_flag set."
         )
-        final_expected = CAP_SEQUENCE_MB[-1]
+        # Under load the deadline can stop the sequence early: the invariant
+        # is that the live cap reflects the last update actually applied.
+        assert applied, "at least one hot-reload update must be applied"
+        final_expected = applied[-1]
         assert cache.config.max_cache_size_mb == final_expected, (
             "Fix B.2 thread-safety: final cap must reflect the last update "
             f"value {final_expected!r}; got {cache.config.max_cache_size_mb!r}."

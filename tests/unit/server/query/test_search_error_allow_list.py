@@ -118,6 +118,9 @@ def test_repository_not_found_names_only_the_alias() -> None:
 # --------------------------------------------------------------------- REST
 
 
+# The shared `env` fixture builds a Tantivy corpus and an isolated app: same
+# allowance as its owning module (test_search_failures_front_doors_2109).
+@pytest.mark.timeout(45)
 def test_rest_fts_failure_body_holds_no_internal_detail(
     rest,  # noqa: F811 -- pytest fixture
     env,  # noqa: F811 -- pytest fixture
@@ -140,6 +143,7 @@ def test_rest_fts_failure_body_holds_no_internal_detail(
 # ---------------------------------------------------------------------- MCP
 
 
+@pytest.mark.timeout(45)
 def test_mcp_unclassified_error_body_holds_no_internal_detail(
     env,  # noqa: F811 -- pytest fixture
     tmp_path: Path,
