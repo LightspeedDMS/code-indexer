@@ -193,28 +193,6 @@ def test_golden_errors_match_local(
     assert str(remote.value) == str(local.value)
 
 
-@pytest.mark.parametrize(
-    "call",
-    [
-        lambda s: s.get_blame("a.txt"),
-        lambda s: s.get_file_history("a.txt"),
-        lambda s: s.search_commits("first"),
-        lambda s: s.search_diffs(search_string="one"),
-        lambda s: s.get_diff("HEAD~1", "HEAD"),
-        lambda s: s.get_log(path="a.txt"),
-        lambda s: s.get_log(author="Ada"),
-        lambda s: s.show_commit("HEAD"),  # include_stats defaults to True
-        lambda s: s.show_commit("HEAD", include_stats=False, include_diff=True),
-    ],
-)
-def test_golden_without_a_seam_operation_refuses_before_any_git(
-    pod: Path, seam: MappedGit, no_local_git: None, call: Any
-) -> None:
-    with pytest.raises(DelegatedRepositoryUnsupportedError, match="git-mcp exposes"):
-        call(GoldenGitService(pod, git_backend=seam))
-    assert seam.calls == []
-
-
 def test_golden_backend_failure_is_an_error_not_empty(
     pod: Path, seam: MappedGit
 ) -> None:
@@ -343,19 +321,6 @@ def test_handler_reads_through_the_seam(handlers: Any, no_local_git: None) -> No
     assert data["success"] is True and data["content"] == "one\n"
 
 
-def test_handler_refusal_is_an_error(handlers: Any, no_local_git: None) -> None:
-    user = SimpleNamespace(username="u")
-    data = _payload(
-        handlers.handle_git_blame(
-            {"repository_alias": "repo-global", "path": "a.txt"}, user
-        )
-    )
-    assert data["success"] is False
-    assert (
-        "git_blame is not supported with content_backend='delegated'" in data["error"]
-    )
-
-
 # ── user git tools on golden repos ─────────────────────────────────────────
 
 
@@ -392,15 +357,6 @@ def test_user_git_reads_match_local_through_the_seam(
     )
     assert actual == expected
     assert expected[3]["untracked"] == ["new.txt"]
-
-
-def test_user_git_log_with_filters_refuses(
-    pod: Path, seam: MappedGit, user_service: Any
-) -> None:
-    for filters in ({"since_date": "2024-01-01"}, {"author": "Ada"}, {"path": "a"}):
-        with pytest.raises(DelegatedRepositoryUnsupportedError):
-            user_service.git_log(pod, git_backend=seam, **filters)
-    assert seam.calls == []
 
 
 def test_user_git_backend_failure_is_an_error(

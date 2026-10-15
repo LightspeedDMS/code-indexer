@@ -572,6 +572,30 @@ def git_operation(
     return f"git {_verb(argv) or '<dynamic>'}"
 
 
+_TREE_TOOLS = frozenset(
+    {"rg", "grep", "find", "cp", "mv", "rm", "rsync", "tar", "du", "ls", "cat"}
+)
+
+
+def tree_tool_operation(call: ast.Call, spawn_aliases: Dict[str, str]) -> Optional[str]:
+    """``spawn <program>`` for a spawn whose literal program is a tree tool."""
+    kind = _call_kind(call, spawn_aliases)
+    if kind not in ("list", "varargs", "string") or not call.args:
+        return None
+    first = call.args[0]
+    program: Optional[str] = None
+    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+        words = first.value.split()
+        program = words[0] if words else None
+    elif isinstance(first, (ast.List, ast.Tuple)) and first.elts:
+        head = first.elts[0]
+        if isinstance(head, ast.Constant) and isinstance(head.value, str):
+            program = head.value
+    if program is None or Path(program).name not in _TREE_TOOLS:
+        return None
+    return f"spawn {Path(program).name}"
+
+
 def scan_source(module: str, source: str) -> Counter:
     tree = ast.parse(source)
     aliases = import_aliases(tree)
@@ -615,6 +639,9 @@ def scan_source(module: str, source: str) -> Counter:
             git_op = git_operation(node, tree, functions[-1], spawn_aliases)
             if git_op is not None:
                 found[(module, where, git_op)] += 1
+            tool_op = tree_tool_operation(node, spawn_aliases)
+            if tool_op is not None:
+                found[(module, where, tool_op)] += 1
             self.generic_visit(node)
 
     _Visitor().visit(tree)
@@ -1245,31 +1272,5 @@ def refusal_evidence(module: str, function: str) -> List[str]:
         }
 
 
-def tree_tool_operation(call: ast.Call, spawn_aliases: Dict[str, str]) -> Optional[str]:
-    """``spawn <program>`` for a spawn whose literal program is a tree tool."""
-    kind = _call_kind(call, spawn_aliases)
-    if kind not in ("list", "varargs", "string") or not call.args:
-        return None
-    first = call.args[0]
-    program: Optional[str] = None
-    if isinstance(first, ast.Constant) and isinstance(first.value, str):
-        # One string is a shell command line (or a lone program name).
-        words = first.value.split()
-        program = words[0] if words else None
-    elif isinstance(first, (ast.List, ast.Tuple)) and first.elts:
-        head = first.elts[0]
-        if isinstance(head, ast.Constant) and isinstance(head.value, str):
-            program = head.value
-    if program is None or Path(program).name not in _TREE_TOOLS:
-        return None
-    return f"spawn {Path(program).name}"
-
-
 _REFUSAL_EVIDENCE = re.compile(r"refus|DelegatedRepositoryUnsupported", re.I)
-
-
-
-_TREE_TOOLS = frozenset(
-    {"rg", "grep", "find", "cp", "mv", "rm", "rsync", "tar", "du", "ls", "cat"}
-)
 

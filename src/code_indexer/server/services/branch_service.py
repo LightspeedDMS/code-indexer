@@ -124,9 +124,12 @@ class BranchService:
         from code_indexer.server.startup.content_backend_wiring import (
             golden_repo_content_root,
             is_content_seam_delegated,
+            is_pod_local_golden_path,
         )
 
         if not is_content_seam_delegated():
+            return False
+        if is_pod_local_golden_path(self.git_topology_service.codebase_dir):
             return False
         from code_indexer.server.startup.git_backend_wiring import (
             server_delegated_git_backend,

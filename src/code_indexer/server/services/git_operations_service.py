@@ -1259,7 +1259,7 @@ class GitOperationsService:
             branch = validate_revision_range(branch, repo_path, param_name="branch")
             format_str = "%H\x1f%an\x1f%ai\x1f%s"
 
-            if git_backend is not None:
+            if git_backend is not None and not (since_date or until or author or path):
                 total_commits, log_stdout = self._git_log_through_backend(
                     git_backend,
                     repo_path,
@@ -1267,7 +1267,6 @@ class GitOperationsService:
                     branch=branch,
                     offset=offset,
                     limit=effective_limit,
-                    filtered=bool(since_date or until or author or path),
                 )
                 return self._git_log_page(
                     repo_path, log_stdout, total_commits, offset=offset, limit=limit
@@ -1289,7 +1288,8 @@ class GitOperationsService:
                 count_cmd.append("--")
                 count_cmd.append(path)
 
-            count_result = run_git_command(
+            run = self._runner_for(git_backend)
+            count_result = run(
                 count_cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1323,7 +1323,7 @@ class GitOperationsService:
                 cmd.append("--")
                 cmd.append(path)
 
-            result = run_git_command(
+            result = run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1358,23 +1358,13 @@ class GitOperationsService:
         branch: Optional[str],
         offset: int,
         limit: int,
-        filtered: bool,
     ) -> "tuple[int, str]":
         """:meth:`git_log`'s count and page through git-mcp: ``rev_list_count``
         and ``log_raw`` -- the same two commands for an unfiltered log."""
         from code_indexer.global_repos.git_operations import (
             decode_like_run_git_command,
         )
-        from code_indexer.server.services.delegated_refusal import (
-            DelegatedRepositoryUnsupportedError,
-        )
 
-        if filtered:
-            raise DelegatedRepositoryUnsupportedError(
-                "git_log with a since, until, author or path filter",
-                "git-mcp counts and lists commits without those filters, and "
-                "this pod does not hold the repository",
-            )
         timeout = self._git_timeouts.git_local_timeout
         repo = str(repo_path)
         total_commits = git_backend.rev_list_count(
@@ -3359,7 +3349,7 @@ class GitOperationsService:
         golden reader (git-mcp ``git_exec``; golden repositories are never
         modified)."""
         if git_backend is None:
-            return self._git_run
+            return run_git_command
         from code_indexer.server.services.git_tools_seam import golden_git_reader
 
         return golden_git_reader(git_backend).run

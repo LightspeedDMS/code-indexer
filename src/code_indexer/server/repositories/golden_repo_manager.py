@@ -994,8 +994,30 @@ class GoldenRepoManager:
                 "local://"
             ):
                 # The clone is with git-mcp/workspace-mcp; its index state is
-                # here. Remove both -- the clone only while no registry row
-                # names it (see _discard_failed_delegated_clone).
+                # here. Remove both, and only while no registry row names the
+                # alias: a row means a registered repository (a reclaimed
+                # re-run of an add whose first executor committed it), whose
+                # index state and clone are live, not this failure's debris.
+                try:
+                    registered = self.get_golden_repo(alias) is not None
+                except Exception as lookup_exc:
+                    logging.error(
+                        "Bug #1218: registration of '%s' failed and its registry "
+                        "row could not be read (%s); its index state and clone "
+                        "at %s are kept",
+                        alias,
+                        lookup_exc,
+                        clone_path,
+                    )
+                    return
+                if registered:
+                    logging.warning(
+                        "Bug #1218: registration of '%s' failed; its index state "
+                        "and clone at %s are kept: a registry row still names it",
+                        alias,
+                        clone_path,
+                    )
+                    return
                 try:
                     self._remove_pod_index_state(clone_path)
                 except OSError as cleanup_exc:
@@ -1382,10 +1404,19 @@ class GoldenRepoManager:
                 reason,
             )
             return removed
+        copies = self._delegated_working_copies_if_wired()
+        if copies is None:
+            logging.warning(
+                "add_golden_repo for '%s': no workspace-mcp clone backend "
+                "(clone_backend='delegated') is wired, so a partial clone an "
+                "interrupted add may have left at %s cannot be removed; if one "
+                "is there, the clone fails with 'destination exists'",
+                alias,
+                clone_path,
+            )
+            return removed
         try:
-            deleted = self._delegated_working_copies(
-                f"add_golden_repo retry for '{alias}'"
-            ).remove(clone_path)
+            deleted = copies.remove(clone_path)
         except GitOperationError:
             raise
         except Exception as exc:  # workspace-mcp transport / HTTP error

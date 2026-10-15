@@ -55,12 +55,13 @@ def _scheduler(golden: Path, snapshot_manager: Any = None) -> RefreshScheduler:
     )
 
 
-def _drift(monkeypatch: pytest.MonkeyPatch, added: set) -> None:
+def _drift(monkeypatch: pytest.MonkeyPatch, added: set) -> MagicMock:
     service = MagicMock()
     service.sync_repo_extensions_if_drifted.return_value = SimpleNamespace(
         added=added, removed=set()
     )
     monkeypatch.setattr(rs, "get_config_service", lambda: service)
+    return service
 
 
 def _seed_remote(world: MetaWorld, rel: str) -> None:
