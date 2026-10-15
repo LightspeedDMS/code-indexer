@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.90.0] - 2026-10-15
+
+### Upgrade notes
+
+- Server: on first start, 12.90.0 creates a random key for stored secrets (solo: `.token_encryption_key`, mode 0600, in the server data directory; cluster: one shared `cluster_secrets` row) and rewrites stored git credentials, CI tokens and the LLM lease state in a new format. This is a one-way upgrade: 12.89 and earlier cannot read the new format. After a downgrade, stored credentials show as unconfigured until the server is upgraded again; nothing is deleted.
+- Server: back up `.token_encryption_key` together with the database. Restoring the database without it means re-entering stored credentials. Keep the existing `.encryption_key_salt` until the startup log reports `remaining=0` for the stored-secret sweep on every node.
+- Server: startup stops if the key file cannot be read, is corrupt, is not a regular file owned by the service user, or cannot be created; a key file with wider permissions is set to 0600 with a warning.
+- Server (cluster): values are written in the new format only after every node seen in the last 24 hours runs 12.90.0, so nodes on an earlier version keep reading credentials during a rolling upgrade. Credentials that only one node can read convert when that node uses them or restarts.
+- Server: a stored credential that cannot be read is kept, marked as needing re-entry, counted on health (DEGRADED) and flagged on the git credentials page and the CI token settings; saving it again clears the mark.
+- Server: PostgreSQL migration 076 adds two nullable columns to the stored-credential tables; SQLite adds them in place.
+
+### Security
+
+- Server: stored git credentials, CI tokens and the LLM lease state are encrypted with a random key created by the server, using authenticated encryption; a wrong key or a changed value is detected. The key is shared by every node of a cluster.
+
 ## [12.89.0] - 2026-10-14
 
 ### Upgrade notes
