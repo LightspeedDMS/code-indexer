@@ -77,6 +77,8 @@ def test_corrupt_store_child_exit_code_is_not_the_generic_failure_code(
     )
 
 
+# Runs two real `cidx index` children sequentially; each pays interpreter + CLI startup.
+@pytest.mark.timeout(60)
 def test_unreadable_store_exit_code_differs_from_corruption_code(
     corrupt_repo: Path, unreadable_repo: Path
 ) -> None:

@@ -3854,6 +3854,8 @@ function saveLlmCredsConfig() {
                         <td class="config-value">
                             {% if github_token_data %}
                                 <span style="color: green;">Configured</span>
+                            {% elif api_keys_status and api_keys_status.github and api_keys_status.github.needs_reentry %}
+                                <span style="color: #b45309;">Needs re-entry (the stored token cannot be decrypted)</span>
                             {% else %}
                                 <span style="color: gray;">Not configured</span>
                             {% endif %}
@@ -3913,6 +3915,8 @@ function saveLlmCredsConfig() {
                         <td class="config-value">
                             {% if gitlab_token_data %}
                                 <span style="color: green;">Configured</span>
+                            {% elif api_keys_status and api_keys_status.gitlab and api_keys_status.gitlab.needs_reentry %}
+                                <span style="color: #b45309;">Needs re-entry (the stored token cannot be decrypted)</span>
                             {% else %}
                                 <span style="color: gray;">Not configured</span>
                             {% endif %}

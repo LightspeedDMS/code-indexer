@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from ..stored_secret_rows import PostgresStoredSecretRowsMixin
+
 if TYPE_CHECKING:
     pass
 
@@ -19,13 +21,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class CITokensPostgresBackend:
+class CITokensPostgresBackend(PostgresStoredSecretRowsMixin):
     """
     PostgreSQL backend for CI token storage.
 
     Satisfies the CITokensBackend protocol.
     Accepts a psycopg v3 connection pool in __init__.
     """
+
+    _SECRET_TABLE = "ci_tokens"
+    _SECRET_PK = "platform"
+    _SECRET_LABELS = ("base_url",)
 
     def __init__(self, pool: Any) -> None:
         """
@@ -46,7 +52,9 @@ class CITokensPostgresBackend:
                    VALUES (%s, %s, %s)
                    ON CONFLICT (platform) DO UPDATE SET
                        encrypted_token = EXCLUDED.encrypted_token,
-                       base_url = EXCLUDED.base_url""",
+                       base_url = EXCLUDED.base_url,
+                       needs_reentry_at = NULL,
+                       needs_reentry_node = NULL""",
                 (platform, encrypted_token, base_url),
             )
         logger.info(f"Saved CI token for platform: {platform}")
@@ -55,13 +63,19 @@ class CITokensPostgresBackend:
         """Get token for a platform."""
         with self._pool.connection() as conn:
             cursor = conn.execute(
-                "SELECT platform, encrypted_token, base_url FROM ci_tokens WHERE platform = %s",
+                "SELECT platform, encrypted_token, base_url, needs_reentry_at"
+                " FROM ci_tokens WHERE platform = %s",
                 (platform,),
             )
             row = cursor.fetchone()
         if row is None:
             return None
-        return {"platform": row[0], "encrypted_token": row[1], "base_url": row[2]}
+        return {
+            "platform": row[0],
+            "encrypted_token": row[1],
+            "base_url": row[2],
+            "needs_reentry_at": row[3],
+        }
 
     def delete_token(self, platform: str) -> bool:
         """Delete token for a platform. Returns True if a row was deleted."""
@@ -90,19 +104,6 @@ class CITokensPostgresBackend:
                 "base_url": row[2],
             }
         return result
-
-    def update_encrypted_token(self, platform: str, new_encrypted_token: str) -> None:
-        """Update encrypted token for lazy re-encryption (Story #999).
-
-        Args:
-            platform: Platform identifier (e.g. "github", "gitlab").
-            new_encrypted_token: New ciphertext produced by the canonical key.
-        """
-        with self._pool.connection() as conn:
-            conn.execute(
-                "UPDATE ci_tokens SET encrypted_token = %s WHERE platform = %s",
-                (new_encrypted_token, platform),
-            )
 
     def close(self) -> None:
         """Close the connection pool."""

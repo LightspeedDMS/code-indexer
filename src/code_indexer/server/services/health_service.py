@@ -567,6 +567,20 @@ class HealthCheckService:
         reasons = unrepairable_refresh_health_reasons(registry)
         return bool(reasons), False, reasons
 
+    def _collect_stored_credential_failures(self) -> Tuple[bool, bool, List[str]]:
+        """Stored credentials no key decrypts (shared DB marks, so every node
+        reports them). DEGRADED only. A process without a backend registry
+        reports nothing; stored_credential_health_reasons turns a read failure
+        into a reason of its own."""
+        from ..app import app as app_module
+        from .stored_credentials_health import stored_credential_health_reasons
+
+        registry = getattr(app_module.state, "backend_registry", None)
+        if registry is None:
+            return False, False, []
+        reasons = stored_credential_health_reasons(registry)
+        return bool(reasons), False, reasons
+
     def _read_fleet_migration_unrecoverable_aliases(self) -> List[str]:
         """
         Read every golden_alias currently recorded with the PERMANENT
@@ -1517,6 +1531,11 @@ class HealthCheckService:
         urf_warn, _urf_err, urf_reasons = self._collect_unrepairable_refresh_failures()
         has_warning = has_warning or urf_warn
         failure_reasons.extend(urf_reasons)
+
+        # Stored credentials needing re-entry -- DEGRADED only.
+        scr_warn, _scr_err, scr_reasons = self._collect_stored_credential_failures()
+        has_warning = has_warning or scr_warn
+        failure_reasons.extend(scr_reasons)
 
         # Bug #2114: search events dropped recently on this node -- DEGRADED
         # only (a full recording queue never drains a node).

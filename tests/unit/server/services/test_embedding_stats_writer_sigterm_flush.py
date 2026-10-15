@@ -405,10 +405,20 @@ _FORKING_CHILD = textwrap.dedent(
     )
     writer.start()
     assert writer.install_sigterm_flush()
-    forked = multiprocessing.get_context("fork").Process(target=time.sleep, args=(30,))
+    ctx = multiprocessing.get_context("fork")
+    ready = ctx.Event()
+
+    def _ready_then_sleep():
+        ready.set()
+        time.sleep(30)
+
+    forked = ctx.Process(target=_ready_then_sleep)
     forked.start()
+    # signal only once the child runs Python code: a SIGTERM delivered
+    # during its post-fork interpreter setup can be cleared by CPython
+    assert ready.wait(30)
     os.kill(forked.pid, signal.SIGTERM)
-    forked.join(5)
+    forked.join(20)
     print(forked.exitcode, flush=True)
     if forked.exitcode is None:
         forked.kill()

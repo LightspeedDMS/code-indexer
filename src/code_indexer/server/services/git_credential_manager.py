@@ -7,7 +7,6 @@ Manages per-user git forge credentials with AES-256-CBC encryption.
 Validates tokens against the forge API before storing.
 """
 
-import functools
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -21,13 +20,7 @@ from code_indexer.server.storage.protocols import GitCredentialsBackend
 from code_indexer.server.storage.sqlite_backends import GitCredentialsSqliteBackend
 from code_indexer.utils.credential_redaction import stored_secret_tail
 from .audit_outcome import conforming_details, record_outcome, record_outcome_async
-from .token_encryption import (
-    derive_key_from_salt as _derive_key_from_salt_fn,
-    derive_encryption_key as _derive_encryption_key_fn,
-    encrypt_token as _encrypt_token_fn,
-    decrypt_single as _decrypt_single_fn,
-    decrypt_with_fallback as _decrypt_with_fallback_fn,
-)
+from .stored_secret_key import StoredSecretCipher
 
 logger = logging.getLogger(__name__)
 
@@ -110,57 +103,56 @@ class GitCredentialManager:
         self._backend: GitCredentialsBackend = (
             backend if backend is not None else GitCredentialsSqliteBackend(db_path)
         )
-        self._cluster_secret = cluster_secret
-        self._server_dir_for_salt: Optional[Path] = None
+        key_dir = Path(db_path).parent
         if server_dir is not None:
             candidate = Path(server_dir)
             if candidate.is_dir():
-                self._server_dir_for_salt = candidate
+                key_dir = candidate
             else:
                 logger.warning(
                     "GitCredentialManager: server_dir %s is not a directory — "
-                    "ignoring for salt-based key derivation",
+                    "using the database directory for the stored-secret key",
                     server_dir,
                 )
-        self._encryption_key = self._derive_encryption_key()
-
-    def _derive_encryption_key(self) -> bytes:
-        """Derive AES-256 key using token_encryption priority chain (Story #999)."""
-        return _derive_encryption_key_fn(
-            server_dir_for_salt=self._server_dir_for_salt,
-            cluster_secret=self._cluster_secret,
+        self._cipher = StoredSecretCipher(
+            key_dir, "GitCredentialManager", cluster_secret=cluster_secret
         )
-
-    @staticmethod
-    def _derive_key_from_salt(salt_input: str) -> bytes:
-        """Derive AES-256 key from a salt string — delegates to token_encryption."""
-        return _derive_key_from_salt_fn(salt_input)
 
     def _encrypt_token(self, plaintext: str) -> str:
-        """Encrypt plaintext using AES-256-CBC — delegates to token_encryption."""
-        return _encrypt_token_fn(plaintext, self._encryption_key)
+        """Encrypt a token for storage (v2 when the cluster gate allows)."""
+        return self._cipher.encrypt(plaintext)
 
-    @staticmethod
-    def _do_decrypt(encrypted: str, key: bytes) -> str:
-        """Decrypt with explicit key — delegates to token_encryption."""
-        return _decrypt_single_fn(encrypted, key)
+    def _read_token(self, cred: Dict[str, Any]) -> str:
+        """Decrypt a stored token, rewriting a legacy value as v2 (CAS).
 
-    def _decrypt_token(self, encrypted: str) -> Tuple[str, bool]:
-        """Decrypt token with canonical key, falling back to hostname key (Story #999).
-
-        Returns:
-            Tuple of (plaintext: str, used_fallback: bool). Callers must re-encrypt
-            the token when used_fallback is True (Story #999 lazy re-encryption).
-
-        Raises:
-            ValueError: If both canonical and hostname-fallback keys fail.
-            binascii.Error: If the input is not valid base64.
-        """
-        return _decrypt_with_fallback_fn(
-            encrypted,
-            canonical_key=self._encryption_key,
-            context_label="GitCredentialManager",
-        )
+        An undecryptable value is marked as needing re-entry (never deleted)
+        and its ValueError propagates."""
+        encrypted = cred["encrypted_token"]
+        credential_id = cred["credential_id"]
+        try:
+            plaintext = self._cipher.read(
+                encrypted,
+                lambda old, new: self._backend.replace_encrypted_token_if_unchanged(
+                    credential_id, old, new
+                ),
+            )
+            # Readable again (e.g. the right key restored): drop a stale mark.
+            # Only a marked row is written; an unmarked read stays read-only.
+            if cred.get("needs_reentry_at"):
+                self._backend.clear_needs_reentry(credential_id, encrypted)
+            return plaintext
+        except ValueError:
+            try:
+                self._backend.mark_needs_reentry(
+                    credential_id, encrypted, node_id=self._cipher.node_id
+                )
+            except Exception:
+                logger.warning(
+                    "Could not mark git credential %s as needing re-entry",
+                    credential_id,
+                    exc_info=True,
+                )
+            raise
 
     async def configure_credential(
         self,
@@ -176,24 +168,23 @@ class GitCredentialManager:
         identity = await client.validate_and_discover(token, forge_host)
 
         credential_id = str(uuid.uuid4())
-        encrypted_token = self._encrypt_token(token)
         now = datetime.now(timezone.utc).isoformat()
 
-        # Synchronous storage write: run it off the event loop.
-        await anyio.to_thread.run_sync(
-            functools.partial(
-                self._backend.upsert_credential,
+        def _store_credential() -> None:
+            # Encryption may query the cluster gate: keep it with the write.
+            self._backend.upsert_credential(
                 credential_id=credential_id,
                 username=username,
                 forge_type=forge_type,
                 forge_host=forge_host,
-                encrypted_token=encrypted_token,
+                encrypted_token=self._encrypt_token(token),
                 git_user_name=identity.get("git_user_name"),
                 git_user_email=identity.get("git_user_email"),
                 forge_username=identity.get("forge_username"),
                 name=name,
             )
-        )
+
+        await anyio.to_thread.run_sync(_store_credential)
 
         return {
             "success": True,
@@ -280,21 +271,26 @@ class GitCredentialManager:
         raw = self._backend.list_credentials(username)
         result = []
         for cred in raw:
-            entry = {k: v for k, v in cred.items() if k != "encrypted_token"}
+            entry = {
+                k: v
+                for k, v in cred.items()
+                if k not in ("encrypted_token", "needs_reentry_at")
+            }
             try:
-                plaintext, used_fallback = self._decrypt_token(cred["encrypted_token"])
-                entry["token_suffix"] = stored_secret_tail(plaintext)
-                if used_fallback:
-                    new_enc = self._encrypt_token(plaintext)
-                    self._backend.update_encrypted_token(cred["credential_id"], new_enc)
-            except Exception:
+                entry["token_suffix"] = stored_secret_tail(self._read_token(cred))
+                entry["needs_reentry"] = False
+            except Exception as exc:
+                # A ValueError is a value no key on this node decrypts.
+                entry["token_suffix"] = "????"
+                entry["needs_reentry"] = isinstance(exc, ValueError)
+                if entry["needs_reentry"]:
+                    entry["needs_reentry_node"] = self._cipher.node_id
                 logger.warning(
-                    "Failed to decrypt token for credential %s (user=%s) — possible key derivation mismatch",
+                    "Failed to read token for credential %s (user=%s, %s)",
                     cred.get("credential_id"),
                     username,
-                    exc_info=True,
+                    type(exc).__name__,
                 )
-                entry["token_suffix"] = "????"
             result.append(entry)
         return result
 
@@ -314,12 +310,12 @@ class GitCredentialManager:
         cred = self._backend.get_credential_for_host(username, forge_host)
         if cred is None:
             return None
-        result = {k: v for k, v in cred.items() if k != "encrypted_token"}
-        plaintext, used_fallback = self._decrypt_token(cred["encrypted_token"])
-        result["token"] = plaintext
-        if used_fallback:
-            new_enc = self._encrypt_token(plaintext)
-            self._backend.update_encrypted_token(cred["credential_id"], new_enc)
+        result = {
+            k: v
+            for k, v in cred.items()
+            if k not in ("encrypted_token", "needs_reentry_at")
+        }
+        result["token"] = self._read_token(cred)
         return result
 
 
@@ -333,9 +329,9 @@ def create_git_credential_manager(
 ) -> GitCredentialManager:
     """Factory for GitCredentialManager — ensures consistent encryption key.
 
-    Story #999: Calls ensure_encryption_key_salt() to seed .encryption_key_salt
-    from .jwt_secret (in postgres mode) or hostname (in sqlite mode), then passes
-    server_dir to GitCredentialManager so it reads the salt file for key derivation.
+    The stored-secret key lives in server_dir (solo) or cluster_secrets
+    (cluster). In postgres mode the legacy salt file is still seeded: legacy
+    writes use it while a cluster node cannot yet read v2 values.
 
     Raises:
         ValueError: If storage_mode is not "sqlite" or "postgres", or if
@@ -350,14 +346,13 @@ def create_git_credential_manager(
             f"Invalid storage_mode {storage_mode!r}. Must be one of: {_VALID_STORAGE_MODES}"
         )
 
-    from code_indexer.server.services.encryption_key_salt import (
-        ensure_encryption_key_salt,
-    )
-
-    ensure_encryption_key_salt(Path(server_dir), storage_mode)
-
     backend: Optional[GitCredentialsBackend] = None
     if storage_mode == "postgres":
+        from code_indexer.server.services.encryption_key_salt import (
+            ensure_encryption_key_salt,
+        )
+
+        ensure_encryption_key_salt(Path(server_dir), storage_mode)
         from code_indexer.server.services.config_service import get_config_service
         from code_indexer.server.storage.postgres.connection_pool import ConnectionPool
         from code_indexer.server.storage.postgres.git_credentials_backend import (

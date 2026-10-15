@@ -111,7 +111,7 @@ class TestCreateTokenManagerSaltIntegration:
             storage_mode="postgres",
         )
 
-        assert mgr1._encryption_key == mgr2._encryption_key
+        assert mgr1._cipher._v2_key == mgr2._cipher._v2_key
 
     def test_postgres_factory_salt_file_created_from_jwt_secret(
         self, server_dir, db_path
@@ -227,4 +227,4 @@ class TestCreateGitCredentialManagerSaltIntegration:
             )
         )
 
-        assert mgr1._encryption_key == mgr2._encryption_key
+        assert mgr1._cipher._v2_key == mgr2._cipher._v2_key

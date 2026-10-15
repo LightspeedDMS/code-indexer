@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..database_manager import DatabaseConnectionManager
+from ..stored_secret_rows import SqliteStoredSecretRowsMixin
 
 logger = logging.getLogger(__name__)
 
@@ -30,15 +31,20 @@ def _row_to_credential_dict(row: Any) -> Dict[str, Any]:
         "name": row[8],
         "created_at": row[9],
         "last_used_at": row[10],
+        "needs_reentry_at": row[11],
     }
 
 
-class GitCredentialsSqliteBackend:
+class GitCredentialsSqliteBackend(SqliteStoredSecretRowsMixin):
     """SQLite backend for user git credentials storage.
 
     Story #386: Git Credential Management with Identity Discovery.
     Stores encrypted PATs per user per forge host with discovered identity fields.
     """
+
+    _SECRET_TABLE = "user_git_credentials"
+    _SECRET_PK = "credential_id"
+    _SECRET_LABELS = ("username", "forge_type", "forge_host", "name")
 
     def __init__(self, db_path: str) -> None:
         """Initialize the backend."""
@@ -58,6 +64,7 @@ class GitCredentialsSqliteBackend:
     ) -> None:
         """Insert or update a credential by (username, forge_type, forge_host) uniqueness."""
         now = datetime.now(timezone.utc).isoformat()
+        self._ensure_column()
 
         def operation(conn):
             conn.execute(
@@ -68,6 +75,8 @@ class GitCredentialsSqliteBackend:
                    ON CONFLICT(username, forge_type, forge_host) DO UPDATE SET
                        credential_id = excluded.credential_id,
                        encrypted_token = excluded.encrypted_token,
+                       needs_reentry_at = NULL,
+                       needs_reentry_node = NULL,
                        git_user_name = excluded.git_user_name,
                        git_user_email = excluded.git_user_email,
                        forge_username = excluded.forge_username,
@@ -92,11 +101,12 @@ class GitCredentialsSqliteBackend:
 
     def list_credentials(self, username: str) -> List[Dict[str, Any]]:
         """Return all credentials belonging to the given username."""
+        self._ensure_column()
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT credential_id, username, forge_type, forge_host, encrypted_token,
                       git_user_name, git_user_email, forge_username, name, created_at,
-                      last_used_at
+                      last_used_at, needs_reentry_at
                FROM user_git_credentials
                WHERE username = ?
                ORDER BY created_at DESC""",
@@ -119,63 +129,16 @@ class GitCredentialsSqliteBackend:
             logger.debug(f"Deleted git credential {credential_id} for user={username}")
         return deleted
 
-    def update_encrypted_token(
-        self, credential_id: str, new_encrypted_token: str
-    ) -> None:
-        """Update the encrypted_token for a credential in-place (lazy re-encryption).
-
-        Used by GitCredentialManager when a fallback key decryption succeeds so the
-        token is re-encrypted with the canonical key for all future reads (Story #999).
-
-        When no matching row is found, logs a WARNING and returns without raising
-        (the credential may have been deleted concurrently; caller can continue safely).
-
-        Args:
-            credential_id: Primary key of the credential row. Must be non-empty.
-            new_encrypted_token: New base64-encoded ciphertext. Must be non-empty.
-
-        Raises:
-            ValueError: If credential_id or new_encrypted_token are None or empty.
-        """
-        if not credential_id:
-            raise ValueError("credential_id must be a non-empty string")
-        if not new_encrypted_token:
-            raise ValueError("new_encrypted_token must be a non-empty string")
-
-        def operation(conn):
-            cursor = conn.execute(
-                "UPDATE user_git_credentials SET encrypted_token = ? WHERE credential_id = ?",
-                (new_encrypted_token, credential_id),
-            )
-            return cursor.rowcount
-
-        rows_updated: int = self._conn_manager.execute_atomic(operation)
-        if rows_updated == 1:
-            logger.debug(
-                "Re-encrypted git credential %s with canonical key", credential_id
-            )
-        elif rows_updated == 0:
-            logger.warning(
-                "update_encrypted_token: no user_git_credentials row found for "
-                "credential_id %r — re-encryption skipped",
-                credential_id,
-            )
-        else:
-            logger.warning(
-                "update_encrypted_token: unexpected rowcount %d for credential_id %r",
-                rows_updated,
-                credential_id,
-            )
-
     def get_credential_for_host(
         self, username: str, forge_host: str
     ) -> Optional[Dict[str, Any]]:
         """Return credential dict for (username, forge_host) or None if absent."""
+        self._ensure_column()
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT credential_id, username, forge_type, forge_host, encrypted_token,
                       git_user_name, git_user_email, forge_username, name, created_at,
-                      last_used_at
+                      last_used_at, needs_reentry_at
                FROM user_git_credentials
                WHERE username = ? AND forge_host = ?
                LIMIT 1""",

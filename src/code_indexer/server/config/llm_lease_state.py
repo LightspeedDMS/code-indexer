@@ -15,8 +15,16 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
+if TYPE_CHECKING:
+    from code_indexer.server.services.stored_secret_key import StoredSecretCipher
+
+from code_indexer.server.services.locked_secret_file import (
+    file_lock,
+    read_bytes_or_none,
+    write_atomically,
+)
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -240,26 +248,68 @@ class LlmLeaseStateManager:
 
     _PG_KEY_NAME = "llm_lease_state"
 
-    def _serialize_state(self, state: LlmLeaseState) -> str:
-        """Serialize and encrypt a LlmLeaseState to a base64 blob."""
-        plaintext = json.dumps(
-            {
-                "lease_id": state.lease_id,
-                "credential_id": state.credential_id,
-                "credential_type": state.credential_type,
-            }
+    def _cipher(self) -> "StoredSecretCipher":
+        """The stored-secret cipher (cluster key and gate on this manager's
+        pool; key file in solo) with the lease state's own legacy keys."""
+        from code_indexer.server.services.stored_secret_key import (
+            StoredSecretCipher,
         )
-        return self._encrypt(plaintext)
 
-    def _deserialize_blob(self, encrypted_blob: str) -> LlmLeaseState:
-        """Decrypt and deserialize a base64 blob to a LlmLeaseState."""
-        plaintext = self._decrypt(encrypted_blob)
+        return StoredSecretCipher(
+            self._server_dir,
+            "LlmLeaseStateManager",
+            pool=self._pool,
+            legacy_keys=self._legacy_keys,
+        )
+
+    def _legacy_keys(self) -> List[bytes]:
+        keys = [self._encryption_key]
+        if self._cluster_encryption_key is not None:
+            keys.insert(0, self._cluster_encryption_key)
+        return keys
+
+    def _serialize_plaintext(self, plaintext: str) -> str:
+        # v2 when the gate allows; otherwise the lease state's legacy format.
+        return self._cipher().rewrite_value(plaintext) or self._encrypt(plaintext)
+
+    def _serialize_state(self, state: LlmLeaseState) -> str:
+        """Serialize and encrypt a LlmLeaseState (v2 when the gate allows)."""
+        return self._serialize_plaintext(
+            json.dumps(
+                {
+                    "lease_id": state.lease_id,
+                    "credential_id": state.credential_id,
+                    "credential_type": state.credential_type,
+                }
+            )
+        )
+
+    def _decrypt_blob(self, encrypted_blob: str) -> Tuple[str, bool]:
+        """(plaintext, is_legacy) for a v2 or legacy blob."""
+        return self._cipher().decrypt(encrypted_blob)
+
+    @staticmethod
+    def _state_from_plaintext(plaintext: str) -> LlmLeaseState:
         data = json.loads(plaintext)
         return LlmLeaseState(
             lease_id=data["lease_id"],
             credential_id=data["credential_id"],
             credential_type=data.get("credential_type", "oauth"),
         )
+
+    def _deserialize_blob(self, encrypted_blob: str) -> LlmLeaseState:
+        """Decrypt and deserialize a blob to a LlmLeaseState."""
+        return self._state_from_plaintext(self._decrypt_blob(encrypted_blob)[0])
+
+    def _rewritten_blob(
+        self, encrypted_blob: str
+    ) -> Tuple[LlmLeaseState, Optional[str]]:
+        """The state, plus a v2 blob to store in place of a legacy one (None
+        when the blob is already v2 or the cluster gate is closed)."""
+        cipher = self._cipher()
+        plaintext, is_legacy = cipher.decrypt(encrypted_blob)
+        new_blob = cipher.rewrite_value(plaintext) if is_legacy else None
+        return (self._state_from_plaintext(plaintext), new_blob)
 
     # ------------------------------------------------------------------
     # PostgreSQL cluster methods
@@ -292,7 +342,17 @@ class LlmLeaseStateManager:
             ).fetchone()
         if row is None:
             return None
-        return self._deserialize_blob(row[0])
+        state, new_blob = self._rewritten_blob(row[0])
+        if new_blob is not None:
+            with self._pool.connection() as conn:
+                conn.execute(
+                    "UPDATE cluster_secrets SET key_value = %s,"
+                    " updated_at = CURRENT_TIMESTAMP"
+                    " WHERE key_name = %s AND key_value = %s",
+                    (new_blob, self._PG_KEY_NAME, row[0]),
+                )
+                conn.commit()
+        return state
 
     def _pg_clear_state(self) -> None:
         assert self._pool is not None, (
@@ -320,13 +380,9 @@ class LlmLeaseStateManager:
             return
 
         self._server_dir.mkdir(parents=True, exist_ok=True)
-        encrypted_blob = self._serialize_state(state)
-        envelope = json.dumps({"encrypted_state": encrypted_blob})
-
-        with open(self._state_file, "w") as fh:
-            fh.write(envelope)
-
-        os.chmod(self._state_file, 0o600)
+        envelope = json.dumps({"encrypted_state": self._serialize_state(state)})
+        with file_lock(self._state_file):
+            write_atomically(self._state_file, envelope)
         logger.debug("Saved LLM lease state to %s", self._state_file)
 
     def load_state(self) -> Optional[LlmLeaseState]:
@@ -340,10 +396,20 @@ class LlmLeaseStateManager:
         if not self._state_file.exists():
             return None
 
-        with open(self._state_file, "r") as fh:
-            envelope = json.load(fh)
-
-        return self._deserialize_blob(envelope["encrypted_state"])
+        with file_lock(self._state_file):
+            raw = read_bytes_or_none(self._state_file)
+            if raw is None:
+                return None
+            state, new_blob = self._rewritten_blob(
+                json.loads(raw.decode("utf-8"))["encrypted_state"]
+            )
+            # Rewrite only the content read above; a changed file is left for
+            # the next load to convert.
+            if new_blob is not None and read_bytes_or_none(self._state_file) == raw:
+                write_atomically(
+                    self._state_file, json.dumps({"encrypted_state": new_blob})
+                )
+        return state
 
     def clear_state(self) -> None:
         """Delete the persisted lease state.
@@ -354,6 +420,7 @@ class LlmLeaseStateManager:
             self._pg_clear_state()
             return
 
-        if self._state_file.exists():
-            self._state_file.unlink()
-            logger.debug("Cleared LLM lease state from %s", self._state_file)
+        with file_lock(self._state_file):
+            if self._state_file.exists():
+                self._state_file.unlink()
+                logger.debug("Cleared LLM lease state from %s", self._state_file)

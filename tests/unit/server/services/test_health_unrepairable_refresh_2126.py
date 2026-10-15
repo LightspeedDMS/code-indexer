@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Iterator, List, Tuple
+from typing import Any, Dict, Iterator, List, Tuple
 from unittest.mock import patch
 
 import pytest
@@ -37,6 +37,23 @@ from tests.utils.golden_repo_metadata_stores import (
 )
 
 PATCH_TARGET = "code_indexer.server.app.app.state.backend_registry"
+
+
+class _NoStoredCredentialMarks:
+    """A stored-credential backend with nothing needing re-entry."""
+
+    def list_needs_reentry(self) -> List[Dict[str, Any]]:
+        return []
+
+
+def _registry(**fields: Any) -> SimpleNamespace:
+    return SimpleNamespace(
+        git_credentials=_NoStoredCredentialMarks(),
+        ci_tokens=_NoStoredCredentialMarks(),
+        **fields,
+    )
+
+
 ALIAS = "example-repo-global"
 REASON = (
     "chunk store missing and not restorable (voyage-code-3: no published "
@@ -84,7 +101,7 @@ def test_unrepairable_refresh_degrades_naming_repository(metadata: Any) -> None:
         metadata, ALIAS, "fatal chunk-store failure", unrepairable_reason=REASON
     )
 
-    status, reasons = _status(SimpleNamespace(golden_repo_metadata=metadata))
+    status, reasons = _status(_registry(golden_repo_metadata=metadata))
 
     assert status == HealthStatus.DEGRADED, reasons
     named = _refresh_reasons(reasons)
@@ -99,7 +116,7 @@ def test_verified_publish_clears_the_reason(metadata: Any) -> None:
 
     resolve_after_publish(metadata, ALIAS, covered)
 
-    status, reasons = _status(SimpleNamespace(golden_repo_metadata=metadata))
+    status, reasons = _status(_registry(golden_repo_metadata=metadata))
     assert status == HealthStatus.HEALTHY, reasons
     assert _refresh_reasons(reasons) == []
 
@@ -112,7 +129,7 @@ def test_ordinary_failure_after_it_clears_the_reason(metadata: Any) -> None:
     )
     record_failure_backoff(metadata, ALIAS, "disk I/O error")
 
-    status, reasons = _status(SimpleNamespace(golden_repo_metadata=metadata))
+    status, reasons = _status(_registry(golden_repo_metadata=metadata))
 
     assert status == HealthStatus.HEALTHY, reasons
     assert _refresh_reasons(reasons) == []
@@ -132,7 +149,7 @@ class _UnreadableStore:
 
 
 def test_unreadable_store_is_degraded_never_silently_healthy() -> None:
-    status, reasons = _status(SimpleNamespace(golden_repo_metadata=_UnreadableStore()))
+    status, reasons = _status(_registry(golden_repo_metadata=_UnreadableStore()))
 
     assert status == HealthStatus.DEGRADED, reasons
     assert any("unreadable" in r for r in reasons), reasons

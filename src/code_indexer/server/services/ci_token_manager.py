@@ -9,22 +9,16 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 
 import json
 import logging
-import os
 import re
 import threading
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Dict, Optional, Set, Tuple, cast
+from typing import Any, Callable, Dict, Optional, Set, Tuple, cast
 
 from code_indexer.server.logging_utils import format_error_log
-from .token_encryption import (
-    derive_key_from_salt as _derive_key_from_salt_fn,
-    derive_encryption_key as _derive_encryption_key_fn,
-    encrypt_token as _encrypt_token_fn,
-    decrypt_single as _decrypt_single_fn,
-    decrypt_with_fallback as _decrypt_with_fallback_fn,
-)
+from .locked_secret_file import file_lock, write_atomically
+from .stored_secret_key import StoredSecretCipher
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +81,8 @@ class TokenStatus:
     platform: str
     configured: bool
     base_url: Optional[str] = None
+    # The stored token cannot be decrypted with any available key.
+    needs_reentry: bool = False
 
 
 class CITokenManager:
@@ -132,17 +128,16 @@ class CITokenManager:
                         overrides cluster_secret for key derivation.
         """
         self._sqlite_backend: Optional[Any] = None
-        self._cluster_secret = cluster_secret
-        self._server_dir_for_salt: Optional[Path] = (
-            Path(server_dir) if server_dir else None
-        )
 
         if server_dir_path:
             self.server_dir = Path(server_dir_path)
         else:
             self.server_dir = Path.home() / ".cidx-server"
 
-        self._encryption_key = self._derive_encryption_key()
+        key_dir = Path(server_dir) if server_dir else self.server_dir
+        self._cipher = StoredSecretCipher(
+            key_dir, "CITokenManager", cluster_secret=cluster_secret
+        )
 
         if storage_backend is not None:
             # PG/cluster mode: use the provided backend directly via existing plumbing
@@ -162,43 +157,47 @@ class CITokenManager:
             # JSON file storage (backward compatible)
             self.token_file = self.server_dir / "ci_tokens.json"
 
-    def _derive_encryption_key(self) -> bytes:
-        """Derive encryption key using token_encryption priority chain (Story #999)."""
-        return _derive_encryption_key_fn(
-            server_dir_for_salt=self._server_dir_for_salt,
-            cluster_secret=self._cluster_secret,
-        )
-
-    @staticmethod
-    def _derive_key_from_salt(salt_input: str) -> bytes:
-        """Derive AES-256 key from a salt string — delegates to token_encryption."""
-        return _derive_key_from_salt_fn(salt_input)
-
     def _encrypt_token(self, token: str) -> str:
-        """Encrypt token using AES-256-CBC — delegates to token_encryption."""
-        return _encrypt_token_fn(token, self._encryption_key)
-
-    @staticmethod
-    def _do_decrypt(encrypted_token: str, key: bytes) -> str:
-        """Decrypt with explicit key — delegates to token_encryption."""
-        return _decrypt_single_fn(encrypted_token, key)
+        """Encrypt a token for storage (v2 when the cluster gate allows)."""
+        return self._cipher.encrypt(token)
 
     def _decrypt_token(self, encrypted_token: str) -> Tuple[str, bool]:
-        """Decrypt token with canonical key, falling back to hostname key (Story #999).
+        """(plaintext, is_legacy); raises a ValueError subclass when unreadable."""
+        return self._cipher.decrypt(encrypted_token)
 
-        Returns:
-            Tuple of (plaintext: str, used_fallback: bool). Callers must re-encrypt
-            the token when used_fallback is True (Story #999 lazy re-encryption).
+    def _read_stored_token(
+        self, platform: str, encrypted_token: str, marked: bool = False
+    ) -> str:
+        """Decrypt a stored token, rewriting a legacy value as v2 (CAS).
 
-        Raises:
-            ValueError: If both canonical and hostname-fallback keys fail.
-            binascii.Error: If the input is not valid base64.
-        """
-        return _decrypt_with_fallback_fn(
-            encrypted_token,
-            canonical_key=self._encryption_key,
-            context_label="CITokenManager",
-        )
+        An undecryptable value is marked as needing re-entry (never deleted)
+        and its ValueError propagates."""
+        backend = self._sqlite_backend
+        assert backend is not None, "storage backend required"
+        try:
+            plaintext = self._cipher.read(
+                encrypted_token,
+                lambda old, new: backend.replace_encrypted_token_if_unchanged(
+                    platform, old, new
+                ),
+            )
+            # Readable again (e.g. the right key restored): drop a stale mark.
+            # Only a marked row is written; an unmarked read stays read-only.
+            if marked:
+                backend.clear_needs_reentry(platform, encrypted_token)
+            return plaintext
+        except ValueError:
+            try:
+                backend.mark_needs_reentry(
+                    platform, encrypted_token, node_id=self._cipher.node_id
+                )
+            except Exception:
+                logger.warning(
+                    "Could not mark %s CI token as needing re-entry",
+                    platform,
+                    exc_info=True,
+                )
+            raise
 
     def _validate_token_format(self, platform: str, token: str) -> None:
         """
@@ -245,15 +244,22 @@ class CITokenManager:
         Args:
             tokens: Dictionary of token data to save
         """
-        # Ensure server directory exists
+        # Callers hold file_lock(self.token_file); unique 0600 temp + replace.
         self.server_dir.mkdir(parents=True, exist_ok=True)
+        write_atomically(self.token_file, json.dumps(tokens, indent=2))
 
-        # Write tokens to file
-        with open(self.token_file, "w") as f:
-            json.dump(tokens, f, indent=2)
-
-        # Set secure permissions (0600)
-        os.chmod(self.token_file, 0o600)
+    def _update_json_entry(
+        self, platform: str, expected_token: str, mutate: Callable[[Dict], None]
+    ) -> None:
+        """Apply *mutate* to the stored entry only while it still holds
+        *expected_token* (a concurrent save is never overwritten)."""
+        self.server_dir.mkdir(parents=True, exist_ok=True)
+        with file_lock(self.token_file):
+            tokens = self._load_tokens()
+            entry = tokens.get(platform)
+            if entry is not None and entry.get("token") == expected_token:
+                mutate(entry)
+                self._save_tokens(tokens)
 
     def save_token(
         self, platform: str, token: str, base_url: Optional[str] = None
@@ -279,15 +285,13 @@ class CITokenManager:
             # SQLite backend (Story #702)
             self._sqlite_backend.save_token(platform, encrypted_token, base_url)
         else:
-            # JSON file storage (backward compatible)
-            # Load existing tokens
-            tokens = self._load_tokens()
-
-            # Update token data
-            tokens[platform] = {"token": encrypted_token, "base_url": base_url}
-
-            # Save to file with secure permissions
-            self._save_tokens(tokens)
+            # JSON file storage (backward compatible); a new value drops any
+            # needs-re-entry mark.
+            self.server_dir.mkdir(parents=True, exist_ok=True)
+            with file_lock(self.token_file):
+                tokens = self._load_tokens()
+                tokens[platform] = {"token": encrypted_token, "base_url": base_url}
+                self._save_tokens(tokens)
 
         logger.info(
             f"Saved encrypted token for platform: {platform}",
@@ -311,8 +315,10 @@ class CITokenManager:
                 return None
             # Decrypt token with graceful error handling (Issue #716 Bug 3)
             try:
-                decrypted_token, used_fallback = self._decrypt_token(
-                    token_row["encrypted_token"]
+                decrypted_token = self._read_stored_token(
+                    platform,
+                    token_row["encrypted_token"],
+                    marked=bool(token_row.get("needs_reentry_at")),
                 )
             except Exception as e:
                 # De-spam memo (Bug #1222): log WARNING once per distinct
@@ -339,9 +345,6 @@ class CITokenManager:
             _key_success = (platform, sha256(_enc_success.encode()).hexdigest())
             with _DECRYPT_WARN_SEEN_LOCK:
                 _DECRYPT_WARN_SEEN.discard(_key_success)
-            if used_fallback:
-                new_enc = self._encrypt_token(decrypted_token)
-                self._sqlite_backend.update_encrypted_token(platform, new_enc)
             return TokenData(
                 platform=platform,
                 token=decrypted_token,
@@ -356,29 +359,32 @@ class CITokenManager:
 
             token_data = tokens[platform]
 
-            # Decrypt token with graceful error handling (Issue #716 Bug 3)
+            stored = token_data["token"]
+            # Decrypt with graceful error handling (Issue #716 Bug 3); the
+            # stored value is never deleted.
             try:
-                decrypted_token, used_fallback = self._decrypt_token(
-                    token_data["token"]
-                )
+                decrypted_token, is_legacy = self._decrypt_token(stored)
             except Exception as e:
                 logger.warning(
                     format_error_log(
                         "APP-GENERAL-062",
-                        f"Failed to decrypt {platform} token, treating as unconfigured: {e}",
+                        f"Failed to decrypt {platform} token, treating as "
+                        f"unconfigured (kept, needs re-entry): {type(e).__name__}",
                     )
                 )
-                # Delete the corrupted token from storage
-                del tokens[platform]
-                self._save_tokens(tokens)
+                self._update_json_entry(
+                    platform, stored, lambda e: e.__setitem__("needs_reentry", True)
+                )
                 return None
 
-            if used_fallback:
-                logger.warning(
-                    "CITokenManager (JSON path): %s token decrypted via fallback — "
-                    "re-encryption not possible without SQLite backend (Story #999)",
-                    platform,
-                )
+            if is_legacy:
+                new_value = self._cipher.rewrite_value(decrypted_token)
+                if new_value is not None:
+                    self._update_json_entry(
+                        platform,
+                        stored,
+                        lambda e: e.update(token=new_value, needs_reentry=False),
+                    )
             return TokenData(
                 platform=platform,
                 token=decrypted_token,
@@ -400,13 +406,14 @@ class CITokenManager:
             # SQLite backend (Story #702)
             deleted = bool(self._sqlite_backend.delete_token(platform))
         else:
-            # JSON file storage (backward compatible)
-            tokens = self._load_tokens()
-
-            if platform in tokens:
-                del tokens[platform]
-                self._save_tokens(tokens)
-                deleted = True
+            # JSON file storage (backward compatible): an explicit delete
+            self.server_dir.mkdir(parents=True, exist_ok=True)
+            with file_lock(self.token_file):
+                tokens = self._load_tokens()
+                if platform in tokens:
+                    del tokens[platform]
+                    self._save_tokens(tokens)
+                    deleted = True
         if deleted:
             logger.info(
                 f"Deleted token for platform: {platform}",
@@ -463,6 +470,7 @@ class CITokenManager:
         if self._use_sqlite and self._sqlite_backend is not None:
             # SQLite backend (Story #702)
             tokens = self._sqlite_backend.list_tokens()
+            marked = {m["id"] for m in self._sqlite_backend.list_needs_reentry()}
 
             result = {}
             for platform in platforms:
@@ -471,6 +479,7 @@ class CITokenManager:
                         platform=platform,
                         configured=True,
                         base_url=tokens[platform].get("base_url"),
+                        needs_reentry=platform in marked,
                     )
                 else:
                     result[platform] = TokenStatus(platform=platform, configured=False)
@@ -487,6 +496,7 @@ class CITokenManager:
                         platform=platform,
                         configured=True,
                         base_url=tokens[platform].get("base_url"),
+                        needs_reentry=bool(tokens[platform].get("needs_reentry")),
                     )
                 else:
                     result[platform] = TokenStatus(platform=platform, configured=False)
@@ -508,9 +518,9 @@ def create_token_manager(
     All code paths that need a CITokenManager MUST use this factory to avoid
     encryption key mismatch bugs (Bug #639).
 
-    Story #999: Calls ensure_encryption_key_salt() to seed .encryption_key_salt
-    from .jwt_secret (in postgres mode) or hostname (in sqlite mode), then passes
-    server_dir to CITokenManager so it reads the salt file for key derivation.
+    The stored-secret key lives in server_dir (solo) or cluster_secrets
+    (cluster). In postgres mode the legacy salt file is still seeded: legacy
+    writes use it while a cluster node cannot yet read v2 values.
 
     Args:
         server_dir: Path to server directory (e.g., ~/.cidx-server)
@@ -526,11 +536,12 @@ def create_token_manager(
             f"Invalid storage_mode {storage_mode!r}. Must be one of: {_VALID_STORAGE_MODES}"
         )
 
-    from code_indexer.server.services.encryption_key_salt import (
-        ensure_encryption_key_salt,
-    )
+    if storage_mode == "postgres":
+        from code_indexer.server.services.encryption_key_salt import (
+            ensure_encryption_key_salt,
+        )
 
-    ensure_encryption_key_salt(Path(server_dir), storage_mode)
+        ensure_encryption_key_salt(Path(server_dir), storage_mode)
 
     return CITokenManager(
         server_dir_path=server_dir,

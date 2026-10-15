@@ -98,7 +98,8 @@ sudo firewall-cmd --reload
 | `~/.cidx-server/groups.db`, `oauth.db`, `refresh_tokens.db`, `scip_audit.db` | Groups and audit log, OAuth clients, refresh tokens, SCIP audit |
 | `~/.cidx-server/logs.db` | Application log database (see [Observability](observability.md)) |
 | `~/.cidx-server/.jwt_secret` | JWT signing secret (standalone mode) |
-| `~/.cidx-server/.encryption_key_salt` | Needed to decrypt stored git credentials and CI tokens; back it up with the database |
+| `~/.cidx-server/.token_encryption_key` | Key for stored git credentials, CI tokens and LLM lease state (created automatically, mode 0600; cluster nodes share a key in the database instead); back it up with the database |
+| `~/.cidx-server/.encryption_key_salt` | Legacy; still needed to read credentials stored by older versions until the server has rewritten them; back it up with the database while it exists |
 | `~/.cidx-server/data/golden-repos/` | Golden repository clones and their indexes |
 | `~/.cidx-server/data/activated-repos/` | Per-user activated repositories |
 | `~/.cidx-server/launch.json`, `applied_launch.json` | Target and applied host/port/workers (written by the server and the auto-updater) |
@@ -278,10 +279,23 @@ When the proxy publishes a public URL, set `CIDX_ISSUER_URL` to it (see [systemd
 Stop the service (or use `sqlite3 <db> ".backup <dest>"` per database) for a consistent copy of:
 
 - `~/.cidx-server/config.json` and `~/.cidx-server/.jwt_secret`
-- `~/.cidx-server/.encryption_key_salt`, together with the database. A restore without this file cannot decrypt
-  the stored git credentials and CI tokens.
+- `~/.cidx-server/.token_encryption_key` (and `~/.cidx-server/.encryption_key_salt` while it exists), together
+  with the database. A restore without the key file cannot decrypt the stored git credentials and CI tokens; the
+  server never replaces an existing key file, and credentials it cannot decrypt are kept, reported on health
+  (DEGRADED) and shown as needing re-entry on the credential pages.
 - `~/.cidx-server/data/cidx_server.db`
 - `~/.cidx-server/groups.db`, `oauth.db`, `refresh_tokens.db`, `scip_audit.db`
+
+### Stored-secret key (12.90 and later)
+
+- The upgrade is one-way for stored credentials: 12.89 and earlier cannot read the format 12.90 writes. After a
+  downgrade, stored git credentials and CI tokens show as unconfigured (or `????`); nothing is deleted, and
+  upgrading again restores access.
+- Back up `~/.cidx-server/.token_encryption_key` together with the database.
+- Keep `~/.cidx-server/.encryption_key_salt` until the startup log line `Stored-secret sweep ...` reports
+  `remaining=0` for every table (on every node in a cluster).
+- Startup aborts when the key file exists but cannot be used (not a regular file, not owned by the server user,
+  or corrupt). Wider permissions are reset to 0600 with a warning.
 
 `~/.cidx-server/data/golden-repos/` can be rebuilt by re-registering and re-indexing the repositories, at the cost
 of the indexing time and embedding-provider calls; back it up if that cost matters.

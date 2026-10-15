@@ -11,6 +11,7 @@ Tests cover:
 """
 
 import json
+import os
 import sqlite3
 import uuid
 from pathlib import Path
@@ -98,24 +99,29 @@ def _insert_raw_credential(
 class TestGitCredentialManagerClusterSecret:
     """Tests for cluster_secret parameter in GitCredentialManager.__init__."""
 
-    def test_standalone_uses_hostname_key(self, tmp_path):
-        """Two standalone (no cluster_secret) managers on same machine derive same key."""
+    def test_managers_on_one_key_dir_share_the_random_key(self, tmp_path):
         db_path = _make_db(tmp_path)
 
         mgr1 = GitCredentialManager(db_path)
         mgr2 = GitCredentialManager(db_path)
 
-        assert mgr1._encryption_key == mgr2._encryption_key
+        assert mgr1._cipher._v2_key == mgr2._cipher._v2_key
 
-    def test_cluster_secret_derives_different_key(self, tmp_path):
-        """A cluster_secret produces a different key than hostname-based derivation."""
+    def test_cluster_secret_is_a_legacy_read_candidate(self, tmp_path):
+        """A legacy value encrypted under a cluster_secret-derived key stays
+        readable by a manager given that cluster_secret."""
+        from code_indexer.server.services.token_encryption import (
+            derive_key_from_salt,
+            encrypt_token,
+        )
+
         db_path = _make_db(tmp_path)
         cluster_secret = uuid.uuid4().hex
+        legacy = encrypt_token("legacy-token", derive_key_from_salt(cluster_secret))
 
-        mgr_standalone = GitCredentialManager(db_path)
         mgr_cluster = GitCredentialManager(db_path, cluster_secret=cluster_secret)
 
-        assert mgr_standalone._encryption_key != mgr_cluster._encryption_key
+        assert mgr_cluster._cipher.decrypt(legacy) == ("legacy-token", True)
 
     def test_cluster_mode_shared_key_readable_across_instances(self, tmp_path):
         """Token encrypted by cluster manager can be decrypted by another with same secret."""
@@ -185,29 +191,30 @@ class TestCreateGitCredentialManagerFactory:
             db_path=db_path, server_dir=str(server_dir), storage_mode="sqlite"
         )
 
-        # Both should use hostname-based key — identical despite jwt_secret change
-        assert mgr1._encryption_key == mgr2._encryption_key
+        # The stored-secret key does not depend on .jwt_secret
+        assert mgr1._cipher._v2_key == mgr2._cipher._v2_key
 
-    def test_create_git_credential_manager_cluster_uses_jwt_secret(
+    def test_create_git_credential_manager_cluster_reads_jwt_secret_legacy(
         self, server_dir, db_path, factory_pools
     ):
-        """In postgres mode, factory uses .jwt_secret — key matches direct cluster construction."""
-        jwt_secret = uuid.uuid4().hex
-        jwt_file = server_dir / ".jwt_secret"
-        jwt_file.write_text(jwt_secret)
+        """In postgres mode, a legacy value written under the node-local
+        .jwt_secret derivation stays readable."""
+        from code_indexer.server.services.token_encryption import (
+            derive_key_from_salt,
+            encrypt_token,
+        )
 
-        # Factory-created cluster manager
+        jwt_secret = uuid.uuid4().hex
+        (server_dir / ".jwt_secret").write_text(jwt_secret)
+        legacy = encrypt_token("legacy-token", derive_key_from_salt(jwt_secret))
+
         mgr_factory = factory_pools.track(
             create_git_credential_manager(
                 db_path=db_path, server_dir=str(server_dir), storage_mode="postgres"
             )
         )
 
-        # Directly-constructed cluster manager with same secret (ground truth)
-        mgr_direct = GitCredentialManager(db_path, cluster_secret=jwt_secret)
-
-        # Keys must match — proving factory reads .jwt_secret
-        assert mgr_factory._encryption_key == mgr_direct._encryption_key
+        assert mgr_factory._cipher.decrypt(legacy) == ("legacy-token", True)
 
     def test_create_git_credential_manager_no_jwt_secret_in_cluster_mode(
         self, server_dir, db_path, factory_pools
@@ -225,8 +232,8 @@ class TestCreateGitCredentialManagerFactory:
             db_path=db_path, server_dir=str(server_dir), storage_mode="sqlite"
         )
 
-        # Both fall back to hostname key — must match
-        assert mgr_cluster._encryption_key == mgr_standalone._encryption_key
+        # Both use the server_dir stored-secret key file
+        assert mgr_cluster._cipher._v2_key == mgr_standalone._cipher._v2_key
 
     def test_create_git_credential_manager_invalid_storage_mode(
         self, server_dir, db_path
@@ -305,10 +312,16 @@ class TestLazyReencryption:
 
         Returns (db_path, canonical_mgr, cred_id, username, original_enc).
         """
+        from code_indexer.server.services.token_encryption import (
+            derive_key_from_salt,
+            encrypt_token,
+        )
+
         cred_id = "test-cred-seed-001"
         username = "testuser-reencrypt"
-        hostname_mgr = GitCredentialManager(reencrypt_db)  # hostname key = old
-        original_enc = hostname_mgr._encrypt_token(_TEST_TOKEN_PLAINTEXT)
+        original_enc = encrypt_token(  # legacy hostname-derived value
+            _TEST_TOKEN_PLAINTEXT, derive_key_from_salt(os.uname().nodename)
+        )
         _insert_raw_credential(reencrypt_db, cred_id, username, original_enc)
         canonical_mgr = GitCredentialManager(
             reencrypt_db, server_dir=str(canonical_server_dir)
@@ -330,10 +343,7 @@ class TestLazyReencryption:
 
         new_enc = _read_stored_enc(db_path, cred_id)
         assert new_enc != original_enc
-        assert (
-            canonical_mgr._do_decrypt(new_enc, canonical_mgr._encryption_key)
-            == _TEST_TOKEN_PLAINTEXT
-        )
+        assert canonical_mgr._cipher.decrypt(new_enc) == (_TEST_TOKEN_PLAINTEXT, False)
 
         # Second call: must not trigger fallback warning
         caplog.clear()
@@ -360,10 +370,7 @@ class TestLazyReencryption:
 
         new_enc = _read_stored_enc(db_path, cred_id)
         assert new_enc != original_enc
-        assert (
-            canonical_mgr._do_decrypt(new_enc, canonical_mgr._encryption_key)
-            == _TEST_TOKEN_PLAINTEXT
-        )
+        assert canonical_mgr._cipher.decrypt(new_enc) == (_TEST_TOKEN_PLAINTEXT, False)
 
     def test_no_reencryption_when_canonical_key_succeeds(
         self, reencrypt_db, canonical_server_dir

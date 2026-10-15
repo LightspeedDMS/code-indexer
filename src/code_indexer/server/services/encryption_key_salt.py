@@ -1,16 +1,11 @@
 """
 Encryption key salt management for unified token encryption (Story #999).
 
-Provides auto-seeding of the .encryption_key_salt file in the server directory.
-This salt is used by both CITokenManager and GitCredentialManager to derive
-their AES-256-CBC encryption keys in a consistent, cluster-aware manner.
-
-Rules:
-- If .encryption_key_salt already exists: return its content unchanged.
-- If missing AND sqlite mode: create with hostname, return it.
-- If missing AND postgres mode AND .jwt_secret exists: create with jwt_secret content (stripped).
-- If missing AND postgres mode AND no .jwt_secret: fall back to hostname with WARNING.
-- Unsupported storage_mode raises ValueError. None server_dir raises TypeError.
+The legacy .encryption_key_salt file: a legacy key source used to read
+stored secrets written by earlier versions, and to write the legacy format
+while a cluster still has nodes that cannot read the v2 format. An existing
+file is returned unchanged. Unsupported storage_mode raises ValueError; a
+None server_dir raises TypeError.
 """
 
 import logging

@@ -1130,6 +1130,13 @@ class DiagnosticsService:
             db_path=self._db_path,
         )
 
+    async def _read_ci_token(self, platform: str) -> Optional[Any]:
+        """The stored CI token for *platform*, read in a worker thread (key
+        file, database and cluster gate I/O never run on the event loop)."""
+        return await asyncio.to_thread(
+            lambda: self._get_token_manager().get_token(platform)
+        )
+
     async def check_vector_storage(self) -> DiagnosticResult:
         """
         Check vector storage health by validating HNSW indexes across all golden repos.
@@ -1688,8 +1695,7 @@ class DiagnosticsService:
         """
         try:
             # Get token from CITokenManager
-            token_manager = self._get_token_manager()
-            token_data = token_manager.get_token("github")
+            token_data = await self._read_ci_token("github")
 
             if token_data is None:
                 return DiagnosticResult(
@@ -1745,8 +1751,7 @@ class DiagnosticsService:
         """
         try:
             # Get token from CITokenManager
-            token_manager = self._get_token_manager()
-            token_data = token_manager.get_token("gitlab")
+            token_data = await self._read_ci_token("gitlab")
 
             if token_data is None:
                 return DiagnosticResult(
@@ -2071,8 +2076,7 @@ class DiagnosticsService:
         """
         try:
             # Get token from CITokenManager
-            token_manager = self._get_token_manager()
-            token_data = token_manager.get_token("github")
+            token_data = await self._read_ci_token("github")
 
             if token_data is None:
                 return DiagnosticResult(
@@ -2144,8 +2148,7 @@ class DiagnosticsService:
         """
         try:
             # Get token from CITokenManager
-            token_manager = self._get_token_manager()
-            token_data = token_manager.get_token("gitlab")
+            token_data = await self._read_ci_token("gitlab")
 
             if token_data is None:
                 return DiagnosticResult(

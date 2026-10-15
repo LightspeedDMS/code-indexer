@@ -8537,13 +8537,12 @@ def _create_config_page_response(
         getattr(request.app.state, "siem_delivery_startup_error", None),
     )
 
-    # Load API keys status
+    # Only the masked display form reaches the template. Reading the tokens
+    # first marks an undecryptable one, so the status below is current.
     token_manager = _get_token_manager()
-    api_keys_status = token_manager.list_tokens()
-
-    # Only the masked display form reaches the template.
     github_token_data = _ci_token_display(token_manager.get_token("github"))
     gitlab_token_data = _ci_token_display(token_manager.get_token("gitlab"))
+    api_keys_status = token_manager.list_tokens()
 
     response = templates.TemplateResponse(
         request,
@@ -12887,8 +12886,9 @@ async def trigger_manual_scan(
         )
 
     # Get GitHub token for authentication (Bug #87)
-    token_manager = _get_token_manager()
-    github_token_data = token_manager.get_token("github")
+    github_token_data = await anyio.to_thread.run_sync(
+        lambda: _get_token_manager().get_token("github")
+    )
     github_token = github_token_data.token if github_token_data else None
 
     logger.debug(

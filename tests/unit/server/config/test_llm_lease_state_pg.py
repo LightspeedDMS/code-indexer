@@ -86,6 +86,23 @@ def _seed_jwt_secret(
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _cluster_gate_closed(monkeypatch):
+    """This SQLite stand-in cannot run the JSONB capability gate or the
+    cluster key provider: pin the gate closed (legacy writes, the behaviour
+    asserted here). The real cluster path runs on PostgreSQL in
+    tests/unit/server/storage/postgres/test_stored_secret_cluster_pg.py."""
+    from cryptography.fernet import Fernet
+
+    from code_indexer.server.services import stored_secret_key
+
+    key = Fernet.generate_key()
+    monkeypatch.setattr(
+        stored_secret_key, "cluster_v2_writes_allowed", lambda *a, **k: False
+    )
+    monkeypatch.setattr(stored_secret_key, "load_or_create_cluster_key", lambda p: key)
+
+
 @pytest.fixture
 def sqlite_conn():
     conn = sqlite3.connect(":memory:")

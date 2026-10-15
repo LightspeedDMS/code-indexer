@@ -1064,11 +1064,14 @@ class TestSingleFlightRegressions:
             f"got {len(coalescer._inflight_keys)} retained entries (leak)"
         )
         snap = metrics.snapshot()["on"]
-        # 1 miss + 3 sequential warm HITs on different threads.
+        # 1 miss + 3 sequential warm HITs on different threads. A cold-group
+        # submitter scheduled after the leader resolved records a HIT, so the
+        # warm HITs are counted from the post-cold-group snapshot.
         assert snap["misses"] == 1
-        assert snap["hits"] == 3, (
+        warm_hits = snap["hits"] - snap_cold["hits"]
+        assert warm_hits == 3, (
             f"Three sequential warm HITs on different threads must each record 1 hit "
-            f"(total 3), got hits={snap['hits']}"
+            f"(total 3), got {warm_hits}"
         )
 
 

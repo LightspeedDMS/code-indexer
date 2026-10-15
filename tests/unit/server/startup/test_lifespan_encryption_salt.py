@@ -1,8 +1,8 @@
 """
-Structural tests for ensure_encryption_key_salt wiring in lifespan.py (Story #999 Step 8).
+Structural tests for prepare_stored_secret_key wiring in lifespan.py (Story #999 Step 8).
 
 Verifies that:
-1. lifespan.py startup region calls ensure_encryption_key_salt(
+1. lifespan.py startup region calls prepare_stored_secret_key(
 2. server_data_dir appears within +/-_PROXIMITY_LINES lines of that call site
 3. storage_mode appears within +/-_PROXIMITY_LINES lines of that call site
 """
@@ -38,7 +38,7 @@ def _startup_region(source: str) -> str:
 
 
 def _call_site_window(startup: str) -> str:
-    """Return a +/-_PROXIMITY_LINES-line window around the ensure_encryption_key_salt( call.
+    """Return a +/-_PROXIMITY_LINES-line window around the prepare_stored_secret_key( call.
 
     Returns up to 2*_PROXIMITY_LINES+1 lines total: _PROXIMITY_LINES before the call,
     the call line itself, and _PROXIMITY_LINES after it.
@@ -46,7 +46,7 @@ def _call_site_window(startup: str) -> str:
     """
     lines = startup.splitlines()
     for i, line in enumerate(lines):
-        if "ensure_encryption_key_salt(" in line:
+        if "prepare_stored_secret_key(" in line:
             start = max(0, i - _PROXIMITY_LINES)
             end = min(len(lines), i + _PROXIMITY_LINES + 1)
             return "\n".join(lines[start:end])
@@ -56,11 +56,11 @@ def _call_site_window(startup: str) -> str:
 def _encryption_salt_call_window() -> str:
     """Assert call exists in startup region and return its +/-_PROXIMITY_LINES-line window."""
     startup = _startup_region(_lifespan_source())
-    assert "ensure_encryption_key_salt(" in startup, (
-        "lifespan.py startup region must call ensure_encryption_key_salt("
+    assert "prepare_stored_secret_key(" in startup, (
+        "lifespan.py startup region must call prepare_stored_secret_key("
     )
     window = _call_site_window(startup)
-    assert window, "ensure_encryption_key_salt( call not found in startup region"
+    assert window, "prepare_stored_secret_key( call not found in startup region"
     return window
 
 
@@ -70,15 +70,15 @@ def _encryption_salt_call_window() -> str:
 
 
 class TestLifespanEncryptionSaltWiring:
-    """Step 8: structural checks that the startup region calls ensure_encryption_key_salt
+    """Step 8: structural checks that the startup region calls prepare_stored_secret_key
     and keeps server_data_dir/storage_mode within a +/-_PROXIMITY_LINES-line window
     of that call."""
 
-    def test_startup_calls_ensure_encryption_key_salt(self):
-        """lifespan.py startup region must call ensure_encryption_key_salt(."""
+    def test_startup_calls_prepare_stored_secret_key(self):
+        """lifespan.py startup region must call prepare_stored_secret_key(."""
         startup = _startup_region(_lifespan_source())
-        assert "ensure_encryption_key_salt(" in startup, (
-            "lifespan.py startup region must call ensure_encryption_key_salt("
+        assert "prepare_stored_secret_key(" in startup, (
+            "lifespan.py startup region must call prepare_stored_secret_key("
         )
 
     def test_call_site_references_server_data_dir(self):
@@ -86,7 +86,7 @@ class TestLifespanEncryptionSaltWiring:
         window = _encryption_salt_call_window()
         assert "server_data_dir" in window, (
             f"server_data_dir must appear within +/-{_PROXIMITY_LINES} lines of "
-            f"ensure_encryption_key_salt( call.\nActual window:\n{window}"
+            f"prepare_stored_secret_key( call.\nActual window:\n{window}"
         )
 
     def test_call_site_references_storage_mode(self):
@@ -94,5 +94,5 @@ class TestLifespanEncryptionSaltWiring:
         window = _encryption_salt_call_window()
         assert "storage_mode" in window, (
             f"storage_mode must appear within +/-{_PROXIMITY_LINES} lines of "
-            f"ensure_encryption_key_salt( call.\nActual window:\n{window}"
+            f"prepare_stored_secret_key( call.\nActual window:\n{window}"
         )
