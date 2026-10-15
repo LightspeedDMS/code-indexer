@@ -462,13 +462,3 @@ def _recorded(order: List[str], step: str, result: Any) -> Any:
     """A side effect that records ``step`` and returns ``result``."""
     order.append(step)
     return result
-
-
-    def serve(username: str, user_alias: str) -> str:
-        (path / ".code-indexer").mkdir(parents=True)
-        return str(path)
-
-
-    def status_for(path: Path, **kwargs: Any) -> Dict[str, Any]:
-        seen.append(path)
-        return {}

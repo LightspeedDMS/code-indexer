@@ -615,24 +615,3 @@ def test_an_activated_repo_still_writes_its_local_workspace(
 
     assert (workspace / "w.md").read_bytes() == b"w\n"
     assert world.writer.calls == []
-
-
-def test_an_activated_repo_still_writes_its_local_workspace(
-    world: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Out of scope here (per-user workspaces): never routed to the writer."""
-    from code_indexer.server.services import file_crud_service as crud_mod
-
-    workspace = tmp_path / "activated-repos" / USER / "mine"
-    workspace.mkdir(parents=True)
-    manager = SimpleNamespace(
-        user_has_activated_repo=lambda user, alias: True,
-        get_activated_repo_path=lambda username, user_alias: str(workspace),
-    )
-    monkeypatch.setattr(crud_mod, "_get_activated_repo_manager", lambda: manager)
-    _delegate(world)
-
-    world.delegated.create_file("mine", "w.md", "w\n", USER)
-
-    assert (workspace / "w.md").read_bytes() == b"w\n"
-    assert world.writer.calls == []

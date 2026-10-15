@@ -461,7 +461,6 @@ class AliasManager:
         return previous_path if isinstance(previous_path, str) else None
 
 
-# Method of AliasManager — needs manual placement
     def record_republished_index(
         self,
         alias_name: str,

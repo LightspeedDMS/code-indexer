@@ -30,6 +30,7 @@ import io
 import json
 import os
 import subprocess
+import unittest.mock
 import urllib.error
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -43,6 +44,7 @@ from code_indexer.server.services import git_operations_service as user_git_modu
 from code_indexer.server.services.git_tools_seam import (
     GitToolsUnavailableError,
     ReadOnlyGitViolation,
+    _is_typed_timeout,
     require_read_only_git,
 )
 from code_indexer.server.startup import content_backend_wiring, git_backend_wiring
@@ -657,23 +659,6 @@ def test_golden_blame_socket_timeout_is_the_local_timeout_result(
     result = Golden(pod, git_backend=backend).get_blame("renamed.txt")
     assert isinstance(result, golden_git.BlameErrorResult)
     assert result.error == "Git blame timed out after 30 seconds"
-
-
-def test_tool_error_timeout_patterns_raise_timeout_error(text: str) -> None:
-    """Every pattern in _TOOL_TIMEOUT_PATTERNS triggers GitMcpTimeoutError
-    on an isError response, verifying the contract with git-mcp."""
-    backend = plugin.GitMcpBackend(base_url="http://localhost:1")
-
-    result = {"isError": True, "content": [{"type": "text", "text": text}]}
-    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "result": result}).encode()
-
-    with unittest.mock.patch("urllib.request.urlopen") as mock_open:
-        resp = io.BytesIO(payload)
-        resp.headers = {}  # type: ignore[attr-defined]
-        mock_open.return_value.__enter__ = lambda s: resp
-        mock_open.return_value.__exit__ = lambda *a: None
-        with pytest.raises(plugin.GitMcpTimeoutError):
-            backend._call("git_exec", {"args": ["status"], "cow_path": "/tmp"})
 
 
 def test_typed_timeout_detection_from_plugin() -> None:

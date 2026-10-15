@@ -836,16 +836,6 @@ def test_delegated_branch_lookup_refuses_local_git(tmp_path: Path) -> None:
         mgr._get_repository_branches(str(tmp_path / "x"))
 
 
-    def clone_into_existing(repo_url: str, alias: str, branch: Optional[str]) -> str:
-        raise GitOperationError(f"destination path '{clone}' already exists")
-
-
-    def lookup(alias: str) -> Any:
-        if registry_down["now"]:
-            raise RuntimeError("database is locked")
-        return real_lookup(alias)
-
-
 def test_delegated_clean_add_needs_no_workspace_mcp_clone_backend(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

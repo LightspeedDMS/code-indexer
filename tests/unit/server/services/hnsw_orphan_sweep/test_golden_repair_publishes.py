@@ -358,7 +358,6 @@ def test_record_target_mismatch_does_not_retry(
     scheduler = _scheduler(world, SweepOutcome.REPAIRED)
     aliases = world["aliases"]
     call_count = 0
-    original = aliases.record_republished_index
 
     def target_moved(*args: Any, **kwargs: Any) -> None:
         nonlocal call_count

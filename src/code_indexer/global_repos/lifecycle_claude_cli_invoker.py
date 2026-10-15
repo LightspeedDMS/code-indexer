@@ -393,7 +393,6 @@ class LifecycleClaudeCliInvoker:
         return _parse_with_optional_section_fallback(result.output)
 
 
-# Method of LifecycleClaudeCliInvoker — needs manual placement
     @staticmethod
     def _validate_repo_names(alias: str, repo_path: Path) -> Path:
         """Validate alias and repo_path WITHOUT looking at this pod's disk.

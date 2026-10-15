@@ -807,7 +807,6 @@ class HNSWOrphanRepairSweepScheduler:
         return (username, user_alias) if username and user_alias else None
 
 
-# Method of HNSWOrphanRepairSweepScheduler — needs manual placement
     def _golden_aliases(self) -> Any:
         from code_indexer.global_repos.alias_manager import AliasManager
 
@@ -817,7 +816,6 @@ class HNSWOrphanRepairSweepScheduler:
 
 
 
-# Method of HNSWOrphanRepairSweepScheduler — needs manual placement
     def _process_published_golden(
         self, candidate: Any, global_alias: str, record: Dict[str, Any]
     ) -> SweepOutcome:
@@ -1008,7 +1006,6 @@ class HNSWOrphanRepairSweepScheduler:
 
 
 
-# Method of HNSWOrphanRepairSweepScheduler — needs manual placement
     def _published_golden(self, candidate: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
         """``(global alias, alias document)`` when a golden candidate's root IS
         the target its alias serves under a delegated IndexStore -- the
