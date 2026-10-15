@@ -204,11 +204,6 @@ class TestActivationFailsLoud:
         with pytest.raises(Exception, match="HTTP 503"):
             manager.get_current_branch(USER, ALIAS)
 
-    def test_composite_activation_is_refused(self, world: ActivatedWorld) -> None:
-        manager = world.delegated_manager()
-        with pytest.raises(ActivatedRepoError, match="Composite"):
-            manager._activate_composite_repository(USER, [ALIAS, "other"], "combo")
-
 
 class TestInspection:
     def test_branch_listing_and_current_branch_match_local(

@@ -594,7 +594,7 @@ class FileCRUDService:
 
         return self._deleted_result(file_path)
 
-    # ── golden repos behind the content seam ───────────────────────────────
+    # ── repos behind the content seam ────────────────────────────────────
 
     def _golden_write_target(
         self, repo_alias: str, repo_path: Path

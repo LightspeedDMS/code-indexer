@@ -18,6 +18,7 @@ Architecture:
 import contextvars
 import hashlib
 import logging
+import os
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -447,6 +448,18 @@ class FileChunkingManager:
 
         return vector_point
 
+    def _image_path(self, img_ref_path: str) -> Path:
+        """A referenced image's absolute path under the codebase.
+
+        Resolved on this disk (following symlinks) for a local pass. With an
+        image source the repository is not on this machine -- there is nothing
+        here to resolve against -- so the path is normalised lexically, keeping
+        the codebase prefix the image source answers for.
+        """
+        if self.image_source is None:
+            return (self.codebase_dir / img_ref_path).resolve()
+        return Path(os.path.normpath(self.codebase_dir / img_ref_path))
+
     def _image_exists(self, img_path: Path) -> bool:
         """Whether a referenced image is there: the image source's answer when
         there is one (the pod may not mount the repository), else the disk's."""
@@ -817,7 +830,7 @@ class FileChunkingManager:
                         # 2. Validated for existence, format, and size
                         # 3. Security-checked (no directory traversal)
                         # Just resolve against codebase_dir to get absolute path
-                        img_path = (self.codebase_dir / img_ref_path).resolve()
+                        img_path = self._image_path(img_ref_path)
 
                         # Double-check the path is valid (defense in depth)
                         if not self._image_exists(img_path):

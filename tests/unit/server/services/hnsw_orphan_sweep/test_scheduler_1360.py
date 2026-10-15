@@ -664,3 +664,104 @@ class TestActivatedRepoCacheInvalidationWiring:
             )
         finally:
             reset_global_cache()
+
+
+class TestPublishedRepairLoopBreaker:
+    """Code review finding: after ``_process_published_golden`` repairs and
+    publishes an index, if ``record_republished_index`` fails the CAS three
+    times, the store holds version V2 (repaired) while the alias still
+    records V1 (stale).  On the next sweep tick the candidate re-appears
+    in the pending list, ``ensure_published_index`` fetches V1 back to
+    disk, and the full repair+publish cycle runs again -- an infinite
+    loop producing a new store version on every tick.
+
+    The ``_published_repair_keys`` guard breaks this: once a publish
+    succeeds, the sort_key is remembered so ``_process_one`` returns
+    CLEAN on re-encounter without invoking the repair pipeline."""
+
+    def test_second_tick_does_not_re_repair_after_publish_succeeded(
+        self, tmp_path: Path, state_backend
+    ) -> None:
+        """Two sweep ticks, each with only one candidate: tick 1 repairs
+        (returns REPAIRED), tick 2 must NOT call process_fn again -- the
+        ``_published_repair_keys`` guard should short-circuit to CLEAN."""
+        repo_root = tmp_path / "repo"
+        _make_clean_collection(repo_root / ".code-indexer" / "index" / "only", seed=1)
+        golden = _FakeGoldenRepoManager({"myrepo": repo_root})
+
+        process_calls: List[str] = []
+
+        def counting_process(candidate: Any) -> SweepOutcome:
+            process_calls.append(candidate.sort_key)
+            return SweepOutcome.REPAIRED
+
+        scheduler = _make_scheduler(
+            tmp_path, golden, state_backend, batch_size=5, process_fn=counting_process
+        )
+
+        # Simulate: tick 1 repairs the candidate and the publish succeeds
+        # (which adds the key to _published_repair_keys), but
+        # record_republished_index fails -- the cursor does advance
+        # (record_item_processed succeeds) so the pass completes
+        # normally.  We manually seed _published_repair_keys here because
+        # the in-place path (which counting_process exercises) does not
+        # go through _process_published_golden.
+        scheduler._run_tick()
+        assert len(process_calls) == 1
+        # Seed the guard as _process_published_golden would after a
+        # successful publish_index + failed record_republished_index.
+        sort_key = process_calls[0]
+        scheduler._published_repair_keys.add(sort_key)
+
+        # Reset cursor to simulate the next pass seeing this candidate
+        # again (as happens when the pass completes and a new one starts,
+        # or when the cursor never advanced due to a recording failure).
+        state_backend.record_item_processed(sort_key, "clean")
+
+        # Force a fresh pass so the candidate is pending again.
+        state_backend.complete_pass()
+        # Re-add the key (complete_pass in the scheduler would clear it,
+        # but we called the backend directly; the real scenario is that
+        # the key stays in _published_repair_keys across ticks within the
+        # same pass).  In production the pass does NOT complete when
+        # record_republished_index fails (the outcome is ERROR which is
+        # recorded, cursor advances, but the alias mismatch persists).
+        scheduler._published_repair_keys.add(sort_key)
+
+        # Tick 2: candidate re-appears, guard fires.
+        process_calls.clear()
+        result = scheduler._run_tick()
+        assert len(process_calls) == 0, (
+            "tick 2 must NOT call process_fn -- the repair was already "
+            "published by this process"
+        )
+        assert result["clean"] == 1
+        assert result["repaired"] == 0
+
+    def test_guard_cleared_on_complete_pass(
+        self, tmp_path: Path, state_backend
+    ) -> None:
+        """The guard set is cleared when a pass completes, so a genuine
+        re-corruption on a later pass is not permanently masked."""
+        repo_root = tmp_path / "repo"
+        _make_clean_collection(repo_root / ".code-indexer" / "index" / "only", seed=1)
+        golden = _FakeGoldenRepoManager({"myrepo": repo_root})
+
+        call_count = {"n": 0}
+
+        def counting_process(candidate: Any) -> SweepOutcome:
+            call_count["n"] += 1
+            return SweepOutcome.CLEAN
+
+        scheduler = _make_scheduler(
+            tmp_path, golden, state_backend, batch_size=5, process_fn=counting_process
+        )
+
+        # Seed the guard.
+        scheduler._published_repair_keys.add("golden:myrepo:anything")
+
+        # Run a tick that completes the pass -- guard should be cleared.
+        scheduler._run_tick()
+        assert len(scheduler._published_repair_keys) == 0, (
+            "complete_pass must clear the guard set"
+        )

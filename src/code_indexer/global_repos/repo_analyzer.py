@@ -28,6 +28,7 @@ from code_indexer.server.services.agent_cli_isolation import (
     try_build_mcp_config_file,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.delegated_refusal import refuse_when_delegated
 
 if TYPE_CHECKING:
     from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
@@ -37,6 +38,16 @@ logger = logging.getLogger(__name__)
 # Grace period given to the Claude subprocess to shut down after SIGTERM before
 # SIGKILL is sent.  Matches the Story #926 spec: "SIGTERM, fall back SIGKILL after 30s".
 _CLAUDE_TERMINATION_GRACE_PERIOD_SECONDS = 30
+
+#: Description generation under a delegated content backend: the Claude CLI
+#: reads the repository with its own file tools at this pod's clone path
+#: (``--add-dir``), which on a mount-less pod holds index state only -- it
+#: would describe an empty tree.
+DESCRIPTION_ANALYSIS_FEATURE = "Golden-repo description generation"
+DESCRIPTION_ANALYSIS_REFUSAL_REASON = (
+    "the Claude CLI reads the repository from this pod's clone path, "
+    "which holds index state only"
+)
 
 
 def split_frontmatter_and_body(content: str) -> Tuple[Dict[str, Any], str]:
@@ -449,7 +460,12 @@ projects_detected: (Langfuse only - list of project names)
             RuntimeError: if Claude CLI extraction returns no result
                 (manager unavailable, CLI not on PATH, API key missing,
                 or Claude returned non-parseable output).
+            DelegatedRepositoryUnsupportedError: (a RuntimeError) the server's
+                content backend is delegated -- the repository is not here.
         """
+        refuse_when_delegated(
+            DESCRIPTION_ANALYSIS_FEATURE, DESCRIPTION_ANALYSIS_REFUSAL_REASON
+        )
         claude_result = self._extract_info_with_claude()
         if claude_result is None:
             raise RuntimeError(

@@ -24,8 +24,9 @@ entirely successful. An error is the only safe failure.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path, PurePosixPath
-from typing import Any, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 from code_indexer.server.storage.shared.content_backend import (
     ContentBackend,
@@ -158,6 +159,16 @@ def content_backend_name_or_none() -> Optional[str]:
         return None
 
 
+def content_backend_name(config: Any) -> str:
+    """*config*'s ``content_backend`` selection, ``local`` when unset.
+
+    For code that holds a server config but runs outside the server process
+    (the auto-updater, operator CLI commands), where ``is_content_seam_delegated``
+    is always False because no backend was built.
+    """
+    return getattr(config, "content_backend", "local") or "local"
+
+
 def configured_content_backend_name() -> str:
     """The running server's ``content_backend`` selection, ``local`` when unset.
 
@@ -166,8 +177,7 @@ def configured_content_backend_name() -> str:
     """
     from code_indexer.server.services.config_service import get_config_service
 
-    config = get_config_service().get_config()
-    return getattr(config, "content_backend", "local") or "local"
+    return content_backend_name(get_config_service().get_config())
 
 
 def server_content_backend() -> Optional[ContentBackend]:
@@ -226,15 +236,143 @@ def golden_repo_content_root(repo_path: Union[str, Path], *, consumer: str) -> P
     return Path(clone_path)
 
 
-def _golden_repo_clone_path(repo_name: str) -> Optional[str]:
-    """The golden repo's base clone path, or None when the registry cannot say."""
+def is_pod_local_golden_path(repo_path: Union[str, Path]) -> bool:
+    """Whether the golden repo behind *repo_path* keeps its files on THIS pod.
+
+    *repo_path* is a golden repo's base clone or a ``.versioned/<alias>/v_*``
+    snapshot of it. Pod-local means a ``local://`` repository other than
+    cidx-meta (Langfuse trace folders): created and written by this pod, never
+    held by a delegated backend, so a delegated read must not be sent there.
+    cidx-meta is ``local://`` too, but its content is shared through the
+    backend. A repo the registry cannot describe is not pod-local -- the
+    delegated seam, as before.
+
+    Blocking (a registry read): call it off the event loop.
+    """
+    from code_indexer.server.storage.shared.snapshot_paths import (
+        is_versioned_snapshot,
+    )
+    from code_indexer.server.utils.index_command_layout import (
+        is_cidx_meta_repo,
+        is_pod_local_repo,
+    )
+
+    parts = PurePosixPath(str(repo_path)).parts
+    if not parts:
+        return False
+    snapshot = is_versioned_snapshot(str(repo_path))
+    alias = parts[-2] if snapshot else parts[-1]
+    repo = _golden_repo_record(alias)
+    repo_url = getattr(repo, "repo_url", None) or None
+    if not snapshot:
+        # Only the golden repo's own directory: an activated copy (or any
+        # other path) that merely ends in the same name is not it.
+        clone_path = getattr(repo, "clone_path", None)
+        if not clone_path or os.path.normpath(str(clone_path)) != os.path.normpath(
+            str(repo_path)
+        ):
+            return False
+    return is_pod_local_repo(repo_url, alias) and not is_cidx_meta_repo(repo_url, alias)
+
+
+def _golden_repo_record(repo_name: str) -> Any:
+    """The golden repo's registry record, or None when the registry cannot say."""
     try:
         from code_indexer.server.repositories.golden_repo_manager import (
             get_golden_repo_manager,
         )
 
-        repo = get_golden_repo_manager().get_golden_repo(repo_name)
+        return get_golden_repo_manager().get_golden_repo(repo_name)
     except Exception as exc:  # the server's state, whatever it is
         logger.debug("No golden repo record for %s: %s", repo_name, exc)
         return None
+
+
+def _golden_repo_clone_path(repo_name: str) -> Optional[str]:
+    """The golden repo's base clone path, or None when the registry cannot say."""
+    repo = _golden_repo_record(repo_name)
     return getattr(repo, "clone_path", None) or None
+
+
+class GoldenRepoSourceError(RuntimeError):
+    """The golden repository behind a path could not be resolved (registry or
+    git-mcp failed): an agent must not be handed no repository instead."""
+
+
+def golden_repo_source(repo_path: Union[str, Path]) -> Optional[Dict[str, str]]:
+    """Where an agent OFF this pod gets the golden repository at *repo_path*.
+
+    For a pod that does not hold its repositories (callers check
+    :func:`is_content_seam_delegated`): *repo_path* is a golden repo's
+    directory (``golden-repos/<alias>``) or a versioned snapshot of it, which
+    on this pod hold index state only. The repository is named by the golden
+    registry -- ``repoUrl`` (the registered remote) and ``branch`` -- and
+    ``commit`` is the commit cidx indexed, asked of git-mcp at the golden
+    repo's base clone (as index freshness does). Returns
+    ``{"alias", "repoUrl", "branch", "commit"}``.
+
+    None when *repo_path* is not under the golden-repos directory (the job is
+    about no repository). Raises :class:`GoldenRepoSourceError` when it IS a
+    golden repo path and the registry or git-mcp cannot answer, or the repo is
+    ``local://`` (its files are on this pod; nothing outside can open it) --
+    never a silent "no repository".
+    """
+    from code_indexer.server.repositories.golden_repo_manager import (
+        get_golden_repo_manager,
+    )
+    from code_indexer.server.startup.git_backend_wiring import (
+        server_delegated_git_backend,
+    )
+    from code_indexer.server.storage.shared.snapshot_paths import (
+        is_versioned_snapshot,
+    )
+
+    try:
+        manager = get_golden_repo_manager()
+        golden_root = Path(os.path.normpath(str(manager.golden_repos_dir)))
+    except Exception as exc:
+        raise GoldenRepoSourceError(f"golden-repo registry unavailable: {exc}") from exc
+    path = Path(os.path.normpath(str(repo_path)))
+    if is_versioned_snapshot(str(path)) and path.parent.parent == (
+        golden_root / ".versioned"
+    ):
+        alias = path.parent.name
+    elif path.parent == golden_root:
+        alias = path.name
+    else:
+        return None
+    try:
+        repo = manager.get_golden_repo(alias)
+    except Exception as exc:
+        raise GoldenRepoSourceError(
+            f"golden-repo registry lookup of {alias!r} failed: {exc}"
+        ) from exc
+    if repo is None:
+        raise GoldenRepoSourceError(f"{repo_path} is not a registered golden repo")
+    if str(repo.repo_url).startswith("local://"):
+        raise GoldenRepoSourceError(
+            f"golden repo {alias!r} is {repo.repo_url}: its files are on this pod "
+            "and no agent outside it can open the repository"
+        )
+    backend = server_delegated_git_backend()
+    if backend is None:
+        raise GoldenRepoSourceError(
+            f"the commit of {alias!r} is unknown: git_backend is 'local', so no "
+            "git-mcp holds the repository"
+        )
+    clone = str(golden_repo_content_root(path, consumer="repository analysis"))
+    try:
+        head = str(backend.rev_parse(clone, "HEAD")).strip()
+    except Exception as exc:
+        detail = getattr(exc, "stderr", None) or exc
+        raise GoldenRepoSourceError(
+            f"git-mcp could not resolve HEAD of {alias!r} at {clone}: {detail}"
+        ) from exc
+    if not head:
+        raise GoldenRepoSourceError(f"git-mcp returned no HEAD for {alias!r}")
+    return {
+        "alias": alias,
+        "repoUrl": str(repo.repo_url),
+        "branch": str(repo.default_branch),
+        "commit": head.split()[0],
+    }

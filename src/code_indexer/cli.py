@@ -10249,9 +10249,35 @@ def uninstall(ctx, wipe_all: bool, confirm: bool):
 )
 @click.option("--verbose", is_flag=True, help="Show detailed information about fixes")
 @click.option("--force", is_flag=True, help="Apply fixes without confirmation prompts")
+@click.option(
+    "--content-backend",
+    type=click.Choice(["local", "delegated"]),
+    default="local",
+    hidden=True,
+    help="Internal: where the repository's files are. 'delegated' means they "
+    "are not on this machine, so the project id and git state the index run "
+    "recorded are kept instead of being re-derived here. Stamped by the server.",
+)
+@click.option(
+    "--git-backend",
+    type=click.Choice(["local", "delegated"]),
+    default="local",
+    hidden=True,
+    help="Internal: who answers git questions about the repository. "
+    "'delegated' keeps the git state the index run recorded through the "
+    "server's git backend instead of asking this machine's git. Stamped by "
+    "the server.",
+)
 @click.pass_context
 @require_mode("local", "remote", "proxy")
-def fix_config(ctx, dry_run: bool, verbose: bool, force: bool):
+def fix_config(
+    ctx,
+    dry_run: bool,
+    verbose: bool,
+    force: bool,
+    content_backend: str = "local",
+    git_backend: str = "local",
+):
     """Fix corrupted configuration files.
 
     \b
@@ -10333,7 +10359,11 @@ def fix_config(ctx, dry_run: bool, verbose: bool, force: bool):
             console.print(f"  📄 Metadata file: {config_dir / 'metadata.json'}")
 
         # Initialize repairer
-        repairer = ConfigurationRepairer(config_dir, dry_run=dry_run)
+        repairer = ConfigurationRepairer(
+            config_dir,
+            dry_run=dry_run,
+            repository_backend_delegated="delegated" in (content_backend, git_backend),
+        )
 
         # Run the fix process
         result = repairer.fix_configuration()
@@ -19883,6 +19913,40 @@ def global_group(ctx):
     pass
 
 
+def _global_activate_delegated_refusal() -> Optional[str]:
+    """Why ``cidx global activate`` must not run on this host, or None.
+
+    It registers an alias pointing at ``<golden-repos>/repos/<name>/.code-indexer/index``
+    on THIS host's disk. Under the server's ``content_backend: delegated`` the
+    repositories live on workspace-mcp and each pod's index state is its own,
+    so that alias -- written to the registry every pod shares -- would name a
+    path no other pod has. The selection is read from the server config
+    (``CIDX_SERVER_DATA_DIR``, default ``~/.cidx-server``): this command runs
+    outside the server process. No server config means a plain CLI host:
+    nothing to refuse. An unreadable one is refused too -- the backend cannot
+    be known.
+    """
+    from .server.startup.content_backend_wiring import content_backend_name
+    from .server.utils.config_manager import ServerConfigManager
+
+    try:
+        server_config = ServerConfigManager().load_config()
+    except ValueError as exc:
+        return (
+            f"cannot read the server config to tell whether repositories are "
+            f"on this host ({exc}); refusing to register an alias"
+        )
+    if server_config is None or content_backend_name(server_config) != "delegated":
+        return None
+    return (
+        "'cidx global activate' is not available when the server's "
+        "content_backend is 'delegated': repositories live on workspace-mcp and "
+        "an alias to this host's index would be unreadable on every other pod. "
+        "Add or refresh the golden repository through the server "
+        "(POST /api/admin/golden-repos or the refresh endpoint) instead."
+    )
+
+
 @global_group.command("activate")
 @click.argument("repo_name")
 @click.pass_context
@@ -19910,6 +19974,11 @@ def global_activate(ctx, repo_name: str):
     from .global_repos.global_activation import GlobalActivator, GlobalActivationError
 
     console = Console()
+
+    refusal = _global_activate_delegated_refusal()
+    if refusal is not None:
+        console.print(f"[red]Error: {refusal}[/red]")
+        sys.exit(1)
 
     # Get golden repos directory
     golden_repos_dir = os.environ.get("CIDX_GOLDEN_REPOS_DIR")

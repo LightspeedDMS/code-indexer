@@ -6,10 +6,11 @@ and git diff-index for change detection.
 """
 
 import logging
+import os
 import subprocess
 from collections.abc import Sequence as _Sequence
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from .git_error_classifier import GitFetchError
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
@@ -90,13 +91,81 @@ _CIDX_UNTRACKED_ARTIFACTS = frozenset(
 )
 
 
+def _delegated_content_writer() -> Optional[Any]:
+    """The content writer that owns the working tree, or None when it is HERE.
+
+    Under ``content_backend='delegated'`` git runs in git-mcp and the working
+    tree lives with workspace-mcp; this pod's ``repo_path`` holds index state
+    only, so an untracked file git names is removed THERE, through the content
+    writer. None outside a delegated server (local backend, CLI, tests): the
+    local disk is the working tree, exactly as before. A delegated server with
+    no writer parked raises -- unlinking this pod's disk instead would remove
+    nothing git can see (or worse, cidx's own state of the same name).
+    """
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    if not is_content_seam_delegated():
+        return None
+    from code_indexer.server.startup.content_writer_wiring import (
+        server_content_writer,
+    )
+
+    writer = server_content_writer()
+    if writer is None:
+        raise RuntimeError(
+            "content_backend='delegated' but no content writer is configured: "
+            "cannot remove untracked files from the working tree, which is not "
+            "on this pod"
+        )
+    return writer
+
+
+def _remove_untracked_file(
+    repo_path: Path, filename: str, writer: Optional[Any]
+) -> bool:
+    """Remove one untracked *filename* from the working tree; True if removed.
+
+    Confined to *repo_path*: a name escaping it is skipped with a warning. With
+    a *writer* (delegated) the working tree is workspace-mcp's: confinement is
+    lexical (this pod cannot resolve that tree's symlinks; the writer confines
+    on its side) and the delete goes through the writer, whose failure raises.
+    Without one, today's resolve() confinement and local unlink.
+    """
+    artifact = repo_path / filename
+    if writer is not None:
+        normalized = Path(os.path.normpath(artifact))
+        if not normalized.is_relative_to(repo_path) or normalized == repo_path:
+            logger.warning(f"Skipping suspicious path outside repo: {filename}")
+            return False
+        return bool(writer.delete(str(normalized)))
+    if not artifact.resolve().is_relative_to(repo_path.resolve()):
+        logger.warning(f"Skipping suspicious path outside repo: {filename}")
+        return False
+    if artifact.exists():
+        artifact.unlink()
+        return True
+    return False
+
+
+def _remove_conflicting_untracked(repo_path: Path, filenames: list[str]) -> None:
+    """Remove the untracked files git says would be overwritten (Bug #1013)."""
+    writer = _delegated_content_writer()
+    for filename in filenames:
+        if _remove_untracked_file(repo_path, filename, writer):
+            logger.info(f"Removed conflicting untracked file: {repo_path / filename}")
+
+
 def _remove_cidx_untracked_artifacts(repo_path: Path, status_lines: list[str]) -> None:
     """
     Remove known cidx artifacts that appear as untracked (??) in git status output.
 
     Only removes files whose names are in _CIDX_UNTRACKED_ARTIFACTS and that
     are reported as untracked by git status --porcelain.  Non-cidx untracked
-    files are left untouched.
+    files are left untouched. Under a delegated content backend the status is
+    git-mcp's and the removal goes through the content writer
+    (``_delegated_content_writer``), never this pod's disk.
 
     Args:
         repo_path: Absolute path to the git repository root.
@@ -108,14 +177,31 @@ def _remove_cidx_untracked_artifacts(repo_path: Path, status_lines: list[str]) -
             filename = line[3:].strip()
             untracked_names.add(filename)
 
-    for name in _CIDX_UNTRACKED_ARTIFACTS:
-        if name in untracked_names:
-            artifact = repo_path / name
-            if artifact.exists():
-                artifact.unlink()
-                logger.info(
-                    f"Removed cidx untracked artifact before git operation: {artifact}"
-                )
+    present = [name for name in _CIDX_UNTRACKED_ARTIFACTS if name in untracked_names]
+    if not present:
+        return
+    writer = _delegated_content_writer()
+    for name in present:
+        if _remove_untracked_file(repo_path, name, writer):
+            logger.info(
+                f"Removed cidx untracked artifact before git operation: "
+                f"{repo_path / name}"
+            )
+
+
+def _working_tree_is_elsewhere() -> bool:
+    """True on a delegated server: the clone is git-mcp's, not on this pod.
+
+    There ``repo_path`` holds index state only, so its absence here says
+    nothing about the repository; whether the clone exists is git-mcp's answer,
+    and a missing one fails the fetch loudly (GitFetchError) instead of being
+    skipped as an orphan.
+    """
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    return is_content_seam_delegated()
 
 
 def _parse_untracked_overwrite_filenames(stderr: str) -> list[str]:
@@ -166,7 +252,7 @@ class GitPullUpdater(UpdateStrategy):
             git_backend if git_backend is not None else LocalGitBackend()
         )
 
-        if not self.repo_path.exists():
+        if not _working_tree_is_elsewhere() and not self.repo_path.exists():
             # Bug #1338: this is the ORPHAN case (registry row present, clone
             # missing on disk) -- raise the typed OrphanedRepoError, not a
             # plain ValueError, so the refresh-scheduler skip site can catch
@@ -374,16 +460,7 @@ class GitPullUpdater(UpdateStrategy):
                     f"Git reset blocked by untracked files in {self.repo_path}: "
                     f"{conflicting}. Removing and retrying."
                 )
-                for filename in conflicting:
-                    artifact = self.repo_path / filename
-                    if not artifact.resolve().is_relative_to(self.repo_path.resolve()):
-                        logger.warning(
-                            f"Skipping suspicious path outside repo: {filename}"
-                        )
-                        continue
-                    if artifact.exists():
-                        artifact.unlink()
-                        logger.info(f"Removed conflicting untracked file: {artifact}")
+                _remove_conflicting_untracked(self.repo_path, conflicting)
                 try:
                     self._git_backend.reset(
                         str(self.repo_path), "hard", f"origin/{branch}", timeout=30
@@ -522,20 +599,7 @@ class GitPullUpdater(UpdateStrategy):
                         f"Git pull blocked by untracked files in {self.repo_path}: "
                         f"{conflicting}. Removing and retrying."
                     )
-                    for filename in conflicting:
-                        artifact = self.repo_path / filename
-                        if not artifact.resolve().is_relative_to(
-                            self.repo_path.resolve()
-                        ):
-                            logger.warning(
-                                f"Skipping suspicious path outside repo: {filename}"
-                            )
-                            continue
-                        if artifact.exists():
-                            artifact.unlink()
-                            logger.info(
-                                f"Removed conflicting untracked file: {artifact}"
-                            )
+                    _remove_conflicting_untracked(self.repo_path, conflicting)
                     try:
                         self._git_backend.pull(str(self.repo_path), timeout=120)
                     except subprocess.CalledProcessError as retry_exc:

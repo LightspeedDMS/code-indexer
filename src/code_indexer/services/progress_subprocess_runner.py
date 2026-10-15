@@ -44,7 +44,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 from code_indexer.services.activity_heartbeat_writer import (
     ACTIVITY_HEARTBEAT_PATH_ENV,
@@ -155,6 +155,19 @@ def gather_repo_metrics(repo_path) -> tuple:
         (file_count, commit_count) as integers.  Returns (0, 0) if repo is
         not a git repository or if git commands fail (graceful degradation).
     """
+    delegated, git_backend = _delegated_metrics_git_backend()
+    if delegated:
+        # The repository is not on this pod: count through git-mcp, or -- with
+        # no git seam to ask -- say so; there is no .git here to probe.
+        if git_backend is None:
+            logger.warning(
+                "gather_repo_metrics: %s is not on this pod and git_backend is "
+                "local; progress weights use no file/commit counts",
+                repo_path,
+            )
+            return (0, 0)
+        return _gather_repo_metrics_through_backend(repo_path, git_backend)
+
     # Check if this is actually a git repository (Bug #589: local:// repos have no .git)
     git_dir = Path(repo_path) / ".git"
     if not git_dir.exists():
@@ -213,6 +226,79 @@ def gather_repo_metrics(repo_path) -> tuple:
         commit_count = 0
 
     return file_count, commit_count
+
+
+def _delegated_metrics_git_backend() -> Tuple[bool, Optional[Any]]:
+    """``(repository not on this pod, the server's git seam or None)``.
+
+    ``(False, None)`` outside a server and on a pod that holds its
+    repositories: the local counts run exactly as before.
+    """
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    if not is_content_seam_delegated():
+        return False, None
+    from code_indexer.server.startup.git_backend_wiring import (
+        server_delegated_git_backend,
+    )
+
+    return True, server_delegated_git_backend()
+
+
+def _gather_repo_metrics_through_backend(repo_path, git_backend: Any) -> tuple:
+    """:func:`gather_repo_metrics` through git-mcp: ``ls_files`` and
+    ``rev_list_count HEAD``, at the path git-mcp sees the repository at.
+
+    A path git calls "not a git repository" (a ``local://`` folder) counts
+    (0, 0), as its missing ``.git`` does locally; any other failure is logged
+    and that count is 0, as a failed local command is.
+    """
+    from code_indexer.server.startup.content_backend_wiring import (
+        golden_repo_content_root,
+    )
+
+    repo_str = str(golden_repo_content_root(repo_path, consumer="gather_repo_metrics"))
+    try:
+        file_count = _backend_count(
+            "tracked files",
+            repo_str,
+            lambda: len([p for p in git_backend.ls_files(repo_str) if p.strip()]),
+        )
+        commit_count = _backend_count(
+            "commits",
+            repo_str,
+            lambda: int(git_backend.rev_list_count(repo_str, "HEAD")),
+        )
+    except _NotARepository:
+        return (0, 0)
+    return file_count, commit_count
+
+
+class _NotARepository(Exception):
+    """git says the path is not a repository: no counts, as no ``.git`` locally."""
+
+
+def _backend_count(what: str, repo_str: str, count: Callable[[], int]) -> int:
+    """One git-backend count; a failure is logged and counts 0, as locally."""
+    from code_indexer.services.git_head import NOT_A_REPOSITORY_MARKER
+
+    try:
+        return count()
+    except subprocess.CalledProcessError as e:
+        if NOT_A_REPOSITORY_MARKER in str(e.stderr or ""):
+            raise _NotARepository() from e
+        failure: Exception = e
+    except Exception as e:  # the backend's transport, whatever it is
+        failure = e
+    logger.warning(
+        "gather_repo_metrics: git backend failed counting %s in %s: %s",
+        what,
+        repo_str,
+        failure,
+    )
+    return 0
 
 
 def _validate_stale_activity_timeout(value: Optional[float]) -> None:

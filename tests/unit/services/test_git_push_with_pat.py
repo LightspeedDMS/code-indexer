@@ -23,6 +23,15 @@ import pytest
 from tests.utils.env_assertions import assert_env_absent, assert_env_present
 
 
+def _mock_git_remote_list(cmd, inner, **kwargs):
+    """Let validate_remote_name's ``git remote`` through the mock."""
+    if cmd == ["git", "remote"]:
+        r = MagicMock()
+        r.stdout = "origin\n"
+        return r
+    return inner(cmd, **kwargs)
+
+
 # Credential fixture used across tests
 MOCK_CREDENTIAL = {
     "token": "ghp_test_secret_token",
@@ -102,7 +111,7 @@ class TestGitPushWithPatEnvVars:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
@@ -133,7 +142,7 @@ class TestGitPushWithPatEnvVars:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
@@ -160,7 +169,7 @@ class TestGitPushWithPatEnvVars:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
@@ -187,7 +196,7 @@ class TestGitPushWithPatEnvVars:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
@@ -214,7 +223,7 @@ class TestGitPushWithPatEnvVars:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
@@ -241,7 +250,7 @@ class TestGitPushWithPatEnvVars:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
@@ -269,7 +278,7 @@ class TestGitPushWithPatEnvVars:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             git_ops_service.git_push_with_pat(
                 repo_dir, "origin", None, credential_without_identity
@@ -306,7 +315,7 @@ class TestGitPushWithPatUrlConversion:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
@@ -337,7 +346,7 @@ class TestGitPushWithPatUrlConversion:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
@@ -368,7 +377,7 @@ class TestGitPushWithPatUrlConversion:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
@@ -397,7 +406,7 @@ class TestGitPushWithPatUrlConversion:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             git_ops_service.git_push_with_pat(
                 repo_dir, "origin", "main", MOCK_CREDENTIAL
@@ -429,7 +438,7 @@ class TestGitPushWithPatUrlConversion:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             git_ops_service.git_push_with_pat(
                 repo_dir,
@@ -477,7 +486,7 @@ class TestGitPushWithPatErrorHandling:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             with patch(
                 "code_indexer.server.services.git_credential_helper.GitCredentialHelper.create_askpass_script",
@@ -509,7 +518,7 @@ class TestGitPushWithPatErrorHandling:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             with patch(
                 "code_indexer.server.services.git_credential_helper.GitCredentialHelper.cleanup_askpass_script",
@@ -543,7 +552,7 @@ class TestGitPushWithPatErrorHandling:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             with pytest.raises(GitCommandError) as exc_info:
                 git_ops_service.git_push_with_pat(
@@ -565,7 +574,7 @@ class TestGitPushWithPatErrorHandling:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             with pytest.raises(GitCommandError) as exc_info:
                 git_ops_service.git_push_with_pat(
@@ -587,7 +596,7 @@ class TestGitPushWithPatErrorHandling:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             with pytest.raises(GitCommandError) as exc_info:
                 git_ops_service.git_push_with_pat(
@@ -615,7 +624,7 @@ class TestGitPushWithPatReturn:
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
-            side_effect=mock_run_git,
+            side_effect=lambda cmd, **kw: _mock_git_remote_list(cmd, mock_run_git, **kw),
         ):
             result = git_ops_service.git_push_with_pat(
                 repo_dir, "origin", "main", MOCK_CREDENTIAL

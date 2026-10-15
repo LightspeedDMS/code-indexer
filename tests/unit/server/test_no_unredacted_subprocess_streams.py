@@ -35,6 +35,7 @@ _STREAM_ATTRS = {"stderr", "stdout"}
 # Calls that redact before formatting. Passing a stream to one of these is safe.
 _REDACTING = {
     "redact_url_credentials",
+    "_redact_bytes",
     "format_subprocess_failure_diagnostic",
     "format_called_process_error_diagnostic",
     "format_completed_process_diagnostic",

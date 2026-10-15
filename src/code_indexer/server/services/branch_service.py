@@ -6,11 +6,13 @@ without mocking, following CLAUDE.md Foundation #1 (Anti-Mock).
 """
 
 import logging
+import subprocess
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional, Protocol, Tuple
+from typing import Any, List, NamedTuple, Optional, Protocol, Tuple
 
 from git import Repo, InvalidGitRepositoryError, GitCommandError
 from code_indexer.services.git_topology_service import GitTopologyService
@@ -35,6 +37,33 @@ _branches_cache: "OrderedDict[Tuple[str, bool], Tuple[float, List[BranchInfo]]]"
     OrderedDict()
 )
 _branches_cache_lock = threading.Lock()
+
+
+#: ``git for-each-ref --format``: per ref, NUL-terminated fields ending with the
+#: tip commit's full message. A commit message cannot hold a NUL, so the stream
+#: splits unambiguously. The raw committer date keeps the commit's own UTC
+#: offset, as GitPython reports it.
+_BACKEND_REF_FORMAT = (
+    "%(refname)%00%(objectname)%00%(authorname)%00%(committerdate:raw)"
+    "%00%(HEAD)%00%(upstream:short)%00%(contents)%00"
+)
+_BACKEND_REF_FIELDS = 7
+_BACKEND_REF_PATTERNS = ("refs/heads", "refs/remotes")
+_LOCAL_PREFIX = "refs/heads/"
+_REMOTE_PREFIX = "refs/remotes/"
+
+
+class _BackendRef(NamedTuple):
+    """One branch as the git backend lists it."""
+
+    name: str
+    local: bool
+    sha: str
+    author: str
+    raw_date: str
+    is_head: bool
+    upstream: str
+    message: str
 
 
 class IndexStatusManager(Protocol):
@@ -63,15 +92,66 @@ class BranchService:
         self.index_status_manager = index_status_manager
         self._closed = False
         self._is_git_repo = self.git_topology_service.is_git_available()
+        # The git seam (git-mcp) and the path it sees the repository at, when
+        # the repository is not on this pod; GitPython needs a local .git.
+        self._git_backend: Optional[Any] = None
+        self._backend_repo_path = ""
+        if not self._is_git_repo:
+            self._is_git_repo = self._attach_delegated_backend()
 
         # Initialize git repo for branch operations (only if git is available)
-        if self._is_git_repo:
+        if self._is_git_repo and self._git_backend is None:
             try:
                 self.repo = Repo(self.git_topology_service.codebase_dir)
             except InvalidGitRepositoryError as e:
                 raise ValueError(f"Invalid git repository: {e}")
         else:
             self.repo = None  # type: ignore[assignment]
+
+    def _attach_delegated_backend(self) -> bool:
+        """On a pod that does not hold the repository, use the git seam.
+
+        Local git found no repository at the codebase dir. With
+        ``content_backend: delegated`` that is because the repository is with
+        git-mcp: its answer is asked instead (only git's own "not a git
+        repository" makes the path non-git). With no git seam to ask, branch
+        listing REFUSES rather than answer "no branches". Elsewhere (local
+        backend, CLI, tests) nothing changes: the path is simply not a repo.
+        """
+        from code_indexer.server.services.delegated_refusal import (
+            refuse_when_delegated,
+        )
+        from code_indexer.server.startup.content_backend_wiring import (
+            golden_repo_content_root,
+            is_content_seam_delegated,
+            is_pod_local_golden_path,
+        )
+
+        if not is_content_seam_delegated():
+            return False
+        if is_pod_local_golden_path(self.git_topology_service.codebase_dir):
+            return False
+        from code_indexer.server.startup.git_backend_wiring import (
+            server_delegated_git_backend,
+        )
+        from code_indexer.services.git_head import probe_backend_repository
+
+        backend = server_delegated_git_backend()
+        if backend is None:
+            refuse_when_delegated(
+                "Branch listing",
+                "git_backend is 'local', so no git-mcp holds the repository",
+            )
+        path = str(
+            golden_repo_content_root(
+                self.git_topology_service.codebase_dir, consumer="BranchService"
+            )
+        )
+        is_repo, _ = probe_backend_repository(path, backend)
+        if is_repo:
+            self._git_backend = backend
+            self._backend_repo_path = path
+        return bool(is_repo)
 
     def list_branches(self, include_remote: bool = False) -> List[BranchInfo]:
         """List branches, CACHED per (codebase_dir, include_remote).
@@ -138,6 +218,8 @@ class BranchService:
         # Return empty list for non-git repositories
         if not self._is_git_repo:
             return []
+        if self._git_backend is not None:
+            return self._list_branches_through_backend(include_remote)
 
         try:
             branches = []
@@ -197,6 +279,116 @@ class BranchService:
             )
             raise RuntimeError("Failed to retrieve branch information") from e
 
+    def _backend_refs(self) -> List["_BackendRef"]:
+        """Every local and remote branch with its tip commit, in ONE git-mcp
+        call (``git for-each-ref``), whatever the number of branches."""
+        assert self._git_backend is not None
+        from code_indexer.global_repos.git_operations import (
+            decode_like_run_git_command,
+        )
+
+        raw = self._git_backend.for_each_ref(
+            self._backend_repo_path, _BACKEND_REF_FORMAT, _BACKEND_REF_PATTERNS
+        )
+        tokens = decode_like_run_git_command(bytes(raw)).split("\x00")
+        # git ends every record with a newline after its last NUL: the stream
+        # is records of 7 fields, then one "\n" leading the next record.
+        tail = tokens.pop()
+        if tail.strip() or len(tokens) % _BACKEND_REF_FIELDS:
+            raise RuntimeError(
+                f"Unexpected git for-each-ref output from git backend "
+                f"({len(tokens)} fields, trailing {tail[:40]!r})"
+            )
+        refs = []
+        for start in range(0, len(tokens), _BACKEND_REF_FIELDS):
+            fields = tokens[start : start + _BACKEND_REF_FIELDS]
+            fields[0] = fields[0].removeprefix("\n")
+            refname, sha, author, raw_date, head, upstream, message = fields
+            if refname.startswith(_LOCAL_PREFIX):
+                name, local = refname[len(_LOCAL_PREFIX) :], True
+            elif refname.startswith(_REMOTE_PREFIX):
+                remote_ref = refname[len(_REMOTE_PREFIX) :]
+                if remote_ref.endswith("/HEAD") or "/" not in remote_ref:
+                    continue  # symbolic origin/HEAD, as the local walk skips it
+                name, local = remote_ref.split("/", 1)[1], False
+            else:
+                continue
+            refs.append(
+                _BackendRef(
+                    name,
+                    local,
+                    sha,
+                    author,
+                    raw_date,
+                    head.strip() == "*",
+                    upstream,
+                    message.strip(),
+                )
+            )
+        return refs
+
+    def _backend_branch_info(
+        self, ref: "_BackendRef", include_remote: bool
+    ) -> BranchInfo:
+        """:meth:`_create_branch_info` for a ref the git backend listed."""
+        seconds, offset = ref.raw_date.split()
+        sign = -1 if offset.startswith("-") else 1
+        tz = timezone(
+            sign * timedelta(hours=int(offset[1:3]), minutes=int(offset[3:5]))
+        )
+        commit_info = CommitInfo(
+            sha=ref.sha,
+            message=ref.message,
+            author=ref.author,
+            date=datetime.fromtimestamp(int(seconds), tz=tz).isoformat(),
+        )
+        remote_tracking = None
+        if include_remote and ref.local and ref.upstream:
+            remote_tracking = self._backend_tracking_info(ref)
+        return BranchInfo(
+            name=ref.name,
+            is_current=ref.local and ref.is_head,
+            last_commit=commit_info,
+            index_status=self._get_index_status(ref.name),
+            remote_tracking=remote_tracking,
+        )
+
+    def _backend_tracking_info(self, ref: "_BackendRef") -> RemoteTrackingInfo:
+        """Ahead/behind of a local branch against its upstream, via git-mcp."""
+        assert self._git_backend is not None
+        try:
+            ahead = self._git_backend.rev_list_count(
+                self._backend_repo_path, f"{ref.upstream}..{ref.name}"
+            )
+            behind = self._git_backend.rev_list_count(
+                self._backend_repo_path, f"{ref.name}..{ref.upstream}"
+            )
+        except subprocess.CalledProcessError as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-058",
+                    f"Failed to calculate ahead/behind for branch '{ref.name}': {e}",
+                )
+            )
+            ahead = behind = 0
+        return RemoteTrackingInfo(remote=ref.upstream, ahead=ahead, behind=behind)
+
+    def _list_branches_through_backend(self, include_remote: bool) -> List[BranchInfo]:
+        """:meth:`_list_branches_uncached` through git-mcp: one
+        ``git for-each-ref`` listing every branch with its tip commit's message
+        (GitPython reads the same commit objects). A backend failure raises."""
+        refs = self._backend_refs()
+        branches = [
+            self._backend_branch_info(ref, include_remote) for ref in refs if ref.local
+        ]
+        seen = {b.name for b in branches}
+        for ref in refs:
+            if not ref.local and ref.name not in seen:
+                branches.append(self._backend_branch_info(ref, False))
+                seen.add(ref.name)
+        branches.sort(key=lambda b: (not b.is_current, b.name))
+        return branches
+
     def get_branch_by_name(self, branch_name: str) -> Optional[BranchInfo]:
         """Get information for a specific branch.
 
@@ -209,6 +401,15 @@ class BranchService:
         # Return None for non-git repositories
         if not self._is_git_repo:
             return None
+        if self._git_backend is not None:
+            return next(
+                (
+                    self._backend_branch_info(ref, include_remote=False)
+                    for ref in self._backend_refs()
+                    if ref.local and ref.name == branch_name
+                ),
+                None,
+            )
 
         try:
             # Check if branch exists

@@ -138,6 +138,10 @@ def _clone_has_only_empty_files(clone_path: Path) -> bool:
     than mask a real failure.
     """
 
+    backend = _delegated_backend()
+    if backend is not None:
+        return _content_has_only_empty_files(backend, clone_path)
+
     def _reraise(err: OSError) -> None:
         # os.walk SWALLOWS listing errors by default, which would let an unreadable
         # subtree look like "no files here" and mask a repo that does have content.
@@ -160,6 +164,63 @@ def _clone_has_only_empty_files(clone_path: Path) -> bool:
     except OSError:
         return False
     return seen_file
+
+
+def _delegated_backend() -> Optional[Any]:
+    """The content backend holding the golden clones, or None when they are on
+    this pod (the local backend, or no running server)."""
+    from code_indexer.server.startup.content_backend_wiring import (
+        server_content_backend,
+    )
+
+    backend = server_content_backend()
+    if backend is None or backend.is_local:
+        return None
+    return backend
+
+
+def _content_has_only_empty_files(backend: Any, clone_path: Path) -> bool:
+    """:func:`_clone_has_only_empty_files` over a delegated content backend.
+
+    This pod's clone directory holds index state only, so the repository's
+    files are the backend's manifest (sizes) and fetch (bytes of the small
+    ones). Same answers: a file over the probe size, a non-blank file, or one
+    that cannot be read (a symlink, a per-file fetch error) is "not all empty";
+    no files at all is False. A listing or transport failure RAISES -- the job
+    fails with the real cause rather than reading an unreachable backend as an
+    empty repository.
+    """
+    from code_indexer.server.startup.content_backend_wiring import (
+        golden_repo_content_root,
+    )
+
+    root = str(
+        golden_repo_content_root(clone_path, consumer="semantic_backfill empty-probe")
+    )
+    prune = sorted(_CONTENT_WALK_SKIP)
+    small: list = []
+    cursor: Optional[str] = None
+    while True:
+        page = backend.manifest(root, cursor=cursor, prune_dirs=prune)
+        for entry in page.entries:
+            if any(part in _CONTENT_WALK_SKIP for part in entry.path.split("/")[:-1]):
+                continue
+            if entry.is_symlink or entry.blob_sha is None:
+                return False  # unreadable -> cannot confirm -> fail loud
+            if entry.size > _EMPTY_PROBE_BYTES:
+                return False  # too big to be empty -- real content
+            small.append(entry.path)
+        if page.next_cursor is None:
+            break
+        if page.next_cursor == cursor:
+            raise RuntimeError(f"manifest cursor did not advance for {root}")
+        cursor = page.next_cursor
+    if not small:
+        return False
+    for fetched in backend.fetch(root, small):
+        if fetched.error is not None or fetched.data.strip():
+            return False
+    return True
 
 
 def semantic_index_present(repo_path: Path) -> bool:

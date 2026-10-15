@@ -88,6 +88,15 @@ class RepoManifest:
         # one it may not exist here at all.
         self._backend_is_local = backend_is_local
 
+    @property
+    def backend_is_local(self) -> bool:
+        """Whether the backend that produced this manifest reads THIS disk.
+
+        False means a delegated backend: an entry with no hash names a file
+        that may not exist on this machine, so it cannot be read here instead.
+        """
+        return self._backend_is_local
+
     @classmethod
     def build(
         cls,

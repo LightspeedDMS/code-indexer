@@ -123,15 +123,20 @@ def server_regex_target(
     A delegated backend runs ripgrep in workspace-mcp, which holds the golden
     repos' base clones, so a versioned-snapshot path is searched at its golden
     repo's base clone (``golden_repo_content_root``, shared with the file
-    tools). Every other path, and every local search, is unchanged.
+    tools). A pod-local ``local://`` golden repo (Langfuse trace folders) has
+    its files only on this pod, so it is searched here, by the local backend
+    (None). Every other path, and every local search, is unchanged.
 
     Blocking (a registry read for a snapshot path): call it off the event loop.
     """
     from code_indexer.server.startup.content_backend_wiring import (
         golden_repo_content_root,
+        is_pod_local_golden_path,
     )
 
     backend = server_ripgrep_backend()
     if backend is None or backend.is_local:
         return Path(repo_path), backend
+    if is_pod_local_golden_path(repo_path):
+        return Path(repo_path), None
     return golden_repo_content_root(repo_path, consumer="Regex search"), backend

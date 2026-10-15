@@ -202,6 +202,11 @@ smoke:
       tests/unit/server/repositories/test_golden_repo_delegated_content.py
       tests/unit/server/routers/test_activated_repos_routes_content_seam.py
       tests/unit/server/repositories/test_activated_repos_content_seam.py
+      tests/unit/server/services/test_activated_write_reindex.py
+      tests/unit/server/auto_update/test_operator_tooling_content_seam.py
+      tests/unit/server/repositories/test_activated_composite_content_seam.py
+      tests/unit/server/test_activated_rest_surfaces_content_seam.py
+      tests/unit/server/test_activated_branch_health_fail_loud.py
       tests/unit/services/test_index_git_seam.py
       tests/unit/services/test_reconcile_git_seam_mountless.py
       tests/unit/services/test_delegated_max_file_size.py
@@ -216,6 +221,8 @@ smoke:
       tests/unit/services/test_git_push_with_pat.py
       tests/unit/services/test_git_push_upstream.py
       tests/unit/services/test_git_push_error_masks_url_authority.py
+      tests/unit/server/services/test_golden_git_history_git_exec.py
+      tests/unit/server/services/test_orchestrator_golden_repo_source.py
       tests/unit/global_repos/test_refresh_git_seam_mountless.py
       tests/unit/global_repos/test_refresh_scheduler_indexing_types.py
       tests/unit/global_repos/test_reclone_mountless.py
@@ -223,12 +230,21 @@ smoke:
       tests/unit/server/routers/test_metadata_outbox_admin.py
       tests/unit/global_repos/test_index_store_snapshot.py
       tests/unit/server/startup/test_index_store_wiring.py
+      tests/unit/server/services/test_temporal_shards_cross_pod.py
       tests/unit/server/services/test_index_materializer_cross_pod.py
       tests/unit/server/repositories/test_golden_add_publishes_index.py
       tests/unit/server/repositories/test_add_index_swap_records_published_index.py
       tests/unit/server/mcp/test_swap_sites_record_published_index.py
       tests/unit/server/services/test_unpublished_swaps_fail_loud.py
       tests/unit/global_repos/test_integrity_baseline_cross_pod.py
+      tests/unit/server/repositories/test_activated_index_store_cross_pod.py
+      tests/unit/server/services/test_activated_index_store_readers.py
+      tests/unit/server/repositories/test_activated_composite_index_store.py
+      tests/unit/server/routers/test_repository_health_golden_served.py
+      tests/unit/server/services/test_checkout_sweep.py
+      tests/unit/server/services/hnsw_orphan_sweep/test_golden_repair_publishes.py
+      tests/unit/server/services/test_index_store_backfill.py
+      tests/unit/server/services/test_activated_history_git_seam.py
       tests/unit/server/startup/test_content_writer_wiring.py
       tests/unit/server/services/test_golden_repo_writes_through_content_writer.py
       tests/unit/server/services/test_activated_file_tools_content_seam.py
@@ -262,6 +278,37 @@ smoke:
       tests/unit/global_repos/test_refresh_cidx_meta_shared_content.py
       tests/unit/server/utils/test_index_command_layout_1488.py
       tests/unit/server/services/test_fts_index_builder.py
+      tests/unit/global_repos/test_git_pull_updater_delegated_worktree.py
+      tests/unit/global_repos/test_lifecycle_description_delegated_refusal.py
+      tests/unit/global_repos/test_refresh_scheduler_delegated_repo_probes.py
+      tests/unit/global_repos/test_regex_search_delegated_paths_are_lexical.py
+      tests/unit/indexing/test_delegated_override_file.py
+      tests/unit/indexing/test_repo_manifest_backend_is_local.py
+      tests/unit/indexing/test_unreached_repo_reads_stay_unreached.py
+      tests/unit/server/mcp/test_all_repositories_status_delegated_failure.py
+      tests/unit/server/mcp/test_auto_watch_skipped_when_delegated.py
+      tests/unit/server/repositories/test_golden_repo_lifecycle_delegated.py
+      tests/unit/server/repositories/test_golden_repo_remove_index_versions.py
+      tests/unit/server/repositories/test_repository_listing_statistics_content_seam.py
+      tests/unit/server/routers/test_branches_v2_current_branch_git_seam.py
+      tests/unit/server/services/semantic_backfill/test_empty_probe_delegated.py
+      tests/unit/server/services/test_delegated_refusal.py
+      tests/unit/server/services/test_description_scheduler_delegated.py
+      tests/unit/server/services/test_file_service_pod_local_repos_skip_seam.py
+      tests/unit/server/services/test_golden_branch_listing_for_each_ref.py
+      tests/unit/server/services/test_golden_lifecycle_sweeps_delegated.py
+      tests/unit/server/services/test_index_freshness_head_cache.py
+      tests/unit/server/test_git_tools_delegated_seam.py
+      tests/unit/server/test_infra_content_seam_guards.py
+      tests/unit/server/utils/test_fix_config_spawn_backend_args.py
+      tests/unit/server/wiki/test_wiki_golden_content_seam.py
+      tests/unit/services/test_delegated_index_pass_local_reads.py
+      tests/unit/services/test_file_identifier_backend_skips_local_probe.py
+      tests/unit/services/test_fix_config_delegated_backends.py
+      tests/unit/services/test_reconcile_working_dir_content_id.py
+      tests/unit/services/test_smart_indexer_hook_install_delegated.py
+      tests/unit/xray/test_xray_pod_local_execution.py
+      tests/unit/xray/test_xray_pod_local_inline.py
       -v --tb=short
       --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
     # The plugins ship their own suites and NO job collected either of them.

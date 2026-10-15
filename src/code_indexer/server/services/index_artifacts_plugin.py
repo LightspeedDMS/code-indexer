@@ -13,6 +13,9 @@ The contract
 A plugin is a zero-argument FACTORY callable returning an object with
 ``current_version(alias)``, ``publish(alias, base_version, source_dir)`` and
 ``checkout(alias, dest_dir, version=None)`` (see ``DelegatedIndexStore``).
+Removing a golden repo also needs ``delete_alias(alias) -> int`` (every
+published version of the alias; cidx-content-backend >= 0.9.0); a client
+without it fails that removal loudly rather than leave the versions behind.
 
 Selection (first match wins)
 ----------------------------

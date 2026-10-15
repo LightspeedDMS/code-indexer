@@ -362,13 +362,35 @@ def test_missing_description_is_checked_in_the_shared_content(
             )
             is False
         )
+        # Missing in the shared content, but NOT queued: generating it means an
+        # agent reading /clone/absent on this pod, which holds index state only.
         assert (
             scheduler._queue_missing_description(
                 "absent-global", Path("/clone/absent"), cli
             )
-            is True
+            is False
         )
+    cli.submit_work.assert_not_called()
+
+
+def test_missing_description_is_queued_locally(meta_world: MetaWorld) -> None:
+    meta_world.seed("present.md", "x")
+    scheduler = _scheduler(meta_world.local_golden)
+    cli = MagicMock()
+    assert (
+        scheduler._queue_missing_description(
+            "present-global", Path("/clone/present"), cli
+        )
+        is False
+    )
+    assert (
+        scheduler._queue_missing_description(
+            "absent-global", Path("/clone/absent"), cli
+        )
+        is True
+    )
     cli.submit_work.assert_called_once()
+    assert cli.submit_work.call_args.args[0] == Path("/clone/absent")
 
 
 # ── backup ───────────────────────────────────────────────────────────────

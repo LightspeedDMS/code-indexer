@@ -273,45 +273,6 @@ class TestMutationArguments:
         backend.pull(REPO, mode="no-ff")
         assert calls[-1]["body"]["params"]["arguments"]["no_ff"] is True
 
-    def test_pull_conflicts_raise_with_git_style_conflict_lines(
-        self, backend, monkeypatch
-    ):
-        """git-mcp's gitPull RETURNS (not throws) {status: 'conflicts'} when the
-        pull stops on conflicts. Discarding it reported a mid-merge copy as a
-        clean pull; it must fail as a local `git pull` does, naming each
-        conflicted path the way git's stdout does."""
-        result = {
-            "status": "conflicts",
-            "commits_pulled": 0,
-            "conflicts": [
-                {"path": "a.txt", "conflict_type": "both_modified"},
-                {"path": "dir/b.txt", "conflict_type": "both_modified"},
-            ],
-            "_guidance": {"message": "conflicts — pulled 0 commit(s)"},
-        }
-        _install(monkeypatch, lambda b: _rpc(_content(result)))
-        with pytest.raises(GitMcpBackendError) as exc:
-            backend.pull(REPO, remote="origin", branch="main")
-        assert isinstance(exc.value, subprocess.CalledProcessError)
-        assert exc.value.returncode != 0
-        assert exc.value.output.splitlines()[:2] == [
-            "CONFLICT (content): Merge conflict in a.txt",
-            "CONFLICT (content): Merge conflict in dir/b.txt",
-        ]
-
-    def test_pull_conflicts_without_paths_still_fail(self, backend, monkeypatch):
-        _install(monkeypatch, lambda b: _rpc(_content({"status": "conflicts"})))
-        with pytest.raises(GitMcpBackendError, match="conflicts"):
-            backend.pull(REPO)
-
-    @pytest.mark.parametrize("status", ["up_to_date", "fast_forwarded", "merged"])
-    def test_a_clean_pull_returns(self, backend, monkeypatch, status):
-        _install(
-            monkeypatch,
-            lambda b: _rpc(_content({"status": status, "conflicts": None})),
-        )
-        assert backend.pull(REPO) is None
-
     def test_pull_rejects_unknown_mode(self, backend, monkeypatch):
         _install(monkeypatch, lambda b: _rpc(_content({})))
         with pytest.raises(GitMcpBackendError, match="unsupported mode"):
@@ -500,6 +461,66 @@ class TestHistoryOps:
         assert exc.value.returncode == 128
         assert exc.value.stderr == "fatal: bad object"
 
+    def test_for_each_ref_sends_one_call_and_returns_bytes(self, backend, monkeypatch):
+        calls = _install(
+            monkeypatch, lambda b: _rpc(_content(self._raw(b"main|\xff\n")))
+        )
+        out = backend.for_each_ref(
+            REPO,
+            "%(refname:short)|%(objectname)",
+            ["refs/heads/", "refs/remotes/origin/"],
+            sort="-committerdate",
+            count=5,
+            timeout=7,
+        )
+        assert out == b"main|\xff\n"
+        assert len(calls) == 1
+        params = calls[0]["body"]["params"]
+        assert params["name"] == "git_for_each_ref"
+        assert params["arguments"] == {
+            "cow_path": REPO,
+            "format": "%(refname:short)|%(objectname)",
+            "patterns": ["refs/heads/", "refs/remotes/origin/"],
+            "sort": "-committerdate",
+            "count": 5,
+        }
+        assert calls[0]["timeout"] == 7
+
+    def test_for_each_ref_omits_unset_options(self, backend, monkeypatch):
+        calls = _install(monkeypatch, lambda b: _rpc(_content(self._raw(b""))))
+        assert backend.for_each_ref(REPO, "%(refname)") == b""
+        assert calls[0]["body"]["params"]["arguments"] == {
+            "cow_path": REPO,
+            "format": "%(refname)",
+        }
+
+    def test_for_each_ref_git_failure_raises_with_git_stderr(
+        self, backend, monkeypatch
+    ):
+        _install(
+            monkeypatch,
+            lambda b: _rpc(_content(self._raw(b"", 129, "error: unknown field"))),
+        )
+        with pytest.raises(GitMcpBackendError) as exc:
+            backend.for_each_ref(REPO, "%(bogus)")
+        assert exc.value.returncode == 129
+        assert exc.value.stderr == "error: unknown field"
+
+    def test_for_each_ref_wrong_shape_fails_loud(self, backend, monkeypatch):
+        _install(monkeypatch, lambda b: _rpc(_content({"exit_code": 0})))
+        with pytest.raises(GitMcpBackendError, match="stdout_b64"):
+            backend.for_each_ref(REPO, "%(refname)")
+
+    def test_for_each_ref_tool_error_fails_loud(self, backend, monkeypatch):
+        _install(
+            monkeypatch,
+            lambda b: _rpc(
+                {"isError": True, "content": [{"type": "text", "text": "bad sort"}]}
+            ),
+        )
+        with pytest.raises(GitMcpBackendError, match="bad sort"):
+            backend.for_each_ref(REPO, "%(refname)", sort="--x")
+
     def test_diff_commits_is_one_call_per_batch(self, backend, monkeypatch):
         def respond(body):
             pairs = body["params"]["arguments"]["pairs"]
@@ -673,15 +694,7 @@ class TestGitToolsRunner:
             "cow_path": REPO,
             "remote": "origin",
             "branch": "w",
-            # Always sent: git-mcp's own default is to SET the upstream, which
-            # a plain `git push` does not do.
-            "set_upstream": False,
         }
-
-    def test_push_set_upstream_is_forwarded(self, backend, monkeypatch):
-        calls = _install(monkeypatch, lambda b: _rpc(_content({"branch": "w"})))
-        backend.push(REPO, "origin", "w", set_upstream=True)
-        assert calls[0]["body"]["params"]["arguments"]["set_upstream"] is True
 
     def test_push_tool_error_raises(self, backend, monkeypatch):
         _install(

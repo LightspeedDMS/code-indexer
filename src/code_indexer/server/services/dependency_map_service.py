@@ -59,6 +59,9 @@ from code_indexer.server.telemetry.spans import create_span
 
 logger = logging.getLogger(__name__)
 
+#: Directories never counted in a repository's size (git's and cidx's own).
+_REPO_SIZE_PRUNED_DIRS = (".git", ".code-indexer")
+
 # Constants
 SCHEDULER_POLL_INTERVAL_SECONDS = 60  # Story #193: Delta refresh polling interval
 THREAD_JOIN_TIMEOUT_SECONDS = 5.0  # Story #193: Daemon thread join timeout
@@ -1865,19 +1868,31 @@ class DependencyMapService:
         Returns:
             Enriched and sorted repo list
         """
+        from code_indexer.server.services.file_service import (
+            content_seam_source,
+            manifest_entries,
+        )
+
         total = len(repo_list)
         for idx, repo in enumerate(repo_list):
             clone_path = Path(repo.get("clone_path", ""))
-            if clone_path.exists():
+            # Content seam: on a pod without the repository its directory holds
+            # only index state, which the walk below would count as an empty
+            # repository and drop. The content backend's manifest describes
+            # the clone instead; a failure to list it raises.
+            source = content_seam_source(
+                str(clone_path), consumer="dependency-map repository sizes"
+            )
+            if source is not None:
+                entries = manifest_entries(source, _REPO_SIZE_PRUNED_DIRS)
+                repo["file_count"] = len(entries)
+                repo["total_bytes"] = sum(e.size for e in entries)
+            elif clone_path.exists():
                 file_count = 0
                 total_bytes = 0
                 for f in clone_path.rglob("*"):
                     # Exclude .git and .code-indexer directories
-                    if (
-                        f.is_file()
-                        and ".git" not in f.parts
-                        and ".code-indexer" not in f.parts
-                    ):
+                    if f.is_file() and not set(_REPO_SIZE_PRUNED_DIRS) & set(f.parts):
                         file_count += 1
                         try:
                             total_bytes += f.stat().st_size

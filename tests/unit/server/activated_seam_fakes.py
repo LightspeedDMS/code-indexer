@@ -26,7 +26,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 from unittest.mock import MagicMock
 
 import pytest
@@ -35,6 +35,8 @@ from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
 from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
+from code_indexer.server.services import index_materializer
+from code_indexer.server.services.activated_index_store import CONTENT_DIGEST_MARKER
 from code_indexer.server.startup import content_backend_wiring
 from code_indexer.server.storage.shared.clone_backend import (
     DelegatedCloneBackend,
@@ -46,6 +48,19 @@ from code_indexer.server.utils.config_manager import ServerResourceConfig
 ALIAS = "example-repo"
 USER = "alice"
 INDEX_DIR = ".code-indexer"
+
+
+#: Names directly under an activated copy's pod directory that are pod state.
+_POD_STATE_NAMES = frozenset(
+    {
+        INDEX_DIR,
+        CONTENT_DIGEST_MARKER,
+        index_materializer.CHECKED_OUT_MARKER,
+        index_materializer.IN_PROGRESS_MARKER,
+        index_materializer.INCOMING_DIRNAME,
+        index_materializer.RETIRED_DIRNAME,
+    }
+)
 
 
 class LocalIOForbidden(AssertionError):
@@ -354,69 +369,90 @@ class ActivatedWorld:
                 continue
             rel = Path(full).relative_to(root).parts
             if root == str(self.pod_golden):
-                return not (rel and rel[0] == INDEX_DIR)
+                return not (rel and rel[0] in _POD_STATE_NAMES)
             # activated-repos/<user>: <alias>/.code-indexer is pod state, and so
-            # is solo mode's <alias>_metadata.json registry beside the copies.
+            # is solo mode's <alias>_metadata.json registry beside the copies,
+            # and the IndexStore checkout's own markers and lock (only ever
+            # written under a delegated IndexStore, on the pod's state dir).
             if len(rel) <= 1:
-                return bool(rel) and not rel[0].endswith("_metadata.json")
-            return rel[1] != INDEX_DIR
+                return bool(rel) and not (
+                    rel[0].endswith("_metadata.json")
+                    or rel[0].endswith(".checkout.lock")
+                )
+            return rel[1] not in _POD_STATE_NAMES
         return False
 
     def _install_guards(self, patcher: pytest.MonkeyPatch) -> None:
-        forbidden = self._forbidden
+        install_local_io_guards(patcher, self._forbidden)
 
-        def _guard(owner: Any, name: str, path_arg: int = 0) -> None:
-            original = getattr(owner, name)
 
-            def wrapper(*args: Any, **kwargs: Any) -> Any:
-                candidates = list(args[: path_arg + 1]) + [
-                    kwargs.get("path"),
-                    kwargs.get("file"),
-                ]
-                if any(c is not None and forbidden(c) for c in candidates):
-                    raise LocalIOForbidden(f"{name}{args!r}")
-                return original(*args, **kwargs)
+def install_local_io_guards(
+    patcher: pytest.MonkeyPatch, forbidden: Callable[[Any], bool]
+) -> None:
+    """Make every local file access, and every subprocess run in or naming a
+    path, raise :class:`LocalIOForbidden` when ``forbidden(path)`` is true."""
 
-            patcher.setattr(owner, name, wrapper)
+    def _guard(owner: Any, name: str, path_arg: int = 0) -> None:
+        original = getattr(owner, name)
 
-        for name in (
-            "read_text",
-            "read_bytes",
-            "write_text",
-            "write_bytes",
-            "open",
-            "unlink",
-            "rename",
-            "exists",
-            "is_file",
-            "is_dir",
-            "iterdir",
-            "glob",
-            "rglob",
-            "stat",
-        ):
-            _guard(Path, name)
-        _guard(builtins, "open")
-        for name in ("listdir", "scandir", "walk", "remove", "unlink", "makedirs"):
-            _guard(os, name)
-        _guard(os.path, "exists")
-        _guard(os.path, "isdir")
-        _guard(os.path, "isfile")
-        _guard(shutil, "rmtree")
-        _guard(shutil, "move", path_arg=1)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            candidates = list(args[: path_arg + 1]) + [
+                kwargs.get("path"),
+                kwargs.get("file"),
+            ]
+            if any(c is not None and forbidden(c) for c in candidates):
+                raise LocalIOForbidden(f"{name}{args!r}")
+            return original(*args, **kwargs)
 
-        def _guard_spawn(owner: Any, name: str) -> None:
-            original = getattr(owner, name)
+        patcher.setattr(owner, name, wrapper)
 
-            def wrapper(*args: Any, **kwargs: Any) -> Any:
-                argv = args[0] if args else kwargs.get("args", [])
-                values = list(argv) if isinstance(argv, (list, tuple)) else [argv]
-                if any(forbidden(v) for v in [kwargs.get("cwd"), *values] if v):
-                    raise LocalIOForbidden(f"{name} {argv!r} cwd={kwargs.get('cwd')}")
-                return original(*args, **kwargs)
+    for name in (
+        "read_text",
+        "read_bytes",
+        "write_text",
+        "write_bytes",
+        "open",
+        "unlink",
+        "rename",
+        "exists",
+        "is_file",
+        "is_dir",
+        "iterdir",
+        "glob",
+        "rglob",
+        "stat",
+    ):
+        _guard(Path, name)
+    _guard(builtins, "open")
+    for name in (
+        "listdir",
+        "scandir",
+        "walk",
+        "stat",
+        "remove",
+        "unlink",
+        "makedirs",
+    ):
+        _guard(os, name)
+    _guard(os.path, "exists")
+    _guard(os.path, "getsize")
+    _guard(os.path, "isdir")
+    _guard(os.path, "isfile")
+    _guard(shutil, "rmtree")
+    _guard(shutil, "move", path_arg=1)
 
-            patcher.setattr(owner, name, wrapper)
+    def _guard_spawn(owner: Any, name: str) -> None:
+        original = getattr(owner, name)
 
-        _guard_spawn(subprocess, "run")
-        _guard_spawn(subprocess, "Popen")
-        _guard_spawn(subprocess, "check_output")
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            argv = args[0] if args else kwargs.get("args", [])
+            values = list(argv) if isinstance(argv, (list, tuple)) else [argv]
+            if any(forbidden(v) for v in [kwargs.get("cwd"), *values] if v):
+                raise LocalIOForbidden(f"{name} {argv!r} cwd={kwargs.get('cwd')}")
+            return original(*args, **kwargs)
+
+        patcher.setattr(owner, name, wrapper)
+
+    _guard_spawn(subprocess, "run")
+    _guard_spawn(subprocess, "Popen")
+    _guard_spawn(subprocess, "check_output")

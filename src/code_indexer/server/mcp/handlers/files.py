@@ -149,9 +149,16 @@ def _start_auto_watch_if_needed(
     )
 
     if is_content_seam_delegated():
-        # The repository is on workspace-mcp; there is nothing on this pod to
-        # watch (AutoWatchManager refuses too) -- and no pod path to probe.
+        # Content seam: the repository is not on this pod, so there is no
+        # directory here to probe or watch (AutoWatchManager.start_watch
+        # refuses a delegated backend too). Changes reach a delegated index
+        # through re-index, never through a local inotify watch.
+        logger.debug(
+            f"Skipping auto-watch for {repository_alias}: delegated content backend",
+            extra={"correlation_id": get_correlation_id()},
+        )
         return
+
     try:
         if file_crud_service.is_write_exception(repository_alias):
             repo_path = str(
@@ -1229,12 +1236,10 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if (
             is_global_repo
             and not bp["recursive"]
-            and normalized_browse_path
+            and bp["path"]
             and not cross_dir_pattern
             and not bp["indexed_only"]
         ):
-            # The NORMALIZED path: a raw leading "/" (e.g. "/src") would join
-            # onto the repository path as an absolute path and list nothing.
             result = _utils.app_module.file_service.list_directory_level(
                 repo_path=repository_alias,
                 subdir=normalized_browse_path,
@@ -1370,6 +1375,7 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
+        _reindex_after_write(result, repository_alias, user, file_path)
         return _mcp_response(result)
     except Exception as e:
         return _handle_crud_exception(e, "create", "handle_create_file")
@@ -1413,6 +1419,7 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
+        _reindex_after_write(result, repository_alias, user, file_path)
         return _mcp_response(result)
     except Exception as e:
         return _handle_crud_exception(e, "edit", "handle_edit_file")
@@ -1440,6 +1447,7 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
+        _reindex_after_write(result, repository_alias, user, file_path)
         return _mcp_response(result)
     except Exception as e:
         return _handle_crud_exception(e, "delete", "handle_delete_file")
@@ -1733,3 +1741,18 @@ def _register(registry: dict) -> None:
     registry["enter_write_mode"] = handle_enter_write_mode
     registry["exit_write_mode"] = handle_exit_write_mode
     registry["directory_tree"] = handle_directory_tree
+
+
+def _reindex_after_write(
+    result: Dict[str, Any], repository_alias: str, user: User, file_path: str
+) -> None:
+    """Under a delegated content backend no watcher sees the write (the copy
+    is not on this pod): enqueue the activated copy's reindex and add the
+    outcome to ``result`` as ``reindex``. A no-op under the local backend,
+    where ``_start_auto_watch_if_needed`` re-indexes."""
+    from code_indexer.server.services.activated_write_reindex import (
+        attach_reindex_outcome,
+    )
+
+    attach_reindex_outcome(result, user.username, repository_alias, [file_path])
+

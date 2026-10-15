@@ -49,15 +49,27 @@ class FakeArtifacts:
         chosen = version or self.current_version(alias)
         if chosen is None or not (self.root / alias / chosen).is_dir():
             raise RuntimeError(f"ENOENT: {alias}@{chosen}")
-        if Path(dest_dir).exists():
+        dest = Path(dest_dir)
+        try:
+            dest.mkdir()
+        except FileExistsError:
             raise RuntimeError("EINVAL: dest exists")
-        shutil.copytree(self.root / alias / chosen, dest_dir)
+        # Writes only under dest -- like the real client, which never stats
+        # dest's parent (on a mount-less pod that is the repository path).
+        source = self.root / alias / chosen
+        for path in sorted(source.rglob("*")):
+            target = dest / path.relative_to(source)
+            if path.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(path.read_bytes())
         return chosen
 
-    def delete_alias(self, alias: str) -> List[str]:
+    def delete_alias(self, alias: str) -> int:
         self.calls.append(("delete_alias", alias))
         if self.fail_delete:
             raise OSError("artifact service unreachable")
         deleted = self.versions.pop(alias, [])
         shutil.rmtree(self.root / alias, ignore_errors=True)
-        return deleted
+        return len(deleted)

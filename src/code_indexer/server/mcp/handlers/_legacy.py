@@ -34,7 +34,6 @@ from code_indexer.global_repos.alias_manager import AliasManager
 # Shared utilities extracted to _utils.py (Story #496 refactoring)
 from . import _utils  # noqa: F401 — tests patch _legacy._utils
 from code_indexer.server.startup.content_backend_wiring import (
-    golden_repo_content_root,
     is_content_seam_delegated,
 )
 from ._utils import (
@@ -225,6 +224,15 @@ def _resolve_repo_path(repo_identifier: str, golden_repos_dir: str) -> Optional[
             if alias_path and Path(alias_path).is_dir():
                 return str(alias_path)
 
+    # A delegated pod holds no clones: every probe below asks this disk for a
+    # `.git` it does not have. Only the index_path fallback can answer.
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    if is_content_seam_delegated():
+        return _registry_index_path_dir(repo_identifier)
+
     # Try as full path first
     if not repo_identifier.endswith("-global"):
         repo_path = Path(repo_identifier)
@@ -273,22 +281,28 @@ def _resolve_repo_path(repo_identifier: str, golden_repos_dir: str) -> Optional[
         return versioned_path
 
     # Fallback: Return index_path if it exists as a directory (for non-git operations like regex_search)
-    if index_path:
-        index_path_obj = Path(index_path)
-        if index_path_obj.is_dir():
-            return str(index_path)
+    return _registry_index_path_dir(repo_identifier)
 
+
+def _registry_index_path_dir(repo_identifier: str) -> Optional[str]:
+    """The registry's index_path for *repo_identifier* when it is a directory."""
+    repo_entry = _get_global_repo(repo_identifier)
+    index_path = repo_entry.get("index_path") if repo_entry else None
+    if index_path and Path(index_path).is_dir():
+        return str(index_path)
     return None
 
 
 def _has_git_dir(repo_path: str) -> bool:
     """Whether *repo_path* is a git working copy: ``.git`` on this pod, or --
     when the repository is not on this pod -- asked of the git seam."""
+    if not is_content_seam_delegated():
+        return (Path(repo_path) / ".git").exists()
     from code_indexer.server.services.git_tools_seam import delegated_git_tools
 
     tools = delegated_git_tools()
     if tools is None:
-        return (Path(repo_path) / ".git").exists()
+        return False
     probe = tools.run(["git", "rev-parse", "--git-dir"], repo_path, check=False)
     return probe.returncode == 0
 
@@ -316,13 +330,20 @@ def _resolve_delegated_activated_git_path(
 
 
 def _resolve_git_repo_path(
-    repository_alias: str, username: str
+    repository_alias: str, username: str, *, via_git_backend: bool = False
 ) -> Tuple[Optional[str], Optional[str]]:
     """Resolve repository path for git operations.
 
     For global repos (ending in -global): validates that the resolved path
     has a .git directory. Local repos (e.g. cidx-meta-global backed by
     local://) have no .git and git operations are not meaningful.
+
+    With ``content_backend: delegated`` a golden repository is not on this pod
+    (no ``.git`` to probe). A caller that runs git through the git seam
+    (``via_git_backend``, see ``delegated_golden_git_backend``) gets the path
+    git-mcp sees it at -- the base clone behind a versioned snapshot. Every
+    other caller runs local git, so it gets a refusal naming why instead of
+    the misleading "is a local repository".
 
     For user-activated repos: returns the activated-repo path if it exists.
 
@@ -351,23 +372,18 @@ def _resolve_git_repo_path(
         if resolved is None:
             return None, f"Repository '{repository_alias}' not found."
         if is_content_seam_delegated():
-            # The pod holds index state only: git runs on the golden repo's
-            # base clone, where the git seam (git-mcp) sees it.
-            resolved = str(golden_repo_content_root(resolved, consumer="git tools"))
+            return _resolve_delegated_golden_git_path(
+                repository_alias, username, resolved, via_git_backend=via_git_backend
+            )
         if not _has_git_dir(resolved):
             return None, (
                 f"Repository '{repository_alias}' is a local repository "
                 "and does not support git operations."
             )
 
-        # Story #387: Group access check - invisible repo pattern
-        # Strip -global suffix to match base name stored in accessible repos set
-        access_filtering_service = _get_access_filtering_service()
-        if access_filtering_service is not None:
-            base_alias = repository_alias[: -len("-global")]
-            accessible = access_filtering_service.get_accessible_repos(username)
-            if base_alias not in accessible:
-                return None, f"Repository '{repository_alias}' not found."
+        denied = _golden_access_denied(repository_alias, username)
+        if denied is not None:
+            return None, denied
 
         return resolved, None
 
@@ -393,6 +409,42 @@ def _resolve_git_repo_path(
             "and does not support git operations."
         )
     return repo_path, None
+
+
+def _golden_access_denied(repository_alias: str, username: str) -> Optional[str]:
+    """Story #387 group access check (invisible repo pattern): the error, or None."""
+    # Strip -global suffix to match base name stored in accessible repos set
+    access_filtering_service = _get_access_filtering_service()
+    if access_filtering_service is not None:
+        base_alias = repository_alias[: -len("-global")]
+        accessible = access_filtering_service.get_accessible_repos(username)
+        if base_alias not in accessible:
+            return f"Repository '{repository_alias}' not found."
+    return None
+
+
+def _resolve_delegated_golden_git_path(
+    repository_alias: str, username: str, resolved: str, *, via_git_backend: bool
+) -> Tuple[Optional[str], Optional[str]]:
+    """``_resolve_git_repo_path`` for a golden repo on a delegated pod.
+
+    Access is checked first, so a refusal never reveals an invisible repo.
+    """
+    from code_indexer.server.services.delegated_refusal import delegated_refusal
+    from code_indexer.server.startup.content_backend_wiring import (
+        golden_repo_content_root,
+    )
+
+    denied = _golden_access_denied(repository_alias, username)
+    if denied is not None:
+        return None, denied
+    if not via_git_backend:
+        return None, delegated_refusal(
+            f"This git tool on golden repository '{repository_alias}'",
+            "it runs git on this pod, and only git-mcp holds the repository",
+        )
+    content_root = golden_repo_content_root(resolved, consumer="git tools")
+    return str(content_root), None
 
 
 # Extracted to files.py (Story #496)

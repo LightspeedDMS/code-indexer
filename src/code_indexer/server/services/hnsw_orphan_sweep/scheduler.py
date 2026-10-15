@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
+from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional, cast
+from typing import Any, Callable, Dict, Optional, Tuple, cast
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.services.hnsw_orphan_sweep.discovery import (
@@ -204,6 +206,9 @@ class HNSWOrphanRepairSweepScheduler:
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._our_published: Dict[str, str] = {}
+
+        self._published_repair_keys: set = set()
 
         # Bug #1864 liveness state. Three different threads touch these --
         # the scheduler loop thread (cycle heartbeat), a bgm-worker thread
@@ -381,6 +386,7 @@ class HNSWOrphanRepairSweepScheduler:
         # last_full_pass_completed_at on every idle tick.
         if candidates and len(pending) <= batch_size:
             self._state_backend.complete_pass()
+            self._published_repair_keys.clear()
             logger.info("HNSWOrphanRepairSweepScheduler: pass complete")
 
         return {"processed": len(batch), **counts}
@@ -418,6 +424,117 @@ class HNSWOrphanRepairSweepScheduler:
         test fakes that don't opt in (plain functions/lambdas with no such
         attribute) fall through to the plain single-argument call below.
         """
+        published_repair_keys = getattr(self, "_published_repair_keys", None)
+        if published_repair_keys and candidate.sort_key in published_repair_keys:
+            logger.debug(
+                "HNSWOrphanRepairSweepScheduler: %s was repaired and "
+                "published by this process on a prior tick; returning CLEAN",
+                candidate.sort_key,
+            )
+            return SweepOutcome.CLEAN
+        try:
+            if self._is_published_temporal(candidate):
+                return self._process_published_temporal(candidate)
+            published = self._published_golden(candidate)
+            if published is not None:
+                return self._process_published_golden(candidate, *published)
+            activated_owner = self._published_activated_owner(candidate)
+            if activated_owner is not None:
+                return self._process_published_activated(candidate, activated_owner)
+            return self._process_in_place(candidate)
+        except Exception:
+            logger.error(
+                "HNSWOrphanRepairSweepScheduler: unexpected error processing %s",
+                candidate.sort_key,
+                exc_info=True,
+            )
+            return SweepOutcome.ERROR
+
+    @staticmethod
+    def _is_published_temporal(candidate: Any) -> bool:
+        """A golden repo's temporal shards under a delegated IndexStore: a
+        published artifact every pod checks out, so a repair must be
+        published, not left on this pod. Always False under the local store."""
+        if getattr(candidate, "kind", None) != "golden_temporal":
+            return False
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+
+        return not server_index_store().is_local
+
+    def _process_published_temporal(self, candidate: Any) -> SweepOutcome:
+        """Repair the RECORDED temporal version and publish the repair.
+
+        This pod first holds exactly the version the alias records (an older
+        checkout is swapped, so a stale copy is never repaired and published
+        over a newer one); a repair is published on top of that version
+        and recorded only while the alias still records it
+        (``update_fields_if``: serialized against ``swap_alias`` within a
+        process via a per-alias lock, so a refresh landing in the same
+        process cannot interleave; a stale write from a different process
+        is corrected by the next refresh).  Shards no pointer records were
+        never published: repaired in place, as before.
+        """
+        from code_indexer.global_repos.alias_manager import AliasManager
+        from code_indexer.server.services.temporal_index_store import (
+            ensure_temporal_root,
+            publish_temporal_root,
+            recorded_temporal,
+        )
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+        from code_indexer.utils.index_store import TEMPORAL_INDEX_VERSION_FIELD
+
+        root = Path(candidate.repo_root)
+        golden_repos_dir, bare_alias = root.parent.parent, root.name
+        global_alias = f"{bare_alias}-global"
+        store = server_index_store()
+        try:
+            aliases = AliasManager(str(golden_repos_dir / "aliases"))
+            document = aliases.read_record(global_alias)
+            recorded = recorded_temporal(document)
+            if recorded is None:
+                return self._process_in_place(candidate)
+            ensure_temporal_root(root, document, bare_alias, store=store)
+        except Exception:
+            logger.error(
+                "HNSWOrphanRepairSweepScheduler: could not fetch the published "
+                "temporal shards of %s before repairing them",
+                candidate.sort_key,
+                exc_info=True,
+            )
+            return SweepOutcome.ERROR
+        outcome = self._process_in_place(candidate)
+        if outcome != SweepOutcome.REPAIRED:
+            return outcome
+        base = recorded[1]
+        try:
+            fields = publish_temporal_root(
+                golden_repos_dir, bare_alias, store=store, base_version=base
+            )
+            if not aliases.update_fields_if(
+                global_alias, {TEMPORAL_INDEX_VERSION_FIELD: base}, fields
+            ):
+                logger.warning(
+                    "HNSWOrphanRepairSweepScheduler: %s moved past version %s "
+                    "while it was repaired; the repair was not recorded",
+                    global_alias,
+                    base,
+                )
+        except Exception:
+            logger.error(
+                "HNSWOrphanRepairSweepScheduler: repaired %s but could not "
+                "publish the repair",
+                candidate.sort_key,
+                exc_info=True,
+            )
+            return SweepOutcome.ERROR
+        return outcome
+
+    def _process_in_place(self, candidate: Any) -> SweepOutcome:
+        """``_process_one`` for a candidate repaired where it lies."""
         try:
             if getattr(self._process_fn, "supports_activated_repo_manager", False):
                 # `self._process_fn` is declared `Callable[[Any],
@@ -637,3 +754,286 @@ class HNSWOrphanRepairSweepScheduler:
             while elapsed < wait_seconds and not self._stop_event.is_set():
                 self._stop_event.wait(timeout=_TICK_SECONDS)
                 elapsed += _TICK_SECONDS
+
+
+    def _process_published_activated(
+        self, candidate: Any, owner: Tuple[str, str]
+    ) -> SweepOutcome:
+        """An activated copy's index under a delegated IndexStore: repair the
+        version the registry records (fetched first, so an older checkout is
+        never repaired and then published over a newer one) and publish the
+        repair on top of it -- otherwise the repair would live on this pod
+        only and the next checkout would bring the orphans back."""
+        username, user_alias = owner
+        try:
+            self._activated_repo_manager.serve_index_here(username, user_alias)
+        except Exception:
+            logger.error(
+                "HNSWOrphanRepairSweepScheduler: could not fetch the published "
+                "index of %s before repairing it",
+                candidate.sort_key,
+                exc_info=True,
+            )
+            return SweepOutcome.ERROR
+        outcome = self._process_in_place(candidate)
+        if outcome != SweepOutcome.REPAIRED:
+            return outcome
+        try:
+            self._activated_repo_manager.publish_index(username, user_alias)
+        except Exception:
+            logger.error(
+                "HNSWOrphanRepairSweepScheduler: repaired %s but could not "
+                "publish the repair",
+                candidate.sort_key,
+                exc_info=True,
+            )
+            return SweepOutcome.ERROR
+        return outcome
+
+
+    def _published_activated_owner(self, candidate: Any) -> Optional[Tuple[str, str]]:
+        """``(username, user_alias)`` of an activated candidate whose index is
+        a PUBLISHED artifact (``index_store_backend: delegated``); None for
+        every other candidate, and always None under the local store."""
+        if getattr(candidate, "kind", None) != "activated":
+            return None
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+
+        if server_index_store().is_local:
+            return None
+        username, _, user_alias = str(candidate.alias).partition("/")
+        return (username, user_alias) if username and user_alias else None
+
+
+    def _golden_aliases(self) -> Any:
+        from code_indexer.global_repos.alias_manager import AliasManager
+
+        return AliasManager(
+            str(Path(self._golden_repo_manager.golden_repos_dir) / "aliases")
+        )
+
+
+
+    def _process_published_golden(
+        self, candidate: Any, global_alias: str, record: Dict[str, Any]
+    ) -> SweepOutcome:
+        """A golden index under a delegated IndexStore: make this pod hold the
+        version the alias records (a stale pre-repair copy is swapped), repair
+        THAT, and publish the repair on top of it (the store refuses if anyone
+        published since), recording the new version for the same target only
+        if the alias still names it with the version the repair started from.
+        Other pods then swap their copy on their next read. Any failure is an
+        ERROR outcome, logged loudly; nothing is published from a stale base."""
+        from code_indexer.server.services.index_materializer import (
+            ensure_published_index,
+            publish_index,
+        )
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+        from code_indexer.utils.index_store import (
+            INDEX_STORE_ALIAS_FIELD,
+            INDEX_VERSION_FIELD,
+        )
+
+        from code_indexer.utils.index_store import published_index_fields
+
+        store = server_index_store()
+        target = str(candidate.repo_root)
+        base = record.get(INDEX_VERSION_FIELD)
+        store_alias = record.get(INDEX_STORE_ALIAS_FIELD)
+        if not isinstance(base, str) or not isinstance(store_alias, str):
+            logger.error(
+                "HNSWOrphanRepairSweepScheduler: %s is served by %s but the "
+                "alias records no published version; not repairing it (a "
+                "repair could not reach other pods)",
+                candidate.sort_key,
+                global_alias,
+            )
+            return SweepOutcome.ERROR
+
+        current = store.current_version_as(store_alias)
+        if current is not None and current != base:
+            our_published = getattr(self, "_our_published", {})
+            our_version = our_published.get(candidate.sort_key)
+            if our_version is not None and current == our_version:
+                logger.info(
+                    "HNSWOrphanRepairSweepScheduler: store %s holds version %s "
+                    "(published by this process) but alias %s records base %s; "
+                    "reconciling (record only)",
+                    store_alias,
+                    current,
+                    global_alias,
+                    base,
+                )
+                fields = published_index_fields(store_alias, current)
+                if self._try_record_republished(
+                    candidate, global_alias, target, base, fields
+                ):
+                    return SweepOutcome.REPAIRED
+                return SweepOutcome.ERROR
+            logger.warning(
+                "HNSWOrphanRepairSweepScheduler: store %s holds version %s "
+                "but alias %s records base %s and this process did not "
+                "publish it; treating as CAS conflict (ERROR)",
+                store_alias,
+                current,
+                global_alias,
+                base,
+            )
+            return SweepOutcome.ERROR
+
+        try:
+            ensure_published_index(target, record, store=store)
+        except Exception:
+            logger.error(
+                "HNSWOrphanRepairSweepScheduler: could not fetch the published "
+                "index of %s before repairing it",
+                candidate.sort_key,
+                exc_info=True,
+            )
+            return SweepOutcome.ERROR
+        outcome = self._process_in_place(candidate)
+        if outcome != SweepOutcome.REPAIRED:
+            return outcome
+        try:
+            fields = publish_index(target, store_alias, store=store, base_version=base)
+        except Exception:
+            logger.error(
+                "HNSWOrphanRepairSweepScheduler: repaired %s but could not "
+                "publish the repair",
+                candidate.sort_key,
+                exc_info=True,
+            )
+            return SweepOutcome.ERROR
+        published_version = fields.get(INDEX_VERSION_FIELD)
+        if published_version:
+            our_published = getattr(self, "_our_published", None)
+            if our_published is not None:
+                our_published[candidate.sort_key] = published_version
+        if not self._try_record_republished(
+            candidate, global_alias, target, base, fields
+        ):
+            return SweepOutcome.ERROR
+        return outcome
+
+    def _try_record_republished(
+        self,
+        candidate: Any,
+        global_alias: str,
+        target: str,
+        base: str,
+        fields: Dict[str, Any],
+    ) -> bool:
+        """Try up to 3 times to record a republished index in the alias.
+        Returns True on success, False on permanent failure."""
+        from code_indexer.utils.index_store import INDEX_VERSION_FIELD
+
+        _BACKOFF = (0.1, 0.5, 1.0)
+        new_version = fields.get(INDEX_VERSION_FIELD)
+        for attempt in range(3):
+            try:
+                self._golden_aliases().record_republished_index(
+                    global_alias, target, base, fields
+                )
+                return True
+            except Exception as exc:
+                err_msg = str(exc)
+                is_target_mismatch = "no longer points" in err_msg
+                is_version_mismatch = "records version" in err_msg
+                if is_target_mismatch:
+                    logger.error(
+                        "HNSWOrphanRepairSweepScheduler: %s alias %s no "
+                        "longer points at the repair target; not retrying",
+                        candidate.sort_key,
+                        global_alias,
+                        exc_info=True,
+                    )
+                    return False
+                if is_version_mismatch and new_version:
+                    try:
+                        record = self._golden_aliases().read_record(global_alias)
+                    except Exception:
+                        logger.error(
+                            "HNSWOrphanRepairSweepScheduler: could not "
+                            "re-read alias %s to check ambiguous success",
+                            global_alias,
+                            exc_info=True,
+                        )
+                        return False
+                    if (
+                        record is not None
+                        and record.get(INDEX_VERSION_FIELD) == new_version
+                    ):
+                        logger.info(
+                            "HNSWOrphanRepairSweepScheduler: alias %s already "
+                            "records version %s (ambiguous success); treating "
+                            "as recorded",
+                            global_alias,
+                            new_version,
+                        )
+                        return True
+                    logger.error(
+                        "HNSWOrphanRepairSweepScheduler: alias %s moved to "
+                        "another version concurrently; not retrying",
+                        global_alias,
+                        exc_info=True,
+                    )
+                    return False
+                if attempt < 2:
+                    logger.warning(
+                        "HNSWOrphanRepairSweepScheduler: record_republished_index "
+                        "attempt %d/3 failed for %s; retrying in %.1fs",
+                        attempt + 1,
+                        candidate.sort_key,
+                        _BACKOFF[attempt],
+                        exc_info=True,
+                    )
+                    time.sleep(_BACKOFF[attempt])
+                else:
+                    logger.error(
+                        "HNSWOrphanRepairSweepScheduler: repaired and published %s "
+                        "(store version %s) but could not record the new version "
+                        "in alias %s after 3 attempts; the alias still records "
+                        "base %s — a manual reconciliation or a future refresh "
+                        "will resolve the mismatch",
+                        candidate.sort_key,
+                        new_version,
+                        global_alias,
+                        base,
+                        exc_info=True,
+                    )
+        return False
+
+
+
+    def _published_golden(self, candidate: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """``(global alias, alias document)`` when a golden candidate's root IS
+        the target its alias serves under a delegated IndexStore -- the
+        clone-path target of a repo not refreshed since it was added, a
+        published version every pod checks out. None for every other
+        candidate (always under the local store):
+
+        * a ``.versioned`` snapshot is never a candidate (discovery skips
+          them; S2 rebuilds snapshots clean);
+        * a clone path the alias no longer serves is this pod's build source
+          for the next refresh: repaired in place, and the repair reaches
+          every pod with that refresh's publish -- as locally;
+        * ``golden_temporal`` shards are pod-local (never published).
+        """
+        if getattr(candidate, "kind", None) != "golden":
+            return None
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+
+        if server_index_store().is_local:
+            return None
+        global_alias = f"{str(candidate.alias).removesuffix('-global')}-global"
+        record = self._golden_aliases().read_record(global_alias)
+        if not record or record.get("target_path") != str(candidate.repo_root):
+            return None
+        return global_alias, dict(record)
+

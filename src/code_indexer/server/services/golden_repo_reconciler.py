@@ -192,6 +192,27 @@ class ReconcileResult:
     # sweep; 0 otherwise.
     circuit_breaker_consecutive_count: int = 0
     circuit_breaker_confirmed_proceed: bool = False
+    # Content seam: registered repos with no index state on THIS pod while
+    # content_backend='delegated'. The repository is with workspace-mcp, so
+    # that absence is not evidence it is gone -- never treated as orphans.
+    orphans_unconfirmed_delegated: List[str] = field(default_factory=list)
+
+
+def _repositories_delegated(golden_repo_manager: Any) -> bool:
+    """True when the repositories are not on this pod (content seam).
+
+    Either the running server's backend or the manager's own says so. Only a
+    real ``True`` from the manager counts, so a duck-typed stand-in keeps the
+    local behaviour.
+    """
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    if is_content_seam_delegated():
+        return True
+    probe = getattr(golden_repo_manager, "repositories_are_delegated", None)
+    return callable(probe) and probe() is True
 
 
 def _get_breaker_backend(golden_repo_manager: GoldenRepoManager) -> Optional[Any]:
@@ -534,6 +555,21 @@ def _run_sweep(
         except GoldenRepoNotFoundError:
             orphan_candidates.append(alias)
 
+    if orphan_candidates and _repositories_delegated(golden_repo_manager):
+        # get_actual_repo_path() looked at THIS pod, which holds only index
+        # state: a miss means "not indexed here", never "repository gone".
+        # No seam can confirm a repository's absence, so nothing is removed.
+        result.orphans_unconfirmed_delegated = list(orphan_candidates)
+        logger.warning(
+            "Bug #1317 reconcile: content_backend='delegated' -- %d registered "
+            "repo(s) have no index state on this pod (%s); the repositories are "
+            "with workspace-mcp, so this is not evidence they are gone. NOT "
+            "treated as registry-orphans.",
+            len(orphan_candidates),
+            ",".join(sorted(orphan_candidates)),
+        )
+        orphan_candidates = []
+
     total = len(repo_rows)
     absent_fraction = (len(orphan_candidates) / total) if total > 0 else 0.0
 
@@ -750,13 +786,21 @@ def _run_sweep(
     _reconcile_global_registry_orphans(golden_repo_manager, repo_rows, result)
 
 
-def _get_clone_git_head(clone_path: str) -> Optional[str]:
+def _get_clone_git_head(clone_path: str, *, delegated: bool = False) -> Optional[str]:
     """Return the full git HEAD SHA for an on-disk clone, or None on failure.
 
     Runs a plain ``git rev-parse HEAD`` with a short timeout. Returns None
     (never raises) on any error so a single unreadable clone never aborts
     the entire staleness sweep.
+
+    ``delegated``: the clone is not on this pod, so git-mcp is asked through
+    the git seam (a versioned snapshot maps to its base clone, the checkout a
+    refresh would index). That path RAISES on failure -- the caller logs it
+    per repo -- because "no HEAD" would quietly switch staleness detection off
+    for every repository.
     """
+    if delegated:
+        return _get_clone_git_head_delegated(clone_path)
     try:
         head_result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -770,6 +814,27 @@ def _get_clone_git_head(clone_path: str) -> Optional[str]:
     if head_result.returncode != 0:
         return None
     sha = head_result.stdout.strip()
+    return sha if sha else None
+
+
+def _get_clone_git_head_delegated(clone_path: str) -> Optional[str]:
+    """HEAD of the clone git-mcp holds for *clone_path* (see _get_clone_git_head)."""
+    from code_indexer.server.startup.content_backend_wiring import (
+        golden_repo_content_root,
+    )
+    from code_indexer.server.startup.git_backend_wiring import (
+        server_delegated_git_backend,
+    )
+
+    backend = server_delegated_git_backend()
+    if backend is None:
+        raise RuntimeError(
+            "GAP-4 staleness check: content_backend='delegated' needs "
+            "git_backend='delegated' -- local git on this pod would read a "
+            "directory that holds no repository"
+        )
+    root = golden_repo_content_root(clone_path, consumer="GAP-4 staleness check")
+    sha = backend.rev_parse(str(root), "HEAD", timeout=10).strip()
     return sha if sha else None
 
 
@@ -831,6 +896,7 @@ def _reconcile_stale_indexes(
     This is a READ-ONLY staleness detection pass: it mutates nothing in the
     registry or on disk. The only side effect is triggering refresh jobs.
     """
+    delegated = _repositories_delegated(golden_repo_manager)
     for repo_row, actual_path in healthy_rows:
         alias = repo_row["alias"]
         try:
@@ -856,7 +922,10 @@ def _reconcile_stale_indexes(
             if not recorded_commit:
                 continue
 
-            actual_head = _get_clone_git_head(actual_path)
+            if delegated:
+                actual_head = _get_clone_git_head(actual_path, delegated=True)
+            else:
+                actual_head = _get_clone_git_head(actual_path)
             if not actual_head:
                 continue
 

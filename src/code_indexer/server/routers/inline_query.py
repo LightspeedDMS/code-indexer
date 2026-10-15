@@ -40,6 +40,7 @@ from code_indexer.server.mcp.reranking import (
     calculate_overfetch_limit as _rest_calculate_overfetch_limit,
     extract_rerank_document as _rest_extract_rerank_document,
 )
+from code_indexer.server.services.activated_index_store import serve_activated_index
 from code_indexer.server.services.deactivation_query_drain import (
     track_activated_repo_query,
 )
@@ -684,6 +685,13 @@ def register_query_routes(
                             activated_repo_manager.get_activated_repo_path(
                                 current_user.username, repo["user_alias"]
                             )
+                        )
+                        # Delegated IndexStore: the copy's index on this pod
+                        # first, so its FTS index is judged, not its absence.
+                        serve_activated_index(
+                            activated_repo_manager,
+                            current_user.username,
+                            repo["user_alias"],
                         )
                     if repo_path is None:
                         continue

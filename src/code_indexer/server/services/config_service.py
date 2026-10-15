@@ -70,6 +70,12 @@ class _ChangeAttempt:
     published: bool = False
 
 
+def _repo_cidx_config_path(repo_path: str) -> Path:
+    """The repository's cidx config (``.code-indexer/config.json``): the file
+    every extension seed, sync and restore here reads and writes."""
+    return Path(repo_path) / ".code-indexer" / "config.json"
+
+
 @dataclass
 class ExtensionDrift:
     """Describes which file extensions were added or removed relative to server config.
@@ -3383,7 +3389,7 @@ class ConfigService:
             alias = repo.get("alias", "")
             try:
                 repo_path = manager.get_actual_repo_path(alias)
-                cidx_config_path = Path(repo_path) / ".code-indexer" / "config.json"
+                cidx_config_path = _repo_cidx_config_path(repo_path)
                 if not cidx_config_path.exists():
                     continue
                 with open(cidx_config_path, "r") as f:
@@ -3410,7 +3416,7 @@ class ConfigService:
         server_exts = config.indexing_config.indexable_extensions
         cli_exts = [ext.lstrip(".") for ext in server_exts]
 
-        cidx_config_path = Path(repo_path) / ".code-indexer" / "config.json"
+        cidx_config_path = _repo_cidx_config_path(repo_path)
         if not cidx_config_path.exists():
             return
 
@@ -3446,7 +3452,7 @@ class ConfigService:
         server_exts_bare: Set[str] = {ext.lstrip(".") for ext in server_exts}
         cli_exts_sorted = sorted(server_exts_bare)
 
-        cidx_config_path = Path(repo_path) / ".code-indexer" / "config.json"
+        cidx_config_path = _repo_cidx_config_path(repo_path)
         if not cidx_config_path.exists():
             return None
 
@@ -3471,6 +3477,30 @@ class ConfigService:
         except Exception as e:
             logger.warning("Could not sync extensions for %s: %s", repo_path, e)
             return None
+
+    def restore_repo_extensions(self, repo_path: str, drift: ExtensionDrift) -> None:
+        """Undo :meth:`sync_repo_extensions_if_drifted`'s write of *drift*.
+
+        For a caller that could not act on the drift (its file listing
+        failed): with the repo config back on its old extensions, the next
+        refresh detects the same drift and reconciles then, instead of
+        finding the config already synced and never reconciling.
+        Errors propagate.
+        """
+        cidx_config_path = _repo_cidx_config_path(repo_path)
+        with open(cidx_config_path, "r") as f:
+            repo_config = json.load(f)
+        synced: Set[str] = {
+            str(ext).lstrip(".") for ext in repo_config.get("file_extensions", [])
+        }
+        repo_config["file_extensions"] = sorted((synced - drift.added) | drift.removed)
+        write_json_atomic(cidx_config_path, repo_config, indent=2)
+        logger.info(
+            "Restored pre-sync file_extensions for %s (%d added, %d removed undone)",
+            repo_path,
+            len(drift.added),
+            len(drift.removed),
+        )
 
     def check_config_update(self) -> bool:
         """Check if config version changed in PG (called periodically).

@@ -184,19 +184,25 @@ class ProxyConfigManager:
         Uses ProxyInitializer discovery logic to find all repositories
         recursively and updates the configuration.
         """
-        config = self.load_config()
-
         # Use ProxyInitializer to discover repositories
         initializer = ProxyInitializer(self.proxy_root)
         discovered_repos = initializer.discover_repositories()
 
         # Update config with fresh discovery
-        config.discovered_repos = discovered_repos
-        self._config_manager.save(config)
+        self.set_repositories(discovered_repos)
 
         logger.info(
             f"Refreshed proxy repositories: {len(discovered_repos)} repositories found"
         )
+
+    def set_repositories(self, repositories: List[str]) -> None:
+        """Replace discovered_repos with *repositories*, saved as
+        ``refresh_repositories`` saves a discovery. For a caller that knows
+        the members without walking the proxy directory (a composite whose
+        members' files are not on this host)."""
+        config = self.load_config()
+        config.discovered_repos = list(repositories)
+        self._config_manager.save(config)
 
     def get_repositories(self) -> List[str]:
         """Get current list of discovered repositories.

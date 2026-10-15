@@ -179,6 +179,9 @@ def test_a_binary_without_line_content_is_an_error_under_delegation(
     backend = _backend_returning(
         monkeypatch, tmp_path, [{**_finding(1), "file": str(tmp_path / "a.py")}]
     )
+    # The file is on this pod (a mount): with none of the candidates here the
+    # request is refused before xray-cli runs (test_xray_pod_local_execution).
+    (tmp_path / "a.py").write_text("x = 1\n")
     results = backend.run_batch(
         evaluator_code="e", file_specs=[_spec()], repo_path=str(tmp_path)
     )

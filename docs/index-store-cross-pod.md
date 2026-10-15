@@ -54,22 +54,22 @@ Fail loud: no recorded version (a pointer written before this existed -- refresh
 the repository), an unreachable store, a failed checkout or fix-config raise
 `PublishedIndexUnavailableError`; the query errors, never returns empty.
 
-## The refresh integrity gate on a pod that did not publish
+## Temporal shards (`server/services/temporal_index_store.py`)
 
-The gate compares the rebuilt index with the published one's point counts and
-self-heals from it (`RefreshScheduler._integrity_baseline`, read before
-indexing):
+A golden repo's temporal shards live at one fixed, mutable root,
+`{golden_repos_dir}/.temporal/{alias}/`, outside any snapshot. Under a delegated
+store they are their own artifact, `temporal.<sha256(repo)>` (golden index
+aliases are kept out of that namespace), recorded with the pointer as
+`temporal_index_store_alias` / `temporal_index_version`:
 
-| Situation | Baseline |
+| Step | What |
 |---|---|
-| Local store, no current target, or this pod holds the target | today's: the target's index on this pod |
-| Pointer records the published version | checked out to the target (`ensure_served_here`), counted there |
-| Pointer records no version (written before cross-pod publishing) | the store's current version, checked out to `<golden-repos>/.integrity-baseline/<store alias>`, counted, used for self-heal, removed after the gate |
-| Nothing published; target is the clone path (first refresh after an add) | no previous points -- a first publish, as today |
-| Nothing published; target is a snapshot | refresh fails: cannot be judged |
+| Refresh / add-index temporal child | serve the recorded shards first (an incremental pass builds on the latest), run, then publish them with the job's snapshot, in the same pointer write; a job that did not rebuild them leaves the recorded version alone |
+| Readers (temporal search, multi-repo temporal, live temporal worker, temporal status, repository health) | `served_temporal_index_root`: hold the recorded version -- checked out, or an older one swapped by rename with rollback; markers beside the root (`.<alias>.temporal-checked-out`, `.<alias>.temporal-in-progress`) |
+| HNSW orphan sweep (`golden_temporal`) | serve the recorded version, repair, publish on top of it (CAS), record via `update_fields_if` (best-effort, not atomic; a stale write is corrected by the next refresh) |
 
-A store or checkout failure fails the refresh; the gate never compares
-against nothing because a baseline could not be fetched.
+A pointer recording no temporal version (not enabled, or written before this)
+is served from what the pod holds, as before; a store failure is an error.
 
 ## Not covered
 
@@ -79,6 +79,9 @@ against nothing because a baseline could not be fetched.
 * The reconciler's missing-pointer repair (`golden_repo_reconciler.py`) writes
   a pointer with no recorded version: other pods fail loud until the next
   refresh publishes.
+* The refresh integrity gate reads the CURRENT target's point counts on the
+  refreshing pod; a pod that never checked that target out compares against
+  nothing (as on a first refresh).
 
 Tests: `tests/unit/server/services/test_index_materializer_cross_pod.py`,
 `tests/unit/server/repositories/test_golden_add_publishes_index.py`,

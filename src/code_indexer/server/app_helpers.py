@@ -18,11 +18,18 @@ import psutil
 import requests
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 from .models.repos import ComponentRepoInfo, CompositeRepositoryDetails
 from .models.activated_repository import ActivatedRepository
 from .logging_utils import format_error_log
+from .services.composite_content import (
+    composite_seam_source,
+    member_entries,
+    plain_member_names,
+)
+from .services.file_service import ContentSeamSource
+from code_indexer.utils.index_store import index_root
 
 logger = logging.getLogger(__name__)
 
@@ -500,8 +507,36 @@ def _analyze_component_repo(repo_path: Path, name: str) -> ComponentRepoInfo:
     Returns:
         ComponentRepoInfo with repository analysis
     """
-    # Check for index
-    index_dir = repo_path / ".code-indexer"
+    has_index, file_count, last_indexed = _component_index_facts(
+        index_root(repo_path), name
+    )
+
+    # Calculate repo size
+    total_size = 0
+    for item in repo_path.rglob("*"):
+        if item.is_file():
+            try:
+                total_size += item.stat().st_size
+            except (OSError, IOError) as e:
+                logger.warning(f"Failed to stat file {item}: {e}")
+                continue
+
+    return ComponentRepoInfo(
+        name=name,
+        path=str(repo_path),
+        has_index=has_index,
+        collection_exists=has_index,
+        indexed_files=file_count,
+        last_indexed=last_indexed,
+        size_mb=total_size / (1024 * 1024),
+    )
+
+
+def _component_index_facts(
+    index_dir: Path, name: str
+) -> Tuple[bool, int, Optional[datetime]]:
+    """(has_index, indexed file count, last indexed) from a member's index
+    state -- inside the member locally, THIS pod's index state delegated."""
     has_index = index_dir.exists()
 
     # Get file count from metadata
@@ -524,17 +559,26 @@ def _analyze_component_repo(repo_path: Path, name: str) -> ComponentRepoInfo:
             except (json.JSONDecodeError, IOError) as e:
                 logger.warning(f"Failed to read metadata for repo {name}: {e}")
                 file_count = 0
+    return has_index, file_count, last_indexed
 
-    # Calculate repo size
-    total_size = 0
-    for item in repo_path.rglob("*"):
-        if item.is_file():
-            try:
-                total_size += item.stat().st_size
-            except (OSError, IOError) as e:
-                logger.warning(f"Failed to stat file {item}: {e}")
-                continue
 
+def _analyze_delegated_component_repo(
+    source: ContentSeamSource, repo_path: Path, name: str
+) -> ComponentRepoInfo:
+    """``_analyze_component_repo`` for a member on workspace-mcp.
+
+    Size is the member's files from the content seam's manifest plus this
+    pod's index state for it; the manifest never walks ``.git``, so unlike
+    the local walk the git object store is not counted. A backend failure (a
+    member missing on workspace-mcp included) raises.
+    """
+    index_dir = index_root(repo_path)
+    has_index, file_count, last_indexed = _component_index_facts(index_dir, name)
+    total_size = sum(entry.size for entry in member_entries(source, repo_path))
+    if has_index:
+        total_size += sum(
+            item.stat().st_size for item in index_dir.rglob("*") if item.is_file()
+        )
     return ComponentRepoInfo(
         name=name,
         path=str(repo_path),
@@ -562,6 +606,19 @@ def _get_composite_details(repo: ActivatedRepository) -> CompositeRepositoryDeta
     total_files = 0
     total_size = 0.0
 
+    source = composite_seam_source(repo.path)
+    if source is not None:
+        # Content seam: the members are on workspace-mcp and the registry
+        # names them -- this pod may not even hold the composite's config.
+        for repo_name in plain_member_names(repo.discovered_repos, repo.path):
+            info = _analyze_delegated_component_repo(
+                source, repo.path / repo_name, repo_name
+            )
+            component_info.append(info)
+            total_files += info.indexed_files
+            total_size += info.size_mb
+        return _composite_details(repo, component_info, total_files, total_size)
+
     # Use ProxyConfigManager to get component repos
     proxy_config = ProxyConfigManager(repo.path)
 
@@ -582,6 +639,15 @@ def _get_composite_details(repo: ActivatedRepository) -> CompositeRepositoryDeta
             total_files += info.indexed_files
             total_size += info.size_mb
 
+    return _composite_details(repo, component_info, total_files, total_size)
+
+
+def _composite_details(
+    repo: ActivatedRepository,
+    component_info: List[ComponentRepoInfo],
+    total_files: int,
+    total_size: float,
+) -> CompositeRepositoryDetails:
     return CompositeRepositoryDetails(
         user_alias=repo.user_alias,
         is_composite=True,

@@ -20,7 +20,10 @@ from typing import Dict, List, Optional, Any, Callable, Tuple, cast
 from code_indexer.config import Config
 
 from ..repositories.background_jobs import BackgroundJobManager
-from ..repositories.activated_repo_manager import ActivatedRepoManager
+from ..repositories.activated_repo_manager import (
+    ActivatedRepoError,
+    ActivatedRepoManager,
+)
 from .config_service import get_config_service
 from .repository_health_aggregator import discover_health_collections
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
@@ -243,7 +246,18 @@ class ActivatedRepoIndexManager:
                 "Security violation: Repository path escapes data directory"
             )
 
-        if not os.path.exists(repo_path):
+        delegated = self._index_is_delegated()
+        if delegated:
+            # Mount-less pod: the copy is not on this disk. Its presence is the
+            # registry's answer for THIS user (checked before anything else is
+            # touched); the index is fetched and published by the job itself.
+            if not self.activated_repo_manager.user_has_activated_repo(
+                username, repo_alias
+            ):
+                raise FileNotFoundError(
+                    f"Repository '{repo_alias}' not found for user '{username}'"
+                )
+        elif not os.path.exists(repo_path):
             raise FileNotFoundError(f"Repository directory not found: {repo_path}")
 
         # Check for concurrent reindex jobs to prevent resource conflicts
@@ -285,6 +299,9 @@ class ActivatedRepoIndexManager:
             repo_path,  # *args[1] -> worker's positional repo_path
             index_types,  # *args[2] -> worker's positional index_types
             clear,  # *args[3] -> worker's positional clear
+            # *args[4] -> the owner whose registered copy the job serves from
+            # and publishes to the IndexStore (delegated only; absent locally)
+            *([username] if delegated else []),
             submitter_username=username,
             repo_alias=repo_alias,  # submit_job tracking kwarg (keyword-only, no conflict with positional)
         )
@@ -327,9 +344,32 @@ class ActivatedRepoIndexManager:
                 )
             raise
 
+        if self._index_is_delegated():
+            # The registry gate for THIS user, then this pod holds the
+            # recorded index version (a failure raises, never "not found").
+            try:
+                repo_path_str = self.activated_repo_manager.serve_index_here(
+                    username, repo_alias
+                )
+            except ActivatedRepoError as e:
+                if "not found" in str(e).lower():
+                    raise FileNotFoundError(
+                        f"Repository '{repo_alias}' not found for user '{username}'"
+                    )
+                raise
+
         return self.get_index_status_for_path(
             Path(repo_path_str), repo_alias=repo_alias, username=username
         )
+
+    def _index_is_delegated(self) -> bool:
+        """True under ``index_store_backend: delegated``: an activated copy's
+        index is published, and served on any pod from the IndexStore."""
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+
+        return not server_index_store().is_local
 
     def get_index_status_for_path(
         self,
@@ -366,10 +406,17 @@ class ActivatedRepoIndexManager:
         repo_path: str,
         index_types: List[str],
         clear: bool,
+        owner: Optional[str] = None,
         progress_callback: Optional[Callable[..., None]] = None,
     ) -> Dict[str, Any]:
         """
         Execute indexing job for specified index types.
+
+        ``owner`` (delegated IndexStore only): the user whose registered copy
+        this is -- the job first makes this pod hold the copy's recorded index
+        version, and after a fully successful run publishes the result on top
+        of it and records the new version. A failed fetch or publish fails the
+        job with its cause.
 
         Story #482 PATH E: Uses ProgressPhaseAllocator for dynamic phase-aware
         progress reporting instead of hardcoded 10/50/90 milestones.
@@ -390,6 +437,12 @@ class ActivatedRepoIndexManager:
         from code_indexer.services.progress_phase_allocator import (
             ProgressPhaseAllocator,
         )
+
+        if owner is not None:
+            try:
+                self.activated_repo_manager.serve_index_here(owner, repo_alias)
+            except Exception as e:
+                return self._index_store_failure(repo_alias, "fetch", e)
 
         # Build allocator for phase-aware progress (Story #482 PATH E)
         file_count, commit_count = gather_repo_metrics(repo_path)
@@ -447,6 +500,12 @@ class ActivatedRepoIndexManager:
             else:
                 message = f"Reindex completed with failures: {', '.join(failed_types)}"
 
+            if all_success and owner is not None:
+                try:
+                    self.activated_repo_manager.publish_index(owner, repo_alias)
+                except Exception as e:
+                    return self._index_store_failure(repo_alias, "publish", e)
+
             update_progress(100, message, phase="complete")
 
             job_result: Dict[str, Any] = {
@@ -483,6 +542,26 @@ class ActivatedRepoIndexManager:
                 "results": {},
                 "error": str(e),
             }
+
+    def _index_store_failure(
+        self, repo_alias: str, step: str, error: Exception
+    ) -> Dict[str, Any]:
+        """The job result when the copy's index could not be fetched from, or
+        published to, the IndexStore -- a failed job carrying the cause."""
+        error_msg = (
+            f"Failed to {step} the index of '{repo_alias}' "
+            f"(IndexStore): {type(error).__name__}: {error}"
+        )
+        self.logger.error(
+            format_error_log("SVC-MIGRATE-009", error_msg),
+            extra=get_log_extra("SVC-MIGRATE-009"),
+        )
+        return {
+            "success": False,
+            "message": error_msg,
+            "results": {},
+            "error": error_msg,
+        }
 
     #: Bug #1978: per-type and overall caps on the summarized job "error"
     #: field -- a verbose subprocess diagnostic (the common case for a

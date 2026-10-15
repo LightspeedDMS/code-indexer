@@ -159,20 +159,46 @@ def append_server_layout_args(
         ``--git-backend=delegated`` appended, in that order. The input list is
         not mutated.
     """
+    return [
+        *cmd,
+        SERVER_NEW_COLLECTION_LAYOUT_ARG,
+        SERVER_IGNORE_RESUME_STATE_ARG,
+        SERVER_MANAGED_PROVIDER_SETTINGS_ARG,
+        *server_backend_args(
+            content_backend=content_backend,
+            git_backend=git_backend,
+            local_content=local_content,
+        ),
+    ]
+
+
+def server_backend_args(
+    *,
+    content_backend: Optional[str] = None,
+    git_backend: Optional[str] = None,
+    local_content: bool = False,
+) -> List[str]:
+    """The backend-selection args a server-spawned cidx command carries.
+
+    For server-spawned cidx commands other than ``cidx index`` that still need
+    to know where the repository is -- ``cidx fix-config`` on a snapshot must
+    not answer git questions from a pod that does not hold the repository.
+    Arguments mean exactly what they mean for :func:`append_server_layout_args`
+    (which stamps through this function): ``None`` reads the server config,
+    ``local_content`` stamps nothing, and only ``delegated`` is ever stamped.
+    Spawn sites splice the result into a literal argv
+    (``["cidx", "fix-config", "--force", *server_backend_args(...)]``) so the
+    command stays readable to the content-seam inventory.
+    """
     if local_content:
         content_backend, git_backend = "local", "local"
     if content_backend is None:
         content_backend = configured_content_backend_name()
     if git_backend is None:
         git_backend = configured_git_backend_name()
-    stamped = [
-        *cmd,
-        SERVER_NEW_COLLECTION_LAYOUT_ARG,
-        SERVER_IGNORE_RESUME_STATE_ARG,
-        SERVER_MANAGED_PROVIDER_SETTINGS_ARG,
-    ]
+    args: List[str] = []
     if content_backend == "delegated":
-        stamped.append(SERVER_DELEGATED_CONTENT_BACKEND_ARG)
+        args.append(SERVER_DELEGATED_CONTENT_BACKEND_ARG)
     if git_backend == "delegated":
-        stamped.append(SERVER_DELEGATED_GIT_BACKEND_ARG)
-    return stamped
+        args.append(SERVER_DELEGATED_GIT_BACKEND_ARG)
+    return args

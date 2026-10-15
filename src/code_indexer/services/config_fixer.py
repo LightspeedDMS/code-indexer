@@ -205,12 +205,21 @@ class CollectionAnalyzer:
 
 
 class ConfigurationValidator:
-    """Validates configuration for correctness and consistency."""
+    """Validates configuration for correctness and consistency.
 
-    def __init__(self, config_dir: Path):
+    ``repository_backend_delegated``: the repository is served by delegated
+    content/git backends (the server stamps ``--content-backend`` /
+    ``--git-backend`` on the fix-config it spawns), so it is not on this
+    machine. The project id and git state in metadata.json were then recorded
+    by the index run through those backends, and this machine's git cannot
+    check them -- it would only overwrite them with "not a git repository".
+    """
+
+    def __init__(self, config_dir: Path, *, repository_backend_delegated: bool = False):
         self.config_dir = config_dir
         self.config_file = config_dir / "config.json"
         self.metadata_file = config_dir / "metadata.json"
+        self.repository_backend_delegated = repository_backend_delegated
 
     def detect_correct_codebase_dir(self) -> Path:
         """Derive correct codebase_dir from config file location."""
@@ -283,8 +292,15 @@ class ConfigurationValidator:
     def validate_metadata(
         self, metadata: Dict[str, Any], config: Config
     ) -> List[ConfigFix]:
-        """Validate metadata and suggest fixes."""
-        fixes = []
+        """Validate metadata and suggest fixes.
+
+        Every check here derives from the repository itself (its git remote,
+        branch and commit), so under delegated backends there is nothing this
+        machine can validate and no fix is proposed.
+        """
+        fixes: List[ConfigFix] = []
+        if self.repository_backend_delegated:
+            return fixes
 
         correct_project_name = self.detect_correct_project_name()
         correct_codebase_dir = self.detect_correct_codebase_dir()
@@ -353,14 +369,22 @@ class ConfigurationValidator:
 class ConfigurationRepairer:
     """Repairs configuration files using intelligent context-aware fixes."""
 
-    def __init__(self, config_dir: Path, dry_run: bool = False):
+    def __init__(
+        self,
+        config_dir: Path,
+        dry_run: bool = False,
+        *,
+        repository_backend_delegated: bool = False,
+    ):
         self.config_dir = config_dir
         self.config_file = config_dir / "config.json"
         self.metadata_file = config_dir / "metadata.json"
         self.dry_run = dry_run
 
         self.json_repairer = JSONSyntaxRepairer()
-        self.validator = ConfigurationValidator(config_dir)
+        self.validator = ConfigurationValidator(
+            config_dir, repository_backend_delegated=repository_backend_delegated
+        )
 
         # Initialize clients
         self.vector_store_client: Optional[FilesystemVectorStore] = None
@@ -581,10 +605,14 @@ class ConfigurationRepairer:
             print(f"Warning: Could not initialize vector store: {e}")
 
     def _check_collections(self) -> List[str]:
-        """Check for collections with wrong names."""
+        """Check for collections with wrong names.
+
+        The expected name is the project id, derived from the repository's git
+        remote -- which under delegated backends this machine cannot read.
+        """
         warnings: List[str] = []
 
-        if not self.collection_analyzer:
+        if not self.collection_analyzer or self.validator.repository_backend_delegated:
             return warnings
 
         correct_project_name = self.validator.detect_correct_project_name()

@@ -41,7 +41,7 @@ RUN pip install ".[cluster,cohere]"
 # execution belongs in the orchestrator's sandboxed worker, not in a
 # long-lived service pod. Without this plugin every lifecycle_registration job
 # dies with exit 127. The plugin registers itself on the upstream
-# `code_indexer.cli_invoker` entry point, so installing it is enough to enable
+# `code_indexer.llm_invoker` entry point, so installing it is enough to enable
 # it (see plugins/cidx_orchestrator_invoker).
 COPY plugins/cidx_orchestrator_invoker ./plugins/cidx_orchestrator_invoker
 RUN pip install ./plugins/cidx_orchestrator_invoker
@@ -69,14 +69,17 @@ RUN pip install ./plugins/cidx_git_backend
 # CIDX_XRAY_SANDBOX_MCP_TOKEN). From 0.8.0 it also registers
 # `code_indexer.scip_backend` (SCIP indexing in sandbox-mcp's `scip` run profile
 # under `scip_backend=delegated-plugin`; CIDX_SCIP_SANDBOX_MCP_URL /
-# CIDX_SCIP_SANDBOX_MCP_TOKEN) -- inert for `local` and `delegated`.
+# CIDX_SCIP_SANDBOX_MCP_TOKEN) -- inert for `local` and `delegated`. 0.10.0
+# adds inline X-Ray (`execute_*_inline`): under `xray_backend=delegated` a
+# pod-local repository's candidate files are read here and run in sandbox-mcp's
+# mountless `xray-inline` profile instead of in this pod.
 #
 # The registry is private: the index URL (with credentials) arrives as a
 # BuildKit SECRET, never a build arg, so it is not written into any layer or the
 # image history. CI's build:image always supplies it, and its in-image step
 # asserts the entry point resolves -- so a CI image can never ship without the
 # plugin. A local `docker build` without the secret skips the plugin, loudly.
-ARG CIDX_CONTENT_BACKEND_VERSION=0.8.0
+ARG CIDX_CONTENT_BACKEND_VERSION=0.10.0
 RUN --mount=type=secret,id=plugin_index,required=false \
     if [ -s /run/secrets/plugin_index ]; then \
       pip install --no-cache-dir --no-deps \

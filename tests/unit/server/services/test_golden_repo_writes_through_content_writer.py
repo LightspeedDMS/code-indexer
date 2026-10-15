@@ -566,8 +566,7 @@ def test_mcp_handler_shapes_match_todays(
         handlers, "_invalidate_wiki_cache", lambda a, p: invalidated.append((a, p))
     )
     _delegate(world)
-    # A stand-in for the authenticated User: the handler reads .username only.
-    user: Any = SimpleNamespace(username=USER)
+    user = SimpleNamespace(username=USER)
 
     ok = handlers.handle_create_file(
         {"repository_alias": ALIAS, "file_path": "m.md", "content": "m\n"}, user

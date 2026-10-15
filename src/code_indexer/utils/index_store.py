@@ -33,13 +33,17 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol, Union
+from typing import Any, Dict, Mapping, Optional, Protocol, Union
 
 #: The index directory's name inside a repository under the local backend.
 #: Exported for the code that must SKIP it while walking or searching a
 #: repository (ripgrep globs, tree walkers): while indexes live in the
 #: repository, every reader of the repository has to step around them.
 INDEX_DIRNAME = ".code-indexer"
+
+
+class IndexStoreDeleteUnsupportedError(RuntimeError):
+    """The index store's artifact client cannot delete published versions."""
 
 
 class IndexStore(Protocol):
@@ -69,6 +73,15 @@ class IndexStore(Protocol):
         """Make a version readable under ``into``; the index root to read."""
         ...
 
+    def delete(self, repo_path: Union[str, Path]) -> Optional[int]:
+        """Delete every published version of ``repo_path``'s index.
+
+        The number of versions deleted (0 when there were none: idempotent),
+        or None when this store publishes nothing. Raises when the versions
+        could not be deleted -- never reports a deletion that did not happen.
+        """
+        ...
+
 
 class LocalIndexStore:
     """Today's layout: the index lives inside the repository it describes."""
@@ -88,11 +101,35 @@ class LocalIndexStore:
         """Nothing to fetch: the built index IS the readable one."""
         return self.index_root(repo_path)
 
+    def delete(self, repo_path: Union[str, Path]) -> Optional[int]:
+        """Nothing published: the index is inside the repository directory,
+        so deleting that directory (golden-repo removal does) deletes it."""
+        return None
+
 
 #: What the artifact service accepts as an alias (workspace-mcp's index store).
 _STORE_ALIAS_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _STORE_ALIAS_MAX = 128
 _ALIAS_HASH_CHARS = 8
+
+
+#: Store aliases of activated (per-user) copies start with this; a golden
+#: repo's store alias never does (``index_store_alias``), so the two
+#: namespaces cannot collide whatever a golden repo is called.
+ACTIVATED_STORE_ALIAS_PREFIX = "activated."
+_ACTIVATED_DIGEST_CHARS = 40
+_ACTIVATED_STORE_ALIAS_RE = re.compile(
+    r"^" + re.escape(ACTIVATED_STORE_ALIAS_PREFIX) + r"[0-9a-f]{40}$"
+)
+
+#: Store aliases of golden repos' TEMPORAL shards start with this; a golden
+#: repo's index alias never does (``index_store_alias``), so the two cannot
+#: share a version history whatever a golden repo is called.
+TEMPORAL_STORE_ALIAS_PREFIX = "temporal."
+_TEMPORAL_DIGEST_CHARS = 40
+_TEMPORAL_STORE_ALIAS_RE = re.compile(
+    r"^" + re.escape(TEMPORAL_STORE_ALIAS_PREFIX) + r"[0-9a-f]{40}$"
+)
 
 
 def index_store_alias(repo_name: str) -> str:
@@ -101,21 +138,100 @@ def index_store_alias(repo_name: str) -> str:
     cidx aliases allow upper case; the store's do not. Lower-casing alone
     would let ``MyRepo`` and ``myrepo`` share one version history, so any
     name the store would not accept as-is gets a short hash of the ORIGINAL
-    name appended: deterministic, and distinct per cidx alias.
+    name appended: deterministic, and distinct per cidx alias. A name in the
+    temporal-shard namespace (``TEMPORAL_STORE_ALIAS_PREFIX``) is hashed and
+    moved out of it.
     """
-    if _STORE_ALIAS_RE.match(repo_name) and ".." not in repo_name:
+    _reserved_prefixes = (ACTIVATED_STORE_ALIAS_PREFIX, TEMPORAL_STORE_ALIAS_PREFIX)
+    reserved = any(repo_name.startswith(p) for p in _reserved_prefixes)
+    if _STORE_ALIAS_RE.match(repo_name) and ".." not in repo_name and not reserved:
         return repo_name
     base = re.sub(r"[^a-z0-9._-]+", "-", repo_name.lower())
     base = re.sub(r"\.{2,}", ".", base)
     base = re.sub(r"^[^a-z0-9]+", "", base) or "repo"
+    if any(base.startswith(p) for p in _reserved_prefixes):
+        base = "golden-" + base
     digest = hashlib.sha256(repo_name.encode("utf-8")).hexdigest()[:_ALIAS_HASH_CHARS]
     return f"{base[: _STORE_ALIAS_MAX - _ALIAS_HASH_CHARS - 1]}-{digest}"
+
+
+def activated_index_store_alias(username: str, user_alias: str) -> str:
+    """The artifact-store alias for ONE user's activated copy.
+
+    Derived server-side from the registry's ``(username, user_alias)`` pair --
+    never from a client value -- as a digest, so it carries no user data and
+    two copies (of the same or different users) never share a version
+    history. Always in the activated namespace, never a golden alias.
+    """
+    if not username or not user_alias:
+        raise ValueError("an activated copy needs a username and a user alias")
+    digest = hashlib.sha256(f"{username}\0{user_alias}".encode("utf-8")).hexdigest()[
+        :_ACTIVATED_DIGEST_CHARS
+    ]
+    return ACTIVATED_STORE_ALIAS_PREFIX + digest
+
+
+def is_activated_store_alias(store_alias: str) -> bool:
+    """True for exactly the aliases ``activated_index_store_alias`` produces."""
+    return bool(_ACTIVATED_STORE_ALIAS_RE.match(store_alias))
 
 
 #: Alias-document field: the store alias a target's index is published under.
 INDEX_STORE_ALIAS_FIELD = "index_store_alias"
 #: Alias-document field: the immutable version published at the target.
 INDEX_VERSION_FIELD = "index_version"
+
+
+def temporal_index_store_alias(repo_name: str) -> str:
+    """The artifact-store alias for one golden repo's temporal shards.
+
+    A digest of the bare repo name, in its own namespace: never a golden index
+    alias (``index_store_alias`` keeps out of it), never an activated one
+    (``activated.`` prefix), and within the store's 128-character limit.
+    """
+    if not repo_name:
+        raise ValueError("a temporal store alias needs a repository name")
+    digest = hashlib.sha256(repo_name.encode("utf-8")).hexdigest()
+    return TEMPORAL_STORE_ALIAS_PREFIX + digest[:_TEMPORAL_DIGEST_CHARS]
+
+
+def is_temporal_store_alias(store_alias: str) -> bool:
+    """True for exactly the aliases ``temporal_index_store_alias`` produces."""
+    return bool(_TEMPORAL_STORE_ALIAS_RE.match(store_alias))
+
+
+#: Alias-document field: the store alias the repo's temporal shards are under.
+TEMPORAL_INDEX_STORE_ALIAS_FIELD = "temporal_index_store_alias"
+#: Alias-document field: the published version of the temporal shards.
+TEMPORAL_INDEX_VERSION_FIELD = "temporal_index_version"
+
+
+def published_temporal_fields(store_alias: str, version: str) -> Dict[str, str]:
+    """The alias-document fields recording a temporal-shard publish."""
+    return {
+        TEMPORAL_INDEX_STORE_ALIAS_FIELD: store_alias,
+        TEMPORAL_INDEX_VERSION_FIELD: version,
+    }
+
+
+def recorded_temporal_fields(document: Optional[Mapping[str, Any]]) -> Dict[str, str]:
+    """The temporal-shard fields ``document`` records (both, or none).
+
+    Temporal shards live at a fixed path outside every snapshot, so a pointer
+    write that REPLACES the alias document (a branch change) carries them
+    over; dropping them would leave other pods serving whatever they held.
+    """
+    fields = document or {}
+    store_alias = fields.get(TEMPORAL_INDEX_STORE_ALIAS_FIELD)
+    version = fields.get(TEMPORAL_INDEX_VERSION_FIELD)
+    if (
+        isinstance(store_alias, str)
+        and store_alias
+        and isinstance(version, str)
+        and version
+    ):
+        return published_temporal_fields(store_alias, version)
+    return {}
 
 
 def published_index_fields(store_alias: str, version: str) -> Dict[str, str]:
@@ -154,7 +270,7 @@ class DelegatedIndexStore:
     service as an immutable version; ``checkout`` fetches a version, verified,
     into a directory a reader opens. ``artifacts`` is the plugin's client
     (``code_indexer.index_artifacts``): ``current_version``, ``publish``,
-    ``checkout``.
+    ``checkout`` and, for ``delete``, ``delete_alias``.
     """
 
     is_local = False
@@ -176,15 +292,29 @@ class DelegatedIndexStore:
         """Check ``version`` (default: current) out to ``into/<index dir>``."""
         return self.checkout_as(index_store_alias(Path(repo_path).name), into, version)
 
-    def current_version_as(self, store_alias: str) -> Optional[str]:
-        """The store's current version of ``store_alias`` (None: nothing yet)."""
-        current = self._artifacts.current_version(store_alias)
-        return str(current) if current else None
-
     def publish_as(self, store_alias: str, built_dir: Path) -> str:
         """``publish`` under an explicit store alias (the caller derived it)."""
         base = self._artifacts.current_version(store_alias)
-        return str(self._artifacts.publish(store_alias, base, str(built_dir)))
+        return self.publish_on(store_alias, built_dir, base)
+
+    def publish_on(
+        self, store_alias: str, built_dir: Path, base_version: Optional[str]
+    ) -> str:
+        """Publish on top of ``base_version`` exactly (None: the first version).
+
+        For an index built FROM a known version: if anyone published since,
+        the store refuses (compare-and-swap) instead of this build silently
+        replacing theirs.
+        """
+        return str(self._artifacts.publish(store_alias, base_version, str(built_dir)))
+
+    def checkout_dir(
+        self, store_alias: str, dest: Path, version: Optional[str] = None
+    ) -> Path:
+        """Check ``version`` out to ``dest`` itself (which must not exist) --
+        for state that is a directory of its own, not an ``<index dir>``."""
+        self._artifacts.checkout(store_alias, str(dest), version)
+        return Path(dest)
 
     def checkout_as(
         self, store_alias: str, into: Path, version: Optional[str] = None
@@ -193,6 +323,46 @@ class DelegatedIndexStore:
         dest = Path(into) / INDEX_DIRNAME
         self._artifacts.checkout(store_alias, str(dest), version)
         return dest
+
+    def delete(self, repo_path: Union[str, Path]) -> Optional[int]:
+        """Delete every published version of the alias ``publish`` writes.
+
+        The artifact client's ``delete_alias`` (idempotent: 0 for an alias
+        with no versions); its errors propagate. A client without it (a plugin
+        older than delete support) raises: the versions would otherwise stay
+        published while the caller believed them gone.
+        """
+        alias = index_store_alias(Path(repo_path).name)
+        delete_alias = getattr(self._artifacts, "delete_alias", None)
+        if not callable(delete_alias):
+            raise IndexStoreDeleteUnsupportedError(
+                f"cannot delete the published index versions of {alias!r}: the "
+                f"index-artifacts client {type(self._artifacts).__name__} has no "
+                "delete_alias (the code_indexer.index_artifacts plugin predates "
+                "it; upgrade it to a version with index deletion)"
+            )
+        return int(delete_alias(alias))
+
+    def delete_as(self, store_alias: str) -> int:
+        """Delete every published version of ``store_alias``; how many went.
+
+        Requires an index-artifacts client with ``delete_alias``
+        (cidx-content-backend >= 0.9.0). Idempotent; every failure raises.
+        """
+        delete_alias = getattr(self._artifacts, "delete_alias", None)
+        if delete_alias is None:
+            raise RuntimeError(
+                "The index-artifacts client cannot delete an alias; "
+                "cidx-content-backend >= 0.9.0 is required"
+            )
+        return int(delete_alias(store_alias))
+
+
+    def current_version_as(self, store_alias: str) -> Optional[str]:
+        """The store's current version of ``store_alias`` (None: nothing yet)."""
+        current = self._artifacts.current_version(store_alias)
+        return str(current) if current else None
+
 
 
 _DEFAULT: IndexStore = LocalIndexStore()

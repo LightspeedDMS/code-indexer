@@ -14,7 +14,11 @@ from code_indexer.server.repositories.user_dir_permissions import (
 from code_indexer.server.utils.cancellable_subprocess import (
     SubprocessCancelledError,
 )
-from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
+from code_indexer.server.storage.shared.git_backend import (
+    DETACHED_HEAD_MARKER,
+    GitBackend,
+    LocalGitBackend,
+)
 from code_indexer.server.storage.shared.snapshot_manager import (
     _ensure_source_tree_readable_for_clone,
 )
@@ -29,11 +33,13 @@ from code_indexer.server.repositories.activated_working_copy import (
     working_copies_for,
 )
 from code_indexer.server.storage.json_column import parse_json_column
-from code_indexer.utils.index_store import index_root
+from code_indexer.server.services.index_materializer import CHECKED_OUT_MARKER
+from code_indexer.utils.index_store import INDEX_VERSION_FIELD, index_root
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.utils.subprocess_diagnostics import (
     format_called_process_error_diagnostic,
     format_completed_process_diagnostic,
+    redact_url_credentials,
 )
 from code_indexer.config import write_json_atomic
 from code_indexer.validation.user_validation import RESERVED_ACTIVATED_REPOS_DIR_NAMES
@@ -1021,14 +1027,21 @@ class ActivatedRepoManager:
             Job ID for tracking activation progress
 
         Raises:
-            ActivatedRepoError: If validation or activation fails
+            ActivatedRepoError: If validation or activation fails, or the
+                content seam is delegated but cannot reach the working copies
         """
-        if self._working_copies().is_delegated:
-            raise ActivatedRepoError(
-                "Composite repositories cannot be activated on a server without "
-                "the repository volume (content_backend='delegated'); activate "
-                "each repository on its own."
-            )
+        # Content seam: a misconfigured delegated server refuses here, before
+        # a job is queued (never falls back to this pod's disk).
+        self._working_copies()
+
+        # The default alias is resolved BEFORE the job is submitted: it is the
+        # job's repo_alias, and submit_job's atomic (operation_type,
+        # repo_alias) claim is what stops two concurrent activations of the
+        # same composite -- on this pod or another -- from both passing the
+        # job's "already exists" check (the loser's rollback would delete the
+        # winner's in-progress composite). A None repo_alias is never claimed.
+        if user_alias is None:
+            user_alias = self._default_composite_alias(golden_repo_aliases)
 
         # Submit background job for composite activation
         job_id = self.background_job_manager.submit_job(
@@ -1045,6 +1058,12 @@ class ActivatedRepoManager:
 
         return job_id
 
+    @staticmethod
+    def _default_composite_alias(golden_repo_aliases: List[str]) -> str:
+        """A composite's alias when the caller gives none: its members' names
+        joined with ``_``, in the order given."""
+        return "_".join(golden_repo_aliases)
+
     def _do_activate_composite_repository(
         self,
         username: str,
@@ -1057,6 +1076,14 @@ class ActivatedRepoManager:
 
         Creates a composite repository structure using ProxyInitializer and
         CoW clones of each golden repository.
+
+        Content seam (``content_backend='delegated'``): the composite
+        directory and its members live on workspace-mcp, each member created
+        by the same delegated clone as a single activation (files via
+        ``/clone-path``, git via git-mcp, index state seeded on this pod). The
+        composite's proxy config and every member's index are this pod's index
+        state under the composite path; the member list is the activated
+        aliases themselves (see ``_composite_member_list``).
 
         Args:
             username: Username requesting activation
@@ -1091,7 +1118,7 @@ class ActivatedRepoManager:
 
             # Step 1: Determine user_alias (default to joined names if not provided)
             if user_alias is None:
-                user_alias = "_".join(golden_repo_aliases)
+                user_alias = self._default_composite_alias(golden_repo_aliases)
                 self.logger.info(
                     f"User alias not provided, defaulting to: {user_alias}"
                 )
@@ -1106,17 +1133,20 @@ class ActivatedRepoManager:
             # created -- an unsafe username/user_alias raises here.
             composite_path_str = self._safe_user_scoped_path(username, user_alias)
             user_dir = self._safe_user_dir(username)
-            ensure_activated_user_dir(user_dir)
+            delegated = self._working_copies().is_delegated
+            # Content seam: workspace-mcp creates the copies' parents itself.
+            if not delegated:
+                ensure_activated_user_dir(user_dir)
 
             composite_path = Path(composite_path_str)
 
             # Check if already exists
-            if composite_path.exists():
+            if self._composite_exists(composite_path, delegated):
                 raise ActivatedRepoError(
                     f"Composite repository '{user_alias}' already exists for user '{username}'"
                 )
 
-            composite_path.mkdir(parents=True, exist_ok=True)
+            self._create_composite_dir(composite_path, delegated)
             update_progress(20, f"Created composite directory at {composite_path}")
 
             # Step 3: Use ProxyInitializer to create proxy configuration
@@ -1125,7 +1155,14 @@ class ActivatedRepoManager:
                 from ...proxy.proxy_initializer import ProxyInitializer
 
                 proxy_init = ProxyInitializer(composite_path)
-                proxy_init.initialize(force=True)
+                if delegated:
+                    # The composite path on this pod holds index state only:
+                    # nothing to discover yet (the members are cloned next)
+                    # and no parent proxy to nest under -- the parents are the
+                    # user's directory and the activated-repos root.
+                    proxy_init.create_proxy_config()
+                else:
+                    proxy_init.initialize(force=True)
                 update_progress(30, "Proxy configuration initialized")
 
                 # Add FilesystemVectorStore and VoyageAI config for composite repos
@@ -1139,8 +1176,9 @@ class ActivatedRepoManager:
                 # this frame.  No metadata row was ever written (Step 6 comes
                 # later), so the rename-to-trash pattern used during
                 # deactivation is both unnecessary and inappropriate here.
-                if composite_path.exists():
-                    shutil.rmtree(composite_path, ignore_errors=True)
+                self._discard_failed_composite(
+                    composite_path, delegated, golden_repo_aliases
+                )
                 raise ActivatedRepoError(
                     f"Failed to initialize proxy configuration: {str(e)}"
                 )
@@ -1159,9 +1197,16 @@ class ActivatedRepoManager:
                 subrepo_path = composite_path / alias
 
                 try:
-                    # Use canonical path resolution for versioned repos
+                    # Use canonical path resolution for versioned repos (under
+                    # a delegated IndexStore: the golden index served here)
+                    served_golden = (
+                        self._serve_golden_index_here(alias)
+                        if self._activated_index().is_delegated()
+                        else None
+                    )
                     golden_repo_actual_path = (
-                        self.golden_repo_manager.get_actual_repo_path(alias)
+                        served_golden
+                        or self.golden_repo_manager.get_actual_repo_path(alias)
                     )
                     # Reuse existing CoW clone method
                     success = self._clone_with_copy_on_write(
@@ -1192,8 +1237,9 @@ class ActivatedRepoManager:
                         f"Failed to clone repository '{alias}': {str(e)}",
                         extra={"correlation_id": get_correlation_id()},
                     )
-                    if composite_path.exists():
-                        shutil.rmtree(composite_path, ignore_errors=True)
+                    self._discard_failed_composite(
+                        composite_path, delegated, golden_repo_aliases
+                    )
                     raise ActivatedRepoError(
                         f"Failed to clone repository '{alias}': {str(e)}"
                     )
@@ -1206,7 +1252,12 @@ class ActivatedRepoManager:
                 from ...proxy.config_manager import ProxyConfigManager
 
                 proxy_config = ProxyConfigManager(composite_path)
-                proxy_config.refresh_repositories()
+                if delegated:
+                    proxy_config.set_repositories(
+                        self._composite_member_list(golden_repo_aliases)
+                    )
+                else:
+                    proxy_config.refresh_repositories()
                 update_progress(90, "Repository discovery completed")
             except Exception as e:
                 # Activation failure during proxy-config refresh — roll back
@@ -1219,8 +1270,9 @@ class ActivatedRepoManager:
                     f"Failed to refresh repositories: {str(e)}",
                     extra={"correlation_id": get_correlation_id()},
                 )
-                if composite_path.exists():
-                    shutil.rmtree(composite_path, ignore_errors=True)
+                self._discard_failed_composite(
+                    composite_path, delegated, golden_repo_aliases
+                )
                 raise ActivatedRepoError(
                     f"Failed to refresh repository configuration: {str(e)}"
                 )
@@ -1248,6 +1300,19 @@ class ActivatedRepoManager:
                 "last_accessed": activated_at,
                 "activation_id": activation_id,
             }
+            # Delegated IndexStore: the proxy config and every member's index
+            # are published (and recorded) so any pod can serve the composite.
+            metadata.update(
+                self._publish_activated_index(
+                    username,
+                    user_alias,
+                    str(composite_path),
+                    metadata,
+                    discard=lambda: self._discard_failed_composite(
+                        composite_path, delegated, golden_repo_aliases
+                    ),
+                )
+            )
 
             try:
                 self._save_metadata(username, user_alias, metadata)
@@ -1263,8 +1328,9 @@ class ActivatedRepoManager:
                     f"Failed to create metadata: {str(e)}",
                     extra={"correlation_id": get_correlation_id()},
                 )
-                if composite_path.exists():
-                    shutil.rmtree(composite_path, ignore_errors=True)
+                self._discard_failed_composite(
+                    composite_path, delegated, golden_repo_aliases
+                )
                 raise ActivatedRepoError(f"Failed to create metadata: {str(e)}")
 
             update_progress(
@@ -1654,7 +1720,9 @@ class ActivatedRepoManager:
             if golden_repo_alias_sw:
                 _gr_sw = self.golden_repo_manager.get_golden_repo(golden_repo_alias_sw)
                 if _gr_sw is not None and branch_name != _gr_sw.default_branch:
-                    self._run_branch_delta_index(repo_dir, user_alias)
+                    self._run_branch_delta_index(
+                        repo_dir, user_alias, **self._publishing_owner(username)
+                    )
 
             # Step 5: Return success with detailed operation information
             message = f"Successfully switched to branch '{branch_name}' in repository '{user_alias}'"
@@ -1729,8 +1797,16 @@ class ActivatedRepoManager:
                     repo_dir, timeout=30
                 )
                 return current_branch
-            except subprocess.CalledProcessError:
-                pass
+            except subprocess.CalledProcessError as exc:
+                # Delegated: git-mcp reports a transport or tool failure as
+                # CalledProcessError too. Only a detached HEAD reads the
+                # metadata branch; anything else is the caller's error.
+                if self._working_copies().is_delegated and (
+                    DETACHED_HEAD_MARKER not in str(exc.stderr or "")
+                ):
+                    raise GitOperationError(
+                        f"Failed to get current branch: {redact_url_credentials(exc.stderr or exc)}"
+                    ) from exc
 
             # Fallback to metadata if git command fails
             repo_data = self._load_metadata(username, user_alias)
@@ -1740,7 +1816,15 @@ class ActivatedRepoManager:
 
         except subprocess.TimeoutExpired:
             raise GitOperationError("Git operation timed out")
+        except GitOperationError:
+            raise
         except Exception as e:
+            if self._working_copies().is_delegated:
+                # The copy is not on this pod: the registry's branch is not an
+                # answer to "git-mcp failed".
+                raise GitOperationError(
+                    f"Failed to get current branch: {type(e).__name__}: {e}"
+                ) from e
             # Final fallback to metadata
             try:
                 repo_data = self._load_metadata(username, user_alias)
@@ -2265,7 +2349,9 @@ class ActivatedRepoManager:
             if _gr_alias_sync:
                 _gr_sync = self.golden_repo_manager.get_golden_repo(_gr_alias_sync)
                 if _gr_sync is not None and current_branch != _gr_sync.default_branch:
-                    self._run_branch_delta_index(repo_dir, user_alias)
+                    self._run_branch_delta_index(
+                        repo_dir, user_alias, **self._publishing_owner(username)
+                    )
 
             # Step 5: Return success message with details
             # changed_files was computed from the diff above (EVO-64678: the seam
@@ -2507,6 +2593,120 @@ class ActivatedRepoManager:
                 f"Failed to load metadata for repository '{user_alias}': {str(e)}"
             )
 
+    def _activated_index(self) -> Any:
+        """The IndexStore facade for activated copies (``ActivatedIndexStore``)."""
+        facade = getattr(self, "_activated_index_store", None)
+        if facade is None:
+            from code_indexer.server.services.activated_index_store import (
+                ActivatedIndexStore,
+            )
+
+            facade = ActivatedIndexStore()
+            self._activated_index_store = facade
+        return facade
+
+    def serve_index_here(self, username: str, user_alias: str) -> str:
+        """The copy's path, with this pod holding the index version the
+        registry records for it (``index_store_backend: delegated``).
+
+        Checks the registry for THIS user first: no registration is
+        ``ActivatedRepoError`` ("not found"), before any copy or index is
+        touched. A failed checkout raises. Under the local store this is
+        ``get_activated_repo_path`` (no registry read, nothing fetched).
+        """
+        repo_path = self.get_activated_repo_path(username, user_alias)
+        facade = self._activated_index()
+        if not facade.is_delegated():
+            return repo_path
+        metadata = self._load_metadata(username, user_alias)
+        if metadata is None:
+            raise ActivatedRepoError(
+                f"Repository '{user_alias}' not found for user '{username}'"
+            )
+        facade.serve(username, user_alias, repo_path, metadata)
+        return repo_path
+
+    def _clone_timeout(self) -> int:
+        """The CoW/seed deadline: ``resource_config.cow_clone_timeout``."""
+        rc = getattr(self.golden_repo_manager, "resource_config", None)
+        timeout: int = (
+            getattr(rc, "cow_clone_timeout", self._COW_CLONE_TIMEOUT_DEFAULT)
+            if rc is not None
+            else self._COW_CLONE_TIMEOUT_DEFAULT
+        )
+        return timeout
+
+    def registration(self, username: str, user_alias: str) -> Optional[Dict[str, Any]]:
+        """The copy's registry entry as stored (no side effects), or None."""
+        return self._load_metadata(username, user_alias)
+
+    def seed_index_from_golden(self, username: str, user_alias: str) -> None:
+        """Re-create this pod's index state for a registered (single) copy from
+        its golden repository's served index, as activation does -- for a copy
+        whose own index is held nowhere (IndexStore backfill). Raises."""
+        metadata = self._load_metadata(username, user_alias)
+        if metadata is None:
+            raise ActivatedRepoError(
+                f"Repository '{user_alias}' not found for user '{username}'"
+            )
+        golden_alias = metadata.get("golden_repo_alias")
+        if not golden_alias:
+            raise ActivatedRepoError(
+                f"Repository '{user_alias}' records no golden repository"
+            )
+        golden_path = self._serve_golden_index_here(
+            golden_alias
+        ) or self.golden_repo_manager.get_actual_repo_path(golden_alias)
+        self._seed_index_state(
+            golden_path,
+            self.get_activated_repo_path(username, user_alias),
+            timeout=self._clone_timeout(),
+            cancel_check=None,
+        )
+
+    def publish_index(
+        self, username: str, user_alias: str, *, fresh: bool = False
+    ) -> None:
+        """Publish the index this pod just built for the copy (a reindex, a
+        branch switch or sync) on top of the version it was built from, and
+        record the new version in the registry. ``fresh``: over whatever the
+        store holds (an index from before publishing existed). No-op under the
+        local store. Raises on failure -- including another pod publishing in
+        between."""
+        facade = self._activated_index()
+        if not facade.is_delegated():
+            return
+        metadata = self._load_metadata(username, user_alias)
+        if metadata is None:
+            raise ActivatedRepoError(
+                f"Repository '{user_alias}' not found for user '{username}'"
+            )
+        repo_path = self.get_activated_repo_path(username, user_alias)
+        # Use the marker this pod wrote at checkout as the CAS base, not the
+        # registry's value (which another pod may have updated in between).
+        marker = Path(repo_path) / CHECKED_OUT_MARKER
+        try:
+            marker_version = marker.read_text()
+        except OSError:
+            marker_version = None
+        if marker_version:
+            metadata[INDEX_VERSION_FIELD] = marker_version
+        metadata.update(
+            facade.publish(username, user_alias, repo_path, metadata, fresh=fresh)
+        )
+        try:
+            self._save_metadata(username, user_alias, metadata)
+        except Exception:
+            self.logger.warning(
+                "publish_index: first metadata-save attempt failed for "
+                "%s/%s (store version %s); retrying once",
+                username,
+                user_alias,
+                metadata.get(INDEX_VERSION_FIELD, "?"),
+                exc_info=True,
+            )
+            self._save_metadata(username, user_alias, metadata)
+
     def get_activated_repo_path(self, username: str, user_alias: str) -> str:
         """
         Get the filesystem path to an activated repository.
@@ -2688,6 +2888,55 @@ class ActivatedRepoManager:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+    def _serve_golden_index_here(self, golden_repo_alias: str) -> Optional[str]:
+        """The golden repository's served path, with this pod holding its
+        published index, for an activation to seed a copy from (the index may
+        have been published by another pod; a pod-local clone path can hold
+        an older build). Raises when it cannot; None for a golden repo with
+        no alias pointer (``get_actual_repo_path`` then reports it)."""
+        from code_indexer.global_repos.alias_manager import AliasManager
+
+        aliases = AliasManager(
+            os.path.join(self.golden_repo_manager.golden_repos_dir, "aliases")
+        )
+        global_alias = f"{golden_repo_alias}-global"
+        target = aliases.read_alias(global_alias)
+        if target:
+            aliases.ensure_served_here(global_alias, target)
+        return target
+
+    def _publish_activated_index(
+        self,
+        username: str,
+        user_alias: str,
+        activated_repo_path: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        discard: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Publish a new activation's index; the registry fields to record.
+
+        *metadata*: the entry about to be registered (a composite's names its
+        members, which are published too). Empty under the local store. A
+        failure discards the copy (*discard*, default: the single copy -- no
+        registration was written yet) and raises.
+        """
+        facade = self._activated_index()
+        if not facade.is_delegated():
+            return {}
+        try:
+            fields: Dict[str, Any] = facade.publish(
+                username, user_alias, activated_repo_path, metadata, fresh=True
+            )
+        except Exception as exc:
+            if discard is not None:
+                discard()
+            else:
+                self._discard_failed_activation(activated_repo_path)
+            raise ActivatedRepoError(
+                f"Failed to publish the index of '{user_alias}': {exc}"
+            ) from exc
+        return fields
+
     def _discard_delegated_copy(
         self, working_copies: DelegatedWorkingCopies, activated_repo_path: str
     ) -> None:
@@ -2705,6 +2954,98 @@ class ActivatedRepoManager:
             os.rmdir(activated_repo_path)
         except OSError:
             pass  # absent, or something else lives there: leave it
+
+    @staticmethod
+    def _composite_member_list(golden_repo_aliases: List[str]) -> List[str]:
+        """A composite's members, as local discovery lists them.
+
+        Locally ``ProxyConfigManager.refresh_repositories`` walks the
+        composite directory for ``.code-indexer`` dirs, which the CoW clone
+        brought along with every member: the sorted member directory names.
+        Under the content seam the members' files are not on this pod and
+        each member's index is seeded by its clone (no index is an error, see
+        ``_seed_index_state``), so the activated aliases ARE that list.
+        """
+        return sorted(set(golden_repo_aliases))
+
+    def _composite_exists(self, composite_path: Path, delegated: bool) -> bool:
+        """Whether the composite's directory exists (workspace-mcp's, delegated)."""
+        if delegated:
+            return self._working_copies().exists(composite_path)
+        return composite_path.exists()
+
+    @staticmethod
+    def _create_composite_dir(composite_path: Path, delegated: bool) -> None:
+        """Create the composite's directory -- delegated, only THIS pod's index
+        state for it: workspace-mcp creates the directory with the first
+        member's clone."""
+        if delegated:
+            index_root(composite_path).mkdir(parents=True, exist_ok=True)
+            return
+        composite_path.mkdir(parents=True, exist_ok=True)
+
+    def _discard_failed_composite(
+        self, composite_path: Path, delegated: bool, members: List[str]
+    ) -> None:
+        """Roll back a composite activation that failed before registration.
+
+        Delegated: the members' copies go with the composite directory on
+        workspace-mcp (one delete), then this pod's index state for it and for
+        every member the activation may have seeded (*members*: the proxy
+        config does not list them until all are cloned).
+        """
+        if delegated:
+            working_copies = self._working_copies()
+            assert isinstance(working_copies, DelegatedWorkingCopies)
+            working_copies.discard(composite_path)
+            self._remove_pod_composite_index_state(str(composite_path), members)
+        elif composite_path.exists():
+            shutil.rmtree(composite_path, ignore_errors=True)
+
+    @classmethod
+    def _remove_pod_composite_index_state(
+        cls, composite_path: str, members: Optional[List[str]] = None
+    ) -> None:
+        """Remove THIS pod's index state for a delegated composite: each
+        member's (*members* plus those the composite's own proxy config --
+        itself pod state -- names), then the composite's. Never touches
+        repository files."""
+        from code_indexer.server.services.composite_content import (
+            plain_member_names,
+        )
+
+        named = plain_member_names(members or [], composite_path)
+        for member in dict.fromkeys(named + cls._pod_composite_members(composite_path)):
+            cls._remove_pod_index_state(os.path.join(composite_path, member))
+        cls._remove_pod_index_state(composite_path)
+
+    @staticmethod
+    def _pod_composite_members(composite_path: str) -> List[str]:
+        """The members the composite's pod proxy config names; [] if none
+        (no config, or the config of a single, non-proxy copy).
+
+        A member name that is not one plain path component is skipped (and
+        logged): removal must never reach outside the composite's directory.
+        """
+        config_file = index_root(composite_path) / "config.json"
+        try:
+            with open(config_file) as f:
+                config = json.load(f)
+            if config.get("proxy_mode") is not True:
+                return []  # a single copy's own config, not a composite's
+            members = config.get("discovered_repos") or []
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError, AttributeError) as e:
+            logging.getLogger(__name__).warning(
+                "Unreadable composite proxy config %s: %s", config_file, e
+            )
+            return []
+        from code_indexer.server.services.composite_content import (
+            plain_member_names,
+        )
+
+        return plain_member_names(members, composite_path)
 
     def _discard_failed_activation(self, activated_repo_path: str) -> None:
         """Remove the copy of an activation that failed after cloning."""
@@ -2786,8 +3127,14 @@ class ActivatedRepoManager:
             update_progress(30, "Creating user directory structure")
 
             # Clone repository with CoW (use canonical path for versioned repos)
-            golden_repo_actual_path = self.golden_repo_manager.get_actual_repo_path(
-                golden_repo_alias
+            served_golden = (
+                self._serve_golden_index_here(golden_repo_alias)
+                if self._activated_index().is_delegated()
+                else None
+            )
+            golden_repo_actual_path = (
+                served_golden
+                or self.golden_repo_manager.get_actual_repo_path(golden_repo_alias)
             )
             update_progress(40, f"Cloning repository from {golden_repo_actual_path}")
             try:
@@ -2955,6 +3302,9 @@ class ActivatedRepoManager:
                 "ssh_key_used": ssh_key_used,
                 "activation_id": activation_id,
             }
+            metadata.update(
+                self._publish_activated_index(username, user_alias, activated_repo_path)
+            )
 
             self._save_metadata(username, user_alias, metadata)
 
@@ -3158,7 +3508,12 @@ class ActivatedRepoManager:
         finally:
             if self._query_tracker is not None:
                 self._query_tracker.clear_quiescing(repo_dir)
-        self._remove_pod_index_state(repo_dir)
+        # The copy's published index goes next; a failure raises and keeps the
+        # registration, so deactivating again finishes the job.
+        self._activated_index().delete(username, user_alias, metadata)
+        # A composite's members each have index state under it (a single
+        # copy's own config names none, so this is _remove_pod_index_state).
+        self._remove_pod_composite_index_state(repo_dir)
         try:
             self._delete_metadata(username, user_alias)
         except (OSError, IOError) as e:
@@ -3764,7 +4119,7 @@ class ActivatedRepoManager:
             )
 
             # Check if .code-indexer directory exists (has configuration)
-            config_dir = repo_path / ".code-indexer"
+            config_dir = index_root(repo_path)
             if not config_dir.exists():
                 self.logger.debug(
                     "No .code-indexer directory, skipping service stop",
@@ -4084,12 +4439,7 @@ class ActivatedRepoManager:
             # (default 3600s / 1 hour, sized for very large repos e.g.
             # evolution ~1M files, phoenix 40GB) instead of a fixed low
             # literal.
-            rc = getattr(self.golden_repo_manager, "resource_config", None)
-            clone_timeout = (
-                getattr(rc, "cow_clone_timeout", self._COW_CLONE_TIMEOUT_DEFAULT)
-                if rc is not None
-                else self._COW_CLONE_TIMEOUT_DEFAULT
-            )
+            clone_timeout = self._clone_timeout()
             # Issue #1511 (second call site): the CoW daemon runs as a
             # different OS user (on a different host) than the process that
             # wrote the golden-repo's index files, which commonly end up at
@@ -4782,11 +5132,20 @@ class ActivatedRepoManager:
         except Exception as e:
             raise ActivatedRepoError(f"Failed to migrate legacy remotes: {str(e)}")
 
+    def _publishing_owner(self, username: str) -> Dict[str, Any]:
+        """``_run_branch_delta_index`` keyword that makes the delta reindex of
+        a REGISTERED copy serve the recorded index first and publish after
+        (delegated IndexStore). Empty under the local store: today's call."""
+        if not self._activated_index().is_delegated():
+            return {}
+        return {"publish_for": username}
+
     def _run_branch_delta_index(
         self,
         repo_path: str,
         user_alias: str,
         cancel_check: Optional[Callable[[], bool]] = None,
+        publish_for: Optional[str] = None,
     ) -> None:
         """
         Run branch-aware delta semantic reindex on an activated repo (Bug #1203).
@@ -4828,9 +5187,13 @@ class ActivatedRepoManager:
             extra={"correlation_id": get_correlation_id()},
         )
         try:
+            if publish_for is not None:
+                self.serve_index_here(publish_for, user_alias)
             self._index_manager.run_branch_delta_index(
                 repo_path, cancel_check=cancel_check
             )
+            if publish_for is not None:
+                self.publish_index(publish_for, user_alias)
         except RuntimeError as exc:
             # Bug #1346: a user-initiated cancel (SubprocessCancelledError,
             # a RuntimeError subclass) is NOT a genuine reindex failure --
@@ -5301,7 +5664,7 @@ class ActivatedRepoManager:
             ActivatedRepoError: If config update fails
         """
         try:
-            config_file = composite_path / ".code-indexer" / "config.json"
+            config_file = index_root(composite_path) / "config.json"
 
             if not config_file.exists():
                 raise ActivatedRepoError(

@@ -19,6 +19,7 @@ from code_indexer.server.repositories.golden_repo_manager import (
     GitOperationError,
 )
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.storage.shared.git_backend import GitBackend
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,130 @@ def classify_branch_type(branch_name: str) -> str:
     return "other"
 
 
+def _branch_info(
+    branch_name: str,
+    *,
+    commit_hash: str,
+    commit_date_str: str,
+    author_name: str,
+    default_branch: Optional[str],
+) -> GoldenRepoBranchInfo:
+    """One listed branch: its tip commit's fields, parsed and classified."""
+    commit_timestamp = None
+    try:
+        commit_timestamp = _parse_git_date(commit_date_str)
+        if commit_timestamp.tzinfo is None:
+            commit_timestamp = commit_timestamp.replace(tzinfo=timezone.utc)
+    except (ValueError, AttributeError) as e:
+        logger.warning(
+            format_error_log(
+                "DEPLOY-GENERAL-024",
+                f"Failed to parse commit date '{commit_date_str}': {e}",
+            )
+        )
+
+    return GoldenRepoBranchInfo(
+        name=branch_name,
+        is_default=(branch_name == default_branch),
+        last_commit_hash=commit_hash,
+        last_commit_timestamp=commit_timestamp,
+        last_commit_author=author_name,
+        branch_type=classify_branch_type(branch_name),
+    )
+
+
+def _sorted_default_first(
+    branches: List[GoldenRepoBranchInfo],
+) -> List[GoldenRepoBranchInfo]:
+    """Sort branches: default first, then by name."""
+    branches.sort(key=lambda b: (not b.is_default, b.name))
+    return branches
+
+
+#: Names cidx lists for the remote: origin's branches, without these two
+#: (the symbolic origin/HEAD and the bare remote name).
+_SKIPPED_REMOTE_REFS = ("origin/HEAD", "origin")
+_ORIGIN_PREFIX = "origin/"
+#: The branch listing: one ``git for-each-ref`` line per branch tip, local and
+#: delegated alike (git-mcp runs the same format).
+_BRANCH_LISTING_FMT = (
+    "%(refname:short)|%(objectname)|%(committerdate:iso8601)|%(authorname)|%(subject)"
+)
+_BRANCH_LISTING_PATTERNS = ("refs/heads/", "refs/remotes/origin/")
+_BRANCH_LISTING_TIMEOUT_SECONDS = 30  # large repositories
+_DEFAULT_BRANCH_TIMEOUT_SECONDS = 10
+_COMMON_DEFAULT_BRANCHES = ("main", "master", "develop", "development")
+
+
+def _listing_lines(listing: str) -> List[str]:
+    """The non-blank lines of a branch listing."""
+    return [line for line in listing.strip().split("\n") if line.strip()]
+
+
+def _local_branch_names(listing: str) -> List[str]:
+    """The listing's LOCAL branches (``refs/heads/``), in listing order."""
+    names = (line.split("|", 1)[0] for line in _listing_lines(listing))
+    return [
+        name
+        for name in names
+        if name not in _SKIPPED_REMOTE_REFS and not name.startswith(_ORIGIN_PREFIX)
+    ]
+
+
+def _parse_branch_listing(
+    listing: str, default_branch: Optional[str]
+) -> List[GoldenRepoBranchInfo]:
+    """Branches from a ``_BRANCH_LISTING_FMT`` listing: default first, then by name.
+
+    Local branches win a name clash with origin's (``refs/heads/`` is listed
+    first); origin/HEAD and the bare remote name are not branches. A line that
+    does not parse is logged and skipped.
+    """
+    branches: List[GoldenRepoBranchInfo] = []
+    seen_names: set = set()  # Track branch names to deduplicate
+    for line in _listing_lines(listing):
+        try:
+            parts = line.split("|")
+            if len(parts) >= 5:
+                raw_name = parts[0]
+
+                # Skip origin/HEAD symbolic ref and bare remote
+                # name (not real branches)
+                if raw_name in _SKIPPED_REMOTE_REFS:
+                    continue
+
+                # Determine if remote branch, strip origin/ prefix
+                is_remote = raw_name.startswith(_ORIGIN_PREFIX)
+                branch_name = raw_name[len(_ORIGIN_PREFIX) :] if is_remote else raw_name
+
+                # Deduplicate: local branches take precedence over remote ones
+                if branch_name in seen_names:
+                    continue
+                seen_names.add(branch_name)
+
+                # parts[4] (commit message) is not currently used
+                branches.append(
+                    _branch_info(
+                        branch_name,
+                        commit_hash=parts[1],
+                        commit_date_str=parts[2],
+                        author_name=parts[3],
+                        default_branch=default_branch,
+                    )
+                )
+
+        except (IndexError, ValueError) as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-025",
+                    f"Failed to parse git output line '{line}': {e}",
+                )
+            )
+            continue
+
+    return _sorted_default_first(branches)
+
+
 class GoldenRepoBranchService:
     """Service for retrieving branch information from golden repositories."""
 
@@ -149,6 +274,9 @@ class GoldenRepoBranchService:
         if not golden_repo:
             raise ValueError(f"Golden repository '{repo_alias}' not found")
 
+        if self._repository_is_delegated(golden_repo):
+            return self._branches_through_git_backend(str(golden_repo.clone_path))
+
         # Use canonical path resolution to handle versioned structure repos
         actual_repo_path = self.golden_repo_manager.get_actual_repo_path(repo_alias)
         repo_path = Path(actual_repo_path)
@@ -167,9 +295,8 @@ class GoldenRepoBranchService:
             cmd = [
                 "git",
                 "for-each-ref",
-                "--format=%(refname:short)|%(objectname)|%(committerdate:iso8601)|%(authorname)|%(subject)",
-                "refs/heads/",
-                "refs/remotes/origin/",
+                f"--format={_BRANCH_LISTING_FMT}",
+                *_BRANCH_LISTING_PATTERNS,
             ]
 
             result = subprocess.run(
@@ -178,85 +305,11 @@ class GoldenRepoBranchService:
                 capture_output=True,
                 text=True,
                 check=True,
-                timeout=30,  # 30 second timeout for large repositories
+                timeout=_BRANCH_LISTING_TIMEOUT_SECONDS,
             )
 
-            branches = []
-            seen_names: set = set()  # Track branch names to deduplicate
             default_branch = self._get_default_branch(repo_path)
-
-            for line in result.stdout.strip().split("\n"):
-                if not line.strip():
-                    continue
-
-                try:
-                    parts = line.split("|")
-                    if len(parts) >= 5:
-                        raw_name = parts[0]
-
-                        # Skip origin/HEAD symbolic ref and bare remote
-                        # name (not real branches)
-                        if raw_name in ("origin/HEAD", "origin"):
-                            continue
-
-                        # Determine if remote branch, strip origin/ prefix
-                        is_remote = raw_name.startswith("origin/")
-                        branch_name = (
-                            raw_name[len("origin/") :] if is_remote else raw_name
-                        )
-
-                        # Deduplicate: local branches take precedence over remote ones
-                        if branch_name in seen_names:
-                            continue
-                        seen_names.add(branch_name)
-
-                        commit_hash = parts[1]
-                        commit_date_str = parts[2]
-                        author_name = parts[3]
-                        # commit_message = parts[4]  # Not currently used
-
-                        # Parse commit timestamp
-                        commit_timestamp = None
-                        try:
-                            commit_timestamp = _parse_git_date(commit_date_str)
-                            if commit_timestamp.tzinfo is None:
-                                commit_timestamp = commit_timestamp.replace(
-                                    tzinfo=timezone.utc
-                                )
-                        except (ValueError, AttributeError) as e:
-                            logger.warning(
-                                format_error_log(
-                                    "DEPLOY-GENERAL-024",
-                                    f"Failed to parse commit date '{commit_date_str}': {e}",
-                                )
-                            )
-
-                        # Classify branch type
-                        branch_type = classify_branch_type(branch_name)
-
-                        branch_info = GoldenRepoBranchInfo(
-                            name=branch_name,
-                            is_default=(branch_name == default_branch),
-                            last_commit_hash=commit_hash,
-                            last_commit_timestamp=commit_timestamp,
-                            last_commit_author=author_name,
-                            branch_type=branch_type,
-                        )
-                        branches.append(branch_info)
-
-                except (IndexError, ValueError) as e:
-                    logger.warning(
-                        format_error_log(
-                            "DEPLOY-GENERAL-025",
-                            f"Failed to parse git output line '{line}': {e}",
-                        )
-                    )
-                    continue
-
-            # Sort branches: default first, then by name
-            branches.sort(key=lambda b: (not b.is_default, b.name))
-
-            return branches
+            return _parse_branch_listing(result.stdout, default_branch)
 
         except subprocess.CalledProcessError as e:
             error_msg = f"Git operation failed: {redact_url_credentials(e.stderr or e.stdout or str(e))}"
@@ -338,7 +391,7 @@ class GoldenRepoBranchService:
                 ]
 
                 # Check common default branch names in order of preference
-                for candidate in ["main", "master", "develop", "development"]:
+                for candidate in _COMMON_DEFAULT_BRANCHES:
                     if candidate in branches:
                         return candidate
 
@@ -353,3 +406,82 @@ class GoldenRepoBranchService:
             )
 
         return None
+
+    # ------------------------------------------------------------------
+    # Content seam: a golden repo this pod does not hold
+    # ------------------------------------------------------------------
+
+    def _repository_is_delegated(self, golden_repo: object) -> bool:
+        """True when *golden_repo*'s clone is with git-mcp, not on this pod.
+
+        ``local://`` repositories stay on the local path: they are pod-local
+        by design (or cidx-meta, which is not a git repository anywhere).
+        """
+        probe = getattr(self.golden_repo_manager, "repositories_are_delegated", None)
+        if not (callable(probe) and probe() is True):
+            return False
+        repo_url = str(getattr(golden_repo, "repo_url", "") or "")
+        return not repo_url.startswith("local://")
+
+    def _branches_through_git_backend(
+        self, clone_path: str
+    ) -> List[GoldenRepoBranchInfo]:
+        """The branch listing, asked of git-mcp (the delegated twin).
+
+        ONE ``for_each_ref`` call with the local listing's format and patterns,
+        parsed by the same ``_parse_branch_listing`` -- so the answer is the
+        local one, whatever the branch count. The default branch is origin's
+        HEAD (one ``rev_parse``), else a common name among the listing's local
+        branches. Any git-mcp failure raises GitOperationError: an empty list
+        would claim the repository has no branches.
+        """
+        from code_indexer.services.temporal.temporal_git_seam import (
+            decode_like_local_git,
+        )
+
+        backend = self.golden_repo_manager.delegated_git_backend("branch listing")
+        try:
+            listing = decode_like_local_git(
+                backend.for_each_ref(
+                    clone_path,
+                    _BRANCH_LISTING_FMT,
+                    _BRANCH_LISTING_PATTERNS,
+                    timeout=_BRANCH_LISTING_TIMEOUT_SECONDS,
+                )
+            )
+            default_branch = self._default_branch_through_git_backend(
+                backend, clone_path, _local_branch_names(listing)
+            )
+        except subprocess.CalledProcessError as e:
+            error_msg = (
+                "Git operation failed: "
+                f"{redact_url_credentials(e.stderr or e.stdout or str(e))}"
+            )
+            logger.error(format_error_log("DEPLOY-GENERAL-026", error_msg))
+            raise GitOperationError(error_msg) from e
+        return _parse_branch_listing(listing, default_branch)
+
+    @staticmethod
+    def _default_branch_through_git_backend(
+        backend: GitBackend, clone_path: str, local_names: List[str]
+    ) -> Optional[str]:
+        """``_get_default_branch`` through the git seam: origin's HEAD, else the
+        first of the common names among the local branches, else the first."""
+        try:
+            ref = backend.rev_parse(
+                clone_path,
+                "--abbrev-ref",
+                "origin/HEAD",
+                timeout=_DEFAULT_BRANCH_TIMEOUT_SECONDS,
+            )
+            if ref.startswith(_ORIGIN_PREFIX):
+                return ref[len(_ORIGIN_PREFIX) :]
+        except subprocess.CalledProcessError:
+            logger.debug(
+                "Could not determine default branch from remote HEAD",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        for candidate in _COMMON_DEFAULT_BRANCHES:
+            if candidate in local_names:
+                return candidate
+        return local_names[0] if local_names else None

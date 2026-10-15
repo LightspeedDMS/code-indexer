@@ -409,3 +409,27 @@ class TestRepositoryListingManager:
         # Search should have same structure as available repositories
         assert "repositories" in search
         assert "total" in search
+
+
+def test_get_golden_clone_path_reads_only_the_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    golden = MagicMock()
+    golden.list_golden_repos.return_value = [
+        {"alias": "other", "clone_path": "/data/golden-repos/other"},
+        {"alias": "repo", "clone_path": "/data/golden-repos/repo"},
+    ]
+    manager = RepositoryListingManager(
+        golden_repo_manager=golden, activated_repo_manager=MagicMock()
+    )
+    monkeypatch.setattr(
+        manager,
+        "get_repository_statistics",
+        MagicMock(side_effect=AssertionError("statistics computed")),
+    )
+
+    assert manager.get_golden_clone_path("repo") == "/data/golden-repos/repo"
+    with pytest.raises(RepositoryListingError, match="'missing' not found"):
+        manager.get_golden_clone_path("missing")

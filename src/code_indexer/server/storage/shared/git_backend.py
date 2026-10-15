@@ -31,6 +31,7 @@ callers already use to build their own errors (e.g. ``GitOperationError``).
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Protocol, Sequence, Tuple, runtime_checkable
@@ -40,6 +41,14 @@ from code_indexer.utils.git_runner import (
     run_git_command_with_retry,
 )
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
+
+_URL_USERINFO_RE_BYTES = re.compile(
+    rb"(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*://)(?P<userinfo>[^/@\s]+)@"
+)
+
+
+def _redact_bytes(data: bytes) -> bytes:
+    return _URL_USERINFO_RE_BYTES.sub(lambda m: m.group("scheme") + b"***@", data)
 
 logger = logging.getLogger(__name__)
 
@@ -113,12 +122,7 @@ class GitBackend(Protocol):
         timeout: Timeout = None,
         retry: bool = False,
     ) -> None:
-        """``git pull [<remote> <branch>]``; mode = default|ff-only|no-ff|rebase.
-
-        A failed pull raises ``CalledProcessError``. A pull that stops on merge
-        conflicts raises it with ``output`` carrying one git-style
-        ``CONFLICT (content): Merge conflict in <path>`` line per conflicted
-        path, as git's own stdout does -- callers read the conflicts from it."""
+        """``git pull [<remote> <branch>]``; mode = default|ff-only|no-ff|rebase."""
         ...  # pragma: no cover
 
     def merge(self, repo_path: str, ref: str, timeout: Timeout = None) -> None:
@@ -208,6 +212,23 @@ class GitBackend(Protocol):
         timeout: Timeout = None,
     ) -> bytes:
         """``git log --format=<fmt> [--all] [--since S] [--skip=N] [-n M] [<revs>]``."""
+        ...  # pragma: no cover
+
+    def for_each_ref(
+        self,
+        repo_path: str,
+        fmt: str,
+        patterns: Sequence[str] = (),
+        *,
+        sort: Optional[str] = None,
+        count: Optional[int] = None,
+        timeout: Timeout = None,
+    ) -> bytes:
+        """``git for-each-ref --format=<fmt> [--sort=S] [--count=N] -- <patterns>``.
+
+        Every matching ref with its fields in ONE call (e.g. all branch tips).
+        Patterns are ref prefixes/globs, never options (they follow ``--``).
+        """
         ...  # pragma: no cover
 
     def diff_commits(
@@ -322,11 +343,9 @@ class GitCommandRunner(Protocol):
         remote: str,
         branch: Optional[str] = None,
         timeout: Timeout = None,
-        set_upstream: bool = False,
     ) -> subprocess.CompletedProcess:
-        """``git push [--set-upstream] <remote> [<branch>]`` with the backend's
-        own credentials; raises ``CalledProcessError`` on failure. Upstream
-        tracking is set only when *set_upstream* asks for it, as git does."""
+        """``git push <remote> [<branch>]`` with the backend's own credentials;
+        raises ``CalledProcessError`` on failure."""
         ...  # pragma: no cover
 
 
@@ -395,16 +414,10 @@ class LocalGitBackend:
         result = cls._run(cmd, cwd, check=False, timeout=timeout, text=False)
         stderr = bytes(result.stderr or b"").decode("utf-8", "replace")
         if check and result.returncode != 0:
-            # The error travels into messages: git echoes a credentialed URL
-            # back on failure, so both streams are redacted here. stdout
-            # round-trips through ``surrogateescape`` so every byte other than
-            # a redacted credential comes back exactly as git wrote it.
             raise subprocess.CalledProcessError(
                 result.returncode,
                 list(cmd),
-                output=redact_url_credentials(
-                    bytes(result.stdout or b"").decode("utf-8", "surrogateescape")
-                ).encode("utf-8", "surrogateescape"),
+                output=_redact_bytes(result.stdout),
                 stderr=redact_url_credentials(stderr),
             )
         return subprocess.CompletedProcess(
@@ -517,12 +530,8 @@ class LocalGitBackend:
         remote: str,
         branch: Optional[str] = None,
         timeout: Timeout = None,
-        set_upstream: bool = False,
     ) -> subprocess.CompletedProcess:
-        cmd = ["git", "push"]
-        if set_upstream:
-            cmd.append("--set-upstream")
-        cmd += ["--end-of-options", remote]
+        cmd = ["git", "push", "--end-of-options", remote]
         if branch:
             cmd.append(branch)
         return self._run(cmd, Path(repo_path), timeout=timeout)
@@ -646,6 +655,26 @@ class LocalGitBackend:
         if max_count:
             cmd.extend(["-n", str(max_count)])
         cmd.extend(revs)
+        return bytes(self._run_bytes(cmd, Path(repo_path), timeout=timeout).stdout)
+
+    def for_each_ref(
+        self,
+        repo_path: str,
+        fmt: str,
+        patterns: Sequence[str] = (),
+        *,
+        sort: Optional[str] = None,
+        count: Optional[int] = None,
+        timeout: Timeout = None,
+    ) -> bytes:
+        # The argv git-mcp's git_for_each_ref runs: options, then ``--`` patterns.
+        cmd = ["git", "for-each-ref", f"--format={fmt}"]
+        if sort:
+            cmd.append(f"--sort={sort}")
+        if count:
+            cmd.append(f"--count={count}")
+        cmd.append("--")
+        cmd.extend(patterns)
         return bytes(self._run_bytes(cmd, Path(repo_path), timeout=timeout).stdout)
 
     def diff_commits(

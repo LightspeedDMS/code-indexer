@@ -164,14 +164,21 @@ def content_seam_source(
     target that is a pod-local versioned snapshot (index state only) maps to
     the golden repo's base clone, which the backend serves. ``consumer`` names
     the caller in the warning logged when that mapping fails.
+
+    Pod-local ``local://`` repositories (Langfuse trace folders) are None even
+    then: their files live only on this pod, never with the backend. cidx-meta
+    is ``local://`` too but shared through the backend, so it keeps the seam.
     """
     from code_indexer.server.startup.content_backend_wiring import (
         golden_repo_content_root,
+        is_pod_local_golden_path,
         server_content_backend,
     )
 
     backend = server_content_backend()
     if backend is None or backend.is_local:
+        return None
+    if is_pod_local_golden_path(repo_path):
         return None
     root = golden_repo_content_root(repo_path, consumer=consumer)
     return ContentSeamSource(backend=backend, root=str(root))
@@ -221,6 +228,18 @@ def iter_manifest_entries(
         entries.extend(page.entries)
         yield from page.entries
     _ttl_put(key, tuple(entries))
+
+
+def walk_manifest_entries(
+    source: ContentSeamSource, prune_dirs: Sequence[str]
+) -> Tuple[ContentEntry, ...]:
+    """Every manifest entry, all pages, NEVER cached.
+
+    For a writable copy (an activated repository) a cached listing would hide
+    the user's own recent writes; a golden repository's reads go through
+    :func:`manifest_entries` instead.
+    """
+    return _walk_manifest(source, _prune_key(prune_dirs))
 
 
 def _prune_key(prune_dirs: Sequence[str]) -> Tuple[str, ...]:

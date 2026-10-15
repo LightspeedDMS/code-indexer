@@ -33,7 +33,50 @@ from code_indexer.utils.index_store import (
     LocalIndexStore,
     index_store_alias,
 )
-from tests.unit.server.index_store_fakes import FakeArtifacts as _Artifacts
+
+
+class _NoRepoRegistry:
+    def get_global_repo(self, alias: str) -> None:
+        return None
+
+
+class _Artifacts:
+    """An artifact service holding real trees: alias -> [(version, dir)]."""
+
+    is_local = False
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.versions: Dict[str, List[str]] = {}
+        self.calls: List[tuple] = []
+        self.fail_publish = False
+        self.fail_checkout = False
+
+    def current_version(self, alias: str) -> Optional[str]:
+        history = self.versions.get(alias)
+        return history[-1] if history else None
+
+    def publish(self, alias: str, base_version: Optional[str], source_dir: str) -> str:
+        self.calls.append(("publish", alias, base_version, source_dir))
+        if self.fail_publish:
+            raise OSError("artifact service unreachable")
+        if base_version != self.current_version(alias):
+            raise RuntimeError("ECONFLICT")
+        version = f"v{len(self.versions.get(alias, [])) + 1:032d}"
+        shutil.copytree(source_dir, self.root / alias / version)
+        self.versions.setdefault(alias, []).append(version)
+        return version
+
+    def checkout(self, alias: str, dest_dir: str, version: Optional[str] = None) -> str:
+        self.calls.append(("checkout", alias, dest_dir, version))
+        if self.fail_checkout:
+            raise RuntimeError("EDIGEST")
+        chosen = version or self.current_version(alias)
+        assert chosen is not None
+        if Path(dest_dir).exists():
+            raise RuntimeError("EINVAL: dest exists")
+        shutil.copytree(self.root / alias / chosen, dest_dir)
+        return chosen
 
 
 class _SnapshotManager:
@@ -62,6 +105,8 @@ def world(tmp_path: Path) -> Dict[str, Any]:
     scheduler._index_store = DelegatedIndexStore(artifacts)
     scheduler._snapshot_manager = _SnapshotManager(golden)
     scheduler.resource_config = None
+    # fix-config is stamped from the repo's registry entry; none here.
+    scheduler._registry = _NoRepoRegistry()
     fixes: List[Path] = []
 
     def fake_run(cmd: List[str], cwd: str, **kw: Any) -> None:
