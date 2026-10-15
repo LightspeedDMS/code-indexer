@@ -84,23 +84,21 @@ def build_configured_index_store(config: Any) -> IndexStore:
     return build_index_store(config, artifacts=artifacts)
 
 
-def server_index_store() -> Optional[IndexStore]:
+def server_index_store() -> IndexStore:
     """The store the running server built at startup (``app.state.index_store``).
 
-    Returns ``None`` outside a server process (CLI, tests) or before startup
-    has built one.  Raises ``RuntimeError`` if the parked value is not an
-    ``IndexStore``.
+    ``LocalIndexStore`` outside a server process (CLI, tests) or before startup
+    built one: indexes are then read where they were built, as before.  Read
+    without importing the app, so a CLI process never constructs a store.
+    Raises ``RuntimeError`` if the parked value is not an ``IndexStore``.
     """
     from code_indexer.server.utils.registry_factory import (
         _running_server_app_state,
     )
 
-    state = _running_server_app_state()
-    if state is None:
-        return None
-    store = getattr(state, "index_store", None)
+    store = getattr(_running_server_app_state(), "index_store", None)
     if store is None:
-        return None
+        return LocalIndexStore()
     if not hasattr(store, "is_local"):
         raise RuntimeError(
             f"app.state.index_store is not an IndexStore: {type(store)}"

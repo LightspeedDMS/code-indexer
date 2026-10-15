@@ -311,13 +311,14 @@ def test_delegated_store_delete_without_plugin_support_raises() -> None:
 # ── server_index_store ─────────────────────────────────────────────────
 
 
-def test_server_index_store_is_none_outside_a_server(
+def test_server_index_store_is_local_outside_a_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from code_indexer.server.utils import registry_factory
 
     monkeypatch.setattr(registry_factory, "_running_server_app_state", lambda: None)
-    assert index_store_wiring.server_index_store() is None
+    store = index_store_wiring.server_index_store()
+    assert store.is_local
 
 
 def test_server_index_store_returns_the_parked_store(
