@@ -8,13 +8,13 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | Class | Rows |
 |---|---|
 | unclassified | 0 |
-| repo-read | 133 |
+| repo-read | 116 |
 | repo-write | 14 |
 | cidx-state-in-repo | 936 |
-| migrated | 426 |
+| migrated | 408 |
 | refused | 4 |
 | local-only | 466 |
-| cidx-state | 781 |
+| cidx-state | 784 |
 | not-repo | 440 |
 
 ## Modules with open rows
@@ -98,7 +98,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/services/fleet_migration/orchestrator.py` | 0 | 0 | 0 | 4 |
 | `server/services/fleet_migration/quarantine.py` | 0 | 0 | 0 | 4 |
 | `server/services/fts_index_builder.py` | 0 | 0 | 0 | 5 |
-| `server/services/git_operations_service.py` | 0 | 21 | 0 | 2 |
+| `server/services/git_operations_service.py` | 0 | 4 | 0 | 2 |
 | `server/services/golden_index_backfill.py` | 0 | 0 | 0 | 4 |
 | `server/services/hnsw_orphan_sweep/discovery.py` | 0 | 1 | 0 | 3 |
 | `server/services/hnsw_orphan_sweep/repair_executor.py` | 0 | 0 | 0 | 5 |
