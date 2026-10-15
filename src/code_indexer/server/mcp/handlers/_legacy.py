@@ -301,7 +301,8 @@ def _has_git_dir(repo_path: str) -> bool:
     from code_indexer.server.services.git_tools_seam import delegated_git_tools
 
     tools = delegated_git_tools()
-    assert tools is not None  # delegated content seam
+    if tools is None:
+        return False
     probe = tools.run(["git", "rev-parse", "--git-dir"], repo_path, check=False)
     return probe.returncode == 0
 

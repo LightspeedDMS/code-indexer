@@ -7,12 +7,10 @@ Uses run_git_command() from git_runner for all git operations.
 
 Golden repositories on a pod that does not hold them (``content_backend:
 delegated``): the service is built with the server's git seam (git-mcp, see
-:func:`delegated_golden_git_backend`). The operations git-mcp exposes --
-``rev_parse``, ``log_raw`` (no path/author/grep filters), ``show_objects`` --
-run through it; the rest (blame, path-filtered history, message and pickaxe
-search, arbitrary diffs, per-commit stats) have no seam operation and REFUSE
-with :class:`DelegatedRepositoryUnsupportedError` before any git runs. Without
-a backend every operation runs local git exactly as before.
+:func:`delegated_golden_git_backend`).  All operations -- including blame,
+path-filtered history, diffs, and search -- run through the seam's
+``git_exec`` fallback when no typed operation exists.  Without a backend
+every operation runs local git exactly as before.
 """
 
 import io
