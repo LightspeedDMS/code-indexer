@@ -10394,6 +10394,8 @@ def save_api_key(
             status_code=status.HTTP_400_BAD_REQUEST,
         )
 
+    from ..services.token_encryption import StoredSecretLegacyWriteRefused
+
     # Save token using CITokenManager - use same server_dir as config service
     try:
         token_manager = _get_token_manager()
@@ -10416,6 +10418,17 @@ def save_api_key(
             error_message=f"Invalid token format: {str(e)}",
             validation_errors={"api_keys": str(e)},
             status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    except StoredSecretLegacyWriteRefused as e:
+        logger.warning(
+            "%s API key save refused while the cluster upgrade is in progress",
+            platform,
+        )
+        return _create_config_page_response(
+            request,
+            session,
+            error_message=str(e),
+            status_code=status.HTTP_409_CONFLICT,
         )
     except Exception as e:
         logger.error(
@@ -10789,6 +10802,15 @@ def _build_git_credential_manager() -> Any:
     )
 
 
+def _stored_secret_write_refused(exc: Exception, door: str) -> JSONResponse:
+    """409 for a stored-secret write refused during a cluster upgrade."""
+    logger.warning(
+        "%s: stored-secret write refused while the cluster upgrade is in progress",
+        door,
+    )
+    return JSONResponse({"success": False, "error": str(exc)}, status_code=409)
+
+
 @web_router.post(
     "/git-credentials",
     dependencies=[Depends(dependencies.require_elevation())],
@@ -10802,6 +10824,7 @@ async def admin_git_credentials_add(request: Request):
         )
 
     from ..clients.forge_client import ForgeAuthenticationError
+    from ..services.token_encryption import StoredSecretLegacyWriteRefused
 
     try:
         body = await request.json()
@@ -10830,6 +10853,8 @@ async def admin_git_credentials_add(request: Request):
 
     except ForgeAuthenticationError as e:
         return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+    except StoredSecretLegacyWriteRefused as e:
+        return _stored_secret_write_refused(e, "admin git credentials")
     except Exception as e:
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
@@ -11134,6 +11159,7 @@ async def user_git_credentials_add(request: Request):
         )
 
     from ..clients.forge_client import ForgeAuthenticationError
+    from ..services.token_encryption import StoredSecretLegacyWriteRefused
 
     try:
         body = await request.json()
@@ -11162,6 +11188,8 @@ async def user_git_credentials_add(request: Request):
 
     except ForgeAuthenticationError as e:
         return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+    except StoredSecretLegacyWriteRefused as e:
+        return _stored_secret_write_refused(e, "git credentials")
     except Exception as e:
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 

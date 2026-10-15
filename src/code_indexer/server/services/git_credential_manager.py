@@ -126,7 +126,12 @@ class GitCredentialManager:
         """Decrypt a stored token, rewriting a legacy value as v2 (CAS).
 
         An undecryptable value is marked as needing re-entry (never deleted)
-        and its ValueError propagates."""
+        and its ValueError propagates. A value left undetermined because a key
+        source could not be read is not marked."""
+        from code_indexer.server.services.token_encryption import (
+            StoredSecretUndetermined,
+        )
+
         encrypted = cred["encrypted_token"]
         credential_id = cred["credential_id"]
         try:
@@ -141,6 +146,8 @@ class GitCredentialManager:
             if cred.get("needs_reentry_at"):
                 self._backend.clear_needs_reentry(credential_id, encrypted)
             return plaintext
+        except StoredSecretUndetermined:
+            raise
         except ValueError:
             try:
                 self._backend.mark_needs_reentry(

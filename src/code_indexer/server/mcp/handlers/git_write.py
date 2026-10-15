@@ -582,6 +582,10 @@ def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]
         return _mcp_response(
             {"success": False, "error": "forge_type must be 'github' or 'gitlab'"}
         )
+    from code_indexer.server.services.token_encryption import (
+        StoredSecretLegacyWriteRefused,
+    )
+
     try:
         manager = _get_credential_manager()
         loop = asyncio.new_event_loop()
@@ -600,6 +604,13 @@ def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]
         finally:
             loop.close()
         return _mcp_response(result)
+    except StoredSecretLegacyWriteRefused as e:
+        logger.warning(
+            "configure_git_credential: stored-secret write refused while the "
+            "cluster upgrade is in progress",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
         logger.exception(
             f"configure_git_credential failed: {e}",

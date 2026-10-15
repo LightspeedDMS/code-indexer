@@ -11,6 +11,7 @@ None server_dir raises TypeError.
 import logging
 import os
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ _JWT_SECRET_FILENAME = ".jwt_secret"
 _VALID_STORAGE_MODES = frozenset({"sqlite", "postgres"})
 
 
-def ensure_encryption_key_salt(server_dir: Path, storage_mode: str) -> str:
+def ensure_encryption_key_salt(server_dir: Path, storage_mode: str) -> Optional[str]:
     """Return the encryption key salt for the server, creating it if absent.
 
     Args:
@@ -27,7 +28,9 @@ def ensure_encryption_key_salt(server_dir: Path, storage_mode: str) -> str:
         storage_mode: "sqlite" for standalone mode, "postgres" for cluster mode.
 
     Returns:
-        The salt string to use for encryption key derivation.
+        The salt string to use for encryption key derivation, or None when an
+        existing salt file (or, in cluster mode, ``.jwt_secret``) cannot be
+        read: the file is left untouched (one WARNING) and nothing is written.
 
     Raises:
         TypeError: If server_dir is None.
@@ -41,11 +44,16 @@ def ensure_encryption_key_salt(server_dir: Path, storage_mode: str) -> str:
             f"Must be one of: {sorted(_VALID_STORAGE_MODES)}"
         )
 
+    from code_indexer.server.services.token_encryption import read_legacy_source
+
     salt_file = Path(server_dir) / _SALT_FILENAME
-    if salt_file.exists():
-        return salt_file.read_text()
+    existing, unreadable = read_legacy_source(salt_file, strip=False)
+    if existing is not None or unreadable:
+        return existing
 
     salt = _compute_initial_salt(Path(server_dir), storage_mode)
+    if salt is None:
+        return None
     salt_file.write_text(salt)
     os.chmod(salt_file, 0o600)
     return salt
@@ -75,17 +83,25 @@ def read_encryption_key_salt(server_dir: Path) -> str:
     return salt_file.read_text()
 
 
-def _compute_initial_salt(server_dir: Path, storage_mode: str) -> str:
-    """Compute the initial salt value based on storage mode.
+def _compute_initial_salt(server_dir: Path, storage_mode: str) -> Optional[str]:
+    """Compute the initial salt value based on storage mode (None: an
+    unreadable ``.jwt_secret`` in cluster mode, so no salt is seeded).
 
     Caller guarantees storage_mode is valid and server_dir is not None.
     """
     if storage_mode == "sqlite":
         return os.uname().nodename
     elif storage_mode == "postgres":
+        from code_indexer.server.services.token_encryption import (
+            read_legacy_source,
+        )
+
         jwt_file = server_dir / _JWT_SECRET_FILENAME
-        if jwt_file.exists():
-            return jwt_file.read_text().strip()
+        jwt_value, unreadable = read_legacy_source(jwt_file, strip=True)
+        if unreadable:
+            return None
+        if jwt_value is not None:
+            return jwt_value
         logger.warning(
             "ensure_encryption_key_salt: .jwt_secret not found at %s — "
             "falling back to hostname-based salt. Tokens may not be readable "

@@ -359,6 +359,42 @@ class TestApiKeySaveFailureStatusCode:
         assert "failed to save api key" in resp.text.lower()
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(_TEST_TIMEOUT)
+class TestApiKeySaveLegacyWriteRefused:
+    def test_refused_legacy_write_returns_409(
+        self, client, admin_session, config_csrf, caplog
+    ) -> None:
+        """A cluster node older than 12.90 is still running (gate closed by a
+        test double) and this node has no legacy key file: the save is
+        refused with the retry message, as a conflict, not a server error."""
+        import logging
+
+        from code_indexer.server.services.stored_secret_key import (
+            StoredSecretCipher,
+        )
+
+        caplog.set_level(logging.WARNING)
+        with patch.object(StoredSecretCipher, "v2_writes_allowed", return_value=False):
+            resp = client.post(
+                "/admin/config/api-keys/github",
+                data={"csrf_token": config_csrf, "token": "ghp_" + "a" * 36},
+                cookies=admin_session,
+                follow_redirects=True,
+            )
+        assert resp.status_code == 409, resp.text[:300]
+        assert "upgrade in progress" in resp.text.lower()
+        door = [
+            r
+            for r in caplog.records
+            if r.name == "code_indexer.server.web.routes"
+            and r.levelno >= logging.WARNING
+        ]
+        # The app's queue logging hands each record to caplog twice.
+        assert len({(r.getMessage(), r.created) for r in door}) <= 1
+        assert all(r.exc_info is None for r in door)
+
+
 if __name__ == "__main__":
     import pytest as _pytest
 

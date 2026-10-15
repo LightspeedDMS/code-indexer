@@ -54,31 +54,65 @@ class SweepCounts:
     unreadable: int = 0
     remaining: int = 0  # legacy rows left as they are (gate closed or changed)
     already_v2: int = 0
+    errors: int = 0  # rows whose processing failed for a non-decryption reason
+
+
+def _sweep_row(
+    cipher: StoredSecretCipher,
+    backend: StoredSecretRows,
+    row: Dict[str, Any],
+    counts: SweepCounts,
+) -> None:
+    from code_indexer.server.services.token_encryption import (
+        StoredSecretUndetermined,
+    )
+
+    row_id, value = row["id"], row["encrypted_token"]
+    try:
+        plaintext, is_legacy = cipher.decrypt(value)
+    except StoredSecretUndetermined:  # no verdict: a key source was unreadable
+        counts.errors += 1
+        logger.warning(
+            "Stored-secret sweep left row %s unchanged: a key source could not "
+            "be read; retried at the next start",
+            row_id,
+        )
+        return
+    except ValueError:  # the decryption verdict: unreadable or ambiguous
+        if row["needs_reentry_at"] is None and not backend.mark_needs_reentry(
+            row_id, value, node_id=cipher.node_id
+        ):
+            counts.remaining += 1  # the row changed concurrently
+            return
+        counts.unreadable += 1
+        return
+    if row["needs_reentry_at"] is not None:
+        backend.clear_needs_reentry(row_id, value)
+    if not is_legacy:
+        counts.already_v2 += 1
+        return
+    new_value = cipher.rewrite_value(plaintext)
+    if new_value is not None and backend.replace_encrypted_token_if_unchanged(
+        row_id, value, new_value
+    ):
+        counts.rewritten += 1
+    else:
+        counts.remaining += 1
 
 
 def _sweep_one(cipher: StoredSecretCipher, backend: StoredSecretRows) -> SweepCounts:
     counts = SweepCounts()
     for row in backend.list_secret_rows():
-        row_id, value = row["id"], row["encrypted_token"]
         try:
-            plaintext, is_legacy = cipher.decrypt(value)
-        except ValueError:
-            counts.unreadable += 1
-            if row["needs_reentry_at"] is None:
-                backend.mark_needs_reentry(row_id, value, node_id=cipher.node_id)
-            continue
-        if row["needs_reentry_at"] is not None:
-            backend.clear_needs_reentry(row_id, value)
-        if not is_legacy:
-            counts.already_v2 += 1
-            continue
-        new_value = cipher.rewrite_value(plaintext)
-        if new_value is not None and backend.replace_encrypted_token_if_unchanged(
-            row_id, value, new_value
-        ):
-            counts.rewritten += 1
-        else:
-            counts.remaining += 1
+            _sweep_row(cipher, backend, row, counts)
+        except Exception as exc:  # one row never stops the sweep; never marked
+            counts.errors += 1
+            logger.error(
+                "Stored-secret sweep could not process row %s (%s); it is left "
+                "unchanged and retried at the next start",
+                row.get("id"),
+                type(exc).__name__,
+            )
     return counts
 
 
@@ -92,12 +126,13 @@ def sweep_stored_secrets(
         results[name] = counts
         logger.info(
             "Stored-secret sweep %s: rewritten=%d unreadable=%d remaining=%d "
-            "already_v2=%d",
+            "already_v2=%d errors=%d",
             name,
             counts.rewritten,
             counts.unreadable,
             counts.remaining,
             counts.already_v2,
+            counts.errors,
         )
         if counts.unreadable:
             logger.warning(
