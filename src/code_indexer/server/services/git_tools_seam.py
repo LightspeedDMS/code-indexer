@@ -119,7 +119,7 @@ _READ_ONLY_GIT = {
         flags=("--numstat", "--name-status", "--stat"), attached=r"-U\d+"
     ),
     "blame": _ReadOnlyOptions(flags=("--porcelain",), separate_value=("-L",)),
-    "rev-parse": _ReadOnlyOptions(flags=("--verify", "-q")),
+    "rev-parse": _ReadOnlyOptions(flags=("--verify", "-q", "--git-dir")),
     "rev-list": _ReadOnlyOptions(
         flags=("--count",), separate_value=("--since", "--until", "--author")
     ),

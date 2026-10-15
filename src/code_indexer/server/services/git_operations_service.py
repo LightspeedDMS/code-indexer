@@ -1055,6 +1055,7 @@ class GitOperationsService:
         stat_only: Optional[bool] = None,
         offset: int = 0,
         limit: Optional[int] = None,
+        git_backend: Optional["GitBackend"] = None,
     ) -> Dict[str, Any]:
         """
         Get git diff output with pagination support.
@@ -1069,6 +1070,8 @@ class GitOperationsService:
             stat_only: Show only file statistics (--stat flag)
             offset: Number of lines to skip (default: 0)
             limit: Maximum lines to return (default: 500, max: 5000)
+            git_backend: the git seam (git-mcp) for a golden repository this
+                pod does not hold. None runs git as before.
 
         Returns:
             Dict with diff_text, files_changed, and pagination metadata
@@ -1140,7 +1143,7 @@ class GitOperationsService:
                 cmd.append("--")
                 cmd.extend(file_paths)
 
-            result = run_git_command(
+            result = self._runner_for(git_backend)(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,

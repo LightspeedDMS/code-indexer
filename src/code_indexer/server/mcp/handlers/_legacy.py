@@ -33,6 +33,9 @@ from code_indexer.global_repos.alias_manager import AliasManager
 
 # Shared utilities extracted to _utils.py (Story #496 refactoring)
 from . import _utils  # noqa: F401 — tests patch _legacy._utils
+from code_indexer.server.startup.content_backend_wiring import (
+    is_content_seam_delegated,
+)
 from ._utils import (
     _get_scip_audit_repository,  # noqa: F401 — re-exported via handlers namespace
     _get_golden_repos_dir,
@@ -290,6 +293,41 @@ def _registry_index_path_dir(repo_identifier: str) -> Optional[str]:
     return None
 
 
+def _has_git_dir(repo_path: str) -> bool:
+    """Whether *repo_path* is a git working copy: ``.git`` on this pod, or --
+    when the repository is not on this pod -- asked of the git seam."""
+    if not is_content_seam_delegated():
+        return (Path(repo_path) / ".git").exists()
+    from code_indexer.server.services.git_tools_seam import delegated_git_tools
+
+    tools = delegated_git_tools()
+    assert tools is not None  # delegated content seam
+    probe = tools.run(["git", "rev-parse", "--git-dir"], repo_path, check=False)
+    return probe.returncode == 0
+
+
+def _resolve_delegated_activated_git_path(
+    repository_alias: str, username: str
+) -> Tuple[Optional[str], Optional[str]]:
+    """The user's activated copy on a pod without it: the registry (the
+    server's DI-wired manager) says whether it is activated for THIS user,
+    and the git seam whether it is a git working copy."""
+    manager = _utils._get_activated_repo_manager()
+    if manager is None or not manager.user_has_activated_repo(
+        username, repository_alias
+    ):
+        return None, f"User-activated repository '{repository_alias}' not found."
+    repo_path = str(
+        manager.get_activated_repo_path(username=username, user_alias=repository_alias)
+    )
+    if not _has_git_dir(repo_path):
+        return None, (
+            f"Repository '{repository_alias}' does not have a .git directory "
+            "and does not support git operations."
+        )
+    return repo_path, None
+
+
 def _resolve_git_repo_path(
     repository_alias: str, username: str, *, via_git_backend: bool = False
 ) -> Tuple[Optional[str], Optional[str]]:
@@ -332,15 +370,11 @@ def _resolve_git_repo_path(
         resolved = _resolve_repo_path(repository_alias, golden_repos_dir)
         if resolved is None:
             return None, f"Repository '{repository_alias}' not found."
-        from code_indexer.server.startup.content_backend_wiring import (
-            is_content_seam_delegated,
-        )
-
         if is_content_seam_delegated():
             return _resolve_delegated_golden_git_path(
                 repository_alias, username, resolved, via_git_backend=via_git_backend
             )
-        if not (Path(resolved) / ".git").exists():
+        if not _has_git_dir(resolved):
             return None, (
                 f"Repository '{repository_alias}' is a local repository "
                 "and does not support git operations."
@@ -351,6 +385,9 @@ def _resolve_git_repo_path(
             return None, denied
 
         return resolved, None
+
+    if is_content_seam_delegated():
+        return _resolve_delegated_activated_git_path(repository_alias, username)
 
     # Bug #1151: derive data_dir from CIDX_SERVER_DATA_DIR (same as service_init.py:162-163/195)
     # so non-default-data-dir deployments resolve activated repos correctly.
