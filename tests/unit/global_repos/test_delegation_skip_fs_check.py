@@ -17,7 +17,6 @@ Covers EVO-64616 code-fix sites:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -26,6 +25,7 @@ from code_indexer.global_repos.alias_manager import (
     AliasManager,
     resolve_alias_or_index_path,
 )
+from code_indexer.server.auth.user_manager import User, UserRole
 
 
 class TestResolveAliasOrIndexPathSkipFsCheck:
@@ -186,5 +186,164 @@ class TestRegistryIndexPathDirDelegated:
             ),
         ):
             result = _registry_index_path_dir("test-global")
+
+        assert result is None
+
+
+def _test_user() -> User:
+    from datetime import datetime, timezone
+
+    return User(
+        username="testuser",
+        password_hash="h",
+        role=UserRole.NORMAL_USER,
+        created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+class TestResolveGlobalRepoTargetDelegated:
+    """_resolve_global_repo_target skips exists() when delegated."""
+
+    _REPO_ENTRY = {
+        "alias_name": "agent-router-global",
+        "index_path": "/data/data/golden-repos/agent-router",
+        "repo_url": "https://gitlab.com/example/agent-router.git",
+    }
+    _SEARCH_MOD = "code_indexer.server.mcp.handlers.search.repo_search"
+    _WIRING_MOD = "code_indexer.server.startup.content_backend_wiring"
+
+    def test_returns_path_when_delegated_and_missing_locally(
+        self, tmp_path: Path
+    ) -> None:
+        from code_indexer.server.mcp.handlers.search.repo_search import (
+            _resolve_global_repo_target,
+        )
+
+        golden_dir = str(tmp_path / "golden-repos")
+        Path(golden_dir).mkdir(parents=True)
+        (tmp_path / "golden-repos" / "aliases").mkdir()
+
+        with (
+            patch(
+                f"{self._WIRING_MOD}.is_content_seam_delegated",
+                return_value=True,
+            ),
+            patch(
+                f"{self._SEARCH_MOD}._get_golden_repos_dir",
+                return_value=golden_dir,
+            ),
+            patch(
+                f"{self._SEARCH_MOD}._list_global_repos",
+                return_value=[self._REPO_ENTRY],
+            ),
+        ):
+            repo_entry, target_path, err = _resolve_global_repo_target(
+                "agent-router-global", _test_user()
+            )
+
+        assert err is None
+        assert target_path == "/data/data/golden-repos/agent-router"
+        assert repo_entry["alias_name"] == "agent-router-global"
+
+    def test_raises_file_not_found_when_not_delegated_and_missing(
+        self, tmp_path: Path
+    ) -> None:
+        from code_indexer.server.mcp.handlers.search.repo_search import (
+            _resolve_global_repo_target,
+        )
+
+        golden_dir = str(tmp_path / "golden-repos")
+        Path(golden_dir).mkdir(parents=True)
+        (tmp_path / "golden-repos" / "aliases").mkdir()
+
+        with (
+            patch(
+                f"{self._WIRING_MOD}.is_content_seam_delegated",
+                return_value=False,
+            ),
+            patch(
+                f"{self._SEARCH_MOD}._get_golden_repos_dir",
+                return_value=golden_dir,
+            ),
+            patch(
+                f"{self._SEARCH_MOD}._list_global_repos",
+                return_value=[self._REPO_ENTRY],
+            ),
+            patch(
+                "code_indexer.global_repos.alias_manager.resolve_alias_or_index_path",
+                return_value="/nonexistent/delegated/path",
+            ),
+            pytest.raises(FileNotFoundError),
+        ):
+            _resolve_global_repo_target("agent-router-global", _test_user())
+
+
+class TestResolveGlobalRepoPathOrIndexDelegated:
+    """_resolve_global_repo_path_or_index forwards skip_fs_check."""
+
+    _UTILS_MOD = "code_indexer.server.mcp.handlers._utils"
+    _WIRING_MOD = "code_indexer.server.startup.content_backend_wiring"
+
+    def test_passes_skip_fs_check_true_when_delegated(self, tmp_path: Path) -> None:
+        from code_indexer.server.mcp.handlers._utils import (
+            _resolve_global_repo_path_or_index,
+        )
+
+        golden_dir = str(tmp_path / "golden-repos")
+        Path(golden_dir).mkdir(parents=True)
+        (tmp_path / "golden-repos" / "aliases").mkdir()
+
+        fake_entry = {
+            "alias_name": "my-repo-global",
+            "index_path": "/data/data/golden-repos/my-repo",
+        }
+
+        with (
+            patch(
+                f"{self._WIRING_MOD}.is_content_seam_delegated",
+                return_value=True,
+            ),
+            patch(
+                f"{self._UTILS_MOD}._get_golden_repos_dir",
+                return_value=golden_dir,
+            ),
+            patch(
+                f"{self._UTILS_MOD}._list_global_repos",
+                return_value=[fake_entry],
+            ),
+        ):
+            result = _resolve_global_repo_path_or_index("my-repo-global")
+
+        assert result == "/data/data/golden-repos/my-repo"
+
+    def test_returns_none_when_not_delegated_and_missing(self, tmp_path: Path) -> None:
+        from code_indexer.server.mcp.handlers._utils import (
+            _resolve_global_repo_path_or_index,
+        )
+
+        golden_dir = str(tmp_path / "golden-repos")
+        Path(golden_dir).mkdir(parents=True)
+        (tmp_path / "golden-repos" / "aliases").mkdir()
+
+        fake_entry = {
+            "alias_name": "my-repo-global",
+            "index_path": "/nonexistent/path",
+        }
+
+        with (
+            patch(
+                f"{self._WIRING_MOD}.is_content_seam_delegated",
+                return_value=False,
+            ),
+            patch(
+                f"{self._UTILS_MOD}._get_golden_repos_dir",
+                return_value=golden_dir,
+            ),
+            patch(
+                f"{self._UTILS_MOD}._list_global_repos",
+                return_value=[fake_entry],
+            ),
+        ):
+            result = _resolve_global_repo_path_or_index("my-repo-global")
 
         assert result is None
