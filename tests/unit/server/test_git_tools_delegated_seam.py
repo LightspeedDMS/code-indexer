@@ -20,7 +20,7 @@ import logging
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, cast
 
 import pytest
 
@@ -915,3 +915,73 @@ def test_user_branch_list_malformed_seam_output_is_an_error(
         user_git_module.GitCommandError, match="unexpected for-each-ref"
     ):
         user_service.git_branch_list(pod, git_backend=_TruncatedRefs(pod, repo))
+
+
+class _TypedOnlyGit:
+    """A git backend plugin built before git_exec: typed reads, no ``run``."""
+
+    def __init__(self, seam: MappedGit) -> None:
+        self._seam = seam
+
+    def log_raw(self, *args: Any, **kwargs: Any) -> Any:
+        return self._seam.log_raw(*args, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda s: s.get_blame("a.txt"),
+        lambda s: s.get_file_history("a.txt"),
+        lambda s: s.search_commits("first"),
+        lambda s: s.search_diffs(search_string="one"),
+        lambda s: s.get_diff("HEAD~1", "HEAD"),
+        lambda s: s.get_log(path="a.txt"),
+        lambda s: s.get_log(author="Ada"),
+        lambda s: s.show_commit("HEAD"),  # include_stats defaults to True
+        lambda s: s.show_commit("HEAD", include_stats=False, include_diff=True),
+    ],
+)
+def test_golden_history_without_a_typed_operation_runs_through_git_exec(
+    repo: Path, pod: Path, seam: MappedGit, monkeypatch, call: Any
+) -> None:
+    expected = call(GoldenGitService(repo))
+    _forbid_local_git(monkeypatch)
+    actual = call(GoldenGitService(pod, git_backend=seam))
+    if hasattr(expected, "search_time_ms"):
+        expected.search_time_ms = actual.search_time_ms = 0.0
+    assert actual == expected
+    assert seam.calls and all(name == "run" for name, _ in seam.calls[-1:])
+
+
+def test_golden_history_refuses_without_git_exec(
+    pod: Path, seam: MappedGit, no_local_git: None
+) -> None:
+    service = GoldenGitService(pod, git_backend=cast(Any, _TypedOnlyGit(seam)))
+    with pytest.raises(DelegatedRepositoryUnsupportedError, match="git_exec"):
+        service.get_blame("a.txt")
+    assert seam.calls == []
+
+
+def test_user_git_log_with_filters_matches_local_through_git_exec(
+    repo: Path, pod: Path, seam: MappedGit, user_service: Any, monkeypatch
+) -> None:
+    filters = ({"since_date": "2024-01-01"}, {"author": "Ada"}, {"path": "a.txt"})
+    expected = [user_service.git_log(repo, **f) for f in filters]
+    _forbid_local_git(monkeypatch)
+    actual = [user_service.git_log(pod, git_backend=seam, **f) for f in filters]
+    assert actual == expected
+    assert {name for name, _ in seam.calls} == {"run"}
+
+
+def test_handler_blame_reads_through_the_seam(
+    handlers: Any, no_local_git: None
+) -> None:
+    user = SimpleNamespace(username="u")
+    data = _payload(
+        handlers.handle_git_blame(
+            {"repository_alias": "repo-global", "path": "a.txt"}, user
+        )
+    )
+    assert data["success"] is True
+    assert [line["content"] for line in data["lines"]] == ["two – ünïcode", "line"]
+

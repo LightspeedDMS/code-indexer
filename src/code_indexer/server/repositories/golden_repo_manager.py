@@ -6818,6 +6818,22 @@ class GoldenRepoManager:
             )
             return None
 
+    def _delegated_working_copies_if_wired(self) -> Any:
+        """:meth:`_delegated_working_copies`, or None when no DelegatedCloneBackend
+        is wired -- for a step that may proceed without workspace-mcp."""
+        from code_indexer.server.repositories.activated_working_copy import (
+            DelegatedWorkingCopies,
+        )
+        from code_indexer.server.storage.shared.clone_backend import (
+            DelegatedCloneBackend,
+        )
+
+        clone_backend = getattr(self._snapshot_manager, "_clone_backend", None)
+        if not isinstance(clone_backend, DelegatedCloneBackend):
+            return None
+        return DelegatedWorkingCopies(clone_backend)
+
+
 
 def get_golden_repo_manager() -> "GoldenRepoManager":
     """

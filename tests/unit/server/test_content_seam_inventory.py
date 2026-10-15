@@ -1087,6 +1087,20 @@ class TestScannerSeesEveryShape:
             {".exists .git": 1, "os.path.isdir .git": 1, ".exists": 1}
         )
 
+    def test_a_tree_tool_spawn_is_listed(self) -> None:
+        src = (
+            "import subprocess\n"
+            "def f(src, dst, root):\n"
+            "    subprocess.run(['cp', '-a', src, dst], check=True)\n"
+            "    subprocess.Popen(('/usr/bin/rg', '--json', 'x', root))\n"
+            "    subprocess.check_output('find . -name x', shell=True)\n"
+            "    subprocess.run(['systemctl', 'restart', 'cidx'])\n"
+        )
+        assert self._ops(src) == Counter(
+            {"spawn cp": 1, "spawn rg": 1, "spawn find": 1}
+        )
+
+
 
 class TestTheIndexingAndQueryRules:
     def test_a_ceiling_only_goes_down(self) -> None:
@@ -1127,6 +1141,25 @@ class TestTheIndexingAndQueryRules:
         assert seam_evidence(
             "x.py", "services/smart_indexer.py:SmartIndexer._smart_index"
         ) == ["git_backend"]
+
+    def test_refusal_evidence_is_a_refusal_not_a_backend(self) -> None:
+        tree = ast.parse(
+            "def refuses():\n    refuse_when_delegated('f', 'r')\n"
+            "def raises():\n    raise DelegatedRepositoryUnsupportedError('f', 'r')\n"
+            "def branches(self):\n    if self._content_backend is not None:\n"
+            "        pass\n"
+        )
+        found = {
+            f.name: sorted(i for i in _identifiers(f) if _REFUSAL_EVIDENCE.search(i))
+            for f in tree.body
+            if isinstance(f, ast.FunctionDef)
+        }
+        assert found == {
+            "refuses": ["refuse_when_delegated"],
+            "raises": ["DelegatedRepositoryUnsupportedError"],
+            "branches": [],
+        }
+
 
 
 class TestTheExcludedAreas:
@@ -1230,3 +1263,13 @@ def tree_tool_operation(call: ast.Call, spawn_aliases: Dict[str, str]) -> Option
     if program is None or Path(program).name not in _TREE_TOOLS:
         return None
     return f"spawn {Path(program).name}"
+
+
+_REFUSAL_EVIDENCE = re.compile(r"refus|DelegatedRepositoryUnsupported", re.I)
+
+
+
+_TREE_TOOLS = frozenset(
+    {"rg", "grep", "find", "cp", "mv", "rm", "rsync", "tar", "du", "ls", "cat"}
+)
+

@@ -384,3 +384,35 @@ class LifecycleClaudeCliInvoker:
                 f"{result.error or result.output}"
             )
         return _parse_with_optional_section_fallback(result.output)
+
+
+# Method of LifecycleClaudeCliInvoker — needs manual placement
+    @staticmethod
+    def _validate_repo_names(alias: str, repo_path: Path) -> Path:
+        """Validate alias and repo_path WITHOUT looking at this pod's disk.
+
+        Raises:
+            ValueError: if alias is None/empty or repo_path is None.
+        """
+        if not isinstance(alias, str) or not alias.strip():
+            raise ValueError(f"alias must be a non-empty string, got {alias!r}")
+        if repo_path is None:
+            raise ValueError("repo_path must not be None")
+        return Path(repo_path)
+
+
+
+def lifecycle_analysis_refusal() -> Optional[str]:
+    """Why lifecycle/description analysis cannot run on this server, or None.
+
+    None under the local default. Under a delegated content backend, None when
+    the configured invoker provisions golden repositories itself
+    (:func:`invoker_resolves_golden_repositories`), else the refusal.
+    """
+    refusal = delegated_refusal(
+        LIFECYCLE_ANALYSIS_FEATURE, LIFECYCLE_ANALYSIS_REFUSAL_REASON
+    )
+    if refusal is None or invoker_resolves_golden_repositories():
+        return None
+    return refusal
+

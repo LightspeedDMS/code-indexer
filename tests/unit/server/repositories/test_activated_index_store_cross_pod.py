@@ -36,6 +36,7 @@ from code_indexer.server.repositories.activated_repo_manager import (
 from code_indexer.server.services import index_materializer as im
 from code_indexer.server.services.activated_index_store import (
     ActivatedIndexStore,
+    CONTENT_DIGEST_MARKER,
     serve_activated_index,
 )
 from code_indexer.server.startup import index_store_wiring
@@ -684,3 +685,86 @@ def test_metadata_save_retries_once_then_serve_and_publish_work(
     v3 = artifacts.current_version(COPY_ALIAS)
     assert v3 is not None and v3 != v2
     assert _meta(manager)[INDEX_VERSION_FIELD] == v3
+
+
+def test_partial_publish_retry_after_rebuild_publishes_new_content(
+    world: ActivatedWorld, artifacts: FakeArtifacts
+) -> None:
+    """A partial publish leaves the marker and digest pointing at the store's
+    current version.  If the on-disk index is rebuilt before the retry, the
+    digest mismatch triggers a re-publish of the new content instead of
+    adopting the stale version the marker still names."""
+    manager = _manager(world)
+    with world.forbid_local_io():
+        _activate(manager)
+    meta = _meta(manager)
+    first_version = meta[INDEX_VERSION_FIELD]
+
+    # The first publish wrote a content digest beside the marker.
+    copy = world.pod_copy()
+    assert (copy / CONTENT_DIGEST_MARKER).is_file()
+    digest_after_first = (copy / CONTENT_DIGEST_MARKER).read_text().strip()
+
+    # Simulate a partial composite publish: member 1 (this copy) succeeded
+    # and advanced the store, but member 2 failed so the registry still
+    # records `first_version`.  The CHECKED_OUT_MARKER was written by
+    # publish_index and matches the store's current version.
+    store = DelegatedIndexStore(artifacts)
+    second_version = store.publish_on(
+        COPY_ALIAS, copy / INDEX_DIR, first_version
+    )
+    (copy / im.CHECKED_OUT_MARKER).write_text(second_version)
+    # Write the digest that was current at the time of that publish.
+    (copy / CONTENT_DIGEST_MARKER).write_text(digest_after_first)
+
+    # Now the on-disk index is rebuilt (content changes).
+    chunks = copy / INDEX_DIR / "index" / "collection" / "chunks.db"
+    chunks.write_bytes(b"rebuilt-content-after-partial-publish")
+
+    # Retry the publish with the registry's stale base_version.
+    # Without the fix this would adopt `second_version` (stale content).
+    ais = ActivatedIndexStore(store_provider=lambda: store)
+    fields = ais.publish(USER, ALIAS, copy, meta)
+
+    # The store must hold a NEW version with the rebuilt content.
+    new_version = fields[INDEX_VERSION_FIELD]
+    assert new_version != first_version
+    assert new_version != second_version
+    assert new_version == artifacts.current_version(COPY_ALIAS)
+    # Verify the published tree contains the rebuilt content.
+    published = artifacts.root / COPY_ALIAS / new_version
+    published_chunks = published / "index" / "collection" / "chunks.db"
+    assert published_chunks.read_bytes() == b"rebuilt-content-after-partial-publish"
+    # The digest was updated to match the new content.
+    assert (copy / CONTENT_DIGEST_MARKER).is_file()
+    assert (copy / CONTENT_DIGEST_MARKER).read_text().strip() != digest_after_first
+
+
+
+def test_partial_publish_retry_without_rebuild_adopts(
+    world: ActivatedWorld, artifacts: FakeArtifacts
+) -> None:
+    """When the on-disk content has NOT changed since the partial publish,
+    the adopt path still works (no unnecessary re-publish)."""
+    manager = _manager(world)
+    with world.forbid_local_io():
+        _activate(manager)
+    meta = _meta(manager)
+    first_version = meta[INDEX_VERSION_FIELD]
+
+    copy = world.pod_copy()
+    digest_after_first = (copy / CONTENT_DIGEST_MARKER).read_text().strip()
+
+    # Simulate partial publish: store advanced, marker updated.
+    store = DelegatedIndexStore(artifacts)
+    second_version = store.publish_on(
+        COPY_ALIAS, copy / INDEX_DIR, first_version
+    )
+    (copy / im.CHECKED_OUT_MARKER).write_text(second_version)
+    (copy / CONTENT_DIGEST_MARKER).write_text(digest_after_first)
+
+    # Content is unchanged -- retry should adopt second_version.
+    ais = ActivatedIndexStore(store_provider=lambda: store)
+    fields = ais.publish(USER, ALIAS, copy, meta)
+    assert fields[INDEX_VERSION_FIELD] == second_version
+

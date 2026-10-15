@@ -459,3 +459,62 @@ class AliasManager:
             return None
         previous_path = alias_data.get("previous_path")
         return previous_path if isinstance(previous_path, str) else None
+
+
+# Method of AliasManager — needs manual placement
+    def record_republished_index(
+        self,
+        alias_name: str,
+        target_path: str,
+        expected_version: str,
+        fields: Dict[str, Any],
+    ) -> None:
+        """Record that the index at ``target_path`` was re-published in place
+        (an HNSW repair under a delegated IndexStore), replacing
+        ``expected_version``.
+
+        Refuses (RuntimeError) when the alias no longer points at
+        ``target_path`` or records another version -- a swap or another
+        republish happened meanwhile, and the newer pointer wins.
+
+        **Race window**: the read-check-write here is NOT atomic -- another
+        writer that slips between ``read_record`` and ``put`` will have its
+        update silently overwritten. The IndexStore's own CAS on the version
+        field (``base_version`` in ``publish_index``) is the primary
+        concurrency guard; this method is a secondary bookkeeping step whose
+        staleness window is small (the competing writer is a refresh or
+        ``swap_alias`` on any pod, not only this sweep tick).
+        """
+        from code_indexer.utils.index_store import INDEX_VERSION_FIELD
+
+        record = self.read_record(alias_name)
+        pointer = pointer_from_document(record)
+        if record is None or pointer is None or pointer[0] != target_path:
+            raise RuntimeError(
+                f"Alias {alias_name} no longer points at {target_path}; "
+                "not recording the repaired index"
+            )
+        if record.get(INDEX_VERSION_FIELD) != expected_version:
+            raise RuntimeError(
+                f"Alias {alias_name} records version "
+                f"{record.get(INDEX_VERSION_FIELD)!r}, not {expected_version!r}; "
+                "not recording the repaired index"
+            )
+        record.update(fields)
+        try:
+            self._metadata.put(KIND_ALIAS, alias_name, record)
+        except Exception as e:
+            raise RuntimeError(f"Failed to update alias {alias_name}: {e}") from e
+        logger.info(
+            "Alias %s: index at %s re-published as %s",
+            alias_name,
+            target_path,
+            fields.get(INDEX_VERSION_FIELD),
+        )
+
+    def list_records(self, prefix: str = "") -> Dict[str, Dict[str, Any]]:
+        """Every alias document whose name starts with *prefix*, whole (no
+        write-mode redirection). Raises when the store cannot be read."""
+        return dict(self._metadata.list_all(KIND_ALIAS, prefix))
+
+

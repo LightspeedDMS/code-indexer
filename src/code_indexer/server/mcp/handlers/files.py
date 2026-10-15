@@ -1738,3 +1738,18 @@ def _register(registry: dict) -> None:
     registry["enter_write_mode"] = handle_enter_write_mode
     registry["exit_write_mode"] = handle_exit_write_mode
     registry["directory_tree"] = handle_directory_tree
+
+
+def _reindex_after_write(
+    result: Dict[str, Any], repository_alias: str, user: User, file_path: str
+) -> None:
+    """Under a delegated content backend no watcher sees the write (the copy
+    is not on this pod): enqueue the activated copy's reindex and add the
+    outcome to ``result`` as ``reindex``. A no-op under the local backend,
+    where ``_start_auto_watch_if_needed`` re-indexes."""
+    from code_indexer.server.services.activated_write_reindex import (
+        attach_reindex_outcome,
+    )
+
+    attach_reindex_outcome(result, user.username, repository_alias, [file_path])
+

@@ -343,6 +343,27 @@ class DelegatedIndexStore:
             )
         return int(delete_alias(alias))
 
+    def delete_as(self, store_alias: str) -> int:
+        """Delete every published version of ``store_alias``; how many went.
+
+        Requires an index-artifacts client with ``delete_alias``
+        (cidx-content-backend >= 0.9.0). Idempotent; every failure raises.
+        """
+        delete_alias = getattr(self._artifacts, "delete_alias", None)
+        if delete_alias is None:
+            raise RuntimeError(
+                "The index-artifacts client cannot delete an alias; "
+                "cidx-content-backend >= 0.9.0 is required"
+            )
+        return int(delete_alias(store_alias))
+
+
+    def current_version_as(self, store_alias: str) -> Optional[str]:
+        """The store's current version of ``store_alias`` (None: nothing yet)."""
+        current = self._artifacts.current_version(store_alias)
+        return str(current) if current else None
+
+
 
 _DEFAULT: IndexStore = LocalIndexStore()
 

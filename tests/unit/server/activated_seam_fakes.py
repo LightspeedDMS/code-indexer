@@ -36,6 +36,7 @@ from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 from code_indexer.server.services import index_materializer
+from code_indexer.server.services.activated_index_store import CONTENT_DIGEST_MARKER
 from code_indexer.server.startup import content_backend_wiring
 from code_indexer.server.storage.shared.clone_backend import (
     DelegatedCloneBackend,
@@ -53,6 +54,7 @@ INDEX_DIR = ".code-indexer"
 _POD_STATE_NAMES = frozenset(
     {
         INDEX_DIR,
+        CONTENT_DIGEST_MARKER,
         index_materializer.CHECKED_OUT_MARKER,
         index_materializer.IN_PROGRESS_MARKER,
         index_materializer.INCOMING_DIRNAME,

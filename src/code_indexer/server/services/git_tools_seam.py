@@ -383,3 +383,19 @@ def delegated_git_tools() -> Optional[DelegatedGitTools]:
             "(git-mcp git_exec)."
         )
     return DelegatedGitTools(backend)
+
+
+def _is_typed_timeout(exc: BaseException) -> bool:
+    """True when *exc* is a backend-typed timeout (``GitMcpTimeoutError``) or
+    its ``__cause__`` chain contains a transport timeout. The typed check avoids
+    substring matching on arbitrary error text."""
+    cls_name = type(exc).__name__
+    if cls_name == "GitMcpTimeoutError":
+        return True
+    cause = exc.__cause__
+    while cause is not None:
+        if type(cause).__name__ in ("GitMcpTimeoutError", "timeout", "TimeoutError"):
+            return True
+        cause = cause.__cause__
+    return False
+

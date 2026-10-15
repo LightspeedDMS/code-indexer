@@ -7,7 +7,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 
 | Class | Rows |
 |---|---|
-| unclassified | 85 |
+| unclassified | 88 |
 | repo-read | 148 |
 | repo-write | 14 |
 | cidx-state-in-repo | 1008 |
@@ -31,7 +31,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `global_repos/control_plane_metadata.py` | 0 | 0 | 0 | 10 |
 | `global_repos/directory_explorer.py` | 0 | 5 | 0 | 0 |
 | `global_repos/frontmatter_verifier.py` | 0 | 0 | 0 | 2 |
-| `global_repos/git_operations.py` | 0 | 14 | 0 | 0 |
+| `global_repos/git_operations.py` | 2 | 14 | 0 | 0 |
 | `global_repos/global_registry.py` | 0 | 0 | 0 | 5 |
 | `global_repos/refresh_integrity_gate.py` | 0 | 0 | 0 | 7 |
 | `global_repos/refresh_scheduler.py` | 0 | 0 | 0 | 16 |
@@ -111,7 +111,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | `server/services/hnsw_orphan_sweep/discovery.py` | 0 | 1 | 0 | 3 |
 | `server/services/hnsw_orphan_sweep/repair_executor.py` | 0 | 0 | 0 | 5 |
 | `server/services/index_freshness.py` | 0 | 0 | 0 | 3 |
-| `server/services/index_materializer.py` | 21 | 0 | 0 | 0 |
+| `server/services/index_materializer.py` | 22 | 0 | 0 | 0 |
 | `server/services/index_store_backfill.py` | 6 | 0 | 0 | 0 |
 | `server/services/langfuse_trace_sync_service.py` | 0 | 0 | 0 | 9 |
 | `server/services/metadata_outbox/sinks.py` | 0 | 0 | 0 | 2 |

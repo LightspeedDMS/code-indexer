@@ -16,7 +16,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import (
     FastAPI,
@@ -53,9 +53,20 @@ from ..auth import dependencies
 from . import repo_access_http
 from ..managers.composite_file_listing import _list_composite_files
 from ..services.stats_service import stats_service
-from ..services.file_service import file_service
+from ..services.file_service import ContentSeamSource, file_service
 from ..services.file_listing_paths import build_non_composite_path_pattern
-from code_indexer.utils.path_confinement import resolve_confined_path
+from code_indexer.utils.path_confinement import (
+    confine_relative_path,
+    resolve_confined_path,
+)
+from ..services.activated_copy_content import (
+    CopyContentUnavailableError,
+    CopyPathError,
+    decode_text_like_read_text,
+    delegated_copy_source,
+    read_copy_file,
+    visible_files,
+)
 from ..services.search_service import search_service
 from ..app_helpers import _execute_repository_sync, _get_composite_details
 
@@ -1066,3 +1077,58 @@ def register_repos_v2_routes(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Search operation failed: {str(e)}",
             )
+
+
+def _copy_file_content_via_seam(source: ContentSeamSource, path: str) -> Dict[str, Any]:
+    """``/api/repositories/{id}/files?content=true`` for an activated copy on
+    workspace-mcp: the local branch's answers (404 for a missing or escaping
+    path, 400 for a directory, the same binary sniff and text decoding) from
+    one fetch. A backend failure is a 500, never "not found"."""
+    try:
+        rel = confine_relative_path(path)
+    except PermissionError:
+        raise HTTPException(status_code=404, detail=f"File '{path}' not found")
+    try:
+        if not rel:
+            raise CopyPathError("not_file", rel)
+        data = read_copy_file(source, rel)
+    except CopyPathError as e:
+        if e.kind == "missing":
+            raise HTTPException(status_code=404, detail=f"File '{path}' not found")
+        raise HTTPException(status_code=400, detail=f"Path '{path}' is not a file")
+    except CopyContentUnavailableError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to read file: {str(e)}",
+        )
+    chunk = data[:8192]
+    is_binary = b"\x00" in chunk
+    if not is_binary:
+        try:
+            chunk.decode("utf-8")
+        except UnicodeDecodeError:
+            is_binary = True
+    if not is_binary:
+        try:
+            return {
+                "path": path,
+                "is_binary": False,
+                "size": len(data),
+                "content": decode_text_like_read_text(data),
+            }
+        except UnicodeDecodeError:
+            pass
+    return {"path": path, "is_binary": True, "size": len(data), "content": None}
+
+
+
+_V2_LANGUAGE_MAP = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".java": "java",
+    ".md": "markdown",
+    ".yml": "yaml",
+    ".json": "json",
+}
+

@@ -1831,3 +1831,20 @@ def _register(registry: dict) -> None:
     # Newer variants overwrite the registry entries (same as _legacy.py)
     registry["git_diff"] = git_diff
     registry["git_log"] = git_log
+
+
+def _history_seam_kwargs(repository_alias: Any) -> Dict[str, Any]:
+    """``git_backend=`` for the history service (global_repos
+    ``GitOperationsService``) on a pod that does not hold the repository.
+
+    Unlike :func:`_git_seam_kwargs`, for ANY alias: a golden repo and a user's
+    activated copy alike are where git-mcp sees them (the path
+    :func:`_resolve_through_git_seam` returned after the registry and access
+    checks), and the history service reads them read-only through it. Nothing
+    on a pod that holds its repositories, so the local call is unchanged.
+    """
+    if not isinstance(repository_alias, str):
+        return {}
+    backend = delegated_golden_git_backend()
+    return {} if backend is None else {"git_backend": backend}
+

@@ -5829,6 +5829,75 @@ class RefreshScheduler:
             )
         self._reconcile_scip_flag(global_alias, repo_info, detected)
 
+    @staticmethod
+    def _restore_drifted_extensions(
+        config_service: Any, source_path: str, drift: Any
+    ) -> None:
+        """Put the repo config back on its pre-drift extensions, or log why not
+        (the listing failure being raised is what the refresh reports)."""
+        try:
+            config_service.restore_repo_extensions(source_path, drift)
+        except Exception as exc:
+            logger.error(
+                "Extension drift for %s could not be restored after the file "
+                "listing failed (%s): the next refresh will not reconcile the "
+                "%d added / %d removed extensions; run a reconcile index",
+                source_path,
+                exc,
+                len(drift.added),
+                len(drift.removed),
+            )
+
+    def note_temporal_indexed(self, alias_name: str) -> None:
+        """Record that temporal shards were (re)built for ``alias_name`` in this
+        job: its snapshot publish then publishes them too."""
+        store = getattr(self, "_index_store", None)
+        if store is None or store.is_local:
+            return
+        indexed = getattr(self, "_temporal_indexed", None)
+        if indexed is None:
+            indexed = set()
+            self._temporal_indexed = indexed
+        indexed.add(alias_name)
+
+    def _publish_indexed_temporal(self, alias_name: str) -> Dict[str, str]:
+        """Publish the temporal shards built in this job (delegated store);
+        the alias-document fields, or {} when none were built (the pointer
+        keeps the version it records). Raises on failure."""
+        indexed = getattr(self, "_temporal_indexed", None) or set()
+        if alias_name not in indexed:
+            return {}
+        indexed.discard(alias_name)
+        from code_indexer.server.services.temporal_index_store import (
+            publish_temporal_root,
+        )
+
+        return publish_temporal_root(
+            self.golden_repos_dir,
+            alias_name,
+            store=self._index_store,
+            base_version=None,
+            use_current_base=True,
+        )
+
+    def serve_temporal_shards(self, alias_name: str) -> None:
+        """Under a delegated IndexStore, make this pod hold the alias's
+        recorded temporal shards before temporal indexing builds on them
+        (``temporal_index_store.served_temporal_index_root``). Raises on a
+        store failure; no-op under the local store."""
+        store = getattr(self, "_index_store", None)
+        if store is None or store.is_local:
+            return
+        from code_indexer.server.services.temporal_index_store import (
+            served_temporal_index_root,
+        )
+
+        served_temporal_index_root(self.golden_repos_dir, alias_name, store=store)
+
+
+
+
+
 
 def _record_fts_build_commit(source_path: Path) -> None:
     """Record the commit the FTS index was just built at (best-effort).
@@ -5881,3 +5950,58 @@ def _description_generation_refusal() -> Optional[str]:
                 len(drift.added),
                 len(drift.removed),
             )
+
+
+# Method of RefreshScheduler — needs manual placement
+    def note_temporal_indexed(self, alias_name: str) -> None:
+        """Record that temporal shards were (re)built for ``alias_name`` in this
+        job: its snapshot publish then publishes them too."""
+        store = getattr(self, "_index_store", None)
+        if store is None or store.is_local:
+            return
+        indexed = getattr(self, "_temporal_indexed", None)
+        if indexed is None:
+            indexed = set()
+            self._temporal_indexed = indexed
+        indexed.add(alias_name)
+
+
+
+# Method of RefreshScheduler — needs manual placement
+    def _publish_indexed_temporal(self, alias_name: str) -> Dict[str, str]:
+        """Publish the temporal shards built in this job (delegated store);
+        the alias-document fields, or {} when none were built (the pointer
+        keeps the version it records). Raises on failure."""
+        indexed = getattr(self, "_temporal_indexed", None) or set()
+        if alias_name not in indexed:
+            return {}
+        indexed.discard(alias_name)
+        from code_indexer.server.services.temporal_index_store import (
+            publish_temporal_root,
+        )
+
+        return publish_temporal_root(
+            self.golden_repos_dir,
+            alias_name,
+            store=self._index_store,
+            base_version=None,
+            use_current_base=True,
+        )
+
+
+
+# Method of RefreshScheduler — needs manual placement
+    def serve_temporal_shards(self, alias_name: str) -> None:
+        """Under a delegated IndexStore, make this pod hold the alias's
+        recorded temporal shards before temporal indexing builds on them
+        (``temporal_index_store.served_temporal_index_root``). Raises on a
+        store failure; no-op under the local store."""
+        store = getattr(self, "_index_store", None)
+        if store is None or store.is_local:
+            return
+        from code_indexer.server.services.temporal_index_store import (
+            served_temporal_index_root,
+        )
+
+        served_temporal_index_root(self.golden_repos_dir, alias_name, store=store)
+
