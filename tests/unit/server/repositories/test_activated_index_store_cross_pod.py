@@ -515,6 +515,27 @@ def _meta(manager: ActivatedRepoManager) -> Dict[str, Any]:
     return meta
 
 
+def test_metadata_save_retries_once_then_serve_and_publish_work(
+    world: ActivatedWorld,
+    artifacts: FakeArtifacts,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_save_metadata fails on the first attempt; the built-in retry saves
+    the registry.  After that, serve_index_here + another publish works:
+    the ECONFLICT loop the review flagged does not occur."""
+    manager = _manager(world)
+    _activate(manager)
+    v1 = _meta(manager)[INDEX_VERSION_FIELD]
+
+    # Mutate so the publish creates a distinct version.
+    (world.pod_copy() / INDEX_DIR / "index" / "collection" / "chunks.db").write_bytes(
+        b"re-1"
+    )
+
+    # Make _save_metadata fail once (retry succeeds).
+    real_save = manager._save_metadata
+    call_count = 0
+
     def flaky_save(*args: Any, **kwargs: Any) -> None:
         nonlocal call_count
         call_count += 1
@@ -522,10 +543,32 @@ def _meta(manager: ActivatedRepoManager) -> Dict[str, Any]:
             raise OSError("disk full")
         return real_save(*args, **kwargs)
 
+    monkeypatch.setattr(manager, "_save_metadata", flaky_save)
 
-    def serve(username: str, user_alias: str) -> str:
-        order.append("serve")
-        return ""
+    # First publish: first save attempt fails, retry succeeds.
+    with world.forbid_local_io():
+        manager.publish_index(USER, ALIAS)
+
+    v2 = artifacts.current_version(COPY_ALIAS)
+    assert v2 is not None and v2 != v1
+    assert (world.pod_copy() / im.CHECKED_OUT_MARKER).read_text() == v2
+    # Registry is consistent (retry succeeded).
+    assert _meta(manager)[INDEX_VERSION_FIELD] == v2
+
+    # serve_index_here sees marker v2 == registry v2, no swap.
+    with world.forbid_local_io():
+        manager.serve_index_here(USER, ALIAS)
+
+    # Second publish after serve_index_here: no ECONFLICT.
+    (world.pod_copy() / INDEX_DIR / "index" / "collection" / "chunks.db").write_bytes(
+        b"re-2"
+    )
+    with world.forbid_local_io():
+        manager.publish_index(USER, ALIAS)
+
+    v3 = artifacts.current_version(COPY_ALIAS)
+    assert v3 is not None and v3 != v2
+    assert _meta(manager)[INDEX_VERSION_FIELD] == v3
 
 
 def test_cas_base_from_marker_not_registry(

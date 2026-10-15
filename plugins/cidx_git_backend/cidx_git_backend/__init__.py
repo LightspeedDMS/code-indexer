@@ -44,6 +44,24 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
+import socket
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """True when *exc* is a transport-level timeout (socket or urllib)."""
+    if isinstance(exc, socket.timeout):
+        return True
+    if isinstance(exc, TimeoutError):
+        return True
+    if isinstance(exc, urllib.error.URLError) and isinstance(
+        exc.reason, (socket.timeout, TimeoutError)
+    ):
+        return True
+    if isinstance(exc, urllib.error.URLError) and "timed out" in str(exc.reason):
+        return True
+    return False
+
+
 def _decode_like_text_mode(raw: bytes) -> str:
     """*raw* git stdout exactly as a local ``subprocess.run(text=True)`` (cidx's
     ``run_git_command``) returns it: the locale encoding, strict errors (an
@@ -93,6 +111,16 @@ class GitMcpBackendError(subprocess.CalledProcessError):
 
     def __str__(self) -> str:
         return self.message
+
+
+class GitMcpTimeoutError(GitMcpBackendError):
+    """A git-mcp call failed because of a transport or git-level timeout."""
+
+
+# simple-git's timeout plugin kills the subprocess with this exact message.
+# git itself (via GIT_HTTP_LOW_SPEED_TIME) produces curl errors that vary by
+# libcurl version, so "timed out" is kept as a broad fallback.
+_TOOL_TIMEOUT_PATTERNS = ("block timeout reached", "timed out")
 
 
 class GitMcpBackend:
@@ -154,6 +182,11 @@ class GitMcpBackend:
             with urllib.request.urlopen(req, timeout=http_timeout) as resp:
                 raw = resp.read().decode("utf-8")
         except (urllib.error.URLError, OSError) as exc:
+            if _is_timeout(exc):
+                raise GitMcpTimeoutError(
+                    f"git-mcp {tool} request to {self._url} timed out: {exc}",
+                    stderr=str(exc),
+                ) from exc
             raise GitMcpBackendError(
                 f"git-mcp {tool} request to {self._url} failed: {exc}", stderr=str(exc)
             ) from exc
@@ -166,8 +199,10 @@ class GitMcpBackend:
         result = payload.get("result", {}) or {}
         text = self._text(result)
         if result.get("isError"):
-            # git-mcp surfaces the underlying git stderr as the tool's text, so
-            # feed it to .stderr — the recovery handlers pattern-match on it.
+            if any(pattern in text for pattern in _TOOL_TIMEOUT_PATTERNS):
+                raise GitMcpTimeoutError(
+                    f"git-mcp {tool} tool error: {text}", stderr=text
+                )
             raise GitMcpBackendError(f"git-mcp {tool} tool error: {text}", stderr=text)
         return self._parse(tool, text)
 
