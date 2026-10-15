@@ -1242,7 +1242,7 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         ):
             result = _utils.app_module.file_service.list_directory_level(
                 repo_path=repository_alias,
-                subdir=bp["path"],
+                subdir=normalized_browse_path,
                 query_params=query_params,
             )
         elif is_global_repo:
@@ -1375,6 +1375,7 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
+        _reindex_after_write(result, repository_alias, user, file_path)
         return _mcp_response(result)
     except Exception as e:
         return _handle_crud_exception(e, "create", "handle_create_file")
@@ -1418,6 +1419,7 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
+        _reindex_after_write(result, repository_alias, user, file_path)
         return _mcp_response(result)
     except Exception as e:
         return _handle_crud_exception(e, "edit", "handle_edit_file")
@@ -1445,6 +1447,7 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
+        _reindex_after_write(result, repository_alias, user, file_path)
         return _mcp_response(result)
     except Exception as e:
         return _handle_crud_exception(e, "delete", "handle_delete_file")

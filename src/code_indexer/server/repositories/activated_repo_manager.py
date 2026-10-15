@@ -39,6 +39,7 @@ from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.utils.subprocess_diagnostics import (
     format_called_process_error_diagnostic,
     format_completed_process_diagnostic,
+    redact_url_credentials,
 )
 from code_indexer.config import write_json_atomic
 from code_indexer.validation.user_validation import RESERVED_ACTIVATED_REPOS_DIR_NAMES
@@ -1804,7 +1805,7 @@ class ActivatedRepoManager:
                     DETACHED_HEAD_MARKER not in str(exc.stderr or "")
                 ):
                     raise GitOperationError(
-                        f"Failed to get current branch: {exc.stderr or exc}"
+                        f"Failed to get current branch: {redact_url_credentials(exc.stderr or exc)}"
                     ) from exc
 
             # Fallback to metadata if git command fails

@@ -31,6 +31,7 @@ callers already use to build their own errors (e.g. ``GitOperationError``).
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Protocol, Sequence, Tuple, runtime_checkable
@@ -39,6 +40,15 @@ from code_indexer.utils.git_runner import (
     run_git_command,
     run_git_command_with_retry,
 )
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
+
+_URL_USERINFO_RE_BYTES = re.compile(
+    rb"(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*://)(?P<userinfo>[^/@\s]+)@"
+)
+
+
+def _redact_bytes(data: bytes) -> bytes:
+    return _URL_USERINFO_RE_BYTES.sub(lambda m: m.group("scheme") + b"***@", data)
 
 logger = logging.getLogger(__name__)
 
@@ -405,7 +415,10 @@ class LocalGitBackend:
         stderr = bytes(result.stderr or b"").decode("utf-8", "replace")
         if check and result.returncode != 0:
             raise subprocess.CalledProcessError(
-                result.returncode, list(cmd), output=result.stdout, stderr=stderr
+                result.returncode,
+                list(cmd),
+                output=_redact_bytes(result.stdout),
+                stderr=redact_url_credentials(stderr),
             )
         return subprocess.CompletedProcess(
             list(cmd), result.returncode, stdout=result.stdout, stderr=stderr

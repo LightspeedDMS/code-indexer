@@ -51,6 +51,10 @@ def _push_raising(stderr: str) -> Any:
     """Fail the `git push` call the way git does, leaving `get-url` working."""
 
     def _mock_run_git(cmd: Any, **kwargs: Any) -> Any:
+        if cmd == ["git", "remote"]:
+            result = MagicMock()
+            result.stdout = "origin\n"
+            return result
         if "get-url" in cmd:
             result = MagicMock()
             result.stdout = _AUTHED_URL

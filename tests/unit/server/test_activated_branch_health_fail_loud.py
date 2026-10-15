@@ -35,6 +35,7 @@ from code_indexer.server.routers.inline_repos import (
     _check_filesystem_backend_health,
     register_repo_routes,
 )
+from code_indexer.server.routers import inline_repos as _inline_repos_module
 from code_indexer.server.startup import content_backend_wiring
 
 from tests.unit.server.activated_seam_fakes import (
@@ -201,6 +202,9 @@ def _client(
         content_backend_wiring,
         "server_content_backend",
         (lambda: _NonLocal()) if delegated else (lambda: None),
+    )
+    monkeypatch.setattr(
+        _inline_repos_module, "delegated_copy_source", lambda _path: None
     )
     manager = Mock()
     manager.list_activated_repositories.return_value = [

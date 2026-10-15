@@ -11,7 +11,7 @@ The repo mount can come off when no row is in an open class (unclassified, repo-
 | repo-read | 116 |
 | repo-write | 14 |
 | cidx-state-in-repo | 936 |
-| migrated | 408 |
+| migrated | 409 |
 | refused | 4 |
 | local-only | 466 |
 | cidx-state | 784 |
