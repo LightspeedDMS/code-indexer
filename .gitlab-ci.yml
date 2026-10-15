@@ -282,6 +282,7 @@ smoke:
       tests/unit/global_repos/test_lifecycle_description_delegated_refusal.py
       tests/unit/global_repos/test_refresh_scheduler_delegated_repo_probes.py
       tests/unit/global_repos/test_regex_search_delegated_paths_are_lexical.py
+      tests/unit/global_repos/test_delegation_skip_fs_check.py
       tests/unit/indexing/test_delegated_override_file.py
       tests/unit/indexing/test_repo_manifest_backend_is_local.py
       tests/unit/indexing/test_unreached_repo_reads_stay_unreached.py

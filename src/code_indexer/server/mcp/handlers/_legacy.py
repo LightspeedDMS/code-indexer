@@ -203,15 +203,19 @@ def _resolve_repo_path(repo_identifier: str, golden_repos_dir: str) -> Optional[
     # AliasManager.read_alias() returns the versioned snapshot path
     from code_indexer.global_repos.alias_manager import resolve_alias_or_index_path
 
+    delegated = is_content_seam_delegated()
     alias_manager = AliasManager.existing(Path(golden_repos_dir) / "aliases")
     if alias_manager is not None:
         # Bug #1315: look up repo_entry for index_path fallback
         legacy_repo_entry = _get_global_repo(repo_identifier)
         # Try the identifier directly (e.g. "cidx-meta-global")
         alias_path = resolve_alias_or_index_path(
-            alias_manager, alias_name=repo_identifier, repo_entry=legacy_repo_entry
+            alias_manager,
+            alias_name=repo_identifier,
+            repo_entry=legacy_repo_entry,
+            skip_fs_check=delegated,
         )
-        if alias_path and Path(alias_path).is_dir():
+        if alias_path and (delegated or Path(alias_path).is_dir()):
             return str(alias_path)
         # If not -global, try with -global suffix
         if not repo_identifier.endswith("-global"):
@@ -220,17 +224,12 @@ def _resolve_repo_path(repo_identifier: str, golden_repos_dir: str) -> Optional[
                 alias_manager,
                 alias_name=f"{repo_identifier}-global",
                 repo_entry=legacy_repo_entry_global,
+                skip_fs_check=delegated,
             )
-            if alias_path and Path(alias_path).is_dir():
+            if alias_path and (delegated or Path(alias_path).is_dir()):
                 return str(alias_path)
 
-    # A delegated pod holds no clones: every probe below asks this disk for a
-    # `.git` it does not have. Only the index_path fallback can answer.
-    from code_indexer.server.startup.content_backend_wiring import (
-        is_content_seam_delegated,
-    )
-
-    if is_content_seam_delegated():
+    if delegated:
         return _registry_index_path_dir(repo_identifier)
 
     # Try as full path first
@@ -288,7 +287,7 @@ def _registry_index_path_dir(repo_identifier: str) -> Optional[str]:
     """The registry's index_path for *repo_identifier* when it is a directory."""
     repo_entry = _get_global_repo(repo_identifier)
     index_path = repo_entry.get("index_path") if repo_entry else None
-    if index_path and Path(index_path).is_dir():
+    if index_path and (is_content_seam_delegated() or Path(index_path).is_dir()):
         return str(index_path)
     return None
 

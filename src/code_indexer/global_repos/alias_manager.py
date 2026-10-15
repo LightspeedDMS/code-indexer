@@ -33,6 +33,8 @@ def resolve_alias_or_index_path(
     alias_manager: "AliasManager",
     alias_name: str,
     repo_entry: Optional[Dict[str, Any]],
+    *,
+    skip_fs_check: bool = False,
 ) -> Optional[str]:
     """Resolve alias_name to a filesystem path, falling back to the registry's
     index_path when the alias pointer file is missing/unreadable (Bug #1315).
@@ -57,6 +59,11 @@ def resolve_alias_or_index_path(
         alias_name: Alias to resolve (e.g. "my-repo-global").
         repo_entry: Registry row dict (must contain "index_path" for the
             fallback to be attempted), or None if the repo entry is unknown.
+        skip_fs_check: When True, return ``index_path`` from the registry
+            without verifying the directory exists on this container's
+            filesystem.  EKS pods with delegated backends (EVO-64616) do
+            not mount the golden-repo volume; the path is still meaningful
+            as a routing key for workspace-mcp / git-mcp.
 
     Returns:
         Resolved filesystem path string, or None if neither the alias
@@ -68,13 +75,14 @@ def resolve_alias_or_index_path(
         return target_path
 
     index_path = repo_entry.get("index_path") if repo_entry else None
-    if index_path and Path(index_path).exists():
-        logger.warning(
-            "Alias pointer for '%s' missing/unreadable; falling back to "
-            "registry index_path '%s' (Bug #1315)",
-            alias_name,
-            index_path,
-        )
+    if index_path and (skip_fs_check or Path(index_path).exists()):
+        if not skip_fs_check:
+            logger.warning(
+                "Alias pointer for '%s' missing/unreadable; falling back to "
+                "registry index_path '%s' (Bug #1315)",
+                alias_name,
+                index_path,
+            )
         return str(index_path)
 
     return None
