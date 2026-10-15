@@ -389,8 +389,9 @@ class GitOperationsService:
                     since=since,
                     max_count=limit + 1,
                 )
-            except subprocess.CalledProcessError:
-                # As local: empty repository or no matching commits.
+            except subprocess.CalledProcessError as exc:
+                if not is_revision_miss(exc):
+                    raise
                 return GitLogResult(commits=[], total_count=0, truncated=False)
             return self._log_result(output, limit)
 
@@ -586,16 +587,21 @@ class GitOperationsService:
                 "git_show_commit diff (include_diff=true)", "per-commit `git show -p`"
             )
         repo = str(self.repo_path)
+        not_found = f"Commit not found: {commit_hash}"
         try:
             full_hash = str(self._git_backend.rev_parse(repo, commit_hash)).strip()
-        except subprocess.CalledProcessError:
-            raise ValueError(f"Commit not found: {commit_hash}")
+        except subprocess.CalledProcessError as exc:
+            if is_revision_miss(exc):
+                raise ValueError(not_found) from exc
+            raise
         try:
             commits = self._parse_log_output(
                 self._backend_log(self.LOG_FORMAT, [full_hash], max_count=1)
             )
-        except subprocess.CalledProcessError:
-            raise ValueError(f"Commit not found: {commit_hash}")
+        except subprocess.CalledProcessError as exc:
+            if is_revision_miss(exc):
+                raise ValueError(not_found) from exc
+            raise
         if not commits:
             raise ValueError(f"Commit not found: {commit_hash}")
         try:
@@ -848,8 +854,10 @@ class GitOperationsService:
             resolved_revision = str(
                 self._git_backend.rev_parse(repo, "--verify", f"{revision}^{{commit}}")
             ).strip()
-        except subprocess.CalledProcessError:
-            raise ValueError(f"Invalid revision: {revision}")
+        except subprocess.CalledProcessError as exc:
+            if is_revision_miss(exc):
+                raise ValueError(f"Invalid revision: {revision}") from exc
+            raise
         shown = self._git_backend.show_objects(repo, [(resolved_revision, path)])
         if len(shown) != 1:
             raise RuntimeError(

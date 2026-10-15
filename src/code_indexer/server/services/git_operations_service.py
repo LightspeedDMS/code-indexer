@@ -2682,13 +2682,7 @@ class GitOperationsService:
         """
         try:
             if git_backend is not None:
-                # `git branch -a`, its lines already stripped and non-empty --
-                # what the loop below reduces each local line to.
-                lines = git_backend.list_branches(
-                    str(repo_path),
-                    all_refs=True,
-                    timeout=self._git_timeouts.git_local_timeout,
-                )
+                return self._branch_list_through_backend(repo_path, git_backend)
             else:
                 lines = run_git_command(
                     ["git", "branch", "-a"],
@@ -3537,83 +3531,4 @@ def __getattr__(name: str) -> Any:
         if _initialized and name in _lazy_values:
             return _lazy_values[name]
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-    def _branch_list_through_backend(
-        self, repo_path: Path, git_backend: "GitBackend"
-    ) -> Dict[str, Any]:
-        """:meth:`git_branch_list` through the git seam, from ``for-each-ref``.
-
-        Not ``list_branches``: git-mcp answers that in ``%(refname:short)``
-        shape (no ``*`` marker, remotes without ``remotes/``), which the
-        ``git branch -a`` parser would misread -- current branch lost, remote
-        branches reported as local. ``for-each-ref`` returns git's own bytes
-        through either backend: ``%(HEAD)`` marks the current branch, the full
-        refname says local or remote, ``%(symref)`` renders ``origin/HEAD`` as
-        ``git branch -a`` does. A detached HEAD (no ``*`` ref) reads as local
-        git prints it, ``(HEAD detached at <short sha>)``.
-        """
-        from code_indexer.global_repos.git_operations import (
-            decode_like_run_git_command,
-        )
-        from code_indexer.server.storage.shared.git_backend import head_branch
-
-        repo = str(repo_path)
-        timeout = self._git_timeouts.git_local_timeout
-        raw = git_backend.for_each_ref(
-            repo, _BRANCH_LIST_REF_FORMAT, _BRANCH_LIST_REF_PATTERNS, timeout=timeout
-        )
-        tokens = decode_like_run_git_command(bytes(raw)).split("\x00")
-        # Every record ends with a NUL then git's newline, which leads the
-        # next record's first field (and is the whole trailing token).
-        tail = tokens.pop()
-        if tail.strip() or len(tokens) % _BRANCH_LIST_REF_FIELDS:
-            raise GitCommandError(
-                f"git branch list: unexpected for-each-ref output from the git "
-                f"backend ({len(tokens)} fields, trailing {tail[:40]!r})",
-                stderr="",
-            )
-        current_branch = ""
-        local_branches: List[str] = []
-        remote_branches: List[str] = []
-        for start in range(0, len(tokens), _BRANCH_LIST_REF_FIELDS):
-            head, refname, symref = tokens[start : start + _BRANCH_LIST_REF_FIELDS]
-            head = head.lstrip("\n")
-            if refname.startswith(_LOCAL_BRANCH_PREFIX):
-                name = refname[len(_LOCAL_BRANCH_PREFIX) :]
-                local_branches.append(name)
-                if head.strip() == "*":
-                    current_branch = name
-            elif refname.startswith(_REMOTE_BRANCH_PREFIX):
-                name = refname[len(_REMOTE_BRANCH_PREFIX) :]
-                if symref.startswith(_REMOTE_BRANCH_PREFIX):
-                    name = f"{name} -> {symref[len(_REMOTE_BRANCH_PREFIX) :]}"
-                remote_branches.append(name)
-        if not current_branch and head_branch(git_backend, repo, timeout) is None:
-            # Detached: `git branch -a` lists it first, as the current entry.
-            short = str(
-                git_backend.rev_parse(repo, "--short", "HEAD", timeout=timeout)
-            ).strip()
-            current_branch = f"(HEAD detached at {short})"
-            local_branches.insert(0, current_branch)
-        return {
-            "current": current_branch,
-            "local": local_branches,
-            "remote": remote_branches,
-        }
-
-
-# Method of GitOperationsService — needs manual placement
-    def _runner_for(
-        self, git_backend: Optional["GitBackend"]
-    ) -> Callable[..., "subprocess.CompletedProcess[str]"]:
-        """The git runner for one operation: :meth:`_git_run`, or -- for a
-        golden repository through the git seam (*git_backend*) -- the read-only
-        golden reader (git-mcp ``git_exec``; golden repositories are never
-        modified)."""
-        if git_backend is None:
-            return self._git_run
-        from code_indexer.server.services.git_tools_seam import golden_git_reader
-
-        return golden_git_reader(git_backend).run
 

@@ -4974,7 +4974,8 @@ class RefreshScheduler:
         the backend's manifest of the clone (``_delegated_repository_backend``),
         never this pod's index-state directory, where a walk finds nothing. A
         listing failure there RAISES (fails the refresh): "could not list" is
-        never "no matching files". A failure to sync the config is still only
+        never "no matching files". The config sync is then undone, so the next
+        refresh sees the same drift. A failure to sync the config is still only
         logged, as before.
 
         Args:
@@ -5007,16 +5008,23 @@ class RefreshScheduler:
             ".versioned",
         }
         shared = self._shared_cidx_meta(alias_name, source_path)
-        if (
-            cidx_meta_content.has_files_with_extensions(shared, drifted_exts, _exclude)
-            if shared is not None
-            else has_files_with_extensions(
-                source_path,
-                drifted_exts,
-                _exclude,
-                backend=_delegated_repository_backend(pod_local),
+        try:
+            matched = (
+                cidx_meta_content.has_files_with_extensions(
+                    shared, drifted_exts, _exclude
+                )
+                if shared is not None
+                else has_files_with_extensions(
+                    source_path,
+                    drifted_exts,
+                    _exclude,
+                    backend=_delegated_repository_backend(pod_local),
+                )
             )
-        ):
+        except Exception:
+            self._restore_drifted_extensions(config_service, source_path, drift)
+            raise
+        if matched:
             logger.info(
                 "Extension drift detected (%d added, %d removed) "
                 "and matching files found for %s -- triggering reconcile",

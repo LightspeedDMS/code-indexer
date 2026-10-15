@@ -206,6 +206,7 @@ class HNSWOrphanRepairSweepScheduler:
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._our_published: Dict[str, str] = {}
 
         self._published_repair_keys: set = set()
 
@@ -839,6 +840,8 @@ class HNSWOrphanRepairSweepScheduler:
             INDEX_VERSION_FIELD,
         )
 
+        from code_indexer.utils.index_store import published_index_fields
+
         store = server_index_store()
         target = str(candidate.repo_root)
         base = record.get(INDEX_VERSION_FIELD)
@@ -852,6 +855,37 @@ class HNSWOrphanRepairSweepScheduler:
                 global_alias,
             )
             return SweepOutcome.ERROR
+
+        current = store.current_version_as(store_alias)
+        if current is not None and current != base:
+            our_version = self._our_published.get(candidate.sort_key)
+            if our_version is not None and current == our_version:
+                logger.info(
+                    "HNSWOrphanRepairSweepScheduler: store %s holds version %s "
+                    "(published by this process) but alias %s records base %s; "
+                    "reconciling (record only)",
+                    store_alias,
+                    current,
+                    global_alias,
+                    base,
+                )
+                fields = published_index_fields(store_alias, current)
+                if self._try_record_republished(
+                    candidate, global_alias, target, base, fields
+                ):
+                    return SweepOutcome.REPAIRED
+                return SweepOutcome.ERROR
+            logger.warning(
+                "HNSWOrphanRepairSweepScheduler: store %s holds version %s "
+                "but alias %s records base %s and this process did not "
+                "publish it; treating as CAS conflict (ERROR)",
+                store_alias,
+                current,
+                global_alias,
+                base,
+            )
+            return SweepOutcome.ERROR
+
         try:
             ensure_published_index(target, record, store=store)
         except Exception:
@@ -875,15 +909,27 @@ class HNSWOrphanRepairSweepScheduler:
                 exc_info=True,
             )
             return SweepOutcome.ERROR
-        # Code review finding: the publish succeeded, so the store now
-        # holds the repaired version.  Record the key BEFORE attempting
-        # record_republished_index so that even if all three CAS attempts
-        # fail, the next sweep tick will not re-fetch the stale base and
-        # re-repair.
-        published_repair_keys = getattr(self, "_published_repair_keys", None)
-        if published_repair_keys is not None:
-            published_repair_keys.add(candidate.sort_key)
-        record_ok = False
+        published_version = fields.get(INDEX_VERSION_FIELD)
+        if published_version:
+            self._our_published[candidate.sort_key] = published_version
+        if not self._try_record_republished(
+            candidate, global_alias, target, base, fields
+        ):
+            return SweepOutcome.ERROR
+        return outcome
+
+    def _try_record_republished(
+        self,
+        candidate: Any,
+        global_alias: str,
+        target: str,
+        base: str,
+        fields: Dict[str, Any],
+    ) -> bool:
+        """Try up to 3 times to record a republished index in the alias.
+        Returns True on success, False on permanent failure."""
+        from code_indexer.utils.index_store import INDEX_VERSION_FIELD
+
         _BACKOFF = (0.1, 0.5, 1.0)
         new_version = fields.get(INDEX_VERSION_FIELD)
         for attempt in range(3):
@@ -891,8 +937,7 @@ class HNSWOrphanRepairSweepScheduler:
                 self._golden_aliases().record_republished_index(
                     global_alias, target, base, fields
                 )
-                record_ok = True
-                break
+                return True
             except Exception as exc:
                 err_msg = str(exc)
                 is_target_mismatch = "no longer points" in err_msg
@@ -905,9 +950,18 @@ class HNSWOrphanRepairSweepScheduler:
                         global_alias,
                         exc_info=True,
                     )
-                    break
+                    return False
                 if is_version_mismatch and new_version:
-                    record = self._golden_aliases().read_record(global_alias)
+                    try:
+                        record = self._golden_aliases().read_record(global_alias)
+                    except Exception:
+                        logger.error(
+                            "HNSWOrphanRepairSweepScheduler: could not "
+                            "re-read alias %s to check ambiguous success",
+                            global_alias,
+                            exc_info=True,
+                        )
+                        return False
                     if (
                         record is not None
                         and record.get(INDEX_VERSION_FIELD) == new_version
@@ -919,15 +973,14 @@ class HNSWOrphanRepairSweepScheduler:
                             global_alias,
                             new_version,
                         )
-                        record_ok = True
-                        break
+                        return True
                     logger.error(
                         "HNSWOrphanRepairSweepScheduler: alias %s moved to "
                         "another version concurrently; not retrying",
                         global_alias,
                         exc_info=True,
                     )
-                    break
+                    return False
                 if attempt < 2:
                     logger.warning(
                         "HNSWOrphanRepairSweepScheduler: record_republished_index "
@@ -951,9 +1004,7 @@ class HNSWOrphanRepairSweepScheduler:
                         base,
                         exc_info=True,
                     )
-        if not record_ok:
-            return SweepOutcome.ERROR
-        return outcome
+        return False
 
 
 
