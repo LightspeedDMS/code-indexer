@@ -207,6 +207,8 @@ class HNSWOrphanRepairSweepScheduler:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
+        self._published_repair_keys: set = set()
+
         # Bug #1864 liveness state. Three different threads touch these --
         # the scheduler loop thread (cycle heartbeat), a bgm-worker thread
         # (tick start/finish, since trigger_now() submits _run_tick to the
@@ -383,6 +385,7 @@ class HNSWOrphanRepairSweepScheduler:
         # last_full_pass_completed_at on every idle tick.
         if candidates and len(pending) <= batch_size:
             self._state_backend.complete_pass()
+            self._published_repair_keys.clear()
             logger.info("HNSWOrphanRepairSweepScheduler: pass complete")
 
         return {"processed": len(batch), **counts}
@@ -420,9 +423,31 @@ class HNSWOrphanRepairSweepScheduler:
         test fakes that don't opt in (plain functions/lambdas with no such
         attribute) fall through to the plain single-argument call below.
         """
-        if self._is_published_temporal(candidate):
-            return self._process_published_temporal(candidate)
-        return self._process_in_place(candidate)
+        published_repair_keys = getattr(self, "_published_repair_keys", None)
+        if published_repair_keys and candidate.sort_key in published_repair_keys:
+            logger.debug(
+                "HNSWOrphanRepairSweepScheduler: %s was repaired and "
+                "published by this process on a prior tick; returning CLEAN",
+                candidate.sort_key,
+            )
+            return SweepOutcome.CLEAN
+        try:
+            if self._is_published_temporal(candidate):
+                return self._process_published_temporal(candidate)
+            published = self._published_golden(candidate)
+            if published is not None:
+                return self._process_published_golden(candidate, *published)
+            activated_owner = self._published_activated_owner(candidate)
+            if activated_owner is not None:
+                return self._process_published_activated(candidate, activated_owner)
+            return self._process_in_place(candidate)
+        except Exception:
+            logger.error(
+                "HNSWOrphanRepairSweepScheduler: unexpected error processing %s",
+                candidate.sort_key,
+                exc_info=True,
+            )
+            return SweepOutcome.ERROR
 
     @staticmethod
     def _is_published_temporal(candidate: Any) -> bool:

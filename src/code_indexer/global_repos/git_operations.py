@@ -1739,38 +1739,6 @@ def is_revision_miss(exc: subprocess.CalledProcessError) -> bool:
     return any(marker in str(stderr or "") for marker in _REVISION_MISS_MARKERS)
 
 
-# Timeout for git blame on repos with deep history (Bug #1008)
-
-
-# Method of GitOperationsService — needs manual placement
-    def _run_git(
-        self, cmd: List[str], *, check: bool, timeout: Optional[float] = None
-    ) -> "subprocess.CompletedProcess[str]":
-        """The one funnel for this service's argv-built git.
-
-        Local: ``run_git_command`` in the repository, exactly as before. Through
-        the git seam: the same argv through git-mcp ``git_exec``, read-only
-        (golden repositories are never modified), decoded as a local run; a
-        backend failure raises instead of reading as git's own exit.
-        """
-        if self._git_backend is None:
-            if timeout is None:
-                local: "subprocess.CompletedProcess[str]" = run_git_command(
-                    cmd, cwd=self.repo_path, check=check
-                )
-                return local
-            timed: "subprocess.CompletedProcess[str]" = run_git_command(
-                cmd, cwd=self.repo_path, check=check, timeout=timeout
-            )
-            return timed
-        from code_indexer.server.services.git_tools_seam import golden_git_reader
-
-        return golden_git_reader(self._git_backend).run(
-            cmd, self.repo_path, check=check, timeout=timeout
-        )
-
-
-
 _REVISION_MISS_MARKERS = (
     "does not have any commits yet",
     "bad default revision",
