@@ -502,9 +502,16 @@ def _resolve_global_repo_path_or_index(alias_name: str) -> Optional[str]:
         (r for r in _list_global_repos() if r.get("alias_name") == alias_name),
         None,
     )
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
     alias_manager = AliasManager(str(Path(_get_golden_repos_dir()) / "aliases"))
     return resolve_alias_or_index_path(
-        alias_manager, alias_name=alias_name, repo_entry=repo_entry
+        alias_manager,
+        alias_name=alias_name,
+        repo_entry=repo_entry,
+        skip_fs_check=is_content_seam_delegated(),
     )
 
 

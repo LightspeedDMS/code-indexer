@@ -100,9 +100,17 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
     # Bug #1315: fall back to the registry's own index_path when the alias
     # pointer file is missing/unreadable, mirroring MultiSearchService's
     # omni-path resolution so direct and omni queries behave identically.
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    delegated = is_content_seam_delegated()
     alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
     target_path = resolve_alias_or_index_path(
-        alias_manager, alias_name=repository_alias, repo_entry=repo_entry
+        alias_manager,
+        alias_name=repository_alias,
+        repo_entry=repo_entry,
+        skip_fs_check=delegated,
     )
     if not target_path:
         err = _repo_lookup_error(
@@ -112,7 +120,7 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
         )
         return None, None, err
 
-    if not Path(target_path).exists():
+    if not delegated and not Path(target_path).exists():
         raise FileNotFoundError(
             f"Global repository '{repository_alias}' not found at {target_path}"
         )
