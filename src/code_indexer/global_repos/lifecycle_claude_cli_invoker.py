@@ -43,6 +43,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from typing import Optional
 
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
 from code_indexer.global_repos.repo_analyzer import invoke_claude_cli  # noqa: F401 — kept for backward-compat test patching
@@ -52,7 +53,13 @@ from code_indexer.global_repos.unified_response_parser import (
     UnifiedResult,
 )
 from code_indexer.server.services.config_service import get_config_service
-from code_indexer.server.services.delegated_refusal import refuse_when_delegated
+from code_indexer.server.services.cli_invoker_plugin import (
+    invoker_resolves_golden_repositories,
+)
+from code_indexer.server.services.delegated_refusal import (
+    delegated_refusal,
+    refuse_when_delegated,
+)
 from code_indexer.server.services.dep_map_dispatcher_factory import (
     build_dep_map_dispatcher,
 )

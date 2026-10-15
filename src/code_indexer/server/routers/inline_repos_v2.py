@@ -63,9 +63,7 @@ from ..services.activated_copy_content import (
     CopyContentUnavailableError,
     CopyPathError,
     decode_text_like_read_text,
-    delegated_copy_source,
     read_copy_file,
-    visible_files,
 )
 from ..services.search_service import search_service
 from ..app_helpers import _execute_repository_sync, _get_composite_details
