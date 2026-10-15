@@ -353,6 +353,13 @@ def register_admin_ops_routes(
                 message=f"Golden repository '{repo_data.alias}' addition started",
             )
 
+        except DuplicateJobError as e:
+            # EVO-69818: a duplicate in-flight job is a conflict, not a server
+            # error -- same mapping as add_golden_repo_index.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(e),
+            ) from e
         except Exception as e:
             # EVO-64608: surface the swallowed cause. Without this the exception's
             # detail goes ONLY into the 500 response body (never into cidx logs), so a
