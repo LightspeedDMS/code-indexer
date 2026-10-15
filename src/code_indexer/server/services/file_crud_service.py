@@ -594,16 +594,18 @@ class FileCRUDService:
 
         return self._deleted_result(file_path)
 
-    # ── golden repos behind the content seam ───────────────────────────────
+    # ── repos behind the content seam ────────────────────────────────────
 
     def _golden_write_target(
         self, repo_alias: str, repo_path: Path
     ) -> Optional["GoldenRepoWriteTarget"]:
-        """Where a write-exception (golden) repo is written when it is not on
-        this pod, or None to write the local disk -- always None for an
-        activated repo and under the local content backend."""
-        if not self.is_write_exception(repo_alias):
-            return None
+        """Where a repo is written when it is not on this pod, or None to write
+        the local disk -- always None under the local content backend.
+
+        Both kinds of repo this service writes go through the content writer
+        under a delegated backend: a write-exception (golden) repo, and a
+        user's activated copy, which lives on workspace-mcp at its path.
+        """
         from code_indexer.server.services.golden_repo_writer import (
             golden_repo_write_target,
         )
