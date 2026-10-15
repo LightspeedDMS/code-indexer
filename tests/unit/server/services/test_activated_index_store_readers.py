@@ -456,3 +456,19 @@ def test_a_delegated_activated_search_serves_the_copy_first(
         )
     assert order == ["serve", "search"]
     arm.serve_index_here.assert_called_once_with(USER, ALIAS)
+
+
+def _recorded(order: List[str], step: str, result: Any) -> Any:
+    """A side effect that records ``step`` and returns ``result``."""
+    order.append(step)
+    return result
+
+
+    def serve(username: str, user_alias: str) -> str:
+        (path / ".code-indexer").mkdir(parents=True)
+        return str(path)
+
+
+    def status_for(path: Path, **kwargs: Any) -> Dict[str, Any]:
+        seen.append(path)
+        return {}

@@ -506,3 +506,138 @@ def test_an_activation_over_a_leftover_published_index_replaces_it(
     meta = manager._load_metadata(USER, ALIAS)
     assert meta[INDEX_VERSION_FIELD] == artifacts.current_version(COPY_ALIAS)
     assert len(artifacts.versions[COPY_ALIAS]) == 2
+
+
+def _meta(manager: ActivatedRepoManager) -> Dict[str, Any]:
+    """The copy's metadata, which these tests require to exist."""
+    meta = manager._load_metadata(USER, ALIAS)
+    assert meta is not None, "the activated copy has no metadata"
+    return meta
+
+
+    def flaky_save(*args: Any, **kwargs: Any) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise OSError("disk full")
+        return real_save(*args, **kwargs)
+
+
+    def serve(username: str, user_alias: str) -> str:
+        order.append("serve")
+        return ""
+
+
+def test_cas_base_from_marker_not_registry(
+    world: ActivatedWorld, artifacts: FakeArtifacts
+) -> None:
+    """Another pod publishes v2 AND updates the registry while this pod's
+    CHECKED_OUT_MARKER still holds v1; publish from this pod uses v1 as
+    the CAS base (-> ECONFLICT because the store's current is v2)."""
+    manager = _manager(world)
+    _activate(manager)
+    v1 = _meta(manager)[INDEX_VERSION_FIELD]
+
+    # Another pod publishes v2 and updates the registry.
+    other = world.tmp / "pod-c" / ALIAS
+    shutil.copytree(world.pod_copy() / INDEX_DIR, other / INDEX_DIR)
+    (other / INDEX_DIR / "index" / "collection" / "chunks.db").write_bytes(b"v2")
+    meta = _meta(manager)
+    meta.update(ActivatedIndexStore().publish(USER, ALIAS, other, meta))
+    manager._save_metadata(USER, ALIAS, meta)
+    v2 = _meta(manager)[INDEX_VERSION_FIELD]
+    assert v2 != v1
+
+    # This pod's marker still says v1.
+    assert (world.pod_copy() / im.CHECKED_OUT_MARKER).read_text() == v1
+
+    # publish_index reads the marker (v1), not the registry (v2), so
+    # the CAS base is v1, which conflicts with the store's current (v2).
+    with pytest.raises(RuntimeError, match="ECONFLICT"):
+        manager.publish_index(USER, ALIAS)
+
+    # The publish call in artifacts confirms v1 was used as base.
+    publish_calls = [c for c in artifacts.calls if c[0] == "publish"]
+    last_publish = publish_calls[-1]
+    assert last_publish[2] == v1  # base_version arg
+
+
+def test_metadata_save_permanent_failure_raises(
+    world: ActivatedWorld,
+    artifacts: FakeArtifacts,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When _save_metadata fails on both attempts, publish_index raises
+    (fails loud) instead of silently swallowing."""
+    manager = _manager(world)
+    _activate(manager)
+
+    (world.pod_copy() / INDEX_DIR / "index" / "collection" / "chunks.db").write_bytes(
+        b"re-1"
+    )
+
+    monkeypatch.setattr(
+        manager,
+        "_save_metadata",
+        lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        with world.forbid_local_io():
+            manager.publish_index(USER, ALIAS)
+
+
+def test_metadata_save_retries_once_then_serve_and_publish_work(
+    world: ActivatedWorld,
+    artifacts: FakeArtifacts,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_save_metadata fails on the first attempt; the built-in retry saves
+    the registry.  After that, serve_index_here + another publish works:
+    the ECONFLICT loop the review flagged does not occur."""
+    manager = _manager(world)
+    _activate(manager)
+    v1 = _meta(manager)[INDEX_VERSION_FIELD]
+
+    # Mutate so the publish creates a distinct version.
+    (world.pod_copy() / INDEX_DIR / "index" / "collection" / "chunks.db").write_bytes(
+        b"re-1"
+    )
+
+    # Make _save_metadata fail once (retry succeeds).
+    real_save = manager._save_metadata
+    call_count = 0
+
+    def flaky_save(*args: Any, **kwargs: Any) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise OSError("disk full")
+        return real_save(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_save_metadata", flaky_save)
+
+    # First publish: first save attempt fails, retry succeeds.
+    with world.forbid_local_io():
+        manager.publish_index(USER, ALIAS)
+
+    v2 = artifacts.current_version(COPY_ALIAS)
+    assert v2 is not None and v2 != v1
+    assert (world.pod_copy() / im.CHECKED_OUT_MARKER).read_text() == v2
+    # Registry is consistent (retry succeeded).
+    assert _meta(manager)[INDEX_VERSION_FIELD] == v2
+
+    # serve_index_here sees marker v2 == registry v2, no swap.
+    with world.forbid_local_io():
+        manager.serve_index_here(USER, ALIAS)
+
+    # Second publish after serve_index_here: no ECONFLICT.
+    (world.pod_copy() / INDEX_DIR / "index" / "collection" / "chunks.db").write_bytes(
+        b"re-2"
+    )
+    with world.forbid_local_io():
+        manager.publish_index(USER, ALIAS)
+
+    v3 = artifacts.current_version(COPY_ALIAS)
+    assert v3 is not None and v3 != v2
+    assert _meta(manager)[INDEX_VERSION_FIELD] == v3

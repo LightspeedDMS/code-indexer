@@ -5861,3 +5861,23 @@ def _description_generation_refusal() -> Optional[str]:
     return delegated_refusal(
         DESCRIPTION_ANALYSIS_FEATURE, DESCRIPTION_ANALYSIS_REFUSAL_REASON
     )
+
+
+    @staticmethod
+    def _restore_drifted_extensions(
+        config_service: Any, source_path: str, drift: Any
+    ) -> None:
+        """Put the repo config back on its pre-drift extensions, or log why not
+        (the listing failure being raised is what the refresh reports)."""
+        try:
+            config_service.restore_repo_extensions(source_path, drift)
+        except Exception as exc:
+            logger.error(
+                "Extension drift for %s could not be restored after the file "
+                "listing failed (%s): the next refresh will not reconcile the "
+                "%d added / %d removed extensions; run a reconcile index",
+                source_path,
+                exc,
+                len(drift.added),
+                len(drift.removed),
+            )

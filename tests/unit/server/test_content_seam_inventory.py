@@ -1158,3 +1158,75 @@ if __name__ == "__main__":
         print(f"wrote {_INVENTORY} and {_SUMMARY}")
     else:
         print(__doc__)
+
+
+def _evidence(module: str, function: str, pattern: "re.Pattern[str]") -> List[str]:
+    """Identifiers in *function* that match *pattern*.
+
+    *function* may be ``other/module.py:Class.method`` for a gate that lives
+    in another module.
+    """
+    if ":" in function:
+        module, function = function.split(":", 1)
+    node = _function_node(module, function)
+    if node is None:
+        return []
+    return sorted({i for i in _identifiers(node) if pattern.search(i)})
+
+
+def refusal_evidence(module: str, function: str) -> List[str]:
+    """Identifiers in *function* that refuse under delegated (_REFUSAL_EVIDENCE)."""
+    return _evidence(module, function, _REFUSAL_EVIDENCE)
+
+
+    def test_a_tree_tool_spawn_is_listed(self) -> None:
+        src = (
+            "import subprocess\n"
+            "def f(src, dst, root):\n"
+            "    subprocess.run(['cp', '-a', src, dst], check=True)\n"
+            "    subprocess.Popen(('/usr/bin/rg', '--json', 'x', root))\n"
+            "    subprocess.check_output('find . -name x', shell=True)\n"
+            "    subprocess.run(['systemctl', 'restart', 'cidx'])\n"
+        )
+        assert self._ops(src) == Counter(
+            {"spawn cp": 1, "spawn rg": 1, "spawn find": 1}
+        )
+
+
+    def test_refusal_evidence_is_a_refusal_not_a_backend(self) -> None:
+        tree = ast.parse(
+            "def refuses():\n    refuse_when_delegated('f', 'r')\n"
+            "def raises():\n    raise DelegatedRepositoryUnsupportedError('f', 'r')\n"
+            "def branches(self):\n    if self._content_backend is not None:\n"
+            "        pass\n"
+        )
+        found = {
+            f.name: sorted(i for i in _identifiers(f) if _REFUSAL_EVIDENCE.search(i))
+            for f in tree.body
+            if isinstance(f, ast.FunctionDef)
+        }
+        assert found == {
+            "refuses": ["refuse_when_delegated"],
+            "raises": ["DelegatedRepositoryUnsupportedError"],
+            "branches": [],
+        }
+
+
+def tree_tool_operation(call: ast.Call, spawn_aliases: Dict[str, str]) -> Optional[str]:
+    """``spawn <program>`` for a spawn whose literal program is a tree tool."""
+    kind = _call_kind(call, spawn_aliases)
+    if kind not in ("list", "varargs", "string") or not call.args:
+        return None
+    first = call.args[0]
+    program: Optional[str] = None
+    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+        # One string is a shell command line (or a lone program name).
+        words = first.value.split()
+        program = words[0] if words else None
+    elif isinstance(first, (ast.List, ast.Tuple)) and first.elts:
+        head = first.elts[0]
+        if isinstance(head, ast.Constant) and isinstance(head.value, str):
+            program = head.value
+    if program is None or Path(program).name not in _TREE_TOOLS:
+        return None
+    return f"spawn {Path(program).name}"

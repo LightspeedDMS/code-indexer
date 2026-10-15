@@ -727,3 +727,54 @@ class HNSWOrphanRepairSweepScheduler:
             while elapsed < wait_seconds and not self._stop_event.is_set():
                 self._stop_event.wait(timeout=_TICK_SECONDS)
                 elapsed += _TICK_SECONDS
+
+
+    def _process_published_activated(
+        self, candidate: Any, owner: Tuple[str, str]
+    ) -> SweepOutcome:
+        """An activated copy's index under a delegated IndexStore: repair the
+        version the registry records (fetched first, so an older checkout is
+        never repaired and then published over a newer one) and publish the
+        repair on top of it -- otherwise the repair would live on this pod
+        only and the next checkout would bring the orphans back."""
+        username, user_alias = owner
+        try:
+            self._activated_repo_manager.serve_index_here(username, user_alias)
+        except Exception:
+            logger.error(
+                "HNSWOrphanRepairSweepScheduler: could not fetch the published "
+                "index of %s before repairing it",
+                candidate.sort_key,
+                exc_info=True,
+            )
+            return SweepOutcome.ERROR
+        outcome = self._process_in_place(candidate)
+        if outcome != SweepOutcome.REPAIRED:
+            return outcome
+        try:
+            self._activated_repo_manager.publish_index(username, user_alias)
+        except Exception:
+            logger.error(
+                "HNSWOrphanRepairSweepScheduler: repaired %s but could not "
+                "publish the repair",
+                candidate.sort_key,
+                exc_info=True,
+            )
+            return SweepOutcome.ERROR
+        return outcome
+
+
+    def _published_activated_owner(self, candidate: Any) -> Optional[Tuple[str, str]]:
+        """``(username, user_alias)`` of an activated candidate whose index is
+        a PUBLISHED artifact (``index_store_backend: delegated``); None for
+        every other candidate, and always None under the local store."""
+        if getattr(candidate, "kind", None) != "activated":
+            return None
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+
+        if server_index_store().is_local:
+            return None
+        username, _, user_alias = str(candidate.alias).partition("/")
+        return (username, user_alias) if username and user_alias else None

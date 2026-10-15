@@ -219,3 +219,45 @@ def test_delegated_reconcile_never_probes_or_restores_the_master(
     monkeypatch.setattr(Path, "exists", real_exists)
     assert (world.pod_golden / ".reconciliation_complete_v1").exists()
     assert not master.exists()
+
+
+def test_listing_failure_keeps_the_drift_for_the_next_refresh(
+    world: MetaWorld, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End to end with the real config service: the listing fails, and the
+    next refresh still sees the drift (it is not consumed)."""
+    import json
+
+    from code_indexer.server.services.config_service import ConfigService
+
+    (tmp_path / "server").mkdir()
+    service = ConfigService(server_dir_path=str(tmp_path / "server"))
+    service.update_setting("indexing", "indexable_extensions", [".py", ".md"])
+    config = Path(world.pod_meta) / ".code-indexer" / "config.json"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(json.dumps({"file_extensions": ["md"]}))
+    monkeypatch.setattr(rs, "get_config_service", lambda: service)
+    world.delegated()
+    world.backend.fail = RuntimeError("workspace-mcp down")
+    scheduler = _scheduler(world.pod_golden)
+
+    with pytest.raises(RuntimeError, match="workspace-mcp"):
+        scheduler._check_extension_drift(str(world.pod_meta), ALIAS, pod_local=False)
+
+    assert json.loads(config.read_text())["file_extensions"] == ["md"]
+    drift = service.sync_repo_extensions_if_drifted(str(world.pod_meta))
+    assert drift is not None and drift.added == {"py"}
+
+
+def test_listing_failure_still_raises_when_the_restore_fails(
+    world: MetaWorld, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    service = _drift(monkeypatch, {"py"})
+    service.restore_repo_extensions.side_effect = OSError("read-only fs")
+    world.delegated()
+    world.backend.fail = RuntimeError("workspace-mcp down")
+    with pytest.raises(RuntimeError, match="workspace-mcp"):
+        _scheduler(world.pod_golden)._check_extension_drift(
+            str(world.pod_meta), ALIAS, pod_local=False
+        )
+    assert "read-only fs" in caplog.text

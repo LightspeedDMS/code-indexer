@@ -26,7 +26,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 from unittest.mock import MagicMock
 
 import pytest
@@ -381,60 +381,148 @@ class ActivatedWorld:
         return False
 
     def _install_guards(self, patcher: pytest.MonkeyPatch) -> None:
-        forbidden = self._forbidden
+        install_local_io_guards(patcher, self._forbidden)
 
-        def _guard(owner: Any, name: str, path_arg: int = 0) -> None:
-            original = getattr(owner, name)
 
-            def wrapper(*args: Any, **kwargs: Any) -> Any:
-                candidates = list(args[: path_arg + 1]) + [
-                    kwargs.get("path"),
-                    kwargs.get("file"),
-                ]
-                if any(c is not None and forbidden(c) for c in candidates):
-                    raise LocalIOForbidden(f"{name}{args!r}")
-                return original(*args, **kwargs)
+def install_local_io_guards(
+    patcher: pytest.MonkeyPatch, forbidden: Callable[[Any], bool]
+) -> None:
+    """Make every local file access, and every subprocess run in or naming a
+    path, raise :class:`LocalIOForbidden` when ``forbidden(path)`` is true."""
 
-            patcher.setattr(owner, name, wrapper)
+    def _guard(owner: Any, name: str, path_arg: int = 0) -> None:
+        original = getattr(owner, name)
 
-        for name in (
-            "read_text",
-            "read_bytes",
-            "write_text",
-            "write_bytes",
-            "open",
-            "unlink",
-            "rename",
-            "exists",
-            "is_file",
-            "is_dir",
-            "iterdir",
-            "glob",
-            "rglob",
-            "stat",
-        ):
-            _guard(Path, name)
-        _guard(builtins, "open")
-        for name in ("listdir", "scandir", "walk", "remove", "unlink", "makedirs"):
-            _guard(os, name)
-        _guard(os.path, "exists")
-        _guard(os.path, "isdir")
-        _guard(os.path, "isfile")
-        _guard(shutil, "rmtree")
-        _guard(shutil, "move", path_arg=1)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            candidates = list(args[: path_arg + 1]) + [
+                kwargs.get("path"),
+                kwargs.get("file"),
+            ]
+            if any(c is not None and forbidden(c) for c in candidates):
+                raise LocalIOForbidden(f"{name}{args!r}")
+            return original(*args, **kwargs)
 
-        def _guard_spawn(owner: Any, name: str) -> None:
-            original = getattr(owner, name)
+        patcher.setattr(owner, name, wrapper)
 
-            def wrapper(*args: Any, **kwargs: Any) -> Any:
-                argv = args[0] if args else kwargs.get("args", [])
-                values = list(argv) if isinstance(argv, (list, tuple)) else [argv]
-                if any(forbidden(v) for v in [kwargs.get("cwd"), *values] if v):
-                    raise LocalIOForbidden(f"{name} {argv!r} cwd={kwargs.get('cwd')}")
-                return original(*args, **kwargs)
+    for name in (
+        "read_text",
+        "read_bytes",
+        "write_text",
+        "write_bytes",
+        "open",
+        "unlink",
+        "rename",
+        "exists",
+        "is_file",
+        "is_dir",
+        "iterdir",
+        "glob",
+        "rglob",
+        "stat",
+    ):
+        _guard(Path, name)
+    _guard(builtins, "open")
+    for name in (
+        "listdir",
+        "scandir",
+        "walk",
+        "stat",
+        "remove",
+        "unlink",
+        "makedirs",
+    ):
+        _guard(os, name)
+    _guard(os.path, "exists")
+    _guard(os.path, "getsize")
+    _guard(os.path, "isdir")
+    _guard(os.path, "isfile")
+    _guard(shutil, "rmtree")
+    _guard(shutil, "move", path_arg=1)
 
-            patcher.setattr(owner, name, wrapper)
+    def _guard_spawn(owner: Any, name: str) -> None:
+        original = getattr(owner, name)
 
-        _guard_spawn(subprocess, "run")
-        _guard_spawn(subprocess, "Popen")
-        _guard_spawn(subprocess, "check_output")
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            argv = args[0] if args else kwargs.get("args", [])
+            values = list(argv) if isinstance(argv, (list, tuple)) else [argv]
+            if any(forbidden(v) for v in [kwargs.get("cwd"), *values] if v):
+                raise LocalIOForbidden(f"{name} {argv!r} cwd={kwargs.get('cwd')}")
+            return original(*args, **kwargs)
+
+        patcher.setattr(owner, name, wrapper)
+
+    _guard_spawn(subprocess, "run")
+    _guard_spawn(subprocess, "Popen")
+    _guard_spawn(subprocess, "check_output")
+
+
+def install_local_io_guards(
+    patcher: pytest.MonkeyPatch, forbidden: Callable[[Any], bool]
+) -> None:
+    """Make every local file access, and every subprocess run in or naming a
+    path, raise :class:`LocalIOForbidden` when ``forbidden(path)`` is true."""
+
+    def _guard(owner: Any, name: str, path_arg: int = 0) -> None:
+        original = getattr(owner, name)
+
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            candidates = list(args[: path_arg + 1]) + [
+                kwargs.get("path"),
+                kwargs.get("file"),
+            ]
+            if any(c is not None and forbidden(c) for c in candidates):
+                raise LocalIOForbidden(f"{name}{args!r}")
+            return original(*args, **kwargs)
+
+        patcher.setattr(owner, name, wrapper)
+
+    for name in (
+        "read_text",
+        "read_bytes",
+        "write_text",
+        "write_bytes",
+        "open",
+        "unlink",
+        "rename",
+        "exists",
+        "is_file",
+        "is_dir",
+        "iterdir",
+        "glob",
+        "rglob",
+        "stat",
+    ):
+        _guard(Path, name)
+    _guard(builtins, "open")
+    for name in (
+        "listdir",
+        "scandir",
+        "walk",
+        "stat",
+        "remove",
+        "unlink",
+        "makedirs",
+    ):
+        _guard(os, name)
+    _guard(os.path, "exists")
+    _guard(os.path, "getsize")
+    _guard(os.path, "isdir")
+    _guard(os.path, "isfile")
+    _guard(shutil, "rmtree")
+    _guard(shutil, "move", path_arg=1)
+
+    def _guard_spawn(owner: Any, name: str) -> None:
+        original = getattr(owner, name)
+
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            argv = args[0] if args else kwargs.get("args", [])
+            values = list(argv) if isinstance(argv, (list, tuple)) else [argv]
+            if any(forbidden(v) for v in [kwargs.get("cwd"), *values] if v):
+                raise LocalIOForbidden(f"{name} {argv!r} cwd={kwargs.get('cwd')}")
+            return original(*args, **kwargs)
+
+        patcher.setattr(owner, name, wrapper)
+
+    _guard_spawn(subprocess, "run")
+    _guard_spawn(subprocess, "Popen")
+    _guard_spawn(subprocess, "check_output")

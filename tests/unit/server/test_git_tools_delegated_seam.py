@@ -566,3 +566,464 @@ def test_git_state_manager_has_no_production_caller() -> None:
         "server/services/scip_self_healing.py",
     ]
     assert _src_mentions("SCIPSelfHealingService(") == []
+
+
+class GitMcpEmulator:
+    """git-mcp's JSON-RPC tools for one repository, seen at *pod*.
+
+    Tool results follow git-mcp: ``git_symbolic_ref`` -> ``{"ref"}``,
+    ``git_rev_parse`` -> ``{"output"}``, ``git_branch_list`` -> simple-git's
+    branch summary (``remotes/`` stripped, ``type``, ``current``; the
+    symbolic ``origin/HEAD`` line is not a branch to it), the raw tools ->
+    ``{"exit_code", "stdout_b64", "stderr"}``. A git failure in a
+    structured tool is a tool error whose text is git's stderr.
+    """
+
+    def __init__(self, pod: Path, real: Path) -> None:
+        self._pod, self._real = str(pod), real
+        self.down = False
+        self.tools: List[str] = []
+
+    def _git(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", *args], cwd=self._real, capture_output=True)
+
+    def _structured(self, args: List[str], key: str) -> Any:
+        out = self._git(*args)
+        if out.returncode:
+            raise _ToolError(out.stderr.decode())
+        return {key: out.stdout.decode().strip()}
+
+    def _raw(self, args: List[str]) -> Any:
+        import base64
+
+        out = self._git(*args)
+        return {
+            "exit_code": out.returncode,
+            "stdout_b64": base64.b64encode(out.stdout).decode(),
+            "stderr": out.stderr.decode(),
+        }
+
+    def _branch_list(self, include_remote: bool) -> Any:
+        listed = self._git(
+            "for-each-ref", "--format=%(HEAD) %(refname) %(symref)", "refs/heads"
+        ).stdout.decode()
+        if include_remote:
+            listed += self._git(
+                "for-each-ref", "--format=%(HEAD) %(refname) %(symref)", "refs/remotes"
+            ).stdout.decode()
+        branches = []
+        for line in listed.splitlines():
+            head = line[0]
+            refname, _, symref = line[2:].partition(" ")
+            if symref.strip():
+                continue
+            remote = refname.startswith("refs/remotes/")
+            branches.append(
+                {
+                    "name": refname.split("/", 2)[2],
+                    "type": "remote" if remote else "local",
+                    "current": head == "*",
+                }
+            )
+        return {"total": len(branches), "branches": branches}
+
+    def tool(self, name: str, a: Any) -> Any:
+        self.tools.append(name)
+        assert a["cow_path"] == self._pod, a
+        if name == "git_symbolic_ref":
+            short = ["--short"] if a.get("short") else []
+            return self._structured(["symbolic-ref", *short, "HEAD"], "ref")
+        if name == "git_rev_parse":
+            return self._structured(["rev-parse", *a["args"]], "output")
+        if name == "git_branch_list":
+            return self._branch_list(a.get("include_remote", True))
+        if name == "git_for_each_ref":
+            return self._raw(
+                [
+                    "for-each-ref",
+                    f"--format={a['format']}",
+                    "--",
+                    *a.get("patterns", []),
+                ]
+            )
+        if name == "git_log_raw":
+            args = ["log", f"--format={a['format']}"]
+            if a.get("since"):
+                args.append(f"--since={a['since']}")
+            if a.get("max_count"):
+                args.append(f"--max-count={a['max_count']}")
+            return self._raw([*args, *a.get("revs", [])])
+        if name == "git_show_objects":
+            items = [self._raw(["show", f"{s['rev']}:{s['path']}"]) for s in a["specs"]]
+            return {"objects": items}
+        raise AssertionError(f"tool not emulated: {name}")
+
+    def urlopen(self, req: Any, timeout: Any = None) -> Any:
+        import io
+        import json
+        import urllib.error
+
+        if self.down:
+            raise urllib.error.URLError("[Errno 111] Connection refused")
+        params = json.loads(req.data.decode())["params"]
+        result: Dict[str, Any]
+        try:
+            result = {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            self.tool(params["name"], params["arguments"])
+                        ),
+                    }
+                ]
+            }
+        except _ToolError as exc:
+            result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+        return io.BytesIO(json.dumps({"jsonrpc": "2.0", "result": result}).encode())
+
+
+class _ParentsFail(MappedGit):
+    """git-mcp failing only the parent read of a commit it just resolved."""
+
+    def rev_parse(self, repo_path: str, *args: str, **kwargs: Any) -> str:
+        if args and str(args[-1]).endswith("^@"):
+            raise subprocess.CalledProcessError(1, "git-mcp", stderr="git-mcp down")
+        return str(self.__getattr__("rev_parse")(repo_path, *args, **kwargs))
+
+
+class _ToolError(Exception):
+    pass
+
+
+@pytest.fixture
+
+
+class _TruncatedRefs(MappedGit):
+    """git-mcp answering for-each-ref with a record cut short."""
+
+    def for_each_ref(self, repo_path: str, *args: Any, **kwargs: Any) -> bytes:
+        return b"*\x00refs/heads/main\n"
+
+
+    def _branch_list(self, include_remote: bool) -> Any:
+        listed = self._git(
+            "for-each-ref", "--format=%(HEAD) %(refname) %(symref)", "refs/heads"
+        ).stdout.decode()
+        if include_remote:
+            listed += self._git(
+                "for-each-ref", "--format=%(HEAD) %(refname) %(symref)", "refs/remotes"
+            ).stdout.decode()
+        branches = []
+        for line in listed.splitlines():
+            head = line[0]
+            refname, _, symref = line[2:].partition(" ")
+            if symref.strip():
+                continue
+            remote = refname.startswith("refs/remotes/")
+            branches.append(
+                {
+                    "name": refname.split("/", 2)[2],
+                    "type": "remote" if remote else "local",
+                    "current": head == "*",
+                }
+            )
+        return {"total": len(branches), "branches": branches}
+
+
+def _load_git_mcp_plugin() -> Any:
+    import importlib.util
+
+    source = (
+        Path(__file__).resolve().parents[3]
+        / "plugins"
+        / "cidx_git_backend"
+        / "cidx_git_backend"
+        / "__init__.py"
+    )
+    spec = importlib.util.spec_from_file_location("cidx_git_backend_contract", source)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _plugin_backend(
+    plugin: Any, pod: Path, real: Path, monkeypatch: pytest.MonkeyPatch
+) -> Tuple[Any, GitMcpEmulator]:
+    emulator = GitMcpEmulator(pod, real)
+    monkeypatch.setattr(plugin.urllib.request, "urlopen", emulator.urlopen)
+    return plugin.GitMcpBackend(base_url="http://git-mcp:3000"), emulator
+
+
+    def _raw(self, args: List[str]) -> Any:
+        import base64
+
+        out = self._git(*args)
+        return {
+            "exit_code": out.returncode,
+            "stdout_b64": base64.b64encode(out.stdout).decode(),
+            "stderr": out.stderr.decode(),
+        }
+
+
+    def _structured(self, args: List[str], key: str) -> Any:
+        out = self._git(*args)
+        if out.returncode:
+            raise _ToolError(out.stderr.decode())
+        return {key: out.stdout.decode().strip()}
+
+
+@pytest.fixture
+def empty_repo(tmp_path: Path) -> Path:
+    path = tmp_path / "empty"
+    path.mkdir()
+    _git(path, "init", "-q", "-b", "main")
+    return path
+
+
+    def for_each_ref(self, repo_path: str, *args: Any, **kwargs: Any) -> bytes:
+        return b"*\x00refs/heads/main\n"
+
+
+@pytest.fixture
+def git_mcp_plugin() -> Any:
+    return _load_git_mcp_plugin()
+
+
+    def rev_parse(self, repo_path: str, *args: str, **kwargs: Any) -> str:
+        if args and str(args[-1]).endswith("^@"):
+            raise subprocess.CalledProcessError(1, "git-mcp", stderr="git-mcp down")
+        return str(self.__getattr__("rev_parse")(repo_path, *args, **kwargs))
+
+
+def test_branch_listing_of_a_pod_local_repo_stays_local(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A local:// repository (Langfuse traces) is on this pod: not a git
+    repository is the answer, with or without git-mcp -- never a refusal."""
+    from code_indexer.server.services import branch_service
+    from code_indexer.services.git_topology_service import GitTopologyService
+
+    folder = tmp_path / "golden-repos" / "langfuse_traces"
+    folder.mkdir(parents=True)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setattr(
+        content_backend_wiring,
+        "server_content_backend",
+        lambda: SimpleNamespace(is_local=False),
+    )
+    monkeypatch.setattr(
+        content_backend_wiring,
+        "_golden_repo_record",
+        lambda alias: SimpleNamespace(
+            repo_url=f"local://{alias}", clone_path=str(folder)
+        ),
+    )
+    for backend in (None, MappedGit(folder, folder)):
+        monkeypatch.setattr(
+            git_backend_wiring, "server_delegated_git_backend", lambda: backend
+        )
+        branch_service._branches_cache.clear()
+        with branch_service.BranchService(GitTopologyService(folder)) as service:
+            assert service.list_branches(include_remote=True) == []
+        if backend is not None:
+            assert backend.calls == []
+
+
+# ── no production caller ───────────────────────────────────────────────────
+
+
+def test_golden_empty_repository_through_the_real_git_mcp_plugin(
+    empty_repo: Path, pod: Path, git_mcp_plugin: Any, monkeypatch
+) -> None:
+    expected = GoldenGitService(empty_repo).get_log()
+    backend, _ = _plugin_backend(git_mcp_plugin, pod, empty_repo, monkeypatch)
+    assert GoldenGitService(pod, git_backend=backend).get_log() == expected
+    assert expected.commits == []
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda s: s.get_log(),
+        lambda s: s.show_commit("HEAD", include_stats=False),
+        lambda s: s.get_file_at_revision("a.txt", "HEAD"),
+    ],
+    ids=["get_log", "show_commit", "get_file_at_revision"],
+)
+
+
+def test_golden_git_mcp_outage_is_an_error_not_an_empty_answer(
+    repo: Path, pod: Path, git_mcp_plugin: Any, monkeypatch, call: Any
+) -> None:
+    backend, emulator = _plugin_backend(git_mcp_plugin, pod, repo, monkeypatch)
+    emulator.down = True
+    with pytest.raises(subprocess.CalledProcessError, match="Connection refused"):
+        call(GoldenGitService(pod, git_backend=backend))
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda s: s.get_log(),
+        lambda s: s.show_commit("HEAD", include_stats=False),
+        lambda s: s.get_file_at_revision("a.txt", "HEAD"),
+    ],
+    ids=["get_log", "show_commit", "get_file_at_revision"],
+)
+
+
+def test_golden_missing_clone_is_an_error_not_an_empty_answer(
+    tmp_path: Path, pod: Path, git_mcp_plugin: Any, monkeypatch, call: Any
+) -> None:
+    not_a_repo = tmp_path / "not-a-repo"
+    not_a_repo.mkdir()
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    backend, _ = _plugin_backend(git_mcp_plugin, pod, not_a_repo, monkeypatch)
+    with pytest.raises(subprocess.CalledProcessError, match="not a git repository"):
+        call(GoldenGitService(pod, git_backend=backend))
+
+
+def test_golden_reads_through_the_real_git_mcp_plugin(
+    repo: Path, pod: Path, git_mcp_plugin: Any, monkeypatch
+) -> None:
+    local = GoldenGitService(repo)
+    expected = (
+        local.get_log(limit=2),
+        local.get_log(branch="no-such-branch"),
+        local.show_commit("HEAD~1", include_stats=False),
+        local.get_file_at_revision("a.txt", "HEAD~1"),
+    )
+    backend, _ = _plugin_backend(git_mcp_plugin, pod, repo, monkeypatch)
+    _forbid_local_git(monkeypatch)
+    remote = GoldenGitService(pod, git_backend=backend)
+    assert (
+        remote.get_log(limit=2),
+        remote.get_log(branch="no-such-branch"),
+        remote.show_commit("HEAD~1", include_stats=False),
+        remote.get_file_at_revision("a.txt", "HEAD~1"),
+    ) == expected
+    assert expected[1].commits == []
+    for call, message in (
+        (lambda s: s.show_commit("no-such-rev", include_stats=False), "not found"),
+        (lambda s: s.get_file_at_revision("a.txt", "no-such-rev"), "Invalid revision"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            call(remote)
+
+
+def test_golden_show_commit_parent_failure_is_an_error(pod: Path, repo: Path) -> None:
+    service = GoldenGitService(pod, git_backend=_ParentsFail(pod, repo))
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        service.show_commit("HEAD", include_stats=False)
+    assert raised.value.stderr == "git-mcp down"
+
+
+def test_user_branch_list_malformed_seam_output_is_an_error(
+    pod: Path, repo: Path, user_service: Any
+) -> None:
+    with pytest.raises(
+        user_git_module.GitCommandError, match="unexpected for-each-ref"
+    ):
+        user_service.git_branch_list(pod, git_backend=_TruncatedRefs(pod, repo))
+
+
+def test_user_branch_list_on_a_detached_head_through_the_seam(
+    repo: Path,
+    pod: Path,
+    seam: MappedGit,
+    user_service: Any,
+    git_mcp_plugin: Any,
+    monkeypatch,
+) -> None:
+    _git(repo, "checkout", "-q", "--detach", "HEAD")
+    expected = user_service.git_branch_list(repo)
+    assert expected["current"].startswith("(HEAD detached at ")
+    backend, _ = _plugin_backend(git_mcp_plugin, pod, repo, monkeypatch)
+    _forbid_local_git(monkeypatch)
+
+    assert user_service.git_branch_list(pod, git_backend=seam) == expected
+    assert user_service.git_branch_list(pod, git_backend=backend) == expected
+
+
+def test_user_branch_list_seam_failure_is_an_error(
+    repo: Path, pod: Path, user_service: Any, git_mcp_plugin: Any, monkeypatch
+) -> None:
+    backend, emulator = _plugin_backend(git_mcp_plugin, pod, repo, monkeypatch)
+    emulator.down = True
+    with pytest.raises(user_git_module.GitCommandError, match="Connection refused"):
+        user_service.git_branch_list(pod, git_backend=backend)
+
+
+@pytest.fixture
+
+
+def test_user_branch_list_through_the_real_git_mcp_plugin(
+    repo: Path, pod: Path, user_service: Any, git_mcp_plugin: Any, monkeypatch
+) -> None:
+    expected = user_service.git_branch_list(repo)
+    assert expected["current"] == "main"
+    assert "origin/remote-only" in expected["remote"]
+    backend, emulator = _plugin_backend(git_mcp_plugin, pod, repo, monkeypatch)
+    _forbid_local_git(monkeypatch)
+
+    assert user_service.git_branch_list(pod, git_backend=backend) == expected
+    assert "git_branch_list" not in emulator.tools
+
+
+    def tool(self, name: str, a: Any) -> Any:
+        self.tools.append(name)
+        assert a["cow_path"] == self._pod, a
+        if name == "git_symbolic_ref":
+            short = ["--short"] if a.get("short") else []
+            return self._structured(["symbolic-ref", *short, "HEAD"], "ref")
+        if name == "git_rev_parse":
+            return self._structured(["rev-parse", *a["args"]], "output")
+        if name == "git_branch_list":
+            return self._branch_list(a.get("include_remote", True))
+        if name == "git_for_each_ref":
+            return self._raw(
+                [
+                    "for-each-ref",
+                    f"--format={a['format']}",
+                    "--",
+                    *a.get("patterns", []),
+                ]
+            )
+        if name == "git_log_raw":
+            args = ["log", f"--format={a['format']}"]
+            if a.get("since"):
+                args.append(f"--since={a['since']}")
+            if a.get("max_count"):
+                args.append(f"--max-count={a['max_count']}")
+            return self._raw([*args, *a.get("revs", [])])
+        if name == "git_show_objects":
+            items = [self._raw(["show", f"{s['rev']}:{s['path']}"]) for s in a["specs"]]
+            return {"objects": items}
+        raise AssertionError(f"tool not emulated: {name}")
+
+
+    def urlopen(self, req: Any, timeout: Any = None) -> Any:
+        import io
+        import json
+        import urllib.error
+
+        if self.down:
+            raise urllib.error.URLError("[Errno 111] Connection refused")
+        params = json.loads(req.data.decode())["params"]
+        result: Dict[str, Any]
+        try:
+            result = {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            self.tool(params["name"], params["arguments"])
+                        ),
+                    }
+                ]
+            }
+        except _ToolError as exc:
+            result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+        return io.BytesIO(json.dumps({"jsonrpc": "2.0", "result": result}).encode())

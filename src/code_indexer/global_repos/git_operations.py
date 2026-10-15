@@ -1701,3 +1701,15 @@ class GitOperationsService:
             matches.append(current_match)
 
         return matches
+
+
+def is_revision_miss(exc: subprocess.CalledProcessError) -> bool:
+    """True when *exc* is git saying the revision (or any commit) does not
+    exist -- the only failure the seam may answer as empty or not found."""
+    stderr = exc.stderr
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    return any(marker in str(stderr or "") for marker in _REVISION_MISS_MARKERS)
+
+
+# Timeout for git blame on repos with deep history (Bug #1008)

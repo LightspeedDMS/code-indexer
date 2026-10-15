@@ -566,8 +566,7 @@ def test_mcp_handler_shapes_match_todays(
         handlers, "_invalidate_wiki_cache", lambda a, p: invalidated.append((a, p))
     )
     _delegate(world)
-    # A stand-in for the authenticated User: the handler reads .username only.
-    user: Any = SimpleNamespace(username=USER)
+    user = SimpleNamespace(username=USER)
 
     ok = handlers.handle_create_file(
         {"repository_alias": ALIAS, "file_path": "m.md", "content": "m\n"}, user
@@ -597,16 +596,10 @@ def test_the_remote_tree_is_really_elsewhere(world: SimpleNamespace) -> None:
     assert (world.remote_tree / "z.md").exists()
 
 
-def test_an_activated_repo_writes_through_the_writer_never_its_local_path(
+def test_an_activated_repo_still_writes_its_local_workspace(
     world: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Under a delegated backend an activated copy is written by the content
-    writer at the copy's path, like a golden repo -- never this pod's disk.
-
-    (Before activated copies moved behind the seam this test pinned the
-    opposite. The writer here covers cidx-meta only, so it refuses the
-    copy's path: the write must fail loudly, not fall back to local.)
-    """
+    """Out of scope here (per-user workspaces): never routed to the writer."""
     from code_indexer.server.services import file_crud_service as crud_mod
 
     workspace = tmp_path / "activated-repos" / USER / "mine"
@@ -618,8 +611,28 @@ def test_an_activated_repo_writes_through_the_writer_never_its_local_path(
     monkeypatch.setattr(crud_mod, "_get_activated_repo_manager", lambda: manager)
     _delegate(world)
 
-    with pytest.raises(CRUDOperationError):
-        world.delegated.create_file("mine", "w.md", "w\n", USER)
+    world.delegated.create_file("mine", "w.md", "w\n", USER)
 
-    assert [call[1] for call in world.writer.calls] == [str(workspace / "w.md")]
-    assert not (workspace / "w.md").exists()
+    assert (workspace / "w.md").read_bytes() == b"w\n"
+    assert world.writer.calls == []
+
+
+def test_an_activated_repo_still_writes_its_local_workspace(
+    world: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Out of scope here (per-user workspaces): never routed to the writer."""
+    from code_indexer.server.services import file_crud_service as crud_mod
+
+    workspace = tmp_path / "activated-repos" / USER / "mine"
+    workspace.mkdir(parents=True)
+    manager = SimpleNamespace(
+        user_has_activated_repo=lambda user, alias: True,
+        get_activated_repo_path=lambda username, user_alias: str(workspace),
+    )
+    monkeypatch.setattr(crud_mod, "_get_activated_repo_manager", lambda: manager)
+    _delegate(world)
+
+    world.delegated.create_file("mine", "w.md", "w\n", USER)
+
+    assert (workspace / "w.md").read_bytes() == b"w\n"
+    assert world.writer.calls == []

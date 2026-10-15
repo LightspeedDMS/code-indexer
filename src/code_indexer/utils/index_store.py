@@ -113,6 +113,15 @@ _STORE_ALIAS_MAX = 128
 _ALIAS_HASH_CHARS = 8
 
 
+#: Store aliases of activated (per-user) copies start with this; a golden
+#: repo's store alias never does (``index_store_alias``), so the two
+#: namespaces cannot collide whatever a golden repo is called.
+ACTIVATED_STORE_ALIAS_PREFIX = "activated."
+_ACTIVATED_DIGEST_CHARS = 40
+_ACTIVATED_STORE_ALIAS_RE = re.compile(
+    r"^" + re.escape(ACTIVATED_STORE_ALIAS_PREFIX) + r"[0-9a-f]{40}$"
+)
+
 #: Store aliases of golden repos' TEMPORAL shards start with this; a golden
 #: repo's index alias never does (``index_store_alias``), so the two cannot
 #: share a version history whatever a golden repo is called.
@@ -133,16 +142,38 @@ def index_store_alias(repo_name: str) -> str:
     temporal-shard namespace (``TEMPORAL_STORE_ALIAS_PREFIX``) is hashed and
     moved out of it.
     """
-    reserved = repo_name.startswith(TEMPORAL_STORE_ALIAS_PREFIX)
+    _reserved_prefixes = (ACTIVATED_STORE_ALIAS_PREFIX, TEMPORAL_STORE_ALIAS_PREFIX)
+    reserved = any(repo_name.startswith(p) for p in _reserved_prefixes)
     if _STORE_ALIAS_RE.match(repo_name) and ".." not in repo_name and not reserved:
         return repo_name
     base = re.sub(r"[^a-z0-9._-]+", "-", repo_name.lower())
     base = re.sub(r"\.{2,}", ".", base)
     base = re.sub(r"^[^a-z0-9]+", "", base) or "repo"
-    if base.startswith(TEMPORAL_STORE_ALIAS_PREFIX):
+    if any(base.startswith(p) for p in _reserved_prefixes):
         base = "golden-" + base
     digest = hashlib.sha256(repo_name.encode("utf-8")).hexdigest()[:_ALIAS_HASH_CHARS]
     return f"{base[: _STORE_ALIAS_MAX - _ALIAS_HASH_CHARS - 1]}-{digest}"
+
+
+def activated_index_store_alias(username: str, user_alias: str) -> str:
+    """The artifact-store alias for ONE user's activated copy.
+
+    Derived server-side from the registry's ``(username, user_alias)`` pair --
+    never from a client value -- as a digest, so it carries no user data and
+    two copies (of the same or different users) never share a version
+    history. Always in the activated namespace, never a golden alias.
+    """
+    if not username or not user_alias:
+        raise ValueError("an activated copy needs a username and a user alias")
+    digest = hashlib.sha256(f"{username}\0{user_alias}".encode("utf-8")).hexdigest()[
+        :_ACTIVATED_DIGEST_CHARS
+    ]
+    return ACTIVATED_STORE_ALIAS_PREFIX + digest
+
+
+def is_activated_store_alias(store_alias: str) -> bool:
+    """True for exactly the aliases ``activated_index_store_alias`` produces."""
+    return bool(_ACTIVATED_STORE_ALIAS_RE.match(store_alias))
 
 
 #: Alias-document field: the store alias a target's index is published under.
