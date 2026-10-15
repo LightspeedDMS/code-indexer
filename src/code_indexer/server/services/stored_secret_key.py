@@ -299,47 +299,82 @@ class StoredSecretCipher:
 
     def encrypt(self, plaintext: str) -> str:
         from code_indexer.server.services.token_encryption import (
-            derive_encryption_key,
             encrypt_token,
             encrypt_v2,
+            legacy_write_key,
         )
 
         if self.v2_writes_allowed():
             return encrypt_v2(plaintext, self._v2_key)
-        return encrypt_token(plaintext, derive_encryption_key(self._server_dir, None))
+        return encrypt_token(plaintext, legacy_write_key(self._server_dir))
 
-    def _legacy_keys(self) -> List[bytes]:
+    def _legacy_key_set(self) -> Tuple[List[bytes], bool]:
+        """(keys, complete); complete is False when a source could not be read."""
         from code_indexer.server.services.token_encryption import (
             legacy_candidate_keys,
+            warn_unreadable_legacy_source,
         )
 
         if self._legacy_keys_override is not None:
-            return list(self._legacy_keys_override())
+            return list(self._legacy_keys_override()), True
         shared = self._cluster_secret
+        shared_read = True
         if self._pool is not None:
-            shared = _read_cluster_jwt_secret(self._pool)
-        return legacy_candidate_keys(self._server_dir, shared)
+            try:
+                shared = _read_cluster_jwt_secret(self._pool)
+            except Exception as exc:  # one source failing must not stop the rest
+                warn_unreadable_legacy_source("cluster_secrets.jwt_secret", exc)
+                shared, shared_read = None, False
+        keys, files_read = legacy_candidate_keys(self._server_dir, shared)
+        return keys, shared_read and files_read
 
     def decrypt(self, value: str) -> Tuple[str, bool]:
-        """(plaintext, is_legacy); raises a ValueError subclass when unreadable."""
+        """(plaintext, is_legacy); raises a ValueError subclass when unreadable
+        (StoredSecretUndetermined when a key source could not be read)."""
         from code_indexer.server.services.token_encryption import (
+            StoredSecretAmbiguous,
             StoredSecretKeyMismatch,
+            StoredSecretUndetermined,
+            StoredSecretUnreadable,
             decrypt_v2,
             decrypt_with_fallback,
         )
 
+        complete = True
+
+        def legacy_keys() -> List[bytes]:
+            nonlocal complete
+            keys, complete = self._legacy_key_set()
+            return keys
+
+        undetermined = StoredSecretUndetermined(
+            f"{self._label}: a key source could not be read; the stored secret "
+            "is left as it is"
+        )
         try:
-            return decrypt_with_fallback(
-                value, self._v2_key, self._legacy_keys, self._label
-            )
-        except StoredSecretKeyMismatch:
+            return decrypt_with_fallback(value, self._v2_key, legacy_keys, self._label)
+        except StoredSecretAmbiguous:
+            raise
+        except StoredSecretUnreadable:
+            if complete:
+                raise
+            raise undetermined from None
+        except StoredSecretKeyMismatch as mismatch:
             # The server_dir key file exists after solo operation (or when a
             # component ran before the cluster key source was configured); a
             # v2 value under it is read and rewritten under the cluster key.
             solo_file = self._server_dir / KEY_FILENAME
             if self._pool is None or not os.path.lexists(solo_file):
                 raise
-            solo_key = validate_key(_read_checked(solo_file), str(solo_file))
+            try:
+                solo_key = validate_key(_read_checked(solo_file), str(solo_file))
+            except StoredSecretKeyError as exc:  # a secondary source: skip it
+                from code_indexer.server.services.token_encryption import (
+                    warn_unreadable_legacy_source,
+                )
+
+                warn_unreadable_legacy_source(str(solo_file), exc)
+                raise undetermined from mismatch
             return decrypt_v2(value, solo_key), True
 
     def rewrite_value(self, plaintext: str) -> Optional[str]:

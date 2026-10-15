@@ -18,8 +18,9 @@ import functools
 import hashlib
 import logging
 import os
+import threading
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Set, Tuple
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.backends import default_backend
@@ -53,6 +54,16 @@ class StoredSecretAmbiguous(StoredSecretUnreadable):
     kept unchanged and treated as unreadable."""
 
 
+class StoredSecretUndetermined(StoredSecretUnreadable):
+    """No available key decrypts the value, but a legacy key source could not
+    be read: not a verdict, so the value is not marked as needing re-entry."""
+
+
+class StoredSecretLegacyWriteRefused(RuntimeError):
+    """A legacy-format write (cluster gate closed) has no readable
+    ``.encryption_key_salt`` to derive its key from."""
+
+
 @functools.lru_cache(maxsize=32)
 def derive_key_from_salt(salt_input: str) -> bytes:
     """The legacy-format key for one legacy key source (compatibility only)."""
@@ -83,25 +94,71 @@ def derive_encryption_key(
     return derive_key_from_salt(os.uname().nodename)
 
 
+def legacy_write_key(server_dir: Path) -> bytes:
+    """The key for a legacy-format write: only a readable existing
+    ``.encryption_key_salt`` (the derivation older nodes read with)."""
+    salt, _ = read_legacy_source(Path(server_dir) / _SALT_FILENAME, strip=False)
+    if salt is None:
+        raise StoredSecretLegacyWriteRefused(
+            "Stored-secret upgrade in progress across the cluster and this node "
+            "has no readable legacy key file; retry after all nodes run 12.90 "
+            "or later"
+        )
+    return derive_key_from_salt(salt)
+
+
 def legacy_candidate_keys(
     server_dir: Optional[Path], cluster_jwt_secret: Optional[str]
-) -> List[bytes]:
-    """Every legacy-format key earlier versions may have written a stored
-    value with; missing sources are skipped, duplicates tried once."""
-    salts: List[str] = []
+) -> Tuple[List[bytes], bool]:
+    """(keys, complete): every legacy-format key earlier versions may have
+    written a stored value with, duplicates tried once. Missing sources are
+    skipped; an unreadable source is skipped and makes ``complete`` False."""
+    salt: Tuple[Optional[str], bool] = (None, False)
+    jwt: Tuple[Optional[str], bool] = (None, False)
     if server_dir is not None:
-        salt_file = Path(server_dir) / _SALT_FILENAME
-        if salt_file.is_file():
-            salts.append(salt_file.read_text())
-    if cluster_jwt_secret:
-        salts.append(cluster_jwt_secret)
-    if server_dir is not None:
-        jwt_file = Path(server_dir) / _JWT_SECRET_FILENAME
-        if jwt_file.is_file():
-            salts.append(jwt_file.read_text().strip())
-    salts.append(os.uname().nodename)
+        salt = read_legacy_source(Path(server_dir) / _SALT_FILENAME, strip=False)
+        jwt = read_legacy_source(Path(server_dir) / _JWT_SECRET_FILENAME, strip=True)
+    complete = not salt[1] and not jwt[1]
+    salts = [salt[0], cluster_jwt_secret, jwt[0], os.uname().nodename]
     unique = [s for i, s in enumerate(salts) if s and s not in salts[:i]]
-    return [derive_key_from_salt(s) for s in unique]
+    return [derive_key_from_salt(s) for s in unique], complete
+
+
+_WARNED_SOURCES: Set[str] = set()
+_WARNED_LOCK = threading.Lock()
+
+
+def warn_unreadable_legacy_source(source: str, exc: BaseException) -> None:
+    """One WARNING per legacy key source per process (never its content)."""
+    with _WARNED_LOCK:
+        if source in _WARNED_SOURCES:
+            return
+        _WARNED_SOURCES.add(source)
+    logger.warning(
+        "Legacy key source %s is unreadable (%s); it is skipped",
+        source,
+        type(exc).__name__,
+    )
+
+
+class NotARegularFile(OSError):
+    """A legacy key path exists but is not a regular file."""
+
+
+def read_legacy_source(path: Path, strip: bool) -> Tuple[Optional[str], bool]:
+    """(text, unreadable): text is None when nothing exists at the path
+    (unreadable False) or when it exists but is not a readable regular text
+    file (unreadable True, one WARNING)."""
+    try:
+        if not os.path.lexists(path):
+            return None, False
+        if not path.is_file():
+            raise NotARegularFile(f"{path} is not a regular file")
+        text = path.read_text()
+    except (OSError, ValueError) as exc:
+        warn_unreadable_legacy_source(str(path), exc)
+        return None, True
+    return (text.strip() if strip else text), False
 
 
 def encrypt_token(plaintext: str, key: bytes) -> str:

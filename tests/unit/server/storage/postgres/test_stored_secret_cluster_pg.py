@@ -309,6 +309,42 @@ def cluster_source(pool: object) -> Iterator[object]:
     clear_cluster_key_source()
 
 
+def test_startup_prepare_leaves_a_directory_at_the_salt_path_untouched(
+    pool: object, tmp_path: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from code_indexer.server.services.stored_secret_key import (
+        clear_cluster_key_source,
+        cluster_pool,
+        register_local_node,
+    )
+    from code_indexer.server.startup.stored_secret_startup import _prepare_sync
+
+    register_local_node("node-a")
+    with pool.connection() as conn:  # type: ignore[attr-defined]
+        conn.execute(
+            "INSERT INTO cluster_secrets (key_name, key_value)"
+            " VALUES ('jwt_secret', 'shared-cluster-jwt-example')"
+        )
+        conn.commit()
+    salt_path = Path(str(tmp_path)) / ".encryption_key_salt"
+    salt_path.mkdir()
+    (salt_path / "marker").write_text("kept")
+    caplog.set_level(logging.WARNING)
+    try:
+        _prepare_sync(
+            Path(str(tmp_path)), "postgres", SimpleNamespace(connection_pool=pool)
+        )
+        assert cluster_pool() is not None
+    finally:
+        clear_cluster_key_source()
+    assert salt_path.is_dir() and (salt_path / "marker").read_text() == "kept"
+    assert len([r for r in caplog.records if str(salt_path) in r.getMessage()]) == 1
+
+
 def _git_manager(pool: object, server_dir: object) -> object:
     from code_indexer.server.services.git_credential_manager import (
         GitCredentialManager,
@@ -356,10 +392,23 @@ def _stored_git(pool: object) -> str:
 def test_gate_closed_writes_legacy_and_does_not_rewrite(
     cluster_source: object, tmp_path: object
 ) -> None:
+    from pathlib import Path
+
+    from code_indexer.server.services.token_encryption import (
+        StoredSecretLegacyWriteRefused,
+        decrypt_single,
+        derive_key_from_salt,
+    )
+
     _node(cluster_source, "node-new", _capable())
     _node(cluster_source, "node-old", {"zone": "example"})
     mgr = _git_manager(cluster_source, tmp_path)
-    assert not mgr._encrypt_token("ghp_" + "f" * 36).startswith("v2:")  # type: ignore[attr-defined]
+    token = "ghp_" + "f" * 36
+    with pytest.raises(StoredSecretLegacyWriteRefused):  # no salt file
+        mgr._encrypt_token(token)  # type: ignore[attr-defined]
+    (Path(str(tmp_path)) / ".encryption_key_salt").write_text("salt-example")
+    written = mgr._encrypt_token(token)  # type: ignore[attr-defined]
+    assert decrypt_single(written, derive_key_from_salt("salt-example")) == token
     legacy = _seed_legacy_git(cluster_source)
     cred = mgr.get_credential_for_host("alice", "git.example.com")  # type: ignore[attr-defined]
     assert cred["token"] == "legacy-pat"

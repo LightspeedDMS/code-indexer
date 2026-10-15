@@ -79,7 +79,7 @@ def test_legacy_value_from_each_derivation_is_read_and_flagged(
     plaintext, is_legacy = decrypt_with_fallback(
         legacy,
         Fernet.generate_key(),
-        lambda: legacy_candidate_keys(server_dir, "shared-cluster-jwt"),
+        lambda: legacy_candidate_keys(server_dir, "shared-cluster-jwt")[0],
         "test",
     )
     assert plaintext == TOKEN
@@ -113,7 +113,7 @@ def test_legacy_value_no_candidate_reads_raises_unreadable(tmp_path: Path) -> No
         decrypt_with_fallback(
             legacy,
             Fernet.generate_key(),
-            lambda: legacy_candidate_keys(tmp_path, None),
+            lambda: legacy_candidate_keys(tmp_path, None)[0],
             "test",
         )
 
@@ -160,7 +160,7 @@ def test_sweep_keeps_and_marks_an_ambiguous_legacy_row(tmp_path: Path) -> None:
 def test_candidates_dedupe_and_skip_missing_sources(tmp_path: Path) -> None:
     host = os.uname().nodename
     _server_dir(tmp_path, salt=host)
-    keys = legacy_candidate_keys(tmp_path, None)
+    keys, _ = legacy_candidate_keys(tmp_path, None)
     assert keys == [derive_key_from_salt(host)]
 
 
@@ -170,7 +170,7 @@ def test_candidate_order_prefers_salt_file(tmp_path: Path) -> None:
         "os.uname",
         return_value=os.uname_result(("L", "h.example.com", "r", "v", "m")),
     ):
-        keys = legacy_candidate_keys(tmp_path, "c")
+        keys, _ = legacy_candidate_keys(tmp_path, "c")
     assert keys == [
         derive_key_from_salt("s"),
         derive_key_from_salt("c"),

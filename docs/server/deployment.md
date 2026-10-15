@@ -296,6 +296,17 @@ Stop the service (or use `sqlite3 <db> ".backup <dest>"` per database) for a con
   `remaining=0` for every table (on every node in a cluster).
 - Startup aborts when the key file exists but cannot be used (not a regular file, not owned by the server user,
   or corrupt). Wider permissions are reset to 0600 with a warning.
+- A legacy key file the server user cannot read (`.encryption_key_salt`, `.jwt_secret`) is left untouched and
+  skipped with one warning naming the file; startup and reads continue with the other keys. A credential that
+  only that file decrypts is neither marked as needing re-entry nor rewritten: it reads as unavailable and is
+  counted under `errors=N` in the sweep line until the file is readable by the server user, then the next start
+  reads and rewrites it. `errors=N` also counts rows the sweep could not process for any other reason; they are
+  left unchanged and retried at the next start.
+- Solo servers and clusters whose nodes all run 12.90 or later write only the new format. In a cluster that still
+  has an older node, saving a git credential or CI token on a node whose `.encryption_key_salt` is missing or
+  unreadable is refused with an error saying the upgrade is in progress; retry once every node runs 12.90 or
+  later (or make the file readable). Cluster startup does not create `.encryption_key_salt` while `.jwt_secret`
+  is unreadable.
 
 `~/.cidx-server/data/golden-repos/` can be rebuilt by re-registering and re-indexing the repositories, at the cost
 of the indexing time and embedding-provider calls; back it up if that cost matters.

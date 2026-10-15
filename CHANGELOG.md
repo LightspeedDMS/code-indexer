@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.91.0] - 2026-10-15
+
+### Upgrade notes
+
+- Server: 12.91.0 supersedes 12.90.0; upgrade directly from 12.89 or earlier to 12.91.0. The 12.90.0 upgrade notes (stored-secret key, one-way upgrade, key file backup) apply unchanged.
+- Server: a legacy key file the service user cannot read (for example a `.jwt_secret` owned by another user) is now skipped with one warning; stored credentials are still read with the remaining legacy keys. Credentials that only such a file can decrypt are counted as errors by the startup sweep and are not marked as needing re-entry; they convert once the file is readable.
+- Server (cluster): while some nodes still run a version before 12.90, saving a git credential or CI token is refused with a retry message (HTTP 409 on the Web pages, a failure result in MCP) unless the node has a readable `.encryption_key_salt`; it succeeds once every node runs 12.90 or later.
+
+### Fixed
+
+- Server: stored credentials that were readable before the upgrade stay readable when a legacy key file is unreadable, and the startup stored-secret sweep completes instead of stopping at the first such row.
+- Server: a stored credential is marked as needing re-entry only when every legacy key was available and none (or more than one) matched.
+
 ## [12.90.0] - 2026-10-15
 
 ### Upgrade notes
