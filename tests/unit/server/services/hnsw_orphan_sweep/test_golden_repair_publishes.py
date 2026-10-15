@@ -23,6 +23,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -412,6 +413,9 @@ def test_a_refresh_snapshot_carries_the_marker(world: Dict[str, Any]) -> None:
     scheduler._snapshot_manager = _Snapshots()
     scheduler.resource_config = None
     scheduler._run_subprocess = lambda *a, **k: None
+    scheduler._pending_meta_fingerprints = {}
+    scheduler._pending_index_publications = {}
+    scheduler._registry = MagicMock()
     source = world["golden"].parent / "src" / REPO
     (source / INDEX_DIRNAME / "index").mkdir(parents=True)
     snapshot = Path(scheduler._create_snapshot(ALIAS, str(source)))

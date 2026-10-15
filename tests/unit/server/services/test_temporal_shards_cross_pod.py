@@ -26,6 +26,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -272,6 +273,7 @@ def _scheduler(golden: Path, store: Any) -> Any:
     scheduler._pending_meta_fingerprints = {}
     scheduler._pending_index_publications = {}
     scheduler._run_subprocess = lambda *a, **k: None
+    scheduler._registry = MagicMock()
     source = golden / REPO
     (source / INDEX_DIRNAME / "index").mkdir(parents=True, exist_ok=True)
     return scheduler
@@ -351,6 +353,9 @@ def _sweeper(outcome: SweepOutcome, root: Path, order: List[str]) -> Any:
         sweep.HNSWOrphanRepairSweepScheduler
     )
     instance._activated_repo_manager = None
+    golden_mgr = MagicMock()
+    golden_mgr.golden_repos_dir = str(root.parent)
+    instance._golden_repo_manager = golden_mgr
 
     def process(candidate: Any) -> SweepOutcome:
         order.append("repair")

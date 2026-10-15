@@ -57,8 +57,11 @@ from code_indexer.server.services.cli_invoker_plugin import (
     invoker_resolves_golden_repositories,
 )
 from code_indexer.server.services.delegated_refusal import (
+    DelegatedRepositoryUnsupportedError,
     delegated_refusal,
-    refuse_when_delegated,
+)
+from code_indexer.server.startup.content_backend_wiring import (
+    is_content_seam_delegated,
 )
 from code_indexer.server.services.dep_map_dispatcher_factory import (
     build_dep_map_dispatcher,
@@ -68,16 +71,17 @@ _logger = logging.getLogger(__name__)
 
 #: Golden-repo lifecycle/description analysis under a delegated content
 #: backend. The analysis agent is handed the repository through THIS pod's
-#: clone path: a local Claude CLI reads it with its own file tools, and the
-#: orchestrator invoker plugin resolves the repo to provision from that path's
-#: local git origin. A mount-less pod holds index state only at that path, so
-#: the agent would analyze an empty tree and a plausible-looking description
-#: would be written to cidx-meta (the dependency-map refusal, same reason).
+#: clone path, which on a mount-less pod holds index state only. An invoker
+#: that provisions the repository itself from cidx's golden registry
+#: (cidx_orchestrator_invoker: registered remote, branch and the indexed commit
+#: via git-mcp) analyzes the real repository; the built-in local Claude CLI
+#: would read the pod path and describe an empty tree into cidx-meta, so it
+#: refuses (the dependency-map refusal, same reason).
 LIFECYCLE_ANALYSIS_FEATURE = "Golden-repo lifecycle/description analysis"
 LIFECYCLE_ANALYSIS_REFUSAL_REASON = (
-    "its analysis agent reads the repository from this pod's clone path "
-    "(local Claude CLI file tools; the orchestrator invoker resolves the repo "
-    "from that path's local git origin), which holds index state only"
+    "the configured CLI invoker reads the repository from this pod's clone "
+    "path, which holds index state only; configure an invoker that provisions "
+    "golden repositories itself (cidx_orchestrator_invoker)"
 )
 
 # Absolute path to the packaged unified prompt.  Resolved once at import
@@ -361,10 +365,17 @@ class LifecycleClaudeCliInvoker:
         # Refuse BEFORE the first look at the pod's disk (_validate_repo_inputs):
         # on a delegated pod the directory holds index state at most, never the
         # repository, so validation could pass and the agent analyze nothing.
-        refuse_when_delegated(
-            LIFECYCLE_ANALYSIS_FEATURE, LIFECYCLE_ANALYSIS_REFUSAL_REASON
-        )
-        path_obj = self._validate_repo_inputs(alias, repo_path)
+        if lifecycle_analysis_refusal() is not None:
+            raise DelegatedRepositoryUnsupportedError(
+                LIFECYCLE_ANALYSIS_FEATURE, LIFECYCLE_ANALYSIS_REFUSAL_REASON
+            )
+        if is_content_seam_delegated():
+            # The invoker provisions the repository from the golden registry
+            # and git-mcp (and fails loud when they cannot answer); this pod's
+            # directory says nothing about it.
+            path_obj = self._validate_repo_names(alias, repo_path)
+        else:
+            path_obj = self._validate_repo_inputs(alias, repo_path)
         _lifecycle_cfg = get_config_service().get_config().lifecycle_analysis_config
         # The agent's subprocess cwd is a neutral scratch directory, never the
         # repo itself, so the repo's own CLAUDE.md/AGENTS.md is not auto-loaded

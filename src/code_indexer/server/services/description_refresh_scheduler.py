@@ -49,17 +49,15 @@ TERSE_DESCRIPTION_MAX_CHARS = 200
 
 
 def _lifecycle_analysis_refusal() -> Optional[str]:
-    """Why lifecycle/description analysis cannot run on this server, or None
-    (delegated content backend: see lifecycle_claude_cli_invoker)."""
-    from code_indexer.global_repos.lifecycle_claude_cli_invoker import (
-        LIFECYCLE_ANALYSIS_FEATURE,
-        LIFECYCLE_ANALYSIS_REFUSAL_REASON,
-    )
-    from code_indexer.server.services.delegated_refusal import delegated_refusal
+    """Why lifecycle/description analysis cannot run on this server, or None.
 
-    return delegated_refusal(
-        LIFECYCLE_ANALYSIS_FEATURE, LIFECYCLE_ANALYSIS_REFUSAL_REASON
+    Delegated content backend: runs when the CLI invoker provisions golden
+    repositories itself (see lifecycle_claude_cli_invoker)."""
+    from code_indexer.global_repos.lifecycle_claude_cli_invoker import (
+        lifecycle_analysis_refusal,
     )
+
+    return lifecycle_analysis_refusal()
 
 
 def _build_claude_env() -> dict:

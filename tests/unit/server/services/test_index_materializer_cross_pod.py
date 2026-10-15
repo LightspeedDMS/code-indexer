@@ -24,6 +24,7 @@ import subprocess
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, cast
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -393,6 +394,7 @@ def _scheduler(world: Dict[str, Any], store: Any) -> rs.RefreshScheduler:
     scheduler._pending_meta_fingerprints = {}
     scheduler._pending_index_publications = {}
     scheduler._run_subprocess = lambda *a, **k: None
+    scheduler._registry = MagicMock()
     return cast(rs.RefreshScheduler, scheduler)
 
 

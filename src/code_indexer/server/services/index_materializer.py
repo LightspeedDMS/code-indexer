@@ -178,19 +178,28 @@ def ensure_published_index(
     """Make the index published at ``target_path`` readable on this pod.
 
     ``document`` is the alias (or registry) document naming ``target_path``.
-    No-op under a local store or when the pod already serves the target.
-    ``fix_config`` defaults to ``run_fix_config``.
+    No-op under a local store or when the pod already serves the recorded
+    version: the pod holds an index there and either its
+    ``CHECKED_OUT_MARKER`` names that version, or it carries no marker (an
+    index built here before markers existed). A target is re-published in
+    place only by a repair (HNSW orphan sweep), so a marker naming another
+    version means this pod holds the pre-repair index: it is swapped for the
+    recorded one. ``fix_config`` defaults to ``run_fix_config``.
     """
     if store.is_local:
         return
     target = Path(target_path)
-    if is_served_here(store, target):
+    if _serves_recorded(store, target, document):
         return
     store_alias, version = _recorded(document, target)
+    fix = fix_config or run_fix_config
     with _exclusive(target):
-        if is_served_here(store, target):
+        if _serves_recorded(store, target, document):
             return
-        _checkout(store, target, store_alias, version, fix_config or run_fix_config)
+        if is_served_here(store, target):
+            _replace(store, target, store_alias, version, fix)
+        else:
+            _checkout(store, target, store_alias, version, fix)
     _prune_superseded(target, document)
 
 
@@ -415,6 +424,7 @@ def _prune_superseded(target: Path, document: Optional[Mapping[str, Any]]) -> No
     previous = (document or {}).get("previous_path")
     if isinstance(previous, str) and previous:
         keep.add(str(Path(previous)))
+    newest = _snapshot_ts(target.name)
     try:
         siblings = list(target.parent.iterdir())
     except OSError as exc:
@@ -422,6 +432,8 @@ def _prune_superseded(target: Path, document: Optional[Mapping[str, Any]]) -> No
         return
     for sibling in siblings:
         if str(sibling) in keep or not _SNAPSHOT_NAME_RE.match(sibling.name):
+            continue
+        if _snapshot_ts(sibling.name) > newest:
             continue
         if not (sibling / CHECKED_OUT_MARKER).is_file():
             continue

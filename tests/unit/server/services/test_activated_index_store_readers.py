@@ -234,6 +234,9 @@ def _scheduler(outcome: SweepOutcome) -> Any:
         sweep.HNSWOrphanRepairSweepScheduler
     )
     instance._activated_repo_manager = MagicMock()
+    golden_mgr = MagicMock()
+    golden_mgr.golden_repos_dir = "/tmp/nonexistent-golden"
+    instance._golden_repo_manager = golden_mgr
     order: List[str] = []
     instance._activated_repo_manager.serve_index_here.side_effect = lambda *a: (
         order.append("serve")

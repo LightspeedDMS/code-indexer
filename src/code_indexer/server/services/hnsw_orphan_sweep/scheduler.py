@@ -856,7 +856,8 @@ class HNSWOrphanRepairSweepScheduler:
 
         current = store.current_version_as(store_alias)
         if current is not None and current != base:
-            our_version = self._our_published.get(candidate.sort_key)
+            our_published = getattr(self, "_our_published", {})
+            our_version = our_published.get(candidate.sort_key)
             if our_version is not None and current == our_version:
                 logger.info(
                     "HNSWOrphanRepairSweepScheduler: store %s holds version %s "
@@ -909,7 +910,9 @@ class HNSWOrphanRepairSweepScheduler:
             return SweepOutcome.ERROR
         published_version = fields.get(INDEX_VERSION_FIELD)
         if published_version:
-            self._our_published[candidate.sort_key] = published_version
+            our_published = getattr(self, "_our_published", None)
+            if our_published is not None:
+                our_published[candidate.sort_key] = published_version
         if not self._try_record_republished(
             candidate, global_alias, target, base, fields
         ):
