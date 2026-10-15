@@ -12,7 +12,7 @@ is reusable by any cluster-mode service (e.g. SSHKeyManager).
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from cryptography.fernet import Fernet
 
@@ -27,11 +27,6 @@ logger = logging.getLogger(__name__)
 def load_or_create_fernet_key(pool: Any, key_name: str) -> Fernet:
     """Load (or race-safely create) a Fernet key stored in cluster_secrets.
 
-    Uses INSERT ... ON CONFLICT (key_name) DO NOTHING so that concurrent
-    nodes racing to create the key all converge on the single winner written
-    by the first INSERT that commits.  After the INSERT + commit the winner
-    is determined by a final SELECT.
-
     Args:
         pool: psycopg3 connection pool (cluster mode).
         key_name: the cluster_secrets key_name
@@ -39,6 +34,23 @@ def load_or_create_fernet_key(pool: Any, key_name: str) -> Fernet:
 
     Returns:
         A Fernet instance built from the stored (winning) key value.
+    """
+    key_value = load_or_create_cluster_secret(
+        pool, key_name, lambda: Fernet.generate_key().decode()
+    )
+    return Fernet(key_value.encode())
+
+
+def load_or_create_cluster_secret(
+    pool: Any, key_name: str, generate: Callable[[], str]
+) -> str:
+    """Load (or race-safely create) a secret value stored in cluster_secrets.
+
+    Uses INSERT ... ON CONFLICT (key_name) DO NOTHING so that concurrent
+    nodes racing to create the value all converge on the single winner
+    written by the first INSERT that commits.  After the INSERT + commit the
+    winner is determined by a final SELECT.  *generate* builds a candidate
+    value; it is only stored when no value exists yet.
     """
     with pool.connection() as conn:
         # Try to read an existing key first
@@ -54,10 +66,10 @@ def load_or_create_fernet_key(pool: Any, key_name: str) -> Fernet:
                 "cluster_key_provider: loaded key '%s' from cluster_secrets",
                 key_name,
             )
-            return Fernet(key_value.encode())
+            return key_value
 
         # Key not present — generate and insert (race-safe)
-        new_key = Fernet.generate_key().decode()
+        new_key = generate()
         conn.execute(
             """
             INSERT INTO cluster_secrets (key_name, key_value)
@@ -75,9 +87,11 @@ def load_or_create_fernet_key(pool: Any, key_name: str) -> Fernet:
                 (key_name,),
             ).fetchone()
 
-        key_value = row["key_value"]  # type: ignore[index]
+        if row is None:
+            raise RuntimeError(f"cluster_secrets row '{key_name}' missing after insert")
+        key_value = row["key_value"]
         logger.info(
             "cluster_key_provider: generated and stored key '%s' in cluster_secrets",
             key_name,
         )
-        return Fernet(key_value.encode())
+        return key_value

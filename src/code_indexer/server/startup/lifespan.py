@@ -685,13 +685,17 @@ def make_lifespan(
         # Story #680: Store latency_tracker in app.state for dashboard route access.
         app.state.latency_tracker = latency_tracker
 
-        # Story #999: Seed .encryption_key_salt before any manager construction.
-        # Propagates on failure so startup aborts — managers require this file.
-        from code_indexer.server.services.encryption_key_salt import (
-            ensure_encryption_key_salt,
+        # Stored-secret key (file solo, cluster_secrets cluster) before any
+        # credential manager is built; an unusable key aborts startup.
+        from code_indexer.server.startup.stored_secret_startup import (
+            prepare_stored_secret_key,
+            start_stored_secret_sweep,
+            stop_stored_secret_sweep,
         )
 
-        ensure_encryption_key_salt(Path(server_data_dir), storage_mode)
+        await prepare_stored_secret_key(
+            Path(server_data_dir), storage_mode, backend_registry
+        )
 
         # Startup: Initialize SQLite log handler FIRST (to capture all startup logs)
         logger.info(
@@ -3430,17 +3434,22 @@ def make_lifespan(
                         create_token_manager,
                     )
 
-                    token_manager = create_token_manager(
-                        server_dir=server_data_dir,
-                        db_path=db_path,
-                        storage_backend=(
-                            backend_registry.ci_tokens
-                            if backend_registry is not None
-                            else None
-                        ),
-                        storage_mode=storage_mode,
+                    def _read_github_token() -> Any:
+                        return create_token_manager(
+                            server_dir=server_data_dir,
+                            db_path=db_path,
+                            storage_backend=(
+                                backend_registry.ci_tokens
+                                if backend_registry is not None
+                                else None
+                            ),
+                            storage_mode=storage_mode,
+                        ).get_token("github")
+
+                    # Key file / database / cluster gate I/O: off the event loop.
+                    github_token_data = await anyio.to_thread.run_sync(
+                        _read_github_token
                     )
-                    github_token_data = token_manager.get_token("github")
                     github_token = (
                         github_token_data.token if github_token_data else None
                     )
@@ -5301,7 +5310,20 @@ def make_lifespan(
         # of truth so that the division is in place when the singletons are first
         # constructed, not after.
 
+        # Rewrite legacy stored secrets as v2 (worker thread; after the node
+        # heartbeat advertises its capabilities).
+        start_stored_secret_sweep(app, Path(server_data_dir), backend_registry)
+
         yield  # Server is now running
+
+        try:
+            await stop_stored_secret_sweep(app)
+        except Exception as _sweep_stop_exc:
+            # Non-fatal: never abort the remaining shutdown chain.
+            logger.warning(
+                "Stored-secret sweep shutdown failed (%s)",
+                type(_sweep_stop_exc).__name__,
+            )
 
         # Story #1083: close the pooled production httpx client owned by the
         # HttpClientFactory. On the production path (fault injection OFF) the

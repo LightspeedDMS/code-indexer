@@ -152,20 +152,17 @@ class TestCITokenManagerServerDir:
         assert result is not None
         assert result.token == TEST_GITHUB_TOKEN
 
-    def test_different_salt_files_produce_different_keys(self, tmp_path):
-        """Two CITokenManagers with different salt files derive different encryption keys."""
+    def test_different_server_dirs_use_different_random_keys(self, tmp_path):
+        """Two server dirs hold independent random stored-secret keys."""
         sd1 = tmp_path / "sd1"
         sd1.mkdir()
-        (sd1 / ".encryption_key_salt").write_text("salt-one")
-
         sd2 = tmp_path / "sd2"
         sd2.mkdir()
-        (sd2 / ".encryption_key_salt").write_text("salt-two")
 
         mgr1 = CITokenManager(server_dir_path=str(sd1), server_dir=str(sd1))
         mgr2 = CITokenManager(server_dir_path=str(sd2), server_dir=str(sd2))
 
-        assert mgr1._encryption_key != mgr2._encryption_key
+        assert mgr1._cipher._v2_key != mgr2._cipher._v2_key
 
     def test_try_decrypt_fallback_ci_token_legacy_hostname_key(
         self, server_dir, db_path
@@ -242,22 +239,18 @@ class TestGitCredentialManagerServerDir:
         assert result is not None
         assert result["token"] == plaintext
 
-    def test_different_salt_files_produce_different_keys(self, tmp_path):
-        """Two GitCredentialManagers with different salt files derive different keys."""
+    def test_different_server_dirs_use_different_random_keys(self, tmp_path):
+        """Two server dirs hold independent random stored-secret keys."""
         db_path = _make_git_db(tmp_path)
-
         sd1 = tmp_path / "sd1"
         sd1.mkdir()
-        (sd1 / ".encryption_key_salt").write_text("salt-alpha")
-
         sd2 = tmp_path / "sd2"
         sd2.mkdir()
-        (sd2 / ".encryption_key_salt").write_text("salt-beta")
 
         mgr1 = GitCredentialManager(db_path=str(db_path), server_dir=str(sd1))
         mgr2 = GitCredentialManager(db_path=str(db_path), server_dir=str(sd2))
 
-        assert mgr1._encryption_key != mgr2._encryption_key
+        assert mgr1._cipher._v2_key != mgr2._cipher._v2_key
 
     def test_try_decrypt_fallback_git_credential_legacy_hostname_key(
         self, server_dir, db_path

@@ -186,38 +186,37 @@ class TestEncryptDecryptSingle:
 
 
 class TestDecryptWithFallback:
-    """Tests for decrypt_with_fallback() — tries canonical key then hostname fallback."""
+    """decrypt_with_fallback(): v2 values use the v2 key; legacy values try
+    every legacy candidate key and are flagged for rewrite."""
 
-    def test_returns_plaintext_and_false_when_canonical_key_works(self):
+    _V2_KEY = b"x" * 43 + b"="  # never used for legacy values
+
+    def test_legacy_value_read_with_first_candidate_is_flagged_legacy(self):
         key = derive_key_from_salt("canonical-salt")
         encrypted = encrypt_token("my-secret-token-value", key)
-        plaintext, used_fallback = decrypt_with_fallback(
-            encrypted, canonical_key=key, context_label="test"
+        plaintext, is_legacy = decrypt_with_fallback(
+            encrypted, self._V2_KEY, lambda: [key], "test"
         )
         assert plaintext == "my-secret-token-value"
-        assert used_fallback is False
+        assert is_legacy is True
 
-    def test_returns_plaintext_and_true_when_fallback_needed(self):
-        """When canonical key fails, tries hostname-derived fallback key."""
+    def test_legacy_value_read_with_later_candidate(self):
         hostname_key = derive_key_from_salt(_hostname())
         encrypted = encrypt_token("my-secret-token-value", hostname_key)
-
-        different_canonical = derive_key_from_salt("some-other-salt")
-        plaintext, used_fallback = decrypt_with_fallback(
-            encrypted, canonical_key=different_canonical, context_label="test"
+        different = derive_key_from_salt("some-other-salt")
+        plaintext, is_legacy = decrypt_with_fallback(
+            encrypted, self._V2_KEY, lambda: [different, hostname_key], "test"
         )
         assert plaintext == "my-secret-token-value"
-        assert used_fallback is True
+        assert is_legacy is True
 
-    def test_raises_value_error_when_both_keys_fail(self):
-        """If both canonical and hostname keys are wrong, raises ValueError (PKCS7 unpadding)."""
+    def test_raises_value_error_when_no_candidate_decrypts(self):
         third_key = derive_key_from_salt("third-unrelated-salt")
         encrypted = encrypt_token("my-secret-token-value", third_key)
-
         canonical = derive_key_from_salt("canonical-not-matching")
         with pytest.raises(ValueError):
             decrypt_with_fallback(
-                encrypted, canonical_key=canonical, context_label="test-raises"
+                encrypted, self._V2_KEY, lambda: [canonical], "test-raises"
             )
 
     def test_context_label_does_not_affect_result(self):
@@ -225,6 +224,6 @@ class TestDecryptWithFallback:
         key = derive_key_from_salt("shared-key-for-label-test")
         encrypted = encrypt_token("sample-test-token", key)
 
-        result_a = decrypt_with_fallback(encrypted, key, context_label="manager-A")
-        result_b = decrypt_with_fallback(encrypted, key, context_label="manager-B")
+        result_a = decrypt_with_fallback(encrypted, self._V2_KEY, lambda: [key], "A")
+        result_b = decrypt_with_fallback(encrypted, self._V2_KEY, lambda: [key], "B")
         assert result_a == result_b

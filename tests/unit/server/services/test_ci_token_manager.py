@@ -59,8 +59,8 @@ class TestCITokenManagerEncryption:
 
         assert "github" in data
         assert data["github"]["token"] != github_token
-        # Encrypted value should look like base64
-        assert re.match(r"^[A-Za-z0-9+/=]+$", data["github"]["token"])
+        # Encrypted value is the v2 authenticated format
+        assert re.match(r"^v2:[A-Za-z0-9_=-]+$", data["github"]["token"])
 
     def test_token_file_has_secure_permissions(self, token_manager, temp_server_dir):
         """Test that token file has 0600 permissions (AC14)."""
@@ -75,24 +75,18 @@ class TestCITokenManagerEncryption:
         # Then permissions should be 0600
         assert file_mode == 0o600
 
-    def test_encryption_uses_aes_256_cbc(self, token_manager):
-        """Test that encryption uses AES-256-CBC (AC14)."""
-        # Given a token
+    def test_encryption_uses_authenticated_v2_format(self, token_manager):
+        """Stored tokens use the v2 authenticated format (Fernet)."""
         token = "ghp_" + "a" * GITHUB_TOKEN_SUFFIX_LEN
 
-        # When encrypting
         encrypted = token_manager._encrypt_token(token)
 
-        # Then encrypted value should be different from plaintext
         assert encrypted != token
+        assert re.match(r"^v2:[A-Za-z0-9_=-]+$", encrypted)
 
-        # And should be base64 encoded (AES-256-CBC output)
-        assert re.match(r"^[A-Za-z0-9+/=]+$", encrypted)
-
-        # And should decrypt back to original
-        decrypted, used_fallback = token_manager._decrypt_token(encrypted)
+        decrypted, is_legacy = token_manager._decrypt_token(encrypted)
         assert decrypted == token
-        assert used_fallback is False
+        assert is_legacy is False
 
     def test_decrypt_round_trip(self, token_manager):
         """Test encryption/decryption round trip (AC14)."""

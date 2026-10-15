@@ -6,7 +6,7 @@ pure typing-construct relocation, zero behaviour change.
 
 from __future__ import annotations
 
-from ._shared import Any, Dict, Optional, Protocol, runtime_checkable
+from ._shared import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -23,8 +23,18 @@ class CITokensBackend(Protocol):
 
     def list_tokens(self) -> Dict[str, Dict[str, Any]]: ...
 
-    def update_encrypted_token(
-        self, platform: str, new_encrypted_token: str
-    ) -> None: ...
+    def list_secret_rows(self) -> List[Dict[str, Any]]: ...
+
+    def list_needs_reentry(self) -> List[Dict[str, Any]]: ...
+
+    def replace_encrypted_token_if_unchanged(
+        self, row_id: str, expected: str, new_value: str
+    ) -> bool: ...
+
+    def mark_needs_reentry(
+        self, row_id: str, expected: str, node_id: Optional[str] = None
+    ) -> bool: ...
+
+    def clear_needs_reentry(self, row_id: str, expected: str) -> bool: ...
 
     def close(self) -> None: ...

@@ -95,15 +95,10 @@ class TestCreateTokenManagerFactory:
         Save a token with one encryption key, attempt to read with a different key,
         verify it returns None but the token row is NOT deleted from the DB.
 
-        Story #999: Key mismatch simulated by writing .encryption_key_salt directly
-        with initial value for manager_key1, then overwriting with different value
-        for manager_key2. No jwt_secret dependency in this test.
+        Key mismatch simulated by losing the stored-secret key file between the
+        two managers (the second creates a new random key).
         """
         import sqlite3
-
-        # Write .encryption_key_salt with initial value so manager_key1 uses it
-        salt_file = temp_server_dir / ".encryption_key_salt"
-        salt_file.write_text("initial-salt-value-one")
 
         manager_key1 = create_token_manager(
             server_dir=str(temp_server_dir),
@@ -120,8 +115,8 @@ class TestCreateTokenManagerFactory:
             ).fetchone()
         assert row_before is not None, "Token must be in DB before decrypt attempt"
 
-        # Overwrite salt file with a completely different value to force key mismatch
-        salt_file.write_text("completely-different-salt-value")
+        # Lose the stored-secret key: the next manager creates a different one
+        (temp_server_dir / ".token_encryption_key").unlink()
 
         manager_key2 = create_token_manager(
             server_dir=str(temp_server_dir),
@@ -293,13 +288,17 @@ class TestCITokenLazyReencryption:
 
         Returns (db_path, canonical_mgr, platform, original_enc).
         """
+        import os
+
+        from code_indexer.server.services.token_encryption import (
+            derive_key_from_salt,
+            encrypt_token,
+        )
+
         platform = "github"
-        hostname_mgr = CITokenManager(
-            server_dir_path=str(ci_server_dir.parent),
-            use_sqlite=True,
-            db_path=ci_db_path,
-        )  # no server_dir= -> uses hostname key
-        original_enc = hostname_mgr._encrypt_token(_CI_TEST_TOKEN)
+        original_enc = encrypt_token(  # legacy hostname-derived value
+            _CI_TEST_TOKEN, derive_key_from_salt(os.uname().nodename)
+        )
         _insert_ci_raw_token(ci_db_path, platform, original_enc)
         canonical_mgr = CITokenManager(
             server_dir_path=str(ci_server_dir.parent),
@@ -324,10 +323,7 @@ class TestCITokenLazyReencryption:
 
         new_enc = _read_ci_stored_enc(db_path, platform)
         assert new_enc != original_enc
-        assert (
-            canonical_mgr._do_decrypt(new_enc, canonical_mgr._encryption_key)
-            == _CI_TEST_TOKEN
-        )
+        assert canonical_mgr._cipher.decrypt(new_enc) == (_CI_TEST_TOKEN, False)
 
         # Second call: must not trigger fallback warning
         caplog.clear()

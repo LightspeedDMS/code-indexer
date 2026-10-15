@@ -40,6 +40,39 @@ logger = logging.getLogger(__name__)
 # Extra seconds added to heartbeat_interval when joining the thread on stop().
 _THREAD_JOIN_GRACE_SECONDS = 5
 
+# metadata keeps every other key; "capabilities" is this node's list and
+# "capabilities_at" the database time it was written (a non-object value is
+# replaced by an object).
+_CAPABILITY_OBJECT_SQL = (
+    "jsonb_build_object('capabilities', %s::jsonb,"
+    " 'capabilities_at', EXTRACT(EPOCH FROM NOW()))"
+)
+
+_HEARTBEAT_UPDATE_SQL = (
+    "UPDATE cluster_nodes SET last_heartbeat = NOW(), status = 'online',"
+    " role = %s, metadata = (CASE WHEN jsonb_typeof(metadata) = 'object'"
+    " THEN metadata ELSE '{}'::jsonb END) || " + _CAPABILITY_OBJECT_SQL + " "
+    "WHERE node_id = %s"
+)
+
+_NODE_UPSERT_SQL = (
+    "INSERT INTO cluster_nodes"
+    " (node_id, hostname, port, status, last_heartbeat, metadata)"
+    " VALUES (%s, %s, %s, %s, NOW(), " + _CAPABILITY_OBJECT_SQL + ")"
+    " ON CONFLICT (node_id) DO UPDATE SET status = EXCLUDED.status,"
+    " hostname = EXCLUDED.hostname, port = EXCLUDED.port, last_heartbeat = NOW(),"
+    " metadata = (CASE WHEN jsonb_typeof(cluster_nodes.metadata) = 'object'"
+    " THEN cluster_nodes.metadata ELSE '{}'::jsonb END) || EXCLUDED.metadata"
+)
+
+
+def _capabilities_json() -> str:
+    import json
+
+    from code_indexer.server.services.stored_secret_key import NODE_CAPABILITIES
+
+    return json.dumps(NODE_CAPABILITIES)
+
 
 class NodeHeartbeatService:
     """
@@ -105,6 +138,11 @@ class NodeHeartbeatService:
 
         self._ensure_table()
         self._upsert_node(status="online")
+        from code_indexer.server.services.stored_secret_key import (
+            register_local_node,
+        )
+
+        register_local_node(self._node_id)
 
         self._stop_event.clear()
         self._thread = threading.Thread(
@@ -200,14 +238,8 @@ class NodeHeartbeatService:
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    UPDATE cluster_nodes
-                    SET    last_heartbeat = NOW(),
-                           status        = 'online',
-                           role          = %s
-                    WHERE  node_id = %s
-                    """,
-                    (role, self._node_id),
+                    _HEARTBEAT_UPDATE_SQL,
+                    (role, _capabilities_json(), self._node_id),
                 )
 
     # ------------------------------------------------------------------
@@ -238,16 +270,8 @@ class NodeHeartbeatService:
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    INSERT INTO cluster_nodes (node_id, hostname, port, status, last_heartbeat)
-                    VALUES (%s, %s, %s, %s, NOW())
-                    ON CONFLICT (node_id) DO UPDATE
-                        SET status         = EXCLUDED.status,
-                            hostname       = EXCLUDED.hostname,
-                            port           = EXCLUDED.port,
-                            last_heartbeat = NOW()
-                    """,
-                    (self._node_id, hostname, port, status),
+                    _NODE_UPSERT_SQL,
+                    (self._node_id, hostname, port, status, _capabilities_json()),
                 )
             conn.commit()
 
