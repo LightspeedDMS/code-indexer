@@ -6,6 +6,12 @@ from datetime import date, datetime
 from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 
+from code_indexer.server.utils.html_sanitizer import (
+    WIKI_ARTICLE_ALLOWLIST,
+    sanitize_html,
+)
+from code_indexer.utils.path_confinement import is_readable_within_root
+
 if TYPE_CHECKING:
     from .wiki_cache import WikiCache
 
@@ -14,6 +20,10 @@ if TYPE_CHECKING:
 MarkdownText = Tuple[PurePath, Optional[str], Optional[str]]
 
 logger = logging.getLogger(__name__)
+
+# A URL that names its own scheme (mailto:, data:, javascript:, ...) is never
+# a wiki-relative path; it is left for the allowlist sanitiser to judge.
+_URL_SCHEME = re.compile(r"^\s*[A-Za-z][A-Za-z0-9+.\-]*:")
 
 
 class WikiService:
@@ -181,7 +191,9 @@ class WikiService:
             prefix = str(match.group(1))
             src = str(match.group(2))
             suffix = str(match.group(3))
-            if src.startswith(("http://", "https://", "/wiki/")):
+            if src.startswith(("http://", "https://", "/wiki/")) or _URL_SCHEME.match(
+                src
+            ):
                 return str(match.group(0))
             clean_path = re.sub(r"^(\.\./)+", "", src)
             return f"{prefix}/wiki/{repo_alias}/_assets/{clean_path}{suffix}"
@@ -412,6 +424,8 @@ class WikiService:
             rel = md_file.relative_to(repo_dir)
             if any(part.startswith(".") for part in rel.parts):
                 continue
+            if not is_readable_within_root(md_file, repo_dir.resolve()):
+                continue
             try:
                 raw = md_file.read_text(encoding="utf-8")
                 metadata, _ = self._strip_front_matter(raw)
@@ -480,6 +494,20 @@ class WikiService:
                 cat_articles.sort(key=lambda a: a["title"].lower())
         return sorted(tree.values(), key=lambda g: g["name"].lower())
 
+    def prepare_article_content(
+        self, html: str, repo_alias: str, current_dir: str
+    ) -> str:
+        """Return article HTML ready to render unescaped in ``article.html``.
+
+        Inter-article links are rewritten first; the allowlist sanitiser runs
+        last, so no later step can alter its output. The result is the final
+        page HTML, which callers cache with ``WikiCache.put_page`` and serve
+        as is.
+        """
+        return sanitize_html(
+            self.rewrite_links(html, repo_alias, current_dir), WIKI_ARTICLE_ALLOWLIST
+        )
+
     def rewrite_links(self, html: str, repo_alias: str, current_dir: str) -> str:
         """Rewrite inter-article links in rendered HTML."""
 
@@ -492,6 +520,8 @@ class WikiService:
             if href.startswith(("http://", "https://")):
                 if "target=" not in full_tag:
                     return full_tag[:-1] + ' target="_blank" rel="noopener">'
+                return full_tag
+            if _URL_SCHEME.match(href):
                 return full_tag
             if href.startswith("/wiki/"):
                 return full_tag
@@ -617,6 +647,8 @@ class WikiService:
         for md_file in sorted(repo_path.rglob("*.md")):
             rel = md_file.relative_to(repo_path)
             if any(part.startswith(".") for part in rel.parts):
+                continue
+            if not is_readable_within_root(md_file, repo_path.resolve()):
                 continue
             try:
                 raw = md_file.read_text(encoding="utf-8")

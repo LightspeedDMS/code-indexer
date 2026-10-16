@@ -52,6 +52,22 @@ from code_indexer.server.services.audit_log_query import (
     build_page_sql,
     build_terminal_rows_sql,
 )
+<<<<<<< HEAD
+=======
+from code_indexer.server.services.siem_delivery.capture import (
+    SiemDestinations,
+    prepare_captures,
+    record_transaction_failure,
+    write_captures,
+)
+from code_indexer.server.services.siem_delivery.capture import (
+    retried_attempt as siem_retried_attempt,
+)
+from code_indexer.server.services.siem_delivery.db import (
+    SQLITE,
+    ensure_sqlite_schema,
+)
+>>>>>>> upstream/master
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 # Issue #1241 P1.3: async-batched audit writer constants.
@@ -97,6 +113,16 @@ AUDIT_ATTRIBUTION_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("event_uuid", "TEXT"),
 )
 
+<<<<<<< HEAD
+=======
+# The user an administrator was impersonating over MCP when the action was
+# performed (NULL otherwise).  Same name and type as the PostgreSQL migration
+# 063_audit_logs_impersonated_user.sql.
+AUDIT_IMPERSONATION_COLUMNS: Tuple[Tuple[str, str], ...] = (
+    ("impersonated_user", "TEXT"),
+)
+
+>>>>>>> upstream/master
 # (index name, indexed columns) -- same names on both backends.
 AUDIT_ATTRIBUTION_INDEXES: Tuple[Tuple[str, str], ...] = (
     ("idx_audit_logs_admin_id", "admin_id"),
@@ -112,6 +138,10 @@ _SELECT_COLUMNS = ", ".join(
     ("id", "timestamp", "admin_id", "action_type")
     + ("target_type", "target_id", "details")
     + tuple(name for name, _ in AUDIT_ATTRIBUTION_COLUMNS)
+<<<<<<< HEAD
+=======
+    + tuple(name for name, _ in AUDIT_IMPERSONATION_COLUMNS)
+>>>>>>> upstream/master
 )
 
 _SQLITE_INSERT_EVENT_SQL = (
@@ -312,7 +342,17 @@ class AuditLogService:
         if not batch:
             return
         try:
+<<<<<<< HEAD
             self.insert_events(batch)
+=======
+            if len(batch) == 1:
+                self.insert_events(batch)
+            else:
+                # retried row by row below: only a row that still fails is
+                # a SIEM capture gap
+                with siem_retried_attempt():
+                    self.insert_events(batch)
+>>>>>>> upstream/master
             return
         except Exception as exc:
             if len(batch) == 1:
@@ -422,13 +462,25 @@ class AuditLogService:
             # Additive attribution columns: the table may have been created
             # by an older release or by GroupAccessManager's 7-column DDL.
             existing = {row[1] for row in conn.execute("PRAGMA table_info(audit_logs)")}
+<<<<<<< HEAD
             for name, ddl_type in AUDIT_ATTRIBUTION_COLUMNS:
+=======
+            for name, ddl_type in (
+                AUDIT_ATTRIBUTION_COLUMNS + AUDIT_IMPERSONATION_COLUMNS
+            ):
+>>>>>>> upstream/master
                 if name not in existing:
                     add_audit_column_tolerating_race(conn, name, ddl_type)
             for index_name, columns in AUDIT_ATTRIBUTION_INDEXES:
                 conn.execute(
                     f"CREATE INDEX IF NOT EXISTS {index_name} ON audit_logs({columns})"
                 )
+<<<<<<< HEAD
+=======
+            # SIEM delivery tables live in the SAME file, so the queue insert
+            # can join the audit transaction.
+            ensure_sqlite_schema(conn)
+>>>>>>> upstream/master
 
         self._conn_manager.execute_atomic(_do_schema)
 
@@ -436,7 +488,16 @@ class AuditLogService:
     # Write
     # ------------------------------------------------------------------
 
+<<<<<<< HEAD
     def insert_events(self, events: Sequence[AuditEvent]) -> None:
+=======
+    def insert_events(
+        self,
+        events: Sequence[AuditEvent],
+        *,
+        siem_destinations: Optional[SiemDestinations] = None,
+    ) -> None:
+>>>>>>> upstream/master
         """Write *events* in ONE transaction on the calling thread.
 
         This is the single write function: every audit row reaches the
@@ -444,13 +505,40 @@ class AuditLogService:
         injected backend is itself an unstarted AuditLogService on the same
         file) it delegates to the backend's ``insert_events``.  Raises on
         failure; callers decide how a failure is counted.
+<<<<<<< HEAD
+=======
+
+        SIEM capture joins the same transaction: projection runs before it
+        starts, and each queue row is a savepointed, fail-open INSERT after
+        the audit rows.  *siem_destinations* (explicit destinations of
+        SIEM self-report rows) is supplied only by those emitters.
+>>>>>>> upstream/master
         """
         if not events:
             return
         if self._backend is not None:
+<<<<<<< HEAD
             self._backend.insert_events(events)
             return
         self._conn_manager.execute_atomic(lambda conn: _insert_event_rows(conn, events))
+=======
+            if siem_destinations is None:
+                self._backend.insert_events(events)
+            else:
+                self._backend.insert_events(events, siem_destinations=siem_destinations)
+            return
+        prepared = prepare_captures(events, siem_destinations)
+
+        def _write(conn: sqlite3.Connection) -> None:
+            _insert_event_rows(conn, events)
+            write_captures(conn, prepared, SQLITE)
+
+        try:
+            self._conn_manager.execute_atomic(_write)
+        except Exception as exc:
+            record_transaction_failure(prepared, exc)
+            raise
+>>>>>>> upstream/master
 
     def enqueue_event(self, event: AuditEvent) -> None:
         """Hand *event* to the writer thread (QUEUED delivery).

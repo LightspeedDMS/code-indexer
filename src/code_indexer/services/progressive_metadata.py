@@ -19,6 +19,17 @@ from code_indexer.services.resume_state_seal import (
 )
 
 logger = logging.getLogger(__name__)
+<<<<<<< HEAD
+=======
+
+#: Story #2121: the resume-from-list fields older releases stored (the work
+#: list, the completed list and the cursor into the work list).
+_RETIRED_RESUME_LIST_FIELDS = (
+    "files_to_index",
+    "completed_files",
+    "current_file_index",
+)
+>>>>>>> upstream/master
 
 
 class ProgressiveMetadata:
@@ -52,15 +63,19 @@ class ProgressiveMetadata:
             "files_processed": 0,
             "chunks_indexed": 0,
             "failed_files": 0,
-            # New fields for true resumability
+            # Story #2121: the size of the current run's plan (no file list
+            # is stored; an interrupted run is recovered by a reconcile).
             "total_files_to_index": 0,
-            "files_to_index": [],  # List of all files that need indexing
-            "completed_files": [],  # List of files that have been successfully indexed
-            "failed_file_paths": [],  # List of files that failed indexing
-            "current_file_index": 0,  # Index of current file being processed
+            "failed_file_paths": [],  # Files the last run could not index
             # Git commit watermark tracking for incremental indexing
             "branch_commit_watermarks": {},  # Per-branch last indexed commit: {branch: commit_hash}
             "last_commit_check_timestamp": 0.0,  # When we last checked for git changes
+            # Issue #1975: a completed reconcile verified the stored points
+            # against disk; cleared whenever a new run starts from zero.
+            "store_verified_by_reconcile": False,
+            # Outcome of the last finished run (record_finished_run).
+            "run_sequence": 0,
+            "last_run_changed_index": None,
         }
 
         if self.metadata_path.exists():
@@ -76,6 +91,10 @@ class ProgressiveMetadata:
                         # Merge existing data with default structure to ensure new fields are present
                         merged_metadata = default_metadata.copy()
                         merged_metadata.update(loaded_data)
+                        # Story #2121: a stored work list written by an older
+                        # release is never kept, replayed or saved again.
+                        for retired in _RETIRED_RESUME_LIST_FIELDS:
+                            merged_metadata.pop(retired, None)
                         return merged_metadata
             except (json.JSONDecodeError, IOError):
                 # Corrupt metadata, start fresh
@@ -167,8 +186,14 @@ class ProgressiveMetadata:
         # run's error before that transition's own work begins. State this
         # as the rule, not a list -- an enumeration silently falls one short
         # the moment a new transition is added and this comment isn't. The
+<<<<<<< HEAD
         # four call sites that currently enforce it: start_indexing() (here),
         # set_files_to_index(), resume_indexing(), and complete_indexing().
+=======
+        # two call sites that currently enforce it: start_indexing() (here)
+        # and complete_indexing(). Story #2121 retired resume-from-list, so
+        # every run that does work starts with start_indexing().
+>>>>>>> upstream/master
         self.metadata.pop("error_message", None)
         self.metadata.update(
             {
@@ -183,10 +208,12 @@ class ProgressiveMetadata:
                 "files_processed": 0,
                 "chunks_indexed": 0,
                 "failed_files": 0,
+                "store_verified_by_reconcile": False,
             }
         )
         self._save_metadata()
 
+<<<<<<< HEAD
     def start_fresh_indexing(
         self, provider_name: str, model_name: str, git_status: Dict[str, Any]
     ):
@@ -197,6 +224,33 @@ class ProgressiveMetadata:
         transition explicitly so a completed status can never be persisted
         alongside another run's resumability fields.
         """
+=======
+    def get_fts_restore_pending(self) -> List[str]:
+        """Un-hidden files whose full-text document could not be restored;
+        a later reconcile retries them (Issue #1999)."""
+        return [str(p) for p in self.metadata.get("fts_restore_pending") or []]
+
+    def set_fts_restore_pending(self, paths: List[str]) -> None:
+        """Replace the list of files whose FTS restore is still owed."""
+        self.metadata["fts_restore_pending"] = list(
+            dict.fromkeys(str(p) for p in paths)
+        )
+        self._save_metadata()
+
+    def mark_store_verified(self) -> None:
+        """Record that a completed reconcile verified the stored points
+        against disk, so a zero processed-file count is no longer ambiguous
+        (Issue #1975)."""
+        self.metadata["store_verified_by_reconcile"] = True
+        self._save_metadata()
+
+    def start_fresh_indexing(
+        self, provider_name: str, model_name: str, git_status: Dict[str, Any]
+    ):
+        """Start a new run after discarding the prior run's file tracking
+        (its plan size and recorded failures), so a completed status can
+        never be persisted alongside another run's tracking."""
+>>>>>>> upstream/master
         self._reset_file_tracking()
         self.start_indexing(provider_name, model_name, git_status)
 
@@ -214,13 +268,52 @@ class ProgressiveMetadata:
         # Save after every update for resumability
         self._save_metadata()
 
-    def complete_indexing(self):
-        """Mark indexing as completed."""
+    def complete_indexing(self, listing_started: float) -> None:
+        """Mark indexing as completed.
+
+        ``listing_started`` is the epoch time captured BEFORE the run listed
+        the repository (Story #2121). It becomes the incremental watermark,
+        not the completion time: a file written while the run was working is
+        newer than it, so the next incremental run picks that file up."""
+        if not listing_started > 0:
+            raise ValueError(
+                f"listing_started must be a positive epoch time: {listing_started!r}"
+            )
         self.metadata["status"] = "completed"
         self.metadata["indexed_at"] = datetime.now(timezone.utc).isoformat()
+<<<<<<< HEAD
         # Update last_index_timestamp to current time for incremental indexing
         self.metadata["last_index_timestamp"] = time.time()
         self.metadata.pop("error_message", None)
+=======
+        self.metadata["last_index_timestamp"] = float(listing_started)
+        self.metadata.pop("error_message", None)
+        self._save_metadata()
+
+    def record_finished_run(self, commit: Optional[str], changed_index: bool) -> None:
+        """Record the outcome of a run that returned (was not cancelled).
+
+        ``run_sequence`` advances on every finished run, so the refresh
+        scheduler sees that this file was rewritten by a run, and
+        ``last_run_changed_index`` says whether that run changed the index
+        (a forced reconcile that changed nothing publishes no snapshot).
+
+        A run left ``completed`` records the HEAD it indexed as
+        ``current_commit``: ``start_indexing`` writes it only when a run
+        starts a session, so a run that found nothing to (re)index would
+        leave the previous commit behind and the scheduler's drift check
+        (current_commit != HEAD) would force a reconcile forever. An
+        interrupted or failed run keeps its stale signal. A commit git could
+        not detect ("unknown") never replaces the recorded one."""
+        self.metadata["run_sequence"] = int(self.metadata.get("run_sequence") or 0) + 1
+        self.metadata["last_run_changed_index"] = bool(changed_index)
+        commit_known = commit is not None and commit.strip().lower() not in (
+            "",
+            "unknown",
+        )
+        if commit_known and self.metadata.get("status") == "completed":
+            self.metadata["current_commit"] = commit
+>>>>>>> upstream/master
         self._save_metadata()
 
     def fail_indexing(self, error_message: Optional[str] = None):
@@ -299,12 +392,6 @@ class ProgressiveMetadata:
 
     def get_stats(self) -> Dict[str, Any]:
         """Get current indexing statistics."""
-        can_resume_interrupted = (
-            self.metadata.get("status") == "in_progress"
-            and len(self.metadata.get("files_to_index", [])) > 0
-            and self.metadata.get("current_file_index", 0)
-            < len(self.metadata.get("files_to_index", []))
-        )
         can_resume_incremental = (
             self.metadata.get("status") in ["in_progress", "completed"]
             and self.metadata.get("last_index_timestamp", 0) > 0
@@ -321,14 +408,7 @@ class ProgressiveMetadata:
             "project_id": self.metadata.get("project_id"),
             "current_branch": self.metadata.get("current_branch"),
             "can_resume": can_resume_incremental,
-            "can_resume_interrupted": can_resume_interrupted,
             "total_files_to_index": self.metadata.get("total_files_to_index", 0),
-            "current_file_index": self.metadata.get("current_file_index", 0),
-            "remaining_files": max(
-                0,
-                self.metadata.get("total_files_to_index", 0)
-                - self.metadata.get("current_file_index", 0),
-            ),
         }
 
     def clear(self):
@@ -346,19 +426,18 @@ class ProgressiveMetadata:
             "files_processed": 0,
             "chunks_indexed": 0,
             "failed_files": 0,
-            # Reset resumability fields
+            # Plan size of the current run and the last run's failures
             "total_files_to_index": 0,
-            "files_to_index": [],
-            "completed_files": [],
             "failed_file_paths": [],
-            "current_file_index": 0,
             # Git commit watermark tracking for incremental indexing
             "branch_commit_watermarks": {},
             "last_commit_check_timestamp": 0.0,
+            "store_verified_by_reconcile": False,
         }
         self._save_metadata()
 
     def _reset_file_tracking(self) -> None:
+<<<<<<< HEAD
         """Discard file tracking belonging to a prior indexing run."""
         self.metadata.update(
             {
@@ -390,19 +469,31 @@ class ProgressiveMetadata:
         self.metadata.pop("error_message", None)
         # Convert Path objects to strings for JSON serialization
         file_strings = [str(path) for path in file_paths]
+=======
+        """Discard file tracking belonging to a prior indexing run. The
+        retired resume-list fields never reach ``self.metadata``
+        (``_load_metadata`` drops them), so only these two remain."""
+        self.metadata.update({"total_files_to_index": 0, "failed_file_paths": []})
+>>>>>>> upstream/master
 
-        self.metadata["files_to_index"] = file_strings
-        self.metadata["total_files_to_index"] = len(file_strings)
-        self.metadata["current_file_index"] = 0
-        self.metadata["completed_files"] = []
-        self.metadata["failed_file_paths"] = []
+    def record_plan(self, planned_files: int) -> None:
+        """Record the size of this run's plan (Story #2121).
+
+        Only the count is stored, never the files: an interrupted run is
+        recovered by a reconcile that derives its plan from the store, so no
+        stored list is ever replayed. The count keeps a killed run's plan
+        observable (``total_files_to_index``)."""
+        if planned_files < 0:
+            raise ValueError(f"planned_files must not be negative: {planned_files}")
+        self.metadata["total_files_to_index"] = planned_files
         self._save_metadata()
 
-    def get_remaining_files(self) -> List[str]:
-        """Get the list of files that still need to be processed."""
-        current_index = self.metadata.get("current_file_index", 0)
-        files_to_index = self.metadata.get("files_to_index", [])
+    def set_failed_file_paths(
+        self, file_paths: List[str], failed_count: Optional[int] = None
+    ) -> None:
+        """Replace the recorded list of files the last run could not index.
 
+<<<<<<< HEAD
         if current_index < len(files_to_index):
             return list(files_to_index[current_index:])
         return []
@@ -452,10 +543,13 @@ class ProgressiveMetadata:
     ) -> None:
         """Replace the recorded list of files the last run could not index.
 
+=======
+>>>>>>> upstream/master
         The next run retries every recorded file (see SmartIndexer), so the
         list always describes the most recent run only. ``failed_count``,
         when given, also sets ``failed_files`` for a run that records no
         other progress.
+<<<<<<< HEAD
         """
         unique: List[str] = []
         for path in file_paths:
@@ -479,13 +573,23 @@ class ProgressiveMetadata:
         Bug #467: Accept both "in_progress" and "failed" status.
         Interrupted indexing (timeout, kill, restart) may have been marked
         "failed" but vectors on disk are valid and work should resume.
+=======
+>>>>>>> upstream/master
         """
-        return (
-            self.metadata.get("status") in ("in_progress", "failed")
-            and len(self.metadata.get("files_to_index", [])) > 0
-            and self.metadata.get("current_file_index", 0)
-            < len(self.metadata.get("files_to_index", []))
-        )
+        # Bug #1998: order-preserving O(F) dedup -- every file can fail in one
+        # run, so a list-membership dedup here was O(files^2).
+        unique: List[str] = list(dict.fromkeys(str(path) for path in file_paths))
+        self.metadata["failed_file_paths"] = unique
+        if failed_count is not None:
+            self.metadata["failed_files"] = failed_count
+        self._save_metadata()
+
+    def discard_file_tracking(self) -> None:
+        """Drop the stored file lists (work list, completed and failed
+        files) from this in-memory state without saving; used when the
+        stored state is not trusted, so none of its file lists are acted on
+        or carried into a later save."""
+        self._reset_file_tracking()
 
     def get_current_branch(self) -> str:
         """Get the current branch from metadata."""

@@ -174,8 +174,14 @@ def test_graph_subcommand_call_site_explicitly_opts_out_of_compile_slot() -> Non
     merely omit the argument (which would rely on a default that could
     silently drift later). _run_xray_cli_process's parameter is required
     (no default) precisely so every call site states its intent."""
+<<<<<<< HEAD
     source = inspect.getsource(rust_backend.RustNativeBackend._spawn_graph_subcommand)
     assert "acquire_compile_slot=False" in source, (
         "_spawn_graph_subcommand must explicitly pass acquire_compile_slot=False "
+=======
+    source = inspect.getsource(rust_backend.RustNativeBackend._run_graph_subcommand)
+    assert "acquire_compile_slot=False" in source, (
+        "_run_graph_subcommand must explicitly pass acquire_compile_slot=False "
+>>>>>>> upstream/master
         "-- it runs a pre-compiled dylib, never triggers rustc"
     )

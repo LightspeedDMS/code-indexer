@@ -33,6 +33,13 @@ _DASHBOARD_HIDDEN_OPERATION_TYPES = [
     "xray_explore",
     "xray_search_batch",
     "temporal_query",
+<<<<<<< HEAD
+=======
+    # SIEM delivery submits one short tick job per busy loop cycle
+    # (SiemDeliveryScheduler.OPERATION_TYPE); its state is on the SIEM
+    # stats surfaces, not in the recent-jobs panel.
+    "siem_delivery_tick",
+>>>>>>> upstream/master
 ]
 
 # Period thresholds for label formatting (in seconds)

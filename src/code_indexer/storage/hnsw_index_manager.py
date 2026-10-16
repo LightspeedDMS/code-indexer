@@ -386,7 +386,11 @@ class HNSWIndexManager:
                 "the custom hnswlib fork (expected commit %s) installed. "
                 "Skipping orphan detect+repair for this finalize; indexing "
                 "will still complete (only the orphan hardening pass is "
+<<<<<<< HEAD
                 "degraded). See docs/hnswlib-custom-build.md for the "
+=======
+                "degraded). See docs/server/hnswlib-custom-build.md for the "
+>>>>>>> upstream/master
                 "rebuild procedure.",
                 context,
                 EXPECTED_HNSWLIB_FORK_COMMIT,

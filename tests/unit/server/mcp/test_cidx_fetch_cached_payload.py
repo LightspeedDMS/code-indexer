@@ -63,7 +63,7 @@ class TestCidxFetchCachedPayloadValidHandle:
         mock_result.has_more = False
 
         mock_cache = MagicMock()
-        mock_cache.retrieve.return_value = mock_result
+        mock_cache.retrieve_owned.return_value = mock_result
 
         mock_app_state = MagicMock()
         mock_app_state.payload_cache = mock_cache
@@ -97,7 +97,7 @@ class TestCidxFetchCachedPayloadValidHandle:
         mock_result.has_more = False
 
         mock_cache = MagicMock()
-        mock_cache.retrieve.return_value = mock_result
+        mock_cache.retrieve_owned.return_value = mock_result
 
         mock_app = MagicMock()
         mock_app.state.payload_cache = mock_cache
@@ -113,8 +113,8 @@ class TestCidxFetchCachedPayloadValidHandle:
             handler = _import_handler()
             handler(params, user)
 
-        mock_cache.retrieve.assert_called_once()
-        call_args = mock_cache.retrieve.call_args
+        mock_cache.retrieve_owned.assert_called_once()
+        call_args = mock_cache.retrieve_owned.call_args
         assert (
             call_args[0][0] == "my-handle-xyz"
             or call_args.kwargs.get("handle") == "my-handle-xyz"
@@ -137,7 +137,7 @@ class TestCidxFetchCachedPayloadInvalidHandle:
         user = _make_user(UserRole.NORMAL_USER)
 
         mock_cache = MagicMock()
-        mock_cache.retrieve.side_effect = CacheNotFoundError("Handle not found")
+        mock_cache.retrieve_owned.side_effect = CacheNotFoundError("Handle not found")
 
         mock_app = MagicMock()
         mock_app.state.payload_cache = mock_cache

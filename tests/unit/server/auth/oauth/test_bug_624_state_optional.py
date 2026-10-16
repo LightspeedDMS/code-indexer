@@ -60,20 +60,37 @@ def _post_consent(
     cookies: object,
     state: Optional[str] = None,
 ) -> object:
-    """Helper: POST /oauth/authorize/consent with optional state."""
+    """Helper: POST /oauth/authorize/consent with optional state, carrying the
+    CSRF token of the rendered consent page as a browser does."""
+    import re
+
+    page = app.get(  # type: ignore[attr-defined]
+        "/oauth/authorize",
+        params={
+            "client_id": client_id,
+            "redirect_uri": "https://example.com/callback",
+            "code_challenge": code_challenge,
+            "response_type": "code",
+        },
+        cookies=cookies,
+        follow_redirects=False,
+    )
+    match = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+    assert match is not None, page.text
     data = {
         "client_id": client_id,
         "redirect_uri": "https://example.com/callback",
         "code_challenge": code_challenge,
         "response_type": "code",
         "consent": "allow",
+        "csrf_token": match.group(1),
     }
     if state is not None:
         data["state"] = state
-    return app.post(
+    return app.post(  # type: ignore[attr-defined]
         "/oauth/authorize/consent",
         data=data,
-        cookies=cookies,  # type: ignore[arg-type]
+        cookies={**dict(cookies), **dict(page.cookies)},  # type: ignore[call-overload]
         follow_redirects=False,
     )
 

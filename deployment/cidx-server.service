@@ -44,7 +44,7 @@ Environment="CIDX_REPO_ROOT=__REPO_ROOT__"
 # Start server with uvicorn
 # Single worker to maintain in-memory cache coherency (HNSW, FTS, OmniCache cursors)
 # Multiple workers duplicate caches (4x memory) and break cursor-based pagination
-ExecStart=/usr/bin/python3 -m uvicorn code_indexer.server.app:app --host __HOST__ --port __PORT__ --workers 1
+ExecStart=/usr/bin/python3 -m uvicorn code_indexer.server.app:app --host __HOST__ --port __PORT__ --workers 1 --no-server-header
 
 # Restart policy
 Restart=always

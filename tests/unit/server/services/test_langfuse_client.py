@@ -108,12 +108,21 @@ class TestLangfuseClientLazyInit:
 
         result = client.create_trace(name="test", session_id="s1")
 
-        # Should have initialized
+        from opentelemetry import trace
+
+        from code_indexer.server.services.langfuse_client import _redact_sdk_data
+
+        # Should have initialized, on its own tracer provider, with the
+        # shared mask hook
         mock_langfuse_class.assert_called_once_with(
             public_key="pk-test",
             secret_key="sk-test",
             host="https://cloud.langfuse.com",
+            tracer_provider=client._tracer_provider,
+            mask=_redact_sdk_data,
         )
+        assert client._tracer_provider is not None
+        assert client._tracer_provider is not trace.get_tracer_provider()
         assert client._langfuse is not None
         assert result is not None
         assert result.trace_id == "test-trace-id"

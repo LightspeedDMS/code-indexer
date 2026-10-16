@@ -6,6 +6,10 @@ Provides admin web interface routes for CIDX server administration.
 
 from code_indexer import __version__ as _cidx_version
 from code_indexer.server.middleware.correlation import get_correlation_id
+<<<<<<< HEAD
+=======
+from code_indexer.server.services import search_event_recording
+>>>>>>> upstream/master
 from code_indexer.validation.user_validation import RESERVED_ACTIVATED_REPOS_DIR_NAMES
 
 import asyncio
@@ -28,7 +32,7 @@ import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, cast
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -54,8 +58,21 @@ from .auth import (
     get_session_manager,
     SessionData,
 )
+<<<<<<< HEAD
 from ..services.ci_token_manager import CITokenManager, TokenValidationError
 from ..services.config_service import BootstrapFileNotWritten, get_config_service
+=======
+from ..services.ci_token_manager import (
+    CITokenManager,
+    TokenData,
+    TokenValidationError,
+)
+from ..services.config_service import (
+    BootstrapFileNotWritten,
+    ConfigChangeConflict,
+    get_config_service,
+)
+>>>>>>> upstream/master
 from ..services.golden_repo_audited_ops import request_golden_repo_refresh
 from ..utils.bounded_submission_gate import (
     BoundedSubmissionGate,
@@ -64,6 +81,10 @@ from ..utils.bounded_submission_gate import (
 from ..utils.host_validation import normalize_server_host
 from code_indexer import __version__ as cidx_version
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.utils.credential_redaction import (
+    mask_url_credentials,
+    with_masked_repo_url,
+)
 from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -294,6 +315,7 @@ RESTART_REQUIRED_FIELDS = [
     "payload_max_fetch_size_chars",
     "payload_cache_ttl_seconds",
     "payload_cleanup_interval_seconds",
+<<<<<<< HEAD
     # EVO-66121 trusted_gateway.* — the gateway authenticator is built once at startup
     # (gateway_auth_wiring.build_gateway_authenticator); no live reload. Only the field
     # names UNIQUE to this section are listed (the hint matches by bare field name, so
@@ -303,7 +325,15 @@ RESTART_REQUIRED_FIELDS = [
     "jwks_uri",
     "audience",
     "leeway_seconds",
+=======
+>>>>>>> upstream/master
 ]
+
+
+def _siem_trusted_ca_rows(section: Any) -> Any:
+    from ..services.siem_delivery.config_view import trusted_ca_rows
+
+    return trusted_ca_rows(section)
 
 
 def _get_token_manager() -> CITokenManager:
@@ -335,6 +365,22 @@ def _get_token_manager() -> CITokenManager:
         storage_backend=storage_backend,
         storage_mode=storage_mode,
     )
+
+
+def _ci_token_display(
+    token_data: Optional[TokenData],
+) -> Optional[Dict[str, Optional[str]]]:
+    """What the Config page may show of a stored CI token: the masked token
+    (at most its last 4 characters) and the base URL. The raw token never
+    enters the template context. None when no token is stored."""
+    if token_data is None:
+        return None
+    from code_indexer.utils.credential_redaction import mask_stored_secret
+
+    return {
+        "masked_token": mask_stored_secret(token_data.token),
+        "base_url": token_data.base_url,
+    }
 
 
 def _get_ssh_key_manager():
@@ -465,6 +511,11 @@ _VALID_CONFIG_SECTIONS = (
     "activated_reaper",
     # Story #1397 - HNSW orphan-repair sweep operating-hours window config
     "hnsw_orphan_sweep",
+<<<<<<< HEAD
+=======
+    # SIEM delivery (Google SecOps)
+    "siem_delivery",
+>>>>>>> upstream/master
     # Issue #1530 - Indexing-subprocess activity watchdog configuration
     "indexing_watchdog",
     # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
@@ -473,8 +524,11 @@ _VALID_CONFIG_SECTIONS = (
     "temporal_legacy_migration",
     # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
     "alias_lock",
+<<<<<<< HEAD
     # Content seam step 5a - aliases and write-mode markers in the registry
     "control_plane_metadata",
+=======
+>>>>>>> upstream/master
     # Issue #1398 - Query & search timeouts configuration
     "search_timeouts",
     # Story #977 - X-Ray precision AST-aware code search configuration
@@ -1166,7 +1220,12 @@ def dashboard_cache_metrics_partial(request: Request, cache_window: int = 86400)
     GROUP BY (cache_mode, provider) aggregation over the durable,
     phantom-free `search_embed_event` table (Story #1293), computed for
     `[now - cache_window, now)`. The two Hit Rate cards (Shadow and On-Mode)
+<<<<<<< HEAD
     are BOTH request-denominated (one row per user request) and windowed,
+=======
+    are BOTH row-denominated (each search_event_log row is one searched
+    repository's cache lookup, Bug #2111) and windowed,
+>>>>>>> upstream/master
     sourced from `search_event_log` via `get_hit_rate_counts(mode, from_ts,
     to_ts)` (Issue #1257 introduced the request-denominated semantics for
     On-Mode; Bug #1391 fixed On-Mode to respect the selected time window and
@@ -1252,7 +1311,12 @@ def dashboard_cache_metrics_partial(request: Request, cache_window: int = 86400)
     coalescer_provider_embed_calls = overall.provider_embed_calls
 
     # Issue #1257 / Bug #1391: Both Hit Rate cards are REQUEST-denominated
+<<<<<<< HEAD
     # (one row per user request in search_event_log), NOT
+=======
+    # (each search_event_log row is one searched repository's cache
+    # lookup), NOT
+>>>>>>> upstream/master
     # operation-denominated, and BOTH now respect the selected cache_window
     # (from_ts/to_ts) instead of one of them (On-Mode) aggregating the
     # table's entire lifetime. Each call fails open independently: a failure
@@ -1595,6 +1659,34 @@ def _create_login_redirect(request: Request) -> RedirectResponse:
     return RedirectResponse(url=redirect_url, status_code=status.HTTP_303_SEE_OTHER)
 
 
+def _elevation_page_redirect(
+    request: Request, username: str
+) -> Optional[RedirectResponse]:
+    """Elevation gate for full Web pages.
+
+    With enforcement on and no valid elevation window owned by `username`,
+    return a redirect to the elevation page, which returns here afterwards
+    (query string kept; the elevate page's ``_sanitize_next`` bounds the
+    target). Returns None when the page may render. Enforcement off passes
+    through. (`quote` is the module-level urllib.parse import.)
+    """
+    if not dependencies._is_elevation_enforcement_enabled():
+        return None
+    from . import mfa_routes
+
+    # Error dict when no valid window exists; None when the window is valid.
+    elev_err = mfa_routes._check_elevation_window(request, username)
+    if elev_err is None:
+        return None
+    return_to = request.url.path
+    if request.url.query:
+        return_to = f"{return_to}?{request.url.query}"
+    return RedirectResponse(
+        f"{mfa_routes._ELEVATE_PAGE}?next={quote(return_to, safe='')}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
 def _require_admin_session(request: Request) -> Optional[SessionData]:
     """Check for valid admin session, return None if not authenticated."""
     try:
@@ -1901,8 +1993,12 @@ def update_user_role(
             username, role_enum, actor=session.username
         ):
             return RedirectResponse(
+<<<<<<< HEAD
                 url=f"/admin/users?error=role_update_failed&detail={quote('User not found', safe='')}",
                 status_code=303,
+=======
+                url="/admin/users?error=user_not_found", status_code=303
+>>>>>>> upstream/master
             )
         return RedirectResponse(
             url=f"/admin/users?success=role_updated&u={quote(username, safe='')}",
@@ -2062,7 +2158,7 @@ async def delete_user(
     """Delete a user (PRG: redirects to /admin/users with status query)."""
     from urllib.parse import quote
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -2084,11 +2180,20 @@ async def delete_user(
         )
 
     try:
+<<<<<<< HEAD
         # Account write plus its durable audit row: off the event loop.
+=======
+        # Account write plus its durable audit row: off the event loop.  The
+        # shared deletion step deletes the account row first, then removes
+        # every row keyed to the name (group membership, SSO links, MFA,
+        # tokens, credentials) in the configured store and submits removal of
+        # the account's repositories.
+>>>>>>> upstream/master
         deleted = await asyncio.to_thread(
             user_manager.delete_user_audited, username, actor=session.username
         )
         if not deleted:
+<<<<<<< HEAD
             # Nothing was deleted: no identity-link or membership cleanup.
             return RedirectResponse(
                 url="/admin/users?error=user_not_found", status_code=303
@@ -2120,6 +2225,10 @@ async def delete_user(
                     "SCIP-GENERAL-041",
                     f"group_manager not available, skipped group cleanup for: {username}",
                 )
+=======
+            return RedirectResponse(
+                url="/admin/users?error=user_not_found", status_code=303
+>>>>>>> upstream/master
             )
 
         return RedirectResponse(
@@ -2305,35 +2414,8 @@ def _create_groups_page_response(
     # Get groups data with counts
     groups_data = _get_groups_data()
 
-    # Get users with their group assignments
-    # First get all users from user manager
-    all_system_users = _get_users_list()
-    assigned_users, _ = group_manager.get_all_users_with_groups()
-
-    # Create a map of assigned users by user_id
-    assigned_map = {u["user_id"]: u for u in assigned_users}
-
-    # Merge: all system users with their group info (or None if unassigned)
-    users_with_groups = []
-    for user in all_system_users:
-        username = user.username
-        if username in assigned_map:
-            user_data = assigned_map[username]
-            user_data["assigned_at"] = _format_datetime_display(
-                user_data.get("assigned_at")
-            )
-            users_with_groups.append(user_data)
-        else:
-            # Unassigned user
-            users_with_groups.append(
-                {
-                    "user_id": username,
-                    "group_id": None,
-                    "group_name": None,
-                    "assigned_at": None,
-                    "assigned_by": None,
-                }
-            )
+    # Users' group assignments are user data: the User Assignments tab loads
+    # them from the elevation-gated groups-users-list partial, never here.
 
     # Get all groups for the dropdown
     all_groups = [
@@ -2397,7 +2479,6 @@ def _create_groups_page_response(
             "active_tab": active_tab,
             "csrf_token": csrf_token,
             "groups": groups_data,
-            "users_with_groups": users_with_groups,
             "all_groups": all_groups,
             "golden_repos": golden_repos,
             "repo_access_map": repo_access_map,
@@ -2586,13 +2667,43 @@ def assign_user_to_group(
             request, session, active_tab="users", error_message="Invalid CSRF token"
         )
 
+<<<<<<< HEAD
     from code_indexer.server.services.group_access_manager import GroupNotFoundError
+=======
+    from code_indexer.server.services.group_access_manager import (
+        GroupNotFoundError,
+        UnknownAccountError,
+    )
+
+    user_manager = dependencies.user_manager
+    if user_manager is None:
+        return _create_groups_page_response(
+            request,
+            session,
+            active_tab="users",
+            error_message="User manager not available",
+        )
+>>>>>>> upstream/master
 
     try:
         group_manager = _get_group_manager()
         try:
             new_group = group_manager.assign_user_to_group_audited(
+<<<<<<< HEAD
                 user_id, group_id, actor=session.username
+=======
+                user_id,
+                group_id,
+                actor=session.username,
+                account_exists=lambda name: user_manager.get_user(name) is not None,
+            )
+        except UnknownAccountError:
+            return _create_groups_page_response(
+                request,
+                session,
+                active_tab="users",
+                error_message=f"User '{user_id}' not found",
+>>>>>>> upstream/master
             )
         except GroupNotFoundError:
             return _create_groups_page_response(
@@ -2633,26 +2744,13 @@ def groups_list_partial(request: Request):
     return response
 
 
-@web_router.get("/partials/groups-users-list", response_class=HTMLResponse)
-def groups_users_list_partial(request: Request):
-    """Partial refresh endpoint for users group assignments section."""
-    session = _require_admin_session(request)
-    if not session:
-        return HTMLResponse(content="", status_code=401)
-
-    csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
-    group_manager = _get_group_manager()
-
-    # Get all users from user manager
-    all_system_users = _get_users_list()
+def _get_users_with_groups(group_manager: Any) -> List[Dict[str, Any]]:
+    """Every system user with their group assignment (None when unassigned)."""
     assigned_users, _ = group_manager.get_all_users_with_groups()
-
-    # Create a map of assigned users by user_id
     assigned_map = {u["user_id"]: u for u in assigned_users}
 
-    # Merge: all system users with their group info (or None if unassigned)
-    users_with_groups = []
-    for user in all_system_users:
+    users_with_groups: List[Dict[str, Any]] = []
+    for user in _get_users_list():
         username = user.username
         if username in assigned_map:
             user_data = assigned_map[username]
@@ -2661,7 +2759,6 @@ def groups_users_list_partial(request: Request):
             )
             users_with_groups.append(user_data)
         else:
-            # Unassigned user
             users_with_groups.append(
                 {
                     "user_id": username,
@@ -2671,6 +2768,30 @@ def groups_users_list_partial(request: Request):
                     "assigned_by": None,
                 }
             )
+    return users_with_groups
+
+
+@web_router.get(
+    "/partials/groups-users-list",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def groups_users_list_partial(request: Request):
+    """Partial for the users' group assignments (the groups page's User
+    Assignments tab).
+
+    Group membership is user data: elevation-gated like the users-list
+    partial, REST ``GET /api/v1/groups/{group_id}`` and MCP ``get_group``.
+    Without a window it answers 403 ``elevation_required``, which the shared
+    elevation interceptor turns into the TOTP modal.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
+    group_manager = _get_group_manager()
+    users_with_groups = _get_users_with_groups(group_manager)
 
     all_groups = [
         {"id": g.id, "name": g.name, "is_default": g.is_default}
@@ -2902,7 +3023,7 @@ async def grant_repo_access(
 
     Supports both AJAX (JSON) and form POST requests (Story #199).
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -2979,7 +3100,7 @@ async def revoke_repo_access(
         CidxMetaCannotBeRevokedError,
     )
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -3225,7 +3346,9 @@ def _batch_create_repos(
                     "WEB-GENERAL-067",
                     "Batch golden repo create failed",
                     repo_alias=repo_data.get("alias", "unknown"),
-                    repo_url=repo_data.get("clone_url", "unknown"),
+                    repo_url=mask_url_credentials(
+                        repo_data.get("clone_url", "unknown")
+                    ),
                     submitter=submitter_username,
                 ),
                 extra=get_log_extra("WEB-GENERAL-067"),
@@ -3462,7 +3585,8 @@ def _get_golden_repos_list(backend_registry=None):
     """Get list of all golden repositories with global alias, version, and index info."""
     try:
         manager = _get_golden_repo_manager()
-        repos = manager.list_golden_repos()
+        # Repository URLs are rendered with their userinfo redacted.
+        repos = [with_masked_repo_url(r) for r in manager.list_golden_repos()]
         server_data_dir = os.environ.get(
             "CIDX_SERVER_DATA_DIR", os.path.expanduser("~/.cidx-server")
         )
@@ -3626,7 +3750,9 @@ def add_golden_repo(
         if "already exists" in error_msg.lower():
             error_msg = f"Repository alias '{alias}' already exists"
         elif "invalid" in error_msg.lower() or "inaccessible" in error_msg.lower():
-            error_msg = f"Invalid or inaccessible repository: {repo_url}"
+            error_msg = (
+                f"Invalid or inaccessible repository: {mask_url_credentials(repo_url)}"
+            )
         return _create_golden_repos_page_response(
             request, session, error_message=error_msg
         )
@@ -3888,10 +4014,14 @@ def toggle_wiki_enabled(
             from pathlib import Path
             from ..wiki.wiki_cache import WikiCache
             from ..wiki.wiki_service import WikiService
+<<<<<<< HEAD
             from ...global_repos.alias_manager import (
                 AliasManager,
                 resolve_alias_or_index_path,
             )
+=======
+            from ...global_repos.alias_manager import AliasManager
+>>>>>>> upstream/master
             from ..utils.registry_factory import resolve_backend_registry_attr
 
             # Bug #1665: resolve the shared PostgreSQL wiki_cache backend in
@@ -4104,7 +4234,7 @@ async def change_golden_repo_branch(
     alias: str,
 ):
     """Change the active branch of a golden repository async (Story #308)."""
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return JSONResponse(
             {"success": False, "error": "Authentication required"},
@@ -4414,6 +4544,8 @@ def _get_single_repo_enriched(alias: str, backend_registry=None) -> Optional[dic
     repo = next((r for r in repos if r.get("alias") == alias), None)
     if repo is None:
         return None
+    # The repository URL is rendered with its userinfo redacted.
+    repo = with_masked_repo_url(repo)
     server_data_dir = os.environ.get(
         "CIDX_SERVER_DATA_DIR", os.path.expanduser("~/.cidx-server")
     )
@@ -5113,9 +5245,15 @@ def _apply_job_filters(
     Mirrors the filter semantics BackgroundJobManager applies internally so that
     JobTracker-only jobs are subject to the same criteria.
     """
+    from code_indexer.server.storage.shared.job_status_filter import (
+        statuses_for_filter,
+    )
+
     result = []
     for job in jobs:
-        if status_filter and job.get("status") != status_filter:
+        if status_filter and job.get("status") not in statuses_for_filter(
+            status_filter
+        ):
             continue
         if type_filter and job.get("operation_type") != type_filter:
             continue
@@ -5599,6 +5737,7 @@ def _create_query_page_response(
     regex: bool = False,
     scip_query_type: str = "definition",
     scip_exact: bool = False,
+    warning_message: Optional[str] = None,
 ) -> HTMLResponse:
     """Create query page response with all necessary context."""
     csrf_token = generate_csrf_token()
@@ -5627,6 +5766,7 @@ def _create_query_page_response(
             "results": results,
             "query_executed": query_executed,
             "error_message": error_message,
+            "warning_message": warning_message,
             "success_message": success_message,
             "time_range_all": time_range_all,
             "time_range": time_range,
@@ -5763,9 +5903,13 @@ def query_submit(
             pass
 
     # Execute actual query
+    query_started = time.monotonic()
     results = []
     query_executed = True
     error_message = None
+    warning_message: Optional[str] = None
+    # Story #2117: the exception a SCIP query that ran failed with.
+    scip_failure: Optional[BaseException] = None
 
     backend_registry = getattr(request.app.state, "backend_registry", None)
 
@@ -5867,7 +6011,12 @@ def query_submit(
 
                                 parts = query_text.strip().split(maxsplit=1)
                                 if len(parts) != 2:
-                                    raise ValueError(
+                                    from code_indexer.server.query.semantic_query_manager import (
+                                        SearchRequestError,
+                                    )
+
+                                    # A refused request, not a failed search.
+                                    raise SearchRequestError(
                                         "Call chain requires two symbols: 'from_symbol to_symbol'"
                                     )
                                 scip_file = Path(scip_files[0])
@@ -5981,6 +6130,10 @@ def query_submit(
                                 ),
                                 extra={"correlation_id": get_correlation_id()},
                             )
+<<<<<<< HEAD
+=======
+                            scip_failure = e
+>>>>>>> upstream/master
                             error_message = f"Callchain query timed out for repository '{user_alias}': {e}. Try a smaller max-depth or narrower symbols."
                         except FileNotFoundError as e:
                             logger.error(
@@ -5991,6 +6144,7 @@ def query_submit(
                                 exc_info=True,
                                 extra={"correlation_id": get_correlation_id()},
                             )
+                            scip_failure = e
                             error_message = f"SCIP index not found or corrupted for repository '{user_alias}'. Generate an index with: `cidx scip generate`"
                         except Exception as e:
                             logger.error(
@@ -6001,18 +6155,15 @@ def query_submit(
                                 exc_info=True,
                                 extra={"correlation_id": get_correlation_id()},
                             )
+                            scip_failure = e
                             error_message = f"SCIP query failed for repository '{user_alias}': {str(e)}. Try regenerating the index with: `cidx scip generate`"
 
         else:
-            # Handle semantic/FTS/temporal queries
+            # Handle semantic/FTS/hybrid/temporal queries
             query_manager = _get_semantic_query_manager()
-            if not query_manager:
-                error_message = "Query service not available"
-            else:
-                # Find the username for this repository
-                # Repository format is "user_alias (username)"
-                repo_parts = repository.split(" (")
-                user_alias = repo_parts[0] if repo_parts else repository
+            # Repository format is "user_alias (username)"
+            repo_parts = repository.split(" (")
+            user_alias = repo_parts[0] if repo_parts else repository
 
             # Get the repository from all available repos (including global)
             all_repos = _get_all_activated_repos_for_query(backend_registry)
@@ -6022,8 +6173,11 @@ def query_submit(
                     target_repo = repo
                     break
 
-            if not target_repo:
+            if not query_manager:
+                error_message = "Query service not available"
+            elif not target_repo:
                 error_message = f"Repository '{user_alias}' not found"
+<<<<<<< HEAD
             elif target_repo.get("is_global"):
                 # Handle global repository query
                 import os
@@ -6092,53 +6246,59 @@ def query_submit(
                             extra={"correlation_id": get_correlation_id()},
                         )
                         error_message = f"Query failed: {str(e)}"
+=======
+>>>>>>> upstream/master
             else:
-                repo_username = target_repo.get("username", session.username)
-
-                # Execute query for user-activated repositories
-                query_response = query_manager.query_user_repositories(
-                    username=repo_username,
-                    query_text=query_text.strip(),
-                    repository_alias=user_alias,
-                    limit=limit,
-                    min_score=parsed_min_score,
-                    language=language if language else None,
-                    path_filter=path_pattern if path_pattern else None,
-                    search_mode=search_mode,
-                    time_range=time_range if time_range else None,
-                    time_range_all=time_range_all,
-                    at_commit=at_commit if at_commit else None,
-                    case_sensitive=case_sensitive,
-                    fuzzy=fuzzy,
-                    regex=regex,
-                )
-
-                # Convert results to template format with full metadata
-                for result in query_response.get("results", []):
-                    results.append(
-                        {
-                            "file_path": result.get("file_path", ""),
-                            "line_numbers": f"{result.get('line_number', 1)}",
-                            "content": result.get("code_snippet", ""),
-                            "score": result.get("similarity_score", 0.0),
-                            "language": _detect_language_from_path(
-                                result.get("file_path", "")
-                            ),
-                            "repository_alias": result.get("repository_alias", ""),
-                            "source_repo": result.get("source_repo"),
-                            "metadata": result.get("metadata"),
-                            "temporal_context": result.get("temporal_context"),
-                        }
+                # Activated and global repositories: the same mode-aware path.
+                try:
+                    text_rows, warning_message = _execute_text_query(
+                        query_manager,
+                        target_repo,
+                        user_alias,
+                        session.username,
+                        query_text,
+                        limit=limit,
+                        min_score=parsed_min_score,
+                        language=language,
+                        path_filter=path_pattern,
+                        search_mode=search_mode,
+                        time_range=time_range,
+                        time_range_all=time_range_all,
+                        at_commit=at_commit,
+                        case_sensitive=case_sensitive,
+                        fuzzy=fuzzy,
+                        regex=regex,
+                        event_writer=search_event_recording.writer_from_app(
+                            request.app
+                        ),
                     )
+                except WebQueryNotCompleted as e:
+                    # The query was not completed (access refused, invalid
+                    # parameters, provider outage, timeout, missing index):
+                    # _execute_text_query logged it and classified the text
+                    # the user is shown (classify_search_error).
+                    error_message = f"Query failed: {e}"
+                else:
+                    results.extend(text_rows)
 
     except Exception as e:
-        logger.error(
-            format_error_log("STORE-GENERAL-035", f"Query execution failed: {e}"),
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
+        message = _classify_web_query_failure(
+            e, error_code="STORE-GENERAL-035", detail_logged_upstream=False
         )
-        error_message = f"Query failed: {str(e)}"
+        error_message = f"Query failed: {message}"
 
+    _record_web_scip_search(
+        request,
+        session.username,
+        repository,
+        query_text,
+        search_mode,
+        scip_query_type,
+        error_message,
+        len(results),
+        query_started,
+        scip_failure,
+    )
     return _create_query_page_response(
         request,
         session,
@@ -6160,6 +6320,7 @@ def query_submit(
         regex=regex,
         scip_query_type=scip_query_type,
         scip_exact=scip_exact,
+        warning_message=warning_message,
     )
 
 
@@ -6208,6 +6369,77 @@ def _get_semantic_query_manager():
         return None
 
 
+# The SCIP query types the Web query page executes (both SCIP paths).
+_WEB_SCIP_QUERY_TYPES = (
+    "definition",
+    "references",
+    "dependencies",
+    "dependents",
+    "impact",
+    "callchain",
+    "context",
+)
+
+
+def _record_web_scip_search(
+    request: Request,
+    username: str,
+    repository: str,
+    query_text: str,
+    search_mode: str,
+    scip_query_type: str,
+    error_message: Optional[str],
+    result_count: int,
+    started: float,
+    failure: Optional[BaseException],
+) -> None:
+    """Story #2115: record a SCIP-mode Web query as "scip".
+
+    Nothing is recorded for other modes (recorded by _execute_text_query),
+    for an unrecognized query type (no query ran), or when the request was
+    refused before a search ran (an error message and no `failure`). A
+    query that ran and raised (`failure`, Story #2117) is a failure row,
+    classified like MCP and REST SCIP. `repository` is the form value
+    "alias (owner)".
+    """
+    if search_mode != "scip" or scip_query_type not in _WEB_SCIP_QUERY_TYPES:
+        return
+    if error_message is not None and failure is None:
+        return
+    recorded_text = query_text.strip()
+    symbols = recorded_text.split(maxsplit=1)
+    if scip_query_type == "callchain" and len(symbols) == 2:
+        # Same text as MCP and REST.
+        recorded_text = search_event_recording.scip_callchain_query_text(*symbols)
+    writer = search_event_recording.writer_from_app(request.app)
+    origin = search_event_recording.SearchOrigin(tool="web:query", door="web")
+    repo_alias = repository.split(" (")[0]
+    if failure is not None:
+        search_event_recording.record_scip_search(
+            writer,
+            {"success": False},
+            origin=origin,
+            username=username,
+            repo_alias=repo_alias,
+            query_text=recorded_text,
+            started_monotonic=started,
+            correlation_id=get_correlation_id(),
+            error=failure,
+        )
+        return
+    search_event_recording.record_completed_search(
+        writer,
+        origin=origin,
+        search_type="scip",
+        username=username,
+        repo_alias=repo_alias,
+        query_text=recorded_text,
+        result_count=result_count,
+        started_monotonic=started,
+        correlation_id=get_correlation_id(),
+    )
+
+
 def _execute_scip_query(
     target_repo: dict,
     user_alias: str,
@@ -6217,11 +6449,13 @@ def _execute_scip_query(
     limit: int,
     min_score: str,
     backend_registry=None,
-) -> tuple[list, Optional[str]]:
+) -> tuple[list, Optional[str], Optional[BaseException]]:
     """
     Execute SCIP query for repository. Supports all 7 SCIP query types.
 
-    Returns tuple of (results_list, error_message).
+    Returns tuple of (results_list, error_message, failure): `failure` is the
+    exception a query that ran failed with (Story #2117), None when it
+    completed or was refused before running.
     """
     from code_indexer.scip.query.primitives import SCIPQueryEngine, QueryResult
     from code_indexer.scip.database.queries import QueryTimeoutError
@@ -6245,7 +6479,7 @@ def _execute_scip_query(
             )
 
     if not repo_path:
-        return results, f"Repository '{user_alias}' path not found"
+        return results, f"Repository '{user_alias}' path not found", None
 
     scip_pattern = str(Path(repo_path) / ".code-indexer" / "scip" / "**" / "*.scip")
     scip_files = glob.glob(scip_pattern, recursive=True)
@@ -6253,6 +6487,7 @@ def _execute_scip_query(
         return (
             results,
             f"No SCIP index found for repository '{user_alias}'. Run 'cidx scip index' first.",
+            None,
         )
 
     try:
@@ -6281,7 +6516,12 @@ def _execute_scip_query(
         elif scip_query_type == "callchain":
             parts = query_text.strip().split(maxsplit=1)
             if len(parts) != 2:
-                raise ValueError(
+                from code_indexer.server.query.semantic_query_manager import (
+                    SearchRequestError,
+                )
+
+                # A refused request, not a failed search.
+                raise SearchRequestError(
                     "Call chain requires two symbols: 'from_symbol to_symbol'"
                 )
             engine = SCIPQueryEngine(Path(scip_files[0]))
@@ -6380,6 +6620,10 @@ def _execute_scip_query(
         return (
             results,
             f"Callchain query timed out for repository '{user_alias}': {e}. Try a smaller max-depth or narrower symbols.",
+<<<<<<< HEAD
+=======
+            e,
+>>>>>>> upstream/master
         )
     except FileNotFoundError as e:
         logger.error(
@@ -6392,6 +6636,7 @@ def _execute_scip_query(
         return (
             results,
             f"SCIP index not found or corrupted for repository '{user_alias}'. Generate an index with: `cidx scip generate`",
+            e,
         )
     except Exception as e:
         logger.error(
@@ -6402,9 +6647,165 @@ def _execute_scip_query(
         return (
             results,
             f"SCIP query failed for repository '{user_alias}': {str(e)}. Try regenerating the index with: `cidx scip generate`",
+            e,
         )
 
-    return results, None
+    return results, None, None
+
+
+class WebQueryNotCompleted(Exception):
+    """A Web text query the query layer did not complete. ``str()`` is what
+    the user is shown: the ``classify_search_error`` message (a client
+    error's own text, else the fixed public failure message)."""
+
+
+def _classify_web_query_failure(
+    error: BaseException, *, error_code: str, detail_logged_upstream: bool
+) -> str:
+    """Log a failed Web query once and return the text the user is shown.
+
+    One rule for every search front door (``classify_search_error``): only a
+    client error's text (it describes the caller's own request) is logged,
+    at WARNING, and shown. Any other failure can carry a provider's or the
+    server's internal text, so the user sees only the fixed public message;
+    its detail is logged at ERROR with the traceback, or, when the query
+    layer already logged it (``detail_logged_upstream``), only its class is
+    logged at WARNING.
+    """
+    from code_indexer.server.query.search_error_policy import classify_search_error
+
+    outcome = classify_search_error(error)
+    error_class = type(error).__name__
+    if not outcome.log_as_internal or detail_logged_upstream:
+        detail = (
+            outcome.message
+            if outcome.client_error
+            else "not a client error, detail not logged"
+        )
+        logger.warning(
+            format_error_log(
+                error_code, f"Query not completed: {error_class}: {detail}"
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+    else:
+        logger.error(
+            format_error_log(
+                error_code, f"Query execution failed: {error_class}: {error}"
+            ),
+            exc_info=error,
+            extra={"correlation_id": get_correlation_id()},
+        )
+    return outcome.message
+
+
+def _execute_text_query(
+    query_manager: Any,
+    target_repo: Dict[str, Any],
+    user_alias: str,
+    session_username: str,
+    query_text: str,
+    *,
+    limit: int,
+    min_score: Optional[float],
+    language: str,
+    path_filter: str,
+    search_mode: str,
+    time_range: str,
+    time_range_all: bool,
+    at_commit: str,
+    case_sensitive: bool,
+    fuzzy: bool,
+    regex: bool,
+    # Any: the app's SearchEventLogWriter, or None when it is not running
+    # (then nothing is recorded); typed loosely like every recording door.
+    event_writer: Any,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Run a semantic/FTS/hybrid/temporal Web query.
+
+    Returns ``(template rows, warning)``; the warning is the query layer's
+    own (e.g. no temporal index), the same text REST and MCP return.
+
+    Shared by both Web query handlers. Activated and global repositories go
+    through the same mode-aware ``query_user_repositories`` path REST and
+    MCP use, with every form parameter. A global repository is queried as
+    the signed-in user, so the normal per-user repository access narrowing
+    applies (a repository the user cannot access is refused like an unknown
+    one); an activated repository is queried as its owner. Failures raise;
+    a query the query layer did not complete (SemanticQueryError, ValueError)
+    is classified with ``classify_search_error``, logged here once at
+    WARNING, and raised as ``WebQueryNotCompleted`` carrying the message the
+    user is shown.
+
+    Story #2115: a completed query is recorded in the search event log
+    (``run_recorded_search``) as the signed-in user, with the mode that ran
+    ("temporal" whenever a time range or commit scopes it); a query that
+    raises records a failure row (Story #2117). Tool "web:query", door web.
+    """
+    from code_indexer.server.query.semantic_query_manager import SemanticQueryError
+    from code_indexer.server.services.search_event_recording import (
+        run_recorded_search,
+    )
+
+    if target_repo.get("is_global"):
+        username = session_username
+    else:
+        username = target_repo.get("username", session_username)
+
+    try:
+        query_response = run_recorded_search(
+            event_writer,
+            lambda: query_manager.query_user_repositories(
+                username=username,
+                query_text=query_text.strip(),
+                repository_alias=user_alias,
+                limit=limit,
+                min_score=min_score,
+                language=language if language else None,
+                path_filter=path_filter if path_filter else None,
+                search_mode=search_mode,
+                time_range=time_range if time_range else None,
+                time_range_all=time_range_all,
+                at_commit=at_commit if at_commit else None,
+                case_sensitive=case_sensitive,
+                fuzzy=fuzzy,
+                regex=regex,
+            ),
+            # search_event_recording: the module imported at the top of
+            # this file.
+            origin=search_event_recording.SearchOrigin(tool="web:query", door="web"),
+            username=session_username,
+            repo_alias=user_alias,
+            search_type=(
+                "temporal"
+                if (time_range or time_range_all or at_commit)
+                else search_mode
+            ),
+            query_text=query_text.strip(),
+            correlation_id=get_correlation_id(),
+        )
+    except (SemanticQueryError, ValueError) as e:
+        # The query layer logged the detail of a failure it raised itself.
+        message = _classify_web_query_failure(
+            e, error_code="STORE-GENERAL-053", detail_logged_upstream=True
+        )
+        raise WebQueryNotCompleted(message) from e
+
+    rows = [
+        {
+            "file_path": result.get("file_path", ""),
+            "line_numbers": f"{result.get('line_number', 1)}",
+            "content": result.get("code_snippet", ""),
+            "score": result.get("similarity_score", 0.0),
+            "language": _detect_language_from_path(result.get("file_path", "")),
+            "repository_alias": result.get("repository_alias", ""),
+            "source_repo": result.get("source_repo"),
+            "metadata": result.get("metadata"),
+            "temporal_context": result.get("temporal_context"),
+        }
+        for result in query_response.get("results", [])
+    ]
+    return rows, query_response.get("warning")
 
 
 @web_router.post("/partials/query-results", response_class=HTMLResponse)
@@ -6489,9 +6890,13 @@ def query_results_partial_post(
             pass
 
     # Execute actual query
+    query_started = time.monotonic()
     results = []
     query_executed = True
     error_message = None
+    warning_message: Optional[str] = None
+    # Story #2117: the exception a SCIP query that ran failed with.
+    scip_failure: Optional[BaseException] = None
     backend_registry = getattr(request.app.state, "backend_registry", None)
 
     try:
@@ -6516,7 +6921,7 @@ def query_results_partial_post(
                 error_message = f"Repository '{user_alias}' not found"
             elif search_mode == "scip":
                 # Execute SCIP query using helper function
-                scip_results, scip_error = _execute_scip_query(
+                scip_results, scip_error, scip_failure = _execute_scip_query(
                     target_repo,
                     user_alias,
                     query_text,
@@ -6529,6 +6934,7 @@ def query_results_partial_post(
                 results.extend(scip_results)
                 if scip_error:
                     error_message = scip_error
+<<<<<<< HEAD
             elif target_repo.get("is_global"):
                 # Handle global repository query
                 import os
@@ -6597,53 +7003,59 @@ def query_results_partial_post(
                             extra={"correlation_id": get_correlation_id()},
                         )
                         error_message = f"Query failed: {str(e)}"
+=======
+>>>>>>> upstream/master
             else:
-                # Execute query for user-activated repositories
-                repo_username = target_repo.get("username", session.username)
-
-                query_response = query_manager.query_user_repositories(
-                    username=repo_username,
-                    query_text=query_text.strip(),
-                    repository_alias=user_alias,
-                    limit=limit,
-                    min_score=parsed_min_score,
-                    language=language if language else None,
-                    path_filter=path_pattern if path_pattern else None,
-                    search_mode=search_mode,
-                    time_range=time_range if time_range else None,
-                    time_range_all=time_range_all,
-                    at_commit=at_commit if at_commit else None,
-                    case_sensitive=case_sensitive,
-                    fuzzy=fuzzy,
-                    regex=regex,
-                )
-
-                # Convert results to template format with full metadata
-                for result in query_response.get("results", []):
-                    results.append(
-                        {
-                            "file_path": result.get("file_path", ""),
-                            "line_numbers": f"{result.get('line_number', 1)}",
-                            "content": result.get("code_snippet", ""),
-                            "score": result.get("similarity_score", 0.0),
-                            "language": _detect_language_from_path(
-                                result.get("file_path", "")
-                            ),
-                            "repository_alias": result.get("repository_alias", ""),
-                            "source_repo": result.get("source_repo"),
-                            "metadata": result.get("metadata"),
-                            "temporal_context": result.get("temporal_context"),
-                        }
+                # Activated and global repositories: the same mode-aware path.
+                try:
+                    text_rows, warning_message = _execute_text_query(
+                        query_manager,
+                        target_repo,
+                        user_alias,
+                        session.username,
+                        query_text,
+                        limit=limit,
+                        min_score=parsed_min_score,
+                        language=language,
+                        path_filter=path_pattern,
+                        search_mode=search_mode,
+                        time_range=time_range,
+                        time_range_all=time_range_all,
+                        at_commit=at_commit,
+                        case_sensitive=case_sensitive,
+                        fuzzy=fuzzy,
+                        regex=regex,
+                        event_writer=search_event_recording.writer_from_app(
+                            request.app
+                        ),
                     )
+                except WebQueryNotCompleted as e:
+                    # The query was not completed (access refused, invalid
+                    # parameters, provider outage, timeout, missing index):
+                    # _execute_text_query logged it and classified the text
+                    # the user is shown (classify_search_error).
+                    error_message = f"Query failed: {e}"
+                else:
+                    results.extend(text_rows)
 
     except Exception as e:
-        logger.error(
-            format_error_log("STORE-GENERAL-041", f"Query execution failed: {e}"),
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
+        message = _classify_web_query_failure(
+            e, error_code="STORE-GENERAL-041", detail_logged_upstream=False
         )
-        error_message = f"Query failed: {str(e)}"
+        error_message = f"Query failed: {message}"
 
+    _record_web_scip_search(
+        request,
+        session.username,
+        repository,
+        query_text,
+        search_mode,
+        scip_query_type,
+        error_message,
+        len(results),
+        query_started,
+        scip_failure,
+    )
     csrf_token_new = generate_csrf_token()
     response = templates.TemplateResponse(
         request,
@@ -6654,6 +7066,7 @@ def query_results_partial_post(
             "query_executed": query_executed,
             "query_text": query_text,
             "error_message": error_message,
+            "warning_message": warning_message,
             "search_mode": search_mode,
         },
     )
@@ -6871,6 +7284,10 @@ def _get_current_config() -> dict:
         ActivatedReaperConfig,
         # Story #1397 - HNSW orphan-repair sweep operating-hours window config
         HNSWOrphanRepairSweepConfig,
+<<<<<<< HEAD
+=======
+        SiemDeliveryConfig,
+>>>>>>> upstream/master
         IndexingWatchdogConfig,
         # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
         FleetMigrationConfig,
@@ -6878,8 +7295,11 @@ def _get_current_config() -> dict:
         TemporalLegacyMigrationConfig,
         # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
         AliasLockConfig,
+<<<<<<< HEAD
         # Content seam step 5a - aliases and write-mode markers in the registry
         ControlPlaneMetadataConfig,
+=======
+>>>>>>> upstream/master
         # Issue #1398 - Query & search timeouts configuration
         SearchTimeoutsConfig,
         # Story #1418 Phase 3 - Embedding & reranker call tracking config
@@ -7114,6 +7534,14 @@ def _get_current_config() -> dict:
         "hnsw_orphan_sweep": settings.get(
             "hnsw_orphan_sweep", asdict(HNSWOrphanRepairSweepConfig())
         ),
+<<<<<<< HEAD
+=======
+        "siem_delivery": settings.get("siem_delivery", asdict(SiemDeliveryConfig())),
+        # SIEM delivery additional trusted CA: public identity rows (no I/O).
+        "siem_delivery_trusted_ca": _siem_trusted_ca_rows(
+            settings.get("siem_delivery", asdict(SiemDeliveryConfig()))
+        ),
+>>>>>>> upstream/master
         # Issue #1530: Indexing-subprocess activity watchdog configuration
         "indexing_watchdog": settings.get(
             "indexing_watchdog", asdict(IndexingWatchdogConfig())
@@ -7128,10 +7556,13 @@ def _get_current_config() -> dict:
         ),
         # Issue #1546 Phase 2: DB-backed alias lock rollout gate
         "alias_lock": settings.get("alias_lock", asdict(AliasLockConfig())),
+<<<<<<< HEAD
         # Content seam step 5a: aliases and write-mode markers in the registry
         "control_plane_metadata": settings.get(
             "control_plane_metadata", asdict(ControlPlaneMetadataConfig())
         ),
+=======
+>>>>>>> upstream/master
         # Issue #1398: Query & search timeouts configuration
         "search_timeouts": settings.get(
             "search_timeouts", asdict(SearchTimeoutsConfig())
@@ -8471,14 +8902,27 @@ def _create_config_page_response(
     """
     csrf_token = generate_csrf_token()
     config = _get_current_config()
+    # SIEM delivery read-only status: this process's in-memory view (no I/O).
+    from ..services.siem_delivery.config_view import status_block as _siem_status
+
+    config["siem_delivery_status"] = _siem_status(
+        getattr(request.app.state, "siem_delivery_scheduler", None),
+        getattr(request.app.state, "siem_delivery_startup_error", None),
+    )
 
     # Load API keys status
     token_manager = _get_token_manager()
     api_keys_status = token_manager.list_tokens()
 
+<<<<<<< HEAD
     # Get token data for masking in template
     github_token_data = token_manager.get_token("github")
     gitlab_token_data = token_manager.get_token("gitlab")
+=======
+    # Only the masked display form reaches the template.
+    github_token_data = _ci_token_display(token_manager.get_token("github"))
+    gitlab_token_data = _ci_token_display(token_manager.get_token("gitlab"))
+>>>>>>> upstream/master
 
     response = templates.TemplateResponse(
         request,
@@ -8654,12 +9098,27 @@ def auto_discovery_page(request: Request):
 
 @web_router.get("/analytics-export", response_class=HTMLResponse)
 def analytics_export_page(request: Request):
-    """Query Analytics Export page — filter and export search event data to Excel."""
+    """Query Analytics Export page — filter and export search event data to Excel.
+
+    Every user's search history is user data: like the elevation-gated
+    ``/api/admin/search-events*`` routes the page calls, it requires the
+    caller's own elevation window.
+    """
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
+    elevate = _elevation_page_redirect(request, session.username)
+    if elevate is not None:
+        return elevate
+
+    # Bug #2110: the Search Type options are the one list writers record.
+    from code_indexer.server.services.search_event_health import (
+        search_event_health_info,
+        search_event_log_window,
+    )
 
     csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
+    event_writer = search_event_recording.writer_from_app(request.app)
     response = templates.TemplateResponse(
         request,
         "analytics_export.html",
@@ -8668,6 +9127,14 @@ def analytics_export_page(request: Request):
             "current_page": "analytics-export",
             "show_nav": True,
             "csrf_token": csrf_token,
+            "search_types": search_event_recording.SEARCH_TYPES,
+            # Bug #2114: events this server process dropped (an export can
+            # be short).
+            "search_event_drops": search_event_health_info(event_writer),
+            # Story #2117: retention (live config) and the oldest stored row
+            # (one indexed read; this route is sync, run in the threadpool).
+            "search_event_window": search_event_log_window(event_writer),
+            "query_text_max_chars": search_event_recording.QUERY_TEXT_MAX_CHARS,
         },
     )
     set_csrf_cookie(response, csrf_token)
@@ -8757,11 +9224,11 @@ async def discovery_start(
     Returns job_id immediately. Client polls GET /api/jobs/{job_id} for progress.
     Deduplicates: if a PENDING or RUNNING job of the same type exists, returns it.
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if session is None:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
-    provider, err = _resolve_provider(request, platform)
+    provider, err = await asyncio.to_thread(_resolve_provider, request, platform)
     if err is not None:
         return err
     if not provider.is_configured():
@@ -8830,7 +9297,7 @@ async def discovery_result(
     Result lives in PayloadCache (TTL-based, not read-once). Re-reads within TTL return 200.
     Auth required.
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if session is None:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
@@ -8877,7 +9344,7 @@ async def discovery_enrich(
     Accepts JSON body: {"clone_urls": ["https://..."]}
     Returns a dict mapping each clone_url to its commit info.
     """
-    provider, error = _resolve_provider(request, platform)
+    provider, error = await asyncio.to_thread(_resolve_provider, request, platform)
     if error is not None:
         return error
 
@@ -9094,7 +9561,7 @@ async def _validate_discovery_hide_request(
     Returns (error_response, repo_identifier). If error_response is not None,
     the caller should return it immediately.
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=status.HTTP_401_UNAUTHORIZED), ""
 
@@ -9193,7 +9660,7 @@ async def fetch_discovery_branches(request: Request):
         }
     """
     # Require admin authentication
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return JSONResponse(
             status_code=401,
@@ -9265,7 +9732,12 @@ async def fetch_discovery_branches(request: Request):
                 logger.warning(
                     format_error_log(
                         "STORE-GENERAL-045",
+<<<<<<< HEAD
                         f"Branch discovery shed load for {clone_url}: {overloaded}",
+=======
+                        "Branch discovery shed load for "
+                        f"{mask_url_credentials(clone_url)}: {overloaded}",
+>>>>>>> upstream/master
                     )
                 )
                 return {
@@ -9448,7 +9920,11 @@ def reset_config(
         return _create_config_page_response(
             request,
             session,
-            success_message="Configuration reset to defaults successfully",
+            success_message=(
+                "Runtime settings reset to defaults. Bootstrap settings, the "
+                "bind address, port, worker count, log level, stored keys, "
+                "security settings and deployment identity were kept."
+            ),
         )
     except Exception as e:
         logger.error(
@@ -9475,9 +9951,12 @@ async def update_langfuse_pull_config(
     csrf_token: Optional[str] = Form(None),
 ):
     """Update Langfuse Trace Pull configuration (Story #164)."""
-    from ..services.config_service import get_config_service
+    from ..services.config_service import (
+        LangfusePullProjectsInvalid,
+        get_config_service,
+    )
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -9520,6 +9999,7 @@ async def update_langfuse_pull_config(
         projects_json = form_data.get("pull_projects", "[]")
         if projects_json:
             updates.append(("langfuse", "pull_projects", projects_json))
+<<<<<<< HEAD
         await asyncio.to_thread(
             functools.partial(
                 config_service.update_settings_audited,
@@ -9527,6 +10007,30 @@ async def update_langfuse_pull_config(
                 actor=session.username,
             )
         )
+=======
+        try:
+            await asyncio.to_thread(
+                functools.partial(
+                    config_service.update_settings_audited,
+                    updates,
+                    actor=session.username,
+                )
+            )
+        except LangfusePullProjectsInvalid as rejected:
+            # The project list was refused (a project with no secret key or
+            # a duplicate public key): nothing was published.
+            logger.warning(
+                f"Langfuse pull config save rejected: {rejected}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return _create_config_page_response(
+                request,
+                session,
+                error_message=f"Configuration not saved: {rejected}",
+                validation_errors={"langfuse_pull": str(rejected)},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+>>>>>>> upstream/master
 
         return _create_config_page_response(
             request,
@@ -9549,15 +10053,6 @@ async def update_langfuse_pull_config(
         )
 
 
-def _extract_git_hostname(remote_url: str) -> Optional[str]:
-    """Extract hostname from git@host:path or ssh:// URLs."""
-    if remote_url.startswith("git@") and ":" in remote_url:
-        return remote_url.split("@", 1)[1].split(":", 1)[0]
-    if remote_url.startswith("ssh://"):
-        return urlparse(remote_url).hostname
-    return None
-
-
 @web_router.post(
     "/config/cidx_meta_backup",
     response_class=HTMLResponse,
@@ -9570,8 +10065,9 @@ async def update_cidx_meta_backup_config(
     """Update cidx-meta backup config with SSH validation and bootstrap."""
     from ..services.cidx_meta_backup.bootstrap import CidxMetaBackupBootstrap
     from ..services.config_service import get_config_service
+    from code_indexer.utils.git_remote_url import git_remote_host
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -9592,7 +10088,7 @@ async def update_cidx_meta_backup_config(
         or remote_url.startswith("https://")
         or remote_url.startswith("http://")
     ):
-        hostname = _extract_git_hostname(remote_url)
+        hostname = git_remote_host(remote_url)
         key_list = _get_ssh_key_manager().list_keys()
         if hostname and not any(hostname in key.hosts for key in key_list.managed):
             return _create_config_page_response(
@@ -9637,6 +10133,248 @@ async def update_cidx_meta_backup_config(
             validation_errors={"cidx_meta_backup": str(e)},
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
+
+
+async def _read_siem_form(
+    request: Request, session: SessionData, *, max_files: int, max_fields: int
+) -> Tuple[Any, Any]:
+    """(form, None), or (None, error page): the body is read under a hard
+    cap BEFORE parsing (413 over it), counts are bounded, CSRF is checked."""
+    from .siem_forms import FormRefused, read_checked_form
+
+    try:
+        form = await read_checked_form(
+            request, max_files=max_files, max_fields=max_fields
+        )
+    except FormRefused as refused:
+        errors = None if refused.status == 403 else {"siem_delivery": refused.message}
+        return None, _create_config_page_response(
+            request,
+            session,
+            error_message=refused.message,
+            validation_errors=errors,
+            status_code=refused.status,
+        )
+    return form, None
+
+
+def _siem_credential_page(
+    request: Request, session: SessionData, action: Any, *args: Any
+) -> Any:
+    """Run one SIEM credential admin action (sync, called off the event
+    loop) and build the config page: identity-only success, or the error."""
+    from ..services.siem_delivery.admin import SiemAdminError
+
+    scheduler = getattr(request.app.state, "siem_delivery_scheduler", None)
+    if scheduler is None:
+        message = "SIEM Delivery is not running in this process"
+        return _create_config_page_response(
+            request,
+            session,
+            error_message=message,
+            validation_errors={"siem_delivery": message},
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    try:
+        result = action(scheduler, session.username, *args)
+    except SiemAdminError as exc:
+        message = f"SIEM Delivery: {exc.message}"
+        return _create_config_page_response(
+            request,
+            session,
+            error_message=message,
+            validation_errors={"siem_delivery": message},
+            status_code=exc.status,
+        )
+    ident = result["credential"]
+    return _create_config_page_response(
+        request,
+        session,
+        success_message=(
+            f"SIEM Delivery service-account credential {result['change']}: "
+            f"{ident['client_email']} (key id {ident['private_key_id']})"
+        ),
+    )
+
+
+@web_router.post(
+    "/config/siem_delivery/credential",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+async def set_siem_delivery_credential(request: Request):
+    """Set or replace the SecOps service-account key (pasted or uploaded).
+
+    Write-only: the response never carries the key, only its identity."""
+    from starlette.datastructures import UploadFile
+
+    from ..services.siem_delivery.admin import set_credential
+    from ..services.siem_delivery.config_view import credential_text_from_inputs
+    from ..services.siem_delivery.credential import MAX_CREDENTIAL_JSON_BYTES
+
+    session = await asyncio.to_thread(_require_admin_session, request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+    form, refused = await _read_siem_form(request, session, max_files=1, max_fields=2)
+    if refused is not None:
+        return refused
+    pasted = form.get("service_account_json")
+    upload = form.get("service_account_file")
+    uploaded = (
+        await upload.read(MAX_CREDENTIAL_JSON_BYTES + 1)
+        if isinstance(upload, UploadFile)
+        else None
+    )
+    try:
+        key_json = credential_text_from_inputs(
+            pasted if isinstance(pasted, str) else "", uploaded
+        )
+    except ValueError as exc:
+        message = f"SIEM Delivery: {exc}"
+        return _create_config_page_response(
+            request,
+            session,
+            error_message=message,
+            validation_errors={"siem_delivery": message},
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            _siem_credential_page, request, session, set_credential, key_json
+        )
+    )
+
+
+@web_router.post(
+    "/config/siem_delivery/credential/remove",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+async def remove_siem_delivery_credential(request: Request):
+    """Remove the stored SecOps service-account key."""
+    from ..services.siem_delivery.admin import remove_credential
+
+    session = await asyncio.to_thread(_require_admin_session, request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+    _form, refused = await _read_siem_form(request, session, max_files=0, max_fields=1)
+    if refused is not None:
+        return refused
+    return await anyio.to_thread.run_sync(
+        functools.partial(_siem_credential_page, request, session, remove_credential)
+    )
+
+
+def _siem_trusted_ca_page(
+    request: Request, session: SessionData, action: Any, *args: Any
+) -> Any:
+    """Run one trusted-CA change (sync, off the event loop) and build the
+    config page: the fingerprint on success, or the validation error."""
+    from ..services.config_service import get_config_service
+    from ..services.siem_delivery.trust import SiemTrustInvalid
+
+    try:
+        result = action(get_config_service(), session.username, *args)
+    except SiemTrustInvalid as exc:
+        message = f"SIEM Delivery: {exc}"
+        return _create_config_page_response(
+            request,
+            session,
+            error_message=message,
+            validation_errors={"siem_delivery": message},
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    except Exception as exc:  # a storage failure: a clean page, never a 500 trace
+        logger.error(
+            "SIEM Delivery trusted CA change failed: %s",
+            type(exc).__name__,
+            exc_info=True,
+            extra={"correlation_id": get_correlation_id()},
+        )
+        message = f"SIEM Delivery: the trusted CA change failed ({type(exc).__name__})"
+        return _create_config_page_response(
+            request,
+            session,
+            error_message=message,
+            validation_errors={"siem_delivery": message},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+    return _create_config_page_response(
+        request,
+        session,
+        success_message=(
+            f"SIEM Delivery trusted CA {result['change']} "
+            f"(SHA-256 {result['fingerprint']})"
+        ),
+    )
+
+
+@web_router.post(
+    "/config/siem_delivery/trusted_ca",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+async def set_siem_delivery_trusted_ca(request: Request):
+    """Set or replace the additional trusted CA (PEM pasted or uploaded).
+
+    It ADDS to the default trust of both outbound legs; it never disables
+    verification."""
+    from starlette.datastructures import UploadFile
+
+    from ..services.siem_delivery.config_view import ca_text_from_inputs
+    from ..services.siem_delivery.trust import MAX_CA_PEM_BYTES, set_trusted_ca
+
+    session = await asyncio.to_thread(_require_admin_session, request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+    form, refused = await _read_siem_form(request, session, max_files=1, max_fields=2)
+    if refused is not None:
+        return refused
+    pasted = form.get("trusted_ca_pem")
+    upload = form.get("trusted_ca_file")
+    uploaded = (
+        await upload.read(MAX_CA_PEM_BYTES + 1)
+        if isinstance(upload, UploadFile)
+        else None
+    )
+    try:
+        pem_text = ca_text_from_inputs(
+            pasted if isinstance(pasted, str) else "", uploaded
+        )
+    except ValueError as exc:
+        message = f"SIEM Delivery: {exc}"
+        return _create_config_page_response(
+            request,
+            session,
+            error_message=message,
+            validation_errors={"siem_delivery": message},
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            _siem_trusted_ca_page, request, session, set_trusted_ca, pem_text
+        )
+    )
+
+
+@web_router.post(
+    "/config/siem_delivery/trusted_ca/remove",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+async def remove_siem_delivery_trusted_ca(request: Request):
+    """Remove the additional trusted CA (back to the default trust only)."""
+    from ..services.siem_delivery.trust import remove_trusted_ca
+
+    session = await asyncio.to_thread(_require_admin_session, request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+    _form, refused = await _read_siem_form(request, session, max_files=0, max_fields=1)
+    if refused is not None:
+        return refused
+    return await anyio.to_thread.run_sync(
+        functools.partial(_siem_trusted_ca_page, request, session, remove_trusted_ca)
+    )
 
 
 # NOTE: This specific route MUST come BEFORE /config/{section} to avoid being
@@ -9718,7 +10456,7 @@ async def update_config_section(
     """Update configuration for a specific section."""
     from ..services.config_service import get_config_service
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -9753,6 +10491,22 @@ async def update_config_section(
 
     # Validate configuration
     error = _validate_config_section(section, data, persisted_host=_persisted_host)
+<<<<<<< HEAD
+=======
+    if error is None and section == "siem_delivery":
+        # The destination allowlist depends on THIS process's fault-injection
+        # gate (a loopback harness endpoint is accepted only behind it).
+        from ..services.siem_delivery.config_view import validate_form as _siem_validate
+
+        _siem_current = get_config_service().get_config().siem_delivery_config
+        assert _siem_current is not None  # ServerConfig.__post_init__
+        error = _siem_validate(
+            _siem_current,
+            data,
+            harness_active=getattr(request.app.state, "fault_injection_service", None)
+            is not None,
+        )
+>>>>>>> upstream/master
     if error:
         return _create_config_page_response(
             request,
@@ -9962,12 +10716,19 @@ def config_section_partial(
         # Fallback: generate new token if cookie missing/invalid
         csrf_token = generate_csrf_token()
     config = _get_current_config()
+    # SIEM delivery read-only status: this process's in-memory view (no I/O).
+    from ..services.siem_delivery.config_view import status_block as _siem_status
+
+    config["siem_delivery_status"] = _siem_status(
+        getattr(request.app.state, "siem_delivery_scheduler", None),
+        getattr(request.app.state, "siem_delivery_startup_error", None),
+    )
 
     # Load API keys status
     token_manager = _get_token_manager()
     api_keys_status = token_manager.list_tokens()
-    github_token_data = token_manager.get_token("github")
-    gitlab_token_data = token_manager.get_token("gitlab")
+    github_token_data = _ci_token_display(token_manager.get_token("github"))
+    gitlab_token_data = _ci_token_display(token_manager.get_token("gitlab"))
 
     response = templates.TemplateResponse(
         request,
@@ -10431,7 +11192,7 @@ def _build_git_credential_manager() -> Any:
 )
 async def admin_git_credentials_add(request: Request):
     """Add a new git credential via admin form submission."""
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return JSONResponse(
             {"success": False, "error": "Session expired"}, status_code=401
@@ -10763,7 +11524,11 @@ async def user_git_credentials_add(request: Request):
     Requires TOTP plus the caller's own elevation window when enforcement is
     on, matching the admin route and the MCP twin configure_git_credential.
     """
+<<<<<<< HEAD
     session = _require_authenticated_session(request)
+=======
+    session = await asyncio.to_thread(_require_authenticated_session, request)
+>>>>>>> upstream/master
     if not session:
         return JSONResponse(
             {"success": False, "error": "Session expired"}, status_code=401
@@ -10904,10 +11669,20 @@ def user_logout(request: Request):
 # SSH Keys Management Page
 @web_router.get("/ssh-keys", response_class=HTMLResponse)
 def ssh_keys_page(request: Request):
-    """SSH Keys management page - view migration status and manage SSH keys."""
+    """SSH Keys management page - view migration status and manage SSH keys.
+
+    Listing key metadata requires the caller's own elevation window, like
+    the REST twin ``GET /api/ssh-keys`` (``require_elevation()``): with
+    enforcement on and no window, the admin is sent to the elevation page,
+    which returns here afterwards (query string kept; the elevate page's
+    ``_sanitize_next`` bounds the target). Enforcement off passes through.
+    """
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
+    elevate = _elevation_page_redirect(request, session.username)
+    if elevate is not None:
+        return elevate
 
     # Generate fresh CSRF token
     csrf_token = generate_csrf_token()
@@ -11195,10 +11970,19 @@ def logs_page(
         search: Search by message text
         node_id: Filter by cluster node ID (Story #501 AC4)
         page: Page number for pagination
+
+    Reading server logs requires the caller's own elevation window, like
+    the MCP twin ``admin_logs_query`` (``@require_mcp_elevation()``): with
+    enforcement on and no window, the admin is sent to the elevation page,
+    which returns here afterwards (filters kept; the elevate page's
+    ``_sanitize_next`` bounds the target). Enforcement off passes through.
     """
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
+    elevate = _elevation_page_redirect(request, session.username)
+    if elevate is not None:
+        return elevate
 
     # Generate CSRF token for forms
     csrf_token = generate_csrf_token()
@@ -11252,7 +12036,11 @@ def logs_page(
     return response
 
 
-@web_router.get("/partials/logs-list", response_class=HTMLResponse)
+@web_router.get(
+    "/partials/logs-list",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def logs_list_partial(
     request: Request,
     level: Optional[str] = None,
@@ -11263,6 +12051,11 @@ def logs_list_partial(
 ):
     """
     Partial endpoint for logs list - used by HTMX for dynamic updates (Story #664 AC2, Story #501 AC4).
+
+    Elevation-gated (``require_elevation()``) like the logs page and the MCP
+    twin ``admin_logs_query``: without a window it answers 403
+    ``elevation_required``, which the shared elevation interceptor turns
+    into the TOTP modal. Enforcement off passes through.
 
     Args:
         request: FastAPI request object
@@ -11327,7 +12120,10 @@ def logs_list_partial(
     return response
 
 
-@web_router.get("/logs/export")
+@web_router.get(
+    "/logs/export",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def export_logs_web(
     request: Request,
     format: str = "json",
@@ -11338,6 +12134,9 @@ def export_logs_web(
     Export logs to file in JSON or CSV format (Story #667 AC1).
 
     Web UI endpoint that triggers browser download of log export file.
+    Elevation-gated (``require_elevation()``) like the logs page and the MCP
+    twin ``admin_logs_query``: without a window it answers 403
+    ``elevation_required``. Enforcement off passes through.
 
     Args:
         request: FastAPI request object
@@ -11535,6 +12334,7 @@ def unified_login_submit(
             detail="User manager not available",
         )
 
+<<<<<<< HEAD
     # Authenticate user (any role accepted)
     user = user_manager.authenticate_user(username, password)
 
@@ -11549,6 +12349,12 @@ def unified_login_submit(
             reason="bad_credentials",
         )
         # Invalid credentials - show error with new CSRF token
+=======
+    def _form_error(
+        message: str, status_code: int = 200, headers: Optional[dict] = None
+    ) -> Response:
+        # Re-render the form with the error and a new CSRF token.
+>>>>>>> upstream/master
         new_csrf_token = generate_csrf_token()
 
         # Check if OIDC is enabled
@@ -11565,13 +12371,69 @@ def unified_login_submit(
                 "request": request,
                 "csrf_token": new_csrf_token,
                 "redirect_to": redirect_to,
-                "error": "Invalid username or password",
+                "error": message,
                 "sso_enabled": sso_enabled,
             },
-            status_code=200,
+            status_code=status_code,
+            headers=headers,
         )
         set_csrf_cookie(error_response, new_csrf_token, path="/")
         return error_response
+
+    # Per-username progressive throttle, shared with REST /auth/login and
+    # OAuth authorize.  The attempt is RESERVED before the password is
+    # checked (one row-locked transaction), so concurrent requests cannot
+    # slip past it; while the backoff window runs every attempt -- a correct
+    # password included -- is refused (no audit row, so refusals cannot
+    # flood the store).  There is no lock state: a throttled username can
+    # still authenticate with an API key, MCP credentials or SSO, and every
+    # window ends on its own (cap 120 s).
+    import math
+
+    from ..auth import login_rate_limiter as _login_throttle
+
+    throttle = _login_throttle.login_rate_limiter
+    try:
+        attempt = throttle.begin_attempt(username)
+    except _login_throttle.ThrottleStoreBusy:
+        return _form_error(
+            "Login is busy, try again shortly.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            {"Retry-After": "1"},
+        )
+    if not attempt.admitted:
+        wait = math.ceil(attempt.retry_after_seconds)
+        return _form_error(
+            f"Too many attempts, try again in {wait} seconds",
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            {"Retry-After": str(wait)},
+        )
+
+    # Authenticate user (any role accepted)
+    user = user_manager.authenticate_user(username, password)
+
+    if user is None:
+        account_exists = user_manager.get_user(username) is not None
+        if not account_exists:
+            # An unknown name costs one password hash too (same helper as
+            # REST), so response time does not reveal whether it exists.
+            from ..auth.auth_error_handler import auth_error_handler
+
+            auth_error_handler.perform_dummy_password_work()
+        # The attempt's one outcome row (the attempt is already counted);
+        # the typed name is recorded only when it names an existing account.
+        reject_login(
+            username,
+            account_exists=account_exists,
+            method=_WEB_LOGIN_METHOD,
+            stage="credentials",
+            reason=_login_throttle.failure_reason(attempt),
+        )
+        return _form_error("Invalid username or password")
+
+    # Every MFA code at a login challenge is reserved on the account's login
+    # throttle key before it is checked; only a completed login clears the
+    # key (below), so a correct password with MFA pending clears nothing.
 
     # Story #565: Password expiry check -- before session creation
     config_svc = get_config_service()
@@ -11616,6 +12478,7 @@ def unified_login_submit(
                 role=user.role.value,
             ),
         )
+        throttle.clear_completed_login(user.username)
         return expiry_response
 
     # Validate redirect_to URL (prevent open redirect)
@@ -11667,6 +12530,7 @@ def unified_login_submit(
             role=user.role.value,
         ),
     )
+    throttle.clear_completed_login(user.username)
 
     return redirect_response
 
@@ -12244,7 +13108,7 @@ async def save_self_monitoring_config(
 
     Requires authenticated admin session and valid CSRF token.
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -12362,7 +13226,7 @@ async def trigger_manual_scan(
     """
     logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: Entry - endpoint called")
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: No admin session found")
         raise HTTPException(
@@ -12623,6 +13487,30 @@ def _schedule_delayed_restart(delay: int = 2) -> None:
     restart_thread.start()
 
 
+def _restart_request_failed(exc: Exception) -> JSONResponse:
+    """The restart request raised, so nothing is restarting: release the
+    in-progress flag (a later restart stays possible) and tell the UI."""
+    global _restart_in_progress
+    with _restart_lock:
+        _restart_in_progress = False
+    logger.error("Server restart request failed: %s", exc, exc_info=True)
+    if isinstance(exc, ConfigChangeConflict):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "message": "The configuration kept changing concurrently; "
+                "no restart was requested. Try again."
+            },
+        )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "message": "The restart request failed; no restart was requested. "
+            "See the server log."
+        },
+    )
+
+
 @web_router.post(
     "/restart",
     response_class=JSONResponse,
@@ -12678,10 +13566,15 @@ def restart_server(request: Request) -> JSONResponse:
             )
         _restart_in_progress = True
 
-    # Log restart request with username
-    username = session.username
-    logger.info(f"Server restart requested by {username}")
+    # This request OWNS the claim from here on: any failure before a restart
+    # is under way releases it (_restart_request_failed), or every later
+    # restart would be refused.  Solo success hands the claim to the delayed
+    # restart worker.
+    try:
+        username = session.username
+        logger.info(f"Server restart requested by {username}")
 
+<<<<<<< HEAD
     # Story #1200 AC7: branch on cluster vs solo mode.
     #
     # Cluster (PG pool present): bump launch_restart_generation only.
@@ -12722,11 +13615,56 @@ def restart_server(request: Request) -> JSONResponse:
         _schedule_delayed_restart(delay=2)
 
     request_server_restart(_restart_this_node, actor=username, scope="node")
+=======
+        # Story #1200 AC7: branch on cluster vs solo mode.
+        #
+        # Cluster (PG pool present): bump launch_restart_generation only.
+        # The bumping node does NOT synchronously write restart.signal here —
+        # its own check_pending_launch_restart() poll (running every interval)
+        # detects target > applied and signals itself (MAJOR-M3 / FIX-2).  All
+        # other nodes are signalled by their own poll loops independently.
+        #
+        # Solo: retain the existing single-node restart path (materialize +
+        # signal / os.execv).  Do NOT bump the generation in solo mode (FIX-5).
+        from code_indexer.server.services.server_restart_audited import (
+            request_server_restart,
+        )
 
-    # Return 202 Accepted immediately
-    return JSONResponse(
-        status_code=202, content={"message": "Server is restarting in 2 seconds..."}
-    )
+        config_svc = get_config_service()
+        if config_svc._pool is not None:
+            # Cluster mode: bump generation, let per-poll check handle
+            # restart.signal.  The audit row is written durably BEFORE the bump.
+            request_server_restart(
+                config_svc.bump_launch_restart_generation,
+                actor=username,
+                scope="cluster",
+            )
+            with _restart_lock:
+                _restart_in_progress = False
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "message": (
+                        "Cluster restart requested: generation bumped. "
+                        "All nodes will restart via the auto-updater."
+                    )
+                },
+            )
+>>>>>>> upstream/master
+
+        # Solo mode: materialize launch config then schedule single-node
+        # restart.  The audit row is written durably BEFORE it is scheduled.
+        def _restart_this_node() -> None:
+            config_svc.materialize_launch_config()
+            _schedule_delayed_restart(delay=2)
+
+        request_server_restart(_restart_this_node, actor=username, scope="node")
+        # Return 202 Accepted immediately
+        return JSONResponse(
+            status_code=202, content={"message": "Server is restarting in 2 seconds..."}
+        )
+    except Exception as exc:
+        return _restart_request_failed(exc)
 
 
 @api_router.get("/server-time")

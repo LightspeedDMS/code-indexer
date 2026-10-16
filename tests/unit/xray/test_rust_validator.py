@@ -690,6 +690,7 @@ def test_front_door_meta_test_covers_authoritative_table() -> None:
             False,
         ),
         (
+<<<<<<< HEAD
             # Flipped True -> False. The front door strips comments before
             # matching, so this arrives as `std ::fs`; the old pattern
             # `\bstd::fs\b` required the two colons to touch `std` and so let
@@ -700,6 +701,10 @@ def test_front_door_meta_test_covers_authoritative_table() -> None:
             # the fix, not a behaviour regression.
             "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { let _ = std /* comment */ ::fs::dummy; Vec::new() }",
             False,
+=======
+            "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { let _ = std /* comment */ ::fs::dummy; Vec::new() }",
+            True,
+>>>>>>> upstream/master
         ),
     ],
 )

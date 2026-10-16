@@ -122,7 +122,7 @@ class TestGitLabCIClient:
 
         # Verify API was called with ref parameter
         call_args = mock_client_instance.get.call_args
-        assert "ref=main" in call_args[0][0]
+        assert call_args.kwargs["params"] == {"ref": "main"}
 
         # Verify only main branch pipelines returned
         assert len(pipelines) == 1
@@ -166,7 +166,7 @@ class TestGitLabCIClient:
 
         # Verify API was called with status parameter
         call_args = mock_client_instance.get.call_args
-        assert "status=failed" in call_args[0][0]
+        assert call_args.kwargs["params"] == {"status": "failed"}
 
         # Verify only failed pipelines returned
         assert len(pipelines) == 1

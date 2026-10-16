@@ -35,6 +35,7 @@ from ..logging_utils import format_error_log
 from ..services import audit_capture
 from ..services.health_service import health_service
 from ..services.maintenance_service import get_maintenance_state
+from ..repositories.background_jobs import HEALTH_FAILED_JOB_WINDOW
 from ..app_helpers import (
     get_server_uptime,
     get_server_start_time,
@@ -70,6 +71,18 @@ _healthz_cached_at: float = 0.0
 _healthz_monotonic = time.monotonic
 
 
+<<<<<<< HEAD
+=======
+def _search_event_health_block() -> Optional[dict]:
+    """Bug #2114: this process's dropped search events for GET /health
+    (None when no search event log writer is running). O(1), no I/O."""
+    from ..services.search_event_health import process_search_event_health
+
+    info = process_search_event_health()
+    return None if info is None else info.model_dump()
+
+
+>>>>>>> upstream/master
 def _reset_healthz_cache() -> None:
     """Test-support helper: clears the /healthz TTL cache state so tests
     don't leak a cached status across test cases. Not used by production
@@ -180,9 +193,10 @@ def register_misc_routes(
             except Exception:
                 pending_jobs = 0
 
+            # Bug #1964: only failures within HEALTH_FAILED_JOB_WINDOW count.
             try:
                 failed_jobs = (
-                    background_job_manager.get_failed_job_count()
+                    background_job_manager.get_recent_failed_job_count()
                     if background_job_manager
                     else 0
                 )
@@ -217,7 +231,8 @@ def register_misc_routes(
             if failed_jobs > 0:
                 health_status = "degraded"
                 message = (
-                    f"CIDX Server is running but {failed_jobs} failed jobs detected"
+                    f"CIDX Server is running but {failed_jobs} failed jobs "
+                    f"detected in the last {HEALTH_FAILED_JOB_WINDOW}"
                 )
             elif pending_jobs > 8:  # High pending job threshold
                 health_status = "warning"
@@ -232,6 +247,7 @@ def register_misc_routes(
                     "active_jobs": active_jobs,
                     "pending_jobs": pending_jobs,
                     "failed_jobs": failed_jobs,
+                    "failed_jobs_window": HEALTH_FAILED_JOB_WINDOW,
                 },
                 "started_at": get_server_start_time(),
                 "maintenance_mode": get_maintenance_state().is_maintenance_mode(),
@@ -243,6 +259,12 @@ def register_misc_routes(
                     ),
                     "node_id": audit_capture.audit_node_id(),
                 },
+<<<<<<< HEAD
+=======
+                # Bug #2114: search events this process dropped on queue
+                # overflow (informational here; /api/system/health degrades).
+                "search_events": _search_event_health_block(),
+>>>>>>> upstream/master
             }
 
             # Add version if available

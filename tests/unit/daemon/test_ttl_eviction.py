@@ -211,26 +211,54 @@ class TestTTLEvictionThreadLifecycle:
         thread.join(timeout=1.0)
         assert not thread.is_alive()
 
-    @patch("time.sleep")
-    def test_run_loop_sleeps_between_checks(self, mock_sleep):
-        """Test run loop sleeps for check_interval between eviction checks."""
+    def test_stop_interrupts_interval_wait_promptly(self):
+        """stop() must wake a thread parked in its check_interval wait.
+
+        A flag-only stop left the thread inside a 60s sleep, so join() could
+        not complete and every daemon service constructed in a test leaked a
+        thread for the rest of the process.
+        """
         from code_indexer.daemon.cache import TTLEvictionThread
 
         mock_service = Mock()
         mock_service.cache_entry = None
         mock_service.cache_lock = threading.Lock()
 
-        # Mock sleep to prevent actual waiting and stop after first iteration
-        def stop_after_sleep(duration):
-            thread.running = False
+        thread = TTLEvictionThread(mock_service, check_interval=60)
+        thread.start()
+        time.sleep(0.05)  # let it enter the interval wait
 
-        mock_sleep.side_effect = stop_after_sleep
+        started = time.monotonic()
+        thread.stop()
+        thread.join(timeout=5.0)
+
+        assert not thread.is_alive(), "thread still alive 5s after stop()"
+        assert time.monotonic() - started < 2.0
+        # Woken by stop(), not by the interval elapsing: no eviction check ran.
+        assert mock_service.method_calls == []
+
+    def test_run_loop_sleeps_between_checks(self):
+        """Test run loop waits for check_interval between eviction checks."""
+        from code_indexer.daemon.cache import TTLEvictionThread
+
+        mock_service = Mock()
+        mock_service.cache_entry = None
+        mock_service.cache_lock = threading.Lock()
 
         thread = TTLEvictionThread(mock_service, check_interval=60)
-        thread.run()
 
-        # Should have slept for check_interval
-        mock_sleep.assert_called_once_with(60)
+        # Interval elapses without stop(); end the loop after this iteration.
+        def interval_elapsed(timeout):
+            thread.running = False
+            return False
+
+        with patch.object(
+            thread._stop_event, "wait", side_effect=interval_elapsed
+        ) as mock_wait:
+            thread.run()
+
+        # Should have waited for check_interval
+        mock_wait.assert_called_once_with(60)
 
 
 class TestTTLEvictionConcurrency:

@@ -20,6 +20,19 @@ from code_indexer.server.repositories.golden_repo_manager import (
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _origin_already_credential_free():
+    """The base-clone origin rewrite before the branch fetch is covered by
+    test_golden_repo_runtime_credentials.py; these tests count only the
+    rollback's git calls."""
+    with patch(
+        "code_indexer.server.repositories.golden_repo_manager."
+        "ensure_remote_url_without_credentials",
+        return_value=0,
+    ):
+        yield
+
+
 @pytest.fixture
 def data_dir(tmp_path):
     """Return a temp data directory with the golden-repos sub-directory."""

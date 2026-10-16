@@ -125,7 +125,8 @@ class _PgStyleSqlitePool:
                 oauth_client_id TEXT,
                 oauth_redirect_uri TEXT,
                 oauth_code_challenge TEXT,
-                oauth_state TEXT
+                oauth_state TEXT,
+                first_factor TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_mfa_challenges_created
             ON mfa_challenges(created_at);

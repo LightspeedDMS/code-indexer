@@ -248,8 +248,16 @@ class TestScrollToctouFinding5:
         real_resolve = chunk_layout_mod.resolve_chunk_layout
         state: Dict[str, Any] = {"calls": 0, "fired": False}
 
+<<<<<<< HEAD
         def side_effecting_resolve(path: Any) -> ChunkLayout:
             result = real_resolve(path)
+=======
+        def side_effecting_resolve(path: Any, **kwargs: Any) -> ChunkLayout:
+            # Bug #1997: _is_chunks_db_collection now passes cached_meta=...
+            # -- forwarded unchanged; the call ORDER this spy keys on is
+            # unaffected.
+            result = real_resolve(path, **kwargs)
+>>>>>>> upstream/master
             state["calls"] += 1
             # scroll_points resolves twice before the scan: (1) inside
             # _is_chunks_db_collection, (2) the pre-scan re-resolve. Fire the

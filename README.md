@@ -1,43 +1,40 @@
 # Code Indexer (`cidx`)
 
-AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
+Semantic code search for your repositories: find code by what it does, not only by the words it contains.
 
 [![CI/CD](https://img.shields.io/github/actions/workflow/status/LightspeedDMS/code-indexer/main.yml?branch=master&label=CI%2FCD)](https://github.com/LightspeedDMS/code-indexer/actions/workflows/main.yml) [![Release](https://img.shields.io/github/v/release/LightspeedDMS/code-indexer?sort=semver&color=blue)](https://github.com/LightspeedDMS/code-indexer/releases) [![Python](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org/) [![License: MIT](https://img.shields.io/github/license/LightspeedDMS/code-indexer?color=green)](LICENSE)
 
-[Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v10.md) | [Architecture](docs/architecture.md)
+## What it is
 
-## What is CIDX?
+CIDX indexes a git repository into a local vector index (VoyageAI or Cohere embeddings, HNSW) and a full-text
+index (Tantivy), and answers natural-language, keyword and regex queries over it. It can also index git history,
+build SCIP code-intelligence indexes, and run structural AST searches. Everything lives in the project's
+`.code-indexer/` directory; nothing runs in a container.
 
-CIDX is an end-to-end code intelligence system for finding, navigating, and reasoning about source code by meaning rather than by tokens. It combines semantic search (VoyageAI or Cohere embeddings on an HNSW vector index, O(log N) lookups) with cross-encoder reranking (Voyage rerank-2.5 or Cohere rerank, applied after RRF coalescing) for quality-multiplied results, full-text and regex retrieval via Tantivy, SCIP-backed symbol navigation, AST-level structural search through tree-sitter, and git-history temporal search -- all running container-free out of `.code-indexer/`.
+It is for:
 
-- **Find code by meaning, by name, or by structure** -- natural-language queries ("authentication logic", "where the rate limiter rejects"), exact / regex / fuzzy FTS, SCIP definitions / references / call chains / dependency graphs / impact analysis, and X-Ray AST evaluators for structural patterns beyond text. Multimodal indexing pulls in diagrams and screenshots embedded in markdown and HTML automatically. A configurable cross-encoder reranking stage (Voyage rerank-2.5 or Cohere rerank) lifts the top-N from "semantically related" to "actually answers the query".
-- **Token-efficient for AI agents** -- X-Ray AST search lets an agent ask "find every method longer than 50 lines that catches and rethrows without logging" and get back the exact matching ranges instead of pulling whole files into context to scan. A user-defined Rust evaluator runs server-side in a sandbox over a tree-sitter AST and returns structured findings -- orders of magnitude cheaper in tokens than loading and re-parsing files in the agent's window. Combined with SCIP for precise symbol navigation and the multi-modal MCP surface, agents do less reading and more reasoning.
-- **Reason across time and across repos** -- commit-history semantic search with time-range and author filters, Langfuse trace sync that makes AI conversation history searchable alongside your code, and a Claude-driven inter-repository dependency map that builds a queryable cross-repo domain graph for change-impact reasoning.
-- **Scale from laptop to cluster** -- start as a CLI, upgrade to a watching daemon with in-process index caching, or deploy a multi-user Server with OAuth 2.0 / OIDC + TOTP MFA + step-up elevation, role-based permissions, REST + MCP APIs (`/mcp` with JWT, `/mcp-public` unauthenticated), semantic memory retrieval, golden-repository management, HNSW caching, and a web dashboard. Cluster mode shares state across nodes via PostgreSQL with leader election and distributed job queuing. Embeddings are multi-provider: VoyageAI or Cohere with primary-only, failover, parallel RRF fusion, or explicit-provider strategies.
+- developers who want to search their own code by meaning from the command line;
+- AI coding assistants, through instructions installed by `cidx teach-ai` or through the server's MCP endpoint;
+- teams, through the CIDX server: shared, centrally indexed repositories with REST, MCP and a Web UI.
 
-<details>
-<summary>Table of Contents</summary>
+## Quickstart
 
-- [What is CIDX?](#what-is-cidx)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Key Features](#key-features)
-- [Operating Modes](#operating-modes)
-- [Configuration](#configuration)
-- [Documentation](#documentation)
-- [Security](#security)
-- [Contributing](#contributing)
-- [License](#license)
-
-</details>
-
-## Installation
+Requires Python 3.9-3.12, a C/C++ compiler (for the hnswlib build) and a VoyageAI API key. Details:
+[Installation](docs/getting-started/installation.md).
 
 ```bash
 pipx install git+https://github.com/LightspeedDMS/code-indexer.git@master
-cidx --version
+export VOYAGE_API_KEY="your-voyage-key"
+
+cd /path/to/your/git/repository
+cidx init
+cidx index --fts
+cidx query "where are requests rejected when the limit is exceeded" --limit 5
+cidx query "authenticate_user" --fts            # exact text
+cidx query "token bucket" --fts --semantic      # hybrid: keyword and meaning
 ```
 
+<<<<<<< HEAD
 **Requirements**: Python 3.9-3.12, 4GB+ RAM, VoyageAI API key (or Cohere API key).
 For platform-specific instructions, Windows setup, and troubleshooting, see [Installation Guide](docs/installation.md).
 
@@ -238,3 +235,33 @@ Released under the [MIT License](LICENSE).
 ---
 
 **Repository**: [https://github.com/LightspeedDMS/code-indexer](https://github.com/LightspeedDMS/code-indexer)
+=======
+Each semantic result shows the score, file and line range, then the matching code; add `--quiet` for a compact
+listing.
+
+## Capabilities
+
+- Semantic, full-text, regex and hybrid search with language, path and score filters: [Query guide](docs/guides/query.md)
+- Git history search with time ranges: [Temporal search](docs/guides/temporal-search.md)
+- Definitions, references, call chains and impact analysis (SCIP): [SCIP guide](docs/guides/scip.md)
+- Structural AST search with user-written evaluators (X-Ray): [X-Ray cookbook](docs/guides/xray-cookbook.md)
+- A background daemon with in-memory indexes and watch mode: [Operating modes](docs/getting-started/operating-modes.md#daemon-mode)
+- Instructions and skills for local AI assistants: [teach-ai](docs/getting-started/teach-ai.md)
+- Embedding providers (VoyageAI, Cohere) and project settings: [Configuration](docs/getting-started/configuration.md)
+- Multi-user server with golden repositories, REST API, Web UI, SSO and MFA: [Server deployment](docs/server/deployment.md)
+- MCP endpoint for AI assistants: [MCP registration](docs/getting-started/mcp-registration.md)
+- Cross-repository dependency map: [Meta-repo discovery](docs/guides/meta-repo-discovery.md)
+- Searchable Langfuse traces: [Langfuse trace sync](docs/server/langfuse-trace-sync.md)
+- Multi-node cluster on PostgreSQL: [Cluster setup](docs/server/cluster-setup.md)
+
+All documentation, by audience: [docs/README.md](docs/README.md). Design: [Architecture overview](docs/architecture/overview.md).
+
+## Project
+
+- Contributing: [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md)
+- Security reports: privately, as described in [SECURITY.md](SECURITY.md); not in public issues
+- Bugs and feature requests: [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
+- Questions: [GitHub Discussions](https://github.com/LightspeedDMS/code-indexer/discussions)
+- Release history: [CHANGELOG.md](CHANGELOG.md)
+- License: [MIT](LICENSE)
+>>>>>>> upstream/master

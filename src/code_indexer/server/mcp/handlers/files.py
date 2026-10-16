@@ -144,9 +144,12 @@ def _start_auto_watch_if_needed(
     """
     from code_indexer.server.services.file_crud_service import file_crud_service
     from code_indexer.server.services.auto_watch_manager import auto_watch_manager
+<<<<<<< HEAD
     from code_indexer.server.startup.content_backend_wiring import (
         is_content_seam_delegated,
     )
+=======
+>>>>>>> upstream/master
 
     if is_content_seam_delegated():
         # Content seam: the repository is not on this pod, so there is no
@@ -870,7 +873,10 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             page=_DEFAULT_PAGE,
             limit=_MAX_MCP_FILE_LIMIT,
             path_pattern=final_path_pattern,
+<<<<<<< HEAD
             indexed_only=bool(params.get("indexed_only", False)),
+=======
+>>>>>>> upstream/master
             direct_children_of=direct_children_of,
         )
 
@@ -1215,7 +1221,10 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             path_pattern=final_path_pattern,
             language=bp["language"],
             sort_by=bp["sort_by"],
+<<<<<<< HEAD
             indexed_only=bp["indexed_only"],
+=======
+>>>>>>> upstream/master
             direct_children_of=direct_children_of,
         )
 
@@ -1618,10 +1627,14 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     if not _admission.allowed:
         return _mcp_response(memory_pressure_mcp_payload(_admission))
 
+<<<<<<< HEAD
     from code_indexer.server.services.file_service import directory_explorer_for
     from code_indexer.server.startup.content_backend_wiring import (
         is_content_seam_delegated,
     )
+=======
+    from code_indexer.global_repos.directory_explorer import DirectoryExplorerService
+>>>>>>> upstream/master
 
     repository_alias = args.get("repository_alias")
     if not repository_alias:

@@ -13,6 +13,10 @@ from typing import Any, Dict, List, Optional
 import psutil
 
 from ..database_manager import DatabaseConnectionManager
+<<<<<<< HEAD
+=======
+from ..shared.job_status_filter import statuses_for_filter
+>>>>>>> upstream/master
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +84,10 @@ def _owning_worker_process_is_alive(executing_pid: Optional[int]) -> bool:
             "Bug #1563: liveness probe for owning worker pid %s raised; "
             "treating as alive (conservative)",
             executing_pid,
+<<<<<<< HEAD
             exc_info=True,
+=======
+>>>>>>> upstream/master
         )
         return True
 
@@ -469,8 +476,13 @@ class BackgroundJobsSqliteBackend:
         Bug #1950: writes status='interrupted' (not 'failed') -- a row
         still running/pending at startup was orphaned by this process's
         own restart, a restart artifact rather than a genuine failure, so
+<<<<<<< HEAD
         it must not poison /health's get_failed_job_count() (which counts
         ONLY status='failed', with no time window) forever.
+=======
+        it must not count toward /health's failed jobs (status='failed'
+        rows completed within the last 24h, Bug #1964).
+>>>>>>> upstream/master
         """
         from datetime import datetime, timezone
 
@@ -515,8 +527,14 @@ class BackgroundJobsSqliteBackend:
             conditions.append("username = ?")
             params.append(username)
         if status:
+<<<<<<< HEAD
             conditions.append("status = ?")
             params.append(status)
+=======
+            statuses = statuses_for_filter(status)
+            conditions.append(f"status IN ({', '.join(['?'] * len(statuses))})")
+            params.extend(statuses)
+>>>>>>> upstream/master
         if operation_type:
             conditions.append("operation_type = ?")
             params.append(operation_type)
@@ -568,8 +586,15 @@ class BackgroundJobsSqliteBackend:
             params.append(username)
 
         if status:
+<<<<<<< HEAD
             conditions.append("status = ?")
             params.append(status)
+=======
+            # "completed" also selects completed_partial (job_status_filter).
+            statuses = statuses_for_filter(status)
+            conditions.append(f"status IN ({', '.join('?' for _ in statuses)})")
+            params.extend(statuses)
+>>>>>>> upstream/master
 
         if operation_type:
             conditions.append("operation_type = ?")
@@ -752,11 +777,44 @@ class BackgroundJobsSqliteBackend:
             logger.info(f"Cleaned up {count} old background jobs")
         return count
 
+<<<<<<< HEAD
     def count_jobs_by_status(self) -> Dict[str, int]:
         """Get count of jobs grouped by status."""
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             "SELECT status, COUNT(*) FROM background_jobs GROUP BY status"
+=======
+    def count_jobs_by_status(
+        self, statuses: Optional[List[str]] = None
+    ) -> Dict[str, int]:
+        """Get count of jobs grouped by status, optionally only for the given
+        statuses (Bug #2123: an index-backed count, not a full-table scan)."""
+        conn = self._conn_manager.get_connection()
+        if statuses:
+            placeholders = ", ".join("?" * len(statuses))
+            cursor = conn.execute(
+                "SELECT status, COUNT(*) FROM background_jobs "
+                f"WHERE status IN ({placeholders}) GROUP BY status",
+                list(statuses),
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT status, COUNT(*) FROM background_jobs GROUP BY status"
+            )
+        return {row[0]: row[1] for row in cursor.fetchall()}
+
+    def get_job_statuses(self, job_ids: List[str]) -> Dict[str, str]:
+        """Bug #2123: status of each given job that exists, in ONE query.
+        Callers bound the id list (below SQLite's bound-parameter limit)."""
+        if not job_ids:
+            return {}
+        conn = self._conn_manager.get_connection()
+        placeholders = ", ".join("?" * len(job_ids))
+        cursor = conn.execute(
+            "SELECT job_id, status FROM background_jobs "
+            f"WHERE job_id IN ({placeholders})",
+            list(job_ids),
+>>>>>>> upstream/master
         )
         return {row[0]: row[1] for row in cursor.fetchall()}
 
@@ -776,17 +834,34 @@ class BackgroundJobsSqliteBackend:
         cutoff_iso = cutoff.isoformat()
 
         conn = self._conn_manager.get_connection()
+<<<<<<< HEAD
         cursor = conn.execute(
             """SELECT status, COUNT(*) FROM background_jobs
                WHERE completed_at IS NOT NULL AND completed_at >= ?
                GROUP BY status""",
+=======
+        # Bug #1964: "+status" keeps the planner from walking every row via
+        # the status index for GROUP BY order; it range-searches the
+        # covering (completed_at, status) index instead (/health runs this).
+        cursor = conn.execute(
+            """SELECT status, COUNT(*) FROM background_jobs
+               WHERE completed_at IS NOT NULL AND completed_at >= ?
+               GROUP BY +status""",
+>>>>>>> upstream/master
             (cutoff_iso,),
         )
 
         stats = {"completed": 0, "failed": 0}
         for row in cursor.fetchall():
+<<<<<<< HEAD
             if row[0] in stats:
                 stats[row[0]] = row[1]
+=======
+            # A partial completion (Bug #679/#2125) is still a completion.
+            key = "completed" if row[0] == "completed_partial" else row[0]
+            if key in stats:
+                stats[key] += row[1]
+>>>>>>> upstream/master
 
         return stats
 
@@ -848,9 +923,14 @@ class BackgroundJobsSqliteBackend:
             # Bug #1950: status='interrupted' (not 'failed') -- a row
             # whose owning worker process is provably gone was orphaned by
             # a restart, a restart artifact rather than a genuine failure,
+<<<<<<< HEAD
             # so it must not poison /health's get_failed_job_count()
             # (which counts ONLY status='failed', with no time window)
             # forever.
+=======
+            # so it must not count toward /health's failed jobs
+            # (status='failed' rows completed within the last 24h, #1964).
+>>>>>>> upstream/master
             placeholders = ", ".join("?" for _ in job_ids_to_fail)
             cursor = conn.execute(
                 f"""UPDATE background_jobs

@@ -664,6 +664,7 @@ class TestActivatedRepoCacheInvalidationWiring:
             )
         finally:
             reset_global_cache()
+<<<<<<< HEAD
 
 
 class TestPublishedRepairLoopBreaker:
@@ -765,3 +766,5 @@ class TestPublishedRepairLoopBreaker:
         assert len(scheduler._published_repair_keys) == 0, (
             "complete_pass must clear the guard set"
         )
+=======
+>>>>>>> upstream/master

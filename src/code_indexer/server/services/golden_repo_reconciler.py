@@ -123,6 +123,13 @@ if TYPE_CHECKING:
     # uses for this class (see _run_sweep's Pass 3 and remove_golden_repo).
     from code_indexer.global_repos.global_activation import GlobalActivator
 
+if TYPE_CHECKING:
+    # Type-checking only: the Bug #1523 global-orphan pass annotates its
+    # activator parameter precisely, while the RUNTIME import stays deferred
+    # inside the function -- the same deferral the surrounding code already
+    # uses for this class (see _run_sweep's Pass 3 and remove_golden_repo).
+    from code_indexer.global_repos.global_activation import GlobalActivator
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_RECONCILE_SUBMITTER = "system-reconcile"
@@ -168,6 +175,7 @@ class ReconcileResult:
     orphans_failed: List[str] = field(default_factory=list)
     pointers_repaired: List[str] = field(default_factory=list)
     pointers_repair_failed: List[str] = field(default_factory=list)
+<<<<<<< HEAD
     # EVO-66808: healthy repos whose stale global_repos.index_path was repointed
     # to the actual on-disk clone path (and those whose repair failed).
     index_paths_repaired: List[str] = field(default_factory=list)
@@ -178,6 +186,8 @@ class ReconcileResult:
     stale_indexes_found: List[str] = field(default_factory=list)
     stale_indexes_refreshed: List[str] = field(default_factory=list)
     stale_indexes_failed: List[str] = field(default_factory=list)
+=======
+>>>>>>> upstream/master
     # Bug #1523: the REVERSE direction -- a live global-registry entry whose
     # `golden_repos` row is already gone. Distinct from orphans_* above,
     # which track rows whose on-disk clone is absent.
@@ -192,6 +202,7 @@ class ReconcileResult:
     # sweep; 0 otherwise.
     circuit_breaker_consecutive_count: int = 0
     circuit_breaker_confirmed_proceed: bool = False
+<<<<<<< HEAD
     # Content seam: registered repos with no index state on THIS pod while
     # content_backend='delegated'. The repository is with workspace-mcp, so
     # that absence is not evidence it is gone -- never treated as orphans.
@@ -213,6 +224,8 @@ def _repositories_delegated(golden_repo_manager: Any) -> bool:
         return True
     probe = getattr(golden_repo_manager, "repositories_are_delegated", None)
     return callable(probe) and probe() is True
+=======
+>>>>>>> upstream/master
 
 
 def _get_breaker_backend(golden_repo_manager: GoldenRepoManager) -> Optional[Any]:
@@ -522,8 +535,12 @@ def _run_sweep(
     refresh_scheduler: Optional[Any] = None,
 ) -> None:
     """Core sweep logic: health check -> classify -> circuit-breaker ->
+<<<<<<< HEAD
     remove orphans -> repair missing pointers on healthy repos ->
     detect stale indexes (GAP-4)."""
+=======
+    remove orphans -> repair missing pointers on healthy repos."""
+>>>>>>> upstream/master
     breaker_backend = _get_breaker_backend(golden_repo_manager)
 
     if not _golden_repos_dir_is_healthy(golden_repo_manager.golden_repos_dir):
@@ -669,6 +686,7 @@ def _run_sweep(
                 "start counting from zero again."
             )
 
+<<<<<<< HEAD
     # Pass 3: repair healthy global repos (idempotent; never deletes):
     #   (a) Bug #1317 / #1315: a MISSING alias pointer -- clone/index intact,
     #       registry says global, only the pointer JSON is gone. Re-write it.
@@ -682,6 +700,12 @@ def _run_sweep(
     #       actual on-disk clone path. Deliberately CONSERVATIVE: only repair when
     #       the stored path is absent on disk AND the actual path is a real dir, so
     #       a valid index_path is never churned.
+=======
+    # Pass 3: repair healthy global repos with a missing alias pointer (the
+    # #1315 fallback symptom) -- clone/index intact, registry says global,
+    # only the pointer JSON is gone. Never delete a healthy repo for this;
+    # just re-write the pointer (idempotent).
+>>>>>>> upstream/master
     from code_indexer.global_repos.alias_manager import AliasManager
     from code_indexer.global_repos.global_activation import GlobalActivator
 
@@ -736,6 +760,7 @@ def _run_sweep(
             )
             result.pointers_repair_failed.append(alias)
 
+<<<<<<< HEAD
         # (b) stale-index_path repair (EVO-66808)
         try:
             repo_info = global_registry.get_global_repo(global_alias)
@@ -781,11 +806,14 @@ def _run_sweep(
             result,
         )
 
+=======
+>>>>>>> upstream/master
     # Pass 4 (Bug #1523): the REVERSE orphan direction -- global-registry
     # entries whose golden_repos row is already gone.
     _reconcile_global_registry_orphans(golden_repo_manager, repo_rows, result)
 
 
+<<<<<<< HEAD
 def _get_clone_git_head(clone_path: str, *, delegated: bool = False) -> Optional[str]:
     """Return the full git HEAD SHA for an on-disk clone, or None on failure.
 
@@ -962,6 +990,8 @@ def _reconcile_stale_indexes(
             )
 
 
+=======
+>>>>>>> upstream/master
 def _list_global_registry_entries(
     activator: "GlobalActivator",
 ) -> List[Dict[str, Any]]:

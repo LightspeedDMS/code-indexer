@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 """Bug #1575 Fix 4 -- smart_indexer.py's non-git-aware incremental reconcile
 path, structural (AST-based) regression test.
 
@@ -36,6 +37,30 @@ which parses a method's real source via ``ast``/``inspect`` to lock in a
 structural invariant a live-execution test cannot cleanly express without
 either mocking the system under test or driving the full, expensive
 embedding pipeline for an assertion that is really about source shape).
+=======
+"""Bug #1575 Fix 4, re-pinned for Story #2120 -- structural (AST-based)
+regression test of ``SmartIndexer._do_reconcile_with_database``.
+
+History: the non-git reconcile once deleted each modified file's old chunks
+with a per-file ``delete_by_filter()`` BEFORE ``begin_indexing()``, so every
+delete took the out-of-session path and persisted ``path_index.bin`` on its
+own (5.6x slower incremental refresh on a 4000-file collection; Fix 4 moved
+the loop inside the session and fixed a swapped-argument call that had
+never deleted anything).
+
+Story #2120 removed that pre-delete entirely (the upsert replaces a file's
+rows itself), and moved the removal of gone paths after processing, as ONE
+batched store call. The guarantees pinned here:
+
+* the reconcile makes no per-file ``delete_by_filter()`` call at all;
+* the post-processing gone-path removal on the processing path runs after
+  ``begin_indexing()`` -- inside the session, so ``end_indexing()`` persists
+  the path index once (Bug #2124).
+
+Behaviour is covered by the real-CLI tests in
+``tests/unit/services/test_reconcile_no_upfront_delete_2120.py``; this test
+parses the real source (``inspect.getsource`` + ``ast``) to lock the shape.
+>>>>>>> upstream/master
 """
 
 from __future__ import annotations
@@ -47,8 +72,11 @@ import textwrap
 from code_indexer.services.smart_indexer import SmartIndexer
 
 _TARGET_METHOD_NAME = "_do_reconcile_with_database"
+<<<<<<< HEAD
 _DELETE_METHOD_NAME = "delete_by_filter"
 _BEGIN_METHOD_NAME = "begin_indexing"
+=======
+>>>>>>> upstream/master
 
 
 def _parse_target_method() -> ast.FunctionDef:
@@ -62,8 +90,13 @@ def _parse_target_method() -> ast.FunctionDef:
 
 
 def _find_calls_to_attribute(func_def: ast.FunctionDef, attribute_name: str) -> list:
+<<<<<<< HEAD
     """Return every ast.Call node in func_def whose callee is
     `<something>.<attribute_name>(...)`, in source (lineno) order."""
+=======
+    """Every ast.Call in func_def whose callee is `<x>.<attribute_name>(...)`,
+    in source (lineno) order."""
+>>>>>>> upstream/master
     calls = []
     for node in ast.walk(func_def):
         if not isinstance(node, ast.Call):
@@ -74,6 +107,7 @@ def _find_calls_to_attribute(func_def: ast.FunctionDef, attribute_name: str) -> 
     return sorted(calls, key=lambda call: call.lineno)
 
 
+<<<<<<< HEAD
 def test_delete_by_filter_call_passes_collection_name_first():
     """The vector_store_client.delete_by_filter() call in
     _do_reconcile_with_database must pass collection_name as its FIRST
@@ -132,3 +166,29 @@ def test_delete_by_filter_call_is_after_begin_indexing_call():
         f"must be hoisted inside the begin_indexing()/end_indexing() "
         f"session bracket, not run before it starts"
     )
+=======
+def test_reconcile_makes_no_per_file_delete_by_filter_call():
+    func_def = _parse_target_method()
+    assert _find_calls_to_attribute(func_def, "delete_by_filter") == [], (
+        f"{_TARGET_METHOD_NAME} deletes rows file by file again: a modified "
+        f"file's rows are replaced by its upsert, and gone paths are removed "
+        f"in one batch after processing (Story #2120, Bug #2124)"
+    )
+
+
+def test_post_processing_gone_path_removal_is_inside_the_session():
+    func_def = _parse_target_method()
+    begin_calls = _find_calls_to_attribute(func_def, "begin_indexing")
+    processing_calls = _find_calls_to_attribute(
+        func_def, "process_branch_changes_high_throughput"
+    )
+    removal_calls = _find_calls_to_attribute(func_def, "_remove_reconcile_gone_paths")
+    assert len(begin_calls) == 1 and len(processing_calls) == 1
+    after_processing = [
+        call for call in removal_calls if call.lineno > processing_calls[0].lineno
+    ]
+    assert len(after_processing) == 1, (
+        "expected exactly one gone-path removal after the files are processed"
+    )
+    assert after_processing[0].lineno > begin_calls[0].lineno
+>>>>>>> upstream/master

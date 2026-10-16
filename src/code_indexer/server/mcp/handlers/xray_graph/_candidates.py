@@ -1,19 +1,32 @@
 """Whole-repo candidate-file collection for analyze_graph (Issue #1935 Part 2).
 
+<<<<<<< HEAD
 Moved verbatim out of the monolithic xray_graph.py. See that package's
 __init__.py module docstring for the overall analyze_graph tool context. With
 a delegated content backend the candidates come from the content manifest
 (`_manifest_rel_paths_by_dir`) instead of an `os.walk` of this pod's disk.
+=======
+Moved verbatim out of the monolithic xray_graph.py -- pure relocation, zero
+behaviour change. See that package's __init__.py module docstring for the
+overall analyze_graph tool context.
+>>>>>>> upstream/master
 """
 
 from __future__ import annotations
 
 import os
+<<<<<<< HEAD
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Dict, Iterator, List, Set, Tuple
 
 if TYPE_CHECKING:
     from code_indexer.server.services.file_service import ContentSeamSource
+=======
+from pathlib import Path
+from typing import Dict, List, Set, Tuple
+
+from code_indexer.utils.path_confinement import is_readable_within_root
+>>>>>>> upstream/master
 
 # R3-2 (Codex re-review, ROUND 3): the SAME whole-repo candidate-file cap
 # Rust's `GRAPH_INDEX_MAX_FILES` (rust/xray-cli/src/main.rs) enforces --
@@ -137,14 +150,18 @@ def _collect_graph_candidate_files(
     # file.
     from code_indexer.services.path_pattern_matcher import PathPatternMatcher
 
+<<<<<<< HEAD
     from code_indexer.xray.search_engine import xray_content_source
 
+=======
+>>>>>>> upstream/master
     selector = PathPatternMatcher().create_selector(include_patterns, exclude_patterns)
     results: List[str] = []
     collection_truncated = False
     files_excluded_with_extractor = 0
     files_excluded_without_extractor = 0
     languages_excluded_with_extractor: Set[str] = set()
+<<<<<<< HEAD
     source = xray_content_source(repo_path)
     rel_dirs = (
         _local_rel_paths_by_dir(repo_path)
@@ -154,11 +171,32 @@ def _collect_graph_candidate_files(
     for rel_dir in rel_dirs:
         for rel, readable in rel_dir:
             if not readable or not selector.select(rel):
+=======
+    # os.walk does not follow symlinked directories, so only a file's own
+    # final component can redirect: a symlink resolving outside the
+    # repository or into its .git (e.g. ``link.py -> .git/config``) is
+    # never handed to the graph extractor.
+    resolved_root = repo_path.resolve()
+    for dirpath, dirnames, filenames in os.walk(repo_path):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_NAMES]
+        for filename in sorted(filenames):
+            full_path = Path(dirpath, filename)
+            if os.path.islink(full_path) and not is_readable_within_root(
+                full_path, resolved_root
+            ):
+                continue
+            rel = full_path.relative_to(repo_path).as_posix()
+            if not selector.select(rel):
+>>>>>>> upstream/master
                 # Bug #1907: this file will NEVER reach Rust -- classify it
                 # NOW, while its extension is still in hand, or it becomes
                 # permanently invisible to every completeness counter.
                 # Extension lookup only, no filesystem call.
+<<<<<<< HEAD
                 ext = PurePosixPath(rel).suffix.lstrip(".").lower()
+=======
+                ext = Path(filename).suffix.lstrip(".").lower()
+>>>>>>> upstream/master
                 language = extractor_extensions.get(ext) if ext else None
                 if language is not None:
                     files_excluded_with_extractor += 1
@@ -180,6 +218,7 @@ def _collect_graph_candidate_files(
         files_excluded_without_extractor,
         sorted(languages_excluded_with_extractor),
     )
+<<<<<<< HEAD
 
 
 #: One directory's files, in selection order: ``(repo-relative path, readable)``.
@@ -213,3 +252,5 @@ def _manifest_rel_paths_by_dir(source: "ContentSeamSource") -> Iterator[_RelDir]
         (entry.path, not entry.is_symlink)
         for entry in manifest_entries(source, sorted(_SKIP_DIR_NAMES))
     ]
+=======
+>>>>>>> upstream/master

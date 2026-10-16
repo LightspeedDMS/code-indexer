@@ -434,6 +434,7 @@ class DatabaseSchema:
         )
     """
 
+<<<<<<< HEAD
     # Content seam step 5a: control-plane metadata (golden-repo alias pointers
     # and write-mode markers) lives in the registry, not in per-pod files
     # under golden-repos/aliases/ and golden-repos/.write_mode/. One row per
@@ -501,6 +502,8 @@ class DatabaseSchema:
         )
     """
 
+=======
+>>>>>>> upstream/master
     # Story #283: Wiki render cache tables
     CREATE_WIKI_CACHE_TABLE = """
         CREATE TABLE IF NOT EXISTS wiki_cache (
@@ -710,9 +713,16 @@ class DatabaseSchema:
             total_latency_ms    INTEGER NOT NULL,
             result_count        INTEGER NOT NULL,
             node_id             TEXT NOT NULL,
-            correlation_id      TEXT
+            correlation_id      TEXT,
+            query_text_truncated INTEGER,
+            tool                TEXT,
+            door                TEXT,
+            outcome             TEXT,
+            error_class         TEXT
         )
     """
+    # Bug #2114 / Story #2117: the columns after correlation_id are the ones an
+    # existing table gains in place (SearchEventLogSqliteBackend, same order).
 
     CREATE_IDX_SEL_TIMESTAMP = """
         CREATE INDEX IF NOT EXISTS idx_sel_timestamp
@@ -722,6 +732,13 @@ class DatabaseSchema:
     CREATE_IDX_SEL_USER = """
         CREATE INDEX IF NOT EXISTS idx_sel_user
             ON search_event_log (username)
+    """
+
+    # Bug #2106: user-filtered export batches seek (username, timestamp);
+    # needed without ANALYZE statistics (solo SQLite never collects them).
+    CREATE_IDX_SEL_USER_TS = """
+        CREATE INDEX IF NOT EXISTS idx_sel_user_ts
+            ON search_event_log (username, timestamp)
     """
 
     # Issue #1160: Query analytics exports table
@@ -875,6 +892,19 @@ class DatabaseSchema:
             conn.execute(self.CREATE_SSH_KEYS_TABLE)
             conn.execute(self.CREATE_SSH_KEY_HOSTS_TABLE)
             conn.execute(self.CREATE_GOLDEN_REPOS_METADATA_TABLE)
+            # Bug #2022: GoldenRepoMetadataSqliteBackend.remove_repo also
+            # deletes from this table; same DDL as ensure_table_exists().
+            from code_indexer.server.storage.sqlite_backends._refresh_failure_backoff_mixin import (
+                create_refresh_failure_backoff_table,
+            )
+
+            create_refresh_failure_backoff_table(conn)
+            # remove_repo also deletes from the forced-reconcile state table.
+            from code_indexer.server.storage.sqlite_backends._forced_reconcile_state_mixin import (
+                create_forced_reconcile_state_table,
+            )
+
+            create_forced_reconcile_state_table(conn)
             conn.execute(self.CREATE_BACKGROUND_JOBS_TABLE)
             # Story #72: Self-monitoring tables
             conn.execute(self.CREATE_SELF_MONITORING_SCANS_TABLE)
@@ -895,6 +925,7 @@ class DatabaseSchema:
             conn.execute(self.CREATE_DEPENDENCY_MAP_TRACKING_TABLE)
             # Story #1360 (Epic #1333 S3): HNSW orphan repair fleet sweep state
             conn.execute(self.CREATE_HNSW_ORPHAN_SWEEP_STATE_TABLE)
+<<<<<<< HEAD
             # Content seam step 5a: control-plane metadata in the registry
             conn.execute(self.CREATE_GOLDEN_REPO_ALIASES_TABLE)
             conn.execute(self.CREATE_WRITE_MODE_MARKERS_TABLE)
@@ -902,6 +933,8 @@ class DatabaseSchema:
             conn.execute(self.CREATE_METADATA_OUTBOX_TABLE)
             conn.execute(self.CREATE_IDX_METADATA_OUTBOX_KEY)
             conn.execute(self.CREATE_METADATA_OUTBOX_STATE_TABLE)
+=======
+>>>>>>> upstream/master
             # Story #283: Wiki render cache tables
             conn.execute(self.CREATE_WIKI_CACHE_TABLE)
             conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)
@@ -952,6 +985,7 @@ class DatabaseSchema:
             conn.execute(self.CREATE_SEARCH_EVENT_LOG_TABLE)
             conn.execute(self.CREATE_IDX_SEL_TIMESTAMP)
             conn.execute(self.CREATE_IDX_SEL_USER)
+            conn.execute(self.CREATE_IDX_SEL_USER_TS)
             # Issue #1160: Query analytics exports
             conn.execute(self.CREATE_QUERY_ANALYTICS_EXPORTS_TABLE)
             conn.execute(self.CREATE_IDX_QAE_CREATED_AT)
@@ -990,6 +1024,7 @@ class DatabaseSchema:
             self._migrate_node_metrics_table(conn)
             # Story #565: Password expiry - add password_changed_at column
             self._migrate_users_password_changed_at(conn)
+            self._migrate_users_account_created_at(conn)
             # Story #578: Server config centralization (migration for existing DBs)
             self._migrate_server_config_table(conn)
             # Bug #573/#574: Rate limiting tables (migration for existing DBs)
@@ -1161,6 +1196,23 @@ class DatabaseSchema:
             conn.execute("ALTER TABLE users ADD COLUMN password_changed_at TEXT")
             conn.commit()
             logger.info("Migrated users schema: added password_changed_at column")
+
+    def _migrate_users_account_created_at(self, conn: sqlite3.Connection) -> None:
+        """
+        Add account_created_at column to users table (additive, nullable).
+
+        Records the instant each account was created; credentials issued
+        before it belong to an earlier account with the same name.  Accounts
+        that predate the column keep NULL (no restriction).
+        Idempotent: checks for existing column before adding.
+        """
+        cursor = conn.execute("PRAGMA table_info(users)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        if "account_created_at" not in existing_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN account_created_at TEXT")
+            conn.commit()
+            logger.info("Migrated users schema: added account_created_at column")
 
     def _migrate_background_jobs_job_tracker(self, conn: sqlite3.Connection) -> None:
         """

@@ -2005,10 +2005,17 @@ def _omni_regex_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     resolver's ``_is_git_repo`` check looks for -- regex search reads the working
     tree, so no commits are involved), a real ``AliasManager`` pointer file per
     repo (the resolver's first-priority lookup), real ripgrep, and the real
+<<<<<<< HEAD
     response formatting.  The only stand-ins are the registry lookups a live
     server would answer from its database: the global-repo listing that wildcard
     expansion enumerates, each repo's registry row, and the access-filtering
     service (absent, i.e. no restriction).
+=======
+    response formatting.  The only stand-ins are the two registry lookups a live
+    server would answer from its database: the global-repo listing that wildcard
+    expansion enumerates, and the access-filtering service (absent, i.e. no
+    restriction).
+>>>>>>> upstream/master
     """
     import code_indexer.server.app as app_module
     from code_indexer.global_repos.alias_manager import AliasManager
@@ -2038,6 +2045,7 @@ def _omni_regex_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         lambda: [{"alias_name": f"{alias}-global"} for alias in _OMNI_REPO_ALIASES],
     )
     monkeypatch.setattr(_utils, "_get_access_filtering_service", lambda: None)
+<<<<<<< HEAD
     # The per-repo registry row (Bug #1315's index_path fallback) is the third
     # registry lookup a live server answers from its database; without it the
     # resolver reached for app.state.backend_registry, which only existed when
@@ -2053,6 +2061,8 @@ def _omni_regex_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
     monkeypatch.setattr(_utils, "_get_global_repo", rows.get)
     monkeypatch.setattr(_legacy, "_get_global_repo", rows.get)
+=======
+>>>>>>> upstream/master
 
 
 @pytest.mark.asyncio

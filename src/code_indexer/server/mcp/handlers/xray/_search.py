@@ -19,6 +19,19 @@ from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
 )
+<<<<<<< HEAD
+=======
+from code_indexer.server.services.search_event_recording import (
+    SearchOrigin,
+    bind_xray_recorder,
+    run_recorded_xray,
+    tracked_job_cancelled,
+    writer_from_app,
+)
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
+>>>>>>> upstream/master
 from code_indexer.xray.sandbox import validate_rust_evaluator
 
 from ._infra import (
@@ -32,6 +45,10 @@ from ._infra import (
     _get_job_tracker,
     _get_xray_cell_limiter,
     _get_xray_executor,
+<<<<<<< HEAD
+=======
+    _lazy_singleton_app_or_none,
+>>>>>>> upstream/master
     _pattern_scope_alias,
     _resolve_effective_timeout,
     _resolve_evaluator_code_off_loop,
@@ -44,6 +61,12 @@ from ._infra import (
 from .. import _utils
 from .._utils import _mcp_response, _parse_and_collapse_repo_alias
 
+<<<<<<< HEAD
+=======
+# Story #2117: the tool and door every MCP xray_search event carries.
+XRAY_SEARCH_ORIGIN = SearchOrigin(tool="xray_search", door="mcp")
+
+>>>>>>> upstream/master
 
 async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """MCP handler for the xray_search tool.
@@ -301,10 +324,30 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         loop_multi = asyncio.get_running_loop()
         job_ids: list = []
         errors: list = []
+<<<<<<< HEAD
 
         def _make_search_job_fn(  # type: ignore[no-untyped-def]
             rp: Path, t: int, jid: str, bjm: Any
         ):
+=======
+        # Story #2107: each alias job records its own search event.
+        event_writer_multi = writer_from_app(_lazy_singleton_app_or_none())
+        event_correlation_id_multi = get_correlation_id()
+
+        def _make_search_job_fn(  # type: ignore[no-untyped-def]
+            rp: Path, t: int, jid: str, bjm: Any, alias: str
+        ):
+            # Bound at request time: the latency clock starts here.
+            record_event = bind_xray_recorder(
+                event_writer_multi,
+                origin=XRAY_SEARCH_ORIGIN,
+                username=user.username,
+                repo_alias=alias,
+                pattern=driver_regex,
+                correlation_id=event_correlation_id_multi,
+            )
+
+>>>>>>> upstream/master
             def _job() -> Dict[str, Any]:  # type: ignore[no-untyped-def]
                 from code_indexer.xray.search_engine import XRaySearchEngine as _E
 
@@ -335,6 +378,7 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
                     # failure) would skip the finally below and leak the
                     # held xray cell-limiter slot forever.
                     _get_job_tracker().update_status(jid, status="running")
+<<<<<<< HEAD
                     result = _E().run(
                         repo_path=rp,
                         driver_regex=driver_regex,
@@ -351,12 +395,39 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
                         progress_callback=None,
                         max_files=max_results,
                         on_process_spawned=_on_spawned,
+=======
+                    # Story #2107/#2117: only the engine run is recorded.
+                    result = run_recorded_xray(
+                        record_event,
+                        lambda: _E().run(
+                            repo_path=rp,
+                            driver_regex=driver_regex,
+                            evaluator_code=evaluator_code,
+                            search_target=search_target,
+                            include_patterns=list(include_patterns),
+                            exclude_patterns=list(exclude_patterns),
+                            case_sensitive=case_sensitive,
+                            context_lines=context_lines,
+                            multiline=multiline,
+                            pcre2=pcre2,
+                            path=path,
+                            timeout_seconds=t,
+                            progress_callback=None,
+                            max_files=max_results,
+                            on_process_spawned=_on_spawned,
+                        ),
+                        lambda: tracked_job_cancelled(_get_job_tracker(), jid),
+>>>>>>> upstream/master
                     )
                 finally:
                     bjm.unregister_child_processes(jid)
                     if _slot and _limiter is not None:
                         _limiter.release()
+<<<<<<< HEAD
                 return _truncate_xray_result(result)
+=======
+                return _truncate_xray_result(result, owner=user.username)
+>>>>>>> upstream/master
 
             return _job
 
@@ -383,7 +454,11 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
             )
 
             _job_fn = _make_search_job_fn(
+<<<<<<< HEAD
                 single_repo_path, effective_timeout_multi, jid, bjm_multi
+=======
+                single_repo_path, effective_timeout_multi, jid, bjm_multi, single_alias
+>>>>>>> upstream/master
             )
             _future = loop_multi.run_in_executor(xray_executor_multi, _job_fn)
 
@@ -495,6 +570,20 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         metadata={"repo_alias": repo_alias_parsed},
     )
 
+<<<<<<< HEAD
+=======
+    # Story #2107: the search event is recorded by the job itself when its
+    # result is known; everything it needs is bound here, at request time.
+    record_event = bind_xray_recorder(
+        writer_from_app(_lazy_singleton_app_or_none()),
+        origin=XRAY_SEARCH_ORIGIN,
+        username=user.username,
+        repo_alias=repo_alias_parsed,
+        pattern=driver_regex,
+        correlation_id=get_correlation_id(),
+    )
+
+>>>>>>> upstream/master
     def job_fn() -> Dict[str, Any]:  # type: ignore[no-untyped-def]
         from code_indexer.xray.search_engine import XRaySearchEngine as _Engine
 
@@ -524,6 +613,7 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
             # write failure) would skip the finally below and leak the
             # held xray cell-limiter slot forever.
             job_tracker.update_status(job_id, status="running")
+<<<<<<< HEAD
             result = _Engine().run(
                 repo_path=repo_path,
                 driver_regex=driver_regex,
@@ -540,12 +630,39 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
                 progress_callback=None,
                 max_files=max_results,
                 on_process_spawned=_on_spawned,
+=======
+            # Story #2107/#2117: only the engine run is recorded.
+            result = run_recorded_xray(
+                record_event,
+                lambda: _Engine().run(
+                    repo_path=repo_path,
+                    driver_regex=driver_regex,
+                    evaluator_code=evaluator_code,
+                    search_target=search_target,
+                    include_patterns=list(include_patterns),
+                    exclude_patterns=list(exclude_patterns),
+                    case_sensitive=case_sensitive,
+                    context_lines=context_lines,
+                    multiline=multiline,
+                    pcre2=pcre2,
+                    path=path,
+                    timeout_seconds=effective_timeout,
+                    progress_callback=None,
+                    max_files=max_results,
+                    on_process_spawned=_on_spawned,
+                ),
+                lambda: tracked_job_cancelled(_get_job_tracker(), job_id),
+>>>>>>> upstream/master
             )
         finally:
             bjm.unregister_child_processes(job_id)
             if _slot and _limiter is not None:
                 _limiter.release()
+<<<<<<< HEAD
         return _truncate_xray_result(result)
+=======
+        return _truncate_xray_result(result, owner=user.username)
+>>>>>>> upstream/master
 
     future = loop.run_in_executor(xray_executor, job_fn)
 

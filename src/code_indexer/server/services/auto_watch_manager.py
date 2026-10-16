@@ -136,6 +136,7 @@ class AutoWatchManager:
                 "message": "Auto-watch is disabled",
             }
 
+<<<<<<< HEAD
         # Content seam: under a delegated content backend the repository is not
         # on this pod -- workspace-mcp serves its bytes -- so there is nothing
         # here to put an inotify watch on. Starting one anyway would watch an
@@ -152,6 +153,8 @@ class AutoWatchManager:
                 "backend: the repository is not on this pod",
             }
 
+=======
+>>>>>>> upstream/master
         # Bug #1689: lazily start the background timeout-checker thread on
         # first real watch action, instead of eagerly in __init__.
         self._ensure_timeout_thread_started()

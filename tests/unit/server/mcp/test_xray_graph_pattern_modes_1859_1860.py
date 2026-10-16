@@ -14,7 +14,11 @@ import pytest
 import yaml
 
 from code_indexer.server.auth.user_manager import User, UserRole
+<<<<<<< HEAD
 from code_indexer.xray.rust_backend import resolve_xray_cli_path
+=======
+from code_indexer.xray.rust_backend import _XRAY_CLI_DEFAULT
+>>>>>>> upstream/master
 
 
 GRAPH_EVALUATOR = """\
@@ -218,7 +222,11 @@ async def test_analyze_graph_pattern_and_evaluator_are_mutually_exclusive(
 
 @pytest.mark.asyncio
 async def test_graph_pattern_name_and_params_resolve_and_run(tmp_path: Path) -> None:
+<<<<<<< HEAD
     if not resolve_xray_cli_path().exists():
+=======
+    if not _XRAY_CLI_DEFAULT.exists():
+>>>>>>> upstream/master
         pytest.skip("xray-cli binary is required for graph execution")
     cidx_meta = tmp_path / "cidx-meta"
     _write_pattern(
@@ -263,7 +271,11 @@ async def test_graph_pattern_name_and_params_resolve_and_run(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_graph_non_java_input_reports_no_supported_files(tmp_path: Path) -> None:
+<<<<<<< HEAD
     if not resolve_xray_cli_path().exists():
+=======
+    if not _XRAY_CLI_DEFAULT.exists():
+>>>>>>> upstream/master
         pytest.skip("xray-cli binary is required for graph execution")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -292,7 +304,11 @@ async def test_graph_non_java_input_reports_no_supported_files(tmp_path: Path) -
 async def test_graph_java_input_does_not_report_no_supported_files(
     tmp_path: Path,
 ) -> None:
+<<<<<<< HEAD
     if not resolve_xray_cli_path().exists():
+=======
+    if not _XRAY_CLI_DEFAULT.exists():
+>>>>>>> upstream/master
         pytest.skip("xray-cli binary is required for graph execution")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -360,7 +376,11 @@ async def test_graph_mixed_unsupported_language_and_unrecognized_extension_repor
     (#1860's own repro: files_with_unsupported_language=41,
     unreadable_or_unsupported_files=11, neither equal to the file count).
     """
+<<<<<<< HEAD
     if not resolve_xray_cli_path().exists():
+=======
+    if not _XRAY_CLI_DEFAULT.exists():
+>>>>>>> upstream/master
         pytest.skip("xray-cli binary is required for graph execution")
 
     parsed = await _run_graph_analysis_over_files(
@@ -385,7 +405,11 @@ async def test_graph_java_with_unrecognized_extension_file_does_not_report_no_su
     files` -- at least one candidate file did reach the extractor with a
     supported language.
     """
+<<<<<<< HEAD
     if not resolve_xray_cli_path().exists():
+=======
+    if not _XRAY_CLI_DEFAULT.exists():
+>>>>>>> upstream/master
         pytest.skip("xray-cli binary is required for graph execution")
 
     parsed = await _run_graph_analysis_over_files(
@@ -412,7 +436,11 @@ async def test_graph_analyze_response_surfaces_new_completeness_fields_for_a_cle
     pipeline (same pattern every other test in this file already uses),
     never a stub of `RustNativeBackend.run_graph_analysis`.
     """
+<<<<<<< HEAD
     if not resolve_xray_cli_path().exists():
+=======
+    if not _XRAY_CLI_DEFAULT.exists():
+>>>>>>> upstream/master
         pytest.skip("xray-cli binary is required for graph execution")
 
     parsed = await _run_graph_analysis_over_files(
@@ -441,7 +469,11 @@ async def test_graph_analyze_response_surfaces_completeness_reasons_for_a_degrad
     ["repo_index_incomplete"]` at the TOP level of the MCP response, not
     only inside `degradation`.
     """
+<<<<<<< HEAD
     if not resolve_xray_cli_path().exists():
+=======
+    if not _XRAY_CLI_DEFAULT.exists():
+>>>>>>> upstream/master
         pytest.skip("xray-cli binary is required for graph execution")
 
     parsed = await _run_graph_analysis_over_files(
@@ -480,7 +512,11 @@ async def test_graph_analyze_response_surfaces_repo_index_incomplete_for_python_
     CAP` patched down to 1 so the walk genuinely truncates (reviewer-
     suggested approach -- avoids writing 50,000 real files).
     """
+<<<<<<< HEAD
     if not resolve_xray_cli_path().exists():
+=======
+    if not _XRAY_CLI_DEFAULT.exists():
+>>>>>>> upstream/master
         pytest.skip("xray-cli binary is required for graph execution")
 
     repo = tmp_path / "repo"
@@ -538,7 +574,11 @@ async def test_graph_unsupported_language_file_with_a_genuine_parse_error_does_n
     error; the fix's `files_with_parse_errors == 0` guard must prevent
     that, since a genuine parse failure happened.
     """
+<<<<<<< HEAD
     if not resolve_xray_cli_path().exists():
+=======
+    if not _XRAY_CLI_DEFAULT.exists():
+>>>>>>> upstream/master
         pytest.skip("xray-cli binary is required for graph execution")
 
     parsed = await _run_graph_analysis_over_files(

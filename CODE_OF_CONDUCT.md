@@ -6,11 +6,11 @@ By participating in this community — contributing code, opening issues, commen
 
 ## Reporting
 
-Concerns about behavior in the project's spaces (issues, pull requests, discussions, related communication channels) may be reported confidentially to the project maintainer at:
+Concerns about behavior in the project's spaces (issues, pull requests, discussions, related communication channels) can be raised with the maintainers in [GitHub Discussions](https://github.com/LightspeedDMS/code-indexer/discussions).
 
-**seba.battig@lightspeeddms.com**
+For a concern that should not be discussed in public, use GitHub's [report abuse or report content](https://docs.github.com/en/communities/maintaining-your-safety-on-github/reporting-abuse-or-spam) feature, which goes privately to GitHub.
 
-All reports will be reviewed and investigated promptly and fairly. The maintainer is obligated to respect the privacy and security of the reporter of any incident.
+All reports will be reviewed and investigated promptly and fairly, and maintainers will respect the privacy and security of anyone who reports an incident.
 
 ## Enforcement
 

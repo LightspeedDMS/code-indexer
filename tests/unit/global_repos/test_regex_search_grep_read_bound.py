@@ -24,13 +24,22 @@ _TEST_TIMEOUT_SECONDS = 10
 def _write_synthetic_grep_output(path: str, num_lines: int) -> int:
     """Write ``num_lines`` synthetic grep-format match lines to ``path``.
 
+<<<<<<< HEAD
     Format: "relative/path.py:LINENUM:content" (colon-separated, matching
     grep -n -H output).
+=======
+    Format: "relative/path.py\\0LINENUM:content" (NUL-terminated path,
+    matching grep -n -H --null output -- Bug #2030).
+>>>>>>> upstream/master
 
     Returns the number of bytes written.
     """
     lines = [
+<<<<<<< HEAD
         f"file{i}.py:{i + 1}:def func_{i}_padding_xxxxxxxxxxxxxxxxxxxx():"
+=======
+        f"file{i}.py\x00{i + 1}:def func_{i}_padding_xxxxxxxxxxxxxxxxxxxx():"
+>>>>>>> upstream/master
         for i in range(num_lines)
     ]
     content = "\n".join(lines) + "\n"

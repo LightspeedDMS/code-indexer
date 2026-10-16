@@ -30,6 +30,7 @@ use xray_core::validator::validate_evaluator_source;
 // ---------------------------------------------------------------------------
 
 /// std modules rejected by `visit_path` and by `check_forbidden_std_subpath`.
+<<<<<<< HEAD
 ///
 /// Mirrors validator.rs's `FORBIDDEN_STD_MODULES` constant, drift-guarded by
 /// `rule_tables_match_validator_source` below. Both reject sites read that ONE
@@ -40,6 +41,9 @@ use xray_core::validator::validate_evaluator_source;
 const FORBIDDEN_STD_MODULES: &[&str] = &[
     "backtrace", "env", "fs", "io", "net", "os", "panic", "path", "process", "thread",
 ];
+=======
+const FORBIDDEN_STD_MODULES: &[&str] = &["fs", "net", "process", "env", "io"];
+>>>>>>> upstream/master
 
 /// Syntactic forms in which a forbidden std module can appear. Each form is a
 /// SEPARATE reject site in validator.rs, so each needs its own test.
@@ -73,8 +77,11 @@ const SINGLETON_CONSTRUCTS: &[&str] = &[
     "extern_abi_fn",
     "mod_decl",
     "use_std_glob",
+<<<<<<< HEAD
     "std_root_rename",
     "std_subpath_rename",
+=======
+>>>>>>> upstream/master
     "syntax_error",
     "macro_rules_definition",
     "macro_body_smuggled_forbidden_construct",
@@ -248,6 +255,7 @@ reject_site_tests! {
         => "use std::io as stdio;",
            "`use std::io` (renamed) is not allowed";
 
+<<<<<<< HEAD
     // ---- std modules added when the depth bypass was closed ----
     //
     // `os` is the module the bypass actually reached: `visit_path` only
@@ -332,6 +340,8 @@ reject_site_tests! {
         => "use std::collections::HashMap as Map;",
            "(renaming a `std` path) is not allowed";
 
+=======
+>>>>>>> upstream/master
     // ---- forbidden macros ----
     rejects_include_macro: "macro:include"
         => r#"fn f() { include!("evil.rs"); }"#,
@@ -502,6 +512,7 @@ fn rule_tables_match_validator_source() {
         );
     }
 
+<<<<<<< HEAD
     // Forbidden std modules. There is now exactly ONE list in validator.rs --
     // the `FORBIDDEN_STD_MODULES` constant -- so this mirrors that constant
     // rather than two hand-rolled `matches!` arms. The duplicate-arm shape
@@ -554,6 +565,30 @@ fn rule_tables_match_validator_source() {
         !visit_path_body.contains("segments[1]"),
         "visit_path indexes segments[1] again -- the forbidden-module check must \
          scan EVERY segment of a std-rooted path, not a fixed depth."
+=======
+    // Forbidden std modules, as literally listed in `visit_path`. "std" is the
+    // path root, not a forbidden module, so it is excluded from the comparison.
+    let mut expected_modules: Vec<String> =
+        FORBIDDEN_STD_MODULES.iter().map(|s| s.to_string()).collect();
+    expected_modules.sort();
+    let actual_path_modules: Vec<String> =
+        ident_literals_between("fn visit_path", "syn::visit::visit_path")
+            .into_iter()
+            .filter(|s| s != "std")
+            .collect();
+    assert_eq!(
+        actual_path_modules, expected_modules,
+        "FORBIDDEN_STD_MODULES is out of sync with validator.rs's visit_path."
+    );
+
+    // The same module list is repeated in check_forbidden_std_subpath for the
+    // `use` forms; it must agree with the path-expression list.
+    let actual_use_modules =
+        ident_literals_between("fn check_forbidden_std_subpath", "#[cfg(test)]");
+    assert_eq!(
+        actual_use_modules, expected_modules,
+        "FORBIDDEN_STD_MODULES is out of sync with check_forbidden_std_subpath."
+>>>>>>> upstream/master
     );
 }
 

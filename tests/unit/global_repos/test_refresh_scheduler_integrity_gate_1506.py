@@ -11,7 +11,12 @@ These tests prove:
    _create_snapshot/swap_alias entirely -- the already-published alias
    keeps serving the last verified-good snapshot.
 2. When a last-known-good snapshot IS available (current_target != master
+<<<<<<< HEAD
    path), the corrupt master_path chunks.db is reflink-self-healed, but
+=======
+   path), the corrupt master_path chunks.db is self-healed (an in-process
+   atomic single-file copy from the published snapshot, Bug #2157), but
+>>>>>>> upstream/master
    publish is STILL skipped for this cycle regardless.
 3. A healthy chunks.db is unaffected -- _create_snapshot/swap_alias still
    run exactly as before (no regression).
@@ -33,7 +38,10 @@ test_refresh_scheduler_cleanup_guard.py.
 """
 
 import json
+<<<<<<< HEAD
 import sqlite3
+=======
+>>>>>>> upstream/master
 import logging
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -139,6 +147,11 @@ def mock_golden_repo_metadata():
     backend = Mock()
     backend.record_refresh_integrity_failure.return_value = 1
     backend.get_refresh_integrity_failure_state.return_value = None
+<<<<<<< HEAD
+=======
+    # Bug #2022: no failure backoff recorded (a bare Mock would read as one).
+    backend.get_refresh_failure_backoff_state.return_value = None
+>>>>>>> upstream/master
     return backend
 
 
@@ -181,9 +194,13 @@ def scheduler(
     )
 
 
+<<<<<<< HEAD
 def _run_refresh(
     scheduler, golden_repos_dir, current_target, new_versioned_path, index_effect=None
 ):
+=======
+def _run_refresh(scheduler, golden_repos_dir, current_target, new_versioned_path):
+>>>>>>> upstream/master
     alias_name = "my-repo-global"
     master_path = str(golden_repos_dir / "my-repo")
     (golden_repos_dir / "my-repo").mkdir(parents=True, exist_ok=True)
@@ -200,7 +217,11 @@ def _run_refresh(
         patch.object(scheduler.alias_manager, "swap_alias") as mock_swap_alias,
         patch.object(scheduler, "_detect_existing_indexes", return_value={}),
         patch.object(scheduler, "_reconcile_registry_with_filesystem"),
+<<<<<<< HEAD
         patch.object(scheduler, "_index_source", side_effect=index_effect),
+=======
+        patch.object(scheduler, "_index_source"),
+>>>>>>> upstream/master
         patch.object(
             scheduler, "_create_snapshot", return_value=new_versioned_path
         ) as mock_create_snapshot,
@@ -251,7 +272,12 @@ class TestIntegrityGateFailureSkipsPublish:
         mock_golden_repo_metadata,
     ):
         """A prior real snapshot exists with healthy data -- the corrupt
+<<<<<<< HEAD
         master_path chunks.db is reflink-restored from it, but this
+=======
+        master_path chunks.db is restored from it (an in-process atomic
+        single-file copy, Bug #2157), but this
+>>>>>>> upstream/master
         cycle's publish is STILL skipped (no new data was safely
         produced this cycle)."""
         from code_indexer.server.storage.shared.clone_backend import (
@@ -488,8 +514,11 @@ def _run_create_new_index(
     mock_golden_repo_metadata,
     alias_name,
     source_path,
+<<<<<<< HEAD
     on_index=None,
     existing_alias_target=None,
+=======
+>>>>>>> upstream/master
 ):
     """Exercises the REAL, unmocked _create_new_index() -> _index_source()
     -> (gate) -> _create_snapshot() orchestration (Codex review Finding 5).
@@ -527,6 +556,7 @@ def _run_create_new_index(
         mock_golden_repo_metadata,
         snapshot_manager=mock_snapshot_manager,
     )
+<<<<<<< HEAD
     if existing_alias_target is not None:
         scheduler.alias_manager.create_alias(alias_name, existing_alias_target)
 
@@ -534,6 +564,8 @@ def _run_create_new_index(
         if on_index is not None:
             on_index()
         return 50
+=======
+>>>>>>> upstream/master
 
     raised = None
     result_path = None
@@ -544,7 +576,11 @@ def _run_create_new_index(
         ),
         patch(
             "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+<<<<<<< HEAD
             side_effect=_index_process,
+=======
+            return_value=50,
+>>>>>>> upstream/master
         ),
         patch(
             "subprocess.run",
@@ -941,6 +977,7 @@ class TestQuarantineBookkeepingFailureLogging:
             "Swallowed reset-failure bookkeeping exception must be logged "
             "at ERROR (was WARNING) with alias + exception detail"
         )
+<<<<<<< HEAD
 
 
 def _empty_the_collection(chunks_db: Path):
@@ -1040,3 +1077,5 @@ class TestCreateNewIndexRefusesAnEmptiedIndex:
 
         assert result_path is None
         assert raised is not None and "collapsed from 20 points to 0" in str(raised)
+=======
+>>>>>>> upstream/master

@@ -445,12 +445,19 @@ def _extract_tojson_literal(html: str, var_name: str) -> str:
 
 
 class TestOauthAuthorizeConsentHandlerArgumentIntegrity:
+<<<<<<< HEAD
     def test_script_literals_equal_rendered_values(self):
+=======
+    def test_form_values_equal_rendered_values(self):
+        """Deny and Authorize are plain form submits: every value travels in
+        an escaped attribute (no script literal) and round-trips exactly."""
+>>>>>>> upstream/master
         html = render(
             "oauth_authorize_consent.html",
             {
                 "show_nav": False,
                 "username": "admin",
+<<<<<<< HEAD
                 "client_name": "client",
                 "client_id": "client-1",
                 "redirect_uri": ADVERSARIAL_VALUE,
@@ -461,6 +468,31 @@ class TestOauthAuthorizeConsentHandlerArgumentIntegrity:
         )
         assert _extract_tojson_literal(html, "const redirectUri") == ADVERSARIAL_VALUE
         assert _extract_tojson_literal(html, "const state") == ADVERSARIAL_VALUE
+=======
+                "client_name": ADVERSARIAL_VALUE,
+                "client_id": "client-1",
+                "redirect_uri": ADVERSARIAL_VALUE,
+                "redirect_host": ADVERSARIAL_VALUE,
+                "code_challenge": "abc",
+                "response_type": "code",
+                "state": ADVERSARIAL_VALUE,
+                "csrf_token": "example-csrf",
+            },
+        )
+        parser = AttrCollectingParser()
+        parser.feed(html)
+        inputs = {
+            attrs.get("name") or attrs.get("id"): attrs.get("value")
+            for tag, attrs in parser.tags
+            if tag == "input"
+        }
+        assert inputs["redirect_uri"] == ADVERSARIAL_VALUE
+        assert inputs["state"] == ADVERSARIAL_VALUE
+        assert inputs["client-name"] == ADVERSARIAL_VALUE
+        assert inputs["csrf_token"] == "example-csrf"
+        assert "<tag>" not in html
+        assert "redirectUri" not in html
+>>>>>>> upstream/master
 
 
 class TestConfigSectionServerHandlerArgumentIntegrity:

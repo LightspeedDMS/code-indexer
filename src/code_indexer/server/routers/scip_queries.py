@@ -10,12 +10,25 @@ Story #41: All routes delegate to SCIPQueryService for unified query execution a
 """
 
 import logging
+import time
 from fastapi import APIRouter, Query, Depends, Request
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
+<<<<<<< HEAD
+=======
+from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.services.search_event_context import get_search_event_ctx
+from code_indexer.server.services.search_event_recording import (
+    SearchOrigin,
+    in_scip_search_scope,
+    record_scip_search,
+    scip_callchain_query_text,
+    writer_from_app,
+)
+>>>>>>> upstream/master
 from code_indexer.server.routers import repo_access_http
 from code_indexer.server.services.scip_query_service import SCIPQueryService
 from code_indexer.server.logging_utils import format_error_log
@@ -44,6 +57,20 @@ router = APIRouter(
     dependencies=[Depends(_require_access_control)],
 )
 
+<<<<<<< HEAD
+=======
+# The endpoint each route's search event row names (Story #2117). Fixed
+# per route, like every other REST door's origin: recording never reads the
+# request, so it can never fail the search.
+_DEFINITION_ORIGIN = SearchOrigin(tool="GET /scip/definition", door="rest")
+_REFERENCES_ORIGIN = SearchOrigin(tool="GET /scip/references", door="rest")
+_DEPENDENCIES_ORIGIN = SearchOrigin(tool="GET /scip/dependencies", door="rest")
+_DEPENDENTS_ORIGIN = SearchOrigin(tool="GET /scip/dependents", door="rest")
+_IMPACT_ORIGIN = SearchOrigin(tool="GET /scip/impact", door="rest")
+_CALLCHAIN_ORIGIN = SearchOrigin(tool="GET /scip/callchain", door="rest")
+_CONTEXT_ORIGIN = SearchOrigin(tool="GET /scip/context", door="rest")
+
+>>>>>>> upstream/master
 # Depth bounds for dependency/dependent traversal queries (Bug #1604 REST
 # audit). Used as the ge/le bounds on the depth Query parameters below, so
 # the HTTP boundary itself rejects an out-of-range depth rather than
@@ -134,6 +161,8 @@ def _get_scip_query_service(request: Request) -> SCIPQueryService:
 
 def _apply_scip_payload_truncation(
     results: List[Dict[str, Any]],
+    *,
+    owner: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to SCIP results.
 
@@ -144,6 +173,8 @@ def _apply_scip_payload_truncation(
 
     Args:
         results: List of SCIP result dictionaries
+        owner: Username of the caller whose request created the entries; only
+            that user can fetch the returned handles.
 
     Returns:
         Results with truncated context fields if applicable
@@ -152,10 +183,43 @@ def _apply_scip_payload_truncation(
         _apply_scip_payload_truncation as mcp_truncate,
     )
 
-    return mcp_truncate(results)  # type: ignore[no-any-return]
+    return mcp_truncate(results, owner=owner)  # type: ignore[no-any-return]
+
+
+def _scip_search_payload(
+    request: Request,
+    origin: SearchOrigin,
+    user: User,
+    payload: Dict[str, Any],
+    project: Optional[str],
+    query_text: str,
+    started: float,
+    error: Optional[BaseException] = None,
+) -> Dict[str, Any]:
+    """Record one SCIP search (Story #2116) by the endpoint `origin` and
+    return its payload. `error` is the exception a search that raised failed
+    with (Story #2117: its class is the row's error class; a rejection
+    records nothing)."""
+    record_scip_search(
+        writer_from_app(request.app),
+        payload,
+        origin=origin,
+        username=user.username,
+        repo_alias=project,
+        query_text=query_text,
+        started_monotonic=started,
+        correlation_id=get_correlation_id(),
+        error=error,
+        # Bug #2111: a search without a project -- the SCIP service noted on
+        # this endpoint's context (in_scip_search_scope) each repository it
+        # searched and that repository's count.
+        context=get_search_event_ctx(),
+    )
+    return payload
 
 
 @router.get("/definition")
+@in_scip_search_scope
 def get_definition(
     request: Request,
     symbol: str = Query(..., description="Symbol name to search for"),
@@ -178,6 +242,7 @@ def get_definition(
     Returns:
         JSON response with success status, symbol, total_results, and results list
     """
+    started = time.monotonic()
     try:
         service = _get_scip_query_service(request)
         results = service.find_definition(
@@ -188,14 +253,22 @@ def get_definition(
         )
 
         # Apply SCIP payload truncation for consistency
-        results = _apply_scip_payload_truncation(results)
+        results = _apply_scip_payload_truncation(results, owner=current_user.username)
 
-        return {
-            "success": True,
-            "symbol": symbol,
-            "total_results": len(results),
-            "results": results,
-        }
+        return _scip_search_payload(
+            request,
+            _DEFINITION_ORIGIN,
+            current_user,
+            {
+                "success": True,
+                "symbol": symbol,
+                "total_results": len(results),
+                "results": results,
+            },
+            project,
+            symbol,
+            started,
+        )
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -203,10 +276,20 @@ def get_definition(
                 f"Definition query failed: {e}",
             )
         )
-        return {"success": False, "error": str(e)}
+        return _scip_search_payload(
+            request,
+            _DEFINITION_ORIGIN,
+            current_user,
+            {"success": False, "error": str(e)},
+            project,
+            symbol,
+            started,
+            error=e,
+        )
 
 
 @router.get("/references")
+@in_scip_search_scope
 def get_references(
     request: Request,
     symbol: str = Query(..., description="Symbol name to search for"),
@@ -236,6 +319,7 @@ def get_references(
     Returns:
         JSON response with success status, symbol, total_results, and results list
     """
+    started = time.monotonic()
     try:
         service = _get_scip_query_service(request)
         results = service.find_references(
@@ -247,14 +331,22 @@ def get_references(
         )
 
         # Apply SCIP payload truncation for consistency
-        results = _apply_scip_payload_truncation(results)
+        results = _apply_scip_payload_truncation(results, owner=current_user.username)
 
-        return {
-            "success": True,
-            "symbol": symbol,
-            "total_results": len(results),
-            "results": results,
-        }
+        return _scip_search_payload(
+            request,
+            _REFERENCES_ORIGIN,
+            current_user,
+            {
+                "success": True,
+                "symbol": symbol,
+                "total_results": len(results),
+                "results": results,
+            },
+            project,
+            symbol,
+            started,
+        )
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -262,10 +354,20 @@ def get_references(
                 f"References query failed: {e}",
             )
         )
-        return {"success": False, "error": str(e)}
+        return _scip_search_payload(
+            request,
+            _REFERENCES_ORIGIN,
+            current_user,
+            {"success": False, "error": str(e)},
+            project,
+            symbol,
+            started,
+            error=e,
+        )
 
 
 @router.get("/dependencies")
+@in_scip_search_scope
 def get_dependencies(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
@@ -295,6 +397,7 @@ def get_dependencies(
     Returns:
         JSON response with success status, symbol, total_results, and results list
     """
+    started = time.monotonic()
     try:
         service = _get_scip_query_service(request)
         results = service.get_dependencies(
@@ -306,14 +409,22 @@ def get_dependencies(
         )
 
         # Apply SCIP payload truncation for consistency
-        results = _apply_scip_payload_truncation(results)
+        results = _apply_scip_payload_truncation(results, owner=current_user.username)
 
-        return {
-            "success": True,
-            "symbol": symbol,
-            "total_results": len(results),
-            "results": results,
-        }
+        return _scip_search_payload(
+            request,
+            _DEPENDENCIES_ORIGIN,
+            current_user,
+            {
+                "success": True,
+                "symbol": symbol,
+                "total_results": len(results),
+                "results": results,
+            },
+            project,
+            symbol,
+            started,
+        )
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -321,10 +432,20 @@ def get_dependencies(
                 f"Dependencies query failed: {e}",
             )
         )
-        return {"success": False, "error": str(e)}
+        return _scip_search_payload(
+            request,
+            _DEPENDENCIES_ORIGIN,
+            current_user,
+            {"success": False, "error": str(e)},
+            project,
+            symbol,
+            started,
+            error=e,
+        )
 
 
 @router.get("/dependents")
+@in_scip_search_scope
 def get_dependents(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
@@ -354,6 +475,7 @@ def get_dependents(
     Returns:
         JSON response with success status, symbol, total_results, and results list
     """
+    started = time.monotonic()
     try:
         service = _get_scip_query_service(request)
         results = service.get_dependents(
@@ -365,14 +487,22 @@ def get_dependents(
         )
 
         # Apply SCIP payload truncation for consistency
-        results = _apply_scip_payload_truncation(results)
+        results = _apply_scip_payload_truncation(results, owner=current_user.username)
 
-        return {
-            "success": True,
-            "symbol": symbol,
-            "total_results": len(results),
-            "results": results,
-        }
+        return _scip_search_payload(
+            request,
+            _DEPENDENTS_ORIGIN,
+            current_user,
+            {
+                "success": True,
+                "symbol": symbol,
+                "total_results": len(results),
+                "results": results,
+            },
+            project,
+            symbol,
+            started,
+        )
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -380,10 +510,20 @@ def get_dependents(
                 f"Dependents query failed: {e}",
             )
         )
-        return {"success": False, "error": str(e)}
+        return _scip_search_payload(
+            request,
+            _DEPENDENTS_ORIGIN,
+            current_user,
+            {"success": False, "error": str(e)},
+            project,
+            symbol,
+            started,
+            error=e,
+        )
 
 
 @router.get("/impact")
+@in_scip_search_scope
 def get_impact(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
@@ -405,6 +545,7 @@ def get_impact(
     Returns:
         JSON response with impact analysis results
     """
+    started = time.monotonic()
     try:
         service = _get_scip_query_service(request)
         result = service.analyze_impact(
@@ -414,15 +555,23 @@ def get_impact(
             username=current_user.username,
         )
 
-        return {
-            "success": True,
-            "target_symbol": result["target_symbol"],
-            "depth_analyzed": result["depth_analyzed"],
-            "total_affected": result["total_affected"],
-            "truncated": result["truncated"],
-            "affected_symbols": result["affected_symbols"],
-            "affected_files": result["affected_files"],
-        }
+        return _scip_search_payload(
+            request,
+            _IMPACT_ORIGIN,
+            current_user,
+            {
+                "success": True,
+                "target_symbol": result["target_symbol"],
+                "depth_analyzed": result["depth_analyzed"],
+                "total_affected": result["total_affected"],
+                "truncated": result["truncated"],
+                "affected_symbols": result["affected_symbols"],
+                "affected_files": result["affected_files"],
+            },
+            project,
+            symbol,
+            started,
+        )
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -430,10 +579,20 @@ def get_impact(
                 f"Impact analysis failed: {e}",
             )
         )
-        return {"success": False, "error": str(e)}
+        return _scip_search_payload(
+            request,
+            _IMPACT_ORIGIN,
+            current_user,
+            {"success": False, "error": str(e)},
+            project,
+            symbol,
+            started,
+            error=e,
+        )
 
 
 @router.get("/callchain")
+@in_scip_search_scope
 def get_callchain(
     request: Request,
     from_symbol: str = Query(..., description="Starting symbol"),
@@ -460,6 +619,7 @@ def get_callchain(
     Returns:
         JSON response with call chain results
     """
+    started = time.monotonic()
     try:
         service = _get_scip_query_service(request)
         chains, timeout_errors = service.trace_callchain(
@@ -480,6 +640,7 @@ def get_callchain(
                     f"{to_symbol!r}: {timeout_errors}",
                 )
             )
+<<<<<<< HEAD
             return {
                 "success": False,
                 "error": (
@@ -498,6 +659,45 @@ def get_callchain(
             "total_chains_found": len(chains),
             "chains": chains,
         }
+=======
+            from code_indexer.scip.database.queries import QueryTimeoutError
+
+            return _scip_search_payload(
+                request,
+                _CALLCHAIN_ORIGIN,
+                current_user,
+                {
+                    "success": False,
+                    "error": (
+                        "Query timeout exceeded while tracing call chain: "
+                        f"{timeout_errors[0]}"
+                    ),
+                    "from_symbol": from_symbol,
+                    "to_symbol": to_symbol,
+                    "chains": [],
+                },
+                project,
+                scip_callchain_query_text(from_symbol, to_symbol),
+                started,
+                error=QueryTimeoutError(str(timeout_errors[0])),
+            )
+
+        return _scip_search_payload(
+            request,
+            _CALLCHAIN_ORIGIN,
+            current_user,
+            {
+                "success": True,
+                "from_symbol": from_symbol,
+                "to_symbol": to_symbol,
+                "total_chains_found": len(chains),
+                "chains": chains,
+            },
+            project,
+            scip_callchain_query_text(from_symbol, to_symbol),
+            started,
+        )
+>>>>>>> upstream/master
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -505,10 +705,20 @@ def get_callchain(
                 f"Call chain tracing failed: {e}",
             )
         )
-        return {"success": False, "error": str(e)}
+        return _scip_search_payload(
+            request,
+            _CALLCHAIN_ORIGIN,
+            current_user,
+            {"success": False, "error": str(e)},
+            project,
+            scip_callchain_query_text(from_symbol, to_symbol),
+            started,
+            error=e,
+        )
 
 
 @router.get("/context")
+@in_scip_search_scope
 def get_context(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
@@ -537,6 +747,7 @@ def get_context(
     Returns:
         JSON response with smart context results
     """
+    started = time.monotonic()
     try:
         service = _get_scip_query_service(request)
         result = service.get_context(
@@ -547,15 +758,23 @@ def get_context(
             username=current_user.username,
         )
 
-        return {
-            "success": True,
-            "target_symbol": result["target_symbol"],
-            "summary": result["summary"],
-            "total_files": result["total_files"],
-            "total_symbols": result["total_symbols"],
-            "avg_relevance": result["avg_relevance"],
-            "files": result["files"],
-        }
+        return _scip_search_payload(
+            request,
+            _CONTEXT_ORIGIN,
+            current_user,
+            {
+                "success": True,
+                "target_symbol": result["target_symbol"],
+                "summary": result["summary"],
+                "total_files": result["total_files"],
+                "total_symbols": result["total_symbols"],
+                "avg_relevance": result["avg_relevance"],
+                "files": result["files"],
+            },
+            project,
+            symbol,
+            started,
+        )
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -563,4 +782,13 @@ def get_context(
                 f"Smart context query failed: {e}",
             )
         )
-        return {"success": False, "error": str(e)}
+        return _scip_search_payload(
+            request,
+            _CONTEXT_ORIGIN,
+            current_user,
+            {"success": False, "error": str(e)},
+            project,
+            symbol,
+            started,
+            error=e,
+        )

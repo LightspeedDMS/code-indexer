@@ -8,8 +8,13 @@ Structural (AST-based) regression test -- same established pattern as
 the golden_repo_manager checkpoint tests (parses real method source via
 `ast`/`inspect`, no mocking of the system under test). Asserts the full
 three-point ordering: create_clone_at_path < the ownership checkpoint <
+<<<<<<< HEAD
 the first git manipulation that follows the clone (the bare-repo
 -detection git command, through the git seam) -- proving the checkpoint sits strictly between
+=======
+the first subprocess.run call that follows the clone (the bare-repo
+-detection git command) -- proving the checkpoint sits strictly between
+>>>>>>> upstream/master
 the clone completing and any further git manipulation continuing under
 the lock, not merely "somewhere after the clone".
 """
@@ -61,6 +66,7 @@ def _index_of_suffix(calls: list, suffix: str) -> int:
     raise AssertionError(f"no call ending in {suffix!r} found")
 
 
+<<<<<<< HEAD
 def _first_git_manipulation_after(calls: list, after_index: int) -> int:
     """The first git manipulation after *after_index*: a raw subprocess.run
     or a call through the git seam (``self._git_backend.*``)."""
@@ -87,10 +93,19 @@ def _assert_checkpoint_between(method, clone_suffix: str) -> None:
         f"next git manipulation ({next_git_index}) -- the ownership "
         f"checkpoint must sit strictly between the clone completing "
         f"and any further git manipulation continuing under the lock"
+=======
+def _first_index_of_exact_after(calls: list, exact_name: str, after_index: int) -> int:
+    for i in range(after_index + 1, len(calls)):
+        if calls[i][2] == exact_name:
+            return i
+    raise AssertionError(
+        f"no {exact_name!r} call found after call-order index {after_index}"
+>>>>>>> upstream/master
     )
 
 
 class TestOwnershipCheckpointAfterCloneStructurally:
+<<<<<<< HEAD
     def test_checkpoint_sits_between_clone_and_next_git_call(self):
         _assert_checkpoint_between(
             ActivatedRepoManager._clone_with_copy_on_write, "create_clone_at_path"
@@ -100,4 +115,24 @@ class TestOwnershipCheckpointAfterCloneStructurally:
         """Content seam: the same ordering when workspace-mcp makes the copy."""
         _assert_checkpoint_between(
             ActivatedRepoManager._clone_delegated_working_copy, "clone"
+=======
+    def test_checkpoint_sits_between_clone_and_next_subprocess_run(self):
+        source = textwrap.dedent(
+            inspect.getsource(ActivatedRepoManager._clone_with_copy_on_write)
+        )
+        calls = _calls_in_order(source)
+
+        clone_index = _index_of_suffix(calls, "create_clone_at_path")
+        checkpoint_index = _index_of_suffix(calls, "raise_if_write_lock_ownership_lost")
+        next_run_index = _first_index_of_exact_after(
+            calls, "subprocess.run", clone_index
+        )
+
+        assert clone_index < checkpoint_index < next_run_index, (
+            f"expected create_clone_at_path ({clone_index}) < "
+            f"raise_if_write_lock_ownership_lost ({checkpoint_index}) < "
+            f"next subprocess.run ({next_run_index}) -- the ownership "
+            f"checkpoint must sit strictly between the clone completing "
+            f"and any further git manipulation continuing under the lock"
+>>>>>>> upstream/master
         )

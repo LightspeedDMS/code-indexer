@@ -11,7 +11,12 @@ NAME, before it ever looks at (or resolves) a symlink's target. Resume must
 apply the same name-based exclusion, or it can resurface content a normal
 walk would never have indexed in the first place.
 
+<<<<<<< HEAD
 This test drives the REAL ``SmartIndexer._do_resume_interrupted()`` over a
+=======
+This test drives the REAL ``SmartIndexer._merge_recorded_failures()`` (the
+failed-file retry, the one stored path list left after Story #2121) over a
+>>>>>>> upstream/master
 real repository containing such symlinks and asserts: (1) a link inside an
 excluded directory is dropped even though its target is eligible, (2) a
 link whose name matches a ``.gitignore`` pattern is dropped even though its
@@ -24,7 +29,11 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import List
+<<<<<<< HEAD
 from unittest.mock import MagicMock, patch
+=======
+from unittest.mock import MagicMock
+>>>>>>> upstream/master
 
 from code_indexer.config import Config
 from code_indexer.services.smart_indexer import SmartIndexer
@@ -83,17 +92,23 @@ def _seed_resumable_metadata(indexer: SmartIndexer, files_to_index: List[str]) -
     """Plant metadata exactly as a repository-authored/crash-abandoned
     .code-indexer/metadata-<provider>.json would."""
     metadata = indexer.progressive_metadata.metadata
+<<<<<<< HEAD
     metadata["status"] = "in_progress"
     metadata["files_to_index"] = list(files_to_index)
     metadata["total_files_to_index"] = len(files_to_index)
     metadata["current_file_index"] = 0
     metadata["completed_files"] = []
     metadata["failed_file_paths"] = []
+=======
+    metadata["status"] = "completed"
+    metadata["failed_file_paths"] = list(files_to_index)
+>>>>>>> upstream/master
     metadata["files_processed"] = 0
     metadata["chunks_indexed"] = 0
 
 
 def _run_resume_and_capture(indexer: SmartIndexer) -> List[Path]:
+<<<<<<< HEAD
     """Drive the REAL resume path, capturing exactly the file list that
     would be handed to chunking/embedding, without invoking real
     chunking/embedding/FTS I/O."""
@@ -118,6 +133,13 @@ def _run_resume_and_capture(indexer: SmartIndexer) -> List[Path]:
 
     files: List[Path] = captured_files.get("files", [])
     return files
+=======
+    """Drive the REAL failed-file retry merge (Story #2121: the one
+    remaining stored path list) and return exactly the files it would hand
+    to processing."""
+    retried, _merged = indexer._merge_recorded_failures([])
+    return retried
+>>>>>>> upstream/master
 
 
 class TestResumeSymlinkLinkNameEligibility:

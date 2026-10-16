@@ -156,7 +156,7 @@ def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
             "Filesystem configuration has been removed in v8.0. "
             "Filesystem is now the only storage backend. "
             "Please remove 'filesystem_config' from your config.json. "
-            "See migration guide at docs/migration-to-v8.md"
+            "See migration guide at docs/archive/migration-to-v8.md"
         )
 
     # Check for legacy voyage_config field (removed in v8.0)
@@ -165,7 +165,7 @@ def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
             "Voyage configuration has been removed in v8.0. "
             "VoyageAI is now configured via VOYAGE_API_KEY environment variable only. "
             "Please remove 'voyage_config' from your config.json. "
-            "See migration guide at docs/migration-to-v8.md"
+            "See migration guide at docs/archive/migration-to-v8.md"
         )
 
     # Check for invalid fields
@@ -187,7 +187,7 @@ def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
             f"Docker/container configuration removed in v8.0. "
             f"Use daemon mode or filesystem storage instead. "
             f"Invalid fields: {', '.join(invalid_fields)}. "
-            f"See migration guide at docs/migration-to-v8.md"
+            f"See migration guide at docs/archive/migration-to-v8.md"
         )
 
     # Check for invalid vector store provider (must be filesystem in v8.0+)
@@ -197,7 +197,7 @@ def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
             raise ValueError(
                 f"Vector store provider '{provider}' is not supported in v8.0. "
                 f"Only 'filesystem' backend is supported. "
-                f"See migration guide at docs/migration-to-v8.md"
+                f"See migration guide at docs/archive/migration-to-v8.md"
             )
 
     # Check for invalid embedding provider
@@ -207,7 +207,7 @@ def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
             raise ValueError(
                 f"Embedding provider '{provider}' is not supported. "
                 f"Supported providers: voyage-ai, cohere. "
-                f"See migration guide at docs/migration-to-v8.md"
+                f"See migration guide at docs/archive/migration-to-v8.md"
             )
 
 
@@ -1025,6 +1025,7 @@ class ConfigManager:
             # Validate no legacy configuration options BEFORE attempting to parse.
             # Raises native ValueError (recoverable -- not corruption).
             _validate_no_legacy_config(data)
+<<<<<<< HEAD
 
             # Ensure absolute path for codebase_dir
             if "codebase_dir" in data:
@@ -1058,6 +1059,42 @@ class ConfigManager:
                     path = actual_dir
                     data["codebase_dir"] = str(path)
 
+=======
+
+            # Ensure absolute path for codebase_dir
+            if "codebase_dir" in data:
+                # Convert to absolute path if needed
+                path = Path(data["codebase_dir"])
+                if not path.is_absolute():
+                    # If relative, resolve relative to config directory
+                    config_dir = self.config_path.parent.parent
+                    path = (config_dir / path).resolve()
+                data["codebase_dir"] = str(path)
+                # Bug #1033: reconcile against actual config file location.
+                # On NFS clusters, nodes may mount the same share at different paths.
+                actual_dir = self.config_path.resolve().parent.parent
+                if path.is_absolute() and actual_dir != path.resolve():
+                    # Story #1082: the reconciliation (override) below is
+                    # LOAD-BEARING and runs every load; only the WARNING is
+                    # de-spammed to at most once per distinct config path so
+                    # the per-query hot path no longer floods the log
+                    # (e.g. 9,634 warnings in one run). No normalized
+                    # codebase_dir is persisted to shared state -- the memo
+                    # is process-local config-path bookkeeping only.
+                    if _should_warn_codebase_dir_mismatch(str(self.config_path)):
+                        logger.warning(
+                            "codebase_dir mismatch: stored=%s, actual=%s. "
+                            "Using actual path (config at %s). This warning "
+                            "is logged once per config path; the per-node "
+                            "override is applied on every load.",
+                            path,
+                            actual_dir,
+                            self.config_path,
+                        )
+                    path = actual_dir
+                    data["codebase_dir"] = str(path)
+
+>>>>>>> upstream/master
             # Config(**data) raises pydantic ValidationError (a ValueError
             # subclass) natively on schema violations -- NOT wrapped here.
             self._config = Config(**data)
@@ -1066,8 +1103,14 @@ class ConfigManager:
             # Config() defaults codebase_dir to Path(".") which is relative.
             # Resolve it against the project root (parent of .code-indexer/).
             if not self._config.codebase_dir.is_absolute():
+<<<<<<< HEAD
                 self._config.codebase_dir = (
                     self.project_root / self._config.codebase_dir
+=======
+                config_dir = self.config_path.parent.parent
+                self._config.codebase_dir = (
+                    config_dir / self._config.codebase_dir
+>>>>>>> upstream/master
                 ).resolve()
         else:
             self._config = Config()
@@ -1398,6 +1441,78 @@ code-indexer index --clear
             found = (index_root(start) / "config.json", start)
         config_path, project_root = found
         return cls(config_path, project_root=project_root)
+
+    @classmethod
+    def load_verified_config(cls, target_dir: "Path") -> "Config":
+        """Load a Config for target_dir via create_with_backtrack(),
+        verifying the resolved config genuinely describes target_dir
+        itself -- not a backtracked-from ANCESTOR's config, nor a
+        defaulted fallback (Bug #1690).
+
+        `create_with_backtrack()` walks UP the directory tree from
+        target_dir looking for `.code-indexer/config.json`, and silently
+        returns a bare `Config()` (codebase_dir=".") when nothing is found
+        anywhere. Both outcomes leave `config.codebase_dir` pointing
+        somewhere OTHER than target_dir. A caller that then uses the
+        returned Config to resolve THIS directory's settings (embedding
+        provider, vector_store provider, exclusions, etc.) would silently
+        apply an unrelated repo's configuration instead of failing loud.
+
+        Establishes the same verification Bug #1683 round 4 applied to
+        `AutoWatchManager.start_watch`: STRICT equality between the
+        resolved target and the resolved codebase_dir (never
+        "equal-or-ancestor" -- round 4's own lesson is that permitting
+        codebase_dir to be a strict ancestor of the target is the UNSAFE
+        direction, since it lets a caller silently operate on the
+        ancestor instead of the intended directory).
+
+        Args:
+            target_dir: The directory whose OWN config is required.
+
+        Returns:
+            The verified Config.
+
+        Raises:
+            ConfigVerificationError: resolved config.codebase_dir does not
+                exactly match target_dir (backtracked ancestor OR
+                defaulted). Subclasses ValueError -- see
+                ConfigVerificationError's docstring.
+        """
+        resolved_target = Path(target_dir).resolve()
+        config_manager = cls.create_with_backtrack(resolved_target)
+
+        # Defense-in-depth (Bug #1690 code-review finding, mirrors
+        # auto_watch_manager.py's round-3 guard): the strict-equality
+        # check below is NOT sufficient on its own. When no config exists
+        # ANYWHERE, create_with_backtrack() returns a ConfigManager whose
+        # config_path does not exist; get_config() then returns a bare
+        # Config() whose codebase_dir defaults to the RELATIVE path ".".
+        # Path(".").resolve() equals Path.cwd() -- not target_dir. If the
+        # caller's CWD happens to equal target_dir (e.g. a server process
+        # whose CWD IS the repo it is querying), that coincidental path
+        # aliasing would satisfy the equality check below even though NO
+        # real config was ever found. Checking config_path.exists() first
+        # closes that gap unconditionally, independent of CWD.
+        if not config_manager.config_path.exists():
+            raise ConfigVerificationError(
+                f"No .code-indexer/config.json found at '{resolved_target}' "
+                "or any parent (create_with_backtrack() defaulted to a "
+                "bare Config with codebase_dir='.'). Refusing to use it "
+                "(Bug #1690)."
+            )
+
+        config = config_manager.get_config()
+        resolved_codebase_dir = Path(config.codebase_dir).resolve()
+        if resolved_codebase_dir != resolved_target:
+            raise ConfigVerificationError(
+                f"No .code-indexer/config.json found directly at "
+                f"'{resolved_target}' (create_with_backtrack() resolved "
+                f"codebase_dir='{resolved_codebase_dir}' instead -- either "
+                "backtracked onto an unrelated ancestor config, or "
+                "defaulted with no config found anywhere). Refusing to use "
+                "it for a different directory (Bug #1690)."
+            )
+        return config
 
     @classmethod
     def load_verified_config(cls, target_dir: "Path") -> "Config":

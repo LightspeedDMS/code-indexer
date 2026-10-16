@@ -99,9 +99,19 @@ class DistributedJobWorkerService:
             self._claimer.fail_job(job_id, f"Non-retryable operation_type: {op_type}")
             return
 
+        # Story #2118: the submitter keeps the volume gate's admin exception;
+        # a row without one is gated as a system job.
+        submitter = job.get("username") or "system"
         try:
-            self._execute_retryable_job(job_id, op_type, repo_alias)
-            self._claimer.complete_job(job_id)
+            result = self._execute_retryable_job(job_id, op_type, repo_alias, submitter)
+            # Bug #2125: like BackgroundJobManager (Bug #679), a result with
+            # partial exactly True ends the job completed_partial.
+            if isinstance(result, dict) and result.get("partial") is True:
+                self._claimer.complete_job(
+                    job_id, result=result, status="completed_partial"
+                )
+            else:
+                self._claimer.complete_job(job_id, result=result)
             logger.info("DistributedJobWorkerService: completed job %s", job_id)
         except Exception as exc:
             logger.error(
@@ -112,9 +122,10 @@ class DistributedJobWorkerService:
             self._claimer.fail_job(job_id, str(exc))
 
     def _execute_retryable_job(
-        self, job_id: str, op_type: str, repo_alias: str
-    ) -> None:
-        """Execute a retryable job based on operation_type."""
+        self, job_id: str, op_type: str, repo_alias: str, submitter_username: str
+    ) -> Any:
+        """Execute a retryable job based on operation_type; return its result
+        (recorded on the completed job, e.g. why a refresh was deferred)."""
         if op_type in ("global_repo_refresh", "refresh_golden_repo"):
             if not repo_alias:
                 raise ValueError(f"Job {job_id}: repo_alias is required for {op_type}")
@@ -127,9 +138,18 @@ class DistributedJobWorkerService:
             # DuplicateJobError naming job_id itself. execute_refresh_for_
             # claimed_job() performs the refresh WORK directly instead,
             # exactly like a normally-submitted job's worker closure does.
+<<<<<<< HEAD
             result = self._refresh_scheduler.execute_refresh_for_claimed_job(
                 repo_alias,
                 progress_callback=self._make_progress_callback(job_id),
+=======
+            # Story #2118: it also applies the volume gate for SYSTEM jobs.
+            result = self._refresh_scheduler.execute_refresh_for_claimed_job(
+                repo_alias,
+                progress_callback=self._make_progress_callback(job_id),
+                job_id=job_id,
+                submitter_username=submitter_username,
+>>>>>>> upstream/master
             )
             # Mirror BackgroundJobManager._execute_job's own interpretation
             # of the refresh result dict (Story #1586 Finding 2): a real
@@ -137,10 +157,18 @@ class DistributedJobWorkerService:
             # (e.g. an integrity-gate skip). Raise here so _process_one_job's
             # existing except block marks the job failed exactly once.
             if isinstance(result, dict) and result.get("success") is False:
+<<<<<<< HEAD
                 failure_detail = result.get("message") or result.get("error")
                 raise RuntimeError(failure_detail or f"Refresh failed for {repo_alias}")
         else:
             raise ValueError(f"Unknown retryable job type: {op_type}")
+=======
+                # Bug #2150: "error" names the cause; "message" is generic.
+                failure_detail = result.get("error") or result.get("message")
+                raise RuntimeError(failure_detail or f"Refresh failed for {repo_alias}")
+            return result
+        raise ValueError(f"Unknown retryable job type: {op_type}")
+>>>>>>> upstream/master
 
     def _make_progress_callback(self, job_id: str) -> Optional[Any]:
         """Build a progress_callback forwarding into the claimer's shared DB

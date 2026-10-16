@@ -1190,7 +1190,11 @@ class TestJobResultErrorFieldBug1978:
             "'.code-indexer/.index-mutation.lock'"
         )
 
+<<<<<<< HEAD
         def _fake_single(rp, index_type, clear, repo_alias=None):
+=======
+        def _fake_single(rp, index_type, clear):
+>>>>>>> upstream/master
             return {"success": False, "error": real_error}
 
         with patch.object(
@@ -1225,7 +1229,11 @@ class TestJobResultErrorFieldBug1978:
         )
         Path(repo_path).mkdir(parents=True, exist_ok=True)
 
+<<<<<<< HEAD
         def _fake_single(rp, index_type, clear, repo_alias=None):
+=======
+        def _fake_single(rp, index_type, clear):
+>>>>>>> upstream/master
             if index_type == "semantic":
                 return {"success": False, "error": "EACCES on chunks.db"}
             if index_type == "fts":
@@ -1257,7 +1265,11 @@ class TestJobResultErrorFieldBug1978:
         )
         Path(repo_path).mkdir(parents=True, exist_ok=True)
 
+<<<<<<< HEAD
         def _fake_single(rp, index_type, clear, repo_alias=None):
+=======
+        def _fake_single(rp, index_type, clear):
+>>>>>>> upstream/master
             return {"success": True, "message": "ok"}
 
         with patch.object(
@@ -1285,7 +1297,11 @@ class TestJobResultErrorFieldBug1978:
 
         huge_error = "Permission denied: " + ("x" * 10000)
 
+<<<<<<< HEAD
         def _fake_single(rp, index_type, clear, repo_alias=None):
+=======
+        def _fake_single(rp, index_type, clear):
+>>>>>>> upstream/master
             return {"success": False, "error": huge_error}
 
         with patch.object(

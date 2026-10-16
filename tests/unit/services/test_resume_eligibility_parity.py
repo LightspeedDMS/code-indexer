@@ -14,11 +14,18 @@ Fix: ``_resume_candidate_is_safe()`` calls FileFinder's own
 ``find_files()`` itself applies) instead of reimplementing a partial
 subset of it.
 
+<<<<<<< HEAD
 These tests drive the REAL ``SmartIndexer._do_resume_interrupted()`` (via
 a planted ``ProgressiveMetadata`` "in_progress" state) and assert an
 oversized/ineligible candidate never reaches
 ``process_files_high_throughput`` -- the same harness pattern as
 ``test_resume_path_containment.py``.
+=======
+These tests drive the REAL ``SmartIndexer._merge_recorded_failures()`` (via
+planted ``failed_file_paths``, the one stored path list left after Story
+#2121) and assert an oversized/ineligible candidate is never retried -- the
+same harness pattern as ``test_resume_path_containment.py``.
+>>>>>>> upstream/master
 """
 
 from __future__ import annotations
@@ -26,7 +33,11 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import List
+<<<<<<< HEAD
 from unittest.mock import MagicMock, patch
+=======
+from unittest.mock import MagicMock
+>>>>>>> upstream/master
 
 from code_indexer.config import Config
 from code_indexer.services.smart_indexer import SmartIndexer
@@ -85,17 +96,23 @@ def _seed_resumable_metadata(indexer: SmartIndexer, files_to_index: List[str]) -
     """Plant metadata exactly as a repository-authored/crash-abandoned
     .code-indexer/metadata-<provider>.json would."""
     md = indexer.progressive_metadata.metadata
+<<<<<<< HEAD
     md["status"] = "in_progress"
     md["files_to_index"] = list(files_to_index)
     md["total_files_to_index"] = len(files_to_index)
     md["current_file_index"] = 0
     md["completed_files"] = []
     md["failed_file_paths"] = []
+=======
+    md["status"] = "completed"
+    md["failed_file_paths"] = list(files_to_index)
+>>>>>>> upstream/master
     md["files_processed"] = 0
     md["chunks_indexed"] = 0
 
 
 def _run_resume_and_capture(indexer: SmartIndexer) -> List[Path]:
+<<<<<<< HEAD
     """Drive the REAL resume path, capturing exactly the file list that
     would be handed to chunking/embedding, without invoking real
     chunking/embedding/FTS I/O."""
@@ -118,6 +135,13 @@ def _run_resume_and_capture(indexer: SmartIndexer) -> List[Path]:
 
     files: List[Path] = captured.get("files", [])
     return files
+=======
+    """Drive the REAL failed-file retry merge (Story #2121: the one
+    remaining stored path list) and return exactly the files it would hand
+    to processing."""
+    retried, _merged = indexer._merge_recorded_failures([])
+    return retried
+>>>>>>> upstream/master
 
 
 class TestResumeEligibilityMatchesFileFinderFullDecision:

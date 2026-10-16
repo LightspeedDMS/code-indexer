@@ -289,8 +289,11 @@ class TestCompleteJob:
         result = claimer.complete_job("job-1")
 
         assert result is True
-        sql = cur.execute.call_args[0][0]
-        assert "completed" in sql
+        sql, params = cur.execute.call_args[0]
+        # Bug #2125: the status is a bound parameter (completed or
+        # completed_partial); the default is "completed".
+        assert "status       = %s" in sql
+        assert params[1] == "completed"
         assert "completed_at" in sql
 
     def test_complete_with_result_serialises_json(self):

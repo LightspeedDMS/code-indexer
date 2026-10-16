@@ -19,6 +19,7 @@ import pytest
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
+from tests.fixtures.refresh_scheduler_stores import real_scheduler_stores
 
 
 class TestSchedulerEventSignaling:
@@ -26,7 +27,10 @@ class TestSchedulerEventSignaling:
 
     @pytest.fixture
     def scheduler_setup(self, tmp_path: Path):
-        """Create scheduler instance with mocked dependencies."""
+        """Create scheduler instance with real, empty stores (an uninjected
+        registry falls back to an uninitialized database and every loop
+        iteration fails, so stop() would only ever interrupt the failure
+        backoff, never the normal poll wait)."""
         golden_repos_dir = tmp_path / "golden_repos"
         golden_repos_dir.mkdir(parents=True, exist_ok=True)
 
@@ -41,12 +45,17 @@ class TestSchedulerEventSignaling:
         # Create mocks
         query_tracker = Mock(spec=QueryTracker)
         cleanup_manager = Mock(spec=CleanupManager)
+        registry, metadata = real_scheduler_stores(
+            tmp_path / "server-data", golden_repos_dir
+        )
 
         scheduler = RefreshScheduler(
             golden_repos_dir=str(golden_repos_dir),
             config_source=config_source,
             query_tracker=query_tracker,
             cleanup_manager=cleanup_manager,
+            registry=registry,
+            golden_repo_metadata_backend=metadata,
         )
 
         return scheduler

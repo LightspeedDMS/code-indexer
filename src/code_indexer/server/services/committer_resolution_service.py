@@ -7,6 +7,7 @@ Implements automatic email discovery with fallback to default email.
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.utils.credential_redaction import mask_url_credentials
 
 import logging
 from pathlib import Path
@@ -97,7 +98,7 @@ class CommitterResolutionService:
                 format_error_log(
                     "SVC-MIGRATE-001",
                     "Cannot extract hostname from URL, using default email",
-                    golden_repo_url=golden_repo_url,
+                    golden_repo_url=mask_url_credentials(golden_repo_url),
                 ),
                 extra=get_log_extra("SVC-MIGRATE-001"),
             )

@@ -3,8 +3,11 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+<<<<<<< HEAD
 import pytest
 
+=======
+>>>>>>> upstream/master
 from code_indexer.services.progressive_metadata import ProgressiveMetadata
 from code_indexer.services.smart_indexer import SmartIndexer
 from code_indexer.services.high_throughput_processor import BranchIndexingResult
@@ -85,8 +88,14 @@ def test_no_files_path_does_not_persist_previous_file_lists(tmp_path, monkeypatc
             "current_commit": "old-commit",
         },
     )
+<<<<<<< HEAD
     metadata.set_files_to_index([tmp_path / "old-a.py", tmp_path / "old-b.py"])
     metadata.mark_file_completed(tmp_path / "old-a.py")
+=======
+    # The prior run's tracking: its plan size and its recorded failures.
+    metadata.record_plan(2)
+    metadata.set_failed_file_paths([str(tmp_path / "old-b.py")])
+>>>>>>> upstream/master
 
     indexer = SmartIndexer.__new__(SmartIndexer)
     indexer.config = SimpleNamespace(codebase_dir=tmp_path)  # type: ignore[assignment]
@@ -102,6 +111,7 @@ def test_no_files_path_does_not_persist_previous_file_lists(tmp_path, monkeypatc
         raising=False,
     )
 
+<<<<<<< HEAD
     with pytest.raises(ValueError, match="No files found to index"):
         indexer._do_full_index(
             batch_size=50,
@@ -121,6 +131,28 @@ def test_no_files_path_does_not_persist_previous_file_lists(tmp_path, monkeypatc
 
 
 def test_branch_change_reports_remaining_files_for_current_run(tmp_path, monkeypatch):
+=======
+    # An empty repository completes (nothing to index) instead of raising.
+    stats = indexer._do_full_index(
+        batch_size=50,
+        progress_callback=None,
+        git_status={"git_available": True, "current_branch": "main"},
+        provider_name="provider",
+        model_name="model",
+    )
+    assert stats.files_processed == 0
+
+    reloaded = _fresh_metadata(metadata_path)
+    assert reloaded.metadata["status"] == "completed"
+    assert reloaded.metadata["failed_file_paths"] == []
+    assert reloaded.metadata["total_files_to_index"] == 0
+    # Story #2121: no stored work list exists at all.
+    for retired in ("files_to_index", "completed_files", "current_file_index"):
+        assert retired not in reloaded.metadata
+
+
+def test_branch_change_reports_the_current_runs_plan(tmp_path, monkeypatch):
+>>>>>>> upstream/master
     metadata_path = tmp_path / "metadata.json"
     metadata = ProgressiveMetadata(metadata_path)
     metadata.start_indexing(
@@ -133,6 +165,7 @@ def test_branch_change_reports_remaining_files_for_current_run(tmp_path, monkeyp
             "current_commit": "old-commit",
         },
     )
+<<<<<<< HEAD
     metadata.set_files_to_index([tmp_path / "old-a.py", tmp_path / "old-b.py"])
 
     indexer = SmartIndexer.__new__(SmartIndexer)
@@ -142,6 +175,15 @@ def test_branch_change_reports_remaining_files_for_current_run(tmp_path, monkeyp
     indexer.repo_manifest = None
     # Local git: the graph-optimized branch path is only taken without a seam.
     indexer.git_backend = None
+=======
+    # A COMPLETED prior run with a plan of 2 (Story #2121: an in_progress
+    # status is routed to the reconcile, not to the branch-change block).
+    metadata.record_plan(2)
+    metadata.complete_indexing(1_700_000_000.0)
+
+    indexer = SmartIndexer.__new__(SmartIndexer)
+    indexer.config = SimpleNamespace(codebase_dir=tmp_path)  # type: ignore[assignment]
+>>>>>>> upstream/master
     indexer.embedding_provider = _Provider()  # type: ignore[assignment]
     indexer.vector_store_client = _VectorStore()
     indexer.progressive_metadata = ProgressiveMetadata(metadata_path)
@@ -172,6 +214,13 @@ def test_branch_change_reports_remaining_files_for_current_run(tmp_path, monkeyp
     indexer.smart_index(force_full=False)
 
     reloaded = _fresh_metadata(metadata_path)
+<<<<<<< HEAD
     assert reloaded.get_stats()["remaining_files"] == 0
     assert reloaded.metadata["files_to_index"] == []
     assert reloaded.metadata["total_files_to_index"] == 0
+=======
+    assert reloaded.metadata["status"] == "completed"
+    assert reloaded.metadata["total_files_to_index"] == 0
+    for retired in ("files_to_index", "completed_files", "current_file_index"):
+        assert retired not in reloaded.metadata
+>>>>>>> upstream/master

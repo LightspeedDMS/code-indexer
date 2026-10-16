@@ -29,6 +29,10 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import numpy as np
+<<<<<<< HEAD
+=======
+import pytest
+>>>>>>> upstream/master
 
 from code_indexer.backends.filesystem_backend import FilesystemBackend
 from code_indexer.services.temporal.temporal_server_paths import (
@@ -45,6 +49,13 @@ REPO_ALIAS = "example-repo"
 USERNAME = "someuser"
 VECTOR_SIZE = 8
 
+<<<<<<< HEAD
+=======
+# Each test indexes through the real store, whose commit is mostly os.fsync
+# (~0.4 s alone); under the gate's parallel I/O that has reached 15 s.
+pytestmark = pytest.mark.timeout(45)
+
+>>>>>>> upstream/master
 OLD_COMMIT = "a" * 8
 NEW_COMMIT = "b" * 8
 STALE_COMMIT = "c" * 8

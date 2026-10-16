@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from code_indexer.server.services.group_access_manager import GroupAccessManager
+from tests.unit.server._account_rows import install_accounts
 
 _ELEVATION_QUALNAME = "require_elevation.<locals>._check"
 
@@ -66,8 +67,13 @@ def mock_admin_user():
 
 
 @pytest.fixture
-def test_client(group_manager, mock_admin_user):
-    """Create a test client with mocked dependencies."""
+def test_client(group_manager, mock_admin_user, tmp_path, monkeypatch):
+    """Create a test client with mocked dependencies.
+
+    ``testuser`` has a real account: memberships are only written for
+    existing accounts.
+    """
+    install_accounts(tmp_path, monkeypatch, ["testuser"])
     from code_indexer.server.routers.groups import (
         router as groups_router,
         users_router,

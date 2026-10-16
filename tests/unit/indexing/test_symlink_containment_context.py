@@ -224,12 +224,24 @@ class _LocalHashEmbeddingProvider(EmbeddingProvider):
     def supports_batch_processing(self) -> bool:
         return True
 
+<<<<<<< HEAD
+=======
+    def request_max_retries(self) -> int:
+        return 0
+
+>>>>>>> upstream/master
     def _get_model_token_limit(self) -> int:
         return 8192
 
 
+<<<<<<< HEAD
 def _full_index(config: Config, repo: Path) -> Tuple[int, List[str]]:
     """Run a real full index; return (files processed, stored work list)."""
+=======
+def _full_index(config: Config, repo: Path) -> Tuple[int, int]:
+    """Run a real full index; return (files processed, recorded plan size).
+    Story #2121: only the plan size is recorded, never the file list."""
+>>>>>>> upstream/master
     provider = _LocalHashEmbeddingProvider()
     store = FilesystemVectorStore(base_path=repo / ".code-indexer" / "index")
     store.ensure_provider_aware_collection(config, provider)
@@ -237,8 +249,13 @@ def _full_index(config: Config, repo: Path) -> Tuple[int, List[str]]:
     stats = SmartIndexer(config, provider, store, metadata_path).smart_index(
         force_full=True
     )
+<<<<<<< HEAD
     stored = json.loads(metadata_path.read_text())["files_to_index"]
     return stats.files_processed, [Path(p).name for p in stored]
+=======
+    planned = int(json.loads(metadata_path.read_text())["total_files_to_index"])
+    return stats.files_processed, planned
+>>>>>>> upstream/master
 
 
 class TestFullIndexContext:
@@ -247,20 +264,34 @@ class TestFullIndexContext:
     ) -> None:
         repo, _ = _repo_with_out_of_root_symlink(tmp_path)
 
+<<<<<<< HEAD
         processed, stored = _full_index(_local_config(repo), repo)
 
         assert processed == 2
         assert sorted(stored) == ["helper.py", "main.py"]
+=======
+        processed, planned = _full_index(_local_config(repo), repo)
+
+        assert processed == 2
+        assert planned == 2
+>>>>>>> upstream/master
 
     def test_server_full_index_excludes_out_of_root_symlink(
         self, tmp_path: Path
     ) -> None:
         repo, _ = _repo_with_out_of_root_symlink(tmp_path)
 
+<<<<<<< HEAD
         processed, stored = _full_index(_server_config(repo), repo)
 
         assert processed == 1
         assert stored == ["main.py"]
+=======
+        processed, planned = _full_index(_server_config(repo), repo)
+
+        assert processed == 1
+        assert planned == 1
+>>>>>>> upstream/master
 
 
 def _smart_indexer(config: Config, tmp_path: Path) -> SmartIndexer:

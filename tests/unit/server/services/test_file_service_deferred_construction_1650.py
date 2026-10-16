@@ -72,6 +72,10 @@ class TestInitDoesNotEagerlyConstructActivatedRepoManager:
             f"be deferred to first real access. call_count={mock_activated_repo_manager_cls.call_count}"
         )
 
+<<<<<<< HEAD
+=======
+    @pytest.mark.timeout(SUBPROCESS_TIMEOUT_SECONDS + 15)
+>>>>>>> upstream/master
     def test_module_level_singleton_construction_is_now_cheap(self) -> None:
         """The module-level `file_service = FileListingService()` singleton
         statement (file_service.py's own module scope) must not construct

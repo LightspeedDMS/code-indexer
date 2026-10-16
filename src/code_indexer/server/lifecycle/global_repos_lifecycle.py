@@ -55,8 +55,12 @@ class GlobalReposLifecycleManager:
         job_tracker=None,
         snapshot_manager: Optional["VersionedSnapshotManager"] = None,
         golden_repo_metadata_backend: Optional[Any] = None,
+<<<<<<< HEAD
         git_backend: Optional[Any] = None,
         index_store: Optional[Any] = None,
+=======
+        index_spend_alarm: Optional[Any] = None,
+>>>>>>> upstream/master
     ):
         """
         Initialize the lifecycle manager.
@@ -73,6 +77,7 @@ class GlobalReposLifecycleManager:
                 reconciliation can update golden_repos_metadata (bare-alias-keyed)
                 alongside global_repos. None (default) lets RefreshScheduler
                 resolve its own fallback lazily (solo mode / not yet available).
+<<<<<<< HEAD
             git_backend: EVO-64678 Phase 3 git seam — forwarded to
                 RefreshScheduler so its golden-repo clone/checkout/pull/refresh
                 git runs through the configured backend (LocalGitBackend by
@@ -82,6 +87,12 @@ class GlobalReposLifecycleManager:
                 refresh publishes its built index and snapshots a checked-out
                 version when index_store_backend='delegated'. None keeps the
                 local store.
+=======
+            index_spend_alarm: Optional IndexSpendAlarm (Story #2118) —
+                forwarded to RefreshScheduler, whose gate defers system
+                refreshes of an alias with a runaway refresh embedding volume.
+                None leaves submissions ungated.
+>>>>>>> upstream/master
         """
         self.golden_repos_dir = Path(golden_repos_dir)
 
@@ -102,9 +113,15 @@ class GlobalReposLifecycleManager:
             check_interval=1.0,  # Check every second
             job_tracker=job_tracker,
             min_retention_age_getter=(
+<<<<<<< HEAD
                 lambda: (
                     get_config_service().get_config().snapshot_min_retention_age_seconds
                 )
+=======
+                lambda: get_config_service()
+                .get_config()
+                .snapshot_min_retention_age_seconds
+>>>>>>> upstream/master
             ),
         )
 
@@ -164,10 +181,17 @@ class GlobalReposLifecycleManager:
             job_tracker=job_tracker,
             snapshot_manager=snapshot_manager,
             golden_repo_metadata_backend=golden_repo_metadata_backend,
+<<<<<<< HEAD
             git_backend=git_backend,
             index_store=index_store,
             alias_lock_db_backed_enabled_getter=self._alias_lock_db_backed_enabled,
             alias_lock_store_resolver=self._resolve_alias_lock_store,
+=======
+            alias_lock_db_backed_enabled_getter=self._alias_lock_db_backed_enabled,
+            alias_lock_store_resolver=self._resolve_alias_lock_store,
+            # Story #2118: defers system refreshes of a runaway alias.
+            index_spend_alarm=index_spend_alarm,
+>>>>>>> upstream/master
         )
 
         # Track running state

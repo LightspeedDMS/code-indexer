@@ -33,6 +33,35 @@ _STATE_FILENAME = "llm_lease_state.json"
 _CLUSTER_KEY_SALT = hashlib.sha256(b"cidx-llm-lease-cluster-salt").digest()
 
 
+def derive_cluster_encryption_key(pool: Any, salt: bytes) -> bytes:
+    """A deterministic AES-256 key from the SHARED JWT secret in cluster_secrets.
+
+    Reads the 'jwt_secret' row and applies PBKDF2 with *salt* (one salt per
+    purpose), so every cluster node sharing the pool derives the same key.
+
+    Raises:
+        RuntimeError: If 'jwt_secret' row does not exist in cluster_secrets.
+    """
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT key_value FROM cluster_secrets WHERE key_name = %s",
+            ("jwt_secret",),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError(
+            "cluster_secrets table has no 'jwt_secret' row; "
+            "cannot derive the cluster encryption key"
+        )
+    jwt_secret_bytes = row[0].encode("utf-8")
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        jwt_secret_bytes,
+        salt,
+        PBKDF2_ITERATIONS,
+        dklen=AES_KEY_SIZE,
+    )
+
+
 # ---------------------------------------------------------------------------
 # State dataclass
 # ---------------------------------------------------------------------------
@@ -140,32 +169,8 @@ class LlmLeaseStateManager:
         )
 
     def _derive_cluster_encryption_key(self, pool: Any) -> bytes:
-        """Derive a deterministic AES-256 key from the shared JWT secret in cluster_secrets.
-
-        Reads the 'jwt_secret' row and applies PBKDF2 with _CLUSTER_KEY_SALT so
-        all cluster nodes sharing the same pool derive the same key.
-
-        Raises:
-            RuntimeError: If 'jwt_secret' row does not exist in cluster_secrets.
-        """
-        with pool.connection() as conn:
-            row = conn.execute(
-                "SELECT key_value FROM cluster_secrets WHERE key_name = %s",
-                ("jwt_secret",),
-            ).fetchone()
-        if row is None:
-            raise RuntimeError(
-                "cluster_secrets table has no 'jwt_secret' row; "
-                "cannot derive cluster encryption key for LlmLeaseStateManager"
-            )
-        jwt_secret_bytes = row[0].encode("utf-8")
-        return hashlib.pbkdf2_hmac(
-            "sha256",
-            jwt_secret_bytes,
-            _CLUSTER_KEY_SALT,
-            PBKDF2_ITERATIONS,
-            dklen=AES_KEY_SIZE,
-        )
+        """The cluster key for lease state (see derive_cluster_encryption_key)."""
+        return derive_cluster_encryption_key(pool, _CLUSTER_KEY_SALT)
 
     # ------------------------------------------------------------------
     # Encryption helpers (AES-256-CBC, PBKDF2-derived key)

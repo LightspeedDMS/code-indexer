@@ -14,7 +14,10 @@ from pathlib import Path
 
 import pytest
 
+<<<<<<< HEAD
 from code_indexer.server.repositories import background_jobs as bgj
+=======
+>>>>>>> upstream/master
 from code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
     JobStatus,

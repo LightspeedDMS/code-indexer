@@ -149,6 +149,7 @@ def get_invoker_factory() -> Optional[InvokerFactory]:
     return factory
 
 
+<<<<<<< HEAD
 #: Module attribute a plugin sets to True when its invoker provisions the
 #: golden repository ITSELF (from cidx's registry, see
 #: content_backend_wiring.golden_repo_source) and never reads the ``cwd`` it is
@@ -169,6 +170,8 @@ def invoker_resolves_golden_repositories() -> bool:
     return getattr(module, RESOLVES_GOLDEN_REPOSITORIES, False) is True
 
 
+=======
+>>>>>>> upstream/master
 def reset_cache() -> None:
     """Clear the resolved plugin. For tests."""
     global _cached

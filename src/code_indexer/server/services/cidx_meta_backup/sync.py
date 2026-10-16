@@ -33,12 +33,19 @@ from code_indexer.utils.git_runner import run_git_command
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
+<<<<<<< HEAD
 from typing import Optional
 
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from code_indexer.server.services.cidx_meta_content import (
     refuse_backup_of_shared_content,
 )
+=======
+from typing import Callable, Optional
+
+from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.utils.cancellable_subprocess import run_with_cancel
+>>>>>>> upstream/master
 
 
 @dataclass
@@ -49,6 +56,7 @@ class SyncResult:
 
 class CidxMetaBackupSync:
     """Mirror local mutable cidx-meta writes to a remote git repository.
+<<<<<<< HEAD
 
     Local is the sole source of truth (Bug #1555): this pushes TO the
     remote, it never merges FROM it. See the module docstring for the
@@ -58,6 +66,25 @@ class CidxMetaBackupSync:
     def __init__(self, cidx_meta_path: str, branch: str) -> None:
         self.cidx_meta_path = cidx_meta_path
         self.branch = branch
+=======
+
+    Local is the sole source of truth (Bug #1555): this pushes TO the
+    remote, it never merges FROM it. See the module docstring for the
+    full design rationale.
+    """
+
+    def __init__(
+        self,
+        cidx_meta_path: str,
+        branch: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> None:
+        self.cidx_meta_path = cidx_meta_path
+        self.branch = branch
+        # Bug #2012: the owning refresh job's cancel check; every git call
+        # (status/add/commit/push) is then terminated on cancel.
+        self._cancel_check = cancel_check
+>>>>>>> upstream/master
 
     def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         env = build_non_interactive_git_env()
@@ -65,6 +92,7 @@ class CidxMetaBackupSync:
         env.setdefault("GIT_AUTHOR_EMAIL", "cidx-meta-backup@example.invalid")
         env.setdefault("GIT_COMMITTER_NAME", env["GIT_AUTHOR_NAME"])
         env.setdefault("GIT_COMMITTER_EMAIL", env["GIT_AUTHOR_EMAIL"])
+<<<<<<< HEAD
         # EVO-64678: this helper runs arbitrary git (including commits) against
         # cidx-meta with argv only known at runtime, so it goes through the seam
         # chokepoint and lets is_mutating_git() classify each call rather than a
@@ -73,6 +101,12 @@ class CidxMetaBackupSync:
         return run_git_command(
             ["git", *args],
             cwd=Path(self.cidx_meta_path),
+=======
+        return run_with_cancel(
+            ["git", *args],
+            self._cancel_check,
+            cwd=self.cidx_meta_path,
+>>>>>>> upstream/master
             capture_output=True,
             text=True,
             env=env,

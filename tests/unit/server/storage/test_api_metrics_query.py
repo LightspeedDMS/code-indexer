@@ -595,10 +595,23 @@ class TestApiMetricsServiceDelegation:
 class TestDashboardServiceWiring:
     """Verify dashboard service get_stats_partial calls get_metrics_bucketed."""
 
-    def test_get_stats_partial_uses_get_metrics_bucketed(self, backend):
+    def test_get_stats_partial_uses_get_metrics_bucketed(self, backend, monkeypatch):
         """When api_metrics_backend provided, get_stats_partial should call
         get_metrics_bucketed with the api_window value."""
+        from code_indexer.server import app as app_module
         from code_indexer.server.services.dashboard_service import DashboardService
+
+        # DashboardService's manager getters read these via `from ..app
+        # import X`; a name absent from the module __dict__ runs app.py's
+        # PEP 562 __getattr__, which builds the whole server app (~3 s).
+        # None is their documented "not initialised" value.
+        for name in (
+            "background_job_manager",
+            "job_tracker",
+            "golden_repo_manager",
+            "activated_repo_manager",
+        ):
+            monkeypatch.setitem(vars(app_module), name, None)
 
         now = datetime.now(timezone.utc)
         bucket = _bucket_start(now, "hour1")

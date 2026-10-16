@@ -404,9 +404,9 @@ function confirmHostPortChange() {
                     <label for="llm-provider-api-key">
                         Provider API Key
                         <input type="password" id="llm-provider-api-key" name="llm_creds_provider_api_key"
-                               value=""
-                               placeholder="Enter provider API key">
-                        <small>API key used to authenticate with the provider</small>
+                               value="" autocomplete="new-password"
+                               placeholder="{{ 'Leave empty to keep current' if config.claude_cli.llm_creds_provider_api_key else 'Enter provider API key' }}">
+                        <small>API key used to authenticate with the provider. {% if config.claude_cli.llm_creds_provider_api_key %}A key is set; leave empty to keep it{% else %}No key is set{% endif %}</small>
                     </label>
                     <label for="llm-consumer-id">
                         Consumer ID
@@ -456,8 +456,9 @@ function testLlmConnection() {
     var url = document.getElementById('llm-provider-url').value;
     var key = document.getElementById('llm-provider-api-key').value;
     var statusEl = document.getElementById('llm-test-status');
-    if (!url || !key) {
-        if (statusEl) { statusEl.textContent = 'Enter URL and API key first'; statusEl.className = 'key-status error'; }
+    // A blank key tests with the stored key (server side).
+    if (!url) {
+        if (statusEl) { statusEl.textContent = 'Enter the provider URL first'; statusEl.className = 'key-status error'; }
         return;
     }
     if (statusEl) { statusEl.textContent = 'Testing...'; statusEl.className = 'key-status'; }
@@ -884,6 +885,11 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<<<<<<< HEAD
+=======
+{% include "partials/siem_delivery_config.html" %}
+
+>>>>>>> upstream/master
 <!-- Indexing Watchdog Settings Section (Issue #1530) -->
 <details class="config-section" id="section-indexing-watchdog">
     <summary>
@@ -1061,6 +1067,7 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<<<<<<< HEAD
 <!-- Control-Plane Metadata Section (content seam step 5a) -->
 <details class="config-section" id="section-control-plane-metadata">
     <summary>
@@ -1149,6 +1156,8 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+=======
+>>>>>>> upstream/master
 <!-- Temporal Legacy Migration Settings Section (Issue #1548) -->
 <details class="config-section" id="section-temporal-legacy-migration">
     <summary>
@@ -2212,11 +2221,14 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ 'Enabled' if config.indexing.temporal_all_branches_enabled else 'Disabled' }}</td>
                         <td class="config-note"><small>When disabled (default), golden temporal indexing tracks only the registered branch; all-branches requests are rejected</small></td>
                     </tr>
+<<<<<<< HEAD
                     <tr>
                         <td class="config-label">Golden Description Generation</td>
                         <td class="config-value">{{ 'Enabled' if config.indexing.golden_description_generation_enabled else 'Disabled' }}</td>
                         <td class="config-note"><small>When disabled, golden-repo add skips the description/lifecycle generation (orchestrator seam). Use when that seam is failing so registration keeps up; only omits the generated description, never search/index data</small></td>
                     </tr>
+=======
+>>>>>>> upstream/master
                 </tbody>
             </table>
             <div class="section-actions">
@@ -2277,6 +2289,7 @@ function saveLlmCredsConfig() {
                     Temporal All-Branches Indexing
                     <small>When disabled (default), golden temporal indexing tracks only the branch registered at golden-repo registration. Enabling later requires no re-index.</small>
                 </label>
+<<<<<<< HEAD
                 <label for="indexing-golden-description-generation-enabled">
                     <!-- EVO-65484: hidden fallback guarantees the key is always submitted
                          even when unchecked (browsers omit unchecked checkboxes) -- same
@@ -2286,6 +2299,8 @@ function saveLlmCredsConfig() {
                     Golden Description Generation
                     <small>Enabled by default. Disable to skip the synchronous description/lifecycle generation on golden-repo add (the orchestrator -> Claude seam) -- use when that seam is failing so registration throughput is not throttled. Only the generated description is omitted; search/index data is unaffected.</small>
                 </label>
+=======
+>>>>>>> upstream/master
             </div>
             <div class="form-actions">
                 <button type="submit" class="primary">Save</button>
@@ -2971,7 +2986,7 @@ function saveLlmCredsConfig() {
                     </tr>
                     <tr>
                         <td class="config-label">Client Secret</td>
-                        <td class="config-value">{{ '********' if config.oidc.client_secret else 'Not configured' }}</td>
+                        <td class="config-value">{{ '********' if config.oidc.client_secret_set else 'Not configured' }}</td>
                         <td class="config-note"></td>
                     </tr>
                     <tr>
@@ -3065,8 +3080,8 @@ function saveLlmCredsConfig() {
                 </label>
                 <label for="oidc-client-secret">
                     Client Secret
-                    <input type="password" id="oidc-client-secret" name="client_secret" value="{{ config.oidc.client_secret }}" placeholder="Leave empty to keep current">
-                    <small>Leave empty to keep existing secret</small>
+                    <input type="password" id="oidc-client-secret" name="client_secret" value="" placeholder="Leave empty to keep current" autocomplete="new-password">
+                    <small>{% if config.oidc.client_secret_set %}A secret is set; leave empty to keep it{% else %}No secret is set{% endif %}</small>
                 </label>
                 <label for="oidc-scopes">
                     Scopes
@@ -4153,7 +4168,7 @@ function saveLlmCredsConfig() {
                     {% if github_token_data %}
                     <tr>
                         <td class="config-label">Token</td>
-                        <td class="config-value">{{ github_token_data.token[:10] ~ ('*' * 26) }}</td>
+                        <td class="config-value">{{ github_token_data.masked_token }}</td>
                         <td class="config-note"><small>Personal Access Token (classic) or Fine-grained PAT</small></td>
                     </tr>
                     {% endif %}
@@ -4212,7 +4227,7 @@ function saveLlmCredsConfig() {
                     {% if gitlab_token_data %}
                     <tr>
                         <td class="config-label">Token</td>
-                        <td class="config-value">{{ gitlab_token_data.token[:10] ~ ('*' * 26) }}</td>
+                        <td class="config-value">{{ gitlab_token_data.masked_token }}</td>
                         <td class="config-note"><small>Personal Access Token or Project Access Token</small></td>
                     </tr>
                     <tr>
@@ -4527,7 +4542,7 @@ function saveLlmCredsConfig() {
                     <tr>
                         <td class="config-label">Secret Key</td>
                         <td class="config-value">
-                            {% if config.langfuse.secret_key %}
+                            {% if config.langfuse.secret_key_set %}
                                 ********
                             {% else %}
                                 Not configured
@@ -4586,9 +4601,9 @@ function saveLlmCredsConfig() {
                 <label for="langfuse-secret-key">
                     Secret Key
                     <input type="password" id="langfuse-secret-key" name="secret_key"
-                           value="{{ config.langfuse.secret_key }}"
-                           placeholder="sk-lf-...">
-                    <small>Langfuse secret key (required when enabled)</small>
+                           value="" autocomplete="new-password"
+                           placeholder="Leave empty to keep current">
+                    <small>Langfuse secret key (required when enabled). {% if config.langfuse.secret_key_set %}A secret is set; leave empty to keep it{% else %}No secret is set{% endif %}</small>
                 </label>
                 <label for="langfuse-host">
                     Host URL
@@ -4727,7 +4742,7 @@ function saveLlmCredsConfig() {
                 <div class="lp-project" style="border: 1px solid var(--pico-muted-border-color); padding: 0.75rem; margin-bottom: 0.5rem; border-radius: 4px;">
                     <div class="form-grid">
                         <label>Public Key <input type="text" class="lp-pk" value="{{ proj.public_key or '' }}" placeholder="pk-lf-..."></label>
-                        <label>Secret Key <input type="password" class="lp-sk" value="{{ proj.secret_key or '' }}" placeholder="sk-lf-..."></label>
+                        <label>Secret Key <input type="password" class="lp-sk" value="" autocomplete="new-password" placeholder="{{ 'Leave empty to keep current' if proj.secret_key_set else 'sk-lf-...' }}"><small>{% if proj.secret_key_set %}A secret is set; leave empty to keep it{% else %}No secret is set{% endif %}</small></label>
                     </div>
                     <button type="button" class="outline small" onclick="this.closest('.lp-project').remove();lpSync();" style="margin-top:0.25rem;">Remove</button>
                 </div>

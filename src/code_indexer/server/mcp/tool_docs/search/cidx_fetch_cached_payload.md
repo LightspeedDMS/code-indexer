@@ -77,7 +77,11 @@ A truncated result's cache_handle points at a small "pages-v1" manifest record -
 | missing_handle | The cache_handle parameter was not provided, or was empty/falsy (None, false, 0, an empty list, etc.). |
 | invalid_page | Only for a pages-v1 (xray_search/xray_explore/xray_search_batch/analyze_graph) cache_handle: page is not a real integer >= 1 and not a decimal-digit string -- a float, zero, a negative value, a bool, or a non-digit string. Never clamped or coerced for these handles. A LEGACY (non-pages-v1) cache_handle never returns this error -- an invalid page value there is silently clamped instead (see the page parameter description above). |
 | malformed_cache_entry | cache_handle is a pages-v1 manifest handle but its stored content fails strict validation -- a real server-side data problem, re-run the original job for a fresh handle. |
+<<<<<<< HEAD
 | cache_expired | The cache handle has expired or does not exist. Re-run the original xray_search or xray_explore to get a fresh handle. |
+=======
+| cache_expired | The cache handle has expired or does not exist, or it was created by another user's request (a handle is served only to the user who created it). Re-run the original xray_search or xray_explore to get a fresh handle. |
+>>>>>>> upstream/master
 | cache_unavailable | The PayloadCache service is not configured/available on this server. Distinct from cache_expired: the handle itself may be fine, but there is currently nothing to fetch it from -- retry once the cache service is back. |
 
 ## Cache Expiry

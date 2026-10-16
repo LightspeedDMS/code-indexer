@@ -6,6 +6,12 @@ pure typing-construct relocation, zero behaviour change.
 
 from __future__ import annotations
 
+<<<<<<< HEAD
+=======
+from datetime import datetime
+from typing import Callable
+
+>>>>>>> upstream/master
 from ._shared import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 
@@ -76,7 +82,15 @@ class OAuthBackend(Protocol):
         ...
 
     def exchange_code_for_token(
+<<<<<<< HEAD
         self, code: str, code_verifier: str, client_id: str
+=======
+        self,
+        code: str,
+        code_verifier: str,
+        client_id: str,
+        account_check: Optional[Callable[[str, datetime], bool]] = None,
+>>>>>>> upstream/master
     ) -> Dict[str, Any]:
         """Exchange a PKCE authorization code for access and refresh tokens.
 
@@ -84,6 +98,12 @@ class OAuthBackend(Protocol):
             code: The authorization code to exchange.
             code_verifier: PKCE code verifier for S256 verification.
             client_id: The OAuth client requesting the exchange.
+<<<<<<< HEAD
+=======
+            account_check: Called with the account name and the instant the
+                code was issued; when it returns False the exchange is
+                refused before any token is minted.
+>>>>>>> upstream/master
 
         Returns:
             Dict with access_token, token_type, expires_in, refresh_token.

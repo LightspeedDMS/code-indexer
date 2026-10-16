@@ -104,7 +104,16 @@ class TestAC3RestartSourceGuards:
         source = _ROUTES_PATH.read_text()
         fn_start = source.find("def restart_server(")
         assert fn_start != -1
-        return source[fn_start : fn_start + 3500]
+        # the whole function (a fixed-size window broke whenever it grew)
+        ends = [
+            pos
+            for pos in (
+                source.find("\n@", fn_start),
+                source.find("\ndef ", fn_start + 1),
+            )
+            if pos != -1
+        ]
+        return source[fn_start : min(ends) if ends else len(source)]
 
     def test_cluster_block_does_not_schedule_delayed_restart(self) -> None:
         """FIX-2: _schedule_delayed_restart must NOT appear in the cluster branch."""

@@ -146,6 +146,12 @@ class DeterministicFakeEmbeddingProvider(EmbeddingProvider):
     def supports_batch_processing(self) -> bool:
         return True
 
+<<<<<<< HEAD
+=======
+    def request_max_retries(self) -> int:
+        return 0
+
+>>>>>>> upstream/master
     def _get_model_token_limit(self) -> int:
         # Duck-typed hook FileChunkingManager calls on the real
         # VoyageAI/Cohere provider classes (batching decision) -- not part

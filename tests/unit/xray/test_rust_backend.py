@@ -511,7 +511,11 @@ def _run_batch_with_fake_cli_error_json(fake_json: str):
     return errors[0]
 
 
+<<<<<<< HEAD
 def test_cli_error_with_compile_error_kind_classifies_as_compile_error(stub_xray_cli):
+=======
+def test_cli_error_with_compile_error_kind_classifies_as_compile_error():
+>>>>>>> upstream/master
     """Bug #1827 (Codex H2 remediation): the JSON `error_kind: "compile"`
     field (set by xray-cli when the failure is a genuine problem in the
     user's evaluator source) must classify the returned error tuple's
@@ -525,9 +529,13 @@ def test_cli_error_with_compile_error_kind_classifies_as_compile_error(stub_xray
     )
 
 
+<<<<<<< HEAD
 def test_cli_error_with_infrastructure_error_kind_classifies_as_xray_cli_error(
     stub_xray_cli,
 ):
+=======
+def test_cli_error_with_infrastructure_error_kind_classifies_as_xray_cli_error():
+>>>>>>> upstream/master
     """Bug #1827 (Codex H2 remediation): the JSON `error_kind:
     "infrastructure"` field (set by xray-cli when the failure is an
     xray-cli/toolchain/filesystem problem unrelated to the user's source)
@@ -544,7 +552,11 @@ def test_cli_error_with_infrastructure_error_kind_classifies_as_xray_cli_error(
     )
 
 
+<<<<<<< HEAD
 def test_cli_error_with_absent_error_kind_classifies_as_xray_cli_error(stub_xray_cli):
+=======
+def test_cli_error_with_absent_error_kind_classifies_as_xray_cli_error():
+>>>>>>> upstream/master
     """Backward-compat / conservative default: when `error_kind` is
     ENTIRELY ABSENT from the JSON (e.g. an older xray-cli binary), the
     cli_error branch must default to "XRayCliError", never silently
@@ -557,7 +569,11 @@ def test_cli_error_with_absent_error_kind_classifies_as_xray_cli_error(stub_xray
     )
 
 
+<<<<<<< HEAD
 def test_cli_error_with_null_error_kind_classifies_as_xray_cli_error(stub_xray_cli):
+=======
+def test_cli_error_with_null_error_kind_classifies_as_xray_cli_error():
+>>>>>>> upstream/master
     """Same conservative default, but for an EXPLICIT JSON `null` (as
     opposed to the key being entirely absent) -- both must behave
     identically: default to "XRayCliError", never "CompileError".
@@ -1187,6 +1203,7 @@ def test_post_fill_after_fresh_compile(tmp_path, stub_xray_cli):
     assert identity in all_args, (
         "store() must receive the composite identity as its key"
     )
+<<<<<<< HEAD
     # store() receives the wrapped envelope, so assert on what it protects:
     # the blob must verify back to exactly the .so that was compiled.
     stored_blobs = [
@@ -1197,6 +1214,9 @@ def test_post_fill_after_fresh_compile(tmp_path, stub_xray_cli):
     assert fake_so_bytes in stored_blobs, (
         "store() must receive a blob that verifies to the .so bytes"
     )
+=======
+    assert fake_so_bytes in all_args, "store() must receive the .so bytes"
+>>>>>>> upstream/master
     assert 350 in all_args, "store() must receive compile_ms=350"
 
 
@@ -1208,7 +1228,11 @@ def test_post_fill_after_fresh_compile(tmp_path, stub_xray_cli):
 # ---------------------------------------------------------------------------
 
 
+<<<<<<< HEAD
 def test_run_batch_propagates_deadline_to_identity_calls(tmp_path, stub_xray_cli):
+=======
+def test_run_batch_propagates_deadline_to_identity_calls(tmp_path):
+>>>>>>> upstream/master
     import json
     from unittest.mock import MagicMock, patch
     from code_indexer.xray.rust_backend import RustNativeBackend, CacheIdentityInfo
@@ -1412,7 +1436,11 @@ def test_error_message_sanitizes_xray_cache_paths(stub_xray_cli):
 # ---------------------------------------------------------------------------
 
 
+<<<<<<< HEAD
 def test_error_message_sanitizes_nested_build_dir_xray_cache_paths(stub_xray_cli):
+=======
+def test_error_message_sanitizes_nested_build_dir_xray_cache_paths():
+>>>>>>> upstream/master
     """Bug #1425's per-invocation build-directory isolation fix (Rust side,
     compiler.rs) moved the compiled .rs source from a flat
     'xray-cache/<hash>.rs' path into an isolated
@@ -1767,12 +1795,16 @@ def test_try_pre_fill_uses_mkstemp_not_pid_suffix_bug_1784_minor5(tmp_path):
 
     fake_so_bytes = b"\x7fELF mkstemp-test"
     mock_cache = MagicMock()
+<<<<<<< HEAD
     # The cluster cache stores an integrity envelope, not bare .so bytes:
     # _try_pre_fill refuses anything it cannot verify, so a raw blob here
     # would exercise the refusal path rather than the cache hit.
     mock_cache.fetch.return_value = wrap_so_for_cluster_cache(
         "5" * 64, "rustc 1.91.0", fake_so_bytes
     )
+=======
+    mock_cache.fetch.return_value = fake_so_bytes
+>>>>>>> upstream/master
     backend = RustNativeBackend(xray_cache_backend=mock_cache)
 
     identity = "5" * 64
@@ -2001,6 +2033,7 @@ def test_python_identity_matches_real_compiled_artifact_filename(tmp_path):
     _require_xray_cli_binary()
     import os
     import subprocess
+<<<<<<< HEAD
     from code_indexer.xray.rust_backend import (
         RustNativeBackend,
         resolve_xray_cli_path,
@@ -2012,6 +2045,9 @@ def test_python_identity_matches_real_compiled_artifact_filename(tmp_path):
     # the gate just vouched for (and from the one the backend under test
     # uses) whenever CIDX_XRAY_CLI_PATH is set.
     xray_cli = resolve_xray_cli_path()
+=======
+    from code_indexer.xray.rust_backend import RustNativeBackend, _XRAY_CLI_DEFAULT
+>>>>>>> upstream/master
 
     backend = RustNativeBackend(xray_cache_backend=None)
     python_info = backend._get_cache_identity_info(VALID_EVALUATOR)
@@ -2027,7 +2063,11 @@ def test_python_identity_matches_real_compiled_artifact_filename(tmp_path):
     env["CIDX_DATA_DIR"] = str(cache_data_dir)
     proc = subprocess.run(
         [
+<<<<<<< HEAD
             str(xray_cli),
+=======
+            str(_XRAY_CLI_DEFAULT),
+>>>>>>> upstream/master
             "--dynlib",
             str(eval_file),
             "--files-from",
@@ -2099,9 +2139,13 @@ def test_large_candidate_list_does_not_overflow_argv_bug_1612():
 # ---------------------------------------------------------------------------
 
 
+<<<<<<< HEAD
 def test_subprocess_oserror_becomes_structured_error_not_unhandled_bug_1612(
     stub_xray_cli,
 ):
+=======
+def test_subprocess_oserror_becomes_structured_error_not_unhandled_bug_1612():
+>>>>>>> upstream/master
     """Bug #1612: an OSError raised by subprocess.Popen (e.g. E2BIG /
     'Argument list too long') must be caught inside RustNativeBackend and
     surfaced as a structured error tuple -- never propagate out of run_batch()

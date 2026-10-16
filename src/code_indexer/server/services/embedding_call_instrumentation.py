@@ -3,7 +3,11 @@
 instrument_call() / instrument_call_async() are the single shared wrappers
 used at every embedding-provider / reranker-client HTTP call site (10
 injection points, see CLAUDE.md and
+<<<<<<< HEAD
 docs/architecture-invariants.md#embedding--reranker-call-tracking).
+=======
+docs/architecture/invariants/query-path.md#embedding-and-reranker-call-tracking).
+>>>>>>> upstream/master
 ``fn`` MUST be the
 smallest unit of work that includes BOTH the outbound network call AND its
 status validation (``raise_for_status()`` or equivalent) -- never just the
@@ -25,11 +29,25 @@ from __future__ import annotations
 
 import contextvars
 import logging
+<<<<<<< HEAD
 import time
 from contextlib import contextmanager
 from typing import Awaitable, Callable, Iterator, Optional, TypeVar
 
 from code_indexer.server.services.embedding_call_stats import EmbeddingCallRecord
+=======
+import threading
+import time
+from contextlib import contextmanager
+from typing import Awaitable, Callable, Iterator, Optional, Sequence, TypeVar
+
+from code_indexer.server.services.embedding_call_stats import EmbeddingCallRecord
+
+# Child-side module (src/code_indexer/services/run_spend_meter.py): the meter
+# belongs to the `cidx index` child process, not to a server service.
+from code_indexer.services.run_spend_meter import get_run_spend_meter
+from code_indexer.server.services.embedding_stats_attribution import StatsAttribution
+>>>>>>> upstream/master
 from code_indexer.server.services.embedding_stats_writer import EmbeddingStatsWriter
 
 logger = logging.getLogger(__name__)
@@ -49,6 +67,7 @@ _stats_purpose_override: "contextvars.ContextVar[Optional[str]]" = (
     contextvars.ContextVar("_stats_purpose_override", default=None)
 )
 
+<<<<<<< HEAD
 # EVO-66113: process-level fallback tags for golden_repo_alias, job_id,
 # node_id.  Set ONCE at child-process startup (via
 # set_process_embed_stats_tags) from env vars threaded by the parent; read
@@ -85,6 +104,44 @@ def set_process_embed_stats_tags(
         _stats_job_id.set(job_id)
     if node_id:
         _stats_node_id.set(node_id)
+=======
+
+_process_default_attribution: Optional[StatsAttribution] = None
+_process_default_attribution_lock = threading.Lock()
+
+
+def set_process_default_attribution(attribution: StatsAttribution) -> None:
+    """Install the PROCESS-WIDE default attribution (Story #2118).
+
+    Called once by a `cidx index` child from its ``--stats-attribution``
+    argument. Process-wide rather than a contextvar because the child's
+    embedding calls run on VectorCalculationManager pool threads."""
+    global _process_default_attribution
+    with _process_default_attribution_lock:
+        _process_default_attribution = attribution
+
+
+def clear_process_default_attribution() -> None:
+    """Remove the process-wide default attribution."""
+    global _process_default_attribution
+    with _process_default_attribution_lock:
+        _process_default_attribution = None
+
+
+#: The provider call sites' label for indexing work; it takes the
+#: attribution purpose.
+_GENERIC_INDEX_PURPOSE = "index"
+#: The contextual temporal embedder's label; in a refresh child it becomes
+#: _TEMPORAL_REFRESH_PURPOSE.
+_TEMPORAL_PURPOSE = "temporal"
+_REFRESH_PURPOSE = "refresh"
+_TEMPORAL_REFRESH_PURPOSE = "temporal_refresh"
+
+
+def _current_attribution() -> Optional[StatsAttribution]:
+    with _process_default_attribution_lock:
+        return _process_default_attribution
+>>>>>>> upstream/master
 
 
 @contextmanager
@@ -122,6 +179,7 @@ def _record_call(
     caught and logged -- callers rely on this NEVER raising.
     """
     try:
+<<<<<<< HEAD
         effective_purpose = _stats_purpose_override.get() or purpose
         # EVO-66113: fall back to process-level tags when the caller did not
         # pass explicit values (which is the normal case for all embed-
@@ -129,6 +187,30 @@ def _record_call(
         effective_alias = golden_repo_alias or _stats_golden_repo_alias.get()
         effective_job_id = job_id or _stats_job_id.get()
         effective_node_id = node_id or _stats_node_id.get()
+=======
+        attribution = _current_attribution()
+        if attribution is not None:
+            # Explicit correlation args always win; the attribution fills
+            # only what the call site left unset. The generic indexing label
+            # "index" takes the attribution purpose ("index" or "refresh");
+            # in a REFRESH child the contextual temporal label "temporal"
+            # becomes "temporal_refresh", so refresh-time temporal spend is
+            # countable apart from registration-time temporal spend. Every
+            # other label ("query", "key_test", ...) is kept.
+            if golden_repo_alias is None:
+                golden_repo_alias = attribution.golden_repo_alias
+            if job_id is None:
+                job_id = attribution.job_id
+            if node_id is None:
+                node_id = attribution.node_id
+            if purpose == _GENERIC_INDEX_PURPOSE:
+                purpose = attribution.purpose
+            elif (
+                purpose == _TEMPORAL_PURPOSE and attribution.purpose == _REFRESH_PURPOSE
+            ):
+                purpose = _TEMPORAL_REFRESH_PURPOSE
+        effective_purpose = _stats_purpose_override.get() or purpose
+>>>>>>> upstream/master
         record = EmbeddingCallRecord(
             provider=provider,
             call_type=call_type,
@@ -140,9 +222,15 @@ def _record_call(
             success=success,
             latency_ms=latency_ms,
             occurred_at=time.time(),
+<<<<<<< HEAD
             golden_repo_alias=effective_alias,
             job_id=effective_job_id,
             node_id=effective_node_id,
+=======
+            golden_repo_alias=golden_repo_alias,
+            job_id=job_id,
+            node_id=node_id,
+>>>>>>> upstream/master
         )
         EmbeddingStatsWriter.get_active().record(record)
     except Exception as exc:  # fail-open: never mask the real result/exception
@@ -162,6 +250,10 @@ def instrument_call(
     golden_repo_alias: Optional[str] = None,
     job_id: Optional[str] = None,
     node_id: Optional[str] = None,
+<<<<<<< HEAD
+=======
+    inputs: Optional[Sequence[str]] = None,
+>>>>>>> upstream/master
 ) -> T:
     """Execute ``fn`` and record exactly one EmbeddingCallRecord for it.
 
@@ -180,14 +272,33 @@ def instrument_call(
         golden_repo_alias: Optional correlation field.
         job_id: Optional correlation field.
         node_id: Optional correlation field (cluster node id).
+<<<<<<< HEAD
+=======
+        inputs: The exact texts this attempt sends (Story #2122). An armed
+            ``cidx index`` child's run-spend meter checks them BEFORE fn();
+            a non-query call without them is refused there.
+>>>>>>> upstream/master
 
     Returns:
         Whatever ``fn()`` returns, unchanged.
 
     Raises:
+<<<<<<< HEAD
         Whatever ``fn()`` raises, unchanged -- instrument_call never
         swallows or replaces the wrapped call's own exception.
     """
+=======
+        RunSpendDefect: before fn(), when the armed run-spend meter refuses
+            the attempt (Story #2122); fn() is never called.
+        Whatever ``fn()`` raises, unchanged -- instrument_call never
+        swallows or replaces the wrapped call's own exception.
+    """
+    # Story #2122: the indexing child's run-spend meter is charged BEFORE
+    # fn(), so a refused input never reaches HTTP. Outside an armed child,
+    # and for purpose "query", this is a no-op. Not fail-open: a refusal
+    # raises RunSpendDefect and no stats record is written (no attempt).
+    get_run_spend_meter().charge(purpose=purpose, inputs=inputs)
+>>>>>>> upstream/master
     start = time.time()
     success = False
     try:
@@ -225,10 +336,18 @@ async def instrument_call_async(
     golden_repo_alias: Optional[str] = None,
     job_id: Optional[str] = None,
     node_id: Optional[str] = None,
+<<<<<<< HEAD
+=======
+    inputs: Optional[Sequence[str]] = None,
+>>>>>>> upstream/master
 ) -> T:
     """Async twin of instrument_call() -- awaits ``fn()`` instead of calling
     it synchronously. Identical contract otherwise (see instrument_call).
     """
+<<<<<<< HEAD
+=======
+    get_run_spend_meter().charge(purpose=purpose, inputs=inputs)
+>>>>>>> upstream/master
     start = time.time()
     success = False
     try:

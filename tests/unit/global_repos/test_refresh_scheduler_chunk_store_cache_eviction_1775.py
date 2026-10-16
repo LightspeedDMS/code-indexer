@@ -183,6 +183,11 @@ def mock_golden_repo_metadata():
     backend = Mock()
     backend.record_refresh_integrity_failure.return_value = 1
     backend.get_refresh_integrity_failure_state.return_value = None
+<<<<<<< HEAD
+=======
+    # Bug #2022: no failure backoff recorded (a bare Mock would read as one).
+    backend.get_refresh_failure_backoff_state.return_value = None
+>>>>>>> upstream/master
     return backend
 
 

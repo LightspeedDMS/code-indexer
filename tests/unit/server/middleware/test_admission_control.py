@@ -121,6 +121,31 @@ def test_middleware_exempts_health():
     assert client.get("/health").status_code == 200
 
 
+def test_middleware_does_not_exempt_api_docs():
+    """API documentation authenticates (DB lookups), so it counts against
+    admission control like any other authenticated request."""
+
+    async def ok(request):
+        return PlainTextResponse("ok")
+
+    async def health(request):
+        return PlainTextResponse("healthy")
+
+    doc_paths = ("/docs", "/redoc", "/openapi.json")
+    app = Starlette(
+        routes=[Route(p, ok) for p in doc_paths] + [Route("/health", health)]
+    )
+    app.add_middleware(
+        AdmissionControlMiddleware,
+        rate_limiter=PerConsumerRateLimiter(capacity=0, refill_per_second=0.0),
+    )
+    client = TestClient(app)
+
+    for path in doc_paths:
+        assert client.get(path).status_code == 429, path
+    assert client.get("/health").status_code == 200
+
+
 # ---------------- Config roundtrip ----------------
 
 

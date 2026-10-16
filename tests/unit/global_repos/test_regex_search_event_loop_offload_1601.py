@@ -72,8 +72,14 @@ def _write_synthetic_ripgrep_json(path: str) -> None:
 
 
 def _write_synthetic_grep_output(path: str) -> None:
+<<<<<<< HEAD
     with open(path, "w", encoding="utf-8") as f:
         f.write("file1.py:1:def func_1():\n")
+=======
+    # grep --null record format (Bug #2030): path\0LINE:content
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("file1.py\x001:def func_1():\n")
+>>>>>>> upstream/master
 
 
 def _mock_executor_copying_from(source_path: str):
@@ -103,8 +109,13 @@ def _build_service(tmp_path, engine: str) -> RegexSearchService:
         if engine == "ripgrep":
             mock_which.return_value = "/usr/bin/rg"
         else:
+<<<<<<< HEAD
             mock_which.side_effect = lambda cmd: (
                 "/usr/bin/grep" if cmd == "grep" else None
+=======
+            mock_which.side_effect = (
+                lambda cmd: "/usr/bin/grep" if cmd == "grep" else None
+>>>>>>> upstream/master
             )
         return RegexSearchService(tmp_path)
 
@@ -158,7 +169,11 @@ class TestRegexSearchEventLoopOffload:
             ),
         ):
             search_method = getattr(service, search_attr)
+<<<<<<< HEAD
             await search_method(
+=======
+            matches, _total = await search_method(
+>>>>>>> upstream/master
                 pattern="func",
                 search_path=tmp_path,
                 include_patterns=None,
@@ -169,6 +184,12 @@ class TestRegexSearchEventLoopOffload:
                 timeout_seconds=30,
             )
 
+<<<<<<< HEAD
+=======
+        # Guards the fixture itself: synthetic output in a format the parser
+        # no longer accepts would parse zero records and pass silently.
+        assert [m.file_path for m in matches] == ["file1.py"]
+>>>>>>> upstream/master
         assert "thread_id" in captured, f"{parse_attr} was never invoked"
         assert captured["thread_id"] != caller_thread_id, (
             f"{engine} output parse ran on the event-loop thread instead "

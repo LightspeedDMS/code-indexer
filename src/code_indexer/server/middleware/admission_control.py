@@ -10,9 +10,8 @@ Scope is per worker process (each uvicorn worker has its own counter), which is
 the natural unit: a worker sheds load when *its* in-flight set is full, so total
 pod capacity is ``workers x max_inflight_requests``.
 
-Health/docs endpoints are always exempt so readiness probes (which must keep
-returning 200 or k8s pulls the pod from the Service) and schema fetches are
-never rejected.
+Health endpoints are always exempt so readiness probes (which must keep
+returning 200 or k8s pulls the pod from the Service) are never rejected.
 """
 
 from __future__ import annotations
@@ -28,9 +27,11 @@ from starlette.responses import JSONResponse, Response
 
 from code_indexer.server.auth.token_bucket import TokenBucketManager
 
-# Paths never subject to admission control: liveness/readiness + API schema.
-# Prefix match, so e.g. "/docs" also covers "/docs/oauth2-redirect".
-_DEFAULT_EXEMPT_PREFIXES = ("/health", "/docs", "/openapi.json", "/redoc")
+# Paths never subject to admission control: liveness/readiness only (prefix
+# match, so "/health" also covers "/healthz"). API documentation is NOT exempt:
+# it requires an authenticated session or token, so it counts like any other
+# authenticated request.
+_DEFAULT_EXEMPT_PREFIXES = ("/health",)
 
 # JWT session cookie name. Mirrors auth.dependencies.CIDX_SESSION_COOKIE; kept as
 # a stable local literal so this request-path middleware doesn't import the heavy

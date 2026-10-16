@@ -842,6 +842,7 @@ class XrayPatternService:
                 # Shared cidx-meta: absent moves on to the next candidate; a
                 # backend failure raises (never "pattern not found").
                 try:
+<<<<<<< HEAD
                     text = shared.read_text(path)
                 except FileNotFoundError:
                     continue
@@ -852,12 +853,15 @@ class XrayPatternService:
                     ) from exc
             elif path.is_file():
                 try:
+=======
+>>>>>>> upstream/master
                     text = path.read_text(encoding="utf-8")
                 except (OSError, UnicodeDecodeError) as exc:
                     raise ValueError(
                         f"pattern_parse_error: pattern file '{path}' exists "
                         f"but could not be read: {exc}"
                     ) from exc
+<<<<<<< HEAD
             else:
                 continue
             try:
@@ -869,6 +873,17 @@ class XrayPatternService:
                 ) from exc
             self._validate_pattern_schema(spec, path)
             return spec  # type: ignore[no-any-return]
+=======
+                try:
+                    spec = yaml.safe_load(text)
+                except yaml.YAMLError as exc:
+                    raise ValueError(
+                        f"pattern_parse_error: pattern file '{path}' exists "
+                        f"but failed to parse as YAML: {exc}"
+                    ) from exc
+                self._validate_pattern_schema(spec, path)
+                return spec  # type: ignore[no-any-return]
+>>>>>>> upstream/master
         return None
 
     def _validate_pattern_schema(self, spec: Any, path: Path) -> None:

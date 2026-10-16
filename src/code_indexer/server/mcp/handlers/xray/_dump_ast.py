@@ -1,13 +1,20 @@
 """xray_dump_ast MCP handler (Issue #1935 Part 2).
 
+<<<<<<< HEAD
 Moved verbatim out of the monolithic xray.py (git show HEAD:.../xray.py:
 1825-2001). The file is now read through the content seam when the server's
 content backend is delegated (`_seam_dump_target`); with the default local
 backend the checks and the read are the original ones (`_local_dump_target`).
+=======
+Moved verbatim out of the monolithic xray.py -- pure relocation, zero
+behaviour change. `handle_xray_dump_ast` below is an intact, unmodified
+copy of HEAD's single function (git show HEAD:.../xray.py:1825-2001).
+>>>>>>> upstream/master
 """
 
 from __future__ import annotations
 
+<<<<<<< HEAD
 import posixpath
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
@@ -17,6 +24,14 @@ from code_indexer.xray.search_engine import XRaySearchEngine, xray_content_sourc
 
 if TYPE_CHECKING:
     from code_indexer.server.services.file_service import ContentSeamSource
+=======
+from pathlib import Path
+from typing import Any, Dict
+
+from code_indexer.server.auth.user_manager import User
+from code_indexer.utils.path_confinement import has_git_segment
+from code_indexer.xray.search_engine import XRaySearchEngine
+>>>>>>> upstream/master
 
 from ._infra import (
     _DUMP_AST_MAX_NODES_DEFAULT,
@@ -126,6 +141,7 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     repo_root = Path(repo_path_str)
+<<<<<<< HEAD
     seam = xray_content_source(repo_root)
     if seam is None:
         target, read_source, refusal = _local_dump_target(repo_root, file_path_raw)
@@ -133,6 +149,52 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         target, read_source, refusal = _seam_dump_target(seam, file_path_raw)
     if refusal is not None:
         return _mcp_response(refusal)
+=======
+
+    # 4. Path traversal protection — resolve and verify the path stays within repo root.
+    target = (repo_root / file_path_raw).resolve()
+    try:
+        target_relative = target.relative_to(repo_root.resolve())
+    except ValueError:
+        return _mcp_response(
+            {
+                "error": "path_traversal_rejected",
+                "message": (
+                    f"file_path {file_path_raw!r} resolves outside the repository root"
+                ),
+            }
+        )
+
+    # 5. File existence check. A path inside the repository's .git is
+    # answered exactly as a missing file.
+    if has_git_segment(target_relative.parts) or not target.is_file():
+        return _mcp_response(
+            {
+                "error": "file_not_found",
+                "message": f"File not found: {file_path_raw!r}",
+            }
+        )
+
+    # 5.5. File-size cap (Story #1494 AC1, Finding A2): refuse BEFORE
+    # touching tree-sitter at all -- os.stat() is a cheap syscall, so a
+    # file above the cap is rejected near-instantly instead of triggering
+    # an unbounded, GIL-held in-process parse (159ms measured on a 759KB
+    # file per the report; scales with file size, with no upper bound).
+    file_size = target.stat().st_size
+    if file_size > _DUMP_AST_MAX_FILE_SIZE_BYTES:
+        return _mcp_response(
+            {
+                "error": "file_too_large",
+                "message": (
+                    f"AST dump refused: file exceeds the in-process parse "
+                    f"size limit of {_DUMP_AST_MAX_FILE_SIZE_BYTES} bytes "
+                    f"(file is {file_size} bytes). Narrow to a smaller "
+                    f"file, or use xray_search/xray_explore (the Rust "
+                    f"subprocess scan path) which has no such limit."
+                ),
+            }
+        )
+>>>>>>> upstream/master
 
     # 6. Parse and serialise
     try:
@@ -147,7 +209,12 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     ),
                 }
             )
+<<<<<<< HEAD
         root = engine.ast_engine.parse(read_source(), lang)
+=======
+        source_bytes = target.read_bytes()
+        root = engine.ast_engine.parse(source_bytes, lang)
+>>>>>>> upstream/master
         ast_tree = XRaySearchEngine._serialize_ast(root, max_nodes=max_nodes)
         return _mcp_response(
             {
@@ -171,6 +238,7 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "message": str(exc),
             }
         )
+<<<<<<< HEAD
 
 
 #: (target path, reader of its bytes, refusal or None). The reader runs only
@@ -292,3 +360,5 @@ def _seam_dump_target(seam: "ContentSeamSource", file_path_raw: str) -> _DumpTar
         return Path(rel), _no_source, _file_too_large(len(fetched.data))
     data = fetched.data
     return Path(rel), lambda: data, None
+=======
+>>>>>>> upstream/master

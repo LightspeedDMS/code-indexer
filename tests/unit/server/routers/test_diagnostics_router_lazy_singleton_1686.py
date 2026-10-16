@@ -42,9 +42,22 @@ import sys
 import threading
 from pathlib import Path
 
+<<<<<<< HEAD
 SRC_ROOT = str(Path(__file__).parent.parent.parent.parent.parent / "src")
 SUBPROCESS_TIMEOUT_SECONDS = 60
 
+=======
+import pytest
+
+SRC_ROOT = str(Path(__file__).parent.parent.parent.parent.parent / "src")
+SUBPROCESS_TIMEOUT_SECONDS = 60
+
+# Fresh-interpreter server imports exceed the suite's default 15 s
+# pytest-timeout under parallel gate load; the ceiling must sit above the
+# subprocess's own budget.
+pytestmark = pytest.mark.timeout(SUBPROCESS_TIMEOUT_SECONDS + 15)
+
+>>>>>>> upstream/master
 
 def _run_and_assert_ok(code: str, env: dict) -> str:
     """Run `code` in a fresh subprocess, assert clean exit, return stdout."""

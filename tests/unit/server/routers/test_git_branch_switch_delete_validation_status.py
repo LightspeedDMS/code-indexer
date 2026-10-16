@@ -1,12 +1,18 @@
 """REST `POST .../branches/{name}/switch` and `DELETE .../branches/{name}`
 must map a `GitArgumentValidationError` specifically (not the broader
 `ValueError`) to HTTP 400 -- an argv-safety rejection (e.g. a leading
+<<<<<<< HEAD
 '-') gets the clean 400 `POST .../branches` (create) already has, while
 `git_branch_delete`'s plain `ValueError("Invalid or expired confirmation
 token")` is not an argv-safety rejection, so it keeps falling through to
 this route's generic `except Exception -> 500` clause -- there is no
 `ValueError` clause on this route at all, only the `GitArgumentValidationError`
 one added here.
+=======
+'-') gets the clean 400 `POST .../branches` (create) already has, while an
+invalid confirmation token is not an argv-safety rejection: it answers 200
+with `requires_confirmation` and a fresh token.
+>>>>>>> upstream/master
 
 Also covers `switch` accepting the exact value `-` (git's own
 `checkout -` shorthand for the previously checked out branch).
@@ -20,7 +26,11 @@ from __future__ import annotations
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
+<<<<<<< HEAD
 from unittest.mock import Mock
+=======
+from unittest.mock import Mock, patch
+>>>>>>> upstream/master
 
 import pytest
 from fastapi.testclient import TestClient
@@ -56,12 +66,19 @@ def _make_repo(tmp_path: Path) -> Path:
 def _arm_repo(repo_path: Path):
     mock_arm = Mock()
     mock_arm.get_activated_repo_path.return_value = str(repo_path)
+<<<<<<< HEAD
     original = git_operations_service.activated_repo_manager
     git_operations_service.activated_repo_manager = mock_arm
     try:
         yield mock_arm
     finally:
         git_operations_service.activated_repo_manager = original
+=======
+    # Swap the backing slot, never read the property: reading it constructs
+    # a real ActivatedRepoManager that would then stay on the singleton.
+    with patch.object(git_operations_service, "_activated_repo_manager_lazy", mock_arm):
+        yield mock_arm
+>>>>>>> upstream/master
 
 
 @pytest.fixture()
@@ -72,6 +89,7 @@ def mock_user():
 
 
 @pytest.fixture()
+<<<<<<< HEAD
 def test_client(mock_user):
     def override():
         return mock_user
@@ -80,6 +98,34 @@ def test_client(mock_user):
     try:
         with TestClient(app) as client:
             yield client
+=======
+def test_client(mock_user, tmp_path):
+    from tests.unit.server.routers.inline_routes_test_helpers import (
+        _access_service_admin,
+    )
+
+    def override():
+        return mock_user
+
+    # A process-wide chunk-store cache left by an earlier test without a
+    # lease root makes the real PayloadCache startup step fail; start from
+    # a clean one.
+    from code_indexer.storage.shared.chunk_store_cache import (
+        reset_global_chunk_store_cache,
+    )
+
+    reset_global_chunk_store_cache()
+    app.dependency_overrides[get_current_user] = override
+    try:
+        with TestClient(app) as client:
+            # After lifespan startup (it installs its own access service):
+            # the caller is an admin of a real access service, so the
+            # activated-repo guard passes; these tests pin route behaviour.
+            with _access_service_admin(
+                tmp_path / "access-groups.db", mock_user.username
+            ):
+                yield client
+>>>>>>> upstream/master
     finally:
         app.dependency_overrides.clear()
 
@@ -115,6 +161,7 @@ class TestGitBranchDeleteValidationStatus:
         assert response.status_code == 400, response.text
         assert "must not start with '-'" in response.text
 
+<<<<<<< HEAD
     def test_expired_confirmation_token_still_returns_500(self, test_client, tmp_path):
         """`git_branch_delete` raises a plain `ValueError("Invalid or
         expired confirmation token")` for a bad token -- not a
@@ -123,6 +170,14 @@ class TestGitBranchDeleteValidationStatus:
         `GitArgumentValidationError` specifically for the new 400 mapping
         added for argv-safety rejections, and has no broader `ValueError`
         clause that would also catch this token error."""
+=======
+    def test_invalid_confirmation_token_returns_fresh_token(
+        self, test_client, tmp_path
+    ):
+        """An invalid token is not an argv-safety rejection: the route
+        answers 200 with `requires_confirmation` and a fresh token, and the
+        branch is not deleted."""
+>>>>>>> upstream/master
         repo = _make_repo(tmp_path)
         _git(["checkout", "-q", "-b", "feature"], repo)
         _git(["checkout", "-q", "main"], repo)
@@ -131,5 +186,13 @@ class TestGitBranchDeleteValidationStatus:
                 f"{_BASE}/branches/feature",
                 params={"confirmation_token": "bogus"},
             )
+<<<<<<< HEAD
         assert response.status_code == 500, response.text
         assert "confirmation token" in response.text.lower()
+=======
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["requires_confirmation"] is True
+        assert isinstance(body["token"], str) and body["token"] != "bogus"
+        assert "feature" in _git(["branch", "--list", "feature"], repo).stdout
+>>>>>>> upstream/master

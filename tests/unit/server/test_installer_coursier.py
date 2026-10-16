@@ -212,13 +212,12 @@ class TestInstallMethodIntegration:
                     "create_startup_script",
                     return_value=installer.server_dir / "start.sh",
                 ):
-                    with patch.object(installer, "seed_initial_admin_user"):
-                        with patch.object(installer, "install_claude_cli"):
-                            with patch.object(installer, "install_scip_indexers"):
-                                with patch.object(installer, "install_ripgrep"):
-                                    with patch.object(
-                                        installer, "install_coursier"
-                                    ) as mock_install_cs:
-                                        installer.install()
+                    with patch.object(installer, "install_claude_cli"):
+                        with patch.object(installer, "install_scip_indexers"):
+                            with patch.object(installer, "install_ripgrep"):
+                                with patch.object(
+                                    installer, "install_coursier"
+                                ) as mock_install_cs:
+                                    installer.install()
 
         mock_install_cs.assert_called_once()

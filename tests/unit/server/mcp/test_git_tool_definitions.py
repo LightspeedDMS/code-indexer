@@ -309,3 +309,58 @@ class TestGitBranchTools:
         """Verify git_branch_delete requires repository:admin permission."""
         tool = TOOL_REGISTRY["git_branch_delete"]
         assert tool["required_permission"] == "repository:admin"
+
+
+_DESTRUCTIVE_FIRST_CALLS = {
+    "git_clean": {"repository_alias": "example-repo"},
+    "git_branch_delete": {"repository_alias": "example-repo", "branch_name": "old"},
+    "git_reset": {"repository_alias": "example-repo", "mode": "hard"},
+}
+_DESTRUCTIVE_SUCCESS = {
+    "git_clean": {"success": True, "removed_files": ["build/"]},
+    "git_branch_delete": {"success": True, "deleted_branch": "old"},
+    "git_reset": {"success": True, "reset_mode": "hard", "target_commit": "HEAD"},
+}
+
+
+class TestDestructiveGitToolConfirmationContract:
+    """The published schemas describe the confirmation flow the handlers
+    implement: the first call carries no token, the confirmation response
+    is ``success: false`` plus ``confirmation_token_required``, and tokens
+    are issued by the server (never a fixed literal)."""
+
+    @pytest.mark.parametrize("tool_name", sorted(_DESTRUCTIVE_FIRST_CALLS))
+    def test_first_call_without_token_is_valid(self, tool_name):
+        schema = TOOL_REGISTRY[tool_name]["inputSchema"]
+        validate(instance=_DESTRUCTIVE_FIRST_CALLS[tool_name], schema=schema)
+
+    @pytest.mark.parametrize("tool_name", sorted(_DESTRUCTIVE_FIRST_CALLS))
+    @pytest.mark.parametrize(
+        "rejection", [None, "Invalid or expired confirmation token"]
+    )
+    def test_confirmation_response_matches_output_schema(self, tool_name, rejection):
+        import json
+
+        from code_indexer.server.mcp.handlers import git_write
+
+        service_result = {"requires_confirmation": True, "token": "example-token"}
+        if rejection is not None:
+            service_result["message"] = rejection
+        mcp = git_write._confirmation_response(service_result, "Operation")
+        assert mcp is not None
+        response = json.loads(mcp["content"][0]["text"])
+
+        validate(instance=response, schema=TOOL_REGISTRY[tool_name]["outputSchema"])
+
+    @pytest.mark.parametrize("tool_name", sorted(_DESTRUCTIVE_SUCCESS))
+    def test_success_response_matches_output_schema(self, tool_name):
+        validate(
+            instance=_DESTRUCTIVE_SUCCESS[tool_name],
+            schema=TOOL_REGISTRY[tool_name]["outputSchema"],
+        )
+
+    @pytest.mark.parametrize("tool_name", sorted(_DESTRUCTIVE_FIRST_CALLS))
+    def test_no_fixed_literal_token_is_documented(self, tool_name):
+        import json
+
+        assert "CONFIRM_" not in json.dumps(TOOL_REGISTRY[tool_name])

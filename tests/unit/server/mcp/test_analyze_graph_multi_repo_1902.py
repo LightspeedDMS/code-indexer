@@ -32,6 +32,7 @@ import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.services.config_service import get_config_service
+<<<<<<< HEAD
 from code_indexer.xray.rust_backend import resolve_xray_cli_path
 
 
@@ -39,6 +40,15 @@ def _require_xray_cli_binary() -> None:
     if not resolve_xray_cli_path().exists():
         pytest.skip(
             f"xray-cli binary not built at {resolve_xray_cli_path()}; "
+=======
+from code_indexer.xray.rust_backend import _XRAY_CLI_DEFAULT
+
+
+def _require_xray_cli_binary() -> None:
+    if not _XRAY_CLI_DEFAULT.exists():
+        pytest.skip(
+            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
+>>>>>>> upstream/master
             "run 'cargo build --release' inside rust/ to enable this test."
         )
 

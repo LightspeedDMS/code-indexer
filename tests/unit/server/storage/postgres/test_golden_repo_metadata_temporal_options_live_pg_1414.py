@@ -2,11 +2,21 @@
 Bug #1414 DoD item 5: live-PostgreSQL round-trip test for
 GoldenRepoMetadataPostgresBackend.update_temporal_options.
 
+<<<<<<< HEAD
 Mirrors the pg_dsn_for_runner / isolated_schema live-PG pattern already
 established in test_migration_runner.py (Story #1164) exactly -- gated by
 TEST_POSTGRES_DSN, skips cleanly when no PostgreSQL is available (matching
 this project's existing CI posture: these tests are not run in CI, only
 locally when a developer has a real PostgreSQL instance to point at).
+=======
+Gated by TEST_POSTGRES_DSN (skips cleanly when no PostgreSQL is available;
+these tests are not run in CI, only locally against a real PostgreSQL).
+The module gets a database of its own on that server, migrated by the real
+MigrationRunner (conftest ``migrated_scratch_pg_dsn``), so the tests run
+against the REAL migrated golden_repos_metadata table and never DROP/CREATE
+a table in the shared database (which fails once that database is migrated:
+other tables hold foreign keys to golden_repos_metadata).
+>>>>>>> upstream/master
 
 Per the project's "faithful DB mocks" lesson (mock-based tests can certify
 a silent no-op write as passing if the mock doesn't mirror the real driver),
@@ -15,7 +25,11 @@ golden_repos_metadata table -- not a mock -- to prove the write actually
 persists and round-trips.
 """
 
+<<<<<<< HEAD
 import os
+=======
+from typing import Iterator
+>>>>>>> upstream/master
 
 import pytest
 
@@ -29,6 +43,7 @@ except ImportError:
     pass
 
 
+<<<<<<< HEAD
 @pytest.fixture(scope="module")
 def pg_dsn_for_temporal_options():
     """Module-scoped DSN string for live-PG temporal_options tests. Skips
@@ -76,6 +91,17 @@ def golden_repos_metadata_table(pg_dsn_for_temporal_options):
     yield pg_dsn_for_temporal_options
     with psycopg.connect(pg_dsn_for_temporal_options, autocommit=True) as conn:
         conn.execute("DROP TABLE IF EXISTS golden_repos_metadata")
+=======
+@pytest.fixture
+def golden_repos_metadata_table(migrated_scratch_pg_dsn: str) -> Iterator[str]:
+    """The real, migrated golden_repos_metadata table in this module's own
+    database; emptied after each test."""
+    import psycopg
+
+    yield migrated_scratch_pg_dsn
+    with psycopg.connect(migrated_scratch_pg_dsn, autocommit=True) as conn:
+        conn.execute("DELETE FROM golden_repos_metadata")
+>>>>>>> upstream/master
 
 
 @pytest.mark.skipif(not HAS_PSYCOPG_FOR_LIVE_PG, reason="psycopg not available")

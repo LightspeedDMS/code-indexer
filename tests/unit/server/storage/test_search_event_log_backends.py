@@ -704,7 +704,12 @@ class TestPostgresGetHitRateCountsWindowingMocked:
 
         assert counts == {"hits": 3, "requests": 5}
         sql_arg, params_arg = conn.execute.call_args[0]
+<<<<<<< HEAD
         assert "WHERE" not in sql_arg.upper()
+=======
+        # Story #2117: the WHERE only excludes failed searches.
+        assert "TIMESTAMP >=" not in sql_arg.upper()
+>>>>>>> upstream/master
         assert "?" not in sql_arg
         assert list(params_arg) == ["on", "on", "on", "on"]
 

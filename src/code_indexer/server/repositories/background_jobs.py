@@ -26,6 +26,8 @@ from dataclasses import dataclass, asdict, fields
 # at module scope (not under TYPE_CHECKING) because we need the runtime
 # class object, not just the type annotation.
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+from code_indexer.server.storage.shared.job_status_filter import statuses_for_filter
+from code_indexer.utils.credential_redaction import with_masked_repo_url
 
 # Bug #1256: driver-agnostic classifier shared with the INSERT-path
 # unique-violation detection in job_tracker._atomic_insert_impl (Bug
@@ -39,6 +41,7 @@ from code_indexer.server.services.job_tracker import (
     is_active_job_unique_violation,
     is_restart_interruption_error,
 )
+<<<<<<< HEAD
 
 from code_indexer.utils.worker_budget import (
     detect_worker_count,
@@ -46,6 +49,8 @@ from code_indexer.utils.worker_budget import (
 )
 
 logger = logging.getLogger(__name__)
+=======
+>>>>>>> upstream/master
 
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import (
@@ -88,6 +93,13 @@ _OPERATIONS_WITHOUT_REPO_ALIAS_BY_DESIGN = frozenset(
 # platform added to _resolve_provider is covered automatically.
 _OPERATION_SUFFIXES_WITHOUT_REPO_ALIAS_BY_DESIGN = ("_discovery",)
 
+<<<<<<< HEAD
+=======
+# Bug #1964: /health counts only failures this recent -- with 30-day job
+# retention, an all-time count kept one old failure 'degraded' for a month.
+HEALTH_FAILED_JOB_WINDOW = "24h"
+
+>>>>>>> upstream/master
 
 def _operation_omits_repo_alias_by_design(operation_type: str) -> bool:
     """Bug #1535: True when `operation_type` is a known, intentional,
@@ -117,8 +129,14 @@ class JobStatus(str, Enum):
     # Bug #1950: a terminal status distinct from FAILED for a job whose
     # worker process was killed by a server restart/shutdown rather than a
     # genuine failure -- /health's degraded computation counts ONLY
+<<<<<<< HEAD
     # status='failed' rows, so this keeps a restart artifact from
     # poisoning that count forever while a genuine failure still trips it.
+=======
+    # status='failed' rows (completed within the last 24h, Bug #1964), so
+    # this keeps a restart artifact out of that count while a genuine
+    # failure still trips it.
+>>>>>>> upstream/master
     INTERRUPTED = "interrupted"
 
 
@@ -223,6 +241,18 @@ PROGRESS_DEBOUNCE_INTERVAL: float = 0.5
 # are unaffected and continue to respect PROGRESS_DEBOUNCE_INTERVAL.
 PROGRESS_COARSE_JUMP_THRESHOLD: int = 10
 
+<<<<<<< HEAD
+=======
+# Bug #2012: a running job's cancel flag is re-read from the shared DB on
+# every progress tick and every cancel poll (~2 s). A failed read is logged
+# at WARNING on the 1st and every CANCEL_READ_WARN_EVERY-th consecutive
+# failure, and at ERROR once when the streak reaches
+# CANCEL_READ_ESCALATE_AFTER. The job is never stopped for it -- these
+# bound the LOGGING, never the job's runtime (Bug #1218).
+CANCEL_READ_WARN_EVERY: int = 30
+CANCEL_READ_ESCALATE_AFTER: int = 150
+
+>>>>>>> upstream/master
 # Bug #1063 Part 4: Hard cap on page_size for list_jobs() and get_jobs_for_display().
 # Prevents unbounded DB fetches caused by large or uncapped page_size values.
 # The dashboard and API consumers use at most 50 rows per page in practice.
@@ -240,10 +270,13 @@ _MEMORY_HEAVY_OPS: frozenset = frozenset(
         "provider_temporal_index_rebuild",
         "sync_repository",
         "change_branch",
+<<<<<<< HEAD
         # A semantic re-embed re-runs `cidx index` (VoyageAI embed) on a golden clone —
         # as heavy as add_golden_repo, so it goes through the same memory-admission gate.
         # Must equal semantic_backfill.policy.SEMANTIC_BACKFILL_REINDEX_OP (validate_dispatch_covers).
         "semantic_backfill_reindex",
+=======
+>>>>>>> upstream/master
     }
 )
 
@@ -256,6 +289,7 @@ _MEMORY_HEAVY_OPS: frozenset = frozenset(
 # IndexJobClaimLoop, or it simply keeps the legacy local-pool path.
 # Public (imported by distributed_job_worker + index_job_claim_loop + lifespan)
 # so the ops set has a single source of truth across the cluster job plumbing.
+<<<<<<< HEAD
 #
 # EVO-66445: fts_backfill_build is POD_PULL (work-stealable across pods) but NOT
 # memory-heavy — a tantivy rebuild is a cheap LOCAL build, so it must not be gated by
@@ -276,6 +310,9 @@ _MEMORY_HEAVY_OPS: frozenset = frozenset(
 POD_PULL_OPS: frozenset = _MEMORY_HEAVY_OPS | frozenset(
     {"fts_backfill_build", "global_repo_refresh"}
 )
+=======
+POD_PULL_OPS: frozenset = _MEMORY_HEAVY_OPS
+>>>>>>> upstream/master
 
 # Memory-aware admission: min seconds between "deferring under memory pressure" INFO
 # logs per manager, so a sustained RED spell (a heavy job deferred every
@@ -333,6 +370,9 @@ class BackgroundJobManager:
         self._job_tracker: Optional["JobTracker"] = job_tracker
         self._executor = None
         self._running_jobs: Dict[str, threading.Thread] = {}
+        # Bug #2012: consecutive failed reads of each running job's cancel
+        # flag (guarded by self._lock; see _check_db_cancellation).
+        self._cancel_read_failures: Dict[str, int] = {}
         self._job_queue: queue.PriorityQueue = queue.PriorityQueue()
         # Story #26: Queue for pending jobs waiting for a slot
         self._pending_job_queue: queue.Queue = queue.Queue()
@@ -445,6 +485,7 @@ class BackgroundJobManager:
         # reading ONLY _temporal_pending_job_queue -- real isolation, so a
         # saturated ordinary lane can never starve a temporal job and vice
         # versa. Sized by temporal_lane_concurrency (restart-required).
+<<<<<<< HEAD
         #
         # R4 exemption: deliberately NOT divided by the worker count. It
         # defaults to 2, so halving it on a 2-worker node leaves 1 -- and the
@@ -452,6 +493,8 @@ class BackgroundJobManager:
         # queued behind the ordinary pool. The lane is latency isolation, not a
         # resource budget. A test pins this so a later divide-by-workers pass
         # cannot absorb it without a decision.
+=======
+>>>>>>> upstream/master
         self._temporal_pool_size = (
             self._background_jobs_config.temporal_lane_concurrency
         )
@@ -1029,6 +1072,10 @@ class BackgroundJobManager:
                     # (sqlite_backends.py:2510), but field testers misread it as
                     # "submitter is not admin". Remove from public projection.
                     db_job.pop("is_admin", None)
+                    # A registration URL kept in the job's metadata (needed to
+                    # run the job) is returned with its userinfo redacted.
+                    if isinstance(db_job.get("metadata"), dict):
+                        db_job["metadata"] = with_masked_repo_url(db_job["metadata"])
                     return db_job  # type: ignore[no-any-return]
             except Exception as e:
                 logging.error(f"Failed to get job {job_id} from SQLite: {e}")
@@ -1098,7 +1145,10 @@ class BackgroundJobManager:
                         job
                         for job in self.jobs.values()
                         if (is_admin or job.username == username)
-                        and (not status_filter or job.status.value == status_filter)
+                        and (
+                            not status_filter
+                            or job.status.value in statuses_for_filter(status_filter)
+                        )
                     ]
                 active_count = len(active_matching)
 
@@ -1127,7 +1177,11 @@ class BackgroundJobManager:
                     for job in self.jobs.values():
                         if not is_admin and job.username != username:
                             continue
-                        if status_filter and job.status.value != status_filter:
+                        if (
+                            status_filter
+                            and job.status.value
+                            not in statuses_for_filter(status_filter)
+                        ):
                             continue
                         merged[job.job_id] = self._job_to_dict(job)
                 # Sort by created_at descending (all values are isoformat strings)
@@ -1158,9 +1212,8 @@ class BackgroundJobManager:
 
             # Apply status filter if provided
             if status_filter:
-                user_jobs = [
-                    job for job in user_jobs if job.status.value == status_filter
-                ]
+                selected = statuses_for_filter(status_filter)
+                user_jobs = [job for job in user_jobs if job.status.value in selected]
 
             # Sort by creation time (newest first)
             user_jobs.sort(key=lambda x: x.created_at, reverse=True)
@@ -1464,8 +1517,13 @@ class BackgroundJobManager:
                         # still running/pending at startup was orphaned by
                         # this process's own restart, a restart artifact
                         # rather than a genuine failure, so it must not
+<<<<<<< HEAD
                         # poison get_failed_job_count() (which /health
                         # reads with no time window) forever.
+=======
+                        # count toward /health's failed jobs (status=
+                        # 'failed' within the last 24h, Bug #1964).
+>>>>>>> upstream/master
                         job.status = JobStatus.INTERRUPTED
                         job.completed_at = now
                         job.error = error
@@ -1536,8 +1594,19 @@ class BackgroundJobManager:
 
         Called from progress_callback to detect cancellations triggered
         on a different cluster node.  Bug #584.
+
+        Bug #2012: a failed read is never silent and never stops the job.
+        The 1st and every CANCEL_READ_WARN_EVERY-th consecutive failure is
+        logged at WARNING with its traceback; reaching
+        CANCEL_READ_ESCALATE_AFTER consecutive failures is logged at ERROR
+        exactly once (a cancel cannot be honoured while reads keep failing).
+        The job keeps running either way -- there is no wall-clock limit on
+        legitimate long work. A successful read ends the streak.
         """
+        if self._sqlite_backend is None:
+            return
         try:
+<<<<<<< HEAD
             if self._sqlite_backend is not None:
                 job_data = self._sqlite_backend.get_job(job_id)
                 if job_data and job_data.get("status") == "cancelled":
@@ -1556,6 +1625,47 @@ class BackgroundJobManager:
                 exc_info=True,
             )
             pass  # Best-effort — don't break progress reporting
+=======
+            job_data = self._sqlite_backend.get_job(job_id)
+        except Exception:
+            with self._lock:
+                failures = self._cancel_read_failures.get(job_id, 0) + 1
+                self._cancel_read_failures[job_id] = failures
+            if failures == CANCEL_READ_ESCALATE_AFTER:
+                logging.error(
+                    "Cancel flag of job %s unreadable for %d consecutive checks; "
+                    "the job keeps running but a cancel cannot be honoured "
+                    "until reads recover",
+                    job_id,
+                    failures,
+                    exc_info=True,
+                )
+            elif failures == 1 or failures % CANCEL_READ_WARN_EVERY == 0:
+                logging.warning(
+                    "Could not read the cancel flag of job %s (consecutive "
+                    "failure %d); the job keeps running",
+                    job_id,
+                    failures,
+                    exc_info=True,
+                )
+            return
+        with self._lock:
+            streak = self._cancel_read_failures.pop(job_id, 0)
+        if streak:
+            logging.info(
+                "Cancel flag of job %s readable again after %d failed checks",
+                job_id,
+                streak,
+            )
+        if job_data and job_data.get("status") == "cancelled":
+            with self._lock:
+                if job_id in self.jobs:
+                    self.jobs[job_id].cancelled = True
+                    logging.debug(
+                        "Bug #584: Detected cross-node cancellation for job %s",
+                        job_id,
+                    )
+>>>>>>> upstream/master
 
     def _close_thread_connections_on_all_managers(self, job_id: str) -> None:
         """Bug #878 Fix A.3 helper.
@@ -1854,11 +1964,17 @@ class BackgroundJobManager:
                             JobStatus.COMPLETED_PARTIAL,
                         ):
                             # Bug #679: COMPLETED_PARTIAL is a completion variant — notify tracker
+                            # with the variant, or its write to the same row
+                            # replaces completed_partial with completed.
                             self._job_tracker.complete_job(
                                 job_id,
                                 result=(
                                     job.result if isinstance(job.result, dict) else None
                                 ),
+<<<<<<< HEAD
+=======
+                                status=job.status.value,
+>>>>>>> upstream/master
                             )
                         elif job.status == JobStatus.FAILED:
                             error_msg = (
@@ -1954,8 +2070,13 @@ class BackgroundJobManager:
                 # BackgroundJobManager.shutdown() itself ever gets a chance
                 # to flag this job cancelled) is a restart artifact, not a
                 # genuine failure -- classify it distinctly so it does not
+<<<<<<< HEAD
                 # poison /health's get_failed_job_count() (status='failed'
                 # only, no time window) forever.
+=======
+                # count toward /health's failed jobs (status='failed'
+                # within the last 24h, Bug #1964).
+>>>>>>> upstream/master
                 is_restart_interruption = is_restart_interruption_error(error_msg)
 
                 with self._lock:
@@ -2031,6 +2152,8 @@ class BackgroundJobManager:
                 # concurrency via queue depth.  Only clean up running job ref.
                 with self._lock:
                     self._running_jobs.pop(job_id, None)
+                    # Bug #2012: the cancel-read streak never outlives its job.
+                    self._cancel_read_failures.pop(job_id, None)
         finally:
             # Bug #878 Fix A.3: Proactively close any SQLite connections
             # this worker thread opened on registered DatabaseConnectionManager
@@ -2222,6 +2345,15 @@ class BackgroundJobManager:
                 1 for job in self.jobs.values() if job.status == JobStatus.FAILED
             )
 
+    def get_recent_failed_job_count(self) -> int:
+        """Count failed jobs completed within HEALTH_FAILED_JOB_WINDOW.
+
+        Bug #1964: this -- not the all-time get_failed_job_count() -- is what
+        /health reads to decide 'degraded'. Both job backends answer it with
+        one time-filtered query over the (completed_at, status) index.
+        """
+        return self.get_job_stats_with_filter(HEALTH_FAILED_JOB_WINDOW)["failed"]
+
     def get_running_job_count(self) -> int:
         """
         Get count of currently running jobs (Story #26).
@@ -2340,6 +2472,7 @@ class BackgroundJobManager:
         for _ in range(self._pool_size):
             self._pending_job_queue.put(None)
         # Story #1400 CRITICAL 1: separate sentinels for the separate
+<<<<<<< HEAD
         # temporal-lane queue/pool, mirroring the ordinary pool above --
         # including reading the size the lane was BUILT with rather than
         # re-deriving it from config. Harmless today (the lane is not divided,
@@ -2347,6 +2480,13 @@ class BackgroundJobManager:
         # change to how the lane is sized, or a live config reload, would leave
         # some lane threads without a sentinel, blocked on get() forever.
         for _ in range(self._temporal_pool_size):
+=======
+        # temporal-lane queue/pool (exact per-worker count, mirroring the
+        # ordinary pool above; same config source used to size the pool at
+        # construction).
+        temporal_pool_size = self._background_jobs_config.temporal_lane_concurrency
+        for _ in range(temporal_pool_size):
+>>>>>>> upstream/master
             self._temporal_pending_job_queue.put(None)
 
         with self._lock:
@@ -2733,14 +2873,13 @@ class BackgroundJobManager:
 
     def _load_jobs_sqlite(self) -> None:
         """
-        Load jobs from SQLite database into memory.
+        Startup housekeeping of the persistent job store.
 
-        Story #723: Clean up orphaned jobs before loading.
-        On server restart, any 'running' or 'pending' jobs are orphaned
-        since the processes executing them no longer exist.
-
-        Story #267 Component 6: Clean up old completed/failed jobs before loading.
-        Story #267 Component 8: Load only active/pending jobs (not all 10K).
+        Story #723: Clean up orphaned jobs (rows whose owning process is gone).
+        Story #267 Component 6: Clean up old completed/failed jobs.
+        Bug #2012: active rows that survive the sweep belong to other live
+        workers/nodes and are deliberately NOT loaded into memory -- see the
+        comment at the end of this method.
         """
         if not self._sqlite_backend:
             return
@@ -2783,45 +2922,31 @@ class BackgroundJobManager:
                     f"(older than {max_age} hours)"
                 )
 
-            # Story #267 Component 8: Load only active/pending jobs into memory.
-            # After orphan cleanup marks running/pending as failed, there should
-            # be very few active jobs. Historical data is served from SQLite directly.
-            loaded_count = 0
+            # Bug #2012: running/pending rows that survive the sweep above are
+            # owned by ANOTHER live process (a sibling worker, or another
+            # node in cluster mode) -- this process can neither execute nor
+            # track them. They are NOT loaded into memory: an in-memory copy
+            # is never updated again and, because list_jobs/get_job_status
+            # prefer memory over the shared DB, it kept reporting a job
+            # 'running' after its owner had saved it interrupted/finished
+            # (and inflated count_active_refresh_jobs). The shared DB row is
+            # the only source of truth for them; cancel_job already writes a
+            # cancel for a job not in memory straight to the DB.
+            foreign_active = 0
             for status_value in ["running", "pending"]:
-                status_jobs = self._sqlite_backend.list_jobs(
-                    status=status_value,
-                    limit=self.MAX_ACTIVE_JOBS_PER_STATUS,
+                foreign_active += len(
+                    self._sqlite_backend.list_jobs(
+                        status=status_value,
+                        limit=self.MAX_ACTIVE_JOBS_PER_STATUS,
+                    )
                 )
-                for job_dict in status_jobs:
-                    self._deserialize_and_add_job(job_dict)
-                    loaded_count += 1
-
-            logging.info(f"Loaded {loaded_count} active jobs from SQLite into memory")
+            logging.info(
+                f"{foreign_active} active jobs owned by other live workers/nodes "
+                "left in the shared job store (not loaded into memory)"
+            )
 
         except Exception as e:
             logging.error(f"Failed to load jobs from SQLite: {e}")
-
-    def _deserialize_and_add_job(self, job_dict: Dict[str, Any]) -> None:
-        """Deserialize a job dictionary from SQLite and add to in-memory dict.
-
-        Story #267 Component 8: Extracted helper to avoid duplicating deserialization
-        logic when loading jobs per-status in _load_jobs_sqlite.
-        """
-        # Convert ISO strings back to datetime objects
-        for field_name in ["created_at", "started_at", "completed_at"]:
-            if job_dict.get(field_name) is not None and isinstance(
-                job_dict[field_name], str
-            ):
-                job_dict[field_name] = datetime.fromisoformat(job_dict[field_name])
-
-        # Convert string status back to enum
-        job_dict["status"] = JobStatus(job_dict["status"])
-
-        # Create job object (filter unknown keys for forward-compat)
-        job = BackgroundJob(
-            **{k: v for k, v in job_dict.items() if k in _BG_JOB_FIELDS}
-        )
-        self.jobs[job_dict["job_id"]] = job
 
     def _calculate_cutoff(self, time_filter: str) -> datetime:
         """
@@ -2928,7 +3053,11 @@ class BackgroundJobManager:
                 if job.status in [JobStatus.RUNNING, JobStatus.PENDING]:
                     if job.created_at >= cutoff_time:
                         include_job = True
-                elif job.status in [JobStatus.COMPLETED, JobStatus.FAILED]:
+                elif job.status in [
+                    JobStatus.COMPLETED,
+                    JobStatus.COMPLETED_PARTIAL,
+                    JobStatus.FAILED,
+                ]:
                     if job.completed_at and job.completed_at >= cutoff_time:
                         include_job = True
 
@@ -2973,7 +3102,7 @@ class BackgroundJobManager:
                                     created_dt = created_str
                                 if created_dt >= cutoff_time:
                                     include_db_job = True
-                        elif status in ("completed", "failed"):
+                        elif status in ("completed", "completed_partial", "failed"):
                             completed_str = db_job.get("completed_at")
                             if completed_str:
                                 if isinstance(completed_str, str):
@@ -3198,7 +3327,9 @@ class BackgroundJobManager:
                     if hasattr(job.status, "value")
                     else str(job.status)
                 )
-                if status_filter and status_str != status_filter:
+                if status_filter and status_str not in statuses_for_filter(
+                    status_filter
+                ):
                     continue
                 if type_filter and job.operation_type != type_filter:
                     continue

@@ -13,6 +13,10 @@ from typing import Any, Dict
 from code_indexer.server.mcp.handlers import xray_truncation as xt
 
 from ._xray_truncation_test_helpers import (
+<<<<<<< HEAD
+=======
+    OWNER,
+>>>>>>> upstream/master
     fetch_all_pages,
     make_finding,
     pg_cache,  # noqa: F401 -- pytest fixture, used via injection
@@ -41,7 +45,13 @@ class TestLivePostgresPagesRoundTrip:
             "refine": [],
         }
 
+<<<<<<< HEAD
         truncated = xt.truncate_result_fields(result, pg_cache, ["findings", "refine"])
+=======
+        truncated = xt.truncate_result_fields(
+            result, pg_cache, ["findings", "refine"], owner=OWNER
+        )
+>>>>>>> upstream/master
 
         pages = fetch_all_pages(pg_cache, truncated["cache_handle"])
         all_findings = [f for p in pages for f in p["findings"]]

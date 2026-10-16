@@ -99,9 +99,11 @@ def cache(memories_dir: Path) -> MemoryMetadataCache:
 
 @pytest.fixture
 def service(
-    group_manager: GroupAccessManager, cache: MemoryMetadataCache
+    group_manager: GroupAccessManager, cache: MemoryMetadataCache, memories_dir: Path
 ) -> AccessFilteringService:
-    return AccessFilteringService(group_manager, memory_metadata_cache=cache)
+    return AccessFilteringService(
+        group_manager, memory_metadata_cache=cache, memories_dir=memories_dir
+    )
 
 
 @pytest.fixture
@@ -377,3 +379,142 @@ def test_admin_sees_memory_files_for_repos_not_granted_to_admins(
 
     assert f"{MEMORY_ID_REPO}.md" in result
     assert f"{MEMORY_ID_GLOBAL}.md" in result
+
+
+# ---------------------------------------------------------------------------
+# filter_visible_memory_ids: the same rule applied to bare memory ids
+# ---------------------------------------------------------------------------
+
+
+def _write_scoped_memories(memories_dir: Path) -> None:
+    _write_memory_file(
+        memories_dir, MEMORY_ID_REPO, scope="repo", referenced_repo="my-repo"
+    )
+    _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
+    _write_memory_file(
+        memories_dir, MEMORY_ID_FILE, scope="file", referenced_repo="ungranted-repo"
+    )
+
+
+def test_visible_memory_ids_keep_input_order_and_apply_scope_rule(
+    service: AccessFilteringService, memories_dir: Path, poweruser: str
+) -> None:
+    _write_scoped_memories(memories_dir)
+    ids = [MEMORY_ID_REPO, MEMORY_ID_FILE, MEMORY_ID_MISSING, MEMORY_ID_GLOBAL]
+
+    assert service.filter_visible_memory_ids(ids, poweruser) == [
+        MEMORY_ID_REPO,
+        MEMORY_ID_GLOBAL,
+    ]
+
+
+def test_visible_memory_ids_drop_non_memory_identifiers(
+    service: AccessFilteringService, poweruser: str
+) -> None:
+    assert service.filter_visible_memory_ids(["my-repo", "README", ""], poweruser) == []
+
+
+def test_visible_memory_ids_admin_keeps_every_id(
+    service: AccessFilteringService, memories_dir: Path, admin_user: str
+) -> None:
+    _write_scoped_memories(memories_dir)
+    ids = [MEMORY_ID_FILE, MEMORY_ID_MISSING, MEMORY_ID_GLOBAL]
+
+    assert service.filter_visible_memory_ids(ids, admin_user) == ids
+
+
+def test_visible_memory_ids_empty_input(
+    service: AccessFilteringService, poweruser: str
+) -> None:
+    assert service.filter_visible_memory_ids([], poweruser) == []
+
+
+def test_visible_memory_ids_resolve_grants_once_per_call(
+    service: AccessFilteringService,
+    group_manager: GroupAccessManager,
+    memories_dir: Path,
+    poweruser: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_scoped_memories(memories_dir)
+    calls = []
+    real_get_group_repos = group_manager.get_group_repos
+
+    def _counting_get_group_repos(group_id: int) -> Any:
+        calls.append(group_id)
+        return real_get_group_repos(group_id)
+
+    monkeypatch.setattr(group_manager, "get_group_repos", _counting_get_group_repos)
+    ids = [MEMORY_ID_REPO, MEMORY_ID_FILE, MEMORY_ID_GLOBAL]
+
+    service.filter_visible_memory_ids(ids, poweruser)
+
+    assert len(calls) == 1
+
+
+def test_visible_memory_ids_see_scope_change_written_by_another_instance(
+    group_manager: GroupAccessManager, memories_dir: Path, poweruser: str
+) -> None:
+    """Each node authorizes from the file as it is now, never a cached scope.
+
+    The reader's cache stays warm with the old scope on purpose: on another
+    cluster node nothing invalidates it when the writer node edits the file.
+    """
+    writer_cache = MemoryMetadataCache(memories_dir, ttl_seconds=60)
+    reader_cache = MemoryMetadataCache(memories_dir, ttl_seconds=60)
+    reader = AccessFilteringService(
+        group_manager, memory_metadata_cache=reader_cache, memories_dir=memories_dir
+    )
+    _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
+    reader_cache.get(MEMORY_ID_GLOBAL)
+    assert reader.filter_visible_memory_ids([MEMORY_ID_GLOBAL], poweruser) == [
+        MEMORY_ID_GLOBAL
+    ]
+
+    _write_memory_file(
+        memories_dir, MEMORY_ID_GLOBAL, scope="repo", referenced_repo="ungranted-repo"
+    )
+    writer_cache.invalidate(MEMORY_ID_GLOBAL)
+
+    assert reader.filter_visible_memory_ids([MEMORY_ID_GLOBAL], poweruser) == []
+
+
+def test_visible_memory_ids_admin_gets_only_memory_identifiers(
+    service: AccessFilteringService, memories_dir: Path, admin_user: str
+) -> None:
+    _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
+    ids = ["my-repo", MEMORY_ID_GLOBAL, "../escape", ""]
+
+    assert service.filter_visible_memory_ids(ids, admin_user) == [MEMORY_ID_GLOBAL]
+
+
+def test_visible_memory_ids_hide_non_string_referenced_repo(
+    service: AccessFilteringService, memories_dir: Path, poweruser: str
+) -> None:
+    memories_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_memory_file(
+        memories_dir / f"{MEMORY_ID_REPO}.md",
+        {"id": MEMORY_ID_REPO, "scope": "repo", "referenced_repo": 12345},
+    )
+
+    assert service.filter_visible_memory_ids([MEMORY_ID_REPO], poweruser) == []
+
+
+def test_visible_memory_ids_hide_everything_without_memories_dir(
+    group_manager: GroupAccessManager,
+    cache: MemoryMetadataCache,
+    memories_dir: Path,
+    poweruser: str,
+) -> None:
+    _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
+    cache_only = AccessFilteringService(group_manager, memory_metadata_cache=cache)
+
+    assert cache_only.filter_visible_memory_ids([MEMORY_ID_GLOBAL], poweruser) == []
+
+
+def test_visible_memory_ids_hide_unreadable_memory_path(
+    service: AccessFilteringService, memories_dir: Path, poweruser: str
+) -> None:
+    (memories_dir / f"{MEMORY_ID_GLOBAL}.md").mkdir(parents=True)
+
+    assert service.filter_visible_memory_ids([MEMORY_ID_GLOBAL], poweruser) == []

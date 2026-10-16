@@ -38,8 +38,11 @@ class GlobalReposBackend(Protocol):
 
     def update_enable_scip(self, alias_name: str, enable_scip: bool) -> bool: ...
 
+<<<<<<< HEAD
     def update_index_path(self, alias_name: str, index_path: str) -> bool: ...
 
+=======
+>>>>>>> upstream/master
     def update_next_refresh(
         self, alias_name: str, next_refresh: Optional[str]
     ) -> bool: ...

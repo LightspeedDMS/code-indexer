@@ -256,10 +256,9 @@ class TestInstallMethodIntegration:
                     "create_startup_script",
                     return_value=installer.server_dir / "start.sh",
                 ):
-                    with patch.object(installer, "seed_initial_admin_user"):
-                        with patch.object(
-                            installer, "install_claude_cli"
-                        ) as mock_install_cli:
-                            installer.install()
+                    with patch.object(
+                        installer, "install_claude_cli"
+                    ) as mock_install_cli:
+                        installer.install()
 
         mock_install_cli.assert_called_once()

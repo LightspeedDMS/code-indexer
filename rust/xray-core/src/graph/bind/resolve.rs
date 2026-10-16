@@ -87,7 +87,11 @@ fn package_prefix(path: &str) -> Option<&str> {
 /// of` only ever returns the ROOT ancestor, never an intermediate one, and
 /// this binder deliberately carries no qualified-name/lexical-chain
 /// substrate that could walk the remaining levels (see `docs/
+<<<<<<< HEAD
 /// xray-architecture.md`'s "What a future round 8 would need" -- the same
+=======
+/// architecture/xray/architecture.md`'s "What a future round 8 would need" -- the same
+>>>>>>> upstream/master
 /// `(enclosing_method, name)`-shaped scope-key gap, here at the type-nesting
 /// level instead of the local-binding level). For that uncovered depth,
 /// this function correctly contributes NO bit at all -- under-tagging,

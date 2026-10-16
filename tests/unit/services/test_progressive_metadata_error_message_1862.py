@@ -3,6 +3,7 @@
 INVARIANT (see the reasoning comment on `start_indexing()` in
 `progressive_metadata.py` for the canonical statement): `error_message`
 describes only the run whose metadata it currently sits in. Any transition
+<<<<<<< HEAD
 that starts, resumes, records new work for, or completes a run must
 therefore drop the previous run's error before that transition's own work
 begins. Four call sites currently enforce this: `start_indexing()`,
@@ -36,6 +37,21 @@ each found one more missed exit:
    `tests/unit/infrastructure/test_smart_indexer.py` -- it lives there
    rather than in this file because it needs a real `SmartIndexer` driving
    the real incremental path, not just `ProgressiveMetadata` in isolation.
+=======
+that starts or completes a run must therefore drop the previous run's error
+before that transition's own work begins. Two call sites enforce this:
+`start_indexing()` and `complete_indexing()`.
+
+Story #2121 retired resume-from-list (`set_files_to_index()` and
+`resume_indexing()` are gone): an interrupted run (status in_progress or
+failed, including a legacy file holding a leftover `error_message`) is
+recovered by a reconcile that starts a fresh run whenever it has work, or
+completes at once when it has none -- either transition drops the error.
+That route is proved end to end by
+`TestLegacyInProgressMetadataErrorClearedByReconcile` in
+`tests/unit/infrastructure/test_smart_indexer.py` (it needs a real
+`SmartIndexer`, not just `ProgressiveMetadata` in isolation).
+>>>>>>> upstream/master
 
 These tests use a real temp directory and real JSON persistence (no
 filesystem mocking), and each assertion reloads a FRESH `ProgressiveMetadata`
@@ -44,6 +60,11 @@ this is what actually proves the persisted JSON changed, matching how the
 production bug was discovered (read out of a file, not out of memory).
 """
 
+<<<<<<< HEAD
+=======
+import time
+
+>>>>>>> upstream/master
 from code_indexer.services.progressive_metadata import ProgressiveMetadata
 
 
@@ -63,7 +84,11 @@ class TestCompleteIndexingClearsErrorMessage:
             "'hnswlib.Index' object has no attribute 'check_integrity'"
         )
 
+<<<<<<< HEAD
         metadata.complete_indexing()
+=======
+        metadata.complete_indexing(time.time())
+>>>>>>> upstream/master
 
         # Reload from disk with a fresh instance -- proves persisted JSON,
         # not just the in-memory dict, reflects the removal.
@@ -76,12 +101,17 @@ class TestStartIndexingClearsErrorMessage:
     """Bug #1862: an in-progress run must not display the PREVIOUS run's error.
 
     This covers the window complete_indexing() alone cannot: a crash between
+<<<<<<< HEAD
     start_indexing() and complete_indexing() on a FRESH run that follows a
     failed one. It does not cover a RESUMED run continuing that same failed
     attempt -- see TestResumeIndexingClearsErrorMessage below for that
     window (a further window, legacy in-progress metadata on the
     incremental/reconcile paths, is covered outside this file -- see the
     module docstring above).
+=======
+    start_indexing() and complete_indexing() on a run that follows a failed
+    one.
+>>>>>>> upstream/master
     """
 
     def test_start_indexing_clears_error_message_on_disk(self, tmp_path):
@@ -94,6 +124,7 @@ class TestStartIndexingClearsErrorMessage:
         reloaded = _create_metadata(tmp_path)
         assert "error_message" not in reloaded.metadata
         assert reloaded.metadata["status"] == "in_progress"
+<<<<<<< HEAD
 
 
 class TestResumeIndexingClearsErrorMessage:
@@ -134,3 +165,5 @@ class TestResumeIndexingClearsErrorMessage:
         # Bug #467: status must remain "failed" through the resume so
         # can_resume_interrupted_operation() keeps accepting it.
         assert reloaded.metadata["status"] == "failed"
+=======
+>>>>>>> upstream/master

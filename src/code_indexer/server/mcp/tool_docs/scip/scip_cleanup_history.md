@@ -29,4 +29,7 @@ INPUTS:
 RETURNS:
 - history: Array of cleanup history entries with cleanup_id, started_at, completed_at, and workspaces_cleaned fields
 
-PERMISSIONS: Requires manage_users (admin only).
+PERMISSIONS: Requires manage_users (admin only) and, when elevation enforcement is on, an active elevation window (TOTP step-up via `elevate_session`).
+
+ERRORS:
+- elevation_required: TOTP step-up needed (only when elevation enforcement is on)

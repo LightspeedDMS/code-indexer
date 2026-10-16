@@ -232,17 +232,18 @@ class TestFtsBootstrap:
         fts_index_dir = git_repo / ".code-indexer" / "tantivy_index"
         assert not (fts_index_dir / "meta.json").exists()
 
-        mock_fts = MagicMock()
+        indexer.smart_index(enable_fts=True)
 
-        with patch(
-            "code_indexer.services.tantivy_index_manager.TantivyIndexManager",
-            return_value=mock_fts,
-        ):
-            indexer.smart_index(enable_fts=True)
+        # Observable outcome (real Tantivy): the new index was bootstrapped
+        # from the files on disk -- nothing was embedded -- and committed,
+        # and is marked content-current (Bug #2056).
+        from code_indexer.services.fts_file_documents import (
+            fts_content_version_is_current,
+        )
+        from code_indexer.services.fts_lifecycle import committed_document_count
 
-        # Observable outcome: add_document must have been called at least once
-        # (bootstrapping from disk files), proving the FTS index was populated.
-        assert mock_fts.add_document.call_count >= 1
+        assert committed_document_count(fts_index_dir) >= 1
+        assert fts_content_version_is_current(fts_index_dir)
 
     def test_populate_fts_not_called_when_fts_index_already_exists(
         self, tmp_path: Path, git_repo: Path, mock_vector_store: MagicMock
@@ -254,14 +255,50 @@ class TestFtsBootstrap:
         indexer.embedding_provider.get_current_model.return_value = "voyage-code-3"
         self._seed_completed_metadata(indexer, git_repo)
 
+<<<<<<< HEAD
         # Create meta.json so the FTS index appears to already exist.
         self._seed_stub_fts_meta_json(git_repo)
+=======
+        # Bug #2056: a REAL current-schema index holding one repo-relative
+        # document -- smart_index() now probes the on-disk index (empty or
+        # absolute-path documents force a one-time rebuild), so a stub
+        # meta.json would fail that probe and silently disable FTS.
+        from code_indexer.services.tantivy_index_manager import (
+            TantivyIndexManager as RealTantivyIndexManager,
+        )
+
+        real_fts = RealTantivyIndexManager(git_repo / ".code-indexer" / "tantivy_index")
+        real_fts.initialize_index(create_new=True)
+        real_fts.add_document(
+            {
+                "path": "existing.py",
+                "content": "EXISTING = 1",
+                "content_raw": "EXISTING = 1",
+                "identifiers": ["EXISTING"],
+                "line_start": 1,
+                "line_end": 1,
+                "language": "py",
+            }
+        )
+        real_fts.commit()
+        real_fts.close()
+        from code_indexer.services.fts_file_documents import (
+            mark_fts_content_current,
+        )
+
+        # Built by fixed code: content-current, so no one-time rebuild.
+        mark_fts_content_current(git_repo / ".code-indexer" / "tantivy_index")
+>>>>>>> upstream/master
 
         mock_fts = MagicMock()
         # Bug #1763: smart_index() now also consults schema_needs_rebuild()
         # -- False represents a genuinely current-schema existing index,
         # matching this test's "already exists, no bootstrap" intent.
         mock_fts.schema_needs_rebuild.return_value = False
+<<<<<<< HEAD
+=======
+        mock_fts.get_document_count.return_value = 1  # the seeded document
+>>>>>>> upstream/master
 
         with patch(
             "code_indexer.services.tantivy_index_manager.TantivyIndexManager",
@@ -271,6 +308,10 @@ class TestFtsBootstrap:
 
         # FTS index already existed with a current schema ->
         # create_new_fts=False -> no bootstrap.
+<<<<<<< HEAD
+=======
+        mock_fts.initialize_index.assert_called_with(create_new=False)
+>>>>>>> upstream/master
         assert mock_fts.add_document.call_count == 0
 
     def _seed_stub_fts_meta_json(self, git_repo: Path) -> Path:
@@ -298,6 +339,7 @@ class TestFtsBootstrap:
         indexer.embedding_provider.get_current_model.return_value = "voyage-code-3"
         self._seed_completed_metadata(indexer, git_repo)
 
+<<<<<<< HEAD
         # meta.json exists (pre-#1763 code would treat this as
         # create_new_fts=False) but represents a stale schema.
         self._seed_stub_fts_meta_json(git_repo)
@@ -316,6 +358,46 @@ class TestFtsBootstrap:
         mock_fts.schema_needs_rebuild.assert_called()
         mock_fts.initialize_index.assert_called_with(create_new=True)
         assert mock_fts.add_document.call_count >= 1
+=======
+        # A REAL pre-#1761 (stale schema) index already exists, holding a
+        # document for a path that is not in the repository.
+        fts_index_dir = git_repo / ".code-indexer" / "tantivy_index"
+        _build_legacy_fts_index(
+            fts_index_dir,
+            [
+                {
+                    "path": "legacy_only.py",
+                    "content": "LEGACYONLY",
+                    "content_raw": "LEGACYONLY",
+                    "identifiers": ["LEGACYONLY"],
+                    "line_start": 1,
+                    "line_end": 1,
+                    "language": "py",
+                }
+            ],
+        )
+
+        indexer.smart_index(enable_fts=True)
+
+        # The stale schema drove a rebuild from disk (real Tantivy): the
+        # legacy document is gone, the repository's files are indexed under
+        # the current schema, and the index is marked content-current.
+        from code_indexer.services.fts_file_documents import (
+            fts_content_version_is_current,
+        )
+        from code_indexer.services.fts_lifecycle import committed_document_count
+        from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+        assert committed_document_count(fts_index_dir) >= 1
+        assert fts_content_version_is_current(fts_index_dir)
+        fts = TantivyIndexManager(fts_index_dir)
+        fts.initialize_index(create_new=False)
+        try:
+            assert not fts.schema_needs_rebuild()
+            assert "legacy_only.py" not in fts.get_all_indexed_paths()
+        finally:
+            fts.close()
+>>>>>>> upstream/master
 
     def test_populate_fts_from_all_files_reads_files_and_adds_documents(
         self, tmp_path: Path, mock_vector_store: MagicMock
@@ -606,7 +688,9 @@ class TestResumePathReanchoring:
 
 
 class TestResumeReanchorWiring:
-    """End-to-end proof that _do_resume_interrupted re-anchors stored paths.
+    """End-to-end proof that stored paths are re-anchored. Story #2121: the
+    one remaining stored path list is the failed-file retry
+    (failed_file_paths, merged by _merge_recorded_failures).
 
     Reproduces the cow-daemon mount-vs-daemon-local split using a real repo
     plus a symlinked "mount" alias directory. The prior run is simulated by
@@ -631,33 +715,14 @@ class TestResumeReanchorWiring:
         # Current run walks the real (daemon-local) path.
         indexer = _make_indexer(repo, tmp_path, mock_vector_store)
 
-        # Prior run stored the file under the stale MOUNT-alias prefix.
+        # Prior run recorded the failed file under the stale MOUNT-alias prefix.
         stale_stored = str(mount_alias / "trace.json")
-        indexer.progressive_metadata.metadata["files_to_index"] = [stale_stored]
-        indexer.progressive_metadata.metadata["total_files_to_index"] = 1
-        indexer.progressive_metadata.metadata["current_file_index"] = 0
+        indexer.progressive_metadata.metadata["failed_file_paths"] = [stale_stored]
 
-        captured: dict = {}
+        retried, _merged = indexer._merge_recorded_failures([])
 
-        def _capture(files, **kwargs):
-            captured["files"] = list(files)
-            from code_indexer.indexing.processor import ProcessingStats
-
-            return ProcessingStats()
-
-        with patch.object(
-            indexer, "process_files_high_throughput", side_effect=_capture
-        ):
-            indexer._do_resume_interrupted(
-                batch_size=50,
-                progress_callback=None,
-                git_status={},
-                provider_name="voyage-ai",
-                model_name="voyage-code-3",
-            )
-
-        assert captured.get("files"), "resume passed no files to the processor"
-        for file_path in captured["files"]:
+        assert retried, "the failed-file retry returned no files"
+        for file_path in retried:
             # Every file MUST be under the current walk root (no stale prefix).
             rel = file_path.relative_to(repo)
             assert rel == Path("trace.json")

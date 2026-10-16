@@ -140,7 +140,15 @@ def handle_cidx_fetch_cached_payload(
         )
 
     try:
+<<<<<<< HEAD
         result = xray_truncation.fetch_cached_page(payload_cache, cache_handle, page)
+=======
+        # Cached content is served only to its creator: a handle this
+        # caller did not create answers cache_expired, like a missing one.
+        result = xray_truncation.fetch_cached_page(
+            payload_cache, cache_handle, page, user.username
+        )
+>>>>>>> upstream/master
         return _mcp_response({"success": True, **result})
     except Exception as exc:  # noqa: BLE001
         from code_indexer.server.cache.payload_cache import CacheNotFoundError as _CNF

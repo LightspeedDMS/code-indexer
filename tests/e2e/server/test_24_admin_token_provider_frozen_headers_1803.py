@@ -81,6 +81,10 @@ from tests.e2e.server.conftest import (
     _require_env,
     isolated_server_data_dir,
     preserve_root_logging_handlers,
+<<<<<<< HEAD
+=======
+    stop_in_process_stall_watchdog,
+>>>>>>> upstream/master
     wait_for_terminal_job,
 )
 
@@ -164,6 +168,10 @@ def short_lived_provider(
         try:
             with preserve_root_logging_handlers():
                 with TestClient(app, raise_server_exceptions=False) as client:
+<<<<<<< HEAD
+=======
+                    stop_in_process_stall_watchdog(app)
+>>>>>>> upstream/master
                     access, refresh = _do_login(client)
 
                     def _relogin() -> Tuple[str, str | None]:

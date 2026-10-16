@@ -101,6 +101,12 @@ class _DeterministicHashEmbeddingProvider(EmbeddingProvider):
     def supports_batch_processing(self) -> bool:
         return True
 
+<<<<<<< HEAD
+=======
+    def request_max_retries(self) -> int:
+        return 0
+
+>>>>>>> upstream/master
     def _get_model_token_limit(self) -> int:
         return _FAKE_MAX_TOKENS
 
@@ -346,7 +352,16 @@ class TestAnalysisFailuresReportedAndRetried:
         assert stored["failed_file_paths"] == []
         assert stored["status"] == "completed"
 
+<<<<<<< HEAD
     def test_resumed_run_retries_recorded_failures(self, tmp_path: Path) -> None:
+=======
+    def test_interrupted_run_recovery_indexes_failures_without_replaying_the_list(
+        self, tmp_path: Path
+    ) -> None:
+        """Story #2121: the interrupted run is recovered by the reconcile,
+        which plans the failed file (missing from the store) and never
+        replays the stored list (a.py is already indexed)."""
+>>>>>>> upstream/master
         import json
 
         repo = tmp_path / "repo"
@@ -370,7 +385,11 @@ class TestAnalysisFailuresReportedAndRetried:
         second = _make_indexer(repo, metadata_path)
         stats = second.smart_index(force_full=False)
 
+<<<<<<< HEAD
         assert stats.files_processed == 2
+=======
+        assert stats.files_processed == 1
+>>>>>>> upstream/master
         assert _has_indexed_points(second, repo, _FAILING_FILE)
         assert json.loads(metadata_path.read_text())["failed_file_paths"] == []
 

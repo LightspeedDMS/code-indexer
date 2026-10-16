@@ -66,6 +66,12 @@ def mock_filesystem_client():
     client.scroll_points.return_value = ([], None)
     client.get_pending_self_heal_reprocess_paths.return_value = frozenset()
     client.is_self_heal_reprocess_sidecar_corrupt.return_value = False
+<<<<<<< HEAD
+=======
+    # Story #2120 probe: an empty collection (a bare Mock attribute is truthy
+    # and would read as populated).
+    client.has_committed_points.return_value = False
+>>>>>>> upstream/master
     return client
 
 
@@ -77,6 +83,29 @@ def temp_metadata_path():
     yield path
     if path.exists():
         path.unlink()
+
+
+def _make_git_repo(path: Path) -> None:
+    """A real git repository with one (empty) commit at ``path``, for tests
+    that run the reconcile with git availability: its working-change check
+    runs real git and fails loudly outside a repository (Story #2121)."""
+    import subprocess
+
+    for args in (
+        ["init", "-q"],
+        [
+            "-c",
+            "user.name=Example",
+            "-c",
+            "user.email=dev@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    ):
+        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
 
 
 class TestProgressiveMetadata:
@@ -132,7 +161,7 @@ class TestProgressiveMetadata:
         git_status = {"git_available": False}
         metadata.start_indexing("test-provider", "test-model", git_status)
 
-        metadata.complete_indexing()
+        metadata.complete_indexing(time.time())
 
         assert metadata.metadata["status"] == "completed"
 
@@ -352,7 +381,7 @@ class TestSmartIndexer:
         git_status = {"git_available": False, "project_id": "test"}
         metadata.start_indexing("test-provider", "test-model", git_status)
         metadata.update_progress(files_processed=1, chunks_added=5)
-        metadata.complete_indexing()
+        metadata.complete_indexing(time.time())
 
         indexer = SmartIndexer(
             mock_config,
@@ -430,7 +459,7 @@ class TestSmartIndexer:
         git_status = {"git_available": False, "project_id": "test"}
         metadata.start_indexing("test-provider", "test-model", git_status)
         metadata.update_progress(files_processed=1, chunks_added=5)  # Add some progress
-        metadata.complete_indexing()
+        metadata.complete_indexing(time.time())
 
         indexer = SmartIndexer(
             mock_config,
@@ -538,7 +567,7 @@ class TestSmartIndexer:
         metadata = ProgressiveMetadata(temp_metadata_path)
         git_status = {"git_available": False, "project_id": "test"}
         metadata.start_indexing("old-provider", "old-model", git_status)
-        metadata.complete_indexing()
+        metadata.complete_indexing(time.time())
 
         indexer = SmartIndexer(
             mock_config,
@@ -709,7 +738,7 @@ class TestIndexingExceptionHandling:
         git_status = {"git_available": False, "project_id": "test"}
         metadata.start_indexing("test-provider", "test-model", git_status)
         metadata.update_progress(files_processed=1, chunks_added=5)
-        metadata.complete_indexing()
+        metadata.complete_indexing(time.time())
 
         indexer = SmartIndexer(
             mock_config,
@@ -783,6 +812,7 @@ class TestIndexingExceptionHandling:
             temp_metadata_path,
         )
 
+        _make_git_repo(mock_config.codebase_dir)
         # Create a test file in the codebase directory
         test_file = mock_config.codebase_dir / "test.py"
         test_file.write_text("# Test content\n")
@@ -859,6 +889,7 @@ class TestIndexingExceptionHandling:
             temp_metadata_path,
         )
 
+        _make_git_repo(mock_config.codebase_dir)
         # Create a test file in the codebase directory
         test_file = mock_config.codebase_dir / "test.py"
         test_file.write_text("# Test content\n")
@@ -923,7 +954,60 @@ class TestIndexingExceptionHandling:
             if test_file.exists():
                 test_file.unlink()
 
-    def test_end_indexing_called_on_resume_exception(
+    _FAILED_RUN_ERROR = "'hnswlib.Index' object has no attribute 'check_integrity'"
+
+    def _seed_failed_run_metadata(self, temp_metadata_path):
+        """Bug #1862 helper: run 1 started, then failed with an error."""
+        metadata = ProgressiveMetadata(temp_metadata_path)
+        git_status = {"git_available": True, "project_id": "test"}
+        metadata.start_indexing("test-provider", "test-model", git_status)
+        metadata.fail_indexing(self._FAILED_RUN_ERROR)
+        return git_status
+
+    def _run_cancelled_recovery(
+        self, indexer, mock_filesystem_client, git_status, test_file
+    ):
+        """Drive the REAL smart_index() over the failed run. Story #2121:
+        it is recovered by the reconcile, here re-interrupted (cancelled),
+        so complete_indexing() never runs. Returns the reconcile's
+        processing mock."""
+        from code_indexer.services.high_throughput_processor import (
+            BranchIndexingResult,
+        )
+
+        with (
+            patch.object(indexer, "get_git_status") as mock_git_status,
+            patch.object(indexer, "file_finder") as mock_file_finder,
+            patch.object(indexer, "_get_indexed_files_snapshot") as mock_snapshot,
+            patch.object(
+                indexer, "process_branch_changes_high_throughput"
+            ) as mock_branch_changes,
+            patch.object(indexer, "_cleanup_multiple_visible_content_points"),
+        ):
+            mock_git_status.return_value = git_status
+            mock_file_finder.find_files.return_value = [test_file]
+            mock_snapshot.return_value = {}  # the file is missing from the store
+            mock_branch_changes.return_value = BranchIndexingResult(
+                files_processed=0,
+                content_points_created=0,
+                cancelled=True,  # re-interrupted mid-recovery
+                processing_time=0.1,
+            )
+            mock_filesystem_client.ensure_provider_aware_collection.return_value = (
+                "test_collection"
+            )
+            mock_filesystem_client.resolve_collection_name.return_value = (
+                "test_collection"
+            )
+            mock_filesystem_client.end_indexing.return_value = {"vectors_indexed": 0}
+            indexer.git_topology_service.is_git_available = Mock(return_value=True)
+            indexer.git_topology_service.get_current_branch = Mock(
+                return_value="master"
+            )
+            indexer.smart_index(force_full=False)
+        return mock_branch_changes
+
+    def test_failed_run_recovery_clears_error_message_1862(
         self,
         mock_config,
         mock_embedding_provider,
@@ -931,22 +1015,20 @@ class TestIndexingExceptionHandling:
         temp_metadata_path,
     ):
         """
-        CRITICAL TEST: Verify that end_indexing() is called even when exception occurs during resume.
-
-        This prevents FilesystemVectorStore from being left in unsearchable state.
+        Bug #1862 / Story #2121: the recovery of a failed run (the reconcile
+        route) that is itself interrupted again must not leave run 1's
+        error_message next to its own progress: the reconcile starts a fresh
+        run, which drops the error, and stays in_progress so the next run
+        reconciles again.
         """
-        # Create temporary files for resume FIRST
-        temp_file1 = mock_config.codebase_dir / "test1.py"
-        temp_file2 = mock_config.codebase_dir / "test2.py"
-        temp_file1.write_text("# Test 1\n")
-        temp_file2.write_text("# Test 2\n")
-
-        # Setup interrupted metadata with absolute paths
-        metadata = ProgressiveMetadata(temp_metadata_path)
-        git_status = {"git_available": True, "project_id": "test"}
-        metadata.start_indexing("test-provider", "test-model", git_status)
-        metadata.set_files_to_index([temp_file1, temp_file2])
-        # Don't complete - leave it interrupted
+        _make_git_repo(mock_config.codebase_dir)
+        test_file = mock_config.codebase_dir / "test1.py"
+        test_file.write_text("# Test 1\n")
+        git_status = self._seed_failed_run_metadata(temp_metadata_path)
+        assert (
+            ProgressiveMetadata(temp_metadata_path).metadata["error_message"]
+            == self._FAILED_RUN_ERROR
+        )
 
         indexer = SmartIndexer(
             mock_config,
@@ -954,129 +1036,21 @@ class TestIndexingExceptionHandling:
             mock_filesystem_client,
             temp_metadata_path,
         )
-
         try:
-            with (
-                patch.object(indexer, "get_git_status") as mock_git_status,
-                patch.object(
-                    indexer, "process_files_high_throughput"
-                ) as mock_high_throughput,
-            ):
-                # Setup mocks for resume path
-                mock_git_status.return_value = git_status
-
-                # Mock high-throughput processor to raise exception
-                mock_high_throughput.side_effect = RuntimeError(
-                    "Simulated resume failure"
-                )
-
-                mock_filesystem_client.ensure_provider_aware_collection.return_value = (
-                    "test_collection"
-                )
-                mock_filesystem_client.begin_indexing.return_value = None
-                mock_filesystem_client.end_indexing.return_value = {
-                    "vectors_indexed": 0
-                }
-
-                # Execute and expect exception
-                with pytest.raises(RuntimeError, match="Git-aware resume failed"):
-                    indexer._do_resume_interrupted(
-                        batch_size=50,
-                        progress_callback=None,
-                        git_status=git_status,
-                        provider_name="test-provider",
-                        model_name="test-model",
-                        quiet=False,
-                        vector_thread_count=8,
-                    )
-
-                # CRITICAL ASSERTION: end_indexing() MUST be called even when exception occurs
-                mock_filesystem_client.begin_indexing.assert_called()
-                mock_filesystem_client.end_indexing.assert_called()
+            reconcile_processing = self._run_cancelled_recovery(
+                indexer, mock_filesystem_client, git_status, test_file
+            )
         finally:
-            if temp_file1.exists():
-                temp_file1.unlink()
-            if temp_file2.exists():
-                temp_file2.unlink()
+            if test_file.exists():
+                test_file.unlink()
 
-    def test_end_indexing_called_on_resume_success(
-        self,
-        mock_config,
-        mock_embedding_provider,
-        mock_filesystem_client,
-        temp_metadata_path,
-    ):
-        """
-        CRITICAL TEST: Verify that end_indexing() is called on successful resume.
-
-        This ensures FilesystemVectorStore indexes are properly rebuilt.
-        """
-        # Create temporary files for resume FIRST
-        temp_file1 = mock_config.codebase_dir / "test1.py"
-        temp_file2 = mock_config.codebase_dir / "test2.py"
-        temp_file1.write_text("# Test 1\n")
-        temp_file2.write_text("# Test 2\n")
-
-        # Setup interrupted metadata with absolute paths
-        metadata = ProgressiveMetadata(temp_metadata_path)
-        git_status = {"git_available": True, "project_id": "test"}
-        metadata.start_indexing("test-provider", "test-model", git_status)
-        metadata.set_files_to_index([temp_file1, temp_file2])
-        # Don't complete - leave it interrupted
-
-        indexer = SmartIndexer(
-            mock_config,
-            mock_embedding_provider,
-            mock_filesystem_client,
-            temp_metadata_path,
-        )
-
-        try:
-            with (
-                patch.object(indexer, "get_git_status") as mock_git_status,
-                patch.object(
-                    indexer, "process_files_high_throughput"
-                ) as mock_high_throughput,
-            ):
-                # Setup mocks for resume path
-                mock_git_status.return_value = git_status
-
-                # Mock successful high-throughput processing
-                from code_indexer.services.smart_indexer import ProcessingStats
-
-                mock_stats = ProcessingStats()
-                mock_stats.files_processed = 2
-                mock_stats.chunks_created = 10
-                mock_stats.cancelled = False
-                mock_high_throughput.return_value = mock_stats
-
-                mock_filesystem_client.ensure_provider_aware_collection.return_value = (
-                    "test_collection"
-                )
-                mock_filesystem_client.begin_indexing.return_value = None
-                mock_filesystem_client.end_indexing.return_value = {
-                    "vectors_indexed": 10
-                }
-
-                # Execute
-                indexer._do_resume_interrupted(
-                    batch_size=50,
-                    progress_callback=None,
-                    git_status=git_status,
-                    provider_name="test-provider",
-                    model_name="test-model",
-                    quiet=False,
-                    vector_thread_count=8,
-                )
-
-                # CRITICAL ASSERTION: end_indexing() MUST be called on success
-                mock_filesystem_client.begin_indexing.assert_called()
-                mock_filesystem_client.end_indexing.assert_called()
-        finally:
-            if temp_file1.exists():
-                temp_file1.unlink()
-            if temp_file2.exists():
-                temp_file2.unlink()
+        reconcile_processing.assert_called_once()
+        assert reconcile_processing.call_args.kwargs["old_branch"] == ""
+        # Reload from disk with a FRESH instance -- proves the persisted
+        # JSON, not just the in-memory dict, no longer carries run 1's error.
+        reloaded = ProgressiveMetadata(temp_metadata_path)
+        assert "error_message" not in reloaded.metadata
+        assert reloaded.metadata["status"] == "in_progress"
 
     def _seed_failed_run_metadata(
         self, temp_metadata_path, temp_file1, temp_file2, completed_chunk_count
@@ -1321,7 +1295,11 @@ class TestIndexingExceptionHandling:
             mock_filesystem_client.end_indexing.assert_called()
 
 
+<<<<<<< HEAD
 class TestLegacyInProgressMetadataErrorClearedBySetFilesToIndex:
+=======
+class TestLegacyInProgressMetadataErrorClearedByFreshStart:
+>>>>>>> upstream/master
     """Bug #1862, fourth gap (found by independent Codex review): a legacy
     on-disk metadata.json written by PRE-FIX code can hold
     status="in_progress" plus a leftover error_message -- a combination
@@ -1329,6 +1307,7 @@ class TestLegacyInProgressMetadataErrorClearedBySetFilesToIndex:
     exactly one place, start_indexing(), which now also pops the error) but
     can still READ from disk, since an upgrade does not rewrite old files.
 
+<<<<<<< HEAD
     _do_incremental_index() (and _do_reconcile_with_database(), the sibling
     flagged path) only call start_indexing() -- and therefore only pop
     error_message -- when status != "in_progress". A legacy file already
@@ -1338,6 +1317,15 @@ class TestLegacyInProgressMetadataErrorClearedBySetFilesToIndex:
     (full, incremental, reconcile) including both flagged ones, so putting
     the pop there closes the gap without adding orchestrator-level call
     sites in smart_indexer.py.
+=======
+    Story #2121: smart_index() routes such a state to the reconcile, and
+    every run that has work -- incremental or reconcile -- starts a fresh
+    run (start_fresh_indexing -> start_indexing, which pops the error),
+    whatever the stored status. This test drives the incremental path
+    directly with the legacy state (defense in depth: that path no longer
+    skips the fresh start for an in_progress status); the reconcile route is
+    proved by test_failed_run_recovery_clears_error_message_1862.
+>>>>>>> upstream/master
     """
 
     _LEGACY_ERROR = "'hnswlib.Index' object has no attribute 'check_integrity'"
@@ -1372,8 +1360,14 @@ class TestLegacyInProgressMetadataErrorClearedBySetFilesToIndex:
         mocked embedding_provider/vector_store_client fixtures) and the
         injected file_finder collaborator are mocked. stats.cancelled=True
         keeps complete_indexing() -- which has its own, separately-tested
+<<<<<<< HEAD
         error_message pop -- out of the path, isolating set_files_to_index()
         as the only thing that could clear the legacy error here."""
+=======
+        error_message pop -- out of the path, isolating the fresh start
+        (start_fresh_indexing) as the only thing that could clear the legacy
+        error here."""
+>>>>>>> upstream/master
         git_status = {"git_available": False, "project_id": "test"}
 
         with (
@@ -1389,7 +1383,11 @@ class TestLegacyInProgressMetadataErrorClearedBySetFilesToIndex:
             mock_stats = ProcessingStats()
             mock_stats.files_processed = 0
             mock_stats.chunks_created = 0
+<<<<<<< HEAD
             mock_stats.cancelled = True  # isolates set_files_to_index()
+=======
+            mock_stats.cancelled = True  # isolates the fresh start
+>>>>>>> upstream/master
             mock_high_throughput.return_value = mock_stats
 
             mock_filesystem_client.ensure_provider_aware_collection.return_value = (
@@ -1412,7 +1410,11 @@ class TestLegacyInProgressMetadataErrorClearedBySetFilesToIndex:
                 vector_thread_count=8,
             )
 
+<<<<<<< HEAD
     def test_legacy_in_progress_metadata_error_cleared_by_set_files_to_index(
+=======
+    def test_legacy_in_progress_metadata_error_cleared_by_fresh_start(
+>>>>>>> upstream/master
         self,
         mock_config,
         mock_embedding_provider,

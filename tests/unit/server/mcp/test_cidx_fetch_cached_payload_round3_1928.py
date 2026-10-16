@@ -103,7 +103,13 @@ class TestMalformedCacheEntryStructuredError:
         try:
             cache.initialize()
             bad_handle = f"{xt._PAGES_V1_HANDLE_PREFIX}corrupt"
+<<<<<<< HEAD
             cache.store_with_key(bad_handle, "not even json")
+=======
+            cache.store_batch_with_keys(
+                [(bad_handle, "not even json")], owner="testuser"
+            )
+>>>>>>> upstream/master
 
             data = _call({"cache_handle": bad_handle, "page": 1}, cache)
         finally:

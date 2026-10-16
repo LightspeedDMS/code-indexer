@@ -7,8 +7,12 @@ The real ``FilesystemVectorStore.delete_by_filter`` signature is::
 
     def delete_by_filter(self, collection_name: str, filter_conditions: Dict[str, Any]) -> bool:
 
+<<<<<<< HEAD
 Both ``_process_files_with_metadata`` (since deleted: it had no callers) and
 ``delete_file_branch_aware`` called
+=======
+Both ``_process_files_with_metadata`` and ``delete_file_branch_aware`` called
+>>>>>>> upstream/master
 it as ``delete_by_filter(filter_dict, collection_name)`` -- the WRONG order.
 Reproduced against the real ``FilesystemVectorStore``: the swapped call
 raises ``TypeError: unhashable type: 'dict'`` deep inside ``scroll_points``
@@ -16,7 +20,12 @@ raises ``TypeError: unhashable type: 'dict'`` deep inside ``scroll_points``
 valid dict key -- the internal per-collection lock lookup hashes it), caught
 by ``delete_by_filter``'s own broad ``except Exception`` and turned into a
 silent ``return False``. Both call sites' chunk-deletion has therefore never
+<<<<<<< HEAD
 actually deleted anything.
+=======
+actually deleted anything. ``_process_files_with_metadata`` was later deleted
+as dead code (Story #2121), so only ``delete_file_branch_aware`` is checked.
+>>>>>>> upstream/master
 
 Structural (AST-based) regression test, deliberately mirroring the
 established pattern in ``test_smart_indexer_1575_fix4_ast_delete_order.py``

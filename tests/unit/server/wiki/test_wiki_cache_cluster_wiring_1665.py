@@ -86,6 +86,7 @@ def _app_state_wiki_context(
     wiki_cache_backend: Optional[Any] = None,
     golden_repo_manager: Optional[Any] = None,
 ) -> Generator[None, None, None]:
+<<<<<<< HEAD
     """Temporarily configure the REAL server app's app.state for
     resolve_backend_registry_attr("wiki_cache", ...) resolution, restoring
     the exact prior state (including "attribute never existed") on exit.
@@ -114,6 +115,41 @@ def _app_state_wiki_context(
                     delattr(app_module.app.state, attr)
             else:
                 setattr(app_module.app.state, attr, value)
+=======
+    """Temporarily install a running server app whose app.state drives
+    resolve_backend_registry_attr("wiki_cache", ...) resolution, restoring
+    the exact prior module entry (including "never existed") on exit.
+
+    `golden_repo_manager`, when supplied, is set on app.state.golden_repo_manager
+    -- the attribute web/routes.py's _get_golden_repo_manager() reads.
+
+    The app is a lightweight real FastAPI app with a real starlette ``State``,
+    placed in ``code_indexer.server.app.__dict__['app']`` -- where both the
+    production ``app_module.app`` lookups and
+    ``registry_factory._running_server_app_state()`` find it -- NOT the
+    module's lazy ``app`` singleton, whose first access runs the whole
+    ``create_app()`` (~3 s, inside a per-test timeout) for no reason here.
+    """
+    from fastapi import FastAPI
+
+    from code_indexer.server import app as app_module  # never builds the app
+
+    server_app = FastAPI()
+    if postgres_mode:
+        server_app.state.storage_mode = "postgres"
+        server_app.state.backend_registry = _FakeBackendRegistry(wiki_cache_backend)
+    if golden_repo_manager is not None:
+        server_app.state.golden_repo_manager = golden_repo_manager
+    saved = app_module.__dict__.get("app", _UNSET)
+    app_module.__dict__["app"] = server_app
+    try:
+        yield
+    finally:
+        if saved is _UNSET:
+            app_module.__dict__.pop("app", None)
+        else:
+            app_module.__dict__["app"] = saved
+>>>>>>> upstream/master
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +258,7 @@ class TestSite2GoldenRepoManagerLifecycleHook:
         self._register_repo(manager, "wiki-cluster-repo")
         fake_backend = MagicMock(name="fake_wiki_backend")
 
+<<<<<<< HEAD
         # The context is entered FIRST: it reads the real app's state, and on
         # the first access in a process that builds the app -- whose startup
         # constructs its own WikiCache. Inside the WikiCache patch that build
@@ -233,6 +270,12 @@ class TestSite2GoldenRepoManagerLifecycleHook:
             with patch(
                 "code_indexer.server.wiki.wiki_cache.WikiCache"
             ) as MockWikiCache:
+=======
+        with patch("code_indexer.server.wiki.wiki_cache.WikiCache") as MockWikiCache:
+            with _app_state_wiki_context(
+                postgres_mode=True, wiki_cache_backend=fake_backend
+            ):
+>>>>>>> upstream/master
                 self._run_removal_worker(manager, "wiki-cluster-repo")
 
         MockWikiCache.assert_called_once_with(
@@ -261,6 +304,7 @@ class TestSite3McpGuidesHandler:
     def _with_golden_repo_manager(self, grm_mock) -> Generator[None, None, None]:
         from code_indexer.server import app as app_module
 
+<<<<<<< HEAD
         saved = getattr(app_module, "golden_repo_manager", _UNSET)
         try:
             app_module.golden_repo_manager = grm_mock
@@ -271,6 +315,19 @@ class TestSite3McpGuidesHandler:
                     delattr(app_module, "golden_repo_manager")
             else:
                 app_module.golden_repo_manager = saved
+=======
+        # via __dict__: getattr/hasattr on the module would run its PEP 562
+        # __getattr__ and build the whole server app (create_app())
+        saved = app_module.__dict__.get("golden_repo_manager", _UNSET)
+        app_module.__dict__["golden_repo_manager"] = grm_mock
+        try:
+            yield
+        finally:
+            if saved is _UNSET:
+                app_module.__dict__.pop("golden_repo_manager", None)
+            else:
+                app_module.__dict__["golden_repo_manager"] = saved
+>>>>>>> upstream/master
 
     def test_uses_shared_postgres_backend_in_cluster_mode(self, tmp_path):
         from code_indexer.server.mcp.handlers.guides import (

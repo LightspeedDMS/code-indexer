@@ -67,8 +67,16 @@ decoupling -- the constructor argument alone must not determine where the
 version marker is read from or written to.
 """
 
+<<<<<<< HEAD
 from pathlib import Path
 
+=======
+import sys
+from pathlib import Path
+
+import pytest
+
+>>>>>>> upstream/master
 from code_indexer.scip.database.migration import get_scip_db_version
 from code_indexer.scip.database.schema import DatabaseManager
 from code_indexer.scip.query.backends import DatabaseBackend
@@ -200,6 +208,13 @@ class TestResidualConsequenceContextLines:
     source files for sub-project query results once project_root is
     computed correctly (as the sub-project's own directory)."""
 
+<<<<<<< HEAD
+=======
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux"),
+        reason="SCIP context verification reads /proc/self/fd (Linux only)",
+    )
+>>>>>>> upstream/master
     def test_context_lines_resolve_for_subproject_query_result(self, tmp_path):
         repo_root = tmp_path / "repo"
         relative_path = Path("backend") / "service"

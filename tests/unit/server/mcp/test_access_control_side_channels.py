@@ -61,6 +61,8 @@ def _make_access_service(
     if accessible_repos is None:
         accessible_repos = set()
     service.get_accessible_repos = Mock(return_value=accessible_repos)
+    # The caller has no activations of their own.
+    service.caller_activation_sources = Mock(return_value={})
 
     if filter_listing_result is not None:
         service.filter_repo_listing = Mock(return_value=filter_listing_result)

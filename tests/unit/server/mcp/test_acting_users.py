@@ -64,6 +64,8 @@ def _make_access_service(
         return repos_map.get(username, set())
 
     service.get_accessible_repos = Mock(side_effect=_get_accessible)
+    # The caller has no activations of their own.
+    service.caller_activation_sources = Mock(return_value={})
     return service
 
 

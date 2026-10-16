@@ -61,10 +61,16 @@ from ..routers.activated_repos import router as activated_repos_router
 from ..routers.provider_indexes import router as provider_indexes_router
 from ..routers.admin_provider_health import router as admin_provider_health_router
 from ..routers.hnsw_orphan_sweep_admin import router as hnsw_orphan_sweep_admin_router
+<<<<<<< HEAD
 from ..routers.embedding_stats_admin import router as embedding_stats_admin_router
 from ..routers.dedup_warnings_admin import router as dedup_warnings_admin_router
 from ..routers.metadata_outbox_admin import router as metadata_outbox_admin_router
 from ..routers.index_store_admin import router as index_store_admin_router
+=======
+from ..routers.siem_delivery_admin import router as siem_delivery_admin_router
+from ..routers.embedding_stats_admin import router as embedding_stats_admin_router
+from ..routers.dedup_warnings_admin import router as dedup_warnings_admin_router
+>>>>>>> upstream/master
 from ..routers.llm_creds import router as llm_creds_router
 from ..routers.debug_routes import debug_router
 from ..routers.groups import (
@@ -88,6 +94,10 @@ from ..web import (
 from ..web.repo_category_routes import repo_category_web_router
 from ..web.dependency_map_routes import dependency_map_router
 from ..web.audit_log_routes import audit_log_web_router
+<<<<<<< HEAD
+=======
+from ..web.siem_delivery_routes import siem_delivery_web_router
+>>>>>>> upstream/master
 
 # Import helper functions from app_helpers (extracted to break circular import with app.py)
 
@@ -279,10 +289,16 @@ def register_inline_routes(
     app.include_router(provider_indexes_router)
     app.include_router(admin_provider_health_router)
     app.include_router(hnsw_orphan_sweep_admin_router)  # Story #1360
+<<<<<<< HEAD
     app.include_router(embedding_stats_admin_router)  # Story #1418 Phase 3
     app.include_router(dedup_warnings_admin_router)  # Story #1589
     app.include_router(metadata_outbox_admin_router)  # content seam step 5a
     app.include_router(index_store_admin_router)  # IndexStore rollout backfill
+=======
+    app.include_router(siem_delivery_admin_router)
+    app.include_router(embedding_stats_admin_router)  # Story #1418 Phase 3
+    app.include_router(dedup_warnings_admin_router)  # Story #1589
+>>>>>>> upstream/master
     app.include_router(debug_router)
     app.include_router(reaper_router, prefix="/api/admin")  # Story #967
     app.include_router(xray_router)  # Story #974
@@ -292,8 +308,16 @@ def register_inline_routes(
     from fastapi.staticfiles import StaticFiles
     from pathlib import Path as PathLib
 
-    # Initialize session manager for web UI
-    init_session_manager(secret_key, server_config, server_config.web_security_config)
+    # Initialize session manager for web UI; sessions are bound to live
+    # accounts, looked up in the shared account store at request time.
+    from ..auth.dependencies import lookup_live_account
+
+    init_session_manager(
+        secret_key,
+        server_config,
+        server_config.web_security_config,
+        account_lookup=lookup_live_account,
+    )
 
     # Mount static files for web UI
     # NOTE: __file__ is in routers/, so use .parent.parent to reach server/ root
@@ -317,6 +341,12 @@ def register_inline_routes(
     # Include the Audit Logs page router with /admin prefix
     app.include_router(audit_log_web_router, prefix="/admin", tags=["admin"])
 
+<<<<<<< HEAD
+=======
+    # Include the SIEM delivery operator panels and actions with /admin prefix
+    app.include_router(siem_delivery_web_router, prefix="/admin", tags=["admin"])
+
+>>>>>>> upstream/master
     # Include wiki router (Stories #280-#283)
     from ..wiki.routes import wiki_router
 

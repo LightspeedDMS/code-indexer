@@ -27,7 +27,11 @@ from pathlib import Path
 
 
 def _run() -> dict:
+<<<<<<< HEAD
     from asgi_lifespan import LifespanManager
+=======
+    from _app_lifespan import app_lifespan
+>>>>>>> upstream/master
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
     from code_indexer.server.app import create_app
@@ -35,7 +39,11 @@ def _run() -> dict:
     app = create_app()
 
     async def _drive() -> dict:
+<<<<<<< HEAD
         async with LifespanManager(app):
+=======
+        async with app_lifespan(app):
+>>>>>>> upstream/master
             telemetry_manager = getattr(app.state, "telemetry_manager", None)
             return {
                 "telemetry_manager_present": telemetry_manager is not None,

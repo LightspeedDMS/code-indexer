@@ -16,13 +16,42 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+<<<<<<< HEAD
 from ..database_manager import DatabaseConnectionManager
 from ._golden_repo_metadata_extra_mixin import _GoldenRepoMetadataExtraMixin
+=======
+from code_indexer.utils.credential_redaction import mask_url_credentials
+from ..database_manager import DatabaseConnectionManager
+from ._forced_reconcile_state_mixin import (
+    _ForcedReconcileStateSqliteMixin,
+    create_forced_reconcile_state_table,
+    delete_forced_reconcile_state_for_repo,
+)
+from ._golden_repo_metadata_extra_mixin import _GoldenRepoMetadataExtraMixin
+from ._published_points_mixin import (
+    PUBLISHED_POINTS_COLUMN,
+    _PublishedPointsSqliteMixin,
+)
+from ._refresh_failure_backoff_mixin import (
+    _RefreshFailureBackoffSqliteMixin,
+    create_refresh_failure_backoff_table,
+    delete_refresh_failure_backoff_for_repo,
+)
+>>>>>>> upstream/master
 
 logger = logging.getLogger(__name__)
 
 
+<<<<<<< HEAD
 class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
+=======
+class GoldenRepoMetadataSqliteBackend(
+    _GoldenRepoMetadataExtraMixin,
+    _RefreshFailureBackoffSqliteMixin,
+    _ForcedReconcileStateSqliteMixin,
+    _PublishedPointsSqliteMixin,
+):
+>>>>>>> upstream/master
     """
     SQLite backend for golden repository metadata (Story #711).
 
@@ -62,8 +91,12 @@ class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
                     temporal_options TEXT,
                     category_id INTEGER,
                     category_auto_assigned INTEGER DEFAULT 0,
+<<<<<<< HEAD
                     wiki_enabled INTEGER DEFAULT 0,
                     workspace_id TEXT
+=======
+                    wiki_enabled INTEGER DEFAULT 0
+>>>>>>> upstream/master
                 )
             """
             )
@@ -301,7 +334,10 @@ class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
         created_at: str,
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
+<<<<<<< HEAD
         workspace_id: Optional[str] = None,
+=======
+>>>>>>> upstream/master
     ) -> None:
         """
         Add a new golden repository.
@@ -314,9 +350,12 @@ class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
             created_at: ISO 8601 timestamp when repository was created.
             enable_temporal: Whether temporal indexing is enabled.
             temporal_options: Optional temporal indexing options (stored as JSON).
+<<<<<<< HEAD
             workspace_id: Optional workspace-mcp workspace id (EVO-65021). Persisted
                 so the delegated SCIP indexer can address sandbox-mcp
                 (``sb-{workspace_id}``). ``None`` when not (yet) known.
+=======
+>>>>>>> upstream/master
 
         Raises:
             sqlite3.IntegrityError: When a repo with the same alias already exists.
@@ -331,8 +370,13 @@ class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
             conn.execute(
                 """INSERT INTO golden_repos_metadata
                    (alias, repo_url, default_branch, clone_path, created_at,
+<<<<<<< HEAD
                     enable_temporal, temporal_options, workspace_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+=======
+                    enable_temporal, temporal_options)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+>>>>>>> upstream/master
                 (
                     alias,
                     repo_url,
@@ -341,7 +385,10 @@ class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
                     created_at,
                     1 if enable_temporal else 0,
                     temporal_json,
+<<<<<<< HEAD
                     workspace_id,
+=======
+>>>>>>> upstream/master
                 ),
             )
             return None
@@ -363,7 +410,11 @@ class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
         cursor = conn.execute(
             """SELECT alias, repo_url, default_branch, clone_path, created_at,
                       enable_temporal, temporal_options, category_id, category_auto_assigned,
+<<<<<<< HEAD
                       COALESCE(wiki_enabled, 0), workspace_id
+=======
+                      COALESCE(wiki_enabled, 0)
+>>>>>>> upstream/master
                FROM golden_repos_metadata WHERE alias = ?""",
             (alias,),
         )
@@ -383,7 +434,10 @@ class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
             "category_id": row[7],
             "category_auto_assigned": bool(row[8]),
             "wiki_enabled": bool(row[9]),
+<<<<<<< HEAD
             "workspace_id": row[10],
+=======
+>>>>>>> upstream/master
         }
 
     def list_repos(self) -> List[Dict[str, Any]]:
@@ -396,8 +450,12 @@ class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT alias, repo_url, default_branch, clone_path, created_at,
+<<<<<<< HEAD
                       enable_temporal, temporal_options, COALESCE(wiki_enabled, 0),
                       workspace_id
+=======
+                      enable_temporal, temporal_options, COALESCE(wiki_enabled, 0)
+>>>>>>> upstream/master
                FROM golden_repos_metadata"""
         )
 
@@ -413,7 +471,10 @@ class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
                     "enable_temporal": bool(row[5]),
                     "temporal_options": json.loads(row[6]) if row[6] else None,
                     "wiki_enabled": bool(row[7]),
+<<<<<<< HEAD
                     "workspace_id": row[8],
+=======
+>>>>>>> upstream/master
                 }
             )
 
@@ -435,7 +496,14 @@ class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
                 "DELETE FROM golden_repos_metadata WHERE alias = ?",
                 (alias,),
             )
+<<<<<<< HEAD
             return cursor.rowcount > 0
+=======
+            deleted_row = cursor.rowcount > 0
+            delete_refresh_failure_backoff_for_repo(conn, alias)
+            delete_forced_reconcile_state_for_repo(conn, alias)
+            return deleted_row
+>>>>>>> upstream/master
 
         deleted: bool = self._conn_manager.execute_atomic(operation)
         if deleted:
@@ -459,6 +527,41 @@ class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
         )
         return cursor.fetchone() is not None
 
+<<<<<<< HEAD
+=======
+    # Stays well under SQLite's bound-parameter limit (999 on older builds).
+    _EXISTING_ALIASES_CHUNK = 500
+
+    def existing_aliases(self, names: List[str]) -> set[str]:
+        """
+        Return which of *names* are golden repository aliases.
+
+        The lookup is bounded to the given names (``WHERE alias IN (...)``,
+        parameterized, chunked), never a listing of every repository.
+
+        Args:
+            names: Candidate aliases.
+
+        Returns:
+            The subset of *names* that exist as golden repository aliases.
+        """
+        unique = sorted(set(names))
+        if not unique:
+            return set()
+        conn = self._conn_manager.get_connection()
+        found: set[str] = set()
+        for start in range(0, len(unique), self._EXISTING_ALIASES_CHUNK):
+            chunk = unique[start : start + self._EXISTING_ALIASES_CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = conn.execute(
+                "SELECT alias FROM golden_repos_metadata "
+                f"WHERE alias IN ({placeholders})",
+                chunk,
+            )
+            found.update(str(row[0]) for row in cursor.fetchall())
+        return found
+
+>>>>>>> upstream/master
     def update_enable_temporal(self, alias: str, enable: bool) -> bool:
         """
         Update the enable_temporal flag for a golden repository.
@@ -515,6 +618,7 @@ class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
             logger.info(f"Updated temporal_options for golden repo: {alias}")
         return updated
 
+<<<<<<< HEAD
     def update_workspace_id(self, alias: str, workspace_id: Optional[str]) -> bool:
         """
         Update the workspace-mcp workspace_id for a golden repo (EVO-65021).
@@ -539,6 +643,8 @@ class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
             logger.info(f"Updated workspace_id for golden repo: {alias}")
         return updated
 
+=======
+>>>>>>> upstream/master
     def update_repo_url(self, alias: str, repo_url: str) -> bool:
         """
         Update the repo_url for a golden repository.
@@ -563,7 +669,15 @@ class GoldenRepoMetadataSqliteBackend(_GoldenRepoMetadataExtraMixin):
 
         updated: bool = self._conn_manager.execute_atomic(operation)
         if updated:
+<<<<<<< HEAD
             logger.info(f"Updated repo_url={repo_url} for golden repo: {alias}")
+=======
+            logger.info(
+                "Updated repo_url=%s for golden repo: %s",
+                mask_url_credentials(repo_url),
+                alias,
+            )
+>>>>>>> upstream/master
         return updated
 
     def update_category(
@@ -655,8 +769,12 @@ def _migrate_golden_repos_metadata_columns(conn: sqlite3.Connection) -> None:
         ("category_id", "INTEGER"),
         ("category_auto_assigned", "INTEGER DEFAULT 0"),
         ("wiki_enabled", "INTEGER DEFAULT 0"),
+<<<<<<< HEAD
         # EVO-65021: workspace-mcp workspace_id retention for golden repos.
         ("workspace_id", "TEXT"),
+=======
+        PUBLISHED_POINTS_COLUMN,  # Story #2118: volume-alarm reference size
+>>>>>>> upstream/master
     ]
     for col_name, col_def in migrations:
         if col_name not in existing_cols:
@@ -864,3 +982,8 @@ def _create_golden_repo_metadata_support_tables(conn: sqlite3.Connection) -> Non
     _create_local_repo_repair_table(conn)
     _create_cidx_meta_conflict_table(conn)
     _create_cleanup_pending_deletion_table(conn)
+<<<<<<< HEAD
+=======
+    create_refresh_failure_backoff_table(conn)
+    create_forced_reconcile_state_table(conn)
+>>>>>>> upstream/master

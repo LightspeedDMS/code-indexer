@@ -1,0 +1,319 @@
+# Query Path
+
+Maintainer reference for how a server semantic, FTS or hybrid query travels from the REST or MCP front door to the
+index and back: the front-door seams, the single query-embedding chokepoint with its coalescer, concurrency governor
+and query-embedding cache, the HNSW and FTS caches, fusion and reranking, and payload truncation. CLI and daemon
+queries use the same `FilesystemVectorStore.search()` but none of the server-only layers described here.
+
+All paths below are relative to `src/code_indexer/` unless they start with `src/`. The point-in-time study behind
+the cache key design is archived in [query-embedding-cache-empirical-study.md](../archive/query-embedding-cache-empirical-study.md).
+
+## Contents
+
+- [Request flow](#request-flow)
+- [Front doors](#front-doors)
+- [The query-embedding chokepoint](#the-query-embedding-chokepoint)
+- [Concurrency governor](#concurrency-governor)
+- [Embedding coalescer](#embedding-coalescer)
+- [Query-embedding cache](#query-embedding-cache)
+- [HNSW and FTS index caches](#hnsw-and-fts-index-caches)
+- [Fusion, reranking and filtering](#fusion-reranking-and-filtering)
+- [Payload truncation](#payload-truncation)
+- [Runtime settings](#runtime-settings)
+
+## Request flow
+
+```
+REST POST /api/query                      MCP search_code
+server/routers/inline_query.py            server/mcp/handlers/search/code_search.py
+        |                                          |
+        |  memory admission check, cluster shard forward (REST), search event context
+        v                                          v
+  SemanticQueryManager (server/query/semantic_query_manager.py)
+  provider strategy and fusion (services/query_strategy.py)
+        |
+        v
+  FilesystemVectorStore.search()  -- loads HNSW/id index (HNSWIndexCache) in parallel with
+        |                            the query embedding
+        v
+  coalesced_query_embedding()  (server/services/governed_call.py)
+        |-- query-embedding cache (server/services/query_embedding_cache.py)
+        |-- EmbeddingCoalescer    (server/services/embedding_coalescer.py)
+        '-- ProviderConcurrencyGovernor (server/services/provider_concurrency_governor.py)
+                |
+                v  provider HTTP call (VoyageAI / Cohere)
+        |
+        v
+  results -> fusion -> reranking -> payload truncation -> access filtering -> response
+```
+
+## Front doors
+
+**REST `POST /api/query`** (`server/routers/inline_query.py`, `semantic_query`). The handler:
+
+1. Rejects the request under memory pressure (`check_query_admission()`).
+2. In a cluster with sharding enabled, forwards a single-repository, non-async query to an owner node
+   (`app.state.shard_router`, loop-guarded by a forward header); any routing failure serves the query locally.
+3. Installs a `SearchEventContext` for search telemetry.
+4. Runs semantic search through `semantic_query_manager.query_user_repositories()`; FTS opens the repository's
+   Tantivy index directly (`TantivyIndexManager.open_for_search()`); hybrid runs both.
+5. Applies reranking (when `rerank_query` is set), then payload truncation (`_apply_rest_semantic_truncation`,
+   `_apply_rest_fts_truncation` in `server/app_helpers.py`).
+
+The request field for the query text is `query_text`.
+
+**MCP `search_code`** (`server/mcp/handlers/search/code_search.py`). After the same admission check and search event
+context, it routes on `repository_alias`: a list goes to the omni path (`search/omni.py`), an alias ending in
+`-global` to `_search_global_repo`, anything else to `_search_activated_repo` (both in `search/repo_search.py`). A
+bare alias the user has not activated is promoted to its `-global` form when that golden repository is globally
+active (`try_global_fallback`). Searches run through `_execute_tracked_search`, which calls the semantic query
+manager and records OTEL search metrics; results then pass through `_apply_rerank_and_filter`
+(`search/_shared.py`).
+
+**Search event log** (`server/services/search_event_recording.py`). Every search door builds its row through
+`record_search_event` and hands it to the bounded `SearchEventLogWriter` queue: fire-and-forget, it never blocks,
+raises or changes the search. `search_type` is one of `SEARCH_TYPES` (`semantic`, `fts`, `hybrid`, `temporal`,
+`regex`, `xray`, `scip`, `git_history`, `ci_logs`); the same list feeds the Query Analytics Export page's Search Type filter, and any other value is
+refused (logged, not stored). The recorded type is the mode that ran: a REST hybrid request without a usable FTS
+index is recorded as `semantic`, and a temporal search is recorded as `temporal` whatever `search_mode` it also
+carries. MCP `search_code` rejects an unknown `search_mode` (REST answers 422).
+
+One rule for every door: every search that RAN writes a row carrying `tool` (MCP tool name, REST method plus route
+template as a fixed per-route constant such as `GET /scip/definition`, never read from the request, or `web:query`/`web:wiki_search`), `door` (`mcp`, `rest`, `web`) and `outcome`
+(`SearchOrigin`, required by every record function). A failure is a row with `outcome = failure` and a neutral
+`error_class`: an identifier-like token from `services/search_event_outcomes.py` (`providers_unavailable`, `timeout`,
+`phase1_failed`, `repository_failed`, `no_repository_searched`, ...) or the exception's class name (a bare `Exception`
+wrapper takes its cause's class; names longer than 64 characters are cut to a valid token), never a message. The
+outcome is decided once per result shape in that module (`search_payload_outcome`, `xray_result_outcome`,
+`scip_payload_outcome`). Nothing is written for a rejection before the repository resolves -- validation, admission,
+an unknown or inaccessible repository (including one alias in a list), the access service unavailable before the
+search -- which the module recognises by error type (`SearchRequestError` and subclasses such as
+`UnresolvedRepositoryError`, `TemporalAliasRejectedError`) or by the rejection error codes `REPOSITORY_NOT_FOUND` /
+`SERVICE_UNAVAILABLE` in a payload, never by an HTTP status alone; a search that started and then failed (including
+`providers_unavailable` and a 503 raised after it started) is a failure row. An
+asynchronous search writes its row when its job completes, with the real result count (REST `async_query`; X-Ray
+jobs); a job cancelled while it ran writes nothing (BackgroundJobManager jobs check the injected `cancel_check`,
+MCP X-Ray jobs their JobTracker status). A deferred temporal handoff (MCP `TEMPORAL_QUERY_DEFERRED`, REST 202)
+writes no row then; it stores a pending record in `app.state.payload_cache` (cluster-shared, keyed by job id and
+caller, 24 h TTL), and the result door that delivers the completed result to that caller (`poll_search_job`,
+`GET /api/query/result/{job_id}`) claims it with one atomic consume and records `temporal` with the delivered count
+and the latency from the search's start -- one row per user per deferred job. The temporal dedup signature includes
+the username, so different users never share a job; a same-user repeat of an identical deferred search reuses the
+job and overwrites its one pending record, so those repeats collapse into one row.
+A recording failure is logged at WARNING with its exception type.
+
+Rows per door: one row per RESOLVED repository a search ran against, with that repository's own result count and
+its own cache fields; the rows of one call share its latency and correlation id. A repository that resolved and then
+failed writes a failure row with `repository_failed`; a whole-call failure after resolution writes one failure row
+per resolved repository (`record_multi_repository_search`, `recording_multi_repository_failure`); an alias that
+never resolved writes nothing. This covers `search_code` (single repository, list, JSON array, wildcard, and
+alias-free semantic fan-out), `POST /api/query` (with or without an alias, sync and async; an alias-free FTS or
+hybrid search records the FTS repository it searched), `POST /api/query/multi`, `/api/scip/multi/*`, SCIP searches
+without an alias (`in_scip_search_scope`; the service reports what resolved), `regex_search` and
+`POST /api/regex/search` (`query_text` = pattern, `result_count` = matches returned), `xray_search`/`xray_explore`
+and `POST /api/xray/search` (one per repository job) and `xray_search_batch` / `POST /api/xray/search/batch` (one per
+repository, `xray_batch_repository_rows`; `query_text` = driver pattern(s), never evaluator source). A promoted bare
+alias is stored as its `-global` alias. Doors resolve repositories as they go (`begin_repository_rows`,
+`searching_resolved_repository`, `note_current_resolution`), so a failure keeps the repositories already resolved;
+each fan-out worker runs under `searching_repository(alias)`, so its provider cache result lands on that
+repository's row (`cache_fields_for`). Exceptions: alias-free `scip_impact`/`scip_context` (the composite engine's
+results carry no repository) and an alias-free call chain that raises partway write one row. The Web UI query page,
+its results partial and wiki search use `run_recorded_search`; X-Ray jobs `run_recorded_xray`; git history and CI
+logs `record_completed_search` with `recording_failure`. SCIP search doors (MCP `scip_*` search tools, REST
+`/scip/*`, the Web page's SCIP mode) record `scip` with the symbol, or `from -> to` for a call chain, as
+`query_text`; `git_search_commits` and `git_search_diffs` record `git_history`, `ci_search_logs` records `ci_logs`.
+Graph, dependency-map, blame/log/history and browsing tools are not searches and write nothing.
+
+Cache columns record a provider only when its embedding cache was CONSULTED: a bypassed search
+(`no_embedding_cache_shortcut`) or a query too long to have a cache key records NULL mode and NULL hit
+(`EmbeddingCacheMetadata.search_event_cache_mode` / `search_event_cache_hit`), while the embed-event table keeps the
+coalescer's own values. Non-embedding searches (regex, X-Ray, SCIP, git history, CI logs, FTS) leave them NULL. The
+export's `hits_only` and `misses_only` filters therefore both require a non-NULL mode; such searches appear only
+under "All". The dashboard hit-rate cards count rows (each one searched repository's cache lookup), excluding
+`outcome = failure`; a lookup made once before a fan-out (an omni search that embeds its query once) served every
+repository it fanned out to, so it is copied onto each of those rows and counted once per repository; rows recorded before 12.85.0 have NULL `tool`/`door`/`outcome`/`error_class` and count as
+before. Those four columns are nullable (PostgreSQL migration 074; SQLite adds them in place, tolerating a concurrent
+worker's add), and a deferred temporal record written by an older node is still recorded, with `tool`/`door` NULL.
+
+Doors pass the full query text; only the shared module cuts it at `QUERY_TEXT_MAX_CHARS` (500) and then sets
+`query_text_truncated`. When the writer's queue is full it drops the event and counts it on the writer instance, so
+the count is per server process: `services/search_event_health.py` reports it as `search_events` in
+`/api/system/health`, MCP `check_health` and `/health`, DEGRADED for 15 minutes after the last drop and never
+UNHEALTHY. Each drop also increments the OTEL counter `cidx.search_event_log.dropped_events`, and the export page
+shows the serving process's count.
+
+## The query-embedding chokepoint
+
+Every server query embedding goes through `coalesced_query_embedding(provider, text, ...)`
+(`server/services/governed_call.py`). Its callers are `FilesystemVectorStore.search()`,
+`server/services/search_service.py`, `services/temporal/temporal_search_service.py`,
+`services/temporal/temporal_fusion_dispatch.py` and `server/mcp/handlers/search/memory_retrieval.py`. All pass
+`embedding_purpose="query"`. Cohere maps it to `input_type="search_query"`. For standard VoyageAI models no
+`input_type` is sent; for `voyage-context-4` a query-purpose batch is sent to the contextualized embeddings endpoint
+with `input_type="query"` (`_CONTEXTUAL_QUERY_MODELS`, `services/voyage_ai.py`).
+
+`coalesced_query_embedding()`:
+
+1. Resolves the cache: absent (CLI, daemon, or a server whose backend registry has no cache backend), disabled,
+   mode `off`, or a normalized query over 256 characters all mean "no cache".
+2. If the coalescer registry exists and `coalesce_enabled` is true, gets the coalescer for the provider's
+   `:embed` lane and config digest and delegates to `EmbeddingCoalescer.submit()` (Path A). The coalescer then owns
+   the cache read, the live embedding and the cache write.
+3. Otherwise (Path B) calls the provider directly through `governed_query_embedding()`, wrapped by
+   `_serve_with_cache()` when a cache is active.
+
+It returns the vector plus `EmbeddingCacheMetadata`, which feeds the durable `search_embed_event` rows
+(`server/services/search_embed_event_writer.py`).
+
+## Concurrency governor
+
+`ProviderConcurrencyGovernor` (`server/services/provider_concurrency_governor.py`) is the only limiter on serving-path
+provider calls. It has four independent lanes: `voyage:embed`, `voyage:rerank`, `cohere:embed`, `cohere:rerank`. Each
+lane has:
+
+- a `ResizableLimiter` whose limit K is driven by an `AimdController` (additive increase after successes, halving on
+  a 429);
+- a sinbin pre-check against `ProviderHealthMonitor`: a sinbinned lane raises `ProviderSinbinnedError` without
+  taking a slot.
+
+The initial K is the runtime setting `query_provider_max_concurrency` (default 16) divided by the number of uvicorn
+workers, clamped to `[coalesce_k_min, coalesce_k_max]` (defaults 8 and 32). These three seeds are read when the
+governor is constructed, so a change takes effect on restart. Calls use
+`execute_with_backoff(lambda: governor.execute(lane, call, acquire_timeout=30.0))`: the 429 backoff sleep happens
+outside the slot. A caller that waits 30 s without getting a slot receives `GovernorBusyError`.
+
+## Embedding coalescer
+
+`EmbeddingCoalescer` (`server/services/embedding_coalescer.py`), one per `:embed` lane and provider config digest,
+merges concurrent single-text query requests into one batch:
+
+- The wait for a governor slot is the accumulation window: requests arriving while the dispatcher waits join the
+  open batch; the attempt that obtains a slot seals the batch and makes exactly one HTTP call.
+- A sealed batch never splits inside the provider: the coalescer uses the provider's own token counter and 90
+  percent of its token limit, and a texts cap of `min(coalesce_max_batch_size, provider texts-per-request)`
+  (`coalesce_max_batch_size` default 96).
+- On success each caller gets its own vector in order; on any error every caller in the batch receives the same
+  exception.
+- Cache handling in `submit()`: an `on`-mode hit returns immediately without queueing or taking a slot; an
+  `on`-mode miss is single-flight (concurrent requests for the same key join the owner's pending result); `shadow`
+  always dispatches.
+
+## Query-embedding cache
+
+`QueryEmbeddingCache` (`server/services/query_embedding_cache.py`) stores query-purpose embeddings so a repeated
+query skips the provider. It is built once in `server/startup/lifespan.py` from
+`backend_registry.query_embedding_cache` and installed with `set_query_embedding_cache()`; it never stores
+document-purpose embeddings and never stores auth-bearing data.
+
+**Storage.** One table, `query_embedding_cache`, primary key `(cache_key, provider, model, dimension)`, value a
+float32 little-endian blob. SQLite in solo mode
+(`server/storage/sqlite_backends/query_embedding_cache_backend.py`), PostgreSQL in a cluster
+(`server/storage/postgres/query_embedding_cache_backend.py`, migration `028_query_embedding_cache.sql`), behind the
+`QueryEmbeddingCacheBackend` protocol (`server/storage/protocols/query_embedding_cache_backend.py`).
+
+**Key.** `build_key(text, anchor_tokens, config_digest=...)`:
+
+1. Split the query on whitespace (punctuation stays attached; case is never changed).
+2. Keep the first `anchor_tokens` tokens in order; sort the remaining tokens.
+3. Join with single spaces. If the result is longer than 256 characters, return `None`: the query bypasses the
+   cache (no lookup, no write); the key is never truncated.
+4. Return `s:<config_digest>:<normalized>`. The digest is the coalescer registry's provider digest (provider,
+   endpoint, model), so two endpoints never share keys.
+
+The effective `anchor_tokens` is the per-provider setting, or 2 when unset. A changed value logs one WARNING per
+provider; rows under the old normalization stop matching and age out.
+
+**Modes** (per provider, read on every call):
+
+| Mode | Lookup | Provider call | Returned vector | Write |
+|------|--------|---------------|-----------------|-------|
+| `off` | no | always | live | none |
+| `shadow` | yes, after the live call | always | live | upsert on miss; `last_used` touch on hit |
+| `on` | yes | only on miss | cached on hit, live on miss | upsert on miss; `last_used` touch on hit |
+
+An unknown mode string is treated as `shadow`. In `on` mode a cached blob whose size does not match the dimension is
+treated as a miss.
+
+**Writes and eviction.** A miss upserts the vector, then calls `prune_to_max(cap)`. The cap is
+`query_embedding_cache_max_entries` (default 10000), raised to at least 100, shared by all providers, evicting by
+oldest `last_used`. A hit does not write synchronously: `record_hit()` puts the touch into a process-local buffer
+that a background thread flushes every 5 s with `touch_last_used_batch`; the buffer flushes early at 2048
+distinct keys.
+
+**Fail-open.** A lookup, upsert, prune or flush error logs a WARNING and the query continues on the live path.
+Upsert failures are counted in `cidx.cache.embedding.write_failures`.
+
+**Per-request bypass.** `no_embedding_cache_shortcut=true` (REST request models in `server/models/api_models.py` and
+`server/models/query.py`; MCP `search_code`) skips the read but still writes the live vector. It cannot enable a
+disabled cache.
+
+**Deep-fidelity audit.** On a sampled cache hit (per-provider audit sample rate, default 0.0),
+`FilesystemVectorStore.search()` runs a second HNSW search with the other vector and
+`_run_deep_fidelity_audit()` (`server/services/embedding_cache_audit.py`) records the top-10 overlap on the
+`search_embed_event` row. In `shadow` mode the live vector is already available; in `on` mode the sampled hit
+re-embeds once. The audit never changes the served result.
+
+**Metrics.** `EmbeddingCacheOtelMetrics` (`server/services/embedding_cache_otel_metrics.py`) publishes
+`cidx.cache.embedding.*` observable gauges computed from the `search_embed_event` table over a time window
+(`hit_rate`, `hits`, `misses`, `provider_calls`, `long_key`, `audit_top10_overlap`, `shadow_cosine_p50`,
+`shadow_cosine_p05`, `shadow_cosine_min`, `shadow_cosine_histogram`), plus `total_entries` and `write_failures` from
+the process.
+
+## HNSW and FTS index caches
+
+`HNSWIndexCache` and `FTSIndexCache` (`server/cache/hnsw_index_cache.py`, `server/cache/fts_index_cache.py`) keep
+loaded indexes in memory between queries. They are process singletons created at startup in
+`server/startup/service_init.py`; `initialize_caches(worker_count)` divides the per-node size cap
+(`DEFAULT_MAX_CACHE_SIZE_MB = 4096`, `server/cache/__init__.py`) by the worker count, with a 256 MB floor per worker.
+Entries expire after a TTL (default 10 minutes); the FTS cache reloads the Tantivy reader on access by default.
+`FilesystemVectorStore.search()` loads the HNSW and id indexes through the cache in parallel with computing the
+query embedding.
+
+## Fusion, reranking and filtering
+
+**Fusion.** For repositories indexed with more than one embedding provider, `services/query_strategy.py` selects a
+strategy (`primary_only`, `failover`, `parallel`, `specific`); `parallel` fuses per-provider results with reciprocal
+rank fusion (`fuse_rrf`, k = 60) by default.
+
+**Reranking** (`server/mcp/reranking.py`, `_apply_reranking_sync`) runs on the fused candidate set, before
+truncation. When a `rerank_query` is given the search overfetches so the reranker has more candidates, and the
+reranker trims to the requested limit. Rerank calls use the governor's `:rerank` lanes.
+
+**Order in MCP** (`_apply_rerank_and_filter`): rerank, then payload truncation, then access filtering
+(`filter_query_results`, and `filter_cidx_meta_results` for `cidx-meta`), then the requested limit. The REST
+handler applies the same rerank-before-truncation order.
+
+## Payload truncation
+
+Large result content is replaced by a preview plus a `cache_handle` so responses stay bounded. The full content is
+stored in `PayloadCache` (`server/cache/payload_cache.py`), installed as `app.state.payload_cache` in
+`server/startup/lifespan.py`: SQLite at `<golden_repos_dir>/.cache/payload_cache.db` in solo mode, the PostgreSQL
+`payload_cache` table in a cluster, so a handle written on one node can be read on another. All oversized results of
+one response are stored with one `store_batch()` call. Entries expire after `payload_cache_ttl_seconds` (default 900).
+Clients fetch the rest of a search result with the MCP tool `get_cached_content`
+(`server/mcp/handlers/search/cached_content.py`); truncated X-Ray results use `cidx_fetch_cached_payload`.
+
+## Runtime settings
+
+Every setting below is a runtime setting stored in the database; none of them is a `config.json` bootstrap key. The
+query-embedding cache and `cache_config` fields are changed through the Web UI config screen. The `coalesce_*`
+settings and `query_provider_max_concurrency` have no Web UI control (see
+[Server settings: Not editable in the Web UI](../reference/server-settings.md#not-editable-in-the-web-ui)).
+
+| Setting | Default | Read |
+|---------|---------|------|
+| `query_embedding_cache_config.query_embedding_cache_enabled` | true | every call |
+| `query_embedding_cache_config.query_embedding_cache_max_entries` | 10000 | every miss |
+| `query_embedding_cache_config.query_embedding_cache_voyage_mode` / `..._cohere_mode` | `shadow` | every call |
+| `query_embedding_cache_config.query_embedding_cache_voyage_anchor_tokens` / `..._cohere_anchor_tokens` | unset (2) | every call |
+| `query_embedding_cache_config.query_embedding_cache_voyage_audit_sample_rate` / `..._cohere_audit_sample_rate` | 0.0 | every hit |
+| `coalesce_enabled` | true | every call |
+| `coalesce_max_batch_size` | 96 | registry build and batch seal |
+| `coalesce_k_min`, `coalesce_k_max` | 8, 32 | governor construction (restart) |
+| `query_provider_max_concurrency` | 16 | governor construction (restart) |
+| `cache_config.index_cache_ttl_minutes`, `cache_config.fts_cache_ttl_minutes` | 10 | applied on change |
+| `cache_config.payload_preview_size_chars`, `payload_max_fetch_size_chars`, `payload_cache_ttl_seconds` | 2000, 5000, 900 | payload cache construction |
+
+The query-embedding cache fields are defined in `QueryEmbeddingCacheConfig`, the others in `ServerConfig` and
+`CacheConfig` (`server/utils/config_manager.py`). How runtime settings are stored and propagated is described in
+[config-state.md](config-state.md).

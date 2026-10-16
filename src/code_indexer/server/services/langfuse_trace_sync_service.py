@@ -363,6 +363,9 @@ class LangfuseTraceSyncService:
         #    Note: we use manual acquire/release (not the write_lock() context
         #    manager) because acquire failure is non-fatal -- we proceed anyway.
         if self._refresh_scheduler is not None:
+            from code_indexer.global_repos.refresh_failure_recovery import (
+                RefreshDeferredError,
+            )
             from code_indexer.server.repositories.background_jobs import (
                 DuplicateJobError,
             )
@@ -384,6 +387,15 @@ class LangfuseTraceSyncService:
                             f"proceeding with refresh trigger anyway"
                         )
                     self._refresh_scheduler.trigger_refresh_for_repo(trigger_alias)
+                except RefreshDeferredError as exc:
+                    cause = (
+                        f"({exc.reason})" if exc.reason else "by its failure backoff"
+                    )
+                    logger.info(
+                        f"Refresh for '{trigger_alias}' deferred until "
+                        f"{exc.backoff_until:.0f} {cause} and "
+                        f"persisted; the refresh scheduler fires it then"
+                    )
                 except DuplicateJobError:
                     logger.debug(
                         f"Refresh already in progress for '{trigger_alias}', skipping"

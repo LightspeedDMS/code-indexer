@@ -134,8 +134,13 @@ def _run_do_incremental_index(
     indexer.progressive_metadata.metadata["status"] = "completed"
     with patch.object(
         indexer.progressive_metadata,
+<<<<<<< HEAD
         "can_resume_interrupted_operation",
         return_value=False,
+=======
+        "record_plan",
+        return_value=None,
+>>>>>>> upstream/master
     ):
         with patch.object(
             indexer.progressive_metadata, "get_resume_timestamp", return_value=1.0
@@ -147,7 +152,11 @@ def _run_do_incremental_index(
             ):
                 with patch.object(indexer.progressive_metadata, "start_indexing"):
                     with patch.object(
+<<<<<<< HEAD
                         indexer.progressive_metadata, "set_files_to_index"
+=======
+                        indexer.progressive_metadata, "start_fresh_indexing"
+>>>>>>> upstream/master
                     ):
                         with patch.object(
                             indexer.progressive_metadata, "update_progress"

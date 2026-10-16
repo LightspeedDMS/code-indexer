@@ -36,6 +36,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import MagicMock
 
+<<<<<<< HEAD
+=======
+import pytest
+
+>>>>>>> upstream/master
 from code_indexer.config import Config
 from code_indexer.services.smart_indexer import SmartIndexer
 
@@ -143,8 +148,13 @@ def test_scroll_all_content_points_returns_every_point_across_multiple_pages(
     )
 
 
+<<<<<<< HEAD
 def test_scroll_all_content_points_stops_on_genuinely_repeated_cursor(
     tmp_path: Path, caplog
+=======
+def test_scroll_all_content_points_raises_on_genuinely_repeated_cursor(
+    tmp_path: Path,
+>>>>>>> upstream/master
 ) -> None:
     points = [
         {"id": "a.py:0", "payload": {"type": "content", "path": "a.py"}},
@@ -153,6 +163,7 @@ def test_scroll_all_content_points_stops_on_genuinely_repeated_cursor(
     client = StuckCursorAfterFirstPageFakeVectorStoreClient(points)
     indexer = _make_indexer(tmp_path, client)
 
+<<<<<<< HEAD
     with caplog.at_level(logging.ERROR):
         result = indexer._scroll_all_content_points("test_collection")
 
@@ -167,4 +178,18 @@ def test_scroll_all_content_points_stops_on_genuinely_repeated_cursor(
     assert len(result) == 2, "expected both pages' points collected before stopping"
     assert any("stuck" in record.message.lower() for record in caplog.records), (
         "expected a 'stuck' ERROR for the genuinely repeated cursor"
+=======
+    # A stuck cursor leaves the snapshot PARTIAL: a reconcile against it
+    # would re-embed every file it cannot see and record the store as
+    # verified, so the scroll raises instead of returning what it has.
+    with pytest.raises(RuntimeError, match="Pagination stuck at offset cursor-A"):
+        indexer._scroll_all_content_points("test_collection")
+
+    # The loop must progress past the FIRST (legitimately advancing) page
+    # before detecting the genuinely repeated cursor on the second call --
+    # bounded, never looping forever on the same stuck cursor.
+    assert client.scroll_calls == 2, (
+        "expected the loop to take the first real page, then detect the "
+        f"repeated cursor on page 2 -- got {client.scroll_calls} calls"
+>>>>>>> upstream/master
     )

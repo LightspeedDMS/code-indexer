@@ -17,6 +17,7 @@ import time
 import sys
 import os
 import pwd
+import re
 import shutil
 import tarfile
 import tempfile
@@ -62,6 +63,8 @@ AUTO_UPDATE_SERVICE_NAME = "cidx-auto-update"
 # Systemd unit directory — configurable for testing or non-standard deployments.
 # Default is the Linux standard /etc/systemd/system.
 SYSTEMD_UNIT_DIR = Path(os.environ.get("SYSTEMD_UNIT_DIR", "/etc/systemd/system"))
+# uvicorn flag the installer renders; _ensure_no_server_header heals old units.
+_NO_SERVER_HEADER_FLAG = "--no-server-header"
 
 # Bug #1320 Part B: fixed, documented installation location of the co-located
 # CoW Storage Daemon's own config file. This is a stable install-location
@@ -130,6 +133,78 @@ HNSWLIB_REPO_URL = "https://github.com/LightspeedDMS/hnswlib.git"
 # Bug #1392: quick `python -c` probe for check_integrity/repair_orphans,
 # same budget as the existing _hnswlib_importable() import probe.
 HNSWLIB_CAPABILITY_PROBE_TIMEOUT_SECONDS = 10
+<<<<<<< HEAD
+=======
+
+
+def _posix_ere_literal(text: str) -> str:
+    """An anchored POSIX ERE (git config's value-pattern syntax) matching
+    exactly *text*."""
+    return "^" + re.sub(r"([\\^$.|?*+()\[\]{}])", r"\\\1", text) + "$"
+
+
+def ensure_single_safe_directory(
+    path: str, sudo_user: Optional[str] = None, add_if_absent: bool = True
+) -> Optional[str]:
+    """Make *path* appear exactly once in the global git safe.directory list
+    (Bug #2028: deploys used to append it unconditionally, on every run).
+
+    Exactly one entry: no-op.  None: added (unless *add_if_absent* is
+    False).  Several: ONE ``--replace-all`` whose value pattern matches only
+    *path* collapses them to one entry -- the entry is never absent, other
+    values and keys are untouched.  The listing's exit 1 means "absent"; any
+    other failure to read is an error, never "absent" (nothing is written).
+    *sudo_user* runs git as that account.
+
+    Returns None on success, else git's stderr: each caller keeps its own
+    logging and fatal/non-fatal semantics.
+    """
+    git = ["sudo", "-u", sudo_user] if sudo_user else []
+    git += ["git", "config", "--global"]
+    listed = subprocess.run(
+        [*git, "--get-all", "safe.directory"],
+        capture_output=True,
+        text=True,
+        env=build_non_interactive_git_env(),
+    )
+    if listed.returncode == 0:
+        count = listed.stdout.splitlines().count(path)
+    elif listed.returncode == 1:  # key absent
+        count = 0
+    else:
+        return listed.stderr or f"git config --get-all exited {listed.returncode}"
+    if count == 1 or (count == 0 and not add_if_absent):
+        logger.debug(
+            f"Git safe.directory needs no change: {path}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return None
+    if count == 0:
+        command = [*git, "--add", "safe.directory", path]
+    else:
+        command = [*git, "--replace-all", "safe.directory", path]
+        command.append(_posix_ere_literal(path))
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        env=build_non_interactive_git_env(),
+    )
+    if result.returncode != 0:
+        return result.stderr or f"git config exited {result.returncode}"
+    if count > 1:
+        logger.info(
+            f"Collapsed {count} duplicate git safe.directory entries to one: {path}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+    else:
+        logger.info(
+            f"Added git safe.directory entry: {path}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+    return None
+
+>>>>>>> upstream/master
 
 # Bug #839: Claude CLI auto-update timeout constants
 NPM_VERSION_TIMEOUT_SECONDS = 5  # How long to wait for `npm --version` probe
@@ -696,48 +771,40 @@ class DeploymentExecutor:
             )
             return False
 
+    def _hnswlib_submodule_dir(self) -> Path:
+        """The hnswlib submodule checkout whose safe.directory entry the
+        auto-updater manages (Bug #2028)."""
+        return self.repo_path / "third_party" / "hnswlib"
+
     def _ensure_submodule_safe_directory(self) -> bool:
         """Add submodule paths to git safe.directory config.
 
         Git's "dubious ownership" check applies to each git repository independently.
         Submodules are separate repositories and need their own safe.directory entries.
+        Bug #2028: added only when absent (duplicates are collapsed).
 
         Returns:
             True if successful or not needed, False on error
         """
         try:
             # Known submodule paths
-            submodule_paths = [
-                self.repo_path / "third_party" / "hnswlib",
-            ]
+            submodule_paths = [self._hnswlib_submodule_dir()]
 
             for submodule_path in submodule_paths:
                 # Skip if submodule directory doesn't exist yet
                 if not submodule_path.exists():
                     continue
 
-                # Add to global safe.directory (runs as root, so use root's config)
-                result = subprocess.run(
-                    [
-                        "git",
-                        "config",
-                        "--global",
-                        "--add",
-                        "safe.directory",
-                        str(submodule_path),
-                    ],
-                    capture_output=True,
-                    text=True,
-                )
-
-                if result.returncode != 0:
+                # Global safe.directory (runs as root, so root's config)
+                error = ensure_single_safe_directory(str(submodule_path))
+                if error is not None:
                     logger.warning(
-                        f"Could not add submodule to safe.directory: {submodule_path}: {result.stderr}",
+                        f"Could not add submodule to safe.directory: {submodule_path}: {error}",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 else:
-                    logger.info(
-                        f"Added submodule to git safe.directory: {submodule_path}",
+                    logger.debug(
+                        f"Submodule git safe.directory configured: {submodule_path}",
                         extra={"correlation_id": get_correlation_id()},
                     )
 
@@ -891,6 +958,7 @@ class DeploymentExecutor:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
+                env=build_non_interactive_git_env(),
             )
 
             if result.returncode != 0:
@@ -922,6 +990,7 @@ class DeploymentExecutor:
                         cwd=self.repo_path,
                         capture_output=True,
                         text=True,
+                        env=build_non_interactive_git_env(),
                     )
 
                     if result.returncode != 0:
@@ -982,23 +1051,11 @@ class DeploymentExecutor:
                     )
                     return False
 
-            # Add fallback path to git safe.directory
-            result = subprocess.run(
-                [
-                    "git",
-                    "config",
-                    "--global",
-                    "--add",
-                    "safe.directory",
-                    str(HNSWLIB_FALLBACK_PATH),
-                ],
-                capture_output=True,
-                text=True,
-            )
-
-            if result.returncode != 0:
+            # Fallback path in git safe.directory, only when absent (Bug #2028)
+            error = ensure_single_safe_directory(str(HNSWLIB_FALLBACK_PATH))
+            if error is not None:
                 logger.warning(
-                    f"Could not add fallback path to safe.directory: {result.stderr}",
+                    f"Could not add fallback path to safe.directory: {error}",
                     extra={"correlation_id": get_correlation_id()},
                 )
                 # Not fatal, continue with clone
@@ -1459,7 +1516,11 @@ class DeploymentExecutor:
             f"{expected_commit or 'unknown'}. Real cidx indexing subprocesses "
             "under this interpreter may fail with AttributeError on "
             "check_integrity()/repair_orphans(). See "
+<<<<<<< HEAD
             "docs/hnswlib-custom-build.md for the manual rebuild procedure."
+=======
+            "docs/server/hnswlib-custom-build.md for the manual rebuild procedure."
+>>>>>>> upstream/master
         )
 
     def _ensure_cli_hnswlib_capability(self) -> bool:
@@ -1549,6 +1610,7 @@ class DeploymentExecutor:
                 capture_output=True,
                 text=True,
                 timeout=10,
+                env=build_non_interactive_git_env(),
             )
             if result.returncode != 0 or not result.stdout.strip():
                 return None
@@ -3173,6 +3235,93 @@ class DeploymentExecutor:
             )
             return None
 
+    def _ensure_no_server_header(self) -> bool:
+        """Self-heal: add --no-server-header to a deployed uvicorn ExecStart.
+
+        Already-deployed units predate the installer flag and nothing else
+        re-renders them.  Only uvicorn-shape cidx ExecStart lines are
+        touched: an installer-shape ``code_indexer.server.main`` line is left
+        as is (main.py passes ``server_header=False`` itself and its argparse
+        rejects unknown flags).  The flag is appended only when absent, so a
+        second run writes nothing.  A rewrite takes effect at the restart
+        that ends the deploy, like the other unit self-heals.
+
+        Each ExecStart is read as its logical command (physical lines joined
+        across a trailing backslash), so a flag on a continuation line is
+        seen.  The flag is only ever appended to a single-line ExecStart; a
+        continued uvicorn ExecStart without it is refused with a WARNING and
+        the unit is left byte-identical (the installer renders one line).
+
+        Returns True when every uvicorn ExecStart carries the flag (already or
+        after the rewrite); False when the unit is missing, has no cidx
+        ExecStart, needs a refused continued-line edit, or the write fails.
+        """
+        try:
+            service_path = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+            if not service_path.exists():
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-017",
+                        f"Service file not found: {service_path}",
+                    )
+                )
+                return False
+            lines = service_path.read_text().split("\n")
+            updated = list(lines)
+            has_cidx_execstart = False
+            start = 0
+            while start < len(lines):
+                end = start
+                if lines[start].startswith("ExecStart="):
+                    while end + 1 < len(lines) and lines[end].rstrip().endswith("\\"):
+                        end += 1
+                    logical = " ".join(
+                        ln.rstrip().rstrip("\\") for ln in lines[start : end + 1]
+                    )
+                    if self._is_cidx_execstart(logical):
+                        has_cidx_execstart = True
+                        if (
+                            "code_indexer.server.main" not in logical
+                            and _NO_SERVER_HEADER_FLAG not in logical.split()
+                        ):
+                            if end > start:
+                                logger.warning(
+                                    format_error_log(
+                                        "DEPLOY-GENERAL-229",
+                                        f"{service_path} ExecStart spans continuation "
+                                        f"lines; not adding {_NO_SERVER_HEADER_FLAG} "
+                                        "automatically -- add it by hand",
+                                    )
+                                )
+                                return False
+                            updated[start] = (
+                                f"{lines[start].rstrip()} {_NO_SERVER_HEADER_FLAG}"
+                            )
+                start = end + 1
+            if not has_cidx_execstart:
+                logger.debug(
+                    "No cidx ExecStart found; skipping --no-server-header self-heal",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return False
+            if updated == lines:
+                return True
+            if not self._write_and_reload_service(service_path, updated):
+                return False
+            logger.info(
+                f"Added {_NO_SERVER_HEADER_FLAG} to {service_path} ExecStart",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+        except Exception as exc:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-227",
+                    f"Error in _ensure_no_server_header: {exc}",
+                )
+            )
+            return False
+
     def _extract_service_user(self, content: str) -> Optional[str]:
         """Extract User= value from service file content.
 
@@ -3313,6 +3462,29 @@ class DeploymentExecutor:
             )
             return False
 
+    def _ensure_safe_directory_entries_deduplicated(self) -> bool:
+        """Bug #2028 self-heal: collapse the duplicate safe.directory entries
+        that earlier, non-idempotent deploys appended to this account's global
+        git config for the paths the auto-updater manages.  Never adds an
+        absent entry and never touches other values or keys.  Non-fatal: a git
+        failure is logged loudly and the deploy continues.
+        """
+        managed = (self._hnswlib_submodule_dir(), HNSWLIB_FALLBACK_PATH)
+        for path in managed:
+            try:
+                error = ensure_single_safe_directory(str(path), add_if_absent=False)
+            except (OSError, subprocess.SubprocessError) as exc:
+                error = str(exc)
+            if error is not None:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-226",
+                        f"Could not deduplicate git safe.directory entries "
+                        f"for {path}: {error}",
+                    )
+                )
+        return True
+
     def _ensure_git_safe_directory(self) -> bool:
         """Ensure git safe.directory is configured for the service user.
 
@@ -3352,60 +3524,23 @@ class DeploymentExecutor:
             # Extract WorkingDirectory from service file - this is the canonical repo path
             repo_root = self._extract_working_directory(content)
 
-            # Check if already configured
-            check_result = subprocess.run(
-                [
-                    "sudo",
-                    "-u",
-                    service_user,
-                    "git",
-                    "config",
-                    "--global",
-                    "--get-all",
-                    "safe.directory",
-                ],
-                capture_output=True,
-                text=True,
-            )
-
-            if check_result.returncode == 0:
-                # Check if our repo path is in the output
-                configured_paths = check_result.stdout.strip().split("\n")
-                if str(repo_root) in configured_paths:
-                    logger.debug(
-                        f"Git safe.directory already configured for {service_user}: {repo_root}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                    return True
-
-            # Add safe.directory configuration
-            add_result = subprocess.run(
-                [
-                    "sudo",
-                    "-u",
-                    service_user,
-                    "git",
-                    "config",
-                    "--global",
-                    "--add",
-                    "safe.directory",
-                    str(repo_root),
-                ],
-                capture_output=True,
-                text=True,
-            )
-
-            if add_result.returncode != 0:
+            # Only when absent; duplicates collapsed (Bug #2028)
+            error = ensure_single_safe_directory(str(repo_root), sudo_user=service_user)
+            if error is not None:
                 logger.error(
                     format_error_log(
                         "DEPLOY-GENERAL-027",
+<<<<<<< HEAD
                         f"Failed to add git safe.directory: {add_result.stderr}",
+=======
+                        f"Failed to add git safe.directory: {error}",
+>>>>>>> upstream/master
                     )
                 )
                 return False
 
-            logger.info(
-                f"Added git safe.directory for {service_user}: {repo_root}",
+            logger.debug(
+                f"Git safe.directory configured for {service_user}: {repo_root}",
                 extra={"correlation_id": get_correlation_id()},
             )
             return True
@@ -3463,6 +3598,7 @@ class DeploymentExecutor:
                 )
                 return True
 
+<<<<<<< HEAD
             # Check if the wildcard is already configured
             check_result = subprocess.run(
                 [
@@ -3512,12 +3648,26 @@ class DeploymentExecutor:
                         "DEPLOY-GENERAL-216",
                         f"Failed to add git safe.directory wildcard: "
                         f"{add_result.stderr}",
+=======
+            # Only when absent; duplicates collapsed (Bug #2028)
+            error = ensure_single_safe_directory("*", sudo_user=service_user)
+            if error is not None:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-216",
+                        f"Failed to add git safe.directory wildcard: {error}",
+>>>>>>> upstream/master
                     )
                 )
                 return False
 
+<<<<<<< HEAD
             logger.info(
                 f"Added git safe.directory wildcard for {service_user}",
+=======
+            logger.debug(
+                f"Git safe.directory wildcard configured for {service_user}",
+>>>>>>> upstream/master
                 extra={"correlation_id": get_correlation_id()},
             )
             return True
@@ -4236,7 +4386,11 @@ class DeploymentExecutor:
                     "CLI system-wide hnswlib capability sync failed -- "
                     "indexing subprocesses may still fail with AttributeError "
                     "on check_integrity()/repair_orphans(). See "
+<<<<<<< HEAD
                     "docs/hnswlib-custom-build.md.",
+=======
+                    "docs/server/hnswlib-custom-build.md.",
+>>>>>>> upstream/master
                 )
             )
 
@@ -4283,6 +4437,18 @@ class DeploymentExecutor:
         # (code_indexer.server.main) and uvicorn-shape units.
         self._ensure_launch_config("DEPLOY")
 
+        # Step 3.5: drop uvicorn's Server header on already-deployed units
+        # (installer renders --no-server-header; this heals older units).
+        if not self._ensure_no_server_header():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-228",
+                    "--no-server-header could not be verified/added to the "
+                    "cidx-server unit -- responses may still carry a Server header",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         # Step 4: Bug #87 - Ensure CIDX_REPO_ROOT environment variable
         self._ensure_cidx_repo_root()
 
@@ -4295,6 +4461,13 @@ class DeploymentExecutor:
         # service account) regardless of which directory they live in.
         self._ensure_git_safe_directory_wildcard()
 
+<<<<<<< HEAD
+=======
+        # Step 5.6: Bug #2028 - collapse duplicate safe.directory entries that
+        # earlier non-idempotent deploys appended (self-heal; non-fatal).
+        self._ensure_safe_directory_entries_deduplicated()
+
+>>>>>>> upstream/master
         # Step 6: Issue #154 - Ensure auto-updater uses server Python
         self._ensure_auto_updater_uses_server_python()
 
@@ -4764,6 +4937,7 @@ class DeploymentExecutor:
                     capture_output=True,
                     text=True,
                     timeout=PACE_MAKER_GIT_TIMEOUT,
+                    env=build_non_interactive_git_env(),
                 )
                 if result.returncode != 0:
                     logger.warning(
@@ -4779,6 +4953,7 @@ class DeploymentExecutor:
                     capture_output=True,
                     text=True,
                     timeout=PACE_MAKER_GIT_TIMEOUT,
+                    env=build_non_interactive_git_env(),
                 )
                 if result.returncode != 0:
                     logger.warning(
@@ -6016,9 +6191,12 @@ class DeploymentExecutor:
                 )
                 return True
 
+<<<<<<< HEAD
             if self._refuse_cow_symlink_under_delegated_content(config, "golden-repos"):
                 return False
 
+=======
+>>>>>>> upstream/master
             cow_cfg = getattr(config, "cow_daemon", None)
             if cow_cfg is None or not getattr(cow_cfg, "mount_point", ""):
                 logger.warning(

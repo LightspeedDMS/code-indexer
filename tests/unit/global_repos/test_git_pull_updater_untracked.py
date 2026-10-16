@@ -86,7 +86,7 @@ class TestUntrackedFileFiltering:
             updater.update()
 
         pull_cmd = mock_run.call_args_list[1][0][0]
-        assert pull_cmd == ["git", "pull"]
+        assert pull_cmd == ["git", "pull", "origin"]
 
     def test_multiple_untracked_files_no_reset(self, updater):
         """

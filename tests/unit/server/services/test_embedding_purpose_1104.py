@@ -23,7 +23,7 @@ is applied.
 import ast
 import inspect
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -258,9 +258,15 @@ class RecordingCoalescer:
         *,
         no_embedding_cache_shortcut: bool = False,
         audit_ctx: Optional[Any] = None,
-    ) -> List[float]:
+    ) -> Tuple[List[float], Any]:
+        # Like EmbeddingCoalescer.submit (Issue #1159): the vector and its
+        # cache metadata.
+        from code_indexer.server.services.governed_call import (
+            EmbeddingCacheMetadata,
+        )
+
         self.calls.append({"text": text, "embedding_purpose": embedding_purpose})
-        return [1.0, 2.0]
+        return [1.0, 2.0], EmbeddingCacheMetadata()
 
 
 def _patch_config(

@@ -51,17 +51,28 @@ from __future__ import annotations
 import json
 import logging
 import os
+<<<<<<< HEAD
 import signal
+=======
+>>>>>>> upstream/master
 import subprocess
 import time
 from dataclasses import dataclass
 from typing import Optional
 
+<<<<<<< HEAD
 logger = logging.getLogger(__name__)
 
 #: Grace period after SIGTERM before escalating to SIGKILL when a stale
 #: subprocess's process group is terminated.
 _SIGTERM_GRACE_SECONDS = 2.0
+=======
+# Bug #2012: the single, layer-neutral group-termination implementation
+# (previously duplicated here and in server/utils/cancellable_subprocess.py).
+from code_indexer.utils.process_group import terminate_process_group
+
+logger = logging.getLogger(__name__)
+>>>>>>> upstream/master
 
 
 @dataclass(frozen=True)
@@ -166,6 +177,7 @@ def evaluate_staleness(
     return None
 
 
+<<<<<<< HEAD
 def terminate_process_group(proc: "subprocess.Popen") -> None:
     """SIGTERM the process group, wait a grace period, escalate to SIGKILL.
     Always blocks until the child is reaped.
@@ -217,6 +229,8 @@ def terminate_process_group(proc: "subprocess.Popen") -> None:
     proc.wait()
 
 
+=======
+>>>>>>> upstream/master
 def _read_heartbeat_mtime_age(heartbeat_path: str) -> Optional[float]:
     """Age (seconds) of the heartbeat file's mtime, or None if it cannot
     be stat'd (routine during the bootstrap grace period).

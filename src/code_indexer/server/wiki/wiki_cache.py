@@ -362,6 +362,42 @@ class WikiCache:
 
         self._conn_manager.execute_atomic(_do_put)
 
+    # Final (link-rewritten, sanitised) pages are stored in wiki_cache under
+    # this article_path prefix. Servers that cached unsanitised HTML use the
+    # bare article path and never read or write these keys; a relative
+    # article path never starts with "/", so the two key spaces never meet.
+    # invalidate_repo deletes by repo_alias and so clears both.
+    SANITIZED_PAGE_KEY_PREFIX = "/sanitized-page-v1/"
+
+    def get_page(
+        self, repo_alias: str, article_path: str, file_path: Path
+    ) -> Optional[Dict]:
+        """Return the cached final page ('html', 'title', 'metadata') if the
+        file's stat values still match, else None."""
+        return self.get_article(
+            repo_alias, self.SANITIZED_PAGE_KEY_PREFIX + article_path, file_path
+        )
+
+    def put_page(
+        self,
+        repo_alias: str,
+        article_path: str,
+        html: str,
+        title: str,
+        file_path: Path,
+        *,
+        metadata: Optional[Dict] = None,
+    ) -> None:
+        """Store a final page; ``html`` must already be sanitised."""
+        self.put_article(
+            repo_alias,
+            self.SANITIZED_PAGE_KEY_PREFIX + article_path,
+            html,
+            title,
+            file_path,
+            metadata=metadata,
+        )
+
     def get_sidebar(self, repo_alias: str, repo_dir: Path) -> Optional[List]:
         """Return cached sidebar list if a cache row exists, else None.
 

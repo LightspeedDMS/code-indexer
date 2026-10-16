@@ -1,18 +1,14 @@
-"""Unit tests for Bug #1173: failed REST searches must NOT write to search_event_log.
+"""Unit tests for Bug #1173 / Story #2117: what a REST search writes to the
+search event log.
 
-The REST semantic_query handler at POST /api/query had its search event enqueue
-call in the `finally:` block, meaning it fired on BOTH success and failure paths.
-Spec H11 requires that only successful (2xx) searches produce a log row.
+Bug #1173 stopped failed searches from being logged as successes. Story #2117
+(owner ruling) replaced "a failed search writes nothing" with: a failed REST
+search enqueues exactly ONE record with outcome "failure" and the exception's
+class as error_class (never its message); a successful search enqueues one
+success record.
 
-These tests exercise the real register_query_routes() closure path — not the MCP
-search_code() handler — because the bug lives in inline_query.py.
-
-Tests:
-  test_no_enqueue_on_semantic_query_error_not_found - SemanticQueryError('not found') -> 404 -> no enqueue
-  test_no_enqueue_on_semantic_query_error_bad_request - SemanticQueryError('no activated') -> 400 -> no enqueue
-  test_no_enqueue_on_value_error - ValueError -> 400 -> no enqueue
-  test_no_enqueue_on_unexpected_exception - RuntimeError -> 500 -> no enqueue
-  test_enqueue_on_success - successful search -> exactly one record enqueued
+These tests exercise the real register_query_routes() closure path -- not the
+MCP search_code() handler -- because the door lives in inline_query.py.
 """
 
 import pytest
@@ -22,7 +18,11 @@ from fastapi.testclient import TestClient
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.routers.inline_query import register_query_routes
-from code_indexer.server.query.semantic_query_manager import SemanticQueryError
+from code_indexer.server.query.semantic_query_manager import (
+    SearchRepositoryNotFoundError,
+    SearchRequestError,
+    SemanticQueryError,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -139,19 +139,29 @@ def app_with_routes(
 # ---------------------------------------------------------------------------
 
 
-class TestNoEnqueueOnFailure:
-    """Bug #1173: search event must NOT be enqueued when the handler raises."""
+class TestRejectedRequestEnqueuesNothing:
+    """Story #2117: a request rejected before its repository resolved (an
+    unknown repository, a refused parameter) is not a search: no record."""
 
-    def test_no_enqueue_on_semantic_query_error_not_found(
+    @pytest.mark.parametrize(
+        "exc, expected_status",
+        [
+            (SearchRepositoryNotFoundError("missing-repo"), status.HTTP_404_NOT_FOUND),
+            (
+                SearchRequestError("no activated repositories for user"),
+                status.HTTP_400_BAD_REQUEST,
+            ),
+        ],
+    )
+    def test_rejected_request_enqueues_nothing(
         self,
         app_with_routes,
         mock_semantic_query_manager,
         writer,
+        exc,
+        expected_status,
     ):
-        """SemanticQueryError 'not found' -> 404 -> no log row (Spec H11)."""
-        mock_semantic_query_manager.query_user_repositories.side_effect = (
-            SemanticQueryError("Repository not found")
-        )
+        mock_semantic_query_manager.query_user_repositories.side_effect = exc
 
         client = TestClient(app_with_routes, raise_server_exceptions=False)
         response = client.post(
@@ -159,87 +169,63 @@ class TestNoEnqueueOnFailure:
             json={"query_text": "find me", "repository_alias": "missing-repo"},
         )
 
-        assert response.status_code == status.HTTP_404_NOT_FOUND
-        assert len(writer.enqueued) == 0, (
-            "Bug #1173: event was enqueued for a failed (404) search — "
-            "enqueue must not fire in the finally: block"
-        )
+        assert response.status_code == expected_status
+        assert writer.enqueued == []
 
-    def test_no_enqueue_on_semantic_query_error_bad_request(
+
+class TestFailedSearchEnqueuesOneFailureRecord:
+    """Story #2117: a REST search that raises enqueues exactly one failure
+    record; error_class is the exception's class, never its message."""
+
+    @pytest.mark.parametrize(
+        "exc, expected_status",
+        [
+            (
+                SemanticQueryError("Repository not found"),
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+            ),
+            (
+                SemanticQueryError("no activated repositories for user"),
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+            ),
+            (ValueError("invalid parameter"), status.HTTP_500_INTERNAL_SERVER_ERROR),
+            (RuntimeError("internal crash"), status.HTTP_500_INTERNAL_SERVER_ERROR),
+        ],
+    )
+    def test_failed_search_enqueues_one_failure_record(
         self,
         app_with_routes,
         mock_semantic_query_manager,
         writer,
+        exc,
+        expected_status,
     ):
-        """SemanticQueryError 'no activated repositories' -> 400 -> no log row."""
-        mock_semantic_query_manager.query_user_repositories.side_effect = (
-            SemanticQueryError("no activated repositories for user")
-        )
+        mock_semantic_query_manager.query_user_repositories.side_effect = exc
 
         client = TestClient(app_with_routes, raise_server_exceptions=False)
         response = client.post(
             "/api/query",
-            json={"query_text": "find me", "repository_alias": "any"},
+            json={"query_text": "find me", "repository_alias": "missing-repo"},
         )
 
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-        assert len(writer.enqueued) == 0, (
-            "Bug #1173: event was enqueued for a failed (400) search"
+        assert response.status_code == expected_status
+        [record] = writer.enqueued
+        assert (record.tool, record.outcome, record.error_class) == (
+            "POST /api/query",
+            "failure",
+            type(exc).__name__,
         )
+        assert record.result_count == 0
 
-    def test_no_enqueue_on_value_error(
-        self,
-        app_with_routes,
-        mock_semantic_query_manager,
-        writer,
-    ):
-        """ValueError -> 400 -> no log row."""
-        mock_semantic_query_manager.query_user_repositories.side_effect = ValueError(
-            "invalid parameter"
-        )
 
-        client = TestClient(app_with_routes, raise_server_exceptions=False)
-        response = client.post(
-            "/api/query",
-            json={"query_text": "find me", "repository_alias": "any"},
-        )
-
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-        assert len(writer.enqueued) == 0, (
-            "Bug #1173: event was enqueued for a failed (400/ValueError) search"
-        )
-
-    def test_no_enqueue_on_unexpected_exception(
-        self,
-        app_with_routes,
-        mock_semantic_query_manager,
-        writer,
-    ):
-        """Unexpected exception -> 500 -> no log row."""
-        mock_semantic_query_manager.query_user_repositories.side_effect = RuntimeError(
-            "internal crash"
-        )
-
-        client = TestClient(app_with_routes, raise_server_exceptions=False)
-        response = client.post(
-            "/api/query",
-            json={"query_text": "find me", "repository_alias": "any"},
-        )
-
-        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
-        assert len(writer.enqueued) == 0, (
-            "Bug #1173: event was enqueued for a failed (500) search"
-        )
-
+class TestSuccessfulSearch:
     def test_enqueue_on_success(
         self,
         app_with_routes,
         mock_semantic_query_manager,
         writer,
     ):
-        """Sanity: successful search DOES enqueue exactly one record."""
-        # Default mock returns 3 results — no side_effect set
-
+        """A successful search enqueues exactly one success record."""
         client = TestClient(app_with_routes, raise_server_exceptions=False)
         response = client.post(
             "/api/query",
@@ -251,3 +237,4 @@ class TestNoEnqueueOnFailure:
             "Expected exactly one SearchEventRecord on success"
         )
         assert writer.enqueued[0].username == "alice"
+        assert writer.enqueued[0].outcome == "success"

@@ -21,7 +21,12 @@ def test_recent_in_progress_metadata_does_not_count_as_rebuilt(tmp_path):
         tmp_path, ["voyage-ai"], saved["last_index_timestamp"]
     ) == ["voyage-ai"]
 
+<<<<<<< HEAD
     metadata.complete_indexing()
+=======
+    # Story #2121: the watermark is the run's listing start (not before since).
+    metadata.complete_indexing(saved["last_index_timestamp"])
+>>>>>>> upstream/master
     completed = json.loads(metadata_path.read_text())
     assert completed["status"] == "completed"
     assert (

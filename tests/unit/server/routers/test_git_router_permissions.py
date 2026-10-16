@@ -61,9 +61,27 @@ ADMIN_USER = _user(UserRole.ADMIN)
 
 
 @pytest.fixture
+<<<<<<< HEAD
 def client():
     c = TestClient(app)
     yield c
+=======
+def client(tmp_path):
+    from tests.unit.server.routers.inline_routes_test_helpers import (
+        _access_service_admin,
+    )
+
+    c = TestClient(app)
+    # Every caller is an admin of a real access service, so the
+    # activated-repo guard passes; these tests pin the permission tiers.
+    with _access_service_admin(
+        tmp_path / "access-groups.db",
+        NORMAL_USER.username,
+        POWER_USER.username,
+        ADMIN_USER.username,
+    ):
+        yield c
+>>>>>>> upstream/master
     app.dependency_overrides.pop(get_current_user, None)
 
 
@@ -320,6 +338,13 @@ def _repo_resolves_to(repo_path):
     no mocking of git itself)."""
     mock_arm = MagicMock()
     mock_arm.get_activated_repo_path.return_value = str(repo_path)
+<<<<<<< HEAD
+=======
+    # prepare_remote_operation -> Optional[str]: the registered repository
+    # URL whose credentials are supplied at run time; None when no golden
+    # repository is registered (the local "golden" remote needs none).
+    mock_arm.prepare_remote_operation.return_value = None
+>>>>>>> upstream/master
     original_svc_arm = git_operations_service.activated_repo_manager
     git_operations_service.activated_repo_manager = mock_arm
     try:
@@ -336,6 +361,7 @@ class TestPlusMainForcePushRest:
         (verified empirically: the push still reports "(forced
         update)"). It is the only force-push mechanism available through
         this route (no separate `force` request field), so it must reach
+<<<<<<< HEAD
         `git push` unchanged and rewrite a diverged remote ref.
 
         NOTE: asserts the git-level effect (the remote's `main` ref
@@ -343,6 +369,10 @@ class TestPlusMainForcePushRest:
         test_normal_branch_main_push_still_succeeds's docstring above for
         the pre-existing, unrelated GitPushResponse field-shape defect
         this documents rather than works around differently.
+=======
+        `git push` unchanged and rewrite a diverged remote ref. Asserts
+        both the HTTP 200 response and the git-level effect.
+>>>>>>> upstream/master
         """
         repo, remote = _make_repo_with_golden_remote(tmp_path)
         # Diverge local history from what is already on the remote (the
@@ -362,6 +392,10 @@ class TestPlusMainForcePushRest:
                 json={"remote": "golden", "branch": "+main"},
             )
 
+<<<<<<< HEAD
+=======
+        assert response.status_code == 200, response.text
+>>>>>>> upstream/master
         assert "must not start with" not in response.text, (
             f"POST push branch='+main' (git's own force-push syntax) must "
             f"not be rejected by validate_branch_name, got "
@@ -374,6 +408,7 @@ class TestPlusMainForcePushRest:
     def test_normal_branch_main_push_still_succeeds(self, client, tmp_path):
         """branch='main' must not be rejected by validate_branch_name's
         leading-'+' check, and the push must actually reach the remote.
+<<<<<<< HEAD
 
         NOTE: this asserts the real git-level effect (the remote's `main`
         ref advances), not a clean HTTP 200. Discovered incidentally: for
@@ -385,6 +420,9 @@ class TestPlusMainForcePushRest:
         This is a pre-existing response-shape defect, unrelated to argv
         validation and out of scope here (different root cause, unrelated
         files); documented rather than silently worked around.
+=======
+        Asserts both the HTTP 200 response and the git-level effect.
+>>>>>>> upstream/master
         """
         repo, remote = _make_repo_with_golden_remote(tmp_path)
         (repo / "f.txt").write_text("second commit\n")
@@ -402,6 +440,10 @@ class TestPlusMainForcePushRest:
                 json={"remote": "golden", "branch": "main"},
             )
 
+<<<<<<< HEAD
+=======
+        assert response.status_code == 200, response.text
+>>>>>>> upstream/master
         assert "must not start with" not in response.text, (
             f"POST push branch='main' (legitimate) must not be rejected by "
             f"validate_branch_name, got {response.status_code}: "

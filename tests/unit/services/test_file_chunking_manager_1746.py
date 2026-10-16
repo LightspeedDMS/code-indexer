@@ -97,7 +97,17 @@ class _RaisingFilesystemClient:
         return True
 
     def get_existing_content_hashes(
+<<<<<<< HEAD
         self, file_path: str, collection_name: str
+=======
+        self,
+        file_path: str,
+        collection_name: str,
+        *,
+        project_id: str,
+        file_hash: str,
+        chunk_count: int,
+>>>>>>> upstream/master
     ) -> Dict[int, Dict[str, Any]]:
         return {}
 

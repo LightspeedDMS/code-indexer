@@ -18,6 +18,10 @@ from code_indexer.server.cache.payload_cache import PayloadCache, PayloadCacheCo
 from code_indexer.server.mcp.handlers import xray_truncation as xt
 
 from ._xray_truncation_test_helpers import (
+<<<<<<< HEAD
+=======
+    OWNER,
+>>>>>>> upstream/master
     cache_factory,  # noqa: F401 -- pytest fixture, used via injection
     fetch_all_pages,
     make_error,
@@ -53,7 +57,11 @@ class TestEveryPageIndependentlyParseable:
         }
 
         truncated = xt.truncate_result_fields(
+<<<<<<< HEAD
             result, cache, ["matches", "evaluation_errors"]
+=======
+            result, cache, ["matches", "evaluation_errors"], owner=OWNER
+>>>>>>> upstream/master
         )
 
         pages = fetch_all_pages(cache, truncated["cache_handle"])
@@ -85,7 +93,11 @@ class TestEveryPageIndependentlyParseable:
         }
 
         truncated = xt.truncate_result_fields(
+<<<<<<< HEAD
             result, cache, ["matches", "evaluation_errors"]
+=======
+            result, cache, ["matches", "evaluation_errors"], owner=OWNER
+>>>>>>> upstream/master
         )
         assert truncated["truncated"] is True
         total_pages = truncated["total_pages"]
@@ -123,7 +135,11 @@ class TestConfigChangeBetweenStoreAndFetch:
         }
         try:
             truncated = xt.truncate_result_fields(
+<<<<<<< HEAD
                 result, store_cache, ["matches", "evaluation_errors"]
+=======
+                result, store_cache, ["matches", "evaluation_errors"], owner=OWNER
+>>>>>>> upstream/master
             )
             cache_handle = truncated["cache_handle"]
         finally:
@@ -154,9 +170,15 @@ class TestLegacyHandleStillFetchable:
     ) -> None:
         cache = cache_factory(max_fetch_size_chars=TINY_LEGACY_BUDGET_CHARS)
         raw_content = json_module.dumps({"matches": [make_match(0)]})
+<<<<<<< HEAD
         legacy_handle = cache.store(raw_content)
 
         result = xt.fetch_cached_page(cache, legacy_handle, FIRST_PAGE_NUMBER)
+=======
+        legacy_handle = cache.store(raw_content, owner=OWNER)
+
+        result = xt.fetch_cached_page(cache, legacy_handle, FIRST_PAGE_NUMBER, OWNER)
+>>>>>>> upstream/master
 
         assert result["content"] == raw_content[:TINY_LEGACY_BUDGET_CHARS]
         assert result["total_pages"] == -(-len(raw_content) // TINY_LEGACY_BUDGET_CHARS)

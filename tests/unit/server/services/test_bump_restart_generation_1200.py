@@ -272,9 +272,17 @@ class TestSavePreservesGenerationSQLite:
             )
             conn.commit()
 
-        # svc saves its config (stale in-memory generation=0)
-        config = svc.get_config()
-        svc.save_config(config)
+        # Bug #2017: a whole-config save of the copy loaded BEFORE the other
+        # process's commit is refused (nothing written) ...
+        from code_indexer.server.services.config_service import ConfigChangeConflict
+
+        with pytest.raises(ConfigChangeConflict):
+            svc.save_config(svc.get_config())
+        assert _read_runtime_row(db_path)["data"].get("launch_restart_generation") == 1
+
+        # ... and once reloaded, the save keeps the row's CURRENT generation.
+        svc.load_config()
+        svc.save_config(svc.get_config())
 
         row = _read_runtime_row(db_path)
         assert row["data"].get("launch_restart_generation") == 1, (
@@ -351,7 +359,7 @@ class TestSaveRuntimeToPgSqlText:
         # Patch materialize_launch_config to avoid filesystem side effects
         svc.materialize_launch_config = MagicMock(return_value=True)  # type: ignore[method-assign]
 
-        svc._save_runtime_to_pg(config)
+        svc.save_config(config)  # Bug #2017: the PG compare-and-set save
 
         # Collect all SQL strings passed to cur.execute
         all_sql_calls = [str(c.args[0]) for c in cur.execute.call_args_list]
@@ -380,7 +388,7 @@ class TestSaveRuntimeToPgSqlText:
         config = svc.get_config()
         svc.materialize_launch_config = MagicMock(return_value=True)  # type: ignore[method-assign]
 
-        svc._save_runtime_to_pg(config)
+        svc.save_config(config)  # Bug #2017: the PG compare-and-set save
 
         all_sql_calls = [str(c.args[0]) for c in cur.execute.call_args_list]
         update_calls = [sql for sql in all_sql_calls if "UPDATE server_config" in sql]
@@ -412,7 +420,7 @@ class TestSaveRuntimeToPgSqlText:
         config = svc.get_config()
         svc.materialize_launch_config = MagicMock(return_value=True)  # type: ignore[method-assign]
 
-        svc._save_runtime_to_pg(config)
+        svc.save_config(config)  # Bug #2017: the PG compare-and-set save
 
         all_sql_calls = [str(c.args[0]) for c in cur.execute.call_args_list]
         select_calls = [
@@ -430,8 +438,13 @@ class TestBumpLaunchRestartGenerationPgSqlText:
     """Defect 3: bump_launch_restart_generation PG path SQL-text assertions."""
 
     def test_bump_pg_uses_jsonb_set_in_single_statement(self, tmp_path: Path) -> None:
-        """PG bump must use jsonb_set in a single UPDATE (no read-modify-write)."""
-        pool, conn, cur = _make_pg_pool(fetchone_side_effect=[])
+        """PG bump must use jsonb_set in a single UPDATE (no read-modify-write).
+
+        Bug #2017: the UPDATE is a compare-and-set on the version read first
+        (the version read, then ``UPDATE ... AND version = %s RETURNING``)."""
+        pool, conn, cur = _make_pg_pool(
+            fetchone_side_effect=[{"version": 7}, {"version": 8}]
+        )
         svc = _make_pg_config_service(tmp_path, pool)
 
         svc.bump_launch_restart_generation()
@@ -455,3 +468,6 @@ class TestBumpLaunchRestartGenerationPgSqlText:
         assert "version" in update_sql and (
             "version + 1" in update_sql or "version+1" in update_sql
         ), "Defect 3: PG bump must increment version in the same statement"
+        assert "AND version = %s" in update_sql, (
+            "Bug #2017: the PG bump must be a compare-and-set on the version read"
+        )

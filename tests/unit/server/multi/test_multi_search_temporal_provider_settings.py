@@ -69,7 +69,11 @@ from code_indexer.server.multi.multi_search_service import (  # noqa: E402
     MultiSearchService,
 )
 from code_indexer.server.multi.multi_search_config import MultiSearchConfig  # noqa: E402
+<<<<<<< HEAD
 from code_indexer.server.multi.models import MultiSearchRequest  # noqa: E402
+=======
+from code_indexer.server.multi.models import InternalMultiSearchRequest  # noqa: E402
+>>>>>>> upstream/master
 from code_indexer.services.temporal.temporal_search_service import (  # noqa: E402
     TemporalSearchResults,
 )
@@ -100,7 +104,11 @@ def test_temporal_search_resets_provider_endpoints_before_fusion() -> None:
             total_found=0,
         )
 
+<<<<<<< HEAD
     request = MultiSearchRequest(
+=======
+    request = InternalMultiSearchRequest(
+>>>>>>> upstream/master
         query="test query",
         search_type="temporal",
         repositories=["repo1"],
@@ -111,6 +119,10 @@ def test_temporal_search_resets_provider_endpoints_before_fusion() -> None:
         exclude_language=None,
         exclude_path=None,
         accuracy=None,
+<<<<<<< HEAD
+=======
+        file_extensions=None,
+>>>>>>> upstream/master
         no_embedding_cache_shortcut=False,
         temporal_embedder=None,
         precomputed_query_vector=None,

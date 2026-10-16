@@ -87,11 +87,22 @@ def mfa_secret(totp: TOTPService) -> str:
 
 
 @pytest.fixture
+<<<<<<< HEAD
 def sessions(monkeypatch) -> SessionManager:
+=======
+def sessions(monkeypatch, users) -> SessionManager:
+    from code_indexer.server.auth import dependencies
+
+>>>>>>> upstream/master
     sm = SessionManager(
         "audit-login-test-signing-key", SimpleNamespace(host="127.0.0.1")
     )
     monkeypatch.setattr(web_auth, "_session_manager", sm)
+<<<<<<< HEAD
+=======
+    # The shared account store start-up wires (MFA completion resolves it).
+    monkeypatch.setattr(dependencies, "user_manager", users)
+>>>>>>> upstream/master
     return sm
 
 
@@ -303,6 +314,10 @@ def _authorize(
     username: str,
     password: str = _PASSWORD,
     redirect_uri: str = _REDIRECT_URI,
+<<<<<<< HEAD
+=======
+    code_challenge: str = _CODE_CHALLENGE,
+>>>>>>> upstream/master
 ):
     return client.post(
         "/oauth/authorize",
@@ -310,7 +325,11 @@ def _authorize(
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "response_type": "code",
+<<<<<<< HEAD
             "code_challenge": _CODE_CHALLENGE,
+=======
+            "code_challenge": code_challenge,
+>>>>>>> upstream/master
             "state": "client-state",
             "username": username,
             "password": password,
@@ -369,6 +388,20 @@ class TestOAuthAuthorizeDoor:
         assert "typed-into-wrong-field" not in store.all_raw_text()
 
     def test_issuance_error_records_one_failure(self, oauth, oauth_client_id, store):
+<<<<<<< HEAD
+=======
+        # A blank (whitespace) challenge passes the door's presence check and
+        # is refused by code issuance, after the password was checked.
+        resp = _authorize(oauth, oauth_client_id, _USER, code_challenge="   ")
+
+        assert resp.status_code == 400, resp.text
+        assert _outcomes(store) == [("authentication_failure", _USER, _USER, "failure")]
+        assert store.rows(*_LOGIN_TYPES)[0].details["stage"] == "issuance"
+
+    def test_unregistered_redirect_uri_is_refused_before_authentication(
+        self, oauth, oauth_client_id, store
+    ):
+>>>>>>> upstream/master
         resp = _authorize(
             oauth,
             oauth_client_id,
@@ -377,8 +410,13 @@ class TestOAuthAuthorizeDoor:
         )
 
         assert resp.status_code == 400, resp.text
+<<<<<<< HEAD
         assert _outcomes(store) == [("authentication_failure", _USER, _USER, "failure")]
         assert store.rows(*_LOGIN_TYPES)[0].details["stage"] == "issuance"
+=======
+        assert "location" not in resp.headers
+        assert _outcomes(store) == []
+>>>>>>> upstream/master
 
     def test_mfa_challenge_step_records_nothing(
         self, oauth, oauth_client_id, mfa_secret, store

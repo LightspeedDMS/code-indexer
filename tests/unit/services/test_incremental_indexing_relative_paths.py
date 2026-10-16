@@ -5,7 +5,8 @@ Root cause: _get_git_deltas_since_commit() returns relative paths from git diff
 Path() but never converts to absolute. These relative Paths then fail when
 file_identifier.get_file_metadata() calls file_path.relative_to(self.project_dir).
 
-The resume path (_do_resume_interrupted) has the same issue.
+The failed-file retry path (_merge_recorded_failures; resume-from-list was
+retired by Story #2121) must convert stored relative paths too.
 
 These tests FAIL before the fix and PASS after.
 """
@@ -145,8 +146,13 @@ def _run_do_incremental_index(
     indexer.progressive_metadata.metadata["status"] = "completed"
     with patch.object(
         indexer.progressive_metadata,
+<<<<<<< HEAD
         "can_resume_interrupted_operation",
         return_value=False,
+=======
+        "record_plan",
+        return_value=None,
+>>>>>>> upstream/master
     ):
         with patch.object(
             indexer.progressive_metadata,
@@ -160,7 +166,11 @@ def _run_do_incremental_index(
             ):
                 with patch.object(indexer.progressive_metadata, "start_indexing"):
                     with patch.object(
+<<<<<<< HEAD
                         indexer.progressive_metadata, "set_files_to_index"
+=======
+                        indexer.progressive_metadata, "start_fresh_indexing"
+>>>>>>> upstream/master
                     ):
                         with patch.object(
                             indexer.progressive_metadata, "update_progress"
@@ -343,62 +353,23 @@ class TestIncrementalIndexingDedupesAcrossTracks:
 
 
 class TestResumePathConvertsRelativeToAbsolute:
-    """Tests that the resume path (_do_resume_interrupted) converts relative paths to absolute."""
+    """Tests that stored relative paths are converted to absolute ones.
+    Story #2121: the one remaining stored path list is the failed-file retry
+    (failed_file_paths), merged by _merge_recorded_failures."""
 
     def _call_do_resume_interrupted(self, indexer, relative_paths):
-        """Helper to call _do_resume_interrupted with all required mocks."""
-        captured_files = []
-
-        def capture_process_files(files, *args, **kwargs):
-            captured_files.extend(files)
-            return ProcessingStats()
-
-        git_status = {
-            "git_available": True,
-            "current_branch": "master",
-            "current_commit": "abc123",
-            "is_dirty": False,
-        }
-
-        with patch.object(
-            indexer.progressive_metadata,
-            "get_remaining_files",
-            return_value=relative_paths,
-        ):
-            with patch.object(indexer.progressive_metadata, "complete_indexing"):
-                with patch.object(indexer.progressive_metadata, "update_progress"):
-                    with patch.object(
-                        indexer.progressive_metadata,
-                        "get_stats",
-                        return_value={
-                            "files_processed": 0,
-                            "total_files_to_index": 1,
-                            "chunks_indexed": 0,
-                        },
-                    ):
-                        with patch.object(indexer.progress_log, "complete_session"):
-                            with patch.object(
-                                indexer.progress_log, "mark_session_cancelled"
-                            ):
-                                with patch.object(
-                                    indexer,
-                                    "process_files_high_throughput",
-                                    side_effect=capture_process_files,
-                                ):
-                                    indexer._do_resume_interrupted(
-                                        batch_size=10,
-                                        progress_callback=None,
-                                        git_status=git_status,
-                                        provider_name="voyage",
-                                        model_name="voyage-3",
-                                        quiet=True,
-                                    )
-        return captured_files
+        """Plant the relative paths as recorded failures and return the
+        files the REAL failed-file retry merge would hand to processing."""
+        indexer.progressive_metadata.metadata["failed_file_paths"] = list(
+            relative_paths
+        )
+        retried, _merged = indexer._merge_recorded_failures([])
+        return retried
 
     def test_resume_files_passed_to_process_are_absolute(self, tmp_path):
-        """When progressive metadata contains relative file paths (stored from a
-        failed incremental run), _do_resume_interrupted must convert them to
-        absolute before passing to process_files_high_throughput."""
+        """When progressive metadata records relative failed file paths
+        (failed_file_paths), the failed-file retry must convert them to
+        absolute paths before they reach processing."""
         repo = tmp_path / "repo"
         repo.mkdir()
         _create_git_repo(repo)

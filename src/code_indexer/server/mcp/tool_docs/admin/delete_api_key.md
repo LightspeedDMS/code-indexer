@@ -14,7 +14,11 @@ inputSchema:
   - key_id
 ---
 
+<<<<<<< HEAD
 TL;DR: Delete an API key and immediately invalidate it. Requires MCP elevation (TOTP step-up). Delete an API key belonging to the authenticated user. The key will be immediately invalidated.
+=======
+TL;DR: Delete an API key and immediately invalidate it. Requires MCP elevation (TOTP step-up) when elevation enforcement is on. Delete an API key belonging to the authenticated user. The key will be immediately invalidated.
+>>>>>>> upstream/master
 
 USE CASES:
 - Revoke compromised key
@@ -33,4 +37,8 @@ ERRORS:
 - elevation_required: TOTP step-up needed
 - totp_setup_required: TOTP not yet configured for this account (setup_url provided)
 
+<<<<<<< HEAD
 EXAMPLE: {"key_id": "key_xyz"} Returns: {"success": true}
+=======
+EXAMPLE: {"key_id": "key_xyz"} Returns: {"success": true}
+>>>>>>> upstream/master

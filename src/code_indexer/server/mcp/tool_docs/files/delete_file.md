@@ -38,4 +38,4 @@ outputSchema:
   - deleted_at
 ---
 
-Delete a file from an activated repository. USE CASES: (1) Remove obsolete files, (2) Clean up temporary files, (3) Delete test fixtures. SAFETY: Optional content_hash validation prevents accidental deletion of modified files. REQUIREMENTS: File must exist. Repository must be activated. PERMISSIONS: Requires repository:write. EXAMPLE: {"repository_alias": "my-repo", "file_path": "src/old_module.py", "content_hash": "xyz789"}
+Delete a file from an activated repository. USE CASES: (1) Remove obsolete files, (2) Clean up temporary files, (3) Delete test fixtures. SAFETY: Optional content_hash validation prevents accidental deletion of modified files. REQUIREMENTS: File must exist. repository_alias is one of your activated workspaces, or a write-exception repository such as cidx-meta-global after enter_write_mode (without write mode the call is refused with "Repo '<alias>' requires write mode..."). PERMISSIONS: Requires repository:write. EXAMPLE: {"repository_alias": "my-work", "file_path": "src/old_module.py", "content_hash": "<content_hash from get_file_content>"}

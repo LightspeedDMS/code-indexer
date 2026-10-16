@@ -46,6 +46,12 @@ from code_indexer.server.repositories.activated_repo_manager import (
 )
 from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 from code_indexer.server.routers.activated_repos import router
+<<<<<<< HEAD
+=======
+from tests.unit.server.routers.inline_routes_test_helpers import (
+    caller_is_access_admin,  # noqa: F401
+)
+>>>>>>> upstream/master
 
 
 @pytest.fixture

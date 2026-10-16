@@ -135,6 +135,7 @@ class BackendRegistry:
     # backends already share the identical record_sample()/get_k() protocol
     # (KStoreProtocol in k_calibration_store.py).
     xray_k_calibration: Any = field(default=None)
+<<<<<<< HEAD
     # Content seam step 5a: golden-repo alias pointers and write-mode markers
     # (control-plane metadata) -- SQLite in solo mode, PostgreSQL in cluster
     # mode, replacing the per-pod golden-repos/aliases/ and .write_mode/ files.
@@ -143,6 +144,12 @@ class BackendRegistry:
     control_plane_metadata: Optional["ControlPlaneMetadataBackend"] = field(
         default=None
     )
+=======
+    # SIEM delivery store (services/siem_delivery/db.py SiemDb): SQLite on
+    # groups.db (beside audit_logs, so capture joins the audit transaction)
+    # in solo mode, the shared general pool in cluster mode.
+    siem_delivery: Any = field(default=None)
+>>>>>>> upstream/master
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +203,7 @@ class StorageFactory:
     @staticmethod
     def _create_sqlite_backends(data_dir: str) -> BackendRegistry:
         """Instantiate all SQLite backends exactly as done today in service_init."""
+        from code_indexer.server.services.siem_delivery.db import SiemDb
         from code_indexer.server.storage.sqlite_backends import (
             ApiMetricsSqliteBackend,
             BackgroundJobsSqliteBackend,
@@ -297,7 +305,11 @@ class StorageFactory:
             xray_k_calibration=SqliteKCalibrationBackend(
                 db_path=str(Path(data_dir) / "xray_k_calibration.db")
             ),
+<<<<<<< HEAD
             control_plane_metadata=ControlPlaneMetadataSqliteBackend(db_path),
+=======
+            siem_delivery=SiemDb.sqlite(str(groups_db_path)),
+>>>>>>> upstream/master
         )
 
     # ------------------------------------------------------------------
@@ -320,6 +332,7 @@ class StorageFactory:
             KeyError: If ``postgres_dsn`` is missing from config.
         """
         # Lazy import — will raise ImportError if psycopg not installed.
+        from code_indexer.server.services.siem_delivery.db import SiemDb
         from code_indexer.server.storage.postgres.connection_pool import ConnectionPool
         from code_indexer.server.storage.postgres.global_repos_backend import (
             GlobalReposPostgresBackend,
@@ -420,9 +433,12 @@ class StorageFactory:
         from code_indexer.server.storage.postgres.xray_graph_k_calibration_backend import (
             XrayGraphKCalibrationPostgresBackend,
         )
+<<<<<<< HEAD
         from code_indexer.server.storage.postgres.control_plane_metadata_backend import (
             ControlPlaneMetadataPostgresBackend,
         )
+=======
+>>>>>>> upstream/master
 
         dsn = config["postgres_dsn"]
         pool_max_size = config.get("postgres_pool_max_size", 20)
@@ -480,7 +496,11 @@ class StorageFactory:
             search_embed_event=SearchEmbedEventPostgresBackend(pool),
             embedding_call_stats=EmbeddingCallStatsPostgresBackend(pool),
             xray_k_calibration=XrayGraphKCalibrationPostgresBackend(pool),
+<<<<<<< HEAD
             control_plane_metadata=ControlPlaneMetadataPostgresBackend(pool),
+=======
+            siem_delivery=SiemDb.postgres(pool),
+>>>>>>> upstream/master
             connection_pool=pool,
             critical_connection_pool=critical_pool,
         )

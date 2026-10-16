@@ -221,24 +221,21 @@ class TestMaterializeCoalesceZeroAndSaveWiring:
         spy = MagicMock(return_value=True)
         svc.materialize_launch_config = spy  # type: ignore[method-assign]
 
-        # Drive _save_runtime_to_sqlite directly
-        runtime_dict = {
-            "workers": 4,
-            "log_level": "info",
-            "host": "0.0.0.0",
-            "port": 8000,
-        }
-        svc._save_runtime_to_sqlite(runtime_dict)
+        # Drive the SQLite runtime-row save (Bug #2017: the compare-and-set
+        # save_config replaced the unconditional _save_runtime_to_sqlite)
+        before = svc._db_config_version
+        config = svc.get_config()
+        config.workers = 4
+        svc.save_config(config)
 
         # AC3: materialize_launch_config must have been called
         assert spy.called, (
-            "_save_runtime_to_sqlite must call self.materialize_launch_config() "
+            "the SQLite save must call self.materialize_launch_config() "
             "after saving (Story #1198 AC3)"
         )
         # _db_config_version must have been set from the saved row
-        assert svc._db_config_version > 0, (
-            "_save_runtime_to_sqlite must set _db_config_version from the "
-            "version read-back after saving (Story #1198 AC3)"
+        assert svc._db_config_version == before + 1, (
+            "the SQLite save must record the committed version (Story #1198 AC3)"
         )
 
 
@@ -311,7 +308,9 @@ class TestMaterializePgSaveWiring:
         original_path = cs_mod.LAUNCH_CONFIG_PATH
         cs_mod.LAUNCH_CONFIG_PATH = tmp_path / "launch.json"
         try:
-            svc._save_runtime_to_pg(config)
+            # Bug #2017: the compare-and-set save_config replaced the
+            # unconditional _save_runtime_to_pg
+            svc.save_config(config)
         finally:
             cs_mod.LAUNCH_CONFIG_PATH = original_path
 

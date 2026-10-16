@@ -39,4 +39,4 @@ outputSchema:
       type: string
 ---
 
-TL;DR: Retry a failed CI/CD workflow or pipeline. Auto-detects GitHub Actions or GitLab CI from the repository remote URL. REQUIRES: personal git credential configured via configure_git_credential (never uses global CI token). QUICK START: ci_retry_run(repository_alias='myrepo-global', run_id=12345). FORGE OVERRIDE: pass forge='github' or forge='gitlab' to skip auto-detection. AUDIT: all retry operations are logged with username and correlation_id. MIGRATION: replaces github_actions_retry_run(owner, repo, run_id) and gitlab_ci_retry_pipeline(project_id, pipeline_id).
+TL;DR: Retry a failed CI/CD workflow or pipeline. Auto-detects GitHub Actions or GitLab CI from the repository remote URL. REQUIRES: personal git credential configured via configure_git_credential (never uses global CI token). QUICK START: ci_retry_run(repository_alias='myrepo-global', run_id=12345). FORGE OVERRIDE: pass forge='github' or forge='gitlab' to skip auto-detection. AUDIT: all retry operations are logged with username and correlation_id.

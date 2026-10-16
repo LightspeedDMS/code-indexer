@@ -1,7 +1,7 @@
 """
 Unit tests for Story #929 Item #17 — documentation accuracy.
 
-Tests verify that docs/operating-modes.md has been updated to reflect the
+Tests verify that docs/getting-started/operating-modes.md has been updated to reflect the
 Research Assistant's actual remediation authority and scope boundaries, and no
 longer misleadingly describes the RA as a read-only code investigation tool.
 """
@@ -10,7 +10,12 @@ from pathlib import Path
 
 import pytest
 
-_DOCS_PATH = Path(__file__).parent.parent.parent / "docs" / "operating-modes.md"
+_DOCS_PATH = (
+    Path(__file__).parent.parent.parent
+    / "docs"
+    / "getting-started"
+    / "operating-modes.md"
+)
 
 
 def _extract_ra_section(docs_content: str) -> str:
@@ -59,7 +64,7 @@ def ra_section() -> str:
 
 
 class TestOperatingModesDocumentationAccuracy:
-    """Item #17: docs/operating-modes.md must describe RA remediation authority."""
+    """Item #17: docs/getting-started/operating-modes.md must describe RA remediation authority."""
 
     def test_remediation_authority_in_ra_section(self, ra_section):
         """The RA section must contain both 'remediation' and 'authority'."""

@@ -111,7 +111,11 @@ def service_grep(test_repo):
 
 
 @pytest.fixture
+<<<<<<< HEAD
 def ripgrep_executor_fixture(service_ripgrep):
+=======
+def ripgrep_executor_fixture():
+>>>>>>> upstream/master
     """Patch ONLY the module-scoped SubprocessExecutor to capture the ripgrep
     command; let ``_search_ripgrep`` use the REAL tempfile/os machinery.
 
@@ -135,6 +139,7 @@ def ripgrep_executor_fixture(service_ripgrep):
 
     Yields a list; each element is the command list passed to execute_with_limits.
     """
+<<<<<<< HEAD
     captured_commands: list = []
     # The seam replaces the executor substitution this fixture used to perform.
     # Scripting the backend needs no patching at all, so the long comment above
@@ -143,6 +148,28 @@ def ripgrep_executor_fixture(service_ripgrep):
     # temp file per call.
     service_ripgrep._ripgrep_backend = FakeRipgrepBackend(argv_log=captured_commands)
     yield captured_commands
+=======
+    captured_commands = []
+
+    mock_result = MagicMock()
+    mock_result.timed_out = False
+    mock_result.status = ExecutionStatus.SUCCESS
+
+    mock_executor = MagicMock()
+
+    def capture_and_return(**kwargs):
+        captured_commands.append(kwargs.get("command", []))
+        return mock_result
+
+    mock_executor.execute_with_limits = AsyncMock(side_effect=capture_and_return)
+    mock_executor.shutdown = MagicMock()
+
+    with patch(
+        "code_indexer.global_repos.regex_search.SubprocessExecutor",
+        return_value=mock_executor,
+    ):
+        yield captured_commands
+>>>>>>> upstream/master
 
 
 # ============================================================================

@@ -51,7 +51,10 @@ from code_indexer.server.services.pace_maker_guard import (  # Story #997
     enforce_pace_maker_config,
 )
 from code_indexer.server.self_monitoring import log_query
+<<<<<<< HEAD
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
+=======
+>>>>>>> upstream/master
 
 logger = logging.getLogger(__name__)
 

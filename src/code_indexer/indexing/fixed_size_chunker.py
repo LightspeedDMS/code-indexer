@@ -14,8 +14,13 @@ from pathlib import Path
 
 from ..config import IndexingConfig, Config
 from .image_extractor import ImageExtractorFactory
+<<<<<<< HEAD
 from ..utils.path_confinement import is_resolved_within_root
 from .text_decoding import decode_like_text_mode
+=======
+from ..utils.path_confinement import is_indexable_location
+from ..utils.source_text_decoding import read_source_text
+>>>>>>> upstream/master
 
 
 class FixedSizeChunker:
@@ -309,6 +314,7 @@ class FixedSizeChunker:
         # production caller passes repo_root; when it is omitted (test-only
         # direct usage of this method) there is no root to check against,
         # so the file is read unconditionally. Local CLI context reads
+<<<<<<< HEAD
         # symlinked files wherever they point.
         if (
             repo_root is not None
@@ -333,6 +339,20 @@ class FixedSizeChunker:
 
         if text is None:
             raise ValueError(f"Could not decode file {file_path}")
+=======
+        # symlinked files wherever they point, except into the repository's
+        # own .git, which no context reads.
+        if repo_root is not None and self._config is not None:
+            resolved_root = self._resolved_root_for(repo_root)
+            if not is_indexable_location(
+                file_path, resolved_root, self._config.confined_to_codebase_root
+            ):
+                raise ValueError("file does not resolve inside the codebase root")
+
+        # Decode through the helper query-time retrieval also uses, so the
+        # line ranges computed here are the ones retrieval slices (Bug #1991).
+        text = read_source_text(file_path)
+>>>>>>> upstream/master
 
         return self.chunk_text(text, file_path, repo_root)
 

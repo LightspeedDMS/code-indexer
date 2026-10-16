@@ -333,14 +333,41 @@ class TestActivationIdGenerationSiteWiredIntoRealActivation:
         golden_repo_manager_mock,
         background_job_manager_mock,
         mock_clone_backend,
+<<<<<<< HEAD
     ):
         return ActivatedRepoManager(
+=======
+        monkeypatch,
+    ):
+        # The real worker reaches CommitterResolutionService's
+        # _create_default_ssh_key_manager(), which resolves server_dir from
+        # the process-wide ConfigService and opens
+        # <server_dir>/data/cidx_server.db.  Point it at this test's own
+        # temp dir with a real schema so the test is hermetic, not reliant
+        # on another test having populated the session-shared server home.
+        from code_indexer.server.services.config_service import (
+            reset_config_service,
+        )
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", temp_data_dir)
+        db_path = os.path.join(temp_data_dir, "data", "cidx_server.db")
+        DatabaseSchema(db_path).initialize_database()
+        reset_config_service()
+
+        yield ActivatedRepoManager(
+>>>>>>> upstream/master
             data_dir=temp_data_dir,
             golden_repo_manager=golden_repo_manager_mock,
             background_job_manager=background_job_manager_mock,
             clone_backend=mock_clone_backend,
         )
 
+<<<<<<< HEAD
+=======
+        reset_config_service()
+
+>>>>>>> upstream/master
     @patch("subprocess.run")
     @patch("os.path.exists")
     def test_real_activation_worker_persists_a_uuid_activation_id(

@@ -11,6 +11,10 @@ replaced (see query_repo_access_env).
 from __future__ import annotations
 
 import json
+<<<<<<< HEAD
+=======
+import shutil
+>>>>>>> upstream/master
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -37,6 +41,10 @@ from tests.unit.server.query.query_repo_access_env import (
     UNGRANTED_REPO,
     USER,
     QueryAccessEnv,
+<<<<<<< HEAD
+=======
+    build_server_db_template,
+>>>>>>> upstream/master
     global_alias,
 )
 
@@ -56,10 +64,20 @@ ADMIN_USER = _user(ADMIN, UserRole.ADMIN)
 OTHER_NON_ADMIN = _user("example_other_user", UserRole.NORMAL_USER)
 
 
+<<<<<<< HEAD
 def _build_fts_index(repo_path: Path, repo: str) -> None:
     manager = TantivyIndexManager(
         index_dir=repo_path / ".code-indexer" / "tantivy_index"
     )
+=======
+def _fts_index_dir(repo_path: Path) -> Path:
+    """Where the query path reads a repo's FTS index."""
+    return repo_path / ".code-indexer" / "tantivy_index"
+
+
+def _build_fts_index(index_dir: Path, repo: str) -> None:
+    manager = TantivyIndexManager(index_dir=index_dir)
+>>>>>>> upstream/master
     manager.initialize_index()
     body = f"def authenticate(user): return '{repo}'"
     manager.add_document(
@@ -74,19 +92,60 @@ def _build_fts_index(repo_path: Path, repo: str) -> None:
         }
     )
     manager.commit()
+<<<<<<< HEAD
 
 
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[QueryAccessEnv]:
+=======
+    # Drop the writer and await merges so the files on disk are final.
+    manager.close()
+
+
+@pytest.fixture(scope="module")
+def fts_index_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build each repo's real Tantivy FTS index once per module.
+
+    A committed, closed Tantivy index is immutable segment files plus
+    meta.json naming them by segment id (no absolute paths), so a plain
+    file copy is a valid index at its new location. Each test copies these
+    instead of paying a fsync'd Tantivy commit per repo.
+    """
+    template = tmp_path_factory.mktemp("fts_index_template")
+    for repo in ALL_REPOS:
+        _build_fts_index(template / repo, repo)
+    return template
+
+
+@pytest.fixture(scope="module")
+def server_db_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return build_server_db_template(tmp_path_factory.mktemp("server_db_template"))
+
+
+@pytest.fixture
+def env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    server_db_template: Path,
+    fts_index_template: Path,
+) -> Iterator[QueryAccessEnv]:
+>>>>>>> upstream/master
     # No embedding provider key: deterministic primary-only routing and no
     # path can reach a real provider (the search boundary is faked).
     monkeypatch.delenv("CO_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path))
+<<<<<<< HEAD
     e = QueryAccessEnv(tmp_path)
     # UNGRANTED_REPO is registered first, so it is the first FTS candidate.
     for repo in ALL_REPOS:
         _build_fts_index(e.repo_paths[repo], repo)
+=======
+    e = QueryAccessEnv(tmp_path, server_db_template)
+    # UNGRANTED_REPO is registered first, so it is the first FTS candidate.
+    for repo in ALL_REPOS:
+        shutil.copytree(fts_index_template / repo, _fts_index_dir(e.repo_paths[repo]))
+>>>>>>> upstream/master
     try:
         yield e
     finally:
@@ -290,6 +349,52 @@ class TestFtsAndHybrid:
         assert body["metadata"]["repositories_searched"] == len(ALL_REPOS)
 
 
+<<<<<<< HEAD
+=======
+class TestOwnActivationCustomAlias:
+    """Rows from the caller's own activation are kept when the caller is
+    granted the golden repository the activation was created from, whatever
+    alias the activation uses (public #1984)."""
+
+    def test_semantic_custom_alias_activation_returns_its_rows(self, env):
+        env.activate_for(USER, GRANTED_REPO, OWN_ACTIVATION)
+
+        resp = _post(
+            env,
+            NON_ADMIN,
+            {
+                "query_text": "find",
+                "repository_alias": OWN_ACTIVATION,
+                "limit": ROWS_PER_REPO,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        rows = resp.json()["results"]
+        assert len(rows) == ROWS_PER_REPO
+        assert _repos_of(rows) == {OWN_ACTIVATION}
+
+    def test_hybrid_custom_alias_activation_returns_its_fts_rows(self, env):
+        env.activate_for(USER, GRANTED_REPO, OWN_ACTIVATION)
+
+        resp = _post(
+            env,
+            NON_ADMIN,
+            {
+                "query_text": "authenticate",
+                "search_mode": "hybrid",
+                "repository_alias": OWN_ACTIVATION,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["fts_results"], body
+        assert _repos_of(body["fts_results"]) == {OWN_ACTIVATION}
+        assert _repos_of(body["semantic_results"]) == {OWN_ACTIVATION}
+
+
+>>>>>>> upstream/master
 class TestMissingAccessServiceRest:
     """No access service: refused whenever a global repo would be searched
     (admins included); an own-activation-only query still runs."""

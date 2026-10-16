@@ -22,7 +22,11 @@ inputSchema:
   required: [forge_type, forge_host, token]
 ---
 
+<<<<<<< HEAD
 TL;DR: Configure a git forge PAT. Requires MCP elevation (TOTP step-up). Validates the token against the forge API, discovers your identity (name, email, username), and stores the token encrypted.
+=======
+TL;DR: Configure a git forge PAT. Requires MCP elevation (TOTP step-up) when elevation enforcement is on. Validates the token against the forge API, discovers your identity (name, email, username), and stores the token encrypted.
+>>>>>>> upstream/master
 
 USE CASES:
 - Set up GitHub/GitLab PAT for push operations

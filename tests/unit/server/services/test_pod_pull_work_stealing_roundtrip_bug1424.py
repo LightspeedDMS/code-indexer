@@ -102,11 +102,19 @@ class _ClaimerJobsTable:
             r["phase_detail"] = detail
         return 1
 
+<<<<<<< HEAD
     def complete(self, job_id, node_id, result_json):
         r = self._owned(job_id, node_id)
         if r is None:
             return 0
         r["status"] = "completed"
+=======
+    def complete(self, job_id, node_id, result_json, status):
+        r = self._owned(job_id, node_id)
+        if r is None:
+            return 0
+        r["status"] = status
+>>>>>>> upstream/master
         r["result"] = result_json
         r["progress"] = 100
         return 1
@@ -152,9 +160,16 @@ def _make_pool(table: _ClaimerJobsTable):
             cur.rowcount = table.update_progress(
                 job_id, node_id, progress, phase, detail
             )
+<<<<<<< HEAD
         elif "status = 'completed'" in normalized:
             result_json, job_id, node_id = params
             cur.rowcount = table.complete(job_id, node_id, result_json)
+=======
+        elif "SET result = %s" in normalized and "status = %s" in normalized:
+            # complete_job: the completion status is bound (Bug #2125).
+            result_json, status, job_id, node_id = params
+            cur.rowcount = table.complete(job_id, node_id, result_json, status)
+>>>>>>> upstream/master
         elif "status = 'failed'" in normalized:
             error, job_id, node_id = params
             cur.rowcount = table.fail(job_id, node_id, error)
@@ -220,7 +235,11 @@ class TestPodPullRoundTrip:
 
         seen = {}
 
+<<<<<<< HEAD
         def add_executor(metadata, progress_callback):
+=======
+        def add_executor(metadata, progress_callback, job_id):
+>>>>>>> upstream/master
             seen.update(metadata)
             progress_callback(40, phase="index", detail="indexing")
             return {"success": True, "alias": metadata["alias"]}
@@ -234,6 +253,7 @@ class TestPodPullRoundTrip:
         assert loop._process_one_job() is True
 
         # Reconstructed from metadata.
+<<<<<<< HEAD
         # EVO-66105: IndexJobClaimLoop injects the claimed row's job_id into
         # metadata so executors can thread it to
         # build_embedding_stats_child_env for per-job VoyageAI cost
@@ -241,6 +261,9 @@ class TestPodPullRoundTrip:
         # against the pre-injection shape. They had been failing on master
         # unnoticed because no CI job collected this file.
         assert seen == {"alias": "repoA", "job_id": "j1"}
+=======
+        assert seen == {"alias": "repoA"}
+>>>>>>> upstream/master
         # Row transitioned pending -> completed with the result + progress
         # written mid-flight to the SHARED row.
         assert row["status"] == "completed"
@@ -279,7 +302,11 @@ class TestPodPullRoundTrip:
         claimer = DistributedJobClaimer(pool=_make_pool(table), node_id="node-2")
         ran = []
 
+<<<<<<< HEAD
         def _dispatch(md, pc):
+=======
+        def _dispatch(md, pc, job_id):
+>>>>>>> upstream/master
             ran.append(md)
             return {"ok": True}
 
@@ -289,6 +316,7 @@ class TestPodPullRoundTrip:
             node_id="node-2",
         )
         assert loop._process_one_job() is True
+<<<<<<< HEAD
         # EVO-66105: IndexJobClaimLoop injects the claimed row's job_id into
         # metadata so executors can thread it to
         # build_embedding_stats_child_env for per-job VoyageAI cost
@@ -296,6 +324,9 @@ class TestPodPullRoundTrip:
         # against the pre-injection shape. They had been failing on master
         # unnoticed because no CI job collected this file.
         assert ran == [{"alias": "repoA", "job_id": "j1"}]
+=======
+        assert ran == [{"alias": "repoA"}]
+>>>>>>> upstream/master
         assert row["status"] == "completed"
         assert row["executing_node"] == "node-2"
 
@@ -440,7 +471,11 @@ class TestPodPullRoundTripRealSubmitBug1430:
 
         seen = {}
 
+<<<<<<< HEAD
         def add_executor(metadata, progress_callback):
+=======
+        def add_executor(metadata, progress_callback, job_id):
+>>>>>>> upstream/master
             seen.update(metadata)
             progress_callback(40, phase="index", detail="indexing")
             return {"success": True, "alias": metadata["alias"]}
@@ -461,6 +496,7 @@ class TestPodPullRoundTripRealSubmitBug1430:
             "`executing_node IS NULL` claim predicate and hangs PENDING "
             "forever."
         )
+<<<<<<< HEAD
         # EVO-66105: IndexJobClaimLoop injects the claimed row's job_id into
         # metadata so executors can thread it to
         # build_embedding_stats_child_env for per-job VoyageAI cost
@@ -469,6 +505,9 @@ class TestPodPullRoundTripRealSubmitBug1430:
         # unnoticed because no CI job collected this file.
         assert seen["alias"] == "repoA"
         assert seen["job_id"] == row["job_id"]
+=======
+        assert seen == {"alias": "repoA"}
+>>>>>>> upstream/master
         assert row["status"] == "completed"
         assert row["executing_node"] == "node-2"
 
@@ -520,7 +559,11 @@ class TestSetupMethodClearsMemoryPressureBug1448:
         table = _ClaimerJobsTable([row], now)
         claimer = DistributedJobClaimer(pool=_make_pool(table), node_id="node-1")
 
+<<<<<<< HEAD
         def add_executor(metadata, progress_callback):
+=======
+        def add_executor(metadata, progress_callback, job_id):
+>>>>>>> upstream/master
             return {"success": True, "alias": metadata["alias"]}
 
         loop = IndexJobClaimLoop(
@@ -563,7 +606,11 @@ class TestSetupMethodClearsMemoryPressureBug1448:
             table = _ClaimerJobsTable([row], datetime.now(timezone.utc))
             claimer = DistributedJobClaimer(pool=_make_pool(table), node_id="node-2")
 
+<<<<<<< HEAD
             def add_executor(metadata, progress_callback):
+=======
+            def add_executor(metadata, progress_callback, job_id):
+>>>>>>> upstream/master
                 return {"success": True, "alias": metadata["alias"]}
 
             loop = IndexJobClaimLoop(

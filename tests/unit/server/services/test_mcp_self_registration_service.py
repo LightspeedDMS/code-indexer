@@ -107,8 +107,10 @@ class TestEnsureRegistered:
             actor=SystemComponent.MCP_SELF_REGISTRATION,
         )
 
-        # Verify config was saved
-        assert mock_config_manager.save_config.called
+        # Verify the credential was stored through the guarded committed-row
+        # change (Bug #2017), never a write-back of the loaded config
+        assert mock_config_manager.apply_system_change.called
+        assert not mock_config_manager.save_config.called
 
 
 class TestClaudeCliAvailable:

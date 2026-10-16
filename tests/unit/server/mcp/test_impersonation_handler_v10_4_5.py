@@ -184,6 +184,25 @@ def test_admin_role_check_works():
     assert data.get("error") == "Impersonation requires ADMIN role"
 
 
+def test_stale_admin_snapshot_on_session_does_not_authorize():
+    """The role is the CURRENT caller's, never a user stored on the session:
+    a session created while its owner was ADMIN does not authorize the owner
+    after a demotion."""
+    current = _make_user("demoted@example.com", UserRole.NORMAL_USER)
+    session_state = _make_session_state()
+    session_state.authenticated_user = _make_user("demoted@example.com")
+
+    data = _call_handler(
+        args={"username": "someone@example.com"},
+        user=current,
+        session_state=session_state,
+        get_user_return=_make_user("someone@example.com", UserRole.NORMAL_USER),
+    )
+
+    assert data == {"status": "error", "error": "Impersonation requires ADMIN role"}
+    session_state.set_impersonation.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # AC5: elevation gate fires -> elevation_required with actionable message
 # ---------------------------------------------------------------------------

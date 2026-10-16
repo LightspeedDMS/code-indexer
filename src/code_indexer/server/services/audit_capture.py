@@ -277,7 +277,23 @@ def _event_loop_owns_this_thread() -> bool:
     return True
 
 
+<<<<<<< HEAD
 def _deliver(event: AuditEvent) -> None:
+=======
+class _NoSiemDestination:
+    """Sentinel: the emitter supplied no explicit SIEM destination."""
+
+    def __repr__(self) -> str:
+        return "NO_SIEM_DESTINATION"
+
+
+# Only SIEM self-report emitters pass an explicit destination: a SiemTarget,
+# or None meaning "deliberately not captured: no destination exists".
+NO_SIEM_DESTINATION: Any = _NoSiemDestination()
+
+
+def _deliver(event: AuditEvent, siem_destination: Any = NO_SIEM_DESTINATION) -> None:
+>>>>>>> upstream/master
     spec = AUDIT_ACTION_CATALOG.get(event.action_type)
     if spec is None:
         _reporter.report(
@@ -295,10 +311,24 @@ def _deliver(event: AuditEvent) -> None:
         return
     if sink is None:
         return  # standalone CLI: no store, by design
+<<<<<<< HEAD
     _deliver_to(sink, spec.delivery, event)
 
 
 def _deliver_to(sink: "AuditLogService", delivery: Delivery, event: AuditEvent) -> None:
+=======
+    _deliver_to(sink, spec.delivery, event, siem_destination)
+
+
+def _deliver_to(
+    sink: "AuditLogService",
+    delivery: Delivery,
+    event: AuditEvent,
+    siem_destination: Any = NO_SIEM_DESTINATION,
+) -> None:
+    # The QUEUED / on-loop writer path does not carry an explicit SIEM
+    # destination: a self-report row reaching it is a counted capture gap.
+>>>>>>> upstream/master
     if delivery is Delivery.QUEUED:
         sink.enqueue_event(event)
         return
@@ -314,6 +344,7 @@ def _deliver_to(sink: "AuditLogService", delivery: Delivery, event: AuditEvent) 
         )
         sink.enqueue_event(event)
         return
+<<<<<<< HEAD
     sink.insert_events([event])
 
 
@@ -321,6 +352,18 @@ def record(event: AuditEvent) -> None:
     """Deliver *event*; never raises (fail-open, counted and logged)."""
     try:
         _deliver(event)
+=======
+    if siem_destination is NO_SIEM_DESTINATION:
+        sink.insert_events([event])
+        return
+    sink.insert_events([event], siem_destinations={event.event_uuid: siem_destination})
+
+
+def record(event: AuditEvent, siem_destination: Any = NO_SIEM_DESTINATION) -> None:
+    """Deliver *event*; never raises (fail-open, counted and logged)."""
+    try:
+        _deliver(event, siem_destination)
+>>>>>>> upstream/master
     except Exception as exc:  # noqa: BLE001 - fail-open by owner decision
         report_drop(WRITE_FAILED, event, exc)
 
@@ -362,6 +405,10 @@ def capture(
     outcome: str,
     details: Optional[Mapping[str, Any]] = None,
     auth_method: Optional[str] = None,
+<<<<<<< HEAD
+=======
+    siem_destination: Any = NO_SIEM_DESTINATION,
+>>>>>>> upstream/master
 ) -> None:
     """Build and record a human-actor event; never raises."""
     try:
@@ -377,7 +424,11 @@ def capture(
     except AuditEventInvalid as exc:
         _report_invalid(exc)
         return
+<<<<<<< HEAD
     record(event)
+=======
+    record(event, siem_destination)
+>>>>>>> upstream/master
 
 
 def capture_system(
@@ -388,6 +439,10 @@ def capture_system(
     target_id: str,
     outcome: str,
     details: Optional[Mapping[str, Any]] = None,
+<<<<<<< HEAD
+=======
+    siem_destination: Any = NO_SIEM_DESTINATION,
+>>>>>>> upstream/master
 ) -> None:
     """Build and record a system-component event; never raises."""
     try:
@@ -402,7 +457,11 @@ def capture_system(
     except AuditEventInvalid as exc:
         _report_invalid(exc)
         return
+<<<<<<< HEAD
     record(event)
+=======
+    record(event, siem_destination)
+>>>>>>> upstream/master
 
 
 async def capture_async(

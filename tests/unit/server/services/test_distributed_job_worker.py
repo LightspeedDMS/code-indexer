@@ -59,7 +59,13 @@ class FakeRefreshScheduler:
     def __init__(self):
         self.refreshed_repos = []
 
+<<<<<<< HEAD
     def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
+=======
+    def execute_refresh_for_claimed_job(
+        self, alias, progress_callback=None, job_id=None, submitter_username="system"
+    ):
+>>>>>>> upstream/master
         self.refreshed_repos.append(alias)
         return {"success": True, "alias": alias}
 
@@ -142,7 +148,17 @@ class TestProcessOneJob:
         )
 
         class FailingScheduler:
+<<<<<<< HEAD
             def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
+=======
+            def execute_refresh_for_claimed_job(
+                self,
+                alias,
+                progress_callback=None,
+                job_id=None,
+                submitter_username="system",
+            ):
+>>>>>>> upstream/master
                 raise RuntimeError("git pull failed")
 
         worker = DistributedJobWorkerService(
@@ -289,7 +305,11 @@ class TestExecuteRetryableJobDirect:
         )
 
         with pytest.raises(ValueError, match="Unknown retryable job type"):
+<<<<<<< HEAD
             worker._execute_retryable_job("job-x", "weird_type", "repo")
+=======
+            worker._execute_retryable_job("job-x", "weird_type", "repo", "system")
+>>>>>>> upstream/master
 
 
 class TestRefreshResultInterpretation:
@@ -308,7 +328,17 @@ class TestRefreshResultInterpretation:
         )
 
         class QuarantinedScheduler:
+<<<<<<< HEAD
             def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
+=======
+            def execute_refresh_for_claimed_job(
+                self,
+                alias,
+                progress_callback=None,
+                job_id=None,
+                submitter_username="system",
+            ):
+>>>>>>> upstream/master
                 return {"success": False, "message": "integrity gate quarantined"}
 
         worker = DistributedJobWorkerService(
@@ -323,6 +353,46 @@ class TestRefreshResultInterpretation:
         assert "integrity gate quarantined" in claimer.failed_jobs[0][1]
         assert len(claimer.completed_jobs) == 0
 
+<<<<<<< HEAD
+=======
+    def test_failure_error_detail_is_the_job_error(self):
+        """Bug #2150: the job error names the cause (e.g. the missing store),
+        never only the generic gate message."""
+        claimer = FakeClaimer()
+        claimer.jobs_to_return.append(
+            {
+                "job_id": "job-gate",
+                "operation_type": "global_repo_refresh",
+                "repo_alias": "example-repo-global",
+            }
+        )
+        detail = "voyage-code-3: chunks.db of an established collection is missing"
+
+        class GateFailedScheduler:
+            def execute_refresh_for_claimed_job(
+                self,
+                alias,
+                progress_callback=None,
+                job_id=None,
+                submitter_username="system",
+            ):
+                return {
+                    "success": False,
+                    "message": "Refresh integrity gate failed; publish skipped",
+                    "error": f"Refresh integrity gate failed; publish skipped: {detail}",
+                }
+
+        worker = DistributedJobWorkerService(
+            claimer=claimer,
+            refresh_scheduler=GateFailedScheduler(),
+        )
+
+        worker._process_one_job()
+
+        assert len(claimer.failed_jobs) == 1
+        assert detail in claimer.failed_jobs[0][1]
+
+>>>>>>> upstream/master
     def test_progress_callback_forwards_to_claimer_update_progress(self):
         """When the claimer supports update_progress, the callback passed to
         execute_refresh_for_claimed_job must forward into it."""
@@ -336,7 +406,17 @@ class TestRefreshResultInterpretation:
         )
 
         class ProgressReportingScheduler:
+<<<<<<< HEAD
             def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
+=======
+            def execute_refresh_for_claimed_job(
+                self,
+                alias,
+                progress_callback=None,
+                job_id=None,
+                submitter_username="system",
+            ):
+>>>>>>> upstream/master
                 assert progress_callback is not None
                 progress_callback(42, phase="scip", detail="halfway")
                 return {"success": True}
@@ -367,7 +447,17 @@ class TestRefreshResultInterpretation:
             def __init__(self):
                 self.seen_callback = "unset"
 
+<<<<<<< HEAD
             def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
+=======
+            def execute_refresh_for_claimed_job(
+                self,
+                alias,
+                progress_callback=None,
+                job_id=None,
+                submitter_username="system",
+            ):
+>>>>>>> upstream/master
                 self.seen_callback = progress_callback
                 return {"success": True}
 

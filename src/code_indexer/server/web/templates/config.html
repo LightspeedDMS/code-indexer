@@ -71,7 +71,15 @@ function cancelEdit(section) {
 }
 
 function confirmResetDefaults() {
-    if (confirm('Are you sure you want to reset all configuration to default values? This action cannot be undone.')) {
+    if (confirm('Reset every runtime setting on this page to its default value?\n\n' +
+                'Kept unchanged: bootstrap settings in config.json (storage mode, PostgreSQL connection, cluster membership, clone backend); ' +
+                'the bind address, port, worker count and log level; stored API keys and client secrets; ' +
+                'security settings (TOTP elevation enforcement, session timeouts, API access restrictions, self-registration, ' +
+                'password policy, SSO provider, SIEM delivery, research assistant network allowlist, credential modes); ' +
+                'and deployment identity (display name, telemetry service name, environment and collector, ' +
+                'credential-provider, Langfuse and backup endpoints).\n\n' +
+                'All other runtime settings (limits, timeouts, schedules, feature switches) return to their defaults. ' +
+                'In a cluster this applies to every node. This action cannot be undone.')) {
         document.getElementById('reset-form').submit();
     }
 }

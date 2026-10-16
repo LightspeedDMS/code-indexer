@@ -20,7 +20,10 @@ from typing import Dict, List, NamedTuple
 from unittest.mock import MagicMock, patch
 
 from code_indexer.services.file_identifier import FileIdentifier
+<<<<<<< HEAD
 from code_indexer.utils.blob_hash import git_blob_hash
+=======
+>>>>>>> upstream/master
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +120,7 @@ class TestFileIdentifierSubprocessMemoization:
 
         call_log: List[list] = []
 
+<<<<<<< HEAD
         fake_runner = _make_fake_runner(call_log)
         # Branch and commit are read by services.git_head (shared with
         # GitDetectionService); file_identifier's own runner stays patched as
@@ -130,6 +134,11 @@ class TestFileIdentifierSubprocessMemoization:
                 "code_indexer.services.git_head.run_git_command",
                 side_effect=fake_runner,
             ),
+=======
+        with patch(
+            "code_indexer.services.file_identifier.run_git_command",
+            side_effect=_make_fake_runner(call_log),
+>>>>>>> upstream/master
         ):
             identifier.get_file_metadata(file_a)
             identifier.get_file_metadata(file_b)
@@ -174,6 +183,7 @@ class TestFileIdentifierSubprocessMemoization:
         expected_branch = "feature-branch"
         expected_commit = "cafebabecafebabecafebabecafebabe12345678"
 
+<<<<<<< HEAD
         fake_runner = _make_fake_runner(
             call_log, branch=expected_branch, commit=expected_commit
         )
@@ -188,6 +198,12 @@ class TestFileIdentifierSubprocessMemoization:
             patch(
                 "code_indexer.services.git_head.run_git_command",
                 side_effect=fake_runner,
+=======
+        with patch(
+            "code_indexer.services.file_identifier.run_git_command",
+            side_effect=_make_fake_runner(
+                call_log, branch=expected_branch, commit=expected_commit
+>>>>>>> upstream/master
             ),
         ):
             meta_a = identifier.get_file_metadata(file_a)

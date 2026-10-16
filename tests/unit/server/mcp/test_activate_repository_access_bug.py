@@ -56,6 +56,8 @@ def _make_access_service(
     svc.get_accessible_repos = Mock(
         return_value=accessible_repos if accessible_repos is not None else set()
     )
+    # The caller has no activations of their own.
+    svc.caller_activation_sources = Mock(return_value={})
     return svc
 
 

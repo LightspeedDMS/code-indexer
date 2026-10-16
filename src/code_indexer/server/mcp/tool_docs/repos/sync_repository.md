@@ -39,7 +39,12 @@ WHAT IT DOES:
 Performs git pull from golden repository to your activated repo and re-indexes changed files to update search indexes with new code. Preserves your local branch state (won't switch branches).
 
 ASYNC BEHAVIOR:
-Returns immediately with a job_id. Sync and re-indexing happen in background. Check repository_status to monitor progress until sync completes.
+Returns immediately with `{"success": true, "job_id": "...", "message": "Repository '<user_alias>' sync started"}`. Sync and re-indexing happen in background; track the job with get_job_details(job_id=...).
+
+ERRORS (`{"success": false, "error": "...", "job_id": null}`):
+- `Missing required parameter: user_alias`
+- `user_alias` is not one of your activated repositories: `Repository '.*' not found` (the error text does not include the alias)
+- `Background job manager not initialized`
 
 WHEN TO USE:
 After upstream repository changes to pull latest commits and refresh your local activation's indexes with new code.

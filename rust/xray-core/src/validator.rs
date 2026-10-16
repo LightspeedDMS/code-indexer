@@ -73,6 +73,7 @@ pub fn validate_rust_graph_evaluator(source: &str) -> Result<(), Vec<ValidationE
     }
 }
 
+<<<<<<< HEAD
 /// The `std` modules an evaluator may never reach, in ANY syntactic form.
 ///
 /// ONE list, consulted by BOTH reject sites (`visit_path` for
@@ -154,6 +155,8 @@ fn is_forbidden_std_module(name: &str) -> bool {
     FORBIDDEN_STD_MODULES.contains(&name)
 }
 
+=======
+>>>>>>> upstream/master
 // ---- Visitor implementation ----
 
 struct ForbiddenConstructVisitor {

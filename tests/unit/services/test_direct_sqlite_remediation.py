@@ -412,7 +412,7 @@ class TestRoutesSelfMonitoringUsesBackend:
 
         assert result == "Running..."
 
-    def test_load_without_backend_uses_sqlite_path(self) -> None:
+    def test_load_without_backend_uses_sqlite_path(self, tmp_path: Path) -> None:
         """_load_self_monitoring_data skips backend when none given."""
         from code_indexer.server.web.routes import _load_self_monitoring_data
 
@@ -420,7 +420,8 @@ class TestRoutesSelfMonitoringUsesBackend:
         backend = _FakeSelfMonitoringBackend()
 
         # Call WITHOUT passing backend= - backend should never be touched
-        _load_self_monitoring_data(Path("/tmp/nonexistent_fake_db.db"), session)
+        # (tmp_path: SQLite creates the file on connect, never in shared /tmp)
+        _load_self_monitoring_data(tmp_path / "nonexistent_fake_db.db", session)
 
         assert len(backend.list_scans_calls) == 0
         assert len(backend.list_issues_calls) == 0

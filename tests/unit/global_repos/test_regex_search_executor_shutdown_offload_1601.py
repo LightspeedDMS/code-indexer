@@ -40,8 +40,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+<<<<<<< HEAD
 from .conftest import executor_target
 
+=======
+>>>>>>> upstream/master
 from code_indexer.global_repos.regex_search import RegexSearchService
 
 _TEST_MAX_RESULTS = 100
@@ -62,8 +65,14 @@ def _write_synthetic_ripgrep_json(path: str) -> None:
 
 
 def _write_synthetic_grep_output(path: str) -> None:
+<<<<<<< HEAD
     with open(path, "w", encoding="utf-8") as f:
         f.write("file1.py:1:def func_1():\n")
+=======
+    # grep --null record format (Bug #2030): path\0LINE:content
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("file1.py\x001:def func_1():\n")
+>>>>>>> upstream/master
 
 
 def _mock_executor_copying_from(source_path: str, shutdown_captured: Dict[str, int]):
@@ -97,8 +106,13 @@ def _build_service(tmp_path, engine: str) -> RegexSearchService:
         if engine == "ripgrep":
             mock_which.return_value = "/usr/bin/rg"
         else:
+<<<<<<< HEAD
             mock_which.side_effect = lambda cmd: (
                 "/usr/bin/grep" if cmd == "grep" else None
+=======
+            mock_which.side_effect = (
+                lambda cmd: "/usr/bin/grep" if cmd == "grep" else None
+>>>>>>> upstream/master
             )
         return RegexSearchService(tmp_path)
 
@@ -128,12 +142,21 @@ class TestExecutorShutdownOffload:
         shutdown_captured: Dict[str, int] = {}
         mock_executor = _mock_executor_copying_from(str(source_path), shutdown_captured)
 
+<<<<<<< HEAD
         # The executor lives in LocalRipgrepBackend for ripgrep and still at
         # regex_search module scope for grep; executor_target() picks the one
         # this engine actually drives.
         with patch(executor_target(engine), return_value=mock_executor):
             search_method = getattr(service, search_attr)
             await search_method(
+=======
+        with patch(
+            "code_indexer.global_repos.regex_search.SubprocessExecutor",
+            return_value=mock_executor,
+        ):
+            search_method = getattr(service, search_attr)
+            matches, _total = await search_method(
+>>>>>>> upstream/master
                 pattern="func",
                 search_path=tmp_path,
                 include_patterns=None,
@@ -144,6 +167,12 @@ class TestExecutorShutdownOffload:
                 timeout_seconds=30,
             )
 
+<<<<<<< HEAD
+=======
+        # Guards the fixture itself: synthetic output in a format the parser
+        # no longer accepts would parse zero records and pass silently.
+        assert [m.file_path for m in matches] == ["file1.py"]
+>>>>>>> upstream/master
         assert "thread_id" in shutdown_captured, "executor.shutdown was never called"
         assert shutdown_captured["thread_id"] != caller_thread_id, (
             f"{search_attr}'s executor.shutdown(wait=True) ran on the "

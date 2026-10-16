@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, List, cast
+from typing import Any, Callable, List, Sequence, cast
 
 # ---------------------------------------------------------------------------
 # Allowlist: known-benign WARNING/ERROR patterns (minimal, explicitly reviewed)
@@ -125,6 +125,26 @@ from typing import Any, Callable, List, cast
 #   request-validation failures; a 500 or other unexpected server error would
 #   use a different message/code and would not be suppressed.
 #
+# "[AUTH-GENERAL-003] Hybrid auth (admin): No valid authentication found"
+#   Emitted at WARNING by auth.dependencies.get_current_admin_user_hybrid when
+#   a request to an admin route has neither a valid session nor a bearer
+#   token (an invalid or expired bearer token is rejected earlier, through
+#   get_current_user, without this line).  GET
+#   /api/admin/users is elevation-gated (require_elevation() chains
+#   get_current_admin_user_hybrid), so an unauthenticated call to it logs this
+#   line.  Produced by:
+#     - test_08_auth_negative.py: test_admin_endpoint_requires_auth, which calls
+#       GET /api/admin/users with no token and asserts HTTP 401.
+#   This is a deliberate unauthenticated negative test of an elevation-gated
+#   admin route; the WARNING is intended production behaviour (every
+#   elevation-gated route logs unauthenticated attempts) and must stay at
+#   WARNING.  The gate is not the only detector of a genuine credential-wiring
+#   failure: such a failure would also break the calling tests themselves,
+#   whose 401/403 (and authenticated-success) assertions would fail.  The
+#   pattern is anchored on the "(admin)" auth type and the no-credentials
+#   wording; the non-admin variant ("Hybrid auth (user): ...") and every other
+#   hybrid-auth WARNING/ERROR use different text and are still audited.
+#
 # "Global repo 'test-global' not found"
 #   Emitted by mcp.handlers.repos when repository_status is called with alias
 #   "test-global" which is not registered in the test server's golden-repo
@@ -174,6 +194,10 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # test_07 + test_08: deliberate negative tests send invalid/empty request bodies;
     # server returns 422 and logs REPO-GENERAL-017 ValidationError.
     "[REPO-GENERAL-017] ValidationError",
+    # test_08 (test_admin_endpoint_requires_auth): deliberate unauthenticated call
+    # to the elevation-gated GET /api/admin/users, asserted 401; the hybrid admin
+    # auth WARNING is intended production behaviour (see header comment).
+    "[AUTH-GENERAL-003] Hybrid auth (admin): No valid authentication found",
     # test_epic985: repository_status called with non-existent "test-global" sentinel alias.
     "Global repo 'test-global' not found",
     # test_epic985: repository_status called with non-existent "test-activated" sentinel alias.
@@ -274,6 +298,8 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # codes, but only this test lowers the caps to provoke it in the E2E harness.
     "[MCP-GENERAL-032] Wildcard expansion cap exceeded",
     "[MCP-GENERAL-033] Total repo count cap exceeded",
+    # Phase-specific entries (e.g. Phase 7's scripted SIEM halts) are NOT
+    # listed here: such a phase passes them as ``extra_allowlist``.
     # Story #1139 (test_16_remaining_surface_1139.py) teardown: the test creates a
     # composite + extra golden/activated repos and DEACTIVATES them in cleanup.
     # ActivatedRepoManager logs this administrative WARNING on every deactivation
@@ -420,10 +446,31 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # real downstream outage) would still surface via other assertions in
     # that code path, and a 503 on any OTHER endpoint is NOT suppressed.
     "HTTP 503 | Request: POST /api/query",
+<<<<<<< HEAD
+=======
+    # First cidx-meta index of the session (fresh data dir): the first golden
+    # registration writes a description and the cidx-meta refresh runs a full
+    # index IN the base clone -- the collection (collection_meta.json) is
+    # created first and the HNSW is only built when the run finalizes.
+    # cidx-meta-global points at that base clone until its first snapshot is
+    # published, so an omni/no-alias semantic query landing inside that window
+    # gets FilesystemVectorStore.search's "stale and missing" WARNING and an
+    # empty cidx-meta contribution, until the index finalizes moments later.
+    # Benign and transient, and it was already possible at v12.82.0: the same
+    # one-file full index of the base clone runs at the same point of the
+    # session there; the window is the embedding latency of that file (about
+    # 1 s normally, 15 s in the run that surfaced it). Anchored on the base
+    # clone path plus the WARNING form's suffix: a .versioned cidx-meta
+    # snapshot, any other repo, another model and the persistent-staleness
+    # ERROR ("-- Run 'cidx index' to rebuild.") are all still audited.
+    "/golden-repos/cidx-meta/.code-indexer/index/voyage-code-3, "
+    "model=voyage-code-3 -- Run 'cidx index' to build the index. "
+    "Returning empty results.",
+>>>>>>> upstream/master
 ]
 
 
-def is_allowlisted(entry: dict[str, Any]) -> bool:
+def is_allowlisted(entry: dict[str, Any], extra_allowlist: Sequence[str] = ()) -> bool:
     """Return True if the log entry's message matches any allowlist pattern.
 
     Matching is case-insensitive substring search so minor message variations
@@ -431,12 +478,15 @@ def is_allowlisted(entry: dict[str, Any]) -> bool:
 
     Args:
         entry: Log entry dict from admin_logs_query response (must have 'message' key).
+        extra_allowlist: Patterns allowed for THIS caller only (a phase's own
+            scripted, asserted warnings), never added to the global list.
 
     Returns:
         True if the entry is known-benign (allowlisted), False otherwise.
     """
     message = (entry.get("message") or "").lower()
-    return any(pattern.lower() in message for pattern in LOG_AUDIT_ALLOWLIST)
+    patterns = list(LOG_AUDIT_ALLOWLIST) + list(extra_allowlist)
+    return any(pattern.lower() in message for pattern in patterns)
 
 
 def filter_new_entries(
@@ -720,8 +770,11 @@ def run_log_audit_gate(
     token: str,
     watermark_id: int,
     phase_name: str,
+    extra_allowlist: Sequence[str] = (),
 ) -> AuditGateResult:
     """Run the full log-audit gate and return the result.
+
+    *extra_allowlist* holds patterns allowed for this caller only.
 
     For in-process (Phase 3) callers: flush the SQLiteLogHandler BEFORE
     calling this function (via app.state.sqlite_log_handler.flush()).
@@ -739,7 +792,7 @@ def run_log_audit_gate(
     """
     entries = query_logs_via_mcp(client, token)
     new_entries = filter_new_entries(entries, watermark_id=watermark_id)
-    violations = [e for e in new_entries if not is_allowlisted(e)]
+    violations = [e for e in new_entries if not is_allowlisted(e, extra_allowlist)]
     passed = len(violations) == 0
     return AuditGateResult(passed=passed, violations=violations, phase_name=phase_name)
 

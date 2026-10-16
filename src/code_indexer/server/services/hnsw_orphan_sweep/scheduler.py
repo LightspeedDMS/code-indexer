@@ -25,10 +25,15 @@ from __future__ import annotations
 
 import logging
 import threading
+<<<<<<< HEAD
 import time
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Tuple, cast
+=======
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, Optional, cast
+>>>>>>> upstream/master
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.services.hnsw_orphan_sweep.discovery import (
@@ -50,6 +55,7 @@ _TICK_SECONDS = 60
 # promptly without a server restart.
 _DISABLED_POLL_SECONDS = 60
 
+<<<<<<< HEAD
 # Re-check leadership on this short cadence instead of the full tick interval.
 # A follower that waited a whole interval would leave the fleet without a sweep
 # for minutes after a failover -- and this sweep's interval is in MINUTES and
@@ -57,6 +63,8 @@ _DISABLED_POLL_SECONDS = 60
 # tomorrow. Mirrors FtsBackfillSweepScheduler's _LEADER_POLL_SECONDS.
 _LEADER_POLL_SECONDS = 30
 
+=======
+>>>>>>> upstream/master
 # Safe fallback cadence when config cannot be read.
 _DEFAULT_TICK_INTERVAL_MINUTES = 7
 _DEFAULT_BATCH_SIZE = 15
@@ -85,12 +93,15 @@ _LIVENESS_SCOPE = "local_process"
 # point: a sweep that is OFF by configuration is a decision, not a failure.
 CYCLE_SKIPPED_DISABLED = "disabled"
 CYCLE_SKIPPED_OUTSIDE_WINDOW = "outside_operating_window"
+<<<<<<< HEAD
 # Background-work audit: a cycle skipped because another node is the elected
 # leader. Normal on 11 of 12 processes, and deliberately NOT folded into the two
 # above -- "disabled" is an operator decision, "outside window" is a schedule,
 # and this is ordinary cluster behaviour. An operator reading the admin endpoint
 # needs to tell them apart.
 CYCLE_SKIPPED_NOT_LEADER = "not_leader"
+=======
+>>>>>>> upstream/master
 
 
 def absent_local_scheduler_liveness() -> Dict[str, Any]:
@@ -163,7 +174,10 @@ class HNSWOrphanRepairSweepScheduler:
         config_service: Any,
         process_fn: Callable[[Any], SweepOutcome] = process_candidate,
         now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+<<<<<<< HEAD
         leader_check: Callable[[], bool] = lambda: True,
+=======
+>>>>>>> upstream/master
     ) -> None:
         """
         Args:
@@ -182,11 +196,14 @@ class HNSWOrphanRepairSweepScheduler:
             config_service: Object with ``get_config()`` returning a config
                 exposing ``hnsw_orphan_repair_sweep_config`` (enabled,
                 batch_size, tick_interval_minutes).
+<<<<<<< HEAD
             leader_check: Whether THIS node should submit ticks. The composition
                 root wires ``resolve_sweep_leader(app.state)``. Defaults to
                 "always leader" so solo/sqlite -- which has no election -- is
                 byte-for-byte unchanged. See the _loop gate for why this sweep
                 needs M1 rather than relying on M4 alone.
+=======
+>>>>>>> upstream/master
             process_fn: Injectable per-item processor for golden/activated
                 (in-repo) candidates (defaults to the real
                 ``process_candidate``); tests may inject a spy/fake.
@@ -202,6 +219,7 @@ class HNSWOrphanRepairSweepScheduler:
         self._config_service = config_service
         self._process_fn = process_fn
         self._now_fn = now_fn
+<<<<<<< HEAD
         self._leader_check = leader_check
 
         self._stop_event = threading.Event()
@@ -209,6 +227,11 @@ class HNSWOrphanRepairSweepScheduler:
         self._our_published: Dict[str, str] = {}
 
         self._published_repair_keys: set = set()
+=======
+
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+>>>>>>> upstream/master
 
         # Bug #1864 liveness state. Three different threads touch these --
         # the scheduler loop thread (cycle heartbeat), a bgm-worker thread
@@ -386,7 +409,10 @@ class HNSWOrphanRepairSweepScheduler:
         # last_full_pass_completed_at on every idle tick.
         if candidates and len(pending) <= batch_size:
             self._state_backend.complete_pass()
+<<<<<<< HEAD
             self._published_repair_keys.clear()
+=======
+>>>>>>> upstream/master
             logger.info("HNSWOrphanRepairSweepScheduler: pass complete")
 
         return {"processed": len(batch), **counts}
@@ -424,6 +450,7 @@ class HNSWOrphanRepairSweepScheduler:
         test fakes that don't opt in (plain functions/lambdas with no such
         attribute) fall through to the plain single-argument call below.
         """
+<<<<<<< HEAD
         published_repair_keys = getattr(self, "_published_repair_keys", None)
         if published_repair_keys and candidate.sort_key in published_repair_keys:
             logger.debug(
@@ -535,6 +562,8 @@ class HNSWOrphanRepairSweepScheduler:
 
     def _process_in_place(self, candidate: Any) -> SweepOutcome:
         """``_process_one`` for a candidate repaired where it lies."""
+=======
+>>>>>>> upstream/master
         try:
             if getattr(self._process_fn, "supports_activated_repo_manager", False):
                 # `self._process_fn` is declared `Callable[[Any],
@@ -641,6 +670,7 @@ class HNSWOrphanRepairSweepScheduler:
                 "window_end": _DEFAULT_WINDOW_END_UTC,
             }
 
+<<<<<<< HEAD
     @staticmethod
     def _wait_seconds_for(
         *, enabled: bool, within_window: bool, is_leader: bool, interval_minutes: int
@@ -681,6 +711,8 @@ class HNSWOrphanRepairSweepScheduler:
             )
             return True
 
+=======
+>>>>>>> upstream/master
     def _loop(self) -> None:
         """Main loop: submit a tick job (if enabled AND within the
         configured UTC operating-hours window), then wait for the
@@ -696,6 +728,7 @@ class HNSWOrphanRepairSweepScheduler:
                 current_hour, cycle_cfg["window_start"], cycle_cfg["window_end"]
             )
 
+<<<<<<< HEAD
             # Background-work audit: gate the submission to the elected leader.
             # Every process ran this loop and leaned on DuplicateJobError against
             # idx_active_job_per_repo (M4, "everyone submits, one wins"). That is
@@ -729,11 +762,27 @@ class HNSWOrphanRepairSweepScheduler:
                 skipped_reason = CYCLE_SKIPPED_NOT_LEADER
             else:
                 skipped_reason = None
+=======
+            # Bug #1864: heartbeat every cycle, including the cycles that
+            # deliberately submit nothing. Without it, a sweep switched off
+            # in the Web UI and a sweep whose loop thread died look the same
+            # from outside -- both simply stop producing ticks.
+            if enabled and within_window:
+                skipped_reason = None
+            elif not enabled:
+                skipped_reason = CYCLE_SKIPPED_DISABLED
+            else:
+                skipped_reason = CYCLE_SKIPPED_OUTSIDE_WINDOW
+>>>>>>> upstream/master
             with self._liveness_lock:
                 self._last_loop_cycle_at = self._now_fn()
                 self._last_cycle_skipped_reason = skipped_reason
 
+<<<<<<< HEAD
             if enabled and within_window and is_leader:
+=======
+            if enabled and within_window:
+>>>>>>> upstream/master
                 try:
                     self.trigger_now()
                 except Exception as exc:
@@ -742,6 +791,7 @@ class HNSWOrphanRepairSweepScheduler:
                         exc,
                         exc_info=True,
                     )
+<<<<<<< HEAD
 
             wait_seconds = self._wait_seconds_for(
                 enabled=enabled,
@@ -749,11 +799,17 @@ class HNSWOrphanRepairSweepScheduler:
                 is_leader=is_leader,
                 interval_minutes=interval_minutes,
             )
+=======
+                wait_seconds = interval_minutes * 60
+            else:
+                wait_seconds = _DISABLED_POLL_SECONDS
+>>>>>>> upstream/master
 
             elapsed = 0
             while elapsed < wait_seconds and not self._stop_event.is_set():
                 self._stop_event.wait(timeout=_TICK_SECONDS)
                 elapsed += _TICK_SECONDS
+<<<<<<< HEAD
 
 
     def _process_published_activated(
@@ -1037,3 +1093,5 @@ class HNSWOrphanRepairSweepScheduler:
             return None
         return global_alias, dict(record)
 
+=======
+>>>>>>> upstream/master

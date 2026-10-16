@@ -1,7 +1,12 @@
 -- Migration 038: Add embedding_call_stats table (Story #1418)
 --
+<<<<<<< HEAD
 -- Vendor cost reconciliation: see docs/architecture-invariants.md's
 -- "Embedding & Reranker Call Tracking" section for the full architecture.
+=======
+-- Vendor cost reconciliation: see docs/architecture/invariants/query-path.md's
+-- "Embedding and reranker call tracking" section for the full architecture.
+>>>>>>> upstream/master
 --
 -- Records every REAL (non-cached, non-suppressed) embedding/reranker call
 -- to VoyageAI/Cohere for vendor cost reconciliation: provider, model,

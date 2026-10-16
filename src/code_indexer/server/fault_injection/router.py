@@ -50,7 +50,7 @@ from code_indexer.server.fault_injection.fault_profile import (
 
 logger = logging.getLogger(__name__)
 
-DOCS_URL = "/docs/fault-injection-operator-guide.md"
+DOCS_URL = "/docs/server/fault-injection.md"
 
 router = APIRouter(prefix="/admin/fault-injection", tags=["admin-fault-injection"])
 

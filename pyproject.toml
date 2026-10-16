@@ -52,6 +52,10 @@ dependencies = [
     "python-multipart>=0.0.6",
     "psutil>=5.9.0,<6.0.0",
     "PyJWT>=2.8.0",
+    # SIEM delivery service-account credentials; imported lazily by
+    # services/siem_delivery/transport.py and sender.py only.  2.x supports
+    # Python 3.8+, so its sources parse under the mypy 3.9 target.
+    "google-auth>=2.40.0,<3",
     "numpy>=1.24.0",
     "tokenizers>=0.13.0",
     "GitPython>=3.1.0",
@@ -110,6 +114,7 @@ dependencies = [
     "markdown>=3.4.0",
     "bleach>=6.0.0",
     # Wiki front matter parsing
+<<<<<<< HEAD
     # Bug #1443 (historical): python-frontmatter==1.2.0's util.py imports
     # typing.TypeGuard, which does not exist in the Python 3.9 stdlib, and the
     # wheel declares no Requires-Python guard -- so pip resolved an unbounded
@@ -118,6 +123,16 @@ dependencies = [
     # that case and is unreachable now that requires-python floors at 3.10
     # (TypeGuard is in the 3.10 stdlib), so the pin is plain again.
     "python-frontmatter>=1.0.0",
+=======
+    # Bug #1443: python-frontmatter==1.2.0's util.py imports typing.TypeGuard,
+    # which does not exist in the Python 3.9 stdlib (this project's requires-python
+    # floor). The wheel declares no Requires-Python guard, so pip happily resolves
+    # the unbounded pin to 1.2.0 on 3.9 and `import frontmatter` raises ImportError.
+    # Verified: 1.1.0 is the last pre-1.2.0 release, is available on PyPI, and
+    # imports + parses correctly on Python 3.9.25 in an isolated venv.
+    "python-frontmatter>=1.0.0,<1.2.0 ; python_version < '3.10'",
+    "python-frontmatter>=1.0.0 ; python_version >= '3.10'",
+>>>>>>> upstream/master
     # Excel export for query analytics (Story #1160)
     "openpyxl>=3.1.0",
     # MFA/TOTP dependencies (Epic #556)

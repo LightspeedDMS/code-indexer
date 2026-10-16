@@ -245,7 +245,9 @@ class TestInstallPostgresTemporalBackendFromBootstrapFailLoud:
     reason="TEST_POSTGRES_DSN not set or PostgreSQL unavailable",
 )
 class TestInstallPostgresTemporalBackendFromBootstrapLivePg:
-    def test_installs_working_factory_with_correct_collection_key(self, tmp_path):
+    def test_installs_working_factory_with_correct_collection_key(
+        self, tmp_path, migrated_scratch_pg_dsn
+    ):
         import hashlib
 
         from code_indexer.storage.temporal_metadata_backend_registry import (
@@ -260,7 +262,9 @@ class TestInstallPostgresTemporalBackendFromBootstrapLivePg:
             TemporalMetadataPostgresBackend,
         )
 
-        dsn = os.environ["TEST_POSTGRES_DSN"]
+        # The module's own migrated database (conftest), whatever state the
+        # shared TEST_POSTGRES_DSN database is in.
+        dsn = migrated_scratch_pg_dsn
         bootstrap_dir = tmp_path / "server_dir"
         bootstrap_dir.mkdir()
         (bootstrap_dir / "config.json").write_text(

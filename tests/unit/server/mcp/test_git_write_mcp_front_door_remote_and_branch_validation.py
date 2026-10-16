@@ -124,7 +124,13 @@ class TestGitPushHandlerValidatesRemoteBeforeCredentialLookup:
         ):
             response = git_write.git_push(
                 {
+<<<<<<< HEAD
                     "repository_alias": "example-repo-global",
+=======
+                    # git write tools refuse a "-global" alias (a shared
+                    # golden repository) before validating anything else.
+                    "repository_alias": "example-repo",
+>>>>>>> upstream/master
                     "remote": remote,
                     "branch": "main",
                 },
@@ -288,7 +294,11 @@ class TestGitMcpFrontDoorRejectsInjection:
                     params={
                         "name": "git_push",
                         "arguments": {
+<<<<<<< HEAD
                             "repository_alias": "example-repo-global",
+=======
+                            "repository_alias": "example-repo",
+>>>>>>> upstream/master
                             "remote": f"--receive-pack=touch {marker}",
                             "branch": "main",
                         },
@@ -368,7 +378,11 @@ class TestGitMcpFrontDoorRejectsInjection:
                     params={
                         "name": "git_push",
                         "arguments": {
+<<<<<<< HEAD
                             "repository_alias": "example-repo-global",
+=======
+                            "repository_alias": "example-repo",
+>>>>>>> upstream/master
                             "remote": "golden",
                             "branch": "+main",
                         },

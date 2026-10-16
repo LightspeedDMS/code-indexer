@@ -43,6 +43,7 @@ THREE POINTER-READING HOLES CLOSED:
   A. NEVER AliasManager.read_alias()/get_previous_path() -- read_alias
      applies WRITE-MODE SOURCE redirection for an active write session on
      a `-global` alias, silently excluding the real live snapshot from
+<<<<<<< HEAD
      the keep set. Raw pointers (AliasManager.list_pointers) are read here
      instead.
   B. SINGLE ATOMIC READ: one read per pointer, target_path AND
@@ -52,6 +53,15 @@ THREE POINTER-READING HOLES CLOSED:
      AliasManager.read_pointer/list_pointers -- ONE "read a pointer" impl
      (content seam step 5a: the documents live in the registry).
   C. UNION OVER EVERY alias, not just `*-global` --
+=======
+     the keep set. Pointer files are read directly here instead.
+  B. SINGLE ATOMIC READ: one open+json.load per pointer, target_path AND
+     previous_path from the SAME dict -- the pre-existing
+     enforce_snapshot_retention read them via two separate opens, which
+     can straddle a concurrent swap. Both now share
+     read_pointer_target_and_previous() -- ONE "read a pointer" impl.
+  C. UNION OVER EVERY `*.json` in aliases/, not just `*-global.json` --
+>>>>>>> upstream/master
      temporal sister pointers reference snapshots in their own
      namespaces; the mechanism that refreshed them is RETIRED
      (Bug #1528/#1529) but the pointer files still exist and must still
@@ -110,6 +120,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 # is a deletion). Re-exported under the SAME names (via __all__ below) for
 # backward compatibility with existing test imports
 # (`from ...versioned_snapshot_reconciler import
+<<<<<<< HEAD
 # compute_snapshot_deletion_candidates`).
 from code_indexer.global_repos.snapshot_retention import (
     DEFAULT_MIN_ABSOLUTE_AGE_SECONDS,
@@ -117,6 +128,17 @@ from code_indexer.global_repos.snapshot_retention import (
     compute_snapshot_deletion_candidates,
     globally_referenced_paths,
     parse_live_timestamp,
+=======
+# compute_snapshot_deletion_candidates, read_pointer_target_and_previous`).
+from code_indexer.global_repos.snapshot_retention import (
+    DEFAULT_MIN_ABSOLUTE_AGE_SECONDS,
+    _protected_snapshot_paths,
+    collect_all_pointers,
+    compute_snapshot_deletion_candidates,
+    globally_referenced_paths,
+    parse_live_timestamp,
+    read_pointer_target_and_previous,
+>>>>>>> upstream/master
     resolve_governing_pointer,
     resolve_retention_keep_last,
 )
@@ -136,9 +158,17 @@ from code_indexer.server.services.versioned_snapshot_reclaim import (
 
 __all__ = [
     "_protected_snapshot_paths",
+<<<<<<< HEAD
     "compute_snapshot_deletion_candidates",
     "globally_referenced_paths",
     "parse_live_timestamp",
+=======
+    "collect_all_pointers",
+    "compute_snapshot_deletion_candidates",
+    "globally_referenced_paths",
+    "parse_live_timestamp",
+    "read_pointer_target_and_previous",
+>>>>>>> upstream/master
     "resolve_governing_pointer",
     "reconcile_versioned_snapshots",
     "VersionedSnapshotReconcileResult",
@@ -281,8 +311,13 @@ def reconcile_versioned_snapshots(
     age-gated CleanupManager. See the module docstring for the full
     contract.
 
+<<<<<<< HEAD
     ``alias_manager`` is used ONLY for raw pointer reads
     (``list_pointers``), never ``read_alias`` (module docstring hole A). Deletion is NOT
+=======
+    ``alias_manager`` is used ONLY for its ``aliases_dir`` path -- pointer
+    files are read directly (module docstring hole A). Deletion is NOT
+>>>>>>> upstream/master
     gated by a mode flag: a computed candidate is safe to delete precisely
     because it survived the age-floor, keep-last-N, and pointer-protection
     checks in ``compute_snapshot_deletion_candidates`` -- there is no
@@ -377,6 +412,7 @@ def _build_sweep_context(
         return _SweepContext(versioned_dir, [], {}, set(), 1)
 
     try:
+<<<<<<< HEAD
         pointers = alias_manager.list_pointers()
     except Exception as aliases_error:
         # A pointer listing that failed is NOT an empty one: sweeping
@@ -385,6 +421,14 @@ def _build_sweep_context(
         result.abort_reason = (
             f"alias pointers for '{alias_manager.aliases_dir}' could not be "
             f"listed -- refusing to sweep (likely an infra/mount/registry "
+=======
+        pointers = collect_all_pointers(alias_manager.aliases_dir)
+    except OSError as aliases_error:
+        result.aborted = True
+        result.abort_reason = (
+            f"'{alias_manager.aliases_dir}' is not a healthy/readable "
+            f"directory -- refusing to sweep (likely an infra/mount "
+>>>>>>> upstream/master
             f"problem): {aliases_error}"
         )
         logger.warning("Bug #1567 reconcile: %s", result.abort_reason)

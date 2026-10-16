@@ -193,21 +193,22 @@ class LlmLeaseLifecycleService:
 
             except Exception as exc:
                 # Non-blocking: server continues in degraded state
+                shown = self._shown_error("Credential checkout failed", exc)
                 if _is_no_credentials_available_error(exc):
                     logger.warning(
                         "LLM lease DEGRADED: no anthropic credential available "
                         "to lease; Claude-backed features unavailable until "
                         "one is provisioned (%s)",
-                        exc,
+                        shown,
                     )
                 else:
                     logger.error(
-                        "Failed to checkout credential from LLM provider: %s", exc
+                        "Failed to checkout credential from LLM provider: %s", shown
                     )
                 self._credential_type = None
                 self._status = LeaseStatusInfo(
                     status=LeaseLifecycleStatus.DEGRADED,
-                    error=str(exc),
+                    error=shown,
                 )
 
     def stop(self) -> None:
@@ -280,6 +281,17 @@ class LlmLeaseLifecycleService:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _shown_error(what: str, exc: Exception) -> str:
+        """The text that may be logged or reported (``status.error`` is
+        served by /api/llm-creds/lease-status) for *exc*: a provider error's
+        own message, which LlmCredsClient builds without the API key; for
+        any other exception, whose text may quote the request's API-key
+        header, only ``"<what> (<ExceptionClass>)"``."""
+        if isinstance(exc, LlmCredsProviderError):
+            return str(exc)
+        return f"{what} ({type(exc).__name__})"
+
     def _do_plain_checkin(self, lease_id: str, credential_id: Optional[str]) -> None:
         """
         Checkin without token writeback — used for api_key credential type.
@@ -295,7 +307,9 @@ class LlmLeaseLifecycleService:
             logger.info("Plain checkin successful: lease_id=%s", lease_id)
         except Exception as exc:
             logger.warning(
-                "Checkin failed for lease_id=%s (non-fatal): %s", lease_id, exc
+                "Checkin failed for lease_id=%s (non-fatal): %s",
+                lease_id,
+                self._shown_error("Checkin failed", exc),
             )
 
     def _do_checkin_with_writeback(
@@ -321,7 +335,9 @@ class LlmLeaseLifecycleService:
             logger.info("Checkin with writeback successful: lease_id=%s", lease_id)
         except Exception as exc:
             logger.warning(
-                "Checkin failed for lease_id=%s (non-fatal): %s", lease_id, exc
+                "Checkin failed for lease_id=%s (non-fatal): %s",
+                lease_id,
+                self._shown_error("Checkin failed", exc),
             )
 
     def _write_claude_api_key(self, api_key: str) -> None:

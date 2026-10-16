@@ -21,10 +21,26 @@ from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
 
+from code_indexer.utils.credential_redaction import mask_url_credentials
 from ._utils import _mcp_response, _parse_json_string_array
 from ._git_seam import remote_get_url as _remote_get_url
 
 logger = logging.getLogger(__name__)
+
+
+def _unsupported_forge_response(remote_url: str) -> Dict[str, Any]:
+    """The error for a remote that is neither GitHub nor GitLab; the remote
+    URL is returned with its userinfo redacted."""
+    return _mcp_response(  # type: ignore[no-any-return]
+        {
+            "success": False,
+            "error": (
+                "Cannot determine forge type from remote URL "
+                f"'{mask_url_credentials(remote_url)}'. "
+                "Only github and gitlab are supported."
+            ),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -145,15 +161,7 @@ def create_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # AC3: Auto-detect forge type
         forge_type = detect_forge_type(remote_url)
         if forge_type is None:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": (
-                        f"Cannot determine forge type from remote URL '{remote_url}'. "
-                        "Only github and gitlab are supported."
-                    ),
-                }
-            )
+            return _unsupported_forge_response(remote_url)
 
         # Extract owner and repo from remote URL
         owner, repo = extract_owner_repo(remote_url)
@@ -292,15 +300,7 @@ def list_pull_requests(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Auto-detect forge type
         forge_type = detect_forge_type(remote_url)
         if forge_type is None:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": (
-                        f"Cannot determine forge type from remote URL '{remote_url}'. "
-                        "Only github and gitlab are supported."
-                    ),
-                }
-            )
+            return _unsupported_forge_response(remote_url)
 
         # Extract owner and repo from remote URL
         owner, repo = extract_owner_repo(remote_url)
@@ -439,15 +439,7 @@ def get_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Auto-detect forge type
         forge_type = detect_forge_type(remote_url)
         if forge_type is None:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": (
-                        f"Cannot determine forge type from remote URL '{remote_url}'. "
-                        "Only github and gitlab are supported."
-                    ),
-                }
-            )
+            return _unsupported_forge_response(remote_url)
 
         # Extract owner and repo from remote URL
         owner, repo = extract_owner_repo(remote_url)
@@ -582,15 +574,7 @@ def list_pull_request_comments(args: Dict[str, Any], user: User) -> Dict[str, An
         # Auto-detect forge type
         forge_type = detect_forge_type(remote_url)
         if forge_type is None:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": (
-                        f"Cannot determine forge type from remote URL '{remote_url}'. "
-                        "Only github and gitlab are supported."
-                    ),
-                }
-            )
+            return _unsupported_forge_response(remote_url)
 
         # Extract owner and repo from remote URL
         owner, repo = extract_owner_repo(remote_url)
@@ -736,15 +720,7 @@ def comment_on_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         forge_type = detect_forge_type(remote_url)
         if forge_type is None:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": (
-                        f"Cannot determine forge type from remote URL '{remote_url}'. "
-                        "Only github and gitlab are supported."
-                    ),
-                }
-            )
+            return _unsupported_forge_response(remote_url)
 
         owner, repo = extract_owner_repo(remote_url)
         host = GitCredentialHelper.extract_host_from_remote_url(remote_url) or (
@@ -898,15 +874,7 @@ def update_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         forge_type = detect_forge_type(remote_url)
         if forge_type is None:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": (
-                        f"Cannot determine forge type from remote URL '{remote_url}'. "
-                        "Only github and gitlab are supported."
-                    ),
-                }
-            )
+            return _unsupported_forge_response(remote_url)
 
         owner, repo = extract_owner_repo(remote_url)
         host = GitCredentialHelper.extract_host_from_remote_url(remote_url) or (
@@ -1039,15 +1007,7 @@ def merge_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         forge_type = detect_forge_type(remote_url)
         if forge_type is None:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": (
-                        f"Cannot determine forge type from remote URL '{remote_url}'. "
-                        "Only github and gitlab are supported."
-                    ),
-                }
-            )
+            return _unsupported_forge_response(remote_url)
 
         owner, repo = extract_owner_repo(remote_url)
         host = GitCredentialHelper.extract_host_from_remote_url(remote_url) or (
@@ -1174,15 +1134,7 @@ def close_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         forge_type = detect_forge_type(remote_url)
         if forge_type is None:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": (
-                        f"Cannot determine forge type from remote URL '{remote_url}'. "
-                        "Only github and gitlab are supported."
-                    ),
-                }
-            )
+            return _unsupported_forge_response(remote_url)
 
         owner, repo = extract_owner_repo(remote_url)
         host = GitCredentialHelper.extract_host_from_remote_url(remote_url) or (

@@ -43,8 +43,11 @@ the two call sites can never diverge again.
 from __future__ import annotations
 
 import socket
+<<<<<<< HEAD
 
 import pytest
+=======
+>>>>>>> upstream/master
 from typing import Any, Dict, List, Optional
 
 from code_indexer.server.utils.cluster_node_id import resolve_cluster_node_id
@@ -88,6 +91,7 @@ class TestResolveClusterNodeId:
         ]
         for raw_config in configs:
             assert resolve_cluster_node_id(raw_config) != "local"
+<<<<<<< HEAD
 
 
 # ── configured_node_id: the explicit value or "" -- never a crash ────────────
@@ -150,3 +154,5 @@ def test_the_dep_map_sentinel_node_id_survives_a_null_cluster(
         json.dumps({"cluster": {"node_id": "cidx-2"}})
     )
     assert service._get_node_id() == "cidx-2"
+=======
+>>>>>>> upstream/master

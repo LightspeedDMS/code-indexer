@@ -111,6 +111,7 @@ class TestMaskUrlCredentials:
         ):
             assert mask_url_credentials(url) == url
 
+<<<<<<< HEAD
     def test_at_after_host_boundary_is_preserved(self):
         # The `/` in the negated class stops the match at the host, so an `@` in
         # the path/ref (a pinned @-tag) is NOT mistaken for userinfo. A regex
@@ -123,6 +124,8 @@ class TestMaskUrlCredentials:
         )
         assert mask_url_credentials("https://tok@host/a@b") == "https://***@host/a@b"
 
+=======
+>>>>>>> upstream/master
     def test_idempotent_and_non_string_safe(self):
         from code_indexer.server.logging_utils import mask_url_credentials
 
@@ -132,6 +135,7 @@ class TestMaskUrlCredentials:
         assert mask_url_credentials(123) == 123
 
 
+<<<<<<< HEAD
 class TestStripUrlCredentials:
     """strip_url_credentials REMOVES the credential (vs mask's ``***``), yielding a
     still-valid URL — used before a repo URL is PERSISTED when git-mcp owns auth
@@ -185,6 +189,8 @@ class TestStripUrlCredentials:
         assert strip_url_credentials(once) == once
         assert strip_url_credentials(None) is None
         assert strip_url_credentials(123) == 123
+=======
+>>>>>>> upstream/master
 def _make_log_record(msg: str = "test message"):
     import logging
 

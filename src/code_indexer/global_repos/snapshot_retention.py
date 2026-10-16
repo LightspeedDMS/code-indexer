@@ -35,10 +35,15 @@ built to avoid --
      in -- falls outside the window and becomes a delete candidate.
 
 The fix makes this module the SINGLE shared source of truth for the
+<<<<<<< HEAD
 ts_live-anchored supersession predicate: `AliasManager.read_pointer` /
 `list_pointers` (target and previous from ONE read of the alias document,
 closing hole A; content seam step 5a moved the document from a file into the
 registry, behind the same calls), never
+=======
+ts_live-anchored supersession predicate: `read_pointer_target_and_previous`
+(one atomic open+json.load, closing hole A), never
+>>>>>>> upstream/master
 `read_alias`/`get_previous_path` (closing hole B), and
 `compute_snapshot_deletion_candidates` (anchoring on `ts_live`, closing
 hole C). `versioned_snapshot_reconciler.py` imports these SAME functions
@@ -72,6 +77,10 @@ master clone) still fails closed exactly as before.
 
 from __future__ import annotations
 
+<<<<<<< HEAD
+=======
+import json
+>>>>>>> upstream/master
 import logging
 import re
 import time
@@ -140,6 +149,45 @@ def resolve_retention_keep_last() -> int:
 # ---------------------------------------------------------------------------
 
 
+<<<<<<< HEAD
+=======
+def read_pointer_target_and_previous(
+    alias_file: Path,
+) -> Optional[Tuple[str, Optional[str]]]:
+    """One atomic open+json.load of an alias pointer file; target_path AND
+    previous_path from the SAME parsed dict. None on any read/parse
+    failure, a non-object payload, or a missing target_path. NEVER
+    AliasManager.read_alias/get_previous_path (module docstring holes
+    A/B)."""
+    try:
+        with open(alias_file, "r") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    target_path = data.get("target_path")
+    if not isinstance(target_path, str) or not target_path:
+        return None
+    previous_path = data.get("previous_path")
+    if not isinstance(previous_path, str) or not previous_path:
+        previous_path = None
+    return target_path, previous_path
+
+
+def collect_all_pointers(aliases_dir: Path) -> Dict[str, Tuple[str, Optional[str]]]:
+    """Read EVERY ``*.json`` in *aliases_dir* -- cross-alias reference
+    union. Unreadable/unparseable files are simply absent -- never raise.
+    Raises OSError only if *aliases_dir* itself cannot be listed."""
+    pointers: Dict[str, Tuple[str, Optional[str]]] = {}
+    for alias_file in aliases_dir.glob("*.json"):
+        parsed = read_pointer_target_and_previous(alias_file)
+        if parsed is not None:
+            pointers[alias_file.stem] = parsed
+    return pointers
+
+
+>>>>>>> upstream/master
 def globally_referenced_paths(
     pointers: Dict[str, Tuple[str, Optional[str]]],
 ) -> Set[str]:
@@ -296,8 +344,14 @@ def _resolve_live_pointer(
 ) -> Tuple[str, Set[str]]:
     """One atomic pointer read (Bug #1567 Gap 1 holes A/B) -> (target_path,
     referenced_paths). Falls back to *current_target* only if the pointer
+<<<<<<< HEAD
     itself cannot be read at all."""
     pointer = alias_manager.read_pointer(alias_name)
+=======
+    file itself cannot be read at all."""
+    alias_file = alias_manager.aliases_dir / f"{alias_name}.json"
+    pointer = read_pointer_target_and_previous(alias_file)
+>>>>>>> upstream/master
     target_path = pointer[0] if pointer is not None else current_target
     previous_path = pointer[1] if pointer is not None else None
     referenced_paths: Set[str] = {target_path}
@@ -383,18 +437,35 @@ def discover_and_enforce_temporal_retention(
         return
     prefix = f"{repo_alias}-temporal-"
     try:
+<<<<<<< HEAD
         # Bug #1567 Gap 1: raw pointer reads, never AliasManager.read_alias.
         pointers = alias_manager.list_pointers(prefix)
     except Exception as exc:
         logger.warning(
             "[temporal-retention] alias scan failed for %s (non-fatal): %s: %s",
+=======
+        alias_files = sorted(alias_manager.aliases_dir.glob(f"{prefix}*.json"))
+    except OSError as exc:
+        logger.warning(
+            "[temporal-retention] alias directory scan failed for %s "
+            "(non-fatal): %s: %s",
+>>>>>>> upstream/master
             repo_alias,
             type(exc).__name__,
             exc,
         )
         return
 
+<<<<<<< HEAD
     for temporal_alias_name, pointer in pointers.items():
+=======
+    for alias_file in alias_files:
+        temporal_alias_name = alias_file.stem
+        # Bug #1567 Gap 1: raw pointer read, never AliasManager.read_alias.
+        pointer = read_pointer_target_and_previous(alias_file)
+        if pointer is None:
+            continue
+>>>>>>> upstream/master
         enforce_snapshot_retention(
             temporal_alias_name,
             pointer[0],

@@ -346,12 +346,17 @@ function copyPublicKey(keyName, publicKey) {
     if (!publicKey) {
         // Fetch if not available inline
         fetch(`/api/ssh-keys/${keyName}/public`)
-            .then(response => response.text())
-            .then(key => {
-                navigator.clipboard.writeText(key).then(() => {
-                    alert('Public key copied to clipboard!');
-                });
+            .then(response => {
+                // Never copy an error body (e.g. a refusal) as the key.
+                if (!response.ok) {
+                    return response.text().then(text => {
+                        throw new Error(`HTTP ${response.status}: ${text}`);
+                    });
+                }
+                return response.text();
             })
+            .then(key => navigator.clipboard.writeText(key))
+            .then(() => alert('Public key copied to clipboard!'))
             .catch(err => alert('Failed to copy: ' + err.message));
     } else {
         navigator.clipboard.writeText(publicKey).then(() => {

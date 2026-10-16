@@ -19,6 +19,7 @@ import yaml  # type: ignore[import-untyped]
 from rich.console import Console
 
 from code_indexer.services.embedding_provider import EmbeddingProvider
+from code_indexer.services.provider_request_timeout import embedding_request_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,9 @@ _MAX_RETRY_SLEEP_SECONDS = 300.0
 
 # Timeout (seconds) used by the lightweight health probe (Story #619 HIGH-2)
 _PROBE_TIMEOUT_S: float = 5.0
+
+#: The single input of health_check(test_api=True).
+_HEALTH_PROBE_TEXT = "health check"
 
 
 class CohereEmbeddingProvider(EmbeddingProvider):
@@ -217,6 +221,7 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         input_type: str = "search_document",
         *,
         retry: bool = True,
+        single_attempt: bool = False,
     ) -> Dict[str, Any]:
         """Make synchronous HTTP request to Cohere Embed API.
 
@@ -228,6 +233,9 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                 When False (QUERY path), makes exactly ONE HTTP attempt and raises
                 immediately on any error — sleep and retry are handled OUTSIDE the
                 governor slot by execute_with_backoff in the caller (Bug #1078 C2).
+            single_attempt: The health probe (Bug #2127): ONE attempt at the
+                query timeout budget, no retries, still an indexing-purpose send
+                (stats tag and run-spend meter charge unchanged).
 
         Returns:
             Parsed JSON response from the API.
@@ -255,11 +263,13 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         def _single_attempt() -> Dict[str, Any]:
             """Execute ONE HTTP call and return the parsed JSON dict."""
             _start = time.time()
-            _timeout = httpx.Timeout(
-                connect=self.config.connect_timeout,
-                read=self.config.timeout,
-                write=self.config.timeout,
-                pool=self.config.timeout,
+            # Bug #2127: an indexing attempt (retry=True) waits longer than a
+            # query, so a slow-period response is received, not abandoned
+            # (and paid for) then resent. The health probe answers fast.
+            _timeout = embedding_request_timeout(
+                self.config.timeout,
+                self.config.connect_timeout,
+                indexing=retry and not single_attempt,
             )
             # Story #1083 (+ residual): pooled=True borrows the factory's ONE
             # long-lived keep-alive client (reused SSLContext + connection pool)
@@ -285,6 +295,10 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                         self.config.api_endpoint,
                         headers=headers,
                         json=payload,
+<<<<<<< HEAD
+=======
+                        timeout=_timeout,
+>>>>>>> upstream/master
                     )
                 _response.raise_for_status()
                 return cast(httpx.Response, _response)
@@ -319,6 +333,10 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                     batch_size=len(texts),
                     purpose="query" if not retry else "index",
                     fn=_do_post_and_validate,
+<<<<<<< HEAD
+=======
+                    inputs=texts,
+>>>>>>> upstream/master
                 )
             except Exception:
                 record_embedding_provider_call(
@@ -341,10 +359,10 @@ class CohereEmbeddingProvider(EmbeddingProvider):
             )
             return dict(response.json())
 
-        # --- Single-attempt path (QUERY, retry=False) ---
+        # --- Single-attempt path (QUERY retry=False, or the health probe) ---
         # One call, no sleep. All errors propagate immediately to the caller
         # (execute_with_backoff handles 429 retries OUTSIDE the governor slot).
-        if not retry:
+        if not retry or single_attempt:
             _start_single = time.time()
             try:
                 return _single_attempt()
@@ -636,6 +654,11 @@ class CohereEmbeddingProvider(EmbeddingProvider):
             provider="cohere",
         )
 
+    def request_max_retries(self) -> int:
+        """Retries one indexing request may make after its first attempt
+        (the retry loop of _make_sync_request)."""
+        return int(self.config.max_retries)
+
     def health_check(self, *, test_api: bool = False) -> bool:
         """Check provider health.
 
@@ -651,7 +674,19 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         if not test_api:
             return True
         try:
-            self._make_sync_request(["health check"], "search_document")
+            # Story #2122: the probe is a planned send of its own; register
+            # it so an armed run-spend meter allows it.
+            from .run_spend_meter import get_run_spend_meter, input_key
+
+            get_run_spend_meter().register_misses(
+                [input_key(_HEALTH_PROBE_TEXT)],
+                max_retries=self.request_max_retries(),
+            )
+            # One attempt at the query budget (Bug #2127): a pre-flight probe
+            # must answer fast, never wait the indexing budget plus retries.
+            self._make_sync_request(
+                [_HEALTH_PROBE_TEXT], "search_document", single_attempt=True
+            )
             return True
         except Exception as exc:
             logger.warning("Cohere health check failed: %s", exc)

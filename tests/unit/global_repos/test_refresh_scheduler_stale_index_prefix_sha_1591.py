@@ -5,7 +5,11 @@ full reconcile on every refresh forever for repos whose metadata.json was
 last written by config_fixer.py's GitStateDetector (which used
 `git rev-parse --short HEAD`, or the literal "unknown" on failure).
 
+<<<<<<< HEAD
 RefreshScheduler._check_stale_index_metadata() (Bug #1508) compares
+=======
+RefreshScheduler._stale_index_signal() (Bug #1508) compares
+>>>>>>> upstream/master
 metadata.json's recorded `current_commit` against the actual working-tree
 HEAD with plain string equality. Two independent producers disagree on
 format:
@@ -19,7 +23,11 @@ HEAD means the index is NOT drifted -- but the old exact-string-equality
 check can never recognize this, so it force-reconciles on every single
 refresh cycle, forever, even when the index is exactly current.
 
+<<<<<<< HEAD
 These tests exercise the REAL `_check_stale_index_metadata()` method
+=======
+These tests exercise the REAL `_stale_index_signal()` method
+>>>>>>> upstream/master
 against a REAL local git repository (real `git init`/`git commit`
 subprocess calls, real `git rev-parse HEAD` executed by the method under
 test) -- no mocking of git itself.
@@ -155,6 +163,14 @@ def _write_metadata(source_path: Path, filename: str = "metadata.json", **fields
         json.dump(fields, f)
 
 
+<<<<<<< HEAD
+=======
+def _forces_reconcile(scheduler, source_path: str, alias_name: str, **kwargs) -> bool:
+    """True when the scheduler's stale-index check reports a signal."""
+    return scheduler._stale_index_signal(source_path, alias_name, **kwargs) is not None
+
+
+>>>>>>> upstream/master
 @pytest.fixture
 def golden_repos_dir(tmp_path):
     golden_dir = tmp_path / "golden-repos"
@@ -232,8 +248,13 @@ class TestAbbreviatedShaPrefixIsNotDrift:
             current_commit=abbreviated,
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(real_git_repo), "email-marketing-api-global"
+=======
+        result = _forces_reconcile(
+            scheduler, str(real_git_repo), "email-marketing-api-global"
+>>>>>>> upstream/master
         )
 
         assert result is False, (
@@ -254,9 +275,13 @@ class TestAbbreviatedShaPrefixIsNotDrift:
             current_commit=abbreviated,
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(real_git_repo), "some-repo-global"
         )
+=======
+        result = _forces_reconcile(scheduler, str(real_git_repo), "some-repo-global")
+>>>>>>> upstream/master
 
         assert result is False
 
@@ -273,9 +298,13 @@ class TestAbbreviatedShaPrefixIsNotDrift:
             current_commit=actual_head,
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(real_git_repo), "some-repo-global"
         )
+=======
+        result = _forces_reconcile(scheduler, str(real_git_repo), "some-repo-global")
+>>>>>>> upstream/master
 
         assert result is False
 
@@ -304,9 +333,13 @@ class TestGenuineDriftStillDetected:
             current_commit=not_a_prefix,
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(real_git_repo), "some-repo-global"
         )
+=======
+        result = _forces_reconcile(scheduler, str(real_git_repo), "some-repo-global")
+>>>>>>> upstream/master
 
         assert result is True, (
             "A recorded short SHA that genuinely does NOT match the actual "
@@ -325,9 +358,13 @@ class TestGenuineDriftStillDetected:
             current_commit=recorded_full_sha,
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(real_git_repo), "some-repo-global"
         )
+=======
+        result = _forces_reconcile(scheduler, str(real_git_repo), "some-repo-global")
+>>>>>>> upstream/master
 
         assert result is True
 
@@ -349,9 +386,13 @@ class TestUnknownSentinelForcesReconcile:
             current_commit="unknown",
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(real_git_repo), "cidx-meta-global"
         )
+=======
+        result = _forces_reconcile(scheduler, str(real_git_repo), "cidx-meta-global")
+>>>>>>> upstream/master
 
         assert result is True, (
             "The literal 'unknown' sentinel carries no usable commit "
@@ -387,9 +428,13 @@ class TestProviderAwareMetadataRead:
             current_commit=abbreviated,
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(real_git_repo), "some-repo-global"
         )
+=======
+        result = _forces_reconcile(scheduler, str(real_git_repo), "some-repo-global")
+>>>>>>> upstream/master
 
         assert result is False, (
             "A prefix match recorded in the REAL production provider-"
@@ -413,9 +458,13 @@ class TestProviderAwareMetadataRead:
             current_commit=first_commit,
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(repo_dir), "some-repo-global"
         )
+=======
+        result = _forces_reconcile(scheduler, str(repo_dir), "some-repo-global")
+>>>>>>> upstream/master
 
         assert result is True, (
             "A genuinely stale current_commit recorded in the provider-"
@@ -435,9 +484,13 @@ class TestProviderAwareMetadataRead:
             current_commit="unknown",
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(real_git_repo), "cidx-meta-global"
         )
+=======
+        result = _forces_reconcile(scheduler, str(real_git_repo), "cidx-meta-global")
+>>>>>>> upstream/master
 
         assert result is True, (
             "'unknown' recorded in the provider-suffixed metadata file "
@@ -469,9 +522,13 @@ class TestProviderAwareMetadataRead:
             current_commit=first_commit,
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(repo_dir), "some-repo-global"
         )
+=======
+        result = _forces_reconcile(scheduler, str(repo_dir), "some-repo-global")
+>>>>>>> upstream/master
 
         assert result is True, (
             "When both a provider-suffixed and a legacy metadata file "
@@ -502,9 +559,13 @@ class TestMinimumPrefixLengthFloor:
             current_commit=too_short,
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(real_git_repo), "some-repo-global"
         )
+=======
+        result = _forces_reconcile(scheduler, str(real_git_repo), "some-repo-global")
+>>>>>>> upstream/master
 
         assert result is True, (
             f"A 1-char recorded fragment ({too_short!r}) is technically a "
@@ -526,9 +587,13 @@ class TestMinimumPrefixLengthFloor:
             current_commit=too_short,
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(real_git_repo), "some-repo-global"
         )
+=======
+        result = _forces_reconcile(scheduler, str(real_git_repo), "some-repo-global")
+>>>>>>> upstream/master
 
         assert result is True, (
             "A 6-char recorded fragment is one below the 7-char minimum "
@@ -546,7 +611,11 @@ class TestMinimumPrefixLengthFloor:
 
 class TestUnknownCaseInsensitiveNormalization:
     def test_uppercase_unknown_forces_reconcile_with_correct_message(
+<<<<<<< HEAD
         self, scheduler, real_git_repo, caplog
+=======
+        self, scheduler, real_git_repo
+>>>>>>> upstream/master
     ):
         _write_metadata(
             real_git_repo,
@@ -554,6 +623,7 @@ class TestUnknownCaseInsensitiveNormalization:
             current_commit="UNKNOWN",
         )
 
+<<<<<<< HEAD
         with caplog.at_level("WARNING"):
             result = scheduler._check_stale_index_metadata(
                 str(real_git_repo), "cidx-meta-global"
@@ -570,6 +640,20 @@ class TestUnknownCaseInsensitiveNormalization:
 
     def test_whitespace_padded_unknown_forces_reconcile_with_correct_message(
         self, scheduler, real_git_repo, caplog
+=======
+        signal = scheduler._stale_index_signal(str(real_git_repo), "cidx-meta-global")
+
+        assert signal is not None
+        assert "no usable recorded commit" in signal.message, (
+            "'UNKNOWN' (uppercase) must be recognized as the unknown "
+            "sentinel and reported via the dedicated message, not fall "
+            f"through to the generic drift-mismatch branch. Got: {signal.message!r}"
+        )
+        assert "reflects commit UNKNOWN" not in signal.message
+
+    def test_whitespace_padded_unknown_forces_reconcile_with_correct_message(
+        self, scheduler, real_git_repo
+>>>>>>> upstream/master
     ):
         _write_metadata(
             real_git_repo,
@@ -577,6 +661,7 @@ class TestUnknownCaseInsensitiveNormalization:
             current_commit=" unknown \n",
         )
 
+<<<<<<< HEAD
         with caplog.at_level("WARNING"):
             result = scheduler._check_stale_index_metadata(
                 str(real_git_repo), "cidx-meta-global"
@@ -587,6 +672,14 @@ class TestUnknownCaseInsensitiveNormalization:
         assert "no usable recorded commit" in messages, (
             "' unknown \\n' (whitespace-padded) must be recognized as the "
             f"unknown sentinel via the dedicated message. Got: {messages!r}"
+=======
+        signal = scheduler._stale_index_signal(str(real_git_repo), "cidx-meta-global")
+
+        assert signal is not None
+        assert "no usable recorded commit" in signal.message, (
+            "' unknown \\n' (whitespace-padded) must be recognized as the "
+            f"unknown sentinel via the dedicated message. Got: {signal.message!r}"
+>>>>>>> upstream/master
         )
 
 
@@ -610,9 +703,13 @@ class TestGenuineDriftRealCommitCoverage:
             current_commit=uppercase_prefix,
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(repo_dir), "some-repo-global"
         )
+=======
+        result = _forces_reconcile(scheduler, str(repo_dir), "some-repo-global")
+>>>>>>> upstream/master
 
         assert result is False, (
             "An uppercase recorded prefix of the CURRENT real HEAD must "
@@ -634,9 +731,13 @@ class TestGenuineDriftRealCommitCoverage:
             current_commit=uppercase_stale_prefix,
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(repo_dir), "some-repo-global"
         )
+=======
+        result = _forces_reconcile(scheduler, str(repo_dir), "some-repo-global")
+>>>>>>> upstream/master
 
         assert result is True, (
             "A real, valid, uppercase-recorded SHA prefix that genuinely "
@@ -660,9 +761,13 @@ class TestGenuineDriftRealCommitCoverage:
             current_commit=longer_than_head,
         )
 
+<<<<<<< HEAD
         result = scheduler._check_stale_index_metadata(
             str(repo_dir), "some-repo-global"
         )
+=======
+        result = _forces_reconcile(scheduler, str(repo_dir), "some-repo-global")
+>>>>>>> upstream/master
 
         assert result is True, (
             "A recorded value LONGER than the actual HEAD can never be a "

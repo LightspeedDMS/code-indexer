@@ -105,6 +105,8 @@ class TestGitResetHandler:
             mode="soft",
             commit_hash="HEAD~1",
             confirmation_token=None,
+            username="testadmin",
+            repo_alias="test-repo",
         )
 
     def test_git_reset_hard_requires_confirmation(
@@ -112,11 +114,10 @@ class TestGitResetHandler:
     ):
         """Test git reset --hard requires confirmation token."""
         # Without confirmation token, should get token requirement error
-        mock_git_service.git_reset.side_effect = ValueError(
-            "Confirmation token required for hard reset"
-        )
-        # Mock generate_confirmation_token to return a string
-        mock_git_service.generate_confirmation_token.return_value = "TEST123"
+        mock_git_service.git_reset.return_value = {
+            "requires_confirmation": True,
+            "token": "TEST123",
+        }
 
         params = {
             "repository_alias": "test-repo",
@@ -158,6 +159,8 @@ class TestGitResetHandler:
             mode="hard",
             commit_hash="HEAD",
             confirmation_token="ABC123",
+            username="testadmin",
+            repo_alias="test-repo",
         )
 
     def test_git_reset_commit_hash_reaches_service(
@@ -191,6 +194,8 @@ class TestGitResetHandler:
             mode="soft",
             commit_hash="abc1234",
             confirmation_token=None,
+            username="testadmin",
+            repo_alias="test-repo",
         )
 
     def test_git_reset_missing_repository(self, mock_user):
@@ -215,11 +220,10 @@ class TestGitCleanHandler:
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git clean requires confirmation token."""
-        mock_git_service.git_clean.side_effect = ValueError(
-            "Confirmation token required for git clean"
-        )
-        # Mock generate_confirmation_token to return a string
-        mock_git_service.generate_confirmation_token.return_value = "CLEAN456"
+        mock_git_service.git_clean.return_value = {
+            "requires_confirmation": True,
+            "token": "CLEAN456",
+        }
 
         params = {"repository_alias": "test-repo"}
 
@@ -250,7 +254,10 @@ class TestGitCleanHandler:
         assert data["success"] is True
         assert len(data["removed_files"]) == 2
         mock_git_service.git_clean.assert_called_once_with(
-            Path("/tmp/test-repo"), confirmation_token="XYZ789"
+            Path("/tmp/test-repo"),
+            confirmation_token="XYZ789",
+            username="testadmin",
+            repo_alias="test-repo",
         )
 
     def test_git_clean_missing_repository(self, mock_user):

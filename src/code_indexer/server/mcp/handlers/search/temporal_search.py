@@ -17,6 +17,13 @@ from typing import Any, Dict, Optional, Tuple
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.services.config_service import get_config_service
+<<<<<<< HEAD
+=======
+from code_indexer.server.services.search_event_outcomes import (
+    REPOSITORY_NOT_FOUND_CODE,
+    SERVICE_UNAVAILABLE_CODE,
+)
+>>>>>>> upstream/master
 from code_indexer.server.services.temporal_live_dispatch import (
     execute_live_temporal_search,
 )
@@ -55,13 +62,28 @@ def _resolve_temporal_repo_path(
             {
                 "success": False,
                 "error": "Repository service not available",
+<<<<<<< HEAD
+=======
+                "error_code": SERVICE_UNAVAILABLE_CODE,
+>>>>>>> upstream/master
                 "results": [],
             }
         )
     try:
         repo_path = _arm.get_activated_repo_path(user.username, repository_alias)
     except Exception as exc:
+<<<<<<< HEAD
         return None, _mcp_response({"success": False, "error": str(exc), "results": []})
+=======
+        return None, _mcp_response(
+            {
+                "success": False,
+                "error": str(exc),
+                "error_code": REPOSITORY_NOT_FOUND_CODE,
+                "results": [],
+            }
+        )
+>>>>>>> upstream/master
     return str(repo_path), None
 
 
@@ -107,12 +129,23 @@ def _execute_temporal_via_live_dispatch(
         config_service=get_config_service(),
     )
 
+<<<<<<< HEAD
+=======
+    from code_indexer.server.query.semantic_query_manager import SearchRequestError
+
+>>>>>>> upstream/master
     try:
         worker_input = build_temporal_worker_input_from_mcp_dict(
             {**params, "repository_alias": repository_alias},
             user.username,
             fusion_fetch_limit,
         )
+<<<<<<< HEAD
+=======
+    except ValueError as exc:
+        # The builder only normalizes the caller's own parameters.
+        raise SearchRequestError(str(exc)) from exc
+>>>>>>> upstream/master
     except TemporalAliasRejectedError as exc:
         return _mcp_response(
             {
@@ -136,6 +169,10 @@ def _execute_temporal_via_live_dispatch(
             {
                 "success": False,
                 "error": "Background job/payload cache service not available",
+<<<<<<< HEAD
+=======
+                "error_code": SERVICE_UNAVAILABLE_CODE,
+>>>>>>> upstream/master
                 "results": [],
             }
         )

@@ -96,6 +96,13 @@ class ApplicationMetrics:
         # a persistently broken ConfigService observable beyond log-scraping.
         self._xray_timeout_config_read_failures_counter: Optional[Any] = None
 
+<<<<<<< HEAD
+=======
+        # Bug #2114: search events dropped on SearchEventLogWriter queue
+        # overflow (per process; /health reports the same count per node).
+        self._search_event_dropped_counter: Optional[Any] = None
+
+>>>>>>> upstream/master
         if (
             telemetry_manager.is_initialized
             and telemetry_manager._config.export_metrics
@@ -180,8 +187,23 @@ class ApplicationMetrics:
                 unit="1",
             )
 
+<<<<<<< HEAD
             self._is_active = True
             logger.info("ApplicationMetrics initialized: 11 metrics registered")
+=======
+            # Bug #2114: search events dropped on recording-queue overflow.
+            self._search_event_dropped_counter = meter.create_counter(
+                name="cidx.search_event_log.dropped_events",
+                description=(
+                    "Number of search events dropped because the search event "
+                    "log queue was full"
+                ),
+                unit="1",
+            )
+
+            self._is_active = True
+            logger.info("ApplicationMetrics initialized: 12 metrics registered")
+>>>>>>> upstream/master
 
         except Exception as e:
             logger.warning(
@@ -355,6 +377,23 @@ class ApplicationMetrics:
                 f"Failed to record xray timeout config read failure metric: {e}"
             )
 
+<<<<<<< HEAD
+=======
+    def record_search_event_dropped(self) -> None:
+        """Record one search event dropped on queue overflow (Bug #2114).
+
+        Viewed as a rate, it shows sustained recording overload that leaves
+        Query Analytics exports short. Never raises.
+        """
+        if not self._is_active:
+            return
+        try:
+            assert self._search_event_dropped_counter is not None
+            self._search_event_dropped_counter.add(1)
+        except Exception as e:
+            logger.debug(f"Failed to record search event drop metric: {e}")
+
+>>>>>>> upstream/master
     @property
     def is_active(self) -> bool:
         """Return whether metrics are actively being recorded."""

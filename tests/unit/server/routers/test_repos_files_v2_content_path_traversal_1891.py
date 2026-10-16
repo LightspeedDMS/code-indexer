@@ -30,6 +30,10 @@ from tests.unit.server.routers.inline_routes_test_helpers import (
     _find_route_handler,
     _patch_closure,
     user_client,  # noqa: F401
+<<<<<<< HEAD
+=======
+    caller_is_access_admin,  # noqa: F401
+>>>>>>> upstream/master
 )
 
 OUTSIDE_MARKER = "SECRET_OUTSIDE_CONTENT_1891"

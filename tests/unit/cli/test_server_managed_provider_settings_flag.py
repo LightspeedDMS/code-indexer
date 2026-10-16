@@ -36,8 +36,12 @@ collaborators are stood in; the SUT (cli.py's flag threading) runs for real.
 from __future__ import annotations
 
 import contextlib
+<<<<<<< HEAD
 import os
 from typing import List, Sequence
+=======
+from typing import List
+>>>>>>> upstream/master
 from unittest.mock import MagicMock, patch
 
 from code_indexer.config import CohereConfig, VoyageAIConfig
@@ -99,6 +103,7 @@ def _make_indexer() -> MagicMock:
 
 
 @contextlib.contextmanager
+<<<<<<< HEAD
 def _in_project(tmp_path):
     """Run the command from inside the fixture project.
 
@@ -121,12 +126,17 @@ def _in_project(tmp_path):
 
 
 @contextlib.contextmanager
+=======
+>>>>>>> upstream/master
 def _index_test_env(
     tmp_path,
     loaded_configs: List[MagicMock],
     mock_indexer,
     mock_index_via_daemon,
+<<<<<<< HEAD
     providers: Sequence[str] = ("voyage-ai",),
+=======
+>>>>>>> upstream/master
 ):
     """Yields a CliRunner. `loaded_configs` accumulates EVERY config object
     `config_manager.load()` hands back across the whole command invocation,
@@ -139,12 +149,18 @@ def _index_test_env(
 
     def _load_side_effect() -> MagicMock:
         cfg = _make_config(str(tmp_path))
+<<<<<<< HEAD
         cfg.get_embedding_providers = lambda: list(providers)
+=======
+>>>>>>> upstream/master
         loaded_configs.append(cfg)
         return cfg
 
     with (
+<<<<<<< HEAD
         _in_project(tmp_path),
+=======
+>>>>>>> upstream/master
         patch(
             "code_indexer.cli.EmbeddingProviderFactory.resolve_api_key",
             return_value="key-123",
@@ -315,7 +331,10 @@ def _index_commits_test_env(tmp_path, loaded_configs: List[MagicMock]):
     mock_vs_instance.base_path = tmp_path / ".code-indexer" / "index"
 
     with (
+<<<<<<< HEAD
         _in_project(tmp_path),
+=======
+>>>>>>> upstream/master
         patch("code_indexer.cli.ConfigManager") as mock_cm,
         patch(
             _MIGRATE_TEMPORAL_PATH, return_value=MigrationResult.COMPLETED
@@ -403,6 +422,7 @@ class TestServerManagedProviderSettingsIndexCommitsFlag:
             temporal_config.voyage_ai.api_endpoint == _REPO_CONFIGURED_VOYAGE_ENDPOINT
         )
         assert temporal_config.cohere.api_endpoint == _REPO_CONFIGURED_COHERE_ENDPOINT
+<<<<<<< HEAD
 
 
 # ---------------------------------------------------------------------------
@@ -507,3 +527,5 @@ class TestContentBackendFlag:
         assert result.exit_code == 2
         builder.assert_not_called()
         mock_indexer.smart_index.assert_not_called()
+=======
+>>>>>>> upstream/master

@@ -56,6 +56,7 @@ _VALID_EVALUATOR = (
 
 
 def _require_xray_cli_binary() -> None:
+<<<<<<< HEAD
     """Ensure the real xray-cli release binary is available, or skip loudly.
 
     Delegates to the shared tests/unit/xray/conftest.py helper, which
@@ -71,6 +72,21 @@ def _require_xray_cli_binary() -> None:
     from tests.unit.xray.conftest import require_xray_cli_binary
 
     require_xray_cli_binary()
+=======
+    """Skip when the real xray-cli release binary is not built locally.
+
+    Mirrors test_rust_backend.py's _require_xray_cli_binary(): this is a
+    genuine, near-zero-mocking regression test that needs the real compiled
+    binary to prove the fix at the actual OS process-exec layer.
+    """
+    from code_indexer.xray.rust_backend import _XRAY_CLI_DEFAULT
+
+    if not _XRAY_CLI_DEFAULT.exists():
+        pytest.skip(
+            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
+            "run 'cargo build --release' inside rust/ to enable this test."
+        )
+>>>>>>> upstream/master
 
 
 class _FakeClusterCache:

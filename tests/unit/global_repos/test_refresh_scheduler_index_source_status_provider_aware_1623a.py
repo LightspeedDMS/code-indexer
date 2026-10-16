@@ -3,7 +3,11 @@ Unit tests for Bug #1623-A: a second, verbatim copy of Bug #1623's exact
 defect inside RefreshScheduler._index_source().
 
 _index_source() (used by the golden-repo registration and local-repo-branch
+<<<<<<< HEAD
 index paths, which do NOT go through _check_stale_index_metadata()) reads
+=======
+index paths, which do NOT go through _stale_index_signal()) read
+>>>>>>> upstream/master
 the interrupted-index status signal by opening the bare legacy
 `.code-indexer/metadata.json` file directly:
 
@@ -14,9 +18,16 @@ the interrupted-index status signal by opening the bare legacy
         needs_reconcile = True
 
 This is blind to provider-suffixed metadata files (metadata-voyage-ai.json,
+<<<<<<< HEAD
 metadata-cohere.json) -- the exact same gap Bug #1623 already fixed in
 _check_stale_index_metadata() by switching to
 metadata_reader.read_status(). This test file proves the second call site
+=======
+metadata-cohere.json) -- the exact same gap Bug #1623 fixed in the
+scheduler's stale-index check, which now goes through _stale_index_signal()
+and metadata_reader.read_index_states(). This test file proves the second
+call site
+>>>>>>> upstream/master
 is now also provider-aware by exercising the REAL _index_source() method
 and inspecting the `cidx index` command it hands to
 run_with_popen_progress() for `--reconcile`.
@@ -24,7 +35,11 @@ run_with_popen_progress() for `--reconcile`.
 Pattern reused from test_refresh_scheduler_extension_drift.py (the
 existing test file covering this same call site's force_reconcile/drift
 behavior) and test_refresh_scheduler_stale_index_status_provider_aware_1623.py
+<<<<<<< HEAD
 (the sibling coverage for _check_stale_index_metadata()).
+=======
+(the sibling coverage for _stale_index_signal()).
+>>>>>>> upstream/master
 
 subprocess.run is deliberately NOT patched: with enable_temporal=False and
 enable_scip defaulting to False (repo_info carries no "enable_scip" key),
@@ -148,8 +163,14 @@ class TestIndexSourceProviderSuffixedStatusDetected:
         assert "--reconcile" in _semantic_cmd(captured)
 
     def test_provider_status_takes_precedence_over_stale_legacy_status(self, tmp_path):
+<<<<<<< HEAD
         """Precedence guard matching read_status()'s documented contract:
         the provider file wins even when the legacy file disagrees."""
+=======
+        """Precedence guard matching read_index_states()'s documented
+        contract: the provider file wins even when the legacy file
+        disagrees (legacy is read only when no provider file exists)."""
+>>>>>>> upstream/master
         sched, golden_repos_dir = _make_scheduler(tmp_path)
         source_repo = _make_source_repo(golden_repos_dir)
         _write_metadata(source_repo, "metadata.json", status="completed")

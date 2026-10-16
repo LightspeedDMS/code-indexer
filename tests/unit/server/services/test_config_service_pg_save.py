@@ -17,8 +17,9 @@ from unittest.mock import MagicMock, patch
 
 
 def _make_dict_row_result(version: int) -> dict:
-    """Simulate a psycopg3 dict_row result for version column."""
-    return {"version": version}
+    """Simulate a psycopg3 dict_row result of the committed runtime row (the
+    seed adopts the whole row in one read, Bug #2017; JSONB is a dict)."""
+    return {"version": version, "config_json": {}}
 
 
 def _make_tuple_row_result(version: int) -> tuple:
@@ -145,12 +146,9 @@ class TestSeedRuntimeToPgRowFactory:
         mock_pool, mock_conn = self._make_mock_pool_with_dict_row(version=2)
         service._pool = mock_pool
 
-        assert hasattr(service, "_save_runtime_to_pg"), (
-            "_save_runtime_to_pg missing — Bug #591 fix not implemented"
-        )
-
+        # Bug #2017: the compare-and-set save_config replaced _save_runtime_to_pg
         config = service.get_config()
-        service._save_runtime_to_pg(config)
+        service.save_config(config)
 
         # conn.row_factory must be set to dict_row (not None/default)
         # This verifies the fix is applied: the method sets row_factory before SELECT

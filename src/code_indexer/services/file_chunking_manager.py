@@ -18,19 +18,29 @@ Architecture:
 import contextvars
 import hashlib
 import logging
+<<<<<<< HEAD
 import os
+=======
+>>>>>>> upstream/master
 import sqlite3
 import time
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import CancelledError, ThreadPoolExecutor, Future
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Any, Optional, Callable, List
 from dataclasses import dataclass
+
+if TYPE_CHECKING:
+    from .fts_file_documents import FtsWriteFailures
 
 from .vector_calculation_manager import VectorCalculationManager
 from ..indexing.fixed_size_chunker import FixedSizeChunker
 from ..indexing import file_facts
 from ..indexing.file_facts import ContentUnavailableError
 from .clean_slot_tracker import CleanSlotTracker, FileData, FileStatus
+<<<<<<< HEAD
+=======
+from .run_spend_meter import get_run_spend_meter
+>>>>>>> upstream/master
 from ..storage.sqlite_chunk_store import (
     ChunkStoreUnavailableError,
     is_fatal_chunk_store_write_error,
@@ -56,6 +66,22 @@ logger = logging.getLogger(__name__)
 # bound on the indexing path; the only legitimate timeout is the per-request
 # outbound embedding-provider HTTP call inside the provider itself.
 THREAD_POOL_SHUTDOWN_TIMEOUT = 30.0  # 30 seconds for graceful shutdown
+
+
+def _multimodal_content_hash(text: str, image_paths: List[Path]) -> str:
+    """Bug #2153: the ``content_hash`` (reuse key) of a multimodal chunk.
+
+    It covers everything the provider is sent: the chunk text AND the bytes
+    of every image, in order, so a changed image under unchanged text is a
+    miss, never a stale reuse. The text is length-prefixed and each image
+    contributes a fixed-size digest, so the encoding is unambiguous."""
+    text_bytes = text.encode("utf-8")
+    digest = hashlib.sha256(b"cidx-multimodal-v1\0")
+    digest.update(len(text_bytes).to_bytes(8, "big"))
+    digest.update(text_bytes)
+    for image_path in image_paths:
+        digest.update(hashlib.sha256(image_path.read_bytes()).digest())
+    return digest.hexdigest()
 
 
 @dataclass
@@ -102,9 +128,13 @@ class FileChunkingManager:
         codebase_dir: Path,  # CRITICAL FOR COW CLONING: Needed for path normalization
         fts_manager=None,  # Optional FTS index manager
         multimodal_client=None,  # Optional VoyageMultimodalClient for multimodal embeddings
+<<<<<<< HEAD
         manifest: Optional["RepoManifest"] = None,
         content_source: Optional["ContentPrefetcher"] = None,
         image_source: Optional["ImageSource"] = None,
+=======
+        fts_write_failures: Optional["FtsWriteFailures"] = None,
+>>>>>>> upstream/master
     ):
         """
         Initialize FileChunkingManager with complete functionality.
@@ -118,6 +148,7 @@ class FileChunkingManager:
             codebase_dir: Repository root directory for path normalization
             fts_manager: Optional FTS index manager
             multimodal_client: Optional VoyageMultimodalClient for multimodal embeddings
+<<<<<<< HEAD
             manifest: The pass's delegated manifest, if any. When set, file size
                 and mtime come from it instead of a local stat.
             content_source: Where file bytes come from. None (the default) reads
@@ -127,6 +158,12 @@ class FileChunkingManager:
                 come from. None (the default) asks this container's disk,
                 exactly as before; an ImagePrefetcher answers through the
                 content seam for a pod that does not hold the repository.
+=======
+            fts_write_failures: Optional run-scoped record of files whose FTS
+                documents could not be replaced (Bug #2056: the run's finish
+                retries them from disk; still failing, they are missing from
+                FTS and leave the index unmarked)
+>>>>>>> upstream/master
 
         Raises:
             ValueError: If thread_count is invalid or dependencies are None
@@ -152,9 +189,13 @@ class FileChunkingManager:
         self.codebase_dir = codebase_dir
         self.fts_manager = fts_manager
         self.multimodal_client = multimodal_client
+<<<<<<< HEAD
         self.manifest = manifest
         self.content_source = content_source
         self.image_source = image_source
+=======
+        self.fts_write_failures = fts_write_failures
+>>>>>>> upstream/master
 
         # CRITICAL FIX: Single cancellation event shared with VectorCalculationManager
         self._cancellation_requested = False
@@ -169,6 +210,27 @@ class FileChunkingManager:
         self.is_voyageai_provider = "VoyageAI" in provider_name
 
         logger.info(f"Initialized FileChunkingManager with {thread_count} base threads")
+
+    def _replace_fts_documents(
+        self, file_path: Path, chunks: List[Dict[str, Any]]
+    ) -> None:
+        """Bug #1761/#2056: replace the file's FTS documents by one per
+        current chunk (none for a blank file) through the shared helper. A
+        failure is logged at ERROR and recorded in the run's
+        `fts_write_failures` (the run's finish retries it from disk; see
+        fts_lifecycle.finish_fts_run); the file's semantic indexing still
+        completes.
+        RuntimeError (writer not initialized) propagates."""
+        from .fts_file_documents import FtsReplaceError, replace_file_fts_documents
+
+        try:
+            replace_file_fts_documents(
+                self.fts_manager, file_path, self.codebase_dir, chunks
+            )
+        except FtsReplaceError as e:
+            logger.error(str(e))
+            if self.fts_write_failures is not None:
+                self.fts_write_failures.record(file_path, str(e))
 
     def _normalize_path_for_storage(self, file_path: Path) -> str:
         """
@@ -285,6 +347,7 @@ class FileChunkingManager:
         file_path: Path,
         metadata: Dict[str, Any],
         progress_callback: Optional[Callable],
+        after: Optional["Future[FileProcessingResult]"] = None,
     ) -> "Future[FileProcessingResult]":
         """
         Submit file for complete lifecycle processing.
@@ -293,6 +356,11 @@ class FileChunkingManager:
             file_path: Path to file to process
             metadata: File metadata for processing
             progress_callback: Callback for progress updates
+            after: Story #2119 -- the future of an EARLIER-submitted file with
+                the same content (file hash). This file starts only once that
+                one has finished (``_process_after_first_copy``), so its reuse
+                lookup sees the rows the first copy committed instead of
+                paying for the same chunks again.
 
         Returns:
             Future that will contain FileProcessingResult when complete
@@ -322,6 +390,7 @@ class FileChunkingManager:
         # Always use clean implementation
         process_method = self._process_file_clean_lifecycle
 
+<<<<<<< HEAD
         # Capture current context (including embed stats ContextVars) so
         # the ThreadPoolExecutor worker inherits them — without this, the
         # worker thread starts with empty ContextVars and embed stats tags
@@ -335,11 +404,88 @@ class FileChunkingManager:
             progress_callback,
             self.slot_tracker,
         )
+=======
+        if after is None:
+            future = self.executor.submit(
+                process_method,
+                file_path,
+                metadata,
+                progress_callback,
+                self.slot_tracker,
+            )
+        else:
+            future = self.executor.submit(
+                self._process_after_first_copy,
+                after,
+                file_path,
+                metadata,
+                progress_callback,
+                self.slot_tracker,
+            )
+>>>>>>> upstream/master
 
         # Track future for clean shutdown
         self._pending_futures.append(future)
 
         return future
+
+    def _process_after_first_copy(
+        self,
+        first_copy: "Future[FileProcessingResult]",
+        file_path: Path,
+        metadata: Dict[str, Any],
+        progress_callback: Optional[Callable],
+        slot_tracker: CleanSlotTracker,
+    ) -> FileProcessingResult:
+        """Story #2119: process a byte-identical copy only after the first
+        copy of its content has finished. The pool is FIFO and the first copy
+        was submitted earlier, so it is running or done by the time this
+        worker waits: no deadlock, and the wait ends when that file does.
+
+        A cancelled first copy cancels this one too; a first copy that raised
+        (only a fatal chunk-store failure escapes a file) aborts this one
+        rather than letting it pay for content the run cannot store. A first
+        copy that FAILED (an unsuccessful result, e.g. the provider rejected
+        it) fails this copy too, without a provider call: the same content
+        would be paid again in this run. It is counted as a failed file, so
+        a later run retries both. A vanished first copy is a skip, not a
+        failure: this copy is then processed normally.
+
+        Waits through ``Future.exception()``, which raises ``CancelledError``
+        for a cancelled future and also wakes on a plain ``cancel()`` --
+        ``concurrent.futures.wait()`` never returns for a future cancelled
+        before any worker picked it up."""
+        try:
+            first_copy_error = first_copy.exception()
+        except CancelledError:
+            return FileProcessingResult(
+                success=False,
+                file_path=file_path,
+                chunks_processed=0,
+                processing_time=0.0,
+                error="Cancelled before processing",
+            )
+        if first_copy_error is not None:
+            raise ChunkStoreUnavailableError(
+                f"Not processing {file_path}: the first copy of its content "
+                f"failed fatally: {first_copy_error}"
+            ) from first_copy_error
+        first_copy_result = first_copy.result()
+        if not first_copy_result.success and not first_copy_result.vanished:
+            return FileProcessingResult(
+                success=False,
+                file_path=file_path,
+                chunks_processed=0,
+                processing_time=0.0,
+                error=(
+                    f"Not processed: the first copy of its content "
+                    f"({first_copy_result.file_path}) failed: "
+                    f"{first_copy_result.error}"
+                ),
+            )
+        return self._process_file_clean_lifecycle(
+            file_path, metadata, progress_callback, slot_tracker
+        )
 
     def _create_vector_point(
         self,
@@ -381,8 +527,12 @@ class FileChunkingManager:
             file_last_modified = None
             file_size = metadata.get("file_size", 0)  # Fallback to metadata or 0
 
-        # Always record when indexing occurred
-        indexed_timestamp = time.time()
+        # Issue #2013: indexed_timestamp is the time the file content was READ
+        # (recorded by FileIdentifier.get_file_metadata just before hashing),
+        # not this point's write time -- reconcile's racy-timestamp check
+        # must cover the read second. Metadata without a read time keeps
+        # the previous behaviour (the current time).
+        indexed_timestamp = metadata.get("content_read_timestamp", time.time())
 
         # Create Git-aware metadata
         metadata_info = None
@@ -448,6 +598,7 @@ class FileChunkingManager:
 
         return vector_point
 
+<<<<<<< HEAD
     def _image_path(self, img_ref_path: str) -> Path:
         """A referenced image's absolute path under the codebase.
 
@@ -490,6 +641,181 @@ class FileChunkingManager:
         if fetched.error is not None or fetched.data is None:
             raise ContentUnavailableError(f"{file_path}: {fetched.error}")
         return fetched.data
+=======
+    def _lookup_reusable_embeddings(
+        self,
+        file_path: Path,
+        collection_name: str,
+        metadata: Dict[str, Any],
+        chunk_count: int,
+    ) -> Dict[str, Any]:
+        """Story #2119: content_hash -> stored embedding of this file's
+        content ids and its path in ``collection_name``. Matched by content,
+        never by chunk index, so a chunk that moved (e.g. a prepended chunk)
+        is reused. Bug #2153: the multimodal collection is looked up here
+        too.
+
+        Fails CLOSED: a lookup error is never "nothing stored" -- that would
+        pay the provider for embeddings the store may already hold. It aborts
+        the whole run with the typed fatal error (exit 86 when SQLite reports
+        corruption, else 87; 89 for a missing established store, found in the
+        cause chain) before any chunk of this file is sent."""
+        file_path_for_lookup = self._normalize_path_for_storage(file_path)
+        try:
+            existing: Dict[str, Any] = (
+                self.vector_store_client.get_existing_content_hashes(
+                    file_path_for_lookup,
+                    collection_name,
+                    project_id=metadata["project_id"],
+                    file_hash=metadata["file_hash"],
+                    chunk_count=chunk_count,
+                )
+            )
+        except Exception as e:
+            logger.error(f"Embedding reuse lookup failed for {file_path}: {e}")
+            raise ChunkStoreUnavailableError(
+                f"Embedding reuse lookup failed for {file_path_for_lookup} "
+                f"in {collection_name}; aborting before any provider call: {e}"
+            ) from e
+        return existing
+
+    def _resolve_chunk_image_paths(self, chunk: Dict[str, Any]) -> List[Path]:
+        """Absolute paths of a chunk's local images that exist inside the
+        codebase. Image paths from ImageExtractorFactory are already relative
+        to codebase_dir and validated (existence, format, size); the checks
+        here are defense in depth."""
+        image_paths: List[Path] = []
+        for img_ref in chunk.get("images", []):
+            # img_ref is a relative path string (TextChunker, legacy) or a
+            # dict with a 'path' key (FixedSizeChunker + ImageExtractorFactory)
+            img_ref_path = img_ref["path"] if isinstance(img_ref, dict) else img_ref
+            if img_ref_path.startswith(("http://", "https://")):
+                logger.debug(f"Skipping remote image URL: {img_ref_path}")
+                continue
+            img_path = (self.codebase_dir / img_ref_path).resolve()
+            if not img_path.exists():
+                logger.debug(f"Image not found: {img_path} - skipping")
+                continue
+            try:
+                img_path.relative_to(self.codebase_dir)
+            except ValueError:
+                logger.warning(f"Image outside codebase: {img_path} - skipping")
+                continue
+            image_paths.append(img_path)
+        return image_paths
+
+    def _ensure_multimodal_collection(self, collection_name: str) -> None:
+        """Create the multimodal collection (same level as the code
+        embeddings) when it does not exist yet."""
+        if self.vector_store_client.collection_exists(collection_name):
+            return
+        if hasattr(self.multimodal_client, "config") and hasattr(
+            self.multimodal_client.config, "default_dimension"
+        ):
+            vector_size = self.multimodal_client.config.default_dimension
+        else:
+            vector_size = 1024  # VoyageAI default
+        self.vector_store_client.create_collection(
+            collection_name=collection_name, vector_size=vector_size
+        )
+        logger.info(
+            f"Created multimodal collection '{collection_name}' at same level "
+            f"as code embeddings"
+        )
+
+    def _multimodal_vector_point(
+        self,
+        chunk: Dict[str, Any],
+        image_paths: List[Path],
+        stored: Dict[str, Any],
+        metadata: Dict[str, Any],
+        file_path: Path,
+    ) -> Dict[str, Any]:
+        """Bug #2153: the point of one image-bearing chunk. A stored vector
+        with the same content_hash (text + image bytes) is reused without a
+        provider call; only a miss is registered with the run-spend meter
+        (Story #2122) and sent."""
+        content_hash = _multimodal_content_hash(chunk["text"], image_paths)
+        reusable = stored.get(content_hash)
+        if reusable:
+            embedding = reusable["vector"]
+        else:
+            run_spend_meter = get_run_spend_meter()
+            if run_spend_meter.is_armed():
+                run_spend_meter.register_misses(
+                    [hashlib.sha256(chunk["text"].encode("utf-8")).hexdigest()],
+                    max_retries=self.multimodal_client.request_max_retries(),
+                )
+            embedding = self.multimodal_client.get_multimodal_embedding(
+                text=chunk["text"], image_paths=image_paths
+            )
+        chunk_data = {
+            "text": chunk["text"],
+            "chunk_index": chunk.get("chunk_index", 0),
+            "total_chunks": 1,  # Multimodal chunks stored individually
+            "line_start": chunk.get("line_start"),
+            "line_end": chunk.get("line_end"),
+            "file_extension": file_path.suffix.lstrip(".") or "txt",
+            "images": chunk.get("images", []),  # Preserve images metadata
+        }
+        vector_point = self._create_vector_point(
+            chunk_data, embedding, metadata, file_path
+        )
+        vector_point["payload"]["content_hash"] = content_hash
+        return vector_point
+
+    def _embed_multimodal_chunks(
+        self,
+        multimodal_chunks: List[Dict[str, Any]],
+        chunk_count: int,
+        metadata: Dict[str, Any],
+        file_path: Path,
+    ) -> List[Dict[str, Any]]:
+        """Embed or reuse one file's image-bearing chunks; return the points
+        to write as ``{"collection_name", "vector_point"}`` entries.
+
+        Bug #1502 (Codex M6): points are only QUEUED here; the caller writes
+        them after every regular embedding of the file is validated.
+        Bug #2153: as on the text path (Story #2119), the multimodal store is
+        consulted first with ONE fail-closed lookup per file. A per-chunk
+        provider or image-read failure skips that chunk."""
+        # Cohere: collection_name property ("embed-v4.0-multimodal");
+        # VoyageAI: falls back to config.model ("voyage-multimodal-3").
+        collection_name = getattr(
+            self.multimodal_client,
+            "collection_name",
+            self.multimodal_client.config.model,
+        )
+        if not collection_name:
+            logger.warning(
+                f"No model name in multimodal client config, skipping the "
+                f"multimodal chunks of {file_path}"
+            )
+            return []
+        self._ensure_multimodal_collection(collection_name)
+        stored = self._lookup_reusable_embeddings(
+            file_path, collection_name, metadata, chunk_count
+        )
+        pending: List[Dict[str, Any]] = []
+        for chunk in multimodal_chunks:
+            image_paths = self._resolve_chunk_image_paths(chunk)
+            if not image_paths:
+                logger.warning(
+                    f"No valid images for chunk {chunk.get('chunk_index')} - skipping"
+                )
+                continue
+            try:
+                vector_point = self._multimodal_vector_point(
+                    chunk, image_paths, stored, metadata, file_path
+                )
+            except Exception as e:
+                logger.error(f"Failed to generate or store multimodal embedding: {e}")
+                continue
+            pending.append(
+                {"collection_name": collection_name, "vector_point": vector_point}
+            )
+        return pending
+>>>>>>> upstream/master
 
     def _process_file_clean_lifecycle(
         self,
@@ -589,6 +915,10 @@ class FileChunkingManager:
             if not chunks:
                 # Empty files are valid but don't need indexing
                 logger.debug(f"Skipping empty file: {file_path}")
+                # Bug #2056 (P2-2): a file that became blank keeps no FTS
+                # documents -- remove whatever an earlier version left.
+                if self.fts_manager:
+                    self._replace_fts_documents(file_path, [])
 
                 slot_tracker.update_slot(slot_id, FileStatus.COMPLETE)
 
@@ -646,25 +976,23 @@ class FileChunkingManager:
             chunks_skipped = 0
 
             collection_name = metadata.get("collection_name")
-            file_path_for_lookup = self._normalize_path_for_storage(file_path)
-            existing_hashes: Dict[int, Any] = {}
+            # Story #2119: content_hash -> stored embedding (fail closed).
+            existing_hashes: Dict[str, Any] = {}
             if collection_name:
-                try:
-                    existing_hashes = (
-                        self.vector_store_client.get_existing_content_hashes(
-                            file_path_for_lookup, collection_name
-                        )
-                    )
-                except Exception as e:
-                    logger.debug(f"Could not load existing hashes for {file_path}: {e}")
+                existing_hashes = self._lookup_reusable_embeddings(
+                    file_path, collection_name, metadata, len(chunks)
+                )
 
+            # Story #2122: content_hash (sha256 hex) of every miss, the only
+            # regular inputs this run may send.
+            missed_keys: List[str] = []
             for chunk in regular_chunks:
                 chunk_text = chunk["text"]
                 new_hash = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
                 chunk_idx = chunk.get("chunk_index", 0)
-                existing = existing_hashes.get(chunk_idx)
+                existing = existing_hashes.get(new_hash)
 
-                if existing and existing.get("content_hash") == new_hash:
+                if existing:
                     # Cache hit: reuse existing vector, rebuild payload with current metadata
                     chunk_data = {
                         "text": chunk_text,
@@ -682,6 +1010,16 @@ class FileChunkingManager:
                 else:
                     # Cache miss: needs embedding
                     uncached_regular_chunks.append(chunk)
+                    missed_keys.append(new_hash)
+
+            run_spend_meter = get_run_spend_meter()
+            if missed_keys and run_spend_meter.is_armed():
+                run_spend_meter.register_misses(
+                    missed_keys,
+                    max_retries=(
+                        self.vector_manager.embedding_provider.request_max_retries()
+                    ),
+                )
 
             if chunks_skipped > 0:
                 logger.info(
@@ -777,10 +1115,12 @@ class FileChunkingManager:
                 and hasattr(self, "multimodal_client")
                 and self.multimodal_client
             ):
-                logger.debug(
-                    f"Processing {len(multimodal_chunks)} multimodal chunks for {file_path}"
+                # Bug #2153: committed multimodal rows are reused (Story #2119).
+                pending_multimodal_points = self._embed_multimodal_chunks(
+                    multimodal_chunks, len(chunks), metadata, file_path
                 )
 
+<<<<<<< HEAD
                 # Ensure multimodal collection exists using collection name
                 # Cohere: collection_name property returns "embed-v4.0-multimodal"
                 # VoyageAI: falls back to config.model ("voyage-multimodal-3")
@@ -932,6 +1272,8 @@ class FileChunkingManager:
                         # Continue processing other chunks rather than failing entire file
                         continue
 
+=======
+>>>>>>> upstream/master
             # Bug #1502 (Codex finding 4): pending_multimodal_points is the
             # POST-embedding-attempt result -- unlike multimodal_chunks
             # (the pre-embedding list, always non-empty when multimodal
@@ -1145,8 +1487,14 @@ class FileChunkingManager:
                         f"Successfully wrote {len(points_data)} points for {file_path}"
                     )
 
-                    # Add FTS documents if FTS manager is available
+                    # Bug #1761/#2056: replace EVERY FTS document of this
+                    # file by one per current chunk -- the chunker's full
+                    # output, whatever its vector path (newly embedded,
+                    # reused from the embedding cache, multimodal). The ONE
+                    # shared implementation (cidx watch uses it too); see
+                    # its docstring for the delete-failure semantics.
                     if self.fts_manager:
+<<<<<<< HEAD
                         # Bug #1761: delete any pre-existing FTS documents for
                         # this file BEFORE adding the fresh chunks below (see
                         # TantivyIndexManager.delete_document_deferred()'s
@@ -1223,6 +1571,10 @@ class FileChunkingManager:
                                     )
                                     # Continue with next chunk
 
+=======
+                        self._replace_fts_documents(file_path, chunks)
+
+>>>>>>> upstream/master
                 except (
                     sqlite3.DatabaseError,
                     OSError,

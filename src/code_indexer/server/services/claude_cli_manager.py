@@ -24,10 +24,14 @@ from typing import Callable, Optional, List, Tuple
 
 from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
 from code_indexer.server.logging_utils import format_error_log
+<<<<<<< HEAD
 from code_indexer.server.services import cidx_meta_content
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.constants import CIDX_META_REPO
 from code_indexer.utils.git_runner import run_git_command
+=======
+from code_indexer.server.services.config_service import get_config_service
+>>>>>>> upstream/master
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
@@ -551,6 +555,7 @@ class ClaudeCliManager:
         if not self._meta_dir:
             return
 
+<<<<<<< HEAD
         # Shared cidx-meta (delegated content backend): this pod's directory
         # holds index state only and is no git repository of the content, so
         # there is nothing to commit here; the reindex below reads the shared
@@ -577,6 +582,31 @@ class ClaudeCliManager:
                 logger.info(
                     f"Committed catch-up changes for {len(processed)} files",
                     extra={"correlation_id": get_correlation_id()},
+=======
+        try:
+            commit_msg = f"Replace README fallbacks with generated descriptions: {', '.join(processed)}"
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=str(self._meta_dir),
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", commit_msg],
+                cwd=str(self._meta_dir),
+                capture_output=True,
+                check=False,
+            )
+            logger.info(
+                f"Committed catch-up changes for {len(processed)} files",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "AUTH-GENERAL-013",
+                    f"Git commit failed: {e}",
+>>>>>>> upstream/master
                 )
             except Exception as e:
                 logger.warning(
@@ -596,7 +626,10 @@ class ClaudeCliManager:
             )
             from code_indexer.server.utils.index_command_layout import (
                 append_server_layout_args,
+<<<<<<< HEAD
                 repo_layout_kwargs,
+=======
+>>>>>>> upstream/master
             )
             from code_indexer.storage.shared.hnsw_sync_state import (
                 resolve_hnsw_sync_epoch_env_var,
@@ -607,6 +640,7 @@ class ClaudeCliManager:
             # Bug #1575 Part C independent re-review: this spawn previously
             # never set CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV at all.
             _reindex_env = build_cidx_subprocess_env(
+<<<<<<< HEAD
                 build_embedding_stats_child_env(
                     get_config_service().get_config(),
                     golden_repo_alias="cidx-meta",
@@ -619,6 +653,26 @@ class ClaudeCliManager:
                 # (if any) is this pod's.
                 append_server_layout_args(
                     ["cidx", "index"], **repo_layout_kwargs(None, CIDX_META_REPO)
+=======
+                build_embedding_stats_child_env(get_config_service().get_config())
+            )
+            _reindex_env.update(resolve_hnsw_sync_epoch_env_var())
+            from code_indexer.server.services.embedding_stats_attribution import (
+                build_server_stats_attribution,
+            )
+
+            # Story #2118: a catch-up re-index of the existing cidx-meta
+            # collection, run outside any background job.
+            _result = subprocess.run(
+                append_server_layout_args(
+                    ["cidx", "index"],
+                    attribution=build_server_stats_attribution(
+                        alias="cidx-meta-global",
+                        job_id=None,
+                        site="claude_cli_meta_reindex",
+                        purpose="refresh",
+                    ),
+>>>>>>> upstream/master
                 ),
                 cwd=str(self._meta_dir),
                 capture_output=True,
@@ -635,7 +689,11 @@ class ClaudeCliManager:
                     format_error_log(
                         "AUTH-GENERAL-014",
                         f"Re-index failed with exit code {_result.returncode}: "
+<<<<<<< HEAD
                         f"{redact_url_credentials(_result.stderr.decode(errors='replace') if _result.stderr else '')}",
+=======
+                        f"{_result.stderr.decode(errors='replace') if _result.stderr else ''}",
+>>>>>>> upstream/master
                     )
                 )
         except Exception as e:

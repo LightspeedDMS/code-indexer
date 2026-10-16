@@ -64,13 +64,29 @@ def _arm_repo(repo_path: Path):
 
 
 @pytest.fixture()
+<<<<<<< HEAD
 def test_client():
+=======
+def test_client(tmp_path):
+    from tests.unit.server.routers.inline_routes_test_helpers import (
+        _access_service_admin,
+    )
+
+>>>>>>> upstream/master
     user = Mock()
     user.username = "testuser"
     app.dependency_overrides[get_current_user] = lambda: user
     try:
         with TestClient(app) as client:
+<<<<<<< HEAD
             yield client
+=======
+            # After lifespan startup (it installs its own access service):
+            # the caller is an admin of a real access service, so the
+            # activated-repo guard passes; these tests pin route behaviour.
+            with _access_service_admin(tmp_path / "access-groups.db", user.username):
+                yield client
+>>>>>>> upstream/master
     finally:
         app.dependency_overrides.clear()
 

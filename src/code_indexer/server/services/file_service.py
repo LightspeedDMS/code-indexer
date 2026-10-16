@@ -14,6 +14,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+<<<<<<< HEAD
 from typing import (
     Callable,
     Iterator,
@@ -28,6 +29,9 @@ from typing import (
     cast,
     TYPE_CHECKING,
 )
+=======
+from typing import List, Optional, Tuple, Dict, Any, Set, cast, TYPE_CHECKING
+>>>>>>> upstream/master
 from datetime import datetime, timezone
 import logging
 import math
@@ -43,6 +47,7 @@ from ..models.api_models import (
 )
 from ..services.config_service import get_config_service
 from code_indexer.utils.path_confinement import (
+<<<<<<< HEAD
     confine_relative_path,
     resolve_confined_path,
 )
@@ -58,6 +63,14 @@ if TYPE_CHECKING:
         DirectoryExplorerService,
     )
 
+=======
+    GitDirectoryPathError,
+    is_readable_within_root,
+    resolve_confined_path,
+)
+
+if TYPE_CHECKING:
+>>>>>>> upstream/master
     # Bug #1650: type-only import for the lazily-constructed
     # activated_repo_manager property below. Kept under TYPE_CHECKING
     # (never imported at runtime here) so the real import stays local to
@@ -1020,6 +1033,7 @@ class FileListingService:
         # Hoist the indexable-extensions lookup out of the per-file loop below
         # (it was one get_config() call PER FILE via _is_file_indexed()).
         indexable_extensions = self._get_indexable_extensions()
+        resolved_root = repo_root.resolve()
 
         # EVO-66189: os.walk with in-place pruning of ALWAYS_EXCLUDED_DIRS, replacing
         # rglob("*") + a post-hoc _is_in_excluded_dir filter. The old walk stat'd EVERY
@@ -1054,6 +1068,14 @@ class FileListingService:
                         # Belt-and-suspenders: pruning already skips excluded subtrees;
                         # this also catches a plain FILE named .git/.code-indexer.
                         if self._is_in_excluded_dir(relative_path):
+                            continue
+
+                        # A symlink is listed only when it resolves inside
+                        # the repository and outside its .git -- the same
+                        # rule every file read applies.
+                        if file_path.is_symlink() and not is_readable_within_root(
+                            file_path, resolved_root
+                        ):
                             continue
 
                         # Skip files matching .gitignore patterns
@@ -1443,6 +1465,7 @@ class FileListingService:
             - pagination_hint: Helpful message for navigating large files
         """
         repo_path = self._get_repository_path(repository_alias, username)
+<<<<<<< HEAD
         if content_seam_source(repo_path) is not None:
             # Content seam: the activated copy is on workspace-mcp; read it as
             # every delegated repository is read (bytes, byte-sha256 hash --
@@ -1454,13 +1477,23 @@ class FileListingService:
                 limit=limit,
                 skip_truncation=skip_truncation,
             )
+=======
+>>>>>>> upstream/master
         # Bug #1891 round 2 (S1): the previous
         # str(full_file_path).startswith(str(repo_root)) check incorrectly
         # admitted a SIBLING directory whose name starts with repo_root's
         # name (e.g. repo_root=".../foo" admits ".../foo-private/...").
         # resolve_confined_path() confines via Path.relative_to() instead,
         # which is immune to that class of bug.
+<<<<<<< HEAD
         full_file_path = resolve_confined_path(Path(repo_path), file_path)
+=======
+        # A path inside the repository's .git is answered as a missing file.
+        try:
+            full_file_path = resolve_confined_path(Path(repo_path), file_path)
+        except GitDirectoryPathError:
+            raise FileNotFoundError(f"File not found: {file_path}")
+>>>>>>> upstream/master
         if not full_file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         if not full_file_path.is_file():
@@ -1638,6 +1671,7 @@ class FileListingService:
             PermissionError: If path traversal attempted
             FileNotFoundError: If file doesn't exist
         """
+<<<<<<< HEAD
         source = content_seam_source(repo_path)
         if source is None:
             data, modified_at, language_path = self._read_bytes_local(
@@ -1672,23 +1706,43 @@ class FileListingService:
             PermissionError: If path traversal attempted
             FileNotFoundError: If file doesn't exist or is not a file
         """
+=======
+>>>>>>> upstream/master
         # Bug #1891 round 2 (S1): the previous
         # str(full_file_path).startswith(str(repo_root)) check incorrectly
         # admitted a SIBLING directory whose name starts with repo_root's
         # name (e.g. repo_root=".../foo" admits ".../foo-private/...").
         # resolve_confined_path() confines via Path.relative_to() instead,
         # which is immune to that class of bug.
+<<<<<<< HEAD
         full_file_path = resolve_confined_path(Path(repo_path), file_path)
+=======
+        # A path inside the repository's .git is answered as a missing file.
+        try:
+            full_file_path = resolve_confined_path(Path(repo_path), file_path)
+        except GitDirectoryPathError:
+            raise FileNotFoundError(f"File not found: {file_path}")
+>>>>>>> upstream/master
         if not full_file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         if not full_file_path.is_file():
             raise FileNotFoundError(f"Not a file: {file_path}")
 
+<<<<<<< HEAD
         # One read: the bytes are both hashed and decoded (_decode_lines, Bug
         # #1449's errors="replace" text-mode decoding), so the hash and the
         # lines describe the same content.
         with open(full_file_path, "rb") as f:
             data = f.read()
+=======
+        # Read all lines for pagination
+        # Bug #1449: errors="replace" so a non-UTF-8 byte (e.g. Windows-1252
+        # punctuation) is substituted with U+FFFD instead of raising
+        # UnicodeDecodeError -- a legitimately-existing file must still be
+        # readable, and byte-stable line/offset pagination is preserved.
+        with open(full_file_path, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+>>>>>>> upstream/master
 
         stat_info = full_file_path.stat()
         modified_at = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)

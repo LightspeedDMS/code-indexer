@@ -29,11 +29,21 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+<<<<<<< HEAD
 from typing import Any, Dict, FrozenSet, Mapping, Optional
 
 from code_indexer.server.middleware.audit_request_context import (
     SOURCE_SYSTEM,
     current_audit_request_context,
+=======
+from typing import Any, Dict, FrozenSet, Mapping, Optional, Tuple
+
+from code_indexer.server.middleware.audit_request_context import (
+    SOURCE_SYSTEM,
+    McpPrincipal,
+    current_audit_request_context,
+    current_mcp_principal,
+>>>>>>> upstream/master
 )
 
 OUTCOMES: FrozenSet[str] = frozenset({"success", "failure", "denied", "attempted"})
@@ -69,6 +79,11 @@ class SystemComponent(str, Enum):
     GOLDEN_REPO_RECONCILER = "golden-repo-reconciler"
     # The loopback-only maintenance switch, driven by the local auto-updater.
     LOCALHOST_MAINTENANCE = "localhost-maintenance"
+<<<<<<< HEAD
+=======
+    # The SIEM delivery worker (automatic requeue after a mapping change).
+    SIEM_DELIVERY = "siem-delivery"
+>>>>>>> upstream/master
 
 
 class AuditEventInvalid(ValueError):
@@ -424,6 +439,73 @@ AUDIT_ACTION_CATALOG: Dict[str, ActionSpec] = {
     "git_cleanup": _spec("auth", None, _Q),
 }
 
+<<<<<<< HEAD
+=======
+# --- SIEM delivery self-reports (target: the "siem_delivery" config section) ---
+_SIEM_HALT_CLASS = _enum(
+    "local_validation_burst",
+    "row_rejection_burst",
+    "request_rejection",
+    "credential",
+    "duplicate_response",
+    "unclassified",
+)
+_SIEM_BATCH = {"batch_id": OPAQUE_ID, "event_count": INT}
+_SIEM_MISSING_TYPES_MAX = 200
+AUDIT_ACTION_CATALOG.update(
+    {
+        "siem_canary_sent": _spec(
+            "config",
+            {
+                "canary_run_id": OPAQUE_ID,
+                "event_count": INT,
+                "result": _enum("accepted", "rejected"),
+                "mapping_version": INT,
+            },
+        ),
+        "siem_canary_visibility_confirmed": _spec(
+            "config",
+            {
+                "canary_run_id": OPAQUE_ID,
+                "expected_count": INT,
+                "confirmed_count": INT,
+                "missing_action_types": _list(
+                    _enum(*AUDIT_ACTION_CATALOG), _SIEM_MISSING_TYPES_MAX
+                ),
+            },
+        ),
+        "siem_quarantine_requeued": _spec(
+            "config",
+            {
+                "count": INT,
+                "mapping_version": INT,
+                "trigger": _enum("mapping_version_change", "admin"),
+            },
+        ),
+        "siem_delivery_resumed": _spec(
+            "config", {"halted_class": _SIEM_HALT_CLASS, "signature_reset": BOOL}
+        ),
+        "siem_batch_acknowledged": _spec("config", _SIEM_BATCH),
+        "siem_batch_rebatched": _spec("config", _SIEM_BATCH),
+        "siem_destination_retargeted": _spec(
+            "config", {"from_destination_key": OPAQUE_ID, "count": INT}
+        ),
+        "siem_destination_abandoned": _spec(
+            "config", {"destination_key": OPAQUE_ID, "count": INT}
+        ),
+        # The service-account key: its non-secret identity only, never the key.
+        "siem_credential_changed": _spec(
+            "config",
+            {
+                "change": _enum("set", "replaced", "removed"),
+                "client_email": USERNAME,
+                "private_key_id": OPAQUE_ID,
+            },
+        ),
+    }
+)
+
+>>>>>>> upstream/master
 JOB_BASED_ACTION_TYPES: FrozenSet[str] = frozenset(
     name for name, spec in AUDIT_ACTION_CATALOG.items() if spec.job_based
 )
@@ -452,6 +534,12 @@ class AuditEvent:
     node_id: Optional[str]
     auth_method: Optional[str]
     details_json: Optional[str]
+<<<<<<< HEAD
+=======
+    # The user an administrator was impersonating over MCP when the action
+    # was performed (the subject); ``actor`` is then the administrator.
+    impersonated_user: Optional[str] = None
+>>>>>>> upstream/master
 
 
 # Column order of an ``audit_logs`` INSERT, shared by both backends.
@@ -470,6 +558,10 @@ AUDIT_ROW_COLUMNS = (
     "auth_method",
     "actor_is_system",
     "event_uuid",
+<<<<<<< HEAD
+=======
+    "impersonated_user",
+>>>>>>> upstream/master
 )
 
 
@@ -490,6 +582,10 @@ def event_row_values(event: AuditEvent) -> tuple:
         event.auth_method,
         1 if event.actor_is_system else 0,
         event.event_uuid,
+<<<<<<< HEAD
+=======
+        event.impersonated_user,
+>>>>>>> upstream/master
     )
 
 
@@ -521,6 +617,28 @@ def _ambient_correlation_id() -> str:
     return correlation_id if correlation_id else f"evt-{uuid.uuid4()}"
 
 
+<<<<<<< HEAD
+=======
+def _impersonation_attribution(
+    actor: str, principal: Optional[McpPrincipal]
+) -> Tuple[str, Optional[str]]:
+    """``(actor, impersonated_user)`` for an event built in an MCP tool call
+    whose bound principal is *principal*.
+
+    During MCP impersonation (the dispatcher bound the call's principal), the
+    authenticated administrator is the actor and the impersonated user is the
+    subject.  A handler acting under impersonation names the impersonated
+    user as its caller; that name is replaced by the administrator's.
+    Outside impersonation the actor is unchanged and the subject is None.
+    """
+    if principal is None:
+        return actor, None
+    if actor == principal.impersonated_user:
+        actor = principal.authenticated_actor
+    return actor, principal.impersonated_user
+
+
+>>>>>>> upstream/master
 def _reportable_field_name(key: Any) -> str:
     text = str(key)
     return text if _FIELD_NAME_RE.match(text) else "<non-identifier-field>"
@@ -622,6 +740,12 @@ def build_event(
     ctx = current_audit_request_context()
     if auth_method is None and ctx is not None:
         auth_method = ctx.auth_method
+<<<<<<< HEAD
+=======
+    actor, impersonated_user = _impersonation_attribution(
+        actor, current_mcp_principal()
+    )
+>>>>>>> upstream/master
     return AuditEvent(
         event_uuid=str(uuid.uuid4()),
         occurred_at=_now_iso(),
@@ -637,6 +761,10 @@ def build_event(
         node_id=_process_node_id,
         auth_method=auth_method,
         details_json=details_json,
+<<<<<<< HEAD
+=======
+        impersonated_user=impersonated_user,
+>>>>>>> upstream/master
     )
 
 
@@ -723,6 +851,12 @@ def build_legacy_event(
         _require_outcome(outcome, str(action_type)[:_MAX_REPORTED_FIELD_NAME])
     details_json = restrict_legacy_details(action_type, details_json)
     ctx = current_audit_request_context()
+<<<<<<< HEAD
+=======
+    actor, impersonated_user = _impersonation_attribution(
+        actor, current_mcp_principal()
+    )
+>>>>>>> upstream/master
     return AuditEvent(
         event_uuid=str(uuid.uuid4()),
         occurred_at=occurred_at if occurred_at is not None else _now_iso(),
@@ -738,4 +872,8 @@ def build_legacy_event(
         node_id=_process_node_id,
         auth_method=ctx.auth_method if ctx is not None else None,
         details_json=details_json,
+<<<<<<< HEAD
+=======
+        impersonated_user=impersonated_user,
+>>>>>>> upstream/master
     )

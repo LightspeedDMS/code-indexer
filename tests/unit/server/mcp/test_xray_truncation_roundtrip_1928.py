@@ -19,6 +19,10 @@ from code_indexer.server.cache.payload_cache import PayloadCache, PayloadCacheCo
 from code_indexer.server.mcp.handlers import xray_truncation as xt
 
 from ._xray_truncation_test_helpers import (
+<<<<<<< HEAD
+=======
+    OWNER,
+>>>>>>> upstream/master
     cache_factory,  # noqa: F401 -- pytest fixture, used via injection
     fetch_all_pages,
     make_finding,
@@ -96,7 +100,13 @@ class TestHugeSingleEntryRoundTripsIntact:
             "fact_graph_complete": True,
         }
 
+<<<<<<< HEAD
         truncated = xt.truncate_result_fields(result, cache, ["findings", "refine"])
+=======
+        truncated = xt.truncate_result_fields(
+            result, cache, ["findings", "refine"], owner=OWNER
+        )
+>>>>>>> upstream/master
 
         assert truncated["truncated"] is True
         assert truncated["inline_entry_truncated"] is True, (
@@ -136,7 +146,11 @@ class TestNestedDictOversizedEntryRoundTrips:
         }
 
         truncated = xt.truncate_result_fields(
+<<<<<<< HEAD
             result, cache, ["matches", "evaluation_errors"]
+=======
+            result, cache, ["matches", "evaluation_errors"], owner=OWNER
+>>>>>>> upstream/master
         )
 
         assert truncated["truncated"] is True

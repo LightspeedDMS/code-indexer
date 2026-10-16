@@ -25,6 +25,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from code_indexer.server.auth.user_manager import User
+<<<<<<< HEAD
+=======
+from code_indexer.server.services.search_event_recording import SearchOrigin
+>>>>>>> upstream/master
 from code_indexer.xray.rust_backend import SharedIdentityCache
 from code_indexer.xray.sandbox import validate_rust_evaluator
 from code_indexer.xray.search_engine import XRaySearchEngine
@@ -138,6 +142,8 @@ def resolve_batch_evaluator(
 def _truncate_xray_batch_result(
     result: Dict[str, Any],
     payload_cache: Any,
+    *,
+    owner: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Apply PayloadCache truncation to matches[]/errors[]/
     evaluation_errors[] -- see xray_truncation.truncate_result_fields()
@@ -147,7 +153,12 @@ def _truncate_xray_batch_result(
     preview field). Called from `_job_fn`, which already runs inside the
     BackgroundJobManager worker thread pool -- off the event loop -- so
     no additional offload is needed here (unlike xray_graph.py's `async
+<<<<<<< HEAD
     def` handlers).
+=======
+    def` handlers). `owner` is the username of the requesting user; only
+    that user can fetch the cached pages.
+>>>>>>> upstream/master
 
     When payload_cache is None, xray_truncation.truncate_result_fields()'s
     own guard (Bug #1928 P3) returns a bounded, cache_unavailable=True
@@ -160,7 +171,14 @@ def _truncate_xray_batch_result(
     """
     try:
         return xray_truncation.truncate_result_fields(
+<<<<<<< HEAD
             result, payload_cache, ["matches", "errors", "evaluation_errors"]
+=======
+            result,
+            payload_cache,
+            ["matches", "errors", "evaluation_errors"],
+            owner=owner,
+>>>>>>> upstream/master
         )
     except xray_truncation.PageSetStoreError as exc:
         logger.error("xray_search_batch truncation: page-set store failed: %s", exc)
@@ -215,6 +233,26 @@ def _get_arm_and_grm() -> Tuple[Any, Any]:
 
 def _get_access_filtering_service() -> Any:
     """Return app.state.access_filtering_service, or None if not wired.
+<<<<<<< HEAD
+=======
+
+    Probes via `_lazy_singleton_app_or_none()` (the
+    same side-effect-free helper Bug #1678/#1693/#1709 introduced for
+    every other app-state accessor in this file) instead of a bare
+    `getattr(_utils.app_module, "app", None)`, which would otherwise
+    permanently construct the process-wide app singleton as a side
+    effect of merely reading it.
+    """
+    app = _lazy_singleton_app_or_none()
+    if app is None:
+        return None
+    return getattr(getattr(app, "state", None), "access_filtering_service", None)
+
+
+def _resolve_repo_path(alias: str) -> Optional[str]:
+    """Resolve alias → versioned snapshot path. Returns None if unknown."""
+    from code_indexer.server.mcp.handlers.repos import _resolve_golden_repo_path
+>>>>>>> upstream/master
 
     Probes via `_lazy_singleton_app_or_none()` (the
     same side-effect-free helper Bug #1678/#1693/#1709 introduced for
@@ -528,7 +566,9 @@ def _run_xray_batch_job(
 
 
 def handle_xray_search_batch(
-    params: Dict[str, Any], user: Optional[User]
+    params: Dict[str, Any],
+    user: Optional[User],
+    origin: Optional[SearchOrigin] = None,
 ) -> Dict[str, Any]:
     """MCP handler for the xray_search_batch tool.
 
@@ -811,17 +851,45 @@ def handle_xray_search_batch(
     captured_timeout = timeout_seconds
     captured_cidx_meta = cidx_meta
 
-    def _job_fn(progress_callback) -> Dict[str, Any]:  # type: ignore[no-untyped-def]
-        raw_result = _run_xray_batch_job(
-            resolved_repos=captured_repos,
-            scans=captured_scans,
-            repo_errors=captured_repo_errors,
-            cidx_meta_path=captured_cidx_meta,
-            max_results=captured_max_results,
-            timeout_seconds=captured_timeout,
-            job_id=_jid[0] if _jid else "",
-            bjm=bjm,
-            progress_callback=progress_callback,
+    # Story #2107 / Bug #2111: the job records the batch when its result is
+    # known -- one row per repository it resolved (an alias it could not
+    # resolve was rejected and gets no row).
+    from code_indexer.server.services.search_event_recording import (
+        bind_xray_recorder,
+        run_recorded_xray,
+        writer_from_app,
+    )
+    from code_indexer.server.telemetry.correlation_bridge import (
+        get_current_correlation_id,
+    )
+
+    record_event = bind_xray_recorder(
+        writer_from_app(_lazy_singleton_app_or_none()),
+        origin=origin or SearchOrigin(tool="xray_search_batch", door="mcp"),
+        username=user.username,
+        repo_alias=None,
+        pattern=" | ".join(scan["driver_regex"] for scan in captured_scans),
+        correlation_id=get_current_correlation_id(),
+        batch_repositories=[repo["alias"] for repo in captured_repos],
+    )
+
+    # cancel_check: injected by BackgroundJobManager (declared parameter); a
+    # batch cancelled after its last between-cell check records no event.
+    def _job_fn(progress_callback, cancel_check=None) -> Dict[str, Any]:  # type: ignore[no-untyped-def]
+        raw_result = run_recorded_xray(
+            record_event,
+            lambda: _run_xray_batch_job(
+                resolved_repos=captured_repos,
+                scans=captured_scans,
+                repo_errors=captured_repo_errors,
+                cidx_meta_path=captured_cidx_meta,
+                max_results=captured_max_results,
+                timeout_seconds=captured_timeout,
+                job_id=_jid[0] if _jid else "",
+                bjm=bjm,
+                progress_callback=progress_callback,
+            ),
+            cancel_check,
         )
         # Bug #1709: probes via _lazy_singleton_app_or_none() instead of a
         # bare getattr(_utils.app_module, "app", None), which would
@@ -831,7 +899,9 @@ def handle_xray_search_batch(
         payload_cache = (
             getattr(payload_cache, "payload_cache", None) if payload_cache else None
         )
-        return _truncate_xray_batch_result(raw_result, payload_cache)
+        return _truncate_xray_batch_result(
+            raw_result, payload_cache, owner=user.username
+        )
 
     # Deferred job_id capture: submit_job requires `func` before it returns the
     # job_id, but the worker (_job_fn) needs the job_id for between-cell

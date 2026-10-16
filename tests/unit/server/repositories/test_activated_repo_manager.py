@@ -462,7 +462,10 @@ class TestActivatedRepoManager:
         # Mock git operations for our improved branch switching logic
         def mock_subprocess_side_effect(cmd, **kwargs):
             mock_result = MagicMock()
-            if cmd == ["git", "remote", "get-url", "origin"]:
+            if cmd in (
+                ["git", "remote", "get-url", "origin"],
+                ["git", "config", "--get", "remote.origin.url"],
+            ):
                 # Mock remote URL check - return a remote URL to trigger fetch attempt
                 mock_result.returncode = 0
                 mock_result.stdout = "https://github.com/test/repo.git"
@@ -522,10 +525,17 @@ class TestActivatedRepoManager:
         # returncode with check=True raises CalledProcessError.
         def mock_subprocess_side_effect(cmd, **kwargs):
             mock_result = MagicMock()
+<<<<<<< HEAD
             mock_result.returncode = 0
             mock_result.stdout = ""
             mock_result.stderr = ""
             if cmd == ["git", "remote", "get-url", "origin"]:
+=======
+            if cmd in (
+                ["git", "remote", "get-url", "origin"],
+                ["git", "config", "--get", "remote.origin.url"],
+            ):
+>>>>>>> upstream/master
                 # Mock remote URL check
                 mock_result.stdout = "https://github.com/test/repo.git"
             elif cmd == ["git", "fetch", "origin"]:

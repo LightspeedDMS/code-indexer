@@ -125,6 +125,7 @@ pub(crate) fn evaluator_rustc_command(build_rs_path: &Path, build_so_path: &Path
     command
 }
 
+<<<<<<< HEAD
 /// Environment variable carrying the heap bound (bytes) for every rustc this
 /// process spawns. Set by cidx (`rust_backend.py::xray_subprocess_env`) from
 /// its configurable compile limit, the same number its `--compile-only`
@@ -171,6 +172,8 @@ pub(crate) fn apply_compile_memory_limit(command: &mut std::process::Command, li
     }
 }
 
+=======
+>>>>>>> upstream/master
 /// Clippy type-complexity escape hatch for `spawn_rustc_child`'s return
 /// type: the spawned child, its pid, and the stdout/stderr drain-thread
 /// receivers `run_rustc_with_timeout` needs after `poll_rustc_until_done`
@@ -188,8 +191,11 @@ fn spawn_rustc_child(mut command: std::process::Command) -> Result<SpawnedRustcC
     command.process_group(0);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
+<<<<<<< HEAD
     let limit = parse_compile_rlimit_data(std::env::var(COMPILE_RLIMIT_DATA_ENV).ok().as_deref());
     apply_compile_memory_limit(&mut command, limit);
+=======
+>>>>>>> upstream/master
 
     let mut child = command.spawn().map_err(|e| CompileError {
         message: format!("Failed to invoke rustc: {}", e),
@@ -283,6 +289,7 @@ pub(crate) fn run_rustc_with_timeout(
     let stderr = drain_pipe_or_warn(stderr_rx, "stderr");
     Ok((success, stdout, stderr))
 }
+<<<<<<< HEAD
 
 #[cfg(test)]
 mod compile_memory_limit_tests {
@@ -346,3 +353,5 @@ mod compile_memory_limit_tests {
         assert_eq!(String::from_utf8_lossy(&stdout).trim(), (LIMIT_BYTES / 1024).to_string());
     }
 }
+=======
+>>>>>>> upstream/master

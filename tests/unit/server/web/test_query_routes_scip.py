@@ -921,7 +921,11 @@ class TestSCIPQueryExecution:
             "code_indexer.scip.query.primitives.SCIPQueryEngine",
             return_value=mock_engine,
         ):
+<<<<<<< HEAD
             results, error_message = _execute_scip_query(
+=======
+            results, error_message, failure = _execute_scip_query(
+>>>>>>> upstream/master
                 target_repo={"path": str(tmp_path), "is_global": False},
                 user_alias="test-repo",
                 query_text="main UserService",
@@ -934,6 +938,11 @@ class TestSCIPQueryExecution:
         assert not results
         assert error_message is not None
         assert "timed out" in error_message.lower()
+<<<<<<< HEAD
+=======
+        # Story #2117: the failure is handed to the search event recorder.
+        assert type(failure).__name__ == "QueryTimeoutError"
+>>>>>>> upstream/master
 
     async def test_scip_query_callchain_validates_input_format(
         self, mock_session, tmp_path

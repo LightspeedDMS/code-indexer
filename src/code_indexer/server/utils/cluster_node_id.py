@@ -45,6 +45,7 @@ import socket
 from typing import Any, Dict, Optional
 
 
+<<<<<<< HEAD
 def configured_node_id(raw_config: Optional[Any]) -> str:
     """The explicitly configured ``cluster.node_id`` string, or ``""``.
 
@@ -59,6 +60,8 @@ def configured_node_id(raw_config: Optional[Any]) -> str:
     return node_id if isinstance(node_id, str) else ""
 
 
+=======
+>>>>>>> upstream/master
 def resolve_cluster_node_id(raw_config: Optional[Dict[str, Any]]) -> str:
     """Resolve this process's cluster node identity from a parsed
     ``config.json`` dict.
@@ -87,4 +90,26 @@ def resolve_cluster_node_id(raw_config: Optional[Dict[str, Any]]) -> str:
         ``get_active_nodes()``, and using it as the fallback here is
         precisely the defect this function exists to eliminate.
     """
+<<<<<<< HEAD
     return configured_node_id(raw_config) or f"{socket.gethostname()}-cidx"
+=======
+    cluster_cfg = raw_config.get("cluster") if isinstance(raw_config, dict) else None
+    configured_node_id = (
+        cluster_cfg.get("node_id") if isinstance(cluster_cfg, dict) else None
+    )
+    if isinstance(configured_node_id, str) and configured_node_id:
+        return configured_node_id
+    return f"{socket.gethostname()}-cidx"
+
+
+def resolve_server_config_node_id(server_config: Any) -> str:
+    """The same identity as ``resolve_cluster_node_id``, from a loaded
+    ``ServerConfig`` (``cluster`` is a bootstrap key read from config.json).
+
+    Used wherever a row must join to job ownership (``executing_node``):
+    telemetry and embedding_call_stats attribution (Story #2118)."""
+    cluster = getattr(server_config, "cluster", None)
+    return resolve_cluster_node_id(
+        {"cluster": {"node_id": cluster.node_id}} if cluster is not None else None
+    )
+>>>>>>> upstream/master

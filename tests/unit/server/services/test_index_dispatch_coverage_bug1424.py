@@ -11,7 +11,11 @@ import pytest
 from code_indexer.server.services.index_job_claim_loop import validate_dispatch_covers
 
 
+<<<<<<< HEAD
 def _noop(md, pc):
+=======
+def _noop(md, pc, job_id):
+>>>>>>> upstream/master
     return None
 
 

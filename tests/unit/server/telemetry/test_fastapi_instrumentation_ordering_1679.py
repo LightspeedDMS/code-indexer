@@ -42,14 +42,26 @@ from __future__ import annotations
 
 import json
 import os
+<<<<<<< HEAD
+=======
+import site
+>>>>>>> upstream/master
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict
+<<<<<<< HEAD
 from urllib.parse import urlparse
 
 import pytest
 
+=======
+
+import pytest
+
+from tests.unit.server.telemetry.otlp_sink import OtlpHttpSink, otlp_http_config
+
+>>>>>>> upstream/master
 _HARNESS = Path(__file__).parent / "_repro_1679_subprocess.py"
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
@@ -60,6 +72,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 # time, guarding only against a genuine hang.
 _DEFAULT_HARNESS_TIMEOUT_SECONDS = 90
 
+<<<<<<< HEAD
 # Fake collector address that is never expected to have a real listener --
 # only the span CREATION path (verified via a separately-attached
 # InMemorySpanExporter) is under test here, never real network export.
@@ -67,6 +80,8 @@ _DEFAULT_HARNESS_TIMEOUT_SECONDS = 90
 # collector.
 _DEFAULT_FAKE_COLLECTOR_ENDPOINT = "http://localhost:4317"
 
+=======
+>>>>>>> upstream/master
 
 def _positive_int_env(var_name: str, default: int) -> int:
     """Read a positive-int env override, or fall back to `default`.
@@ -90,6 +105,7 @@ def _positive_int_env(var_name: str, default: int) -> int:
     return value
 
 
+<<<<<<< HEAD
 def _url_env(var_name: str, default: str) -> str:
     """Read a http(s):// URL env override, or fall back to `default`.
 
@@ -118,18 +134,31 @@ _FAKE_COLLECTOR_ENDPOINT = _url_env(
     "CIDX_TEST_FAKE_COLLECTOR_ENDPOINT", _DEFAULT_FAKE_COLLECTOR_ENDPOINT
 )
 
+=======
+>>>>>>> upstream/master
 _HARNESS_TIMEOUT_SECONDS = _positive_int_env(
     "CIDX_TEST_HARNESS_TIMEOUT_SECONDS", _DEFAULT_HARNESS_TIMEOUT_SECONDS
 )
 
 
+<<<<<<< HEAD
 def _run_harness(tmp_path: Path, *, telemetry_enabled: bool) -> Dict[str, Any]:
+=======
+def _run_harness(
+    tmp_path: Path, *, telemetry_enabled: bool, collector_endpoint: str
+) -> Dict[str, Any]:
+>>>>>>> upstream/master
     """Launch _repro_1679_subprocess.py in a fresh Python process with a
     telemetry-enabled config.json, and return its parsed JSON result.
 
     Mirrors the config bootstrap pattern established in
     test_telemetry_app_integration.py (minimal config.json +
+<<<<<<< HEAD
     data/golden-repos directory is sufficient for create_app()).
+=======
+    data/golden-repos directory is sufficient for create_app()). Traces
+    export over OTLP/HTTP to `collector_endpoint`, the shared listening sink.
+>>>>>>> upstream/master
     """
     config_dir = tmp_path / ".cidx-server"
     (config_dir / "data" / "golden-repos").mkdir(parents=True)
@@ -140,7 +169,11 @@ def _run_harness(tmp_path: Path, *, telemetry_enabled: bool) -> Dict[str, Any]:
                 "telemetry_config": {
                     "enabled": telemetry_enabled,
                     "export_traces": True,
+<<<<<<< HEAD
                     "collector_endpoint": _FAKE_COLLECTOR_ENDPOINT,
+=======
+                    **otlp_http_config(collector_endpoint),
+>>>>>>> upstream/master
                 }
             }
         )
@@ -150,6 +183,13 @@ def _run_harness(tmp_path: Path, *, telemetry_enabled: bool) -> Dict[str, Any]:
 
     env = dict(os.environ)
     env["CIDX_SERVER_DATA_DIR"] = str(config_dir)
+<<<<<<< HEAD
+=======
+    # Keep the subprocess away from the real ~/.cidx-server (home-relative
+    # config readers), while user-site packages stay importable.
+    env["PYTHONUSERBASE"] = site.getuserbase()
+    env["HOME"] = str(tmp_path)
+>>>>>>> upstream/master
     env["REPRO_1679_OUTPUT_FILE"] = str(output_file)
 
     proc = subprocess.run(
@@ -173,7 +213,13 @@ def _run_harness(tmp_path: Path, *, telemetry_enabled: bool) -> Dict[str, Any]:
 class TestFastAPIRequestSpansBug1679:
     """Reproduces and validates the fix for Bug #1679."""
 
+<<<<<<< HEAD
     def test_real_http_request_produces_real_spans(self, tmp_path: Path) -> None:
+=======
+    def test_real_http_request_produces_real_spans(
+        self, tmp_path: Path, otlp_sink: OtlpHttpSink
+    ) -> None:
+>>>>>>> upstream/master
         """
         A real HTTP request through create_app()'s real ASGI lifespan
         MUST produce at least one real span once FastAPI instrumentation
@@ -186,7 +232,13 @@ class TestFastAPIRequestSpansBug1679:
         After the fix: instrumentation happens at app-construction time,
         before the middleware stack is built -- this asserts > 0.
         """
+<<<<<<< HEAD
         result = _run_harness(tmp_path, telemetry_enabled=True)
+=======
+        result = _run_harness(
+            tmp_path, telemetry_enabled=True, collector_endpoint=otlp_sink.endpoint
+        )
+>>>>>>> upstream/master
 
         assert result["telemetry_manager_present"] is True, result
         assert result["status_code"] == 200, result
@@ -200,7 +252,11 @@ class TestFastAPIRequestSpansBug1679:
         )
 
     def test_telemetry_disabled_produces_no_telemetry_manager(
+<<<<<<< HEAD
         self, tmp_path: Path
+=======
+        self, tmp_path: Path, otlp_sink: OtlpHttpSink
+>>>>>>> upstream/master
     ) -> None:
         """
         Requirement #5: when telemetry is disabled entirely, there is no
@@ -209,7 +265,13 @@ class TestFastAPIRequestSpansBug1679:
         app is structurally instrumented. Unaffected by the Bug #1679
         fix; documents the zero-overhead guarantee the fix must preserve.
         """
+<<<<<<< HEAD
         result = _run_harness(tmp_path, telemetry_enabled=False)
+=======
+        result = _run_harness(
+            tmp_path, telemetry_enabled=False, collector_endpoint=otlp_sink.endpoint
+        )
+>>>>>>> upstream/master
 
         assert result["telemetry_manager_present"] is False, result
         assert result["status_code"] == 200, result

@@ -1,6 +1,10 @@
 """Document processing utilities for indexing."""
 
 import logging
+<<<<<<< HEAD
+=======
+import time
+>>>>>>> upstream/master
 from pathlib import Path
 from typing import FrozenSet, List, Dict, Any, Optional, Callable, Iterable
 from dataclasses import dataclass
@@ -9,7 +13,11 @@ from ..config import Config
 from ..services.embedding_provider import EmbeddingProvider
 from .file_finder import FileFinder
 from .fixed_size_chunker import FixedSizeChunker
+<<<<<<< HEAD
 from ..utils.path_confinement import is_resolved_within_root
+=======
+from ..utils.path_confinement import is_indexable_location
+>>>>>>> upstream/master
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +43,29 @@ class ProcessingStats:
     #: internal executor error) -- callers must treat that as "some
     #: failure is unattributed" rather than assuming completeness.
     failed_paths: FrozenSet[str] = frozenset()
+<<<<<<< HEAD
+=======
+    #: Index entries the run changed without processing a file: deleted or
+    #: hidden paths, un-hidden paths, restored full-text documents. With
+    #: `files_processed`, tells a run that changed nothing apart.
+    index_entries_changed: int = 0
+    #: Bug #2155: relative paths of the files a previous run recorded as
+    #: failed that this run re-planned (``_merge_recorded_failures``).
+    retried_failed_paths: FrozenSet[str] = frozenset()
+
+    @property
+    def failed_only_on_recorded_retries(self) -> bool:
+        """Bug #2155: the run processed no file and EVERY failure is an
+        attributed retry of a failure recorded before it started -- no new
+        work failed. An unattributed failure is never such a retry."""
+        return (
+            self.files_processed == 0
+            and self.failed_files > 0
+            and not self.cancelled
+            and self.failed_files == len(self.failed_paths)
+            and self.failed_paths <= self.retried_failed_paths
+        )
+>>>>>>> upstream/master
 
     @property
     def duration(self) -> float:
@@ -86,6 +117,7 @@ class DocumentProcessor:
         test double, which would otherwise turn the containment root
         into an unrelated mock value and reject every real file.
 
+<<<<<<< HEAD
         Server context only (``config.confined_to_codebase_root``); local
         CLI indexing keeps every candidate, following symlinks wherever
         they point.
@@ -97,13 +129,31 @@ class DocumentProcessor:
         rejected_count = 0
         for candidate in candidates:
             if is_resolved_within_root(candidate, resolved_root):
+=======
+        Server context (``config.confined_to_codebase_root``) drops a
+        candidate resolving outside the root or into its ``.git``; local
+        CLI indexing follows symlinks wherever they point, except into the
+        repository's own ``.git``, which no context indexes.
+        """
+        resolved_root = Path(self.config.codebase_dir).resolve()
+        confined = self.config.confined_to_codebase_root
+        kept: List[Path] = []
+        rejected_count = 0
+        for candidate in candidates:
+            if is_indexable_location(candidate, resolved_root, confined):
+>>>>>>> upstream/master
                 kept.append(candidate)
             else:
                 rejected_count += 1
         if rejected_count:
             logger.warning(
+<<<<<<< HEAD
                 "%d candidate file path(s) resolve outside the codebase "
                 "root; dropping them from this indexing pass.",
+=======
+                "%d candidate file path(s) do not resolve to an indexable "
+                "location; dropping them from this indexing pass.",
+>>>>>>> upstream/master
                 rejected_count,
             )
         return kept

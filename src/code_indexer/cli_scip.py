@@ -859,7 +859,7 @@ def scip_definition(
     all_results = []
     for scip_file in scip_files:
         try:
-            engine = SCIPQueryEngine(scip_file)
+            engine = SCIPQueryEngine(scip_file, confine_to_repo_root=False)
             results = engine.find_definition(symbol, exact=exact)
             all_results.extend(results)
         except Exception as e:
@@ -1006,7 +1006,7 @@ def scip_references(
     all_results = []
     for scip_file in scip_files:
         try:
-            engine = SCIPQueryEngine(scip_file)
+            engine = SCIPQueryEngine(scip_file, confine_to_repo_root=False)
             results = engine.find_references(symbol, limit=limit, exact=exact)
             all_results.extend(results)
             if limit > 0 and len(all_results) >= limit:
@@ -1188,7 +1188,7 @@ def scip_dependencies(
     all_results = []
     for scip_file in scip_files:
         try:
-            engine = SCIPQueryEngine(scip_file)
+            engine = SCIPQueryEngine(scip_file, confine_to_repo_root=False)
             results = engine.get_dependencies(symbol, depth=depth, exact=exact)
             all_results.extend(results)
         except Exception as e:
@@ -1369,7 +1369,7 @@ def scip_dependents(
     all_results = []
     for scip_file in scip_files:
         try:
-            engine = SCIPQueryEngine(scip_file)
+            engine = SCIPQueryEngine(scip_file, confine_to_repo_root=False)
             results = engine.get_dependents(symbol, depth=depth, exact=exact)
             all_results.extend(results)
         except Exception as e:
@@ -1530,6 +1530,7 @@ def scip_impact(
         exclude=exclude,
         include=include,
         kind=kind,
+        confine_to_repo_root=False,
     )
 
     if result.total_affected == 0:
@@ -1688,7 +1689,7 @@ def scip_callchain(
         # Use largest SCIP file (main codebase index, not test fixtures)
         scip_file = max(scip_files, key=lambda f: f.stat().st_size)
 
-    engine = SCIPQueryEngine(scip_file)
+    engine = SCIPQueryEngine(scip_file, confine_to_repo_root=False)
 
     # Trace call chain using fast database primitive
     console.print(
@@ -1993,7 +1994,12 @@ def scip_context(
 
     console.print(f"Building smart context for '{symbol}'...\n", style="blue")
     result = get_smart_context(
-        symbol, scip_dir, limit=limit, min_score=min_score, project=project
+        symbol,
+        scip_dir,
+        limit=limit,
+        min_score=min_score,
+        project=project,
+        confine_to_repo_root=False,
     )
 
     if result.total_files == 0:

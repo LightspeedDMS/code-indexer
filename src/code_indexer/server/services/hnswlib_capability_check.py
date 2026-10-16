@@ -15,7 +15,11 @@ entry point. Bug #1415 reversed that: it still aborted the entire indexing
 operation on a drifted install (a fleet-wide production outage), so the CLI
 side now degrades gracefully too -- `_detect_and_repair_orphans()` logs one
 WARNING and skips the orphan hardening pass instead, letting the caller
+<<<<<<< HEAD
 persist a valid, correct index. See docs/hnswlib-custom-build.md.
+=======
+persist a valid, correct index. See docs/server/hnswlib-custom-build.md.
+>>>>>>> upstream/master
 """
 
 import logging
@@ -27,7 +31,11 @@ from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 
+<<<<<<< HEAD
 _DOCS_POINTER = "docs/hnswlib-custom-build.md"
+=======
+_DOCS_POINTER = "docs/server/hnswlib-custom-build.md"
+>>>>>>> upstream/master
 
 
 def check_hnswlib_capability() -> Tuple[bool, str]:

@@ -649,3 +649,43 @@ class TestStartCheckoutUnexpectedErrorStillLogsError:
         assert len(error_records) == 1
         assert warning_records == []
         assert svc.get_status().status == LeaseLifecycleStatus.DEGRADED
+
+
+# The API key _make_service's client sends, and the error an HTTP layer raises
+# for a header it rejects: it quotes the header value (escaped).
+_SERVICE_API_KEY = "test-api-key"
+
+
+def _header_rejected(request: httpx.Request) -> httpx.Response:
+    raise httpx.LocalProtocolError(
+        f"Illegal header value {_SERVICE_API_KEY.encode()!r}"
+    )
+
+
+class TestNonProviderErrorTextNeverShown:
+    """An exception that is not an LlmCredsProviderError may quote the
+    request's API-key header: the lifecycle reports and logs only its class,
+    never its text (status.error is served by /api/llm-creds/lease-status)."""
+
+    def test_checkout_failure_reports_only_the_exception_class(self, tmp_path, caplog):
+        svc = _make_service(tmp_path, checkout_handler=_header_rejected)
+
+        with caplog.at_level(logging.DEBUG, logger=_LIFECYCLE_LOGGER_NAME):
+            svc.start()  # Must NOT raise
+
+        status = svc.get_status()
+        assert status.status == LeaseLifecycleStatus.DEGRADED
+        assert status.error == "Credential checkout failed (LocalProtocolError)"
+        assert "LocalProtocolError" in caplog.text
+        assert _SERVICE_API_KEY not in caplog.text
+
+    def test_checkin_failure_logs_only_the_exception_class(self, tmp_path, caplog):
+        svc = _make_service(tmp_path, checkin_handler=_header_rejected)
+        svc.start()
+        assert svc.get_status().status == LeaseLifecycleStatus.ACTIVE
+
+        with caplog.at_level(logging.DEBUG, logger=_LIFECYCLE_LOGGER_NAME):
+            svc.stop()  # Must NOT raise
+
+        assert "LocalProtocolError" in caplog.text
+        assert _SERVICE_API_KEY not in caplog.text

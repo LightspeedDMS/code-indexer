@@ -31,6 +31,7 @@
         >
             Export
         </button>
+        <span id="logs-export-status" aria-live="polite"></span>
     </div>
 </div>
 
@@ -125,6 +126,11 @@ function clearFilters() {
     htmx.ajax('GET', '/admin/partials/logs-list', {target: '#logs-list-section', swap: 'innerHTML'});
 }
 
+function setLogsExportStatus(text) {
+    const status = document.getElementById('logs-export-status');
+    if (status) status.textContent = text;
+}
+
 function exportLogs() {
     // Get selected format
     const format = document.getElementById('export-format').value;
@@ -143,8 +149,33 @@ function exportLogs() {
         exportUrl += '&search=' + encodeURIComponent(search);
     }
 
-    // Trigger download by navigating to export URL
-    window.location.href = exportUrl;
+    // Download through fetch() + a blob, never a page navigation: the export
+    // is elevation-gated, and only fetch() passes through the elevation
+    // interceptor, which opens the TOTP modal and retries (as audit_logs.js).
+    setLogsExportStatus('Preparing export...');
+    fetch(exportUrl, { credentials: 'same-origin' }).then(function (response) {
+        if (!response.ok) {
+            setLogsExportStatus('Export failed (HTTP ' + response.status + ').');
+            return null;
+        }
+        const disposition = response.headers.get('Content-Disposition') || '';
+        const match = /filename="([^"]+)"/.exec(disposition);
+        const filename = match ? match[1] : 'logs.' + format;
+        return response.blob().then(function (blob) {
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(link.href);
+            setLogsExportStatus('Exported ' + filename + '.');
+        });
+    }).catch(function (err) {
+        if (!err || err.message !== 'elevation_cancelled') {
+            setLogsExportStatus('Export failed.');
+        }
+    });
 }
 </script>
 {% endblock %}

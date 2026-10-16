@@ -46,7 +46,16 @@ _BYTE_MAX_VALUE = 255.0
 _VECTOR_SCALE = 2.0
 _VECTOR_OFFSET = 1.0
 _FAKE_MAX_TOKENS = 8192
+<<<<<<< HEAD
 _FILE_COUNT = 12
+=======
+# Each indexed file costs one serialized durable "dirty" epoch write (Bug
+# #1575 Part C: tmp-file + directory fsync under .index_rebuild.lock) per
+# run, so this count sets how many fsyncs sit on the critical path; at 12
+# files a slow disk pushed a two-run test past the 15 s timeout. Six still
+# leaves files to resume after the interrupt below.
+_FILE_COUNT = 6
+>>>>>>> upstream/master
 _INTERRUPT_AFTER_FILE_PROGRESS_CALLS = 3
 _RESUME_MARKER = "Resuming interrupted operation"
 # Emitted unconditionally on entry to SmartIndexer._do_reconcile_with_database
@@ -117,6 +126,12 @@ class _DeterministicHashEmbeddingProvider(EmbeddingProvider):
     def supports_batch_processing(self) -> bool:
         return True
 
+<<<<<<< HEAD
+=======
+    def request_max_retries(self) -> int:
+        return 0
+
+>>>>>>> upstream/master
     def _get_model_token_limit(self) -> int:
         return _FAKE_MAX_TOKENS
 
@@ -242,15 +257,27 @@ def _assert_fully_indexed(repo: Path, files: List[Path]) -> None:
 
 
 class TestInterruptedServerIndexResumes:
+<<<<<<< HEAD
     def test_interrupted_server_index_resumes_without_reconcile(
         self, tmp_path: Path
     ) -> None:
         repo = tmp_path / "repo"
         _build_repo(repo)
+=======
+    def test_interrupted_server_index_is_reconciled_not_resumed(
+        self, tmp_path: Path
+    ) -> None:
+        """Story #2121: even state the server itself sealed is never replayed
+        as a stored list; the interrupted index is recovered by the
+        store-derived reconcile and completes fully indexed."""
+        repo = tmp_path / "repo"
+        files = _build_repo(repo)
+>>>>>>> upstream/master
         _interrupted_server_run(repo)
 
         infos = _server_run_collecting_info(repo)
 
+<<<<<<< HEAD
         assert _took_resume_path(infos), (
             "An interrupted server-context index must resume from the resume "
             f"state the server itself wrote. Progress info: {infos}"
@@ -261,6 +288,11 @@ class TestInterruptedServerIndexResumes:
         )
         stored = json.loads(_metadata_path(repo).read_text())
         assert stored["status"] == "completed"
+=======
+        assert not _took_resume_path(infos), f"Progress info: {infos}"
+        assert _took_reconcile_path(infos), f"Progress info: {infos}"
+        _assert_fully_indexed(repo, files)
+>>>>>>> upstream/master
 
     def test_every_server_save_is_sealed(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
@@ -389,8 +421,14 @@ class TestStateWithoutValidSealIgnored:
         assert _took_reconcile_path(infos), f"Progress info: {infos}"
         _assert_fully_indexed(repo, files)
 
+<<<<<<< HEAD
     def test_local_cli_still_trusts_unsealed_state(self, tmp_path: Path) -> None:
         """Local CLI indexing is unchanged: its own resume file is trusted."""
+=======
+    def test_local_cli_reconciles_an_interrupted_state(self, tmp_path: Path) -> None:
+        """Story #2121: local CLI indexing no longer resumes from a stored
+        list either; an interrupted state is recovered by the reconcile."""
+>>>>>>> upstream/master
         repo = tmp_path / "repo"
         files = _build_repo(repo)
         _write_resume_file(repo, _unsealed_resume_state(files))
@@ -405,7 +443,13 @@ class TestStateWithoutValidSealIgnored:
         _make_indexer(repo).smart_index(
             force_full=False, progress_callback=collecting_callback
         )
+<<<<<<< HEAD
         assert _took_resume_path(infos)
+=======
+        assert not _took_resume_path(infos), f"Progress info: {infos}"
+        assert _took_reconcile_path(infos), f"Progress info: {infos}"
+        _assert_fully_indexed(repo, files)
+>>>>>>> upstream/master
 
 
 class TestSealKey:

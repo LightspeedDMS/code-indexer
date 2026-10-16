@@ -1,23 +1,33 @@
 """Unit tests for LangfuseService facade."""
 
-import pytest
+import sys
 import threading
 from unittest.mock import Mock, patch, MagicMock
 
-# Prevent real Langfuse SDK initialization at module level - MUST be before other imports
-import sys
+import pytest
 
-sys.modules["langfuse"] = MagicMock()
-
-from code_indexer.server.services.langfuse_service import (  # noqa: E402
+from code_indexer.server.services.langfuse_service import (
     LangfuseService,
     get_langfuse_service,
     reset_langfuse_service,
 )
-from code_indexer.server.utils.config_manager import (  # noqa: E402
+from code_indexer.server.utils.config_manager import (
     ServerConfig,
     LangfuseConfig,
 )
+
+
+@pytest.fixture(autouse=True)
+def stub_langfuse_sdk(monkeypatch):
+    """Prevent real Langfuse SDK initialization in these tests only.
+
+    Importing langfuse_service does not import the SDK: LangfuseClient
+    imports it lazily inside _ensure_initialized, at call time, while this
+    fixture is active. monkeypatch.setitem restores just the ``langfuse``
+    entry afterwards, so the stub never leaks into other test files and no
+    other module is evicted from sys.modules.
+    """
+    monkeypatch.setitem(sys.modules, "langfuse", MagicMock())
 
 
 @pytest.fixture

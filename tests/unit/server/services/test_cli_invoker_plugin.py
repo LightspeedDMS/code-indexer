@@ -153,11 +153,14 @@ class TestPython39EntryPointsRealSignature:
         monkeypatch.setattr(
             cli_invoker_plugin, "entry_points", _fake_entry_points_py39_signature
         )
+<<<<<<< HEAD
         # Force the 3.9 code path regardless of the interpreter actually running
         # the suite (the fork builds on 3.11). Without this the zero-arg fake is
         # only exercised on a genuine 3.9 run; on 3.10+ the code correctly calls
         # entry_points(group=...) and the 3.9-shaped fake would reject it.
         monkeypatch.setattr(cli_invoker_plugin.sys, "version_info", (3, 9, 0))
+=======
+>>>>>>> upstream/master
         cli_invoker_plugin.reset_cache()
 
         factory = get_invoker_factory()

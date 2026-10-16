@@ -2,14 +2,14 @@
 name: discover_repositories
 category: repos
 required_permission: query_repos
-tl_dr: List repos from external sources (GitHub orgs, local paths) not yet indexed.
-slim_description: "List repositories available from external source configurations (GitHub orgs, local paths) that are not yet indexed in CIDX."
+tl_dr: List the golden repositories registered on this server that the caller can access.
+slim_description: "List the golden repositories registered on this server, limited to those the caller's group access allows. Reads the server's own registry; it does not contact external sources. source_type is accepted but not used."
 inputSchema:
   type: object
   properties:
     source_type:
       type: string
-      description: Source type filter (optional)
+      description: Accepted for compatibility but not used; the result is the same with or without it.
   required: []
 outputSchema:
   type: object
@@ -19,10 +19,10 @@ outputSchema:
       description: Whether operation succeeded
     repositories:
       type: array
-      description: List of discovered golden repositories
+      description: Golden repositories registered on the server that the caller can access
       items:
         type: object
-        description: Golden repository information from GoldenRepository.to_dict()
+        description: Golden repository registration record
         properties:
           alias:
             type: string
@@ -52,45 +52,49 @@ outputSchema:
   - success
 ---
 
-TL;DR: List repositories available from external source configurations like GitHub organizations or local paths that are NOT yet indexed.
+TL;DR: Return the golden repositories registered on this server that the caller can access. The tool reads the server's golden repository registry. It does not query GitHub, GitLab or any other external source, and it does not list repositories that have not been added with `add_golden_repo`.
 
-USE CASES:
-(1) Explore what repositories are available in your GitHub organization before indexing them
-(2) Find repositories from configured sources to decide which ones to add as queryable golden repos
-(3) Audit external repository sources to see what's accessible
+BEHAVIOUR:
+- Reads every golden repository record from the server's registry.
+- When group-based access filtering is configured, keeps only the repositories the caller's groups can access.
+- `source_type` is accepted but not used: the result is the same with or without it.
 
 REQUIREMENTS:
-- Permission: 'query_repos' (all roles)
-- External sources must be configured in CIDX server config
-- Network access for remote sources (GitHub/GitLab APIs)
-
-DIFFERENCE FROM list_global_repos:
-- discover_repositories: Shows POTENTIAL repos from external sources (not yet indexed)
-- list_global_repos: Shows already-indexed repos ready to query
+- Permission: `query_repos`
 
 RETURNS:
+```json
 {
   "success": true,
   "repositories": [
     {
-      "alias": "my-backend",
-      "repo_url": "https://github.com/org/backend.git",
+      "alias": "example-repo",
+      "repo_url": "https://example.com/org/example-repo.git",
       "default_branch": "main",
-      "source_type": "github_org"
+      "clone_path": "/path/to/golden-repos/example-repo",
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "enable_temporal": false,
+      "temporal_options": null,
+      "wiki_enabled": false
     }
   ]
 }
+```
+
+`alias` is the bare golden repository alias. Query tools use the globally activated form, `<alias>-global` (for example `example-repo-global`).
 
 EXAMPLE:
-discover_repositories(source_type='github_org')
--> Returns all repos from configured GitHub organization
+discover_repositories()
+-> Returns the accessible golden repository records
 
-COMMON ERRORS:
-- "No external sources configured" -> Admin must configure repository sources in server config
-- "API rate limit exceeded" -> GitHub/GitLab API throttling, wait or use authentication
-- "Source not accessible" -> Network issues or invalid credentials
+ERRORS:
+- Any failure while reading the registry returns `{"success": false, "error": "<message>", "repositories": []}`.
+
+DIFFERENCE FROM list_global_repos:
+- discover_repositories: golden repository registration records (bare alias, clone path, default branch, temporal options).
+- list_global_repos: globally activated repositories (`-global` aliases) with index paths and refresh times, the names query tools accept.
 
 RELATED TOOLS:
-- list_global_repos: See already-indexed queryable repositories
-- add_golden_repo: Index a discovered repository to make it queryable
-- get_job_statistics: Monitor indexing progress after adding repos
+- list_global_repos: List the queryable `-global` repositories
+- add_golden_repo: Register and index a new golden repository (admin)
+- get_job_statistics: Monitor background jobs

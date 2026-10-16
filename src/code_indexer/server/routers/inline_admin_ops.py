@@ -19,7 +19,7 @@ Zero behavior change: same paths, methods, response models, and handler logic.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Literal, Optional
 
 import re
 
@@ -32,9 +32,15 @@ from fastapi import (
     Request,
     Header,
     Body,
+    Query,
 )
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from ..services.search_event_log_writer import (
+    CORRELATION_ID_MAX_CHARS,
+    TOOL_MAX_CHARS,
+)
 
 from ..models.repos import (
     AddGoldenRepoRequest,
@@ -54,11 +60,24 @@ from ..repositories.golden_repo_manager import GoldenRepoError, GitOperationErro
 from ..repositories.activated_repo_manager import ActivatedRepoError
 from ..repositories.background_jobs import DuplicateJobError
 from ..logging_utils import format_error_log
+<<<<<<< HEAD
+=======
+from code_indexer.utils.credential_redaction import with_masked_repo_url
+>>>>>>> upstream/master
 from ..services.activated_repo_audited_ops import deactivate_repository_for_user
 from ..services.golden_repo_audited_ops import (
     request_golden_repo_refresh,
     submit_provider_scoped_index_job,
 )
+<<<<<<< HEAD
+=======
+
+# Constants used by route handlers
+GOLDEN_REPO_ADD_OPERATION = "add_golden_repo"
+GOLDEN_REPO_REFRESH_OPERATION = "refresh_golden_repo"
+JOB_STATUS_PENDING = "pending"
+JOB_STATUS_RUNNING = "running"
+>>>>>>> upstream/master
 
 # Issue #1160: Default export file retention when config is unavailable.
 _DEFAULT_EXPORT_RETENTION_DAYS: int = 30
@@ -95,7 +114,15 @@ class ExportFiltersRequest(BaseModel):
     repo_alias: Optional[str] = None
     from_timestamp: Optional[float] = None
     to_timestamp: Optional[float] = None
-    cache_hit_filter: Optional[str] = None
+    # Any other value is rejected with 422 instead of silently meaning "all".
+    cache_hit_filter: Optional[Literal["all", "hits_only", "misses_only"]] = None
+    # Story #2117: exact-match filters on the search's entry point, outcome,
+    # tool/endpoint and correlation id (rows from before these columns
+    # existed match none of them).
+    door: Optional[Literal["mcp", "rest", "web"]] = None
+    outcome: Optional[Literal["success", "failure"]] = None
+    tool: Optional[str] = Field(None, max_length=TOOL_MAX_CHARS)
+    correlation_id: Optional[str] = Field(None, max_length=CORRELATION_ID_MAX_CHARS)
 
 
 def register_admin_ops_routes(
@@ -222,13 +249,21 @@ def register_admin_ops_routes(
         Returns:
             List of golden repositories
         """
-        repos = golden_repo_manager.list_golden_repos()
+        # Repository URLs are returned with their userinfo redacted.
+        repos = [
+            with_masked_repo_url(repo)
+            for repo in golden_repo_manager.list_golden_repos()
+        ]
         return {
             "golden_repositories": repos,
             "total": len(repos),
         }
 
-    @app.get("/api/admin/activated-repos")
+    # Lists every user's activated repositories (user data): elevation required.
+    @app.get(
+        "/api/admin/activated-repos",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def admin_list_all_activated_repos(
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
@@ -800,7 +835,11 @@ def register_admin_ops_routes(
             "average_duration": average_duration,
         }
 
-    @app.get("/api/admin/scip-pr-history")
+    # Audit-log content: elevation required, like GET /api/v1/audit-logs.
+    @app.get(
+        "/api/admin/scip-pr-history",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def get_scip_pr_history(
         repo_alias: Optional[str] = None,
         limit: int = 100,
@@ -827,7 +866,11 @@ def register_admin_ops_routes(
             logger.error("Error fetching PR history: %s", e)
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.get("/api/admin/scip-git-cleanup-history")
+    # Audit-log content: elevation required, like GET /api/v1/audit-logs.
+    @app.get(
+        "/api/admin/scip-git-cleanup-history",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def get_scip_git_cleanup_history(
         repo_path: Optional[str] = None,
         limit: int = 100,
@@ -889,6 +932,32 @@ def register_admin_ops_routes(
             # GoldenRepoManager.remove_golden_repo() so both REST and MCP
             # surfaces get the same pre-flight cleanup automatically.
 
+<<<<<<< HEAD
+=======
+                    # Cancel active jobs gracefully
+                    for job in active_jobs:
+                        if job.get("status") in [
+                            JOB_STATUS_PENDING,
+                            JOB_STATUS_RUNNING,
+                        ]:
+                            cancel_result = background_job_manager.cancel_job(
+                                job["job_id"], current_user.username, is_admin=True
+                            )
+                            if cancel_result["success"]:
+                                logging.info(
+                                    f"Cancelled background job {job['job_id']} for repository {alias}"
+                                )
+                            else:
+                                logging.warning(
+                                    f"Failed to cancel job {job['job_id']}: {cancel_result['message']}"
+                                )
+            except Exception as job_error:
+                # Job cancellation failure shouldn't prevent deletion, but log it
+                logging.warning(
+                    f"Job cancellation failed during repository deletion: {job_error}"
+                )
+
+>>>>>>> upstream/master
             # Perform repository deletion with proper error handling; the job
             # and its audit row name the authenticated caller.
             golden_repo_manager.remove_golden_repo(
@@ -972,7 +1041,13 @@ def register_admin_ops_routes(
             )
         return _DEFAULT_EXPORT_RETENTION_DAYS
 
-    @app.post("/api/admin/search-events/export", status_code=202)
+    # Search history (every user's query text) and its exports are admin reads
+    # of user data: each route requires the caller's own elevation window.
+    @app.post(
+        "/api/admin/search-events/export",
+        status_code=202,
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def trigger_query_analytics_export(
         request: Request,
         body: ExportFiltersRequest = Body(default=ExportFiltersRequest()),
@@ -996,6 +1071,10 @@ def register_admin_ops_routes(
             "from_timestamp": body.from_timestamp,
             "to_timestamp": body.to_timestamp,
             "cache_hit_filter": body.cache_hit_filter or "all",
+            "door": body.door,
+            "outcome": body.outcome,
+            "tool": body.tool,
+            "correlation_id": body.correlation_id,
         }
 
         # Bug #1174A fix: use the BGM job_id as the export row id so that
@@ -1027,7 +1106,10 @@ def register_admin_ops_routes(
         job_id_holder["job_id"] = job_id
         return {"job_id": job_id}
 
-    @app.get("/api/admin/search-events/exports")
+    @app.get(
+        "/api/admin/search-events/exports",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def list_query_analytics_exports(
         request: Request,
         id: Optional[str] = None,
@@ -1073,7 +1155,10 @@ def register_admin_ops_routes(
             )
         return {"exports": result}
 
-    @app.get("/api/admin/search-events/exports/{export_id}/download")
+    @app.get(
+        "/api/admin/search-events/exports/{export_id}/download",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def download_query_analytics_export(
         request: Request,
         export_id: str,
@@ -1134,7 +1219,10 @@ def register_admin_ops_routes(
             filename=f"query-analytics-{_ts}.xlsx",
         )
 
-    @app.get("/api/admin/search-events")
+    @app.get(
+        "/api/admin/search-events",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def get_search_events(
         request: Request,
         username: Optional[str] = None,
@@ -1144,6 +1232,12 @@ def register_admin_ops_routes(
         to_ts: Optional[float] = None,
         limit: int = 100,
         offset: int = 0,
+        door: Optional[Literal["mcp", "rest", "web"]] = None,
+        outcome: Optional[Literal["success", "failure"]] = None,
+        tool: Optional[str] = Query(None, max_length=TOOL_MAX_CHARS),
+        correlation_id: Optional[str] = Query(
+            None, max_length=CORRELATION_ID_MAX_CHARS
+        ),
         current_user: dependencies.User = Depends(
             dependencies.get_current_admin_user_hybrid
         ),
@@ -1195,6 +1289,10 @@ def register_admin_ops_routes(
                 to_ts=to_ts,
                 limit=limit,
                 offset=offset,
+                door=door,
+                outcome=outcome,
+                tool=tool,
+                correlation_id=correlation_id,
             )
             return {"events": events, "total": total}
 

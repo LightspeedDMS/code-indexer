@@ -32,7 +32,10 @@ other test's default-success stderr="" responses never tripping that guard.
 from __future__ import annotations
 
 import logging
+<<<<<<< HEAD
 import subprocess
+=======
+>>>>>>> upstream/master
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -69,6 +72,7 @@ def _fail_with_stderr(cmd, stderr: str) -> Mock:
     return Mock(args=list(cmd), returncode=1, stdout="", stderr=stderr)
 
 
+<<<<<<< HEAD
 def _honour_check(cmd, response, kwargs):
     """Mirror real subprocess.run(check=True): raise on a non-zero return code.
 
@@ -84,6 +88,8 @@ def _honour_check(cmd, response, kwargs):
     return response
 
 
+=======
+>>>>>>> upstream/master
 def _make_run(overrides: Dict[Any, Mock]):
     """Build a subprocess.run side_effect.
 
@@ -102,10 +108,17 @@ def _make_run(overrides: Dict[Any, Mock]):
             str(cwd) if cwd is not None else None,
         )
         if scoped_key in overrides:
+<<<<<<< HEAD
             return _honour_check(cmd, overrides[scoped_key], kwargs)
         key = tuple(cmd)
         if key in overrides:
             return _honour_check(cmd, overrides[key], kwargs)
+=======
+            return overrides[scoped_key]
+        key = tuple(cmd)
+        if key in overrides:
+            return overrides[key]
+>>>>>>> upstream/master
         return _ok(cmd)
 
     return _run
@@ -262,6 +275,7 @@ class TestSyncWithGoldenRepositoryDiagnostics:
 
         overrides = {
             ("git", "fetch", "golden"): _ok(("git", "fetch", "golden")),
+<<<<<<< HEAD
             # EVO-64678: the seam issues `git diff --name-only <spec>`
             # (flag before spec), not upstream's spec-first ordering.
             (
@@ -269,12 +283,20 @@ class TestSyncWithGoldenRepositoryDiagnostics:
                 "diff",
                 "--name-only",
                 "HEAD..golden/master",
+=======
+            (
+                "git",
+                "diff",
+                "HEAD..golden/master",
+                "--name-only",
+>>>>>>> upstream/master
             ): _ok((), stdout="some_file.py\n"),
             ("git", "merge", "golden/master"): _fail_stdout_only(
                 ("git", "merge", "golden/master")
             ),
         }
 
+<<<<<<< HEAD
         # EVO-64678: these commands now reach git through the seam
         # (LocalGitBackend -> run_git_command), so the fake must cover
         # git_runner's subprocess too, not just this module's.
@@ -283,6 +305,9 @@ class TestSyncWithGoldenRepositoryDiagnostics:
             patch(f"{_MODULE}.subprocess.run", side_effect=_run),
             patch("code_indexer.utils.git_runner.subprocess.run", side_effect=_run),
         ):
+=======
+        with patch(f"{_MODULE}.subprocess.run", side_effect=_make_run(overrides)):
+>>>>>>> upstream/master
             with pytest.raises(GitOperationError) as exc_info:
                 manager.sync_with_golden_repository(username, user_alias)
 
@@ -530,6 +555,7 @@ class TestCloneWithCopyOnWriteAdditionalDiagnostics:
         m._clone_backend.create_clone_at_path.side_effect = _fake_create_clone
 
         overrides = {
+<<<<<<< HEAD
             # EVO-64678: the seam's config_set() writes the repo-local config
             # (git's default location), so there is no explicit --local flag.
             (
@@ -539,6 +565,16 @@ class TestCloneWithCopyOnWriteAdditionalDiagnostics:
                 "minimal",
             ): _fail_stdout_only(
                 ("git", "config", "core.checkStat", "minimal"),
+=======
+            (
+                "git",
+                "config",
+                "--local",
+                "core.checkStat",
+                "minimal",
+            ): _fail_stdout_only(
+                ("git", "config", "--local", "core.checkStat", "minimal"),
+>>>>>>> upstream/master
                 stdout="checkstat diagnostic on stdout",
             ),
             ("git", "update-index", "--refresh"): _fail_stdout_only(
@@ -547,6 +583,7 @@ class TestCloneWithCopyOnWriteAdditionalDiagnostics:
             ),
         }
 
+<<<<<<< HEAD
         # EVO-64678: these commands now reach git through the seam
         # (LocalGitBackend -> run_git_command), so the fake must cover
         # git_runner's subprocess too, not just this module's.
@@ -554,6 +591,10 @@ class TestCloneWithCopyOnWriteAdditionalDiagnostics:
         with (
             patch(f"{_MODULE}.subprocess.run", side_effect=_run),
             patch("code_indexer.utils.git_runner.subprocess.run", side_effect=_run),
+=======
+        with (
+            patch(f"{_MODULE}.subprocess.run", side_effect=_make_run(overrides)),
+>>>>>>> upstream/master
             caplog.at_level(logging.WARNING),
         ):
             result = m._clone_with_copy_on_write(str(source), str(dest))
@@ -570,6 +611,7 @@ class TestCloneWithCopyOnWriteAdditionalDiagnostics:
             if "update-index --refresh failed" in r.message
         ]
         assert checkstat_warnings, f"expected checkstat warning, got: {caplog.records}"
+<<<<<<< HEAD
         assert "checkstat diagnostic on stdout" in checkstat_warnings[0]
 
         # EVO-64678: `git update-index --refresh` goes through the seam with
@@ -579,6 +621,13 @@ class TestCloneWithCopyOnWriteAdditionalDiagnostics:
         # Bug #1836's stdout-diagnostic requirement applies to the sites that
         # DO report a failure, which checkstat above covers.
         assert not update_index_warnings
+=======
+        assert update_index_warnings, (
+            f"expected update-index warning, got: {caplog.records}"
+        )
+        assert "checkstat diagnostic on stdout" in checkstat_warnings[0]
+        assert "update-index diagnostic on stdout" in update_index_warnings[0]
+>>>>>>> upstream/master
 
 
 class TestSetupOriginRemoteForLocalRepoDiagnostics:

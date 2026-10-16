@@ -34,7 +34,7 @@ import json
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .connection_pool import ConnectionPool
 from .pg_utils import sanitize_row
@@ -181,7 +181,10 @@ class OAuthPostgresBackend:
         state: str,
     ) -> str:
         """Generate a one-time PKCE authorization code."""
-        from code_indexer.server.auth.oauth.oauth_manager import OAuthError
+        from code_indexer.server.auth.oauth.oauth_manager import (
+            AUTHORIZATION_CODE_LIFETIME,
+            OAuthError,
+        )
 
         if not code_challenge or code_challenge.strip() == "":
             raise OAuthError("code_challenge required")
@@ -193,7 +196,7 @@ class OAuthPostgresBackend:
             raise OAuthError(f"Invalid redirect_uri: {redirect_uri}")
 
         code = secrets.token_urlsafe(32)
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        expires_at = datetime.now(timezone.utc) + AUTHORIZATION_CODE_LIFETIME
 
         try:
             with self._pool.connection() as conn:
@@ -218,12 +221,18 @@ class OAuthPostgresBackend:
         return code
 
     def exchange_code_for_token(
-        self, code: str, code_verifier: str, client_id: str
+        self,
+        code: str,
+        code_verifier: str,
+        client_id: str,
+        account_check: Optional[Callable[[str, datetime], bool]] = None,
     ) -> Dict[str, Any]:
-        """Exchange a PKCE authorization code for access and refresh tokens."""
+        """Exchange a PKCE authorization code for access and refresh tokens;
+        *account_check* (account name, code issue instant) runs first."""
         from code_indexer.server.auth.oauth.oauth_manager import (
             OAuthError,
             PKCEVerificationError,
+            check_code_account,
         )
 
         token_id = secrets.token_urlsafe(32)
@@ -233,42 +242,59 @@ class OAuthPostgresBackend:
         hard_expires_at = now + timedelta(days=self.HARD_EXPIRATION_DAYS)
 
         try:
+            # 1. Read and validate the code; the connection is released
+            #    before the account check, which takes its own connection.
             with self._pool.connection() as conn:
                 row = conn.execute(
                     "SELECT code, client_id, user_id, code_challenge, expires_at, used FROM oauth_codes WHERE code = %s AND client_id = %s",
                     (code, client_id),
                 ).fetchone()
 
-                if not row:
-                    raise OAuthError("Invalid authorization code")
-                used_val = row[5]
-                if used_val:
+            if not row:
+                raise OAuthError("Invalid authorization code")
+            used_val = row[5]
+            if used_val:
+                raise OAuthError("Authorization code already used")
+            expires_at_dt = datetime.fromisoformat(row[4])
+            if datetime.now(timezone.utc) > expires_at_dt:
+                raise OAuthError("Authorization code expired")
+
+            # PKCE verification
+            stored_challenge = row[3]
+            computed_challenge = (
+                base64.urlsafe_b64encode(
+                    hashlib.sha256(code_verifier.encode()).digest()
+                )
+                .decode()
+                .rstrip("=")
+            )
+            if computed_challenge != stored_challenge:
+                raise PKCEVerificationError("PKCE verification failed")
+
+            # 2. Account check, holding no pooled connection.
+            check_code_account(account_check, row[2], expires_at_dt)
+
+            # 3. Consume the code (only if still unused) and issue the token
+            #    in one transaction; a code consumed meanwhile mints nothing,
+            #    and any raise inside the block rolls the consume back.
+            code_client_id = row[1]
+            with self._pool.connection() as conn:
+                consumed = conn.execute(
+                    "UPDATE oauth_codes SET used = TRUE"
+                    " WHERE code = %s AND client_id = %s AND used = FALSE"
+                    " RETURNING user_id, expires_at",
+                    (code, code_client_id),
+                ).fetchone()
+                if consumed is None:
                     raise OAuthError("Authorization code already used")
-                expires_at_dt = datetime.fromisoformat(row[4])
-                if datetime.now(timezone.utc) > expires_at_dt:
+                code_user_id = consumed[0]
+                # expires_at is a TEXT column holding an ISO-8601 instant.
+                if datetime.now(timezone.utc) > datetime.fromisoformat(consumed[1]):
                     raise OAuthError("Authorization code expired")
-
-                # PKCE verification
-                stored_challenge = row[3]
-                computed_challenge = (
-                    base64.urlsafe_b64encode(
-                        hashlib.sha256(code_verifier.encode()).digest()
-                    )
-                    .decode()
-                    .rstrip("=")
-                )
-                if computed_challenge != stored_challenge:
-                    raise PKCEVerificationError("PKCE verification failed")
-
-                conn.execute(
-                    "UPDATE oauth_codes SET used = TRUE WHERE code = %s", (code,)
-                )
 
                 token_expires_at = now + timedelta(
                     hours=self.ACCESS_TOKEN_LIFETIME_HOURS
                 )
-                code_client_id = row[1]
-                code_user_id = row[2]
 
                 conn.execute(
                     """INSERT INTO oauth_tokens (token_id, client_id, user_id, access_token, refresh_token,
@@ -373,8 +399,15 @@ class OAuthPostgresBackend:
     def refresh_access_token(
         self, refresh_token: str, client_id: str
     ) -> Dict[str, Any]:
-        """Exchange a refresh token for new access and refresh tokens."""
-        from code_indexer.server.auth.oauth.oauth_manager import OAuthError
+        """Exchange a refresh token for new access and refresh tokens.
+
+        The token is redeemable only by the client it was issued to (RFC 6749
+        section 6); any other client gets ``invalid_grant`` and the token
+        stays valid for its own client."""
+        from code_indexer.server.auth.oauth.oauth_manager import (
+            AuthorizationGrantRefused,
+            OAuthError,
+        )
 
         new_access_token = secrets.token_urlsafe(48)
         new_refresh_token = secrets.token_urlsafe(48)
@@ -383,25 +416,32 @@ class OAuthPostgresBackend:
 
         try:
             with self._pool.connection() as conn:
+                # One conditional statement rotates the token: of concurrent
+                # refreshes of the same token exactly one matches the row;
+                # the others match nothing and are refused.  A token past its
+                # hard expiry matches nothing either.  hard_expires_at is ISO
+                # text: cast it, with a naive value read as UTC (SET LOCAL
+                # scopes the zone to this transaction).
+                conn.execute("SET LOCAL TIME ZONE 'UTC'")
                 row = conn.execute(
-                    "SELECT token_id FROM oauth_tokens WHERE refresh_token = %s",
-                    (refresh_token,),
-                ).fetchone()
-                if not row:
-                    raise OAuthError("Invalid refresh token")
-
-                conn.execute(
                     """UPDATE oauth_tokens
                        SET access_token = %s, refresh_token = %s, expires_at = %s, last_activity = %s
-                       WHERE refresh_token = %s""",
+                       WHERE refresh_token = %s AND client_id = %s
+                         AND hard_expires_at::timestamptz > %s::timestamptz
+                       RETURNING token_id""",
                     (
                         new_access_token,
                         new_refresh_token,
                         new_expires_at.isoformat(),
                         now.isoformat(),
                         refresh_token,
+                        client_id,
+                        now.isoformat(),
                     ),
-                )
+                ).fetchone()
+                if not row:
+                    conn.rollback()
+                    raise AuthorizationGrantRefused("Invalid refresh token")
                 conn.commit()
         except OAuthError:
             raise

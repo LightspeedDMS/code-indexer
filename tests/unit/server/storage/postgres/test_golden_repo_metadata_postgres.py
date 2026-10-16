@@ -465,9 +465,12 @@ class TestRemoveRepo:
 
         backend.remove_repo("target")
 
-        sql = mock_cursor.execute.call_args[0][0]
-        assert "DELETE FROM golden_repos_metadata" in sql
-        assert "alias = %s" in sql
+        statements = [c[0][0] for c in mock_cursor.execute.call_args_list]
+        assert "DELETE FROM golden_repos_metadata" in statements[0]
+        assert "alias = %s" in statements[0]
+        # Bug #2022: the repo's refresh failure backoff goes in the same
+        # transaction, after the repo row.
+        assert "DELETE FROM refresh_failure_backoff_state" in statements[1]
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +629,27 @@ class TestUpdateRepoUrl:
         assert "repo_url" in sql
         assert params[0] == "https://new.url/repo.git"
         assert params[1] == "my-alias"
+
+    def test_update_repo_url_stores_url_as_given_and_logs_it_redacted(
+        self, caplog
+    ) -> None:
+        """The stored URL keeps its userinfo; the log carries it redacted."""
+        import logging
+
+        from code_indexer.server.storage.postgres.golden_repo_metadata_backend import (
+            GoldenRepoMetadataPostgresBackend,
+        )
+
+        url = "https://example-user:example-token-123@git.example.com/o/r.git"
+        mock_pool, _, mock_cursor = _make_mock_pool(rowcount=1)
+        backend = GoldenRepoMetadataPostgresBackend(mock_pool)
+
+        with caplog.at_level(logging.INFO):
+            assert backend.update_repo_url("my-alias", url) is True
+
+        assert mock_cursor.execute.call_args[0][1][0] == url
+        assert "https://***@git.example.com/o/r.git" in caplog.text
+        assert "example-token-123" not in caplog.text
 
     def test_update_repo_url_returns_true_when_updated(self) -> None:
         from code_indexer.server.storage.postgres.golden_repo_metadata_backend import (

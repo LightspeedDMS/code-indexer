@@ -340,7 +340,11 @@ def bootstrap_cidx_meta(
                 logger.error(
                     format_error_log(
                         "APP-GENERAL-004",
+<<<<<<< HEAD
                         f"Failed to initialize cidx-meta: {redact_url_credentials(e.stderr if e.stderr else str(e))}",
+=======
+                        f"Failed to initialize cidx-meta: {e.stderr if e.stderr else str(e)}",
+>>>>>>> upstream/master
                     )
                 )
                 # Continue with registration even if init fails - don't break server startup

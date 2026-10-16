@@ -34,9 +34,13 @@ from code_indexer.server.services.ci_token_manager import (
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 from code_indexer.server.storage.json_column import parse_json_column
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
+<<<<<<< HEAD
 import logging
 
 logger = logging.getLogger(__name__)
+=======
+from code_indexer.utils.credential_redaction import mask_stored_secret
+>>>>>>> upstream/master
 
 if TYPE_CHECKING:
     from code_indexer.server.storage.protocols import DiagnosticsBackend
@@ -49,6 +53,10 @@ API_TIMEOUT_SECONDS = 30.0
 
 # Timeout for SSH connectivity checks (seconds) - Story S5 AC6
 SSH_TIMEOUT_SECONDS = 60.0
+
+# Retired result detail keys: dropped whenever persisted results are rebuilt,
+# never served.
+_RETIRED_SECRET_DETAIL_KEYS = frozenset({"token_prefix"})
 
 # Cache TTL by category (per epic spec)
 DEFAULT_CACHE_TTL = timedelta(minutes=10)  # General diagnostics
@@ -848,14 +856,28 @@ class DiagnosticsService:
         """Rebuild DiagnosticResult objects from persisted result dicts.
 
         Shared by _load_results_from_db and _read_category_from_db (Bug
+<<<<<<< HEAD
         #1653) so the two call sites can't drift.
+=======
+        #1653) so the two call sites can't drift. Detail keys in
+        _RETIRED_SECRET_DETAIL_KEYS are dropped; the row itself is replaced
+        on the category's next run.
+>>>>>>> upstream/master
         """
         return [
             DiagnosticResult(
                 name=result_dict["name"],
                 status=DiagnosticStatus(result_dict["status"]),
                 message=result_dict["message"],
+<<<<<<< HEAD
                 details=result_dict.get("details", {}),
+=======
+                details={
+                    key: value
+                    for key, value in (result_dict.get("details") or {}).items()
+                    if key not in _RETIRED_SECRET_DETAIL_KEYS
+                },
+>>>>>>> upstream/master
                 timestamp=datetime.fromisoformat(result_dict["timestamp"]),
             )
             for result_dict in results_data
@@ -2086,11 +2108,7 @@ class DiagnosticsService:
                     name="GitHub Token",
                     status=DiagnosticStatus.WARNING,
                     message="GitHub token has invalid format (expected ghp_* or github_pat_*)",
-                    details={
-                        "token_prefix": (
-                            token_data.token[:10] if len(token_data.token) >= 10 else ""
-                        )
-                    },
+                    details={"masked_token": mask_stored_secret(token_data.token)},
                 )
 
             # Test API call with timeout (AC7: 30 seconds)
@@ -2163,11 +2181,7 @@ class DiagnosticsService:
                     name="GitLab Token",
                     status=DiagnosticStatus.WARNING,
                     message="GitLab token has invalid format (expected glpat-*)",
-                    details={
-                        "token_prefix": (
-                            token_data.token[:10] if len(token_data.token) >= 10 else ""
-                        )
-                    },
+                    details={"masked_token": mask_stored_secret(token_data.token)},
                 )
 
             # Build API URL from base_url

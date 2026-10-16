@@ -38,10 +38,18 @@ def _victim_searchable(indexer, collection_name: str, victim_content: str) -> bo
 
 
 def test_resume_interrupted_reprocesses_self_heal_wipe_same_run(tmp_path):
+<<<<<<< HEAD
     """Trigger site: `upsert_points` during `_do_resume_interrupted`.
     The reviewer flags this as the MOST likely real-world trigger, since
     an interrupted run is itself a primary way `id_index.bin` gets
     corrupted in the first place."""
+=======
+    """Trigger site: the recovery of an interrupted run (Story #2121: the
+    store-derived reconcile; resume-from-list is retired). The reviewer
+    flags this as the MOST likely real-world trigger, since an interrupted
+    run is itself a primary way `id_index.bin` gets corrupted in the first
+    place."""
+>>>>>>> upstream/master
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_repo(repo)
@@ -64,6 +72,7 @@ def test_resume_interrupted_reprocesses_self_heal_wipe_same_run(tmp_path):
     _corrupt_id_index_bin(collection_path)
 
     # Simulate an interrupted run: a prior process died mid-index,
+<<<<<<< HEAD
     # leaving progressive_metadata in "in_progress" with remaining work.
     pm = indexer1.progressive_metadata
     pm.metadata["status"] = "in_progress"
@@ -74,6 +83,15 @@ def test_resume_interrupted_reprocesses_self_heal_wipe_same_run(tmp_path):
 
     indexer2 = _make_smart_indexer(repo, metadata_path)
     assert indexer2.progressive_metadata.can_resume_interrupted_operation()
+=======
+    # leaving progressive_metadata in "in_progress".
+    pm = indexer1.progressive_metadata
+    pm.metadata["status"] = "in_progress"
+    pm._save_metadata()
+
+    indexer2 = _make_smart_indexer(repo, metadata_path)
+    assert indexer2.progressive_metadata.metadata["status"] == "in_progress"
+>>>>>>> upstream/master
     indexer2.smart_index(safety_buffer_seconds=0)
 
     assert read_pending_self_heal_reprocess_paths(collection_path) == frozenset()

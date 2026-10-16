@@ -28,7 +28,10 @@ from code_indexer.server.services.agent_cli_isolation import (
     try_build_mcp_config_file,
 )
 from code_indexer.server.services.config_service import get_config_service
+<<<<<<< HEAD
 from code_indexer.server.services.delegated_refusal import refuse_when_delegated
+=======
+>>>>>>> upstream/master
 
 if TYPE_CHECKING:
     from code_indexer.server.services.claude_cli_manager import ClaudeCliManager

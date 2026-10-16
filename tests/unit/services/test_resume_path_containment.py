@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 """Indexer resume-state trust and containment.
 
 Every stored ``files_to_index`` candidate on the resume
@@ -15,15 +16,38 @@ assert the out-of-tree/ineligible candidate never reaches
 chunking/embedding/FTS. Only that boundary method is patched (to avoid
 real network calls to the embedding provider and real chunk-store I/O);
 everything upstream of it (ProgressiveMetadata, SmartIndexer's real resume
+=======
+"""Indexer stored-path trust and containment (failed-file retry).
+
+Story #2121 retired resume-from-list; the one remaining stored path list is
+``failed_file_paths`` (files the previous run could not index, retried by
+the next run). Every stored candidate must be resolved (collapse ``..``,
+follow symlinks) and REJECTED unless it lands strictly inside the resolved
+``codebase_dir``, applying the same eligibility filters (extensions,
+excludes) a fresh FileFinder walk would apply. Rejected entries are dropped
+rather than aborting the run.
+
+These tests drive the REAL ``SmartIndexer._merge_recorded_failures()`` (via
+a planted ``ProgressiveMetadata``, exactly as a repository-authored
+``.code-indexer/metadata-<provider>.json`` would look) and assert the
+out-of-tree/ineligible candidate is never retried, i.e. never reaches
+processing. Everything (ProgressiveMetadata, SmartIndexer's real retry
+>>>>>>> upstream/master
 logic, FileFinder) is real.
 """
 
 from __future__ import annotations
 
+<<<<<<< HEAD
 import logging
 import subprocess
 from pathlib import Path
 from typing import Dict, List
+=======
+import subprocess
+from pathlib import Path
+from typing import List
+>>>>>>> upstream/master
 from unittest.mock import MagicMock, patch
 
 from code_indexer.config import Config
@@ -89,6 +113,7 @@ def _mock_vector_store() -> MagicMock:
 
 def _seed_resumable_metadata(indexer: SmartIndexer, files_to_index: List[str]) -> None:
     """Plant metadata exactly as a repository-authored
+<<<<<<< HEAD
     .code-indexer/metadata-<provider>.json would: an "in_progress" resume
     state with repository-controlled files_to_index and no files processed
     yet, so can_resume_interrupted_operation() is satisfied."""
@@ -99,11 +124,19 @@ def _seed_resumable_metadata(indexer: SmartIndexer, files_to_index: List[str]) -
     md["current_file_index"] = 0
     md["completed_files"] = []
     md["failed_file_paths"] = []
+=======
+    .code-indexer/metadata-<provider>.json would: a completed run whose
+    repository-controlled failed_file_paths are retried by the next run."""
+    md = indexer.progressive_metadata.metadata
+    md["status"] = "completed"
+    md["failed_file_paths"] = list(files_to_index)
+>>>>>>> upstream/master
     md["files_processed"] = 0
     md["chunks_indexed"] = 0
 
 
 def _run_resume_and_capture(indexer: SmartIndexer) -> List[Path]:
+<<<<<<< HEAD
     """Drive the REAL resume path, capturing exactly the file list that
     would be handed to chunking/embedding (process_files_high_throughput),
     without invoking real chunking/embedding/FTS I/O."""
@@ -125,6 +158,12 @@ def _run_resume_and_capture(indexer: SmartIndexer) -> List[Path]:
         )
 
     return captured.get("files", [])
+=======
+    """Drive the REAL failed-file retry merge and return exactly the files
+    it would hand to processing (chunking/embedding/FTS)."""
+    retried, _merged = indexer._merge_recorded_failures([])
+    return retried
+>>>>>>> upstream/master
 
 
 def _assert_eligible_if_it_were_in_tree(
@@ -327,6 +366,7 @@ class TestResumePathTraversalContainment:
             f"the same way a fresh walk would reject it. Processed files: {processed_files}"
         )
 
+<<<<<<< HEAD
     def test_dropped_entries_log_warning_with_count_not_content(
         self, tmp_path: Path, caplog
     ) -> None:
@@ -334,13 +374,28 @@ class TestResumePathTraversalContainment:
         naming the COUNT of dropped entries, never the path/content. Uses
         an ELIGIBLE (.py) out-of-tree target so the drop is attributable
         to containment, not eligibility filtering."""
+=======
+    def test_dropped_failed_entries_log_warning_with_count_not_content(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        """Rejected recorded failed paths are logged at WARNING naming the
+        COUNT of dropped entries, never the path/content. Uses an ELIGIBLE
+        (.py) out-of-tree target so the drop is attributable to containment,
+        not eligibility filtering."""
+        import logging
+
+>>>>>>> upstream/master
         repo = tmp_path / "repo"
         repo.mkdir()
         _create_git_repo(repo)
 
         (repo / "legit.py").write_text("# legit\n")
         outside_marker = tmp_path / "outside_marker.py"
+<<<<<<< HEAD
         outside_marker_content = "# MARKER_RESUME_LOG_OUTSIDE_TREE\n"
+=======
+        outside_marker_content = "# MARKER_FAILED_LIST_LOG_OUTSIDE_TREE\n"
+>>>>>>> upstream/master
         outside_marker.write_text(outside_marker_content)
 
         indexer = _make_indexer(repo, tmp_path, _mock_vector_store())
@@ -352,6 +407,7 @@ class TestResumePathTraversalContainment:
         with caplog.at_level(logging.WARNING):
             _run_resume_and_capture(indexer)
 
+<<<<<<< HEAD
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         expected_message = (
             "Resume metadata contained 1 file path candidate(s) that are "
@@ -369,6 +425,18 @@ class TestResumePathTraversalContainment:
                 "The WARNING must name the count, not the path/content of "
                 f"the dropped entry. Got: {message}"
             )
+=======
+        messages = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        expected = (
+            "Recorded failed-file list contained 1 path candidate(s) that are "
+            "outside the codebase root or ineligible for indexing; dropping them."
+        )
+        assert expected in messages, messages
+        for message in messages:
+            assert "outside_marker" not in message, message
+>>>>>>> upstream/master
 
 
 class TestResumeContainmentDiscriminationProof:

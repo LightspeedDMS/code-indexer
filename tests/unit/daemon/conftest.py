@@ -138,6 +138,9 @@ class FakeEmbeddingProvider(EmbeddingProvider):
         """Check if provider supports efficient batch processing."""
         return True
 
+    def request_max_retries(self) -> int:
+        return 0
+
     def _get_model_token_limit(self) -> int:
         """Get token limit for current model.
 

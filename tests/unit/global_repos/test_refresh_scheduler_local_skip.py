@@ -93,6 +93,10 @@ class TestRefreshSchedulerLocalRepoSkip:
             str(local_repo_dir),
             allow_reserved=True,
         )
+        # A local repo with a past next_refresh (as one registered before
+        # local repos were excluded carries) IS returned as due: only the
+        # loop's per-repo skip keeps it from being submitted.
+        registry.update_next_refresh("cidx-meta-global", 1.0)
 
         remote_repo_dir = golden_repos_dir / "test-repo"
         remote_repo_dir.mkdir()
@@ -104,26 +108,36 @@ class TestRefreshSchedulerLocalRepoSkip:
             str(remote_repo_dir),
         )
 
+        from tests.fixtures.refresh_scheduler_stores import real_metadata_store
+
         scheduler = RefreshScheduler(
             golden_repos_dir=str(golden_repos_dir),
             config_source=config_mgr,
             query_tracker=query_tracker,
             cleanup_manager=cleanup_manager,
             registry=registry,
+            golden_repo_metadata_backend=real_metadata_store(
+                golden_repos_dir.parent / "server-data"
+            ),
         )
 
-        submitted = []
+        submitted: list = []
 
-        def capture_and_stop(alias_name):
-            submitted.append(alias_name)
-            # Stop after submitting the remote repo (only one submission expected)
+        def stop_after_one_iteration(timeout=None):
+            # Stop at the poll wait: the whole iteration ran, so EVERY due
+            # repo was examined (stopping on the first submission would skip
+            # the local repo whenever the remote one came first).
             scheduler._running = False
+            return True
 
         with (
             patch.object(
-                scheduler, "_submit_refresh_job", side_effect=capture_and_stop
+                scheduler, "_submit_refresh_job", side_effect=submitted.append
             ),
             patch.object(scheduler, "get_refresh_interval", return_value=0),
+            patch.object(
+                scheduler._stop_event, "wait", side_effect=stop_after_one_iteration
+            ),
         ):
             scheduler._running = True
             scheduler._scheduler_loop()

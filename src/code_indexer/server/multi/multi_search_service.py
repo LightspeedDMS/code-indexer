@@ -20,15 +20,42 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Callable, Dict, List, Any, Optional
 
 from .multi_search_config import MultiSearchConfig
 from .multi_result_aggregator import MultiResultAggregator
+<<<<<<< HEAD
 from .models import MultiSearchRequest, MultiSearchResponse, MultiSearchMetadata
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
+=======
+from .models import (
+    InternalMultiSearchRequest,
+    MultiSearchMetadata,
+    MultiSearchRequest,
+    MultiSearchResponse,
+    UnresolvedRepositoryError,
+)
+from ..models.api_models import MAX_CANDIDATE_LIMIT
+from ..query.filtered_search import (
+    SearchBudgetExhausted,
+    extension_budget_spent,
+    filtered_semantic_search,
+    fts_filter_kwargs,
+)
+from code_indexer.server.logging_utils import format_error_log, public_error_message
+>>>>>>> upstream/master
 
 logger = logging.getLogger(__name__)
+
+
+def _extension_deadline_of(request: MultiSearchRequest) -> Optional[float]:
+    """#2047: the server-computed request deadline. Only search() builds an
+    InternalMultiSearchRequest; any other request has no budget."""
+    if isinstance(request, InternalMultiSearchRequest):
+        return request.extension_deadline
+    return None
+
 
 # Constants for timeout recommendations
 MAX_RECOMMENDED_REPOS = 10
@@ -143,6 +170,19 @@ class MultiSearchService:
         shard_ownership = getattr(self, "_shard_ownership", None)
         return shard_ownership is not None and shard_ownership.owns(repo_id)
 
+<<<<<<< HEAD
+=======
+    def _per_repo_limit(self, request: MultiSearchRequest) -> int:
+        """Per-repository retrieval limit for every omni search path.
+
+        Bounded by the request limit, the operator per-repo setting
+        (omni_max_results_per_repo, UI range up to 10000) AND the internal
+        candidate cap, so a raised setting can never fan out thousands of
+        results per repository.
+        """
+        return min(request.limit, self.config.max_results_per_repo, MAX_CANDIDATE_LIMIT)
+
+>>>>>>> upstream/master
     def search(self, request: MultiSearchRequest) -> MultiSearchResponse:
         """
         Execute search across multiple repositories.
@@ -157,6 +197,20 @@ class MultiSearchService:
             MultiSearchResponse with results grouped by repository and metadata
         """
         start_time = time.time()
+
+        # #2047: ONE time budget for the whole request, computed HERE by the
+        # server (the public request has no such field, so a client value can
+        # never be used) and shared by every repository searched below. The
+        # validated request is copied field by field from its own type: a
+        # public request carries no internal fields; the server's own
+        # InternalMultiSearchRequest (MCP omni) keeps its query vector.
+        from ..query.filtered_search import extension_overfetch_deadline
+
+        fields = {name: getattr(request, name) for name in type(request).model_fields}
+        fields["extension_deadline"] = extension_overfetch_deadline(
+            request.file_extensions
+        )
+        request = InternalMultiSearchRequest.model_construct(**fields)
 
         # Route to appropriate search strategy
         if request.search_type == "regex":
@@ -236,9 +290,16 @@ class MultiSearchService:
         for repo_id in request.repositories:
             _ctx = contextvars.copy_context()
             future = self.thread_executor.submit(
-                _ctx.run, search_func, repo_id, request
+                _ctx.run, self._start_unless_budget_spent, search_func, repo_id, request
             )
             future_to_repo[future] = repo_id
+
+        from ..services.search_event_context import note_current_repositories
+        from ..services.search_event_outcomes import repository_resolved
+
+        # Story #2117: repositories that resolved and then failed (an alias
+        # that never resolved is a rejection and is not counted).
+        failed: List[str] = []
 
         # Collect results as they complete
         for future in as_completed(future_to_repo):
@@ -250,9 +311,15 @@ class MultiSearchService:
                     repo_results[repo_id] = result
                 else:
                     repo_results[repo_id] = []
+            except SearchBudgetExhausted as e:
+                # #2047: reported per repository, never silently dropped.
+                errors[repo_id] = str(e)
+                failed.append(repo_id)
+                logger.info("multi_search: %s", e)
             except TimeoutError:
                 error_msg = self._format_timeout_error(request, [repo_id])
                 errors[repo_id] = error_msg
+                failed.append(repo_id)
                 logger.warning(
                     format_error_log(
                         "REPO-GENERAL-023",
@@ -260,12 +327,28 @@ class MultiSearchService:
                     )
                 )
             except Exception as e:
-                errors[repo_id] = f"Search failed: {str(e)}"
+                # One client-error rule: only a client error keeps its text;
+                # any other failure answers a fixed message and its detail
+                # (which can name on-disk paths) goes to the server log only.
+                from ..query.search_error_policy import classify_search_error
+
+                errors[repo_id] = (
+                    public_error_message("Repository or index not found")
+                    if isinstance(e, FileNotFoundError)
+                    else classify_search_error(e).message
+                )
+                if repository_resolved(e):
+                    failed.append(repo_id)
                 logger.error(
                     format_error_log(
                         "REPO-GENERAL-024", f"Search error for repo {repo_id}: {e}"
-                    )
+                    ),
+                    exc_info=True,
                 )
+
+        # Bug #2111 / Story #2117: the request's search event rows are one
+        # per repository that resolved (searched, or failed after resolving).
+        note_current_repositories(searched=list(repo_results), failed=failed)
 
         # Aggregate results with optional score filtering
         aggregator = MultiResultAggregator(
@@ -289,6 +372,28 @@ class MultiSearchService:
             errors=errors if errors else None,
         )
 
+    def _start_unless_budget_spent(
+        self,
+        search_func: Callable[[str, MultiSearchRequest], List[Dict[str, Any]]],
+        repo_id: str,
+        request: MultiSearchRequest,
+    ) -> List[Dict[str, Any]]:
+        """#2047: run one queued repository's search unless the request's
+        shared time budget ran out before this task started (the pool runs
+        at most max_workers searches at once, so later repositories start
+        late). A search already running is never interrupted."""
+        if extension_budget_spent(_extension_deadline_of(request)):
+            raise SearchBudgetExhausted(
+                "Not searched: the request's search time budget ran out "
+                f"before repository {repo_id} could start"
+            )
+        from ..services.search_event_context import searching_repository
+
+        # Bug #2111: this worker runs in its own copied context; the cache
+        # lookups its search makes are kept for repo_id's row.
+        with searching_repository(repo_id):
+            return search_func(repo_id, request)
+
     def _search_single_repo_sync(
         self, repo_id: str, request: MultiSearchRequest
     ) -> List[Dict[str, Any]]:
@@ -306,7 +411,7 @@ class MultiSearchService:
             List of search results for this repository
 
         Raises:
-            ValueError: If search type is not supported
+            SearchRequestError: If search type is not supported
             Exception: If search fails
         """
         search_type = request.search_type
@@ -318,7 +423,9 @@ class MultiSearchService:
         elif search_type == "temporal":
             return self._search_temporal_sync(repo_id, request)
         else:
-            raise ValueError(f"Unsupported search type: {search_type}")
+            from ..query.semantic_query_manager import SearchRequestError
+
+            raise SearchRequestError(f"Unsupported search type: {search_type}")
 
     def _search_semantic_sync(
         self, repo_id: str, request: MultiSearchRequest
@@ -338,23 +445,9 @@ class MultiSearchService:
         """
         # Import here to avoid circular dependency
         from ..services.search_service import SemanticSearchService
-        from ..models.api_models import SemanticSearchRequest
 
         # Create search service
         search_service = SemanticSearchService()
-
-        # Create single-repo search request
-        single_repo_request = SemanticSearchRequest(
-            query=request.query,
-            limit=min(request.limit, self.config.max_results_per_repo),
-            include_source=True,  # Must be True to return content in results
-            language=request.language,
-            path_filter=request.path_filter,
-            exclude_language=request.exclude_language,
-            exclude_path=request.exclude_path,
-            accuracy=request.accuracy,
-            no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
-        )
 
         # Execute search using path resolved via GlobalRegistry (Story #43)
         # Use self._get_repository_path() for consistent path resolution
@@ -374,10 +467,14 @@ class MultiSearchService:
             # search results ("Query is everything").  Repos with a different digest
             # receive None and embed via their own chokepoint with the correct config.
             effective_precomputed: Optional[List[float]] = None
-            if (
-                request.precomputed_query_vector is not None
-                and request.precomputed_query_vector_digest
-            ):
+            # Query vectors are computed by the server: only the server-built
+            # InternalMultiSearchRequest carries one.
+            server_vector: Optional[List[float]] = None
+            server_digest: Optional[str] = None
+            if isinstance(request, InternalMultiSearchRequest):
+                server_vector = request.precomputed_query_vector
+                server_digest = request.precomputed_query_vector_digest
+            if server_vector is not None and server_digest:
                 try:
                     from code_indexer.server.services.search_service import (
                         EmbeddingProviderFactory,
@@ -395,14 +492,14 @@ class MultiSearchService:
                         http_client_factory=_get_http_client_factory(),
                     )
                     repo_digest = _digest_for_provider(repo_embedding_service)
-                    precomp_digest = request.precomputed_query_vector_digest
+                    precomp_digest = server_digest
                     allow_reuse = (
                         not is_fallback_digest(precomp_digest)
                         and not is_fallback_digest(repo_digest)
                         and repo_digest == precomp_digest
                     )
                     if allow_reuse:
-                        effective_precomputed = request.precomputed_query_vector
+                        effective_precomputed = server_vector
                     else:
                         logger.debug(
                             "multi_search: repo %s digest %s differs/sentinel — "
@@ -422,6 +519,7 @@ class MultiSearchService:
                         _dex,
                     )
 
+<<<<<<< HEAD
             response = search_service.search_repository_path(
                 repo_path,
                 single_repo_request,
@@ -430,12 +528,36 @@ class MultiSearchService:
                 hnsw_cache=(
                     self.hnsw_index_cache if self._owns_for_cache(repo_id) else None
                 ),
+=======
+            # #2047: the one shared semantic search (filters; file_extensions
+            # pushed into ONE store query, so one index load per repository).
+            # The per-repo limit may include access-filter over-fetch above
+            # the public 100 cap; it is bounded by the operator per-repo
+            # setting AND the candidate cap.
+            search_items = filtered_semantic_search(
+                search_service.search_repository_path,
+                query=request.query,
+                limit=self._per_repo_limit(request),
+                language=request.language,
+                path_filter=request.path_filter,
+                exclude_language=request.exclude_language,
+                exclude_path=request.exclude_path,
+                accuracy=request.accuracy,
+                no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
+                file_extensions=request.file_extensions,
+>>>>>>> upstream/master
                 precomputed_query_vector=effective_precomputed,
+                repo_path=repo_path,
+                # Bug #881: fan-out bypasses the cache by default; under cluster
+                # sharding an OWNED repo warms this pod's (shard-bounded) cache.
+                hnsw_cache=(
+                    self.hnsw_index_cache if self._owns_for_cache(repo_id) else None
+                ),
             )
 
             # Convert response to dict format
             results = []
-            for item in response.results:
+            for item in search_items:
                 result_dict = {
                     "file_path": item.file_path,
                     "line_start": item.line_start,
@@ -492,6 +614,7 @@ class MultiSearchService:
             tantivy_manager = TantivyIndexManager(fts_index_dir)
             tantivy_manager.open_for_search()
 
+<<<<<<< HEAD
             # Convert language filter to list if present
             languages = [request.language] if request.language else None
 
@@ -503,13 +626,23 @@ class MultiSearchService:
             path_filters = parse_exclude_patterns(request.path_filter) or None
 
             # Execute FTS search
+=======
+            # Execute FTS search; the filters come from the one shared builder
+            # (#2047: file_extensions push-down under the request deadline).
+>>>>>>> upstream/master
             fts_results = tantivy_manager.search(
                 query_text=request.query,
-                limit=min(request.limit, self.config.max_results_per_repo),
-                languages=languages,
-                path_filters=path_filters,
+                limit=self._per_repo_limit(request),
                 use_regex=False,
                 snippet_lines=3,
+                **fts_filter_kwargs(
+                    language=request.language,
+                    path_filter=request.path_filter,
+                    exclude_language=request.exclude_language,
+                    exclude_path=request.exclude_path,
+                    file_extensions=request.file_extensions,
+                    deadline=_extension_deadline_of(request),
+                ),
             )
 
             # Convert FTS results to standardized format
@@ -597,6 +730,10 @@ class MultiSearchService:
             # the store is what actually performs the search.
             from ...services.temporal.temporal_server_paths import (
                 resolve_golden_repo_coordinates,
+<<<<<<< HEAD
+=======
+                server_temporal_index_root,
+>>>>>>> upstream/master
             )
 
             # Prefer deriving golden_repos_dir STRUCTURALLY from the repo path
@@ -611,10 +748,14 @@ class MultiSearchService:
                 if _coordinates is not None
                 else PathLib(_get_golden_repos_dir())
             )
+<<<<<<< HEAD
             # Delegated IndexStore: this pod holds the recorded temporal version.
             from ..services.temporal_index_store import served_temporal_index_root
 
             index_dir = served_temporal_index_root(_golden_repos_dir, repo_id)
+=======
+            index_dir = server_temporal_index_root(_golden_repos_dir, repo_id)
+>>>>>>> upstream/master
             id_index_cache = None
             if self.hnsw_index_cache is not None:
                 from ...server.cache.id_index_cache import get_global_id_index_cache
@@ -641,7 +782,7 @@ class MultiSearchService:
                 index_path=index_dir,
                 vector_store=vector_store_client,
                 query_text=request.query,
-                limit=min(request.limit, self.config.max_results_per_repo),
+                limit=self._per_repo_limit(request),
                 language=request.language,
                 file_path_filter=request.path_filter,
                 # Story #1108 (S4): forward per-request cache bypass flag
@@ -718,7 +859,7 @@ class MultiSearchService:
                 request.query,
                 "--quiet",
                 "--limit",
-                str(min(request.limit, self.config.max_results_per_repo)),
+                str(self._per_repo_limit(request)),
                 "--fts",
                 "--regex",
             ]
@@ -841,8 +982,10 @@ class MultiSearchService:
             raise RuntimeError("backend_registry not initialized on app.state")
         repo_entry = backend_registry.global_repos.get_repo(repo_id)
 
+        # Story #2117: an alias that does not resolve is a rejection, not a
+        # failed search (UnresolvedRepositoryError is a FileNotFoundError).
         if not repo_entry:
-            raise FileNotFoundError(
+            raise UnresolvedRepositoryError(
                 f"Repository '{repo_id}' not found in global repositories"
             )
 
@@ -855,13 +998,13 @@ class MultiSearchService:
         )
 
         if not target_path:
-            raise FileNotFoundError(
+            raise UnresolvedRepositoryError(
                 f"Alias for global repository '{repo_id}' not found"
             )
 
         # Verify the path exists
         if not Path(target_path).exists():
-            raise FileNotFoundError(
+            raise UnresolvedRepositoryError(
                 f"Repository path for '{repo_id}' does not exist: {target_path}"
             )
 

@@ -55,6 +55,16 @@ from code_indexer.server.services.audit_events import AUDIT_ACTION_CATALOG
 _PROBE = Path(__file__).with_name("_audit_route_table_probe.py")
 _SRC_ROOT = Path(code_indexer.__file__).resolve().parent.parent
 
+<<<<<<< HEAD
+=======
+# Budget for the fresh-interpreter route-table probe behind `route_entries`.
+# The module fixture's setup is charged to whichever test requests it first,
+# so every test requesting `route_entries` carries _ROUTE_PROBE_TIMEOUT: the
+# suite's default 15 s pytest-timeout must not fire before this budget.
+_ROUTE_PROBE_TIMEOUT_SECONDS = 300
+_ROUTE_PROBE_TIMEOUT = pytest.mark.timeout(_ROUTE_PROBE_TIMEOUT_SECONDS + 15)
+
+>>>>>>> upstream/master
 _ADMIN_PERMISSIONS = frozenset(
     {"manage_users", "manage_golden_repos", "repository:admin", "public"}
 )
@@ -123,6 +133,12 @@ _ENTRY_POINTS: Dict[str, FrozenSet[str]] = {
             "update_totp_elevation_audited",
             "reset_to_defaults_audited",
             "set_config",
+<<<<<<< HEAD
+=======
+            # SIEM trusted CA (one apply_audited_change each)
+            "set_trusted_ca",
+            "remove_trusted_ca",
+>>>>>>> upstream/master
         },
         "git_settings_changed": {"apply_git_settings_change"},
         "provider_api_key_set": {"apply_audited_change"},
@@ -134,6 +150,19 @@ _ENTRY_POINTS: Dict[str, FrozenSet[str]] = {
         "server_restart_requested": {"request_server_restart"},
         "user_repo_activated_by_admin": {"activate_repository_for_user"},
         "user_repo_deactivated_by_admin": {"deactivate_repository_for_user"},
+<<<<<<< HEAD
+=======
+        # SIEM delivery self-reports (audited in the shared admin service).
+        "siem_canary_sent": {"run_canary"},
+        "siem_canary_visibility_confirmed": {"confirm_visible"},
+        "siem_quarantine_requeued": {"requeue_quarantined", "record_requeue_event"},
+        "siem_delivery_resumed": {"resume"},
+        "siem_batch_acknowledged": {"acknowledge_batch"},
+        "siem_batch_rebatched": {"rebatch_batch"},
+        "siem_destination_retargeted": {"retarget_destination"},
+        "siem_destination_abandoned": {"abandon_destination"},
+        "siem_credential_changed": {"set_credential", "remove_credential"},
+>>>>>>> upstream/master
         # Legacy types whose rows now come from one audited entry point.
         "user_group_change": {"assign_user_to_group_audited"},
         "repo_access_revoke": {
@@ -264,8 +293,13 @@ _SELF_AUTHENTICATING_ROUTES: Dict[str, Tuple[str, ...]] = {
     "POST /auth/elevate-ajax": _ELEVATION,
     "POST /admin/mfa/verify": ("mfa_activated",),
     "POST /user/mfa/verify": ("mfa_activated",),
+<<<<<<< HEAD
     "GET /admin/mfa/recovery-codes": ("mfa_recovery_codes_regenerated",),
     "GET /user/mfa/recovery-codes": ("mfa_recovery_codes_regenerated",),
+=======
+    "POST /admin/mfa/recovery-codes": ("mfa_recovery_codes_regenerated",),
+    "POST /user/mfa/recovery-codes": ("mfa_recovery_codes_regenerated",),
+>>>>>>> upstream/master
     "POST /user/mfa/disable": ("mfa_disabled",),
     "GET /admin/mfa/setup": ("mfa_secret_regenerated_cross_user",),
     "PUT /api/users/change-password": (
@@ -361,9 +395,55 @@ _ROUTE_MAPPED: Dict[str, Tuple[str, ...]] = {
     "POST /admin/config/reset": _CONFIG,
     "POST /admin/config/langfuse_pull": _CONFIG,
     "POST /admin/config/cidx_meta_backup": _CONFIG,
+<<<<<<< HEAD
     "POST /admin/self-monitoring": _CONFIG,
     "POST /admin/config/api-keys/{platform}": ("ci_token_set",),
     "DELETE /admin/config/api-keys/{platform}": ("ci_token_deleted",),
+=======
+    "POST /admin/config/siem_delivery/trusted_ca": _CONFIG,
+    "POST /admin/config/siem_delivery/trusted_ca/remove": _CONFIG,
+    "POST /admin/config/siem_delivery/credential": ("siem_credential_changed",),
+    "POST /admin/config/siem_delivery/credential/remove": ("siem_credential_changed",),
+    "POST /admin/self-monitoring": _CONFIG,
+    "POST /admin/config/api-keys/{platform}": ("ci_token_set",),
+    "DELETE /admin/config/api-keys/{platform}": ("ci_token_deleted",),
+    # SIEM delivery admin actions
+    "POST /api/admin/siem-delivery/canary": ("siem_canary_sent",),
+    "POST /api/admin/siem-delivery/canary/confirm-visible": (
+        "siem_canary_visibility_confirmed",
+    ),
+    "POST /api/admin/siem-delivery/resume": ("siem_delivery_resumed",),
+    "POST /api/admin/siem-delivery/quarantine/requeue": ("siem_quarantine_requeued",),
+    "POST /api/admin/siem-delivery/batches/{batch_id}/acknowledge": (
+        "siem_batch_acknowledged",
+    ),
+    "POST /api/admin/siem-delivery/batches/{batch_id}/rebatch": (
+        "siem_batch_rebatched",
+    ),
+    "POST /api/admin/siem-delivery/destinations/{destination_key}/retarget": (
+        "siem_destination_retargeted",
+    ),
+    "POST /api/admin/siem-delivery/destinations/{destination_key}/abandon": (
+        "siem_destination_abandoned",
+    ),
+    # The same SIEM actions through the Web UI (same shared service, same types)
+    "POST /admin/siem-delivery/canary": ("siem_canary_sent",),
+    "POST /admin/siem-delivery/canary/confirm-visible": (
+        "siem_canary_visibility_confirmed",
+    ),
+    "POST /admin/siem-delivery/resume": ("siem_delivery_resumed",),
+    "POST /admin/siem-delivery/quarantine/requeue": ("siem_quarantine_requeued",),
+    "POST /admin/siem-delivery/batches/{batch_id}/acknowledge": (
+        "siem_batch_acknowledged",
+    ),
+    "POST /admin/siem-delivery/batches/{batch_id}/rebatch": ("siem_batch_rebatched",),
+    "POST /admin/siem-delivery/destinations/{destination_key}/retarget": (
+        "siem_destination_retargeted",
+    ),
+    "POST /admin/siem-delivery/destinations/{destination_key}/abandon": (
+        "siem_destination_abandoned",
+    ),
+>>>>>>> upstream/master
     # Server operations
     "POST /api/admin/maintenance/enter": ("maintenance_mode_entered",),
     "POST /api/admin/maintenance/exit": ("maintenance_mode_exited",),
@@ -558,7 +638,11 @@ def route_entries(tmp_path_factory: pytest.TempPathFactory) -> List[RouteEntry]:
         env=env,
         capture_output=True,
         text=True,
+<<<<<<< HEAD
         timeout=300,
+=======
+        timeout=_ROUTE_PROBE_TIMEOUT_SECONDS,
+>>>>>>> upstream/master
     )
     assert result.returncode == 0, result.stderr[-4000:]
     entries: List[RouteEntry] = json.loads(out.read_text(encoding="utf-8"))
@@ -605,11 +689,19 @@ def test_every_mcp_door_is_mapped_exempt_or_a_known_gap(mcp_registries) -> None:
     assert unclassified(inventory, _MCP_MAPPED, _MCP_EXEMPT, _MCP_GAPS) == []
 
 
+<<<<<<< HEAD
+=======
+@_ROUTE_PROBE_TIMEOUT
+>>>>>>> upstream/master
 def test_every_mutating_route_is_mapped_exempt_or_self_service(route_entries) -> None:
     inventory = route_inventory(route_entries)
     assert unclassified(inventory, *_ROUTE_TABLES) == []
 
 
+<<<<<<< HEAD
+=======
+@_ROUTE_PROBE_TIMEOUT
+>>>>>>> upstream/master
 def test_the_conditionally_mounted_fault_injection_router_is_inventoried(
     route_entries,
 ) -> None:
@@ -626,6 +718,10 @@ def test_the_conditionally_mounted_fault_injection_router_is_inventoried(
     assert expected <= route_inventory(route_entries)
 
 
+<<<<<<< HEAD
+=======
+@_ROUTE_PROBE_TIMEOUT
+>>>>>>> upstream/master
 def test_no_self_service_route_sits_behind_an_admin_gate(route_entries) -> None:
     assert self_service_behind_a_gate(route_entries, _ROUTE_SELF_SERVICE) == []
 
@@ -634,6 +730,10 @@ def test_no_door_is_left_as_a_known_gap() -> None:
     assert (_ROUTE_GAPS, _MCP_GAPS) == ({}, {})
 
 
+<<<<<<< HEAD
+=======
+@_ROUTE_PROBE_TIMEOUT
+>>>>>>> upstream/master
 def test_no_classification_names_a_door_outside_the_inventory(
     mcp_registries, route_entries
 ) -> None:
@@ -684,6 +784,10 @@ def test_every_mapped_mcp_door_reaches_its_emission(mcp_registries) -> None:
     assert missing_emissions(_MCP_MAPPED, reached) == []
 
 
+<<<<<<< HEAD
+=======
+@_ROUTE_PROBE_TIMEOUT
+>>>>>>> upstream/master
 def test_every_mapped_route_door_reaches_its_emission(route_entries) -> None:
     assert missing_emissions(_ROUTE_MAPPED, _route_reach(route_entries)) == []
 
@@ -703,6 +807,10 @@ def test_every_allowlisted_catalog_type_is_claimed_by_a_door() -> None:
     assert sorted(allowlisted - claimed) == []
 
 
+<<<<<<< HEAD
+=======
+@_ROUTE_PROBE_TIMEOUT
+>>>>>>> upstream/master
 def test_known_gaps_still_reach_no_audit_emission(
     mcp_registries, route_entries
 ) -> None:
@@ -745,6 +853,10 @@ def test_an_unmapped_elevation_marked_handler_is_reported() -> None:
     assert unclassified(inventory, _MCP_MAPPED) == ["example_marked"]
 
 
+<<<<<<< HEAD
+=======
+@_ROUTE_PROBE_TIMEOUT
+>>>>>>> upstream/master
 def test_an_unmapped_gated_route_is_reported(route_entries) -> None:
     dummy = {
         "key": "POST /api/admin/example-dummy",
@@ -765,6 +877,10 @@ def test_an_unmapped_gated_route_is_reported(route_entries) -> None:
     ]
 
 
+<<<<<<< HEAD
+=======
+@_ROUTE_PROBE_TIMEOUT
+>>>>>>> upstream/master
 def test_a_new_route_with_an_unknown_admin_helper_is_reported(route_entries) -> None:
     """A gate the name lists do not know still cannot hide a mutating route."""
     unknown_helper = {

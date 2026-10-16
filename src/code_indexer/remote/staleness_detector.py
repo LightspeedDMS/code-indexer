@@ -62,6 +62,10 @@ class EnhancedQueryResultItem(BaseModel):
     indexed_timestamp: Optional[float] = Field(
         None, description="Unix timestamp when file was indexed"
     )
+    content_unavailable: bool = Field(
+        default=False,
+        description="Server could not read the chunk's content (Bug #1991)",
+    )
 
     # Additional staleness detection fields
     local_file_mtime: Optional[float] = Field(
@@ -100,6 +104,9 @@ class EnhancedQueryResultItem(BaseModel):
             language=getattr(query_result, "language", None),
             file_last_modified=query_result.file_last_modified,
             indexed_timestamp=query_result.indexed_timestamp,
+            content_unavailable=bool(
+                getattr(query_result, "content_unavailable", False)
+            ),
             local_file_mtime=local_file_mtime,
             is_stale=is_stale,
             staleness_delta_seconds=staleness_delta_seconds,

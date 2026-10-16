@@ -35,6 +35,7 @@ from tests.unit.server.routers.inline_routes_test_helpers import (
     _find_elevation_check_dependencies,
     admin_client,  # noqa: F401, F811
     user_client,  # noqa: F401, F811
+    caller_is_access_admin,  # noqa: F401
 )
 
 

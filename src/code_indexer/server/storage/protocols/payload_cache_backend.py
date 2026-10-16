@@ -15,6 +15,12 @@ class PayloadCacheBackend(Protocol):
 
     Supports both SQLite (standalone) and PostgreSQL (cluster) backends.
     Stores large content with TTL-based eviction, keyed by a cache handle.
+<<<<<<< HEAD
+=======
+    Each entry may record its creator (``owner``, a username); an entry with
+    no owner has no creator and is never served by the generic retrieval
+    doors.
+>>>>>>> upstream/master
     """
 
     def store(
@@ -24,6 +30,10 @@ class PayloadCacheBackend(Protocol):
         preview: str,
         ttl_seconds: int,
         node_id: Optional[str] = None,
+<<<<<<< HEAD
+=======
+        owner: Optional[str] = None,
+>>>>>>> upstream/master
     ) -> None:
         """Store a payload cache entry.
 
@@ -33,6 +43,10 @@ class PayloadCacheBackend(Protocol):
             preview: Truncated preview of the content.
             ttl_seconds: Time-to-live in seconds.
             node_id: Optional cluster node identifier (NULL in standalone).
+<<<<<<< HEAD
+=======
+            owner: Username of the entry's creator (NULL: no creator).
+>>>>>>> upstream/master
         """
         ...
 
@@ -40,6 +54,10 @@ class PayloadCacheBackend(Protocol):
         self,
         entries: List[Tuple[str, str, str, int]],
         node_id: Optional[str] = None,
+<<<<<<< HEAD
+=======
+        owner: Optional[str] = None,
+>>>>>>> upstream/master
     ) -> None:
         """Store multiple payload cache entries in ONE atomic transaction.
 
@@ -50,6 +68,11 @@ class PayloadCacheBackend(Protocol):
         Args:
             entries: List of (cache_handle, content, preview, ttl_seconds) tuples.
             node_id: Optional cluster node identifier (NULL in standalone).
+<<<<<<< HEAD
+=======
+            owner: Username of the creator of every entry in the batch,
+                written by the same statement (NULL: no creator).
+>>>>>>> upstream/master
         """
         ...
 
@@ -57,6 +80,10 @@ class PayloadCacheBackend(Protocol):
         self,
         entries: List[Tuple[str, str, str, int]],
         node_id: Optional[str] = None,
+<<<<<<< HEAD
+=======
+        owner: Optional[str] = None,
+>>>>>>> upstream/master
     ) -> None:
         """Store multiple payload cache entries in ONE atomic transaction,
         PROPAGATING any write failure instead of swallowing it.
@@ -72,6 +99,10 @@ class PayloadCacheBackend(Protocol):
         Args:
             entries: List of (cache_handle, content, preview, ttl_seconds) tuples.
             node_id: Optional cluster node identifier (NULL in standalone).
+<<<<<<< HEAD
+=======
+            owner: Username of the creator of every entry in the batch.
+>>>>>>> upstream/master
 
         Raises:
             Whatever the underlying connection/transaction raises on
@@ -87,8 +118,49 @@ class PayloadCacheBackend(Protocol):
             cache_handle: Unique identifier for the cache entry.
 
         Returns:
+<<<<<<< HEAD
             Dict with keys: content, preview, created_at, node_id — or None
             if the entry does not exist or has exceeded its TTL.
+=======
+            Dict with keys: content, preview, created_at, node_id, owner —
+            or None if the entry does not exist or has exceeded its TTL.
+        """
+        ...
+
+    def retrieve_owned(self, cache_handle: str, owner: str) -> Optional[Dict[str, Any]]:
+        """Retrieve an entry only when `owner` created it.
+
+        ONE query filtered by handle AND owner: a missing handle, an
+        owner-less entry and another user's entry all match no row, so
+        their content is never read (same cost as a missing handle).
+
+        Returns:
+            Same dict as retrieve(), or None (missing, not owned, expired).
+        """
+        ...
+
+    def store_expiring(self, cache_handle: str, content: str, ttl_seconds: int) -> None:
+        """Insert or replace one entry that lives exactly `ttl_seconds`.
+
+        The entry's creation time comes from the store's own clock (the
+        database clock), never the caller's, so every node agrees on when
+        it expires. The entry has no creator (owner NULL). Failures
+        propagate.
+        """
+        ...
+
+    def consume(self, cache_handle: str) -> bool:
+        """Atomically delete a live (unexpired) entry.
+
+        Returns True only to the single caller whose delete removed the
+        entry; every concurrent or later caller, on any node, gets False.
+        An expired or missing entry yields False. Liveness is measured on
+        the store's own clock, the clock store_expiring() stamps entries
+        with. Failures propagate.
+
+        Args:
+            cache_handle: Unique identifier for the cache entry.
+>>>>>>> upstream/master
         """
         ...
 

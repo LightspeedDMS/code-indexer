@@ -5,11 +5,16 @@ from code_indexer.utils.git_runner import run_git_command
 
 import subprocess
 from pathlib import Path
+from typing import Callable, Optional
 
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+<<<<<<< HEAD
 from code_indexer.server.services.cidx_meta_content import (
     refuse_backup_of_shared_content,
 )
+=======
+from code_indexer.server.utils.cancellable_subprocess import run_with_cancel
+>>>>>>> upstream/master
 
 from .branch_detect import detect_default_branch
 
@@ -26,6 +31,14 @@ class CidxMetaBackupBootstrap:
         ".snapshot-reader-leases/",
     )
 
+<<<<<<< HEAD
+=======
+    def __init__(self, cancel_check: Optional[Callable[[], bool]] = None) -> None:
+        # Bug #2012: the owning refresh job's cancel check; every git call
+        # made by bootstrap() (via _git) is then terminated on cancel.
+        self._cancel_check = cancel_check
+
+>>>>>>> upstream/master
     def _git(
         self, cidx_meta_path: str, *args: str, check: bool = True
     ) -> subprocess.CompletedProcess:
@@ -40,6 +53,7 @@ class CidxMetaBackupBootstrap:
         # an interactive editor in the non-interactive systemd job context
         # -- see CidxMetaBackupSync._git() for the active fix this mirrors.
         env.setdefault("GIT_EDITOR", "true")
+<<<<<<< HEAD
         # EVO-64678: this helper runs arbitrary git (including commits) against
         # cidx-meta with argv only known at runtime, so it goes through the seam
         # chokepoint and lets is_mutating_git() classify each call rather than a
@@ -48,6 +62,12 @@ class CidxMetaBackupBootstrap:
         return run_git_command(
             ["git", *args],
             cwd=Path(cidx_meta_path),
+=======
+        return run_with_cancel(
+            ["git", *args],
+            self._cancel_check,
+            cwd=cidx_meta_path,
+>>>>>>> upstream/master
             capture_output=True,
             text=True,
             env=env,
@@ -97,7 +117,10 @@ class CidxMetaBackupBootstrap:
         """
         refuse_backup_of_shared_content(cidx_meta_path)
         git_dir = Path(cidx_meta_path) / ".git"
-        branch = detect_default_branch(cidx_meta_path) or "master"
+        branch = (
+            detect_default_branch(cidx_meta_path, cancel_check=self._cancel_check)
+            or "master"
+        )
 
         if not git_dir.exists():
             self._git(cidx_meta_path, "init")

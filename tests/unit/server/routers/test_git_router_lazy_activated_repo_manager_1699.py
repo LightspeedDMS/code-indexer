@@ -65,10 +65,23 @@ import sys
 import threading
 from pathlib import Path
 
+<<<<<<< HEAD
+=======
+import pytest
+
+>>>>>>> upstream/master
 SRC_ROOT = str(Path(__file__).parent.parent.parent.parent.parent / "src")
 SUBPROCESS_TIMEOUT_SECONDS = 60
 THREAD_JOIN_TIMEOUT_SECONDS = 30
 
+<<<<<<< HEAD
+=======
+# Fresh-interpreter server imports (and the real app construction in the
+# concurrent test) exceed the suite's default 15 s pytest-timeout under
+# parallel gate load; the ceiling must sit above the subprocess's own budget.
+pytestmark = pytest.mark.timeout(SUBPROCESS_TIMEOUT_SECONDS + 15)
+
+>>>>>>> upstream/master
 
 def _make_env(tmp_path: Path, suffix: str) -> dict:
     """Build a subprocess env with CIDX_SERVER_DATA_DIR pointed at an

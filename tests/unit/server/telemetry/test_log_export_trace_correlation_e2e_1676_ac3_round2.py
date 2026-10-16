@@ -37,6 +37,11 @@ from __future__ import annotations
 import logging
 import threading
 
+<<<<<<< HEAD
+=======
+from tests.unit.server.telemetry.otlp_sink import OtlpHttpSink
+
+>>>>>>> upstream/master
 
 def _install_in_memory_log_exporter(logger_provider):
     """Attach a real InMemoryLogRecordExporter to ``logger_provider`` via a
@@ -78,7 +83,11 @@ def _emit_log_line_inside_a_span_on_a_worker_thread(
 
 class TestOtelContextPropagatesToRealExportedLogRecordAcrossThreads:
     def test_exported_log_record_carries_the_worker_threads_span_ids(
+<<<<<<< HEAD
         self,
+=======
+        self, otlp_sink: OtlpHttpSink
+>>>>>>> upstream/master
     ) -> None:
         from code_indexer.server.services.async_logging import (
             install_queue_logging,
@@ -105,6 +114,7 @@ class TestOtelContextPropagatesToRealExportedLogRecordAcrossThreads:
             # TelemetryManager's log bridge registration attaches to.
             listener = install_queue_logging([])
             try:
+<<<<<<< HEAD
                 # Bug #1744 investigation: export_traces=False here (not
                 # True) is deliberate, not an oversight. It removes ONE of
                 # two real, unreachable-network OTLP exporters this test
@@ -148,11 +158,23 @@ class TestOtelContextPropagatesToRealExportedLogRecordAcrossThreads:
                 # (structural network dependency on its own subject, not a
                 # swappable trace-only artifact) and is correctly left with
                 # a real, if now singular, network exporter.
+=======
+                # export_traces=False still yields a real, recording
+                # TracerProvider (no span processor), so create_span() below
+                # produces a genuine span. export_logs=True is this test's
+                # subject: the real OTLP log exporter it constructs flushes
+                # to the listening sink, so shutdown completes at once.
+>>>>>>> upstream/master
                 config = TelemetryConfig(
                     enabled=True,
                     export_traces=False,
                     export_metrics=False,
                     export_logs=True,
+<<<<<<< HEAD
+=======
+                    collector_endpoint=otlp_sink.endpoint,
+                    collector_protocol="http",
+>>>>>>> upstream/master
                 )
                 manager = get_telemetry_manager(config)
                 try:

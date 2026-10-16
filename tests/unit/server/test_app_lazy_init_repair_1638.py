@@ -78,6 +78,10 @@ class TestReentrantProbeDuringCreateAppDoesNotDeadlock:
     boundary of create_app(), not the code under test.
     """
 
+<<<<<<< HEAD
+=======
+    @pytest.mark.timeout(SUBPROCESS_TIMEOUT_SECONDS + 15)
+>>>>>>> upstream/master
     def test_reentrant_probe_returns_none_with_exactly_one_init_call(
         self,
     ) -> None:
@@ -166,6 +170,11 @@ class TestMockPatchRoundTrip:
     afterward via the _lazy_values snapshot fallback.
     """
 
+<<<<<<< HEAD
+=======
+    # Builds the full app in-process when no earlier test has (~12 s alone).
+    @pytest.mark.timeout(60)
+>>>>>>> upstream/master
     def test_mock_patch_of_lazy_attr_absent_from_dict_restores_cleanly(
         self,
     ) -> None:

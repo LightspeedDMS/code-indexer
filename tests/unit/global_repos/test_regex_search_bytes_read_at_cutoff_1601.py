@@ -12,13 +12,19 @@ parsing after only the first internal chunk. Reporting the reader's
 from __future__ import annotations
 
 import json
+<<<<<<< HEAD
 import shutil
+=======
+>>>>>>> upstream/master
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+<<<<<<< HEAD
 from .conftest import FakeRipgrepBackend
 
+=======
+>>>>>>> upstream/master
 from code_indexer.global_repos.regex_search import RegexSearchService, _READ_CHUNK_BYTES
 
 _TEST_MAX_RESULTS = 1  # stop parsing after the very first match
@@ -94,6 +100,7 @@ class TestBytesReadAtCutoffCorrectness:
             mock_which.return_value = "/usr/bin/rg"
             service = RegexSearchService(tmp_path)
 
+<<<<<<< HEAD
         # Seam: the backend copies the synthetic ripgrep JSON into the service's
         # own temp file and reports output_capped, which is what the real
         # byte-cap kill looks like. No executor mock, nothing global patched.
@@ -104,6 +111,13 @@ class TestBytesReadAtCutoffCorrectness:
             output_capped=True, on_run=_copy_source
         )
         if True:
+=======
+        mock_executor = _mock_output_capped_executor(str(source_path))
+        with patch(
+            "code_indexer.global_repos.regex_search.SubprocessExecutor",
+            return_value=mock_executor,
+        ):
+>>>>>>> upstream/master
             matches, total = await service._search_ripgrep(
                 pattern="func",
                 search_path=tmp_path,

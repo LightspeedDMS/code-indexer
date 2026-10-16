@@ -1358,6 +1358,7 @@ class TestFinding1PodPullMetadataMissingRepoAlias:
         )
 
         # --- Step 2: run that metadata through the REAL reconstruction ---
+<<<<<<< HEAD
         # This is lifespan.py's _pp_provider_temporal one-liner, verbatim:
         #   return _provider_temporal_index_job(**md, progress_callback=cb)
         from code_indexer.server.mcp.handlers import (
@@ -1366,6 +1367,17 @@ class TestFinding1PodPullMetadataMissingRepoAlias:
 
         def _pp_provider_temporal_mirror(md, progress_callback):
             return real_job(**md, progress_callback=progress_callback)
+=======
+        # The REAL pod-pull executor lifespan installs
+        # (server/services/pod_pull_dispatch.py).
+        from code_indexer.server.services.pod_pull_dispatch import (
+            build_index_dispatch,
+        )
+
+        _pp_provider_temporal = build_index_dispatch(MagicMock())[
+            "provider_temporal_index_rebuild"
+        ]
+>>>>>>> upstream/master
 
         mock_scheduler = MagicMock()
         mock_scheduler.acquire_write_lock.return_value = True
@@ -1394,10 +1406,18 @@ class TestFinding1PodPullMetadataMissingRepoAlias:
             fake_grm._sqlite_backend.update_enable_temporal.return_value = True
             mock_app_module.golden_repo_manager = fake_grm
 
+<<<<<<< HEAD
             result = _pp_provider_temporal_mirror(
                 captured_metadata, progress_callback=None
             )
 
+=======
+            result = _pp_provider_temporal(
+                captured_metadata, lambda *a, **k: None, "claimed-job-1"
+            )
+
+        assert result is not None
+>>>>>>> upstream/master
         assert result.get("success") is True, (
             f"reconstructed job must succeed, got: {result!r}"
         )

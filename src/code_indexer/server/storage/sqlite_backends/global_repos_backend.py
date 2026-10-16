@@ -282,6 +282,7 @@ class GlobalReposSqliteBackend:
             logger.debug(f"Updated enable_scip={enable_scip} for repo: {alias_name}")
         return updated
 
+<<<<<<< HEAD
     def update_index_path(self, alias_name: str, index_path: str) -> bool:
         """
         Repoint a repository's on-disk index_path (EVO-66808).
@@ -311,6 +312,8 @@ class GlobalReposSqliteBackend:
             logger.debug(f"Updated index_path={index_path} for repo: {alias_name}")
         return updated
 
+=======
+>>>>>>> upstream/master
     def update_next_refresh(self, alias_name: str, next_refresh: Optional[str]) -> bool:
         """
         Update the next_refresh timestamp for a repository.

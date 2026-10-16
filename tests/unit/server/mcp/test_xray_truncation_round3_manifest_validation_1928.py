@@ -15,7 +15,11 @@ import pytest
 
 from code_indexer.server.mcp.handlers import xray_truncation as xt
 
+<<<<<<< HEAD
 from ._xray_truncation_test_helpers import cache_factory  # noqa: F401
+=======
+from ._xray_truncation_test_helpers import OWNER, cache_factory  # noqa: F401
+>>>>>>> upstream/master
 
 _SMALL_BUDGET_CHARS = 300
 
@@ -30,9 +34,15 @@ class TestManifestDiscriminatorAndValidation:
         legacy windowed path, never mistaken for a pages-v1 manifest."""
         cache = cache_factory(max_fetch_size_chars=_SMALL_BUDGET_CHARS)
         json_shaped_content = json.dumps({"format": "pages-v1", "total_pages": 99})
+<<<<<<< HEAD
         legacy_handle = cache.store(json_shaped_content)
 
         result = xt.fetch_cached_page(cache, legacy_handle, 1)
+=======
+        legacy_handle = cache.store(json_shaped_content, owner=OWNER)
+
+        result = xt.fetch_cached_page(cache, legacy_handle, 1, OWNER)
+>>>>>>> upstream/master
 
         assert result["content"] == json_shaped_content[:_SMALL_BUDGET_CHARS]
 
@@ -42,10 +52,17 @@ class TestManifestDiscriminatorAndValidation:
     ) -> None:
         cache = cache_factory(max_fetch_size_chars=_SMALL_BUDGET_CHARS)
         bad_handle = f"{xt._PAGES_V1_HANDLE_PREFIX}corrupt-handle"
+<<<<<<< HEAD
         cache.store_with_key(bad_handle, "not even json")
 
         with pytest.raises(xt.MalformedManifestError):
             xt.fetch_cached_page(cache, bad_handle, 1)
+=======
+        cache.store_batch_with_keys([(bad_handle, "not even json")], owner=OWNER)
+
+        with pytest.raises(xt.MalformedManifestError):
+            xt.fetch_cached_page(cache, bad_handle, 1, OWNER)
+>>>>>>> upstream/master
 
     def test_prefixed_handle_with_mismatched_page_count_raises_loudly(
         self,
@@ -58,7 +75,14 @@ class TestManifestDiscriminatorAndValidation:
             "total_pages": 3,
             "page_handles": ["only-one-handle"],
         }
+<<<<<<< HEAD
         cache.store_with_key(bad_handle, json.dumps(manifest))
 
         with pytest.raises(xt.MalformedManifestError):
             xt.fetch_cached_page(cache, bad_handle, 1)
+=======
+        cache.store_batch_with_keys([(bad_handle, json.dumps(manifest))], owner=OWNER)
+
+        with pytest.raises(xt.MalformedManifestError):
+            xt.fetch_cached_page(cache, bad_handle, 1, OWNER)
+>>>>>>> upstream/master

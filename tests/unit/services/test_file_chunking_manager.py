@@ -113,6 +113,7 @@ class MockFixedSizeChunker:
         self.chunk_contents = []
 
     def chunk_file(
+<<<<<<< HEAD
         self,
         file_path: Path,
         repo_root: Optional[Path] = None,
@@ -124,6 +125,14 @@ class MockFixedSizeChunker:
         caller already read, so the file is not opened twice; it is accepted and
         unused here, as is repo_root, since this mock never reads or extracts
         images."""
+=======
+        self, file_path: Path, repo_root: Optional[Path] = None
+    ) -> List[Dict]:
+        """Mock chunk_file method -- signature mirrors the REAL
+        FixedSizeChunker.chunk_file(file_path, repo_root=...) API that
+        FileChunkingManager actually calls (repo_root is accepted, and
+        unused here since this mock never performs image extraction)."""
+>>>>>>> upstream/master
         self.chunk_calls.append(file_path)
         # Recorded so a caller that stops handing its bytes over is visible: the
         # whole point of `content` is that this file is not opened twice.
@@ -197,6 +206,12 @@ class MockFilesystemClient:
     def upsert_points(self, points: List[Dict], collection_name=None) -> bool:
         """Mock upsert method - called by FileChunkingManager."""
         return self.upsert_points_batched(points, collection_name)
+
+    def get_existing_content_hashes(
+        self, file_path, collection_name, *, project_id, file_hash, chunk_count
+    ) -> Dict:
+        """Story #2119 reuse lookup: nothing stored."""
+        return {}
 
     def upsert_points_batched(self, points: List[Dict], collection_name=None) -> bool:
         """Mock atomic upsert method."""
@@ -1237,6 +1252,8 @@ class TestFileChunkingManagerValidation:
         mock_filesystem_client.upsert_points = Mock(return_value=True)
         mock_filesystem_client.create_collection = Mock(return_value=True)
         mock_filesystem_client.collection_exists = Mock(return_value=False)
+        # Story #2119 reuse lookup: nothing stored (a dict, like the real store).
+        mock_filesystem_client.get_existing_content_hashes = Mock(return_value={})
 
         with FileChunkingManager(
             vector_manager=mock_vector_manager,

@@ -44,13 +44,21 @@ def _mock_user():
 
 
 @pytest.fixture(scope="module")
-def test_client(_mock_user):
+def test_client(_mock_user, tmp_path_factory):
+    from tests.unit.server.routers.inline_routes_test_helpers import (
+        _access_service_admin,
+    )
+
     def _override():
         return _mock_user
 
     app.dependency_overrides[get_current_user] = _override
     client = TestClient(app)
-    yield client
+    # The caller is an admin of a real access service, so the activated-repo
+    # guard passes; these tests pin the read endpoints' contract.
+    groups_db = tmp_path_factory.mktemp("access") / "groups.db"
+    with _access_service_admin(groups_db, _mock_user.username):
+        yield client
     app.dependency_overrides.clear()
 
 

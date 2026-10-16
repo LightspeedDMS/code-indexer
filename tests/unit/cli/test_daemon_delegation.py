@@ -214,16 +214,24 @@ class TestCrashRecovery:
                                 # Should fallback to standalone
                                 assert mock_standalone.call_count == 1
 
-    def test_cleanup_stale_socket(self):
-        """Test cleanup of stale socket file."""
+    def test_cleanup_stale_socket(self, tmp_path):
+        """A socket file nobody listens on (dead daemon's leftover) is removed.
+
+        A socket a live daemon listens on is kept: see
+        test_daemon_query_live_socket_kept.py.
+        """
+        import socket
+
         from code_indexer.cli_daemon_delegation import _cleanup_stale_socket
 
-        socket_path = Path("/tmp/test_daemon.sock")
+        socket_path = tmp_path / "d.sock"
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(socket_path))
+        stale.close()
 
-        # Test socket exists and gets removed
-        with patch.object(Path, "unlink") as mock_unlink:
-            _cleanup_stale_socket(socket_path)
-            mock_unlink.assert_called_once()
+        _cleanup_stale_socket(socket_path)
+
+        assert not socket_path.exists()
 
     def test_cleanup_stale_socket_handles_missing_file(self):
         """Test cleanup handles missing socket file gracefully."""

@@ -14,11 +14,18 @@ All service return values explicitly null-checked with error responses.
 import base64
 import html as html_module
 import logging
+<<<<<<< HEAD
 from typing import Any, Dict, List, Optional
+=======
+import math
+import os
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+>>>>>>> upstream/master
 from urllib.parse import quote
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
 
 from code_indexer.server.auth import dependencies as _auth_dependencies
 from code_indexer.server.auth.elevated_session_manager import (
@@ -30,10 +37,16 @@ from code_indexer.server.auth.login_outcome import complete_login, reject_login
 
 logger = logging.getLogger(__name__)
 
+<<<<<<< HEAD
 # First factor recorded for a login completed at the MFA challenge.  The
 # challenge does not carry how the first factor was proven, and the password
 # login is the door that issues it (an SSO login's challenge records the
 # same value).
+=======
+# A challenge records how its first factor was proven (``first_factor``:
+# password or sso) and its audit rows use that.  This value labels only a
+# refusal where no challenge is known (unknown or expired token).
+>>>>>>> upstream/master
 _CHALLENGE_LOGIN_METHOD = "password"
 
 _LOGIN_ROUTE = "/login"
@@ -278,7 +291,36 @@ def _render_setup(
 
     show_mode=False: Setup flow with "Verify and Activate MFA" button.
     show_mode=True:  Show existing QR with "Test Code" and "View Recovery Codes".
+    Every argument is HTML-escaped before it is placed in the page; the
+    autoescaping Jinja recovery-codes partial is rendered from the raw values.
     """
+    regenerate_form = _regenerate_form(
+        recovery_link_prefix + "/recovery-codes", csrf, target_user
+    )
+    (
+        qr_b64,
+        manual_key,
+        csrf,
+        target_user,
+        error,
+        success,
+        verify_route,
+        back_link,
+        re_setup_link,
+    ) = (
+        html_module.escape(value, quote=True)
+        for value in (
+            qr_b64,
+            manual_key,
+            csrf,
+            target_user,
+            error,
+            success,
+            verify_route,
+            back_link,
+            re_setup_link,
+        )
+    )
     err = (
         f'<div style="color:#ff4444;background:#2a0a0a;padding:10px;border-radius:6px;margin:10px 0">{error}</div>'
         if error
@@ -315,7 +357,7 @@ def _render_setup(
             "<input type='hidden' name='test_only' value='1'>"
             "<input type='text' name='totp_code' maxlength='6' pattern='[0-9]{6}' placeholder='000000' autocomplete='one-time-code' required>"
             "<button type='submit' style='background:#333;color:#fff'>Test Code</button></form>"
-            f"<a href='{recovery_link_prefix}/recovery-codes?user={target_user}' style='display:block;text-align:center;padding:12px;margin-top:10px;background:#444;color:#fff;border-radius:6px;text-decoration:none'>View Recovery Codes</a>"
+            f"{regenerate_form}"
             f"{re_setup_html}"
         )
     else:
@@ -356,6 +398,61 @@ def _render_setup(
         f"<a href='{back_link}' class='back'>Cancel — Go to Dashboard</a>"
         "</div></body></html>"
     )
+
+
+_templates = Jinja2Templates(
+    directory=os.path.join(os.path.dirname(__file__), "templates")
+)
+
+
+def _page_csrf_token(request: Request) -> str:
+    """Web UI CSRF token for a page's forms (the signed cookie's, or a new one)."""
+    from .routes import generate_csrf_token, get_csrf_token_from_cookie
+
+    return get_csrf_token_from_cookie(request) or generate_csrf_token()
+
+
+def _with_csrf_cookie(response: Any, token: str) -> Any:
+    """Store *token* in the signed Web UI CSRF cookie on *response*."""
+    from .routes import set_csrf_cookie
+
+    set_csrf_cookie(response, token)
+    return response
+
+
+def _csrf_refusal(request: Request, submitted: Optional[str]) -> Optional[Any]:
+    """403 page unless *submitted* matches the signed Web UI CSRF cookie."""
+    from .routes import validate_login_csrf_token
+
+    if validate_login_csrf_token(request, submitted):
+        return None
+    return _error_html_page(
+        "Request Refused", "Invalid or missing form token. Reload the page.", 403
+    )
+
+
+def _regenerate_form(action: str, csrf: str, target_user: str) -> str:
+    """POST form that regenerates recovery codes (never a GET link)."""
+    template = _templates.get_template("partials/mfa_recovery_codes_form.html")
+    return str(template.render(action=action, csrf_token=csrf, target_user=target_user))
+
+
+def _render_regenerate_confirm(
+    request: Request, action: str, target_user: str, back_link: str
+) -> Any:
+    """Page whose only action is the POST that regenerates recovery codes."""
+    csrf = _page_csrf_token(request)
+    response = _templates.TemplateResponse(
+        request,
+        "mfa_recovery_codes_confirm.html",
+        {
+            "action": action,
+            "csrf_token": csrf,
+            "target_user": target_user,
+            "back_link": back_link,
+        },
+    )
+    return _with_csrf_cookie(response, csrf)
 
 
 def _render_recovery_codes(codes: List[str], done_link: str = "/admin/") -> str:
@@ -428,7 +525,10 @@ def mfa_setup_page(
     if mode == "show":
         uri = _totp_service.get_provisioning_uri(target_user)
         if uri is None:
-            return HTMLResponse(f"No MFA configured for {target_user}", status_code=404)
+            return HTMLResponse(
+                f"No MFA configured for {html_module.escape(target_user, quote=True)}",
+                status_code=404,
+            )
     else:
         if is_cross_user:
             secret = _totp_service.regenerate_secret_cross_user(
@@ -452,7 +552,7 @@ def mfa_setup_page(
     is_show = mode == "show"
     verified = request.query_params.get("verified") == "1"
     qr_b64 = base64.b64encode(qr_bytes).decode()
-    csrf = request.cookies.get("csrf_token", "")
+    csrf = _page_csrf_token(request)
 
     # AC5: accurate audit log immediately before success return
     if is_cross_user:
@@ -464,30 +564,55 @@ def mfa_setup_page(
             target_user,
         )
 
-    return HTMLResponse(
-        _render_setup(
-            qr_b64,
-            manual_key,
-            csrf,
-            target_user,
-            show_mode=is_show,
-            success="Code verified successfully!" if verified else "",
-        )
+    page = _render_setup(
+        qr_b64,
+        manual_key,
+        csrf,
+        target_user,
+        show_mode=is_show,
+        success="Code verified successfully!" if verified else "",
     )
+    return _with_csrf_cookie(HTMLResponse(page), csrf)
+
+
+_ADMIN_RECOVERY_ROUTE = "/admin/mfa/recovery-codes"
 
 
 @mfa_router.get("/recovery-codes", response_class=HTMLResponse)
 def mfa_recovery_codes_page(request: Request, user: Optional[str] = None):
-    """Regenerate and display recovery codes for a user.
+    """Show the page offering recovery-code regeneration; changes nothing.
 
-    Story #925 AC6: requires active elevation window.
-    Cross-user operations require full scope; self-service accepts totp_repair scope.
+    Recovery codes are generated only by an explicit POST from an elevated
+    session (see mfa_recovery_codes_regenerate).
+    """
+    admin_username = _get_session_username(request)
+    if not admin_username:
+        return RedirectResponse(_LOGIN_ROUTE, status_code=303)
+    target = user if user else admin_username
+    return _render_regenerate_confirm(
+        request, _ADMIN_RECOVERY_ROUTE, target, back_link=_ADMIN_ROUTE
+    )
+
+
+@mfa_router.post("/recovery-codes", response_class=HTMLResponse)
+def mfa_recovery_codes_regenerate(
+    request: Request,
+    user: Optional[str] = Form(None),
+    csrf_token: Optional[str] = Form(None),
+):
+    """Regenerate and display recovery codes for an existing account.
+
+    Requires a valid Web UI CSRF token and (Story #925 AC6) an active
+    elevation window: full scope cross-user, totp_repair scope for self.
     """
     admin_username = _get_session_username(request)
     if not admin_username:
         return RedirectResponse(_LOGIN_ROUTE, status_code=303)
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
+    csrf_err = _csrf_refusal(request, csrf_token)
+    if csrf_err is not None:
+        return csrf_err
 
     target = user if user else admin_username
     is_cross_user = target != admin_username
@@ -502,6 +627,11 @@ def mfa_recovery_codes_page(request: Request, user: Optional[str] = None):
             elev_err.get("message", "Active elevation window required."),
             403,
         )
+    user_manager = _auth_dependencies.user_manager
+    if user_manager is None:
+        return HTMLResponse("User service not available", status_code=503)
+    if user_manager.get_user(target) is None:
+        return _error_html_page("Account Not Found", f"No account {target}.", 404)
 
     codes = _totp_service.regenerate_recovery_codes(target, actor=admin_username)
     if codes is None:
@@ -518,6 +648,7 @@ def _render_qr_error(
     back_link: str = "/admin/",
     recovery_link_prefix: str = "/admin/mfa",
     re_setup_link: str = "",
+    csrf: str = "",
 ) -> HTMLResponse:
     """Re-render QR page with error message after failed verification."""
     assert _totp_service is not None
@@ -535,7 +666,7 @@ def _render_qr_error(
         _render_setup(
             qr_b64,
             manual_key,
-            "",
+            csrf,
             username,
             error=error_msg,
             show_mode=show_mode,
@@ -566,10 +697,14 @@ def mfa_verify(
     if test_only:
         if _totp_service.verify_code(username, totp_code):
             return RedirectResponse(
-                f"/admin/mfa/setup?user={username}&mode=show&verified=1",
+                f"/admin/mfa/setup?user={quote(username, safe='')}&mode=show&verified=1",
                 status_code=303,
             )
-        return _render_qr_error(username, "Invalid code.", show_mode=True)
+        token = _page_csrf_token(request)
+        error_page = _render_qr_error(
+            username, "Invalid code.", show_mode=True, csrf=token
+        )
+        return _with_csrf_cookie(error_page, token)
 
     # Setup mode: activate MFA
     codes = _totp_service.activate_mfa_and_issue_recovery_codes(
@@ -653,7 +788,10 @@ def user_mfa_setup_page(request: Request, mode: Optional[str] = None):
         # MFA already active -- show existing QR with test option
         uri = _totp_service.get_provisioning_uri(username)
         if uri is None:
-            return HTMLResponse(f"No MFA configured for {username}", status_code=404)
+            return HTMLResponse(
+                f"No MFA configured for {html_module.escape(username, quote=True)}",
+                status_code=404,
+            )
         is_show = True
     else:
         # New setup or explicit re-setup
@@ -677,21 +815,20 @@ def user_mfa_setup_page(request: Request, mode: Optional[str] = None):
 
     verified = request.query_params.get("verified") == "1"
     qr_b64 = base64.b64encode(qr_bytes).decode()
-    csrf = request.cookies.get("csrf_token", "")
-    return HTMLResponse(
-        _render_setup(
-            qr_b64,
-            manual_key,
-            csrf,
-            username,
-            show_mode=is_show,
-            success="Code verified successfully!" if verified else "",
-            verify_route=_USER_MFA_VERIFY_ROUTE,
-            back_link=_USER_BACK_LINK,
-            recovery_link_prefix=_USER_RECOVERY_PREFIX,
-            re_setup_link="/user/mfa/setup?mode=new" if is_show else "",
-        )
+    csrf = _page_csrf_token(request)
+    page = _render_setup(
+        qr_b64,
+        manual_key,
+        csrf,
+        username,
+        show_mode=is_show,
+        success="Code verified successfully!" if verified else "",
+        verify_route=_USER_MFA_VERIFY_ROUTE,
+        back_link=_USER_BACK_LINK,
+        recovery_link_prefix=_USER_RECOVERY_PREFIX,
+        re_setup_link="/user/mfa/setup?mode=new" if is_show else "",
     )
+    return _with_csrf_cookie(HTMLResponse(page), csrf)
 
 
 @user_mfa_router.post("/verify", response_class=HTMLResponse)
@@ -717,7 +854,8 @@ def user_mfa_verify(
                 "/user/mfa/setup?mode=show&verified=1",
                 status_code=303,
             )
-        return _render_qr_error(
+        token = _page_csrf_token(request)
+        error_page = _render_qr_error(
             username,
             "Invalid code.",
             show_mode=True,
@@ -725,7 +863,9 @@ def user_mfa_verify(
             back_link=_USER_BACK_LINK,
             recovery_link_prefix=_USER_RECOVERY_PREFIX,
             re_setup_link="/user/mfa/setup?mode=new",
+            csrf=token,
         )
+        return _with_csrf_cookie(error_page, token)
 
     codes = _totp_service.activate_mfa_and_issue_recovery_codes(
         username, totp_code, actor=username
@@ -746,13 +886,55 @@ def user_mfa_verify(
 
 @user_mfa_router.get("/recovery-codes", response_class=HTMLResponse)
 def user_mfa_recovery_codes_page(request: Request):
-    """Regenerate and display recovery codes for session user (self-only)."""
+    """Show the page offering recovery-code regeneration; changes nothing.
+
+    Recovery codes are generated only by an explicit POST from an elevated
+    session (see user_mfa_recovery_codes_regenerate).
+    """
+    username = _get_any_session_username(request)
+    if not username:
+        return RedirectResponse(_LOGIN_ROUTE, status_code=303)
+    return _render_regenerate_confirm(
+        request,
+        f"{_USER_RECOVERY_PREFIX}/recovery-codes",
+        username,
+        back_link=_USER_BACK_LINK,
+    )
+
+
+@user_mfa_router.post("/recovery-codes", response_class=HTMLResponse)
+def user_mfa_recovery_codes_regenerate(
+    request: Request, csrf_token: Optional[str] = Form(None)
+):
+    """Regenerate and display recovery codes for session user (self-only).
+
+    Requires a valid Web UI CSRF token. With elevation enforcement on, also
+    requires the caller's own elevation window (either scope); without one,
+    redirects to the elevation page, which returns to the confirmation page.
+    Enforcement off passes through.
+    """
     username = _get_any_session_username(request)
     if not username:
         return RedirectResponse(_LOGIN_ROUTE, status_code=303)
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
+    csrf_err = _csrf_refusal(request, csrf_token)
+    if csrf_err is not None:
+        return csrf_err
 
+<<<<<<< HEAD
+=======
+    if _auth_dependencies._is_elevation_enforcement_enabled():
+        elev_err = _check_elevation_window(
+            request, username, required_scope="totp_repair"
+        )
+        if elev_err is not None:
+            return RedirectResponse(
+                f"{_ELEVATE_PAGE}?next={quote(request.url.path, safe='')}",
+                status_code=303,
+            )
+
+>>>>>>> upstream/master
     codes = _totp_service.regenerate_recovery_codes(username, actor=username)
     if codes is None:
         return HTMLResponse("Failed to generate recovery codes", status_code=500)
@@ -802,7 +984,7 @@ def user_mfa_status(request: Request):
 def render_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
     """Render the TOTP challenge page shown after password verification.
 
-    Returns HTMLResponse with X-Frame-Options: DENY to prevent clickjacking.
+    Framing is refused by the headers SecurityHeadersMiddleware adds.
     """
     safe_error = html_module.escape(error) if error else ""
     safe_token = html_module.escape(token)
@@ -862,10 +1044,7 @@ def render_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
         "<a href='/login' class='back'>Cancel and return to login</a>"
         "</div></body></html>"
     )
-    response = HTMLResponse(html)
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
-    return response
+    return HTMLResponse(html)
 
 
 def render_oauth_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
@@ -873,7 +1052,7 @@ def render_oauth_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse
 
     Posts to /oauth/mfa/verify instead of /admin/mfa/challenge/verify so
     the OAuth authorization completes after TOTP verification.
-    Returns HTMLResponse with X-Frame-Options: DENY to prevent clickjacking.
+    Framing is refused by the headers SecurityHeadersMiddleware adds.
     """
     safe_error = html_module.escape(error) if error else ""
     safe_token = html_module.escape(token)
@@ -933,10 +1112,47 @@ def render_oauth_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse
         "<a href='/login' class='back'>Cancel and return to login</a>"
         "</div></body></html>"
     )
-    response = HTMLResponse(html)
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
-    return response
+    return HTMLResponse(html)
+
+
+if TYPE_CHECKING:
+    from code_indexer.server.auth.login_rate_limiter import AttemptOutcome
+    from code_indexer.server.auth.mfa_challenge import MfaChallenge
+
+
+def reserve_challenge_attempt(
+    token: str,
+    challenge: "MfaChallenge",
+    render: Callable[[str, str], HTMLResponse],
+) -> Tuple[Optional["AttemptOutcome"], Optional[HTMLResponse]]:
+    """Reserve a code attempt at a login challenge.
+
+    The code is reserved BEFORE it is checked, under the challenge's
+    ``throttle_scope``: the account's password-login key for a password
+    challenge, its own SSO-MFA key for one an SSO login started.  Returns
+    ``(attempt, None)`` when admitted, or ``(None, page)``: the same
+    challenge re-rendered by *render* with 429 (window running) or 503
+    (store busy) and ``Retry-After``; the code is not checked and the
+    challenge stays usable after the window.
+    """
+    from ..auth import login_rate_limiter as _login_throttle
+
+    try:
+        attempt = _login_throttle.login_rate_limiter.begin_attempt(
+            challenge.username, scope=challenge.throttle_scope
+        )
+    except _login_throttle.ThrottleStoreBusy:
+        page = render(token, "Login is busy, try again shortly.")
+        page.status_code = 503
+        page.headers["Retry-After"] = "1"
+        return None, page
+    if not attempt.admitted:
+        wait = math.ceil(attempt.retry_after_seconds)
+        page = render(token, f"Too many attempts, try again in {wait} seconds.")
+        page.status_code = 429
+        page.headers["Retry-After"] = str(wait)
+        return None, page
+    return attempt, None
 
 
 @mfa_router.post("/challenge/verify", response_class=HTMLResponse)
@@ -948,14 +1164,26 @@ def mfa_challenge_verify(
 ):
     """Verify TOTP or recovery code against a pending MFA challenge.
 
-    Uses consume-first pattern to prevent TOCTOU race conditions:
-    the token is atomically consumed before verification. On failure,
-    the user must re-enter their password (token is gone).
+    The code is first reserved on the challenge's throttle key (a refusal
+    keeps the challenge).  Then consume-first prevents TOCTOU races: the
+    token is atomically consumed before verification.  On failure, the user
+    must re-enter their password (token is gone).
     """
+    from ..auth import login_rate_limiter as _login_throttle
     from ..auth.mfa_challenge import mfa_challenge_manager
 
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
+
+    client_ip = request.client.host if request.client else "unknown"
+    attempt = None
+    pending = mfa_challenge_manager.get_challenge(challenge_token, client_ip)
+    if pending is not None:
+        attempt, refusal = reserve_challenge_attempt(
+            challenge_token, pending, render_mfa_challenge_page
+        )
+        if refusal is not None:
+            return refusal
 
     # Consume-first: atomically remove token before verifying.
     # This prevents duplicate session creation from concurrent requests.
@@ -972,7 +1200,6 @@ def mfa_challenge_verify(
         return RedirectResponse("/login?info=mfa_expired", status_code=303)
 
     # Validate client IP matches the one from password verification
-    client_ip = request.client.host if request.client else "unknown"
     if challenge_data.client_ip != client_ip:
         logger.warning(
             "MFA challenge IP mismatch for %s: expected %s got %s",
@@ -983,11 +1210,38 @@ def mfa_challenge_verify(
         reject_login(
             challenge_data.username,
             account_exists=True,  # issued only after a successful first factor
+<<<<<<< HEAD
             method=_CHALLENGE_LOGIN_METHOD,
+=======
+            method=challenge_data.first_factor,
+>>>>>>> upstream/master
             stage="challenge",
             reason="challenge_invalid_or_expired",
         )
         return RedirectResponse("/login?info=mfa_expired", status_code=303)
+
+    # Only the live account that passed the first factor may be signed in.
+    from ..auth import dependencies
+
+    account = dependencies.resolve_credential_account(
+        dependencies.lookup_live_account,
+        challenge_data.username,
+        challenge_data.created_at,
+    )
+    if account is None:
+        reject_login(
+            challenge_data.username,
+            account_exists=False,
+            method=challenge_data.first_factor,
+            stage="challenge",
+            reason="challenge_invalid_or_expired",
+        )
+        return RedirectResponse("/login?info=mfa_expired", status_code=303)
+
+    # A challenge usable here (same IP, consumed) was usable when peeked
+    # above, so its code attempt is reserved; never check one unreserved.
+    if attempt is None:
+        raise RuntimeError("MFA code reached its check without a reservation")
 
     # Verify TOTP or recovery code
     verified = False
@@ -1009,14 +1263,28 @@ def mfa_challenge_verify(
         )
         complete_login(
             challenge_data.username,
+<<<<<<< HEAD
             method=_CHALLENGE_LOGIN_METHOD,
+=======
+            method=challenge_data.first_factor,
+>>>>>>> upstream/master
             mfa=method,
             flow="web_session",
             issue=lambda: session_mgr.create_session(
                 redirect_response,
+<<<<<<< HEAD
                 username=challenge_data.username,
                 role=challenge_data.role,
             ),
+=======
+                username=account.username,
+                role=account.role.value,
+            ),
+        )
+        # Both factors passed: the login is complete; clear its own key.
+        _login_throttle.login_rate_limiter.clear_completed_login(
+            challenge_data.username, scope=challenge_data.throttle_scope
+>>>>>>> upstream/master
         )
         logger.info(
             "MFA login verified for %s (method=%s)", challenge_data.username, method
@@ -1027,9 +1295,15 @@ def mfa_challenge_verify(
     reject_login(
         challenge_data.username,
         account_exists=True,
+<<<<<<< HEAD
         method=_CHALLENGE_LOGIN_METHOD,
         stage="mfa_code",
         reason="mfa_code_invalid",
+=======
+        method=challenge_data.first_factor,
+        stage="mfa_code",
+        reason=_login_throttle.failure_reason(attempt, "mfa_code_invalid"),
+>>>>>>> upstream/master
     )
     logger.warning(
         "MFA verification failed for %s (method=%s)", challenge_data.username, method

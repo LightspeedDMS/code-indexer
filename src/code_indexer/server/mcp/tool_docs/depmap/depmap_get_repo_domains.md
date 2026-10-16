@@ -35,10 +35,8 @@ result.
 Use this tool to understand how a repository fits into the broader architecture:
 which domains it belongs to, and what function it serves in each.
 
-BREAKING CHANGE (Story #888): Empty-string repo_name now returns success=false,
-resolution=invalid_input. Previous behavior was success=true with an empty domains
-list. Callers that relied on empty-success must add input validation before calling
-this tool.
+EMPTY INPUT: An empty-string repo_name returns success=false,
+resolution=invalid_input.
 
 Response structure:
 

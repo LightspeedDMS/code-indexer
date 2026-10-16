@@ -8,11 +8,10 @@ Provides 17 git operations across 5 feature groups:
 - F5: Recovery (git_reset, git_clean, git_merge_abort, git_checkout_file)
 - F6: Branch Management (git_branch_list, git_branch_create, git_branch_switch, git_branch_delete)
 
-Implements confirmation token system for destructive operations with:
-- 6-character alphanumeric tokens
-- 5-minute expiration
-- Single-use validation
-- In-memory storage
+Destructive operations (hard reset, clean, branch delete) require a
+confirmation token: 128-bit, valid for exactly 5 minutes on the store's clock,
+single-use, bound to user, repository alias, operation and parameters, and kept
+in the cluster-shared PayloadCache (see git_confirmation_tokens).
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
@@ -21,19 +20,32 @@ import json
 import logging
 import os
 import re
-import secrets
 import subprocess
 import threading
-import time
 from pathlib import Path
+<<<<<<< HEAD
 from typing import Any, Callable, cast, Dict, List, Optional, TYPE_CHECKING
 
 from cachetools import TTLCache
+=======
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+>>>>>>> upstream/master
 
+from code_indexer.server.services.git_confirmation_tokens import (
+    ConfirmationBinding,
+    issue_confirmation_token,
+    redeem_confirmation_token,
+)
 from code_indexer.server.utils.config_manager import ServerConfigManager
 from code_indexer.utils.git_runner import run_git_command
+<<<<<<< HEAD
 from code_indexer.server.logging_utils import format_error_log, mask_url_credentials
 from code_indexer.server.services.git_argv_safety import (
+=======
+from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.git_argv_safety import (
+    GIT_CLEAN_UNTRACKED_ARGV,
+>>>>>>> upstream/master
     validate_branch_name,
     validate_pathspecs,
     validate_remote_name,
@@ -41,12 +53,15 @@ from code_indexer.server.services.git_argv_safety import (
     validate_revision,
     validate_revision_range,
 )
+<<<<<<< HEAD
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 from code_indexer.server.services.git_tools_seam import (
     DelegatedGitTools,
     GitToolsUnavailableError,
     delegated_git_tools,
 )
+=======
+>>>>>>> upstream/master
 
 if TYPE_CHECKING:
     # Bug #1650: type-only imports for the lazily-constructed attributes
@@ -57,16 +72,20 @@ if TYPE_CHECKING:
         GitTimeoutsConfig,
         ApiLimitsConfig,
     )
+<<<<<<< HEAD
     from code_indexer.server.storage.shared.git_backend import GitBackend
     from code_indexer.server.repositories.activated_repo_manager import (
         ActivatedRepoManager,
     )
+=======
+    from code_indexer.server.repositories.activated_repo_manager import (
+        ActivatedRepoManager,
+    )
+    from code_indexer.server.cache.payload_cache import PayloadCache
+>>>>>>> upstream/master
 
 # Module logger
 logger = logging.getLogger(__name__)
-
-# Token expiry constant (not configurable - internal security setting)
-TOKEN_EXPIRY = 300  # 5 minutes for confirmation tokens
 
 
 class GitCommandError(Exception):
@@ -148,6 +167,15 @@ class GitOperationsService:
     _config_lazy_lock = threading.RLock()
     _activated_repo_manager_lock = threading.RLock()
 
+<<<<<<< HEAD
+=======
+    # Cluster-shared store for confirmation tokens, wired by server startup
+    # (app.state.payload_cache). Class-level default so instances built via
+    # __new__ also read None; while unset, a destructive operation fails
+    # instead of keeping tokens in this process.
+    payload_cache: Optional["PayloadCache"] = None
+
+>>>>>>> upstream/master
     def __init__(self, config_manager: Optional[ServerConfigManager] = None):
         """
         Initialize GitOperationsService with configuration.
@@ -156,15 +184,29 @@ class GitOperationsService:
             config_manager: ServerConfigManager instance for loading git service config.
                           If None, creates a new ServerConfigManager internally.
         """
-        # Thread-safe TTLCache for automatic token expiration (Issue #1, #2)
-        # maxsize=10000: Reasonable limit for concurrent users
-        # ttl=TOKEN_EXPIRY: Automatic cleanup after 5 minutes
-        # timer=time.time: Use time.time() for testability (allows mocking)
-        self._tokens: TTLCache = TTLCache(
-            maxsize=10000, ttl=TOKEN_EXPIRY, timer=time.time
-        )
-        self._tokens_lock = threading.RLock()
+        # Bug #1650 remediation: code review of the first fix attempt
+        # (commit 2085fe9a, module-level PEP 562 lazy-init only) proved
+        # deferring the module-level `git_operations_service` singleton
+        # binding alone does NOT fix the reported symptom -- PEP 562's
+        # __getattr__ fires transparently on `from module import name` too,
+        # and all five real consumers (routers/git.py,
+        # mcp/handlers/{git_read,git_write,__init__,_legacy}.py) bind the
+        # name at module scope, so importing any MCP handler module still
+        # forces this __init__ to run. The actual fix is making __init__
+        # itself cheap: both the config-service resolution/read (relevant to
+        # the Bug #1428 credential-bleed path -- get_config_service() can
+        # return real provider API keys) and the ActivatedRepoManager
+        # construction (-> GoldenRepoManager -> SQLite golden-repo load,
+        # spawning bgm-worker/bgm-temporal-worker threads) are deferred to
+        # first REAL use via the properties defined below __init__, instead
+        # of running here unconditionally.
+        self._config_manager_arg = config_manager
+        self._config_manager_lazy: Optional[ServerConfigManager] = None
+        self._config_loaded = False
+        self._git_timeouts_lazy: Optional["GitTimeoutsConfig"] = None
+        self._api_limits_lazy: Optional["ApiLimitsConfig"] = None
 
+<<<<<<< HEAD
         # Bug #1650 remediation: code review of the first fix attempt
         # (commit 2085fe9a, module-level PEP 562 lazy-init only) proved
         # deferring the module-level `git_operations_service` singleton
@@ -253,6 +295,74 @@ class GitOperationsService:
                 # Use defaults when no config file exists
                 from ..utils.config_manager import GitTimeoutsConfig, ApiLimitsConfig
 
+=======
+        self._activated_repo_manager_lazy: Optional["ActivatedRepoManager"] = None
+
+    @property
+    def config_manager(self) -> ServerConfigManager:
+        """Lazily resolve the config service (Bug #1650): get_config_service()
+        is only invoked on first genuine need, not at construction time."""
+        if self._config_manager_lazy is None:
+            with self._config_lazy_lock:
+                if self._config_manager_lazy is None:
+                    if self._config_manager_arg is not None:
+                        self._config_manager_lazy = self._config_manager_arg
+                    else:
+                        from code_indexer.server.services.config_service import (
+                            get_config_service,
+                        )
+
+                        self._config_manager_lazy = get_config_service()
+        return self._config_manager_lazy
+
+    @config_manager.setter
+    def config_manager(self, value: ServerConfigManager) -> None:
+        with self._config_lazy_lock:
+            self._config_manager_lazy = value
+            # Invalidate previously-derived timeout/limit config so a newly
+            # assigned config_manager takes effect on next access, instead
+            # of silently continuing to serve values derived from the
+            # config_manager this one replaces.
+            self._config_loaded = False
+            self._git_timeouts_lazy = None
+            self._api_limits_lazy = None
+
+    def _ensure_config_loaded(self) -> None:
+        """Run the config read (Bug #83 Phase 1 timeout/limit derivation)
+        exactly once, on first real need -- not at construction time.
+
+        The is-not-None/else branch below is an unmodified relocation of
+        the pre-existing Bug #83 Phase 1 logic that used to run
+        unconditionally inside __init__ -- only WHEN it runs changed
+        (deferred to first access), not WHAT it does.
+        """
+        if self._config_loaded:
+            return
+        with self._config_lazy_lock:
+            if self._config_loaded:
+                return
+            config = self.config_manager.get_config()
+            # Handle case where no config file exists (e.g., CI/CD parity tests)
+            #
+            # Bug #1650 round-2 remediation (M1): each slot is only filled
+            # if still None. Without this guard, a caller that explicitly
+            # sets _git_timeouts (e.g. a test's mock/sentinel, via the
+            # setter below) and then reads _api_limits for the first time
+            # would silently have its _git_timeouts overwritten here too --
+            # this method fills BOTH slots unconditionally on every run
+            # (there being no way to derive one without the other from a
+            # single config read), so it must not clobber a slot that was
+            # already independently populated.
+            if config is not None:
+                if self._git_timeouts_lazy is None:
+                    self._git_timeouts_lazy = config.git_timeouts_config
+                if self._api_limits_lazy is None:
+                    self._api_limits_lazy = config.api_limits_config
+            else:
+                # Use defaults when no config file exists
+                from ..utils.config_manager import GitTimeoutsConfig, ApiLimitsConfig
+
+>>>>>>> upstream/master
                 if self._git_timeouts_lazy is None:
                     self._git_timeouts_lazy = GitTimeoutsConfig()
                 if self._api_limits_lazy is None:
@@ -689,9 +799,10 @@ class GitOperationsService:
         """
         Push commits to remote repository (REST API wrapper).
 
-        Uses the server's configured SSH key for authentication (not user
-        PAT credentials). This is the code path invoked from the REST API.
-        The MCP git_push handler uses git_push_with_pat() for PAT-based push.
+        The REST front door: pushes through git_push, the single push
+        implementation, with the registered repository URL as the run-time
+        credential source. The MCP git_push handler reaches the same
+        git_push through git_push_with_pat(), with the user's PAT.
 
         Args:
             repo_alias: User's repository alias
@@ -708,6 +819,7 @@ class GitOperationsService:
 
         remote = kwargs.get("remote", "origin")
         branch = kwargs.get("branch")
+        set_upstream = bool(kwargs.get("set_upstream", False))
 
         repo_path = self.activated_repo_manager.get_activated_repo_path(
             username=username, user_alias=repo_alias
@@ -715,8 +827,18 @@ class GitOperationsService:
 
         # Story #636: Trigger migration before push if needed
         self._trigger_migration_if_needed(repo_path, username, repo_alias)
+        # Stored origin converges; credentials are supplied at run time.
+        credentials_url = self.activated_repo_manager.prepare_remote_operation(
+            username, repo_alias
+        )
 
-        result = self.git_push(Path(repo_path), remote=remote, branch=branch)
+        result = self.git_push(
+            Path(repo_path),
+            remote=remote,
+            branch=branch,
+            credentials_url=credentials_url,
+            set_upstream=set_upstream,
+        )
         result["success"] = True
         return result
 
@@ -748,8 +870,17 @@ class GitOperationsService:
 
         # Story #636: Trigger migration before pull if needed
         self._trigger_migration_if_needed(repo_path, username, repo_alias)
+        # Stored origin converges; credentials are supplied at run time.
+        credentials_url = self.activated_repo_manager.prepare_remote_operation(
+            username, repo_alias
+        )
 
-        result = self.git_pull(Path(repo_path), remote=remote, branch=branch)
+        result = self.git_pull(
+            Path(repo_path),
+            remote=remote,
+            branch=branch,
+            credentials_url=credentials_url,
+        )
         result["success"] = True
         return result
 
@@ -780,8 +911,14 @@ class GitOperationsService:
 
         # Story #636: Trigger migration before fetch if needed
         self._trigger_migration_if_needed(repo_path, username, repo_alias)
+        # Stored origin converges; credentials are supplied at run time.
+        credentials_url = self.activated_repo_manager.prepare_remote_operation(
+            username, repo_alias
+        )
 
-        result = self.git_fetch(Path(repo_path), remote=remote)
+        result = self.git_fetch(
+            Path(repo_path), remote=remote, credentials_url=credentials_url
+        )
         result["success"] = True
         return result
 
@@ -819,6 +956,8 @@ class GitOperationsService:
             mode=mode,
             commit_hash=commit_hash,
             confirmation_token=confirmation_token,
+            username=username,
+            repo_alias=repo_alias,
         )
         # Note: result already contains success field from git_reset
         # or requires_confirmation/token for hard reset
@@ -849,7 +988,12 @@ class GitOperationsService:
         repo_path = self.activated_repo_manager.get_activated_repo_path(
             username=username, user_alias=repo_alias
         )
-        result = self.git_clean(Path(repo_path), confirmation_token=confirmation_token)
+        result = self.git_clean(
+            Path(repo_path),
+            confirmation_token=confirmation_token,
+            username=username,
+            repo_alias=repo_alias,
+        )
         # Note: result already contains success field from git_clean
         # or requires_confirmation/token
         return result
@@ -1014,6 +1158,8 @@ class GitOperationsService:
             Path(repo_path),
             branch_name=branch_name,
             confirmation_token=confirmation_token,
+            username=username,
+            repo_alias=repo_alias,
         )
         # Note: result already contains success field from git_branch_delete
         # or requires_confirmation/token
@@ -1312,6 +1458,7 @@ class GitOperationsService:
             # validation at all. See git_argv_safety module docstring for
             # the invariant.
             branch = validate_revision_range(branch, repo_path, param_name="branch")
+<<<<<<< HEAD
             format_str = "%H\x1f%an\x1f%ai\x1f%s"
 
             if git_backend is not None and not (since_date or until or author or path):
@@ -1326,6 +1473,8 @@ class GitOperationsService:
                 return self._git_log_page(
                     repo_path, log_stdout, total_commits, offset=offset, limit=limit
                 )
+=======
+>>>>>>> upstream/master
 
             # Get total commit count (for pagination metadata)
             # Use branch or HEAD as the revision specifier
@@ -1742,6 +1891,25 @@ class GitOperationsService:
 
     # F4: Remote Operations
 
+    @staticmethod
+    def _remote_timeout_error(
+        error: subprocess.TimeoutExpired, operation: str, remote: str
+    ) -> "GitCommandError":
+        """GitCommandError naming what timed out: the network command
+        itself (``git <operation>``) or one of the bounded local lookups
+        before it (the remote, the current branch's upstream)."""
+        cmd = error.cmd if isinstance(error.cmd, (list, tuple)) else []
+        sub = str(cmd[1]) if len(cmd) > 1 else ""
+        if sub == operation:
+            what = f"git {operation}"
+        elif sub == "remote":
+            what = f"resolving remote '{remote}'"
+        elif sub in ("symbolic-ref", "rev-parse"):
+            what = "checking the current branch's upstream"
+        else:
+            what = f"local 'git {sub}' before git {operation}"
+        return GitCommandError(f"{what} timed out after {error.timeout}s", stderr="")
+
     def _count_pushed_commits(
         self, result: subprocess.CompletedProcess, repo_path: Path
     ) -> int:
@@ -1756,6 +1924,8 @@ class GitOperationsService:
         stderr_text = result.stderr or ""
         match = re.search(r"([0-9a-f]{7,40})\.\.\.?([0-9a-f]{7,40})", stderr_text)
         if match:
+            from code_indexer.utils import git_runner
+
             try:
                 count_result = self._git_run(
                     [
@@ -1766,9 +1936,14 @@ class GitOperationsService:
                     ],
                     cwd=repo_path,
                     check=True,
+                    timeout=git_runner.REMOTE_RESOLVE_TIMEOUT_SECONDS,
                 )
                 return int(count_result.stdout.strip())
-            except (subprocess.CalledProcessError, ValueError) as e:
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+                ValueError,
+            ) as e:
                 logger.warning(
                     "Failed to count pushed commits via rev-list: %s. "
                     "Falling back to 1 (push succeeded).",
@@ -1778,15 +1953,30 @@ class GitOperationsService:
         return 0
 
     def git_push(
-        self, repo_path: Path, remote: str = "origin", branch: Optional[str] = None
+        self,
+        repo_path: Path,
+        remote: str = "origin",
+        branch: Optional[str] = None,
+        credentials_url: Optional[str] = None,
+        set_upstream: bool = False,
+        push_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Push commits to remote repository.
+        Push commits to remote repository -- the single push implementation
+        behind both front doors (REST: the registered repository
+        credential; MCP: the user's PAT, via git_push_with_pat).
 
         Args:
             repo_path: Path to git repository
             remote: Remote name (default: "origin")
-            branch: Optional branch name
+            branch: Optional push refspec (a branch name, "src:dst", "+main")
+            credentials_url: URL whose http(s) userinfo is supplied to git
+                as the credential at run time (None when none are needed)
+            set_upstream: Push with git's --set-upstream, so each pushed
+                local branch tracks its remote counterpart
+            push_url: Credential-free URL the push is sent over instead of
+                the remote's own URL; the remote keeps its name, so
+                tracking refers to it. Applied at run time, never stored.
 
         Returns:
             Dict with success flag and pushed_commits count
@@ -1794,6 +1984,7 @@ class GitOperationsService:
         Raises:
             GitCommandError: If git push fails
         """
+<<<<<<< HEAD
         try:
             # remote must be a configured remote name; remote/branch values
             # never reach argv with a leading '-' unless branch is exactly
@@ -1819,14 +2010,31 @@ class GitOperationsService:
             result = self._git_run(
                 cmd,
                 cwd=repo_path,
+=======
+        # Imported here: the server.git package imports service modules.
+        from code_indexer.server.git.git_push import (
+            PushCredentialsNotApplicableError,
+            push,
+        )
+
+        try:
+            result = push(
+                repo_path,
+                remote,
+                branch,
+                set_upstream=set_upstream,
+                credentials_url=credentials_url,
+                push_url=push_url,
+>>>>>>> upstream/master
                 timeout=self._git_timeouts.git_remote_timeout,
-                check=True,
             )
 
             pushed_commits = self._count_pushed_commits(result, repo_path)
 
             return {"success": True, "pushed_commits": pushed_commits}
 
+        except PushCredentialsNotApplicableError as e:
+            raise GitCommandError(str(e), stderr="")
         except subprocess.CalledProcessError as e:
             stderr = getattr(e, "stderr", "")
 
@@ -1847,7 +2055,7 @@ class GitOperationsService:
                     f"git push failed: {e}", stderr=stderr, returncode=e.returncode
                 )
         except subprocess.TimeoutExpired as e:
-            raise GitCommandError(f"git push timed out after {e.timeout}s", stderr="")
+            raise self._remote_timeout_error(e, "push", remote)
 
     def git_push_with_pat(
         self,
@@ -1858,28 +2066,37 @@ class GitOperationsService:
         remote_url: Optional[str] = None,
         set_upstream: bool = True,
     ) -> Dict[str, Any]:
-        """Push commits using PAT authentication via GIT_ASKPASS.
+        """The MCP git_push front door: pushes through git_push, the single
+        push implementation, with the user's PAT as the credential.
 
-        Story #387: PAT-Authenticated Git Push with User Attribution.
-        Story #445: Fix branches with no upstream tracking.
+        Story #387 (PAT push), Story #445 (branches without upstream).
 
-        Uses GIT_ASKPASS to provide the PAT, converts SSH remotes to HTTPS,
-        and sets GIT_AUTHOR/COMMITTER env vars from stored identity.
+        A PAT applies over http(s), so an SSH remote is pushed over its
+        https form (``push_url``) while keeping its name. The PAT is
+        supplied at run time only -- never on argv, never stored in the
+        clone, never written to a file -- and answers both the username
+        and the password prompt.
+
+        ``branch`` is the destination branch for HEAD (this front door's
+        contract): HEAD is pushed to refs/heads/<branch>, or to the current
+        branch's own name when None.
 
         Args:
             repo_path: Path to git repository
             remote: Remote name (e.g., "origin")
-            branch: Optional branch name; auto-detected from HEAD when None
-            credential: Dict with token, git_user_name, git_user_email
+            branch: Destination branch for HEAD; the current branch when None
+            credential: Dict with the PAT under "token"
             remote_url: Pre-resolved remote URL (avoids redundant subprocess call)
-            set_upstream: When True (default), sets upstream tracking after push
+            set_upstream: When True (default), the pushed branch tracks it
 
         Returns:
-            Dict with success flag and push details
+            Dict with success flag and pushed_commits count
 
         Raises:
+            GitArgumentValidationError: remote/branch fail validation
             GitCommandError: If git push fails
         """
+<<<<<<< HEAD
         # This is a separate argv-building path from git_push() above -- the
         # MCP git_push handler calls this method directly. Validate
         # remote/branch here, before any subprocess, including the "git
@@ -1899,10 +2116,22 @@ class GitOperationsService:
         if self._delegated_tools() is not None:
             return self.git_push(repo_path, remote=remote, branch=branch)
 
+=======
+        # This front door's own inputs are validated before any subprocess
+        # (including the "git remote get-url" preflight below); git_push
+        # validates the refspec built from them again. See git_argv_safety
+        # module docstring for the invariant.
+        from code_indexer.server.git.git_subprocess_env import (
+            http_credentials_url,
+            remote_url_without_credentials,
+        )
+>>>>>>> upstream/master
         from code_indexer.server.services.git_credential_helper import (
             GitCredentialHelper,
         )
+        from code_indexer.utils import git_runner
 
+<<<<<<< HEAD
         helper = GitCredentialHelper()
 
         # Use provided URL or fetch it
@@ -2013,15 +2242,47 @@ class GitOperationsService:
             raise GitCommandError(
                 f"git push failed: {detail}",
                 stderr=stderr,
+=======
+        # Local metadata lookups, bounded; a timeout says what timed out.
+        try:
+            remote = validate_remote_name(remote, repo_path)
+            branch = validate_branch_name(branch, param_name="branch")
+            if remote_url is None:
+                remote_url = run_git_command(
+                    ["git", "remote", "get-url", remote],
+                    cwd=repo_path,
+                    check=True,
+                    timeout=git_runner.REMOTE_RESOLVE_TIMEOUT_SECONDS,
+                ).stdout.strip()
+        except subprocess.CalledProcessError as e:
+            raise GitCommandError(
+                f"Failed to get remote URL for '{remote}': {e}",
+                stderr=getattr(e, "stderr", ""),
+>>>>>>> upstream/master
                 returncode=e.returncode,
             )
         except subprocess.TimeoutExpired as e:
-            raise GitCommandError(f"git push timed out after {e.timeout}s", stderr="")
-        finally:
-            helper.cleanup_askpass_script(askpass_path)
+            raise self._remote_timeout_error(e, "push", remote)
+
+        push_url = remote_url_without_credentials(
+            GitCredentialHelper.convert_ssh_to_https(remote_url)
+        )
+        token = credential["token"]
+        return self.git_push(
+            repo_path,
+            remote=remote,
+            branch=f"HEAD:refs/heads/{branch}" if branch else "HEAD",
+            credentials_url=http_credentials_url(push_url, token, token),
+            set_upstream=set_upstream,
+            push_url=push_url,
+        )
 
     def git_pull(
-        self, repo_path: Path, remote: str = "origin", branch: Optional[str] = None
+        self,
+        repo_path: Path,
+        remote: str = "origin",
+        branch: Optional[str] = None,
+        credentials_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Pull updates from remote repository.
@@ -2030,6 +2291,8 @@ class GitOperationsService:
             repo_path: Path to git repository
             remote: Remote name (default: "origin")
             branch: Optional branch name
+            credentials_url: Registered repository URL whose credentials are
+                supplied to git at run time (None when none are needed)
 
         Returns:
             Dict with success, updated_files count, and conflicts list
@@ -2050,7 +2313,11 @@ class GitOperationsService:
             # whole element is checked and its '+'/'src:dst' contents reach
             # git unchanged. See git_argv_safety module docstring for
             # the invariant.
+<<<<<<< HEAD
             remote = validate_remote_name(remote, repo_path, runner=self._git_run)
+=======
+            remote = validate_remote_name(remote, repo_path)
+>>>>>>> upstream/master
             branch = validate_branch_name(branch, param_name="branch")
 
             # NOTE: unlike push/fetch below, `--end-of-options` is not a
@@ -2068,11 +2335,22 @@ class GitOperationsService:
             if branch:
                 cmd.append(branch)
 
+<<<<<<< HEAD
             result = self._git_run(
+=======
+            from code_indexer.server.git.remote_credentials import (
+                credentials_for_remote,
+            )
+
+            result = run_git_command(
+>>>>>>> upstream/master
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_remote_timeout,
                 check=False,
+                credentials_url=credentials_for_remote(
+                    repo_path, remote, credentials_url, push=False
+                ).credentials_url,
             )
 
             conflicts = []
@@ -2096,15 +2374,22 @@ class GitOperationsService:
             }
 
         except subprocess.TimeoutExpired as e:
-            raise GitCommandError(f"git pull timed out after {e.timeout}s", stderr="")
+            raise self._remote_timeout_error(e, "pull", remote)
 
-    def git_fetch(self, repo_path: Path, remote: str = "origin") -> Dict[str, Any]:
+    def git_fetch(
+        self,
+        repo_path: Path,
+        remote: str = "origin",
+        credentials_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Fetch updates from remote repository.
 
         Args:
             repo_path: Path to git repository
             remote: Remote name (default: "origin")
+            credentials_url: Registered repository URL whose credentials are
+                supplied to git at run time (None when none are needed)
 
         Returns:
             Dict with success flag and fetched_refs list
@@ -2116,15 +2401,28 @@ class GitOperationsService:
             # remote must be a configured remote name; it never reaches
             # argv with a leading '-'. See git_argv_safety module docstring
             # for the invariant.
+<<<<<<< HEAD
             remote = validate_remote_name(remote, repo_path, runner=self._git_run)
 
             result = self._git_run(
+=======
+            remote = validate_remote_name(remote, repo_path)
+
+            from code_indexer.server.git.remote_credentials import (
+                credentials_for_remote,
+            )
+
+            result = run_git_command(
+>>>>>>> upstream/master
                 # Defense in depth: hard option boundary right after the
                 # subcommand, before remote.
                 ["git", "fetch", "--end-of-options", remote],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_remote_timeout,
                 check=True,
+                credentials_url=credentials_for_remote(
+                    repo_path, remote, credentials_url, push=False
+                ).credentials_url,
             )
 
             fetched_refs = []
@@ -2141,7 +2439,7 @@ class GitOperationsService:
                 returncode=e.returncode,
             )
         except subprocess.TimeoutExpired as e:
-            raise GitCommandError(f"git fetch timed out after {e.timeout}s", stderr="")
+            raise self._remote_timeout_error(e, "fetch", remote)
 
     # F5: Recovery Operations
 
@@ -2151,6 +2449,9 @@ class GitOperationsService:
         mode: str,
         commit_hash: Optional[str] = None,
         confirmation_token: Optional[str] = None,
+        *,
+        username: Optional[str] = None,
+        repo_alias: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Reset repository to a specific commit.
@@ -2160,12 +2461,17 @@ class GitOperationsService:
             mode: Reset mode ("soft", "mixed", "hard")
             commit_hash: Optional commit hash (default: HEAD)
             confirmation_token: Required for hard reset
+            username, repo_alias: Required for hard reset; the token is
+                bound to them and to the target commit
 
         Returns:
             Dict with success/reset_mode/target_commit OR requires_confirmation/token
+            (a fresh token when the presented one is missing, invalid,
+            expired, already used, or bound to something else)
 
         Raises:
-            ValueError: If hard reset attempted without valid token
+            ValueError: If a hard reset lacks username or repo_alias
+            RuntimeError: If no shared confirmation token store is wired
             GitCommandError: If git reset fails
         """
         # mode must be exactly one of the supported literal reset modes,
@@ -2176,6 +2482,7 @@ class GitOperationsService:
         # could still resolve to `--hard` once it reaches argv. See
         # git_argv_safety module docstring for the invariant.
         mode = validate_reset_mode(mode)
+<<<<<<< HEAD
 
         # commit_hash is a free-form revision expression (HEAD, HEAD~N, a
         # SHA, a tag); it must not start with '-' or contain a control
@@ -2191,14 +2498,31 @@ class GitOperationsService:
             if not confirmation_token:
                 token = self._generate_confirmation_token("git_reset_hard")
                 return {"requires_confirmation": True, "token": token}
+=======
+>>>>>>> upstream/master
 
-            if not self._validate_confirmation_token(
-                "git_reset_hard", confirmation_token
-            ):
-                raise ValueError("Invalid or expired confirmation token")
+        # commit_hash is a free-form revision expression (HEAD, HEAD~N, a
+        # SHA, a tag); it must not start with '-' or contain a control
+        # character, validated before any confirmation token is even
+        # issued. Beyond that, `git reset` itself resolves or rejects the
+        # value exactly as it would with no validation at all. See
+        # git_argv_safety module docstring for the invariant.
+        commit_hash = validate_revision(
+            commit_hash, repo_path, param_name="commit_hash"
+        )
+
+        target = commit_hash or "HEAD"
+        if mode == "hard":
+            pending = self._confirmation_gate(
+                ConfirmationBinding.of(
+                    "git_reset_hard", username, repo_alias, commit=target
+                ),
+                confirmation_token,
+            )
+            if pending is not None:
+                return pending
 
         try:
-            target = commit_hash or "HEAD"
             cmd = ["git", "reset", f"--{mode}", target]
 
             self._git_run(
@@ -2220,7 +2544,12 @@ class GitOperationsService:
             raise GitCommandError(f"git reset timed out after {e.timeout}s", stderr="")
 
     def git_clean(
-        self, repo_path: Path, confirmation_token: Optional[str] = None
+        self,
+        repo_path: Path,
+        confirmation_token: Optional[str] = None,
+        *,
+        username: Optional[str] = None,
+        repo_alias: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Remove untracked files and directories.
@@ -2228,24 +2557,33 @@ class GitOperationsService:
         Args:
             repo_path: Path to git repository
             confirmation_token: Required for this destructive operation
+            username, repo_alias: Required; the token is bound to them
 
         Returns:
             Dict with success/removed_files OR requires_confirmation/token
+            (a fresh token when the presented one is missing, invalid,
+            expired, already used, or bound to something else)
 
         Raises:
-            ValueError: If attempted without valid token
+            ValueError: If username or repo_alias is missing
+            RuntimeError: If no shared confirmation token store is wired
             GitCommandError: If git clean fails
         """
-        if not confirmation_token:
-            token = self._generate_confirmation_token("git_clean")
-            return {"requires_confirmation": True, "token": token}
-
-        if not self._validate_confirmation_token("git_clean", confirmation_token):
-            raise ValueError("Invalid or expired confirmation token")
+        pending = self._confirmation_gate(
+            ConfirmationBinding.of("git_clean", username, repo_alias),
+            confirmation_token,
+        )
+        if pending is not None:
+            return pending
 
         try:
+<<<<<<< HEAD
             result = self._git_run(
                 ["git", "clean", "-fd"],
+=======
+            result = run_git_command(
+                list(GIT_CLEAN_UNTRACKED_ARGV),
+>>>>>>> upstream/master
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
                 check=True,
@@ -2809,7 +3147,11 @@ class GitOperationsService:
             branch_name = validate_branch_name(branch_name, param_name="branch_name")
             assert branch_name is not None  # required parameter, never None here
 
+<<<<<<< HEAD
             self._git_run(
+=======
+            run_git_command(
+>>>>>>> upstream/master
                 ["git", "branch", branch_name],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2893,6 +3235,9 @@ class GitOperationsService:
         repo_path: Path,
         branch_name: str,
         confirmation_token: Optional[str] = None,
+        *,
+        username: Optional[str] = None,
+        repo_alias: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Delete a branch.
@@ -2901,12 +3246,17 @@ class GitOperationsService:
             repo_path: Path to git repository
             branch_name: Branch to delete
             confirmation_token: Required for this destructive operation
+            username, repo_alias: Required; the token is bound to them and
+                to branch_name
 
         Returns:
             Dict with success/deleted_branch OR requires_confirmation/token
+            (a fresh token when the presented one is missing, invalid,
+            expired, already used, or bound to something else)
 
         Raises:
-            ValueError: If attempted without valid token
+            ValueError: If username or repo_alias is missing
+            RuntimeError: If no shared confirmation token store is wired
             GitCommandError: If git branch delete fails
         """
         # branch_name must not start with '-' (would be read as a git
@@ -2918,15 +3268,22 @@ class GitOperationsService:
         # invariant.
         branch_name = validate_branch_name(branch_name, param_name="branch_name")
         assert branch_name is not None  # required parameter, never None here
+<<<<<<< HEAD
 
         if not confirmation_token:
             token = self._generate_confirmation_token("git_branch_delete")
             return {"requires_confirmation": True, "token": token}
+=======
+>>>>>>> upstream/master
 
-        if not self._validate_confirmation_token(
-            "git_branch_delete", confirmation_token
-        ):
-            raise ValueError("Invalid or expired confirmation token")
+        pending = self._confirmation_gate(
+            ConfirmationBinding.of(
+                "git_branch_delete", username, repo_alias, branch=branch_name
+            ),
+            confirmation_token,
+        )
+        if pending is not None:
+            return pending
 
         try:
             self._git_run(
@@ -2979,54 +3336,33 @@ class GitOperationsService:
 
     # Confirmation Token System
 
-    def _generate_confirmation_token(self, operation: str) -> str:
+    def _confirmation_gate(
+        self, binding: ConfirmationBinding, confirmation_token: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """Return None when `confirmation_token` is redeemed for `binding`
+        (the operation may run); otherwise the requires_confirmation
+        response carrying a fresh token bound to `binding`.
+
+        Tokens live in the cluster-shared PayloadCache, so any worker or
+        node can redeem them; redemption is atomic and single-use.
         """
-        Generate a 6-character confirmation token (thread-safe).
-
-        Args:
-            operation: Operation name for token validation
-
-        Returns:
-            6-character alphanumeric token
-        """
-        # Generate 6-character token using uppercase letters and digits
-        # Excluding ambiguous characters: 0, O, I, 1
-        chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-        token = "".join(secrets.choice(chars) for _ in range(6))
-
-        # Thread-safe token storage (TTLCache handles expiration automatically)
-        with self._tokens_lock:
-            # Store only operation name - TTLCache handles expiry via its TTL parameter
-            self._tokens[token] = operation
-
-        return token
-
-    def _validate_confirmation_token(self, operation: str, token: str) -> bool:
-        """
-        Validate a confirmation token (thread-safe, single-use).
-
-        Args:
-            operation: Expected operation name
-            token: Token to validate
-
-        Returns:
-            True if token is valid and not expired, False otherwise
-        """
-        # Thread-safe token validation
-        with self._tokens_lock:
-            # TTLCache automatically removes expired entries on access
-            if token not in self._tokens:
-                return False
-
-            stored_operation = self._tokens[token]
-
-            # Check operation match
-            if stored_operation != operation:
-                return False
-
-            # Token is valid - consume it (single-use)
-            del self._tokens[token]
-            return True
+        cache = self.payload_cache
+        if cache is None:
+            raise RuntimeError(
+                "Confirmation token store is not configured: the shared "
+                "payload cache is not wired into GitOperationsService"
+            )
+        if confirmation_token and redeem_confirmation_token(
+            cache, binding, confirmation_token
+        ):
+            return None
+        response: Dict[str, Any] = {
+            "requires_confirmation": True,
+            "token": issue_confirmation_token(cache, binding),
+        }
+        if confirmation_token:
+            response["message"] = "Invalid or expired confirmation token"
+        return response
 
     # -------------------------------------------------------------------------
     # Story #453: Git Stash Operations
@@ -3442,6 +3778,23 @@ class GitOperationsService:
 # same lock.
 _lazy_init_lock = threading.RLock()
 
+# Bug #1650 (mirrors Bug #1638): the lazy-init lock MUST be an RLock, not a
+# plain Lock. If any future call chain inside GitOperationsService.__init__
+# (directly or via a dependency such as ActivatedRepoManager/
+# GoldenRepoManager) ever reads this module's `git_operations_service`
+# attribute again before construction finishes, that re-entrant call arrives
+# on the SAME thread while the lock is already held. A plain Lock would
+# self-deadlock there; the RLock lets the re-entrant call back in, and the
+# `_initializing` sentinel (defined below) -- not the lock -- is what stops
+# it from recursively re-running the constructor: it returns AttributeError
+# (-> None via getattr(..., None)) instead, matching the exact pre-fix
+# semantics (before this fix, `git_operations_service` was simply unbound
+# until the module-level assignment completed). Declared before
+# _get_git_operations_service() so every reader/writer of the singleton --
+# whether reached via __getattr__ or called directly -- serializes on the
+# same lock.
+_lazy_init_lock = threading.RLock()
+
 # Global service instance (lazy initialization to avoid circular imports)
 _git_operations_service_instance: Optional[GitOperationsService] = None
 
@@ -3589,4 +3942,7 @@ def __getattr__(name: str) -> Any:
         if _initialized and name in _lazy_values:
             return _lazy_values[name]
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+<<<<<<< HEAD
 
+=======
+>>>>>>> upstream/master

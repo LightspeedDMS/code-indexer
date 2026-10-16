@@ -344,7 +344,7 @@ class TestTruncateXrayResultLargeDataIntegrity:
             **{"app": mock_app},
         ):
             helper = _import_helper()
-            result = helper(large)
+            result = helper(large, owner="alice")
 
         cache_handle = result["cache_handle"]
         all_matches: list = []
@@ -352,7 +352,11 @@ class TestTruncateXrayResultLargeDataIntegrity:
         page_num = 1
         max_pages_safety = 200
         for _ in range(max_pages_safety):
+<<<<<<< HEAD
             fetched = xt.fetch_cached_page(cache, cache_handle, page_num)
+=======
+            fetched = xt.fetch_cached_page(cache, cache_handle, page_num, "alice")
+>>>>>>> upstream/master
             parsed = json.loads(fetched["content"])
             all_matches.extend(parsed.get("matches", []))
             all_errors.extend(parsed.get("evaluation_errors", []))

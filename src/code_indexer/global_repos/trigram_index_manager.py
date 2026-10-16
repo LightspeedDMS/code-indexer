@@ -25,7 +25,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Set, Tuple
 
+<<<<<<< HEAD
 from ..utils.index_store import index_root
+=======
+>>>>>>> upstream/master
 from .regex_trigram import trigrams
 
 logger = logging.getLogger(__name__)
@@ -199,6 +202,7 @@ _COMMIT_EVERY_FILES = 2000
 _STALE_BUILD_FILE_AGE_SECONDS = 6 * 60 * 60
 
 
+<<<<<<< HEAD
 def trigram_prefilter_available() -> bool:
     """Whether a trigram index can be built and trusted on this server.
 
@@ -222,6 +226,11 @@ def trigram_prefilter_available() -> bool:
 def trigram_index_dir(repo_path: Path) -> Path:
     """Return the trigram index directory of the repository at ``repo_path``."""
     return index_root(repo_path) / "trigram_index"
+=======
+def trigram_index_dir(repo_path: Path) -> Path:
+    """Return the trigram index directory of the repository at ``repo_path``."""
+    return Path(repo_path) / ".code-indexer" / "trigram_index"
+>>>>>>> upstream/master
 
 
 def remove_leftover_build_files(
@@ -624,6 +633,7 @@ class TrigramIndexManager:
                         f"trigram index query for {self._db_path} cancelled "
                         f"after timeout"
                     )
+<<<<<<< HEAD
                 # EVO-66189: the trigram DB is ~1.2 GB on shared NFS; cold queries were
                 # dominated by NFS page seeks (measured 4-9s cold vs ~0.2s warm). mmap it
                 # so cold pages fault through the OS page cache (shared across queries, no
@@ -632,6 +642,8 @@ class TrigramIndexManager:
                 # written back to NFS.
                 conn.execute("PRAGMA mmap_size=2147483648")  # 2 GiB: map the whole DB
                 conn.execute("PRAGMA cache_size=-65536")  # ~64 MB page cache
+=======
+>>>>>>> upstream/master
                 # Order the required trigrams rarest-first (df 0 == absent).
                 df_map = {t: 0 for t in tris}
                 for t, df in conn.execute(
@@ -650,9 +662,14 @@ class TrigramIndexManager:
                 if df_map[ordered[0]] == 0:
                     return always
 
+<<<<<<< HEAD
                 # Rarest-first intersection in a connection-local temp table, kept in RAM
                 # (temp_store=MEMORY) instead of written back to shared NFS (temp_store=FILE).
                 conn.execute("PRAGMA temp_store=MEMORY")
+=======
+                # Rarest-first intersection in a connection-local temp table.
+                conn.execute("PRAGMA temp_store=FILE")
+>>>>>>> upstream/master
                 conn.execute("CREATE TEMP TABLE cand (id INTEGER PRIMARY KEY)")
                 try:
                     conn.execute(

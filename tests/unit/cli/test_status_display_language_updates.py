@@ -325,3 +325,80 @@ def test_index_files_status_has_no_icon(
         assert status == "" or (
             "📊" not in status and "✅" not in status and "❌" not in status
         ), f"Status should be text-only or empty, got: '{status}'"
+
+
+def _semantic_index_details(tmp_path: Path, config_manager: ConfigManager, metadata):
+    """Write metadata.json, run the real _status_impl (table and external
+    services mocked as in the tests above) and return the Semantic Index
+    row's details text."""
+    config_dir = tmp_path / ".code-indexer"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "metadata.json").write_text(json.dumps(metadata))
+    mock_table = MagicMock()
+    mock_embedding = MagicMock()
+    mock_embedding.get_provider_name.return_value = "voyage-ai"
+    mock_embedding.get_current_model.return_value = "voyage-code-3"
+    mock_embedding.health_check.return_value = True
+    mock_embedding.get_model_info.return_value = {"dimensions": 1024}
+    with (
+        patch("code_indexer.cli.Table", return_value=mock_table),
+        patch("code_indexer.cli.EmbeddingProviderFactory") as mock_factory,
+        patch(
+            "code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"
+        ) as mock_fs,
+    ):
+        mock_factory.create.return_value = mock_embedding
+        mock_fs_instance = MagicMock()
+        mock_fs_instance.health_check.return_value = True
+        mock_fs_instance.collection_exists.return_value = True
+        mock_fs_instance.resolve_collection_name.return_value = (
+            "code-indexer-voyage-code-3-d1024"
+        )
+        mock_fs_instance.count_points.return_value = 1234
+        mock_fs_instance.get_indexed_file_count_fast.return_value = 100
+        mock_fs_instance.validate_embedding_dimensions.return_value = True
+        mock_fs.return_value = mock_fs_instance
+
+        from code_indexer.cli import _status_impl, cli
+
+        ctx = click.Context(cli)
+        ctx.obj = {"config_manager": config_manager}
+        _status_impl(ctx)
+
+    for call_args in mock_table.add_row.call_args_list:
+        if call_args[0][0] == "Semantic Index":
+            return str(call_args[0][2])
+    raise AssertionError("Semantic Index row should exist")
+
+
+@pytest.mark.parametrize(
+    "status, total, processed, expected",
+    [
+        ("in_progress", 10, 4, "Not complete (6 files remaining)"),
+        ("in_progress", 4, 4, "Not complete (finishing up)"),
+        ("completed", 10, 10, None),
+        ("failed", 10, 4, None),
+    ],
+)
+def test_incomplete_index_indicator_without_stored_list(
+    filesystem_config_with_indexes, tmp_path, status, total, processed, expected
+):
+    """Story #2121 stores no file list (no files_to_index); an interrupted
+    index (status in_progress) must still show "Not complete", its remaining
+    count derived from the recorded plan size (total_files_to_index) minus
+    files_processed. Only in_progress counts, as before."""
+    config_manager = filesystem_config_with_indexes[0]
+    details = _semantic_index_details(
+        tmp_path,
+        config_manager,
+        {
+            "status": status,
+            "total_files_to_index": total,
+            "files_processed": processed,
+            "indexed_at": "2025-11-10T20:00:00",
+        },
+    )
+    if expected is None:
+        assert "Not complete" not in details, details
+    else:
+        assert expected in details, details

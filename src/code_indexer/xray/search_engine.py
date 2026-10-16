@@ -27,11 +27,20 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+<<<<<<< HEAD
     from code_indexer.server.services.file_service import ContentSeamSource
     from code_indexer.xray.rust_backend import SharedIdentityCache, XrayCacheBackend
 
 from code_indexer.utils.index_store import INDEX_DIRNAME
 from code_indexer.utils.path_confinement import is_resolved_within_root
+=======
+    from code_indexer.xray.rust_backend import SharedIdentityCache, XrayCacheBackend
+
+from code_indexer.utils.path_confinement import (
+    has_git_segment,
+    is_readable_within_root,
+)
+>>>>>>> upstream/master
 from code_indexer.global_repos.regex_search import (
     RegexSearchService,
     RipgrepExecutionError,
@@ -46,6 +55,7 @@ logger = logging.getLogger(__name__)
 # this many compiled-pattern/path comparisons are spent after Phase 1.
 _ZERO_MATCH_PATTERN_MATCH_ATTEMPT_BUDGET = 10_000
 
+<<<<<<< HEAD
 #: Directory names the filename driver discards at the repository root
 #: anyway. Sent to the content manifest as its prune list so the backend never
 #: hashes cidx's own index store -- which, unlike the local walk's root-only
@@ -110,6 +120,8 @@ def _is_cidx_or_git_internal(rel: str) -> bool:
         ".git",
     )
 
+=======
+>>>>>>> upstream/master
 
 class XRayPhase1TimeoutError(Exception):
     """Raised when Phase 1 (candidate-file selection) exceeds timeout_seconds.
@@ -1038,7 +1050,11 @@ class XRaySearchEngine:
             "recursive matching across directories."
         )
         warnings: List[Dict[str, Any]] = []
+<<<<<<< HEAD
         probe_service = _phase1_regex_service(repo_path)
+=======
+        probe_service = RegexSearchService(repo_path)
+>>>>>>> upstream/master
         probe_loop_start = time.monotonic()
 
         for idx, pat in enumerate(include_patterns):
@@ -1204,6 +1220,7 @@ class XRaySearchEngine:
         candidates: List[Path] = []
         all_rel_paths: List[str] = []
         start = time.monotonic()
+<<<<<<< HEAD
 
         source = xray_content_source(repo_path)
         rel_paths = (
@@ -1233,11 +1250,57 @@ class XRaySearchEngine:
             if not _is_manifest_deadline(exc):
                 raise
             raise XRayPhase1TimeoutError(candidates=sorted(candidates)) from exc
+=======
+        # Resolved ONCE for the whole walk, never per candidate.
+        resolved_repo_root = repo_path.resolve()
+
+        # Bug #1598: iterate rglob() directly (unsorted) instead of
+        # sorted(repo_path.rglob("*")) -- sorted() would fully drain and
+        # sort the entire tree in memory BEFORE the loop body executes even
+        # once, so a time-check inside the loop alone could never bound
+        # that initial traversal on a large tree. Sort only the final,
+        # already-bounded candidate list to preserve deterministic output
+        # ordering.
+        for p in repo_path.rglob("*"):
+            if time.monotonic() - start > timeout_seconds:
+                raise XRayPhase1TimeoutError(candidates=sorted(candidates))
+
+            if not p.is_file():
+                continue
+
+            # p.is_file() follows a symlink's target regardless of where
+            # it points -- when confined (server context), reject any
+            # candidate whose resolved location is not strictly inside the
+            # repository root, or is inside the repository's .git (e.g. a
+            # committed ``link.py -> .git/config``).
+            if self._confine_to_repo_root and not is_readable_within_root(
+                p, resolved_repo_root
+            ):
+                continue
+
+            rel = str(p.relative_to(repo_path))
+            # Finding 3.6 (v10.4.4): skip CIDX's internal index store.
+            if rel.startswith(".code-indexer/") or rel == ".code-indexer":
+                continue
+            # v10.4.6 (Defect 2): also exclude .git/ — git internals
+            # (FETCH_HEAD, COMMIT_EDITMSG, objects/, etc.) are never code
+            # candidates, at any depth (a nested .git included).
+            if has_git_segment(Path(rel).parts):
+                continue
+            all_rel_paths.append(rel)
+
+            if not selector.select(rel):
+                continue
+
+            if pattern.search(rel):
+                candidates.append(p)
+>>>>>>> upstream/master
 
         self._last_phase1_warnings = self._check_zero_match_patterns(
             include_patterns, all_rel_paths
         )
         return sorted(candidates)
+<<<<<<< HEAD
 
     def _local_filename_rel_paths(self, repo_path: Path) -> Iterator[Optional[str]]:
         """Every file under *repo_path* as a repo-relative path, walking the disk.
@@ -1292,6 +1355,8 @@ class XRaySearchEngine:
             source, _FILENAME_MANIFEST_PRUNE_DIRS, deadline=deadline
         ):
             yield None if entry.is_symlink else entry.path
+=======
+>>>>>>> upstream/master
 
     def _run_phase1_content(
         self,
@@ -1368,7 +1433,11 @@ class XRaySearchEngine:
             ".git/**",
             *list(exclude_patterns or []),
         ]
+<<<<<<< HEAD
         service = _phase1_regex_service(repo_path)
+=======
+        service = RegexSearchService(repo_path)
+>>>>>>> upstream/master
         try:
             search_result = _run_async_in_sync(
                 service.search(

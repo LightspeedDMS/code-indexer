@@ -10,6 +10,8 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+from code_indexer.utils.credential_redaction import mask_url_credentials
+
 logger = logging.getLogger(__name__)
 
 
@@ -148,7 +150,8 @@ class GlobalRepoOperations:
                 {
                     "alias": repo.get("alias_name"),  # alias_name → alias
                     "repo_name": repo.get("repo_name"),
-                    "url": repo.get("repo_url"),  # repo_url → url
+                    # repo_url → url, returned with its userinfo redacted
+                    "url": mask_url_credentials(repo.get("repo_url")),
                     "last_refresh": repo.get("last_refresh"),
                 }
             )
@@ -186,7 +189,8 @@ class GlobalRepoOperations:
         return {
             "alias": repo.get("alias_name"),  # alias_name → alias
             "repo_name": repo.get("repo_name"),
-            "url": repo.get("repo_url"),  # repo_url → url
+            # repo_url → url, returned with its userinfo redacted
+            "url": mask_url_credentials(repo.get("repo_url")),
             "last_refresh": repo.get("last_refresh"),
             "enable_temporal": repo.get(
                 "enable_temporal", False

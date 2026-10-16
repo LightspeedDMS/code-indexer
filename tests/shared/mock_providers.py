@@ -87,6 +87,9 @@ class MockEmbeddingProvider(EmbeddingProvider):
         """Mock batch processing support."""
         return True
 
+    def request_max_retries(self) -> int:
+        return 0
+
     def health_check(self) -> bool:
         return True
 

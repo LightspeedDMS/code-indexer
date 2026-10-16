@@ -66,8 +66,13 @@ fail-closed:
   ``uses_shared_metadata_stores()``, plural.
 
 Full rationale, the confirmed cluster symptoms, and the both-doors injection
+<<<<<<< HEAD
 requirement: docs/architecture-invariants.md, "Temporal Worker Lineage Store
 Selection (Bug #1533)".
+=======
+requirement: docs/architecture/invariants/indexing-and-migrations.md, "Temporal
+indexing" (golden lineage read from the shared stores).
+>>>>>>> upstream/master
 """
 
 import logging
@@ -238,8 +243,13 @@ def _resolve_golden_temporal_context(
         ValueError: the alias is known but its fixed root cannot be derived.
         Exception: any lineage-lookup failure propagates unchanged.
     """
+<<<<<<< HEAD
     from code_indexer.server.services.temporal_index_store import (
         served_temporal_index_root,
+=======
+    from code_indexer.services.temporal.temporal_server_paths import (
+        server_temporal_index_root,
+>>>>>>> upstream/master
     )
 
     manager = _resolve_lineage_repo_manager(activated_repo_manager)
@@ -254,7 +264,11 @@ def _resolve_golden_temporal_context(
     return _GoldenTemporalContext(
         golden_repo_alias,
         manager,
+<<<<<<< HEAD
         served_temporal_index_root(golden_repos_dir, golden_repo_alias),
+=======
+        server_temporal_index_root(golden_repos_dir, golden_repo_alias),
+>>>>>>> upstream/master
     )
 
 
@@ -322,11 +336,39 @@ def _build_ctx(worker_input: TemporalWorkerInput) -> Dict[str, Any]:
     }
 
 
+<<<<<<< HEAD
 def _to_dicts(temporal_results: Any, repository_alias: str) -> List[Dict[str, Any]]:
     return [
         convert_temporal_result_to_query_result(t, repository_alias).to_dict()
         for t in temporal_results
     ]
+=======
+def _activation_sources(
+    worker_input: TemporalWorkerInput, golden_alias: Optional[str]
+) -> Optional[List[str]]:
+    """Provenance for rows of this job (public #1984).
+
+    None for a global repo; otherwise the golden repo the activation was
+    created from, or an empty list when that is unknown (which grants
+    nothing when the rows are later access-filtered).
+    """
+    if worker_input.repository_alias.endswith("-global"):
+        return None
+    return [golden_alias] if golden_alias else []
+
+
+def _to_dicts(
+    temporal_results: Any,
+    repository_alias: str,
+    activation_sources: Optional[List[str]],
+) -> List[Dict[str, Any]]:
+    rows = []
+    for t in temporal_results:
+        query_result = convert_temporal_result_to_query_result(t, repository_alias)
+        query_result.activation_source_repos = activation_sources
+        rows.append(query_result.to_dict())
+    return rows
+>>>>>>> upstream/master
 
 
 def _snapshot_payload(
@@ -353,11 +395,19 @@ class _TemporalWorkerCheckpointer:
         job_id: str,
         repository_alias: str,
         ctx: Dict[str, Any],
+<<<<<<< HEAD
+=======
+        activation_sources: Optional[List[str]],
+>>>>>>> upstream/master
     ) -> None:
         self._payload_cache = payload_cache
         self._job_id = job_id
         self._repository_alias = repository_alias
         self._ctx = ctx
+<<<<<<< HEAD
+=======
+        self._activation_sources = activation_sources
+>>>>>>> upstream/master
         self.shards_total: Optional[int] = None
         self._last_write = 0.0
 
@@ -387,7 +437,11 @@ class _TemporalWorkerCheckpointer:
         ):
             return
         try:
+<<<<<<< HEAD
             qr = _to_dicts(cumulative, self._repository_alias)
+=======
+            qr = _to_dicts(cumulative, self._repository_alias, self._activation_sources)
+>>>>>>> upstream/master
             store_temporal_snapshot(
                 self._payload_cache,
                 self._job_id,
@@ -483,14 +537,26 @@ def run_temporal_worker(
         payload_cache, job_id, _snapshot_payload([], 0, None, ctx), terminal=False
     )
 
+<<<<<<< HEAD
     checkpointer = _TemporalWorkerCheckpointer(
         payload_cache, job_id, worker_input.repository_alias, ctx
+=======
+    activation_sources = _activation_sources(worker_input, golden_ctx.alias)
+    checkpointer = _TemporalWorkerCheckpointer(
+        payload_cache, job_id, worker_input.repository_alias, ctx, activation_sources
+>>>>>>> upstream/master
     )
     final = _run_fusion(
         config, index_path, vector_store, worker_input, checkpointer, cancel_check
     )
 
+<<<<<<< HEAD
     qr_final = _to_dicts(final.results, worker_input.repository_alias)
+=======
+    qr_final = _to_dicts(
+        final.results, worker_input.repository_alias, activation_sources
+    )
+>>>>>>> upstream/master
     store_temporal_snapshot(
         payload_cache,
         job_id,

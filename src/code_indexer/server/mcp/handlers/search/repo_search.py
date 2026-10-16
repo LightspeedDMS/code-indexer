@@ -68,6 +68,15 @@ def _repo_lookup_error(
         available_values=available_repos,
     )
     error_envelope["results"] = []
+<<<<<<< HEAD
+=======
+    # Story #2117: a rejection before the repository resolved (not recorded).
+    from code_indexer.server.services.search_event_outcomes import (
+        REPOSITORY_NOT_FOUND_CODE,
+    )
+
+    error_envelope["error_code"] = REPOSITORY_NOT_FOUND_CODE
+>>>>>>> upstream/master
     return _mcp_response(error_envelope)
 
 
@@ -100,6 +109,7 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
     # Bug #1315: fall back to the registry's own index_path when the alias
     # pointer file is missing/unreadable, mirroring MultiSearchService's
     # omni-path resolution so direct and omni queries behave identically.
+<<<<<<< HEAD
     from code_indexer.server.startup.content_backend_wiring import (
         is_content_seam_delegated,
     )
@@ -111,6 +121,11 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
         alias_name=repository_alias,
         repo_entry=repo_entry,
         skip_fs_check=delegated,
+=======
+    alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
+    target_path = resolve_alias_or_index_path(
+        alias_manager, alias_name=repository_alias, repo_entry=repo_entry
+>>>>>>> upstream/master
     )
     if not target_path:
         err = _repo_lookup_error(
@@ -120,11 +135,26 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
         )
         return None, None, err
 
+<<<<<<< HEAD
     if not delegated and not Path(target_path).exists():
         raise FileNotFoundError(
             f"Global repository '{repository_alias}' not found at {target_path}"
         )
 
+=======
+    if not Path(target_path).exists():
+        from code_indexer.server.query.semantic_query_manager import (
+            SearchRepositoryNotFoundError,
+        )
+
+        logger.error(
+            "Global repository %r target is missing on disk: %s",
+            repository_alias,
+            target_path,
+        )
+        raise SearchRepositoryNotFoundError(repository_alias)
+
+>>>>>>> upstream/master
     return repo_entry, target_path, None
 
 
@@ -216,7 +246,11 @@ def _execute_tracked_search(
     """Execute _perform_search with query-tracker ref counting and timing.
 
     Args:
+<<<<<<< HEAD
         limit: must be > 0; raises ValueError otherwise.
+=======
+        limit: must be > 0; raises SearchRequestError otherwise.
+>>>>>>> upstream/master
 
     Returns:
         (results, execution_time_ms, timeout_occurred, effective_strategy)
@@ -228,7 +262,15 @@ def _execute_tracked_search(
     plain list the plain list is passed through unchanged.
     """
     if limit <= 0:
+<<<<<<< HEAD
         raise ValueError(f"limit must be > 0, got {limit}")
+=======
+        from code_indexer.server.query.semantic_query_manager import (
+            SearchRequestError,
+        )
+
+        raise SearchRequestError(f"limit must be > 0, got {limit}")
+>>>>>>> upstream/master
 
     query_tracker = _get_query_tracker()
     kwargs = _build_search_kwargs(params, user, user_repos, limit)

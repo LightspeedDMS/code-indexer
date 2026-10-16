@@ -8,71 +8,19 @@ import inspect
 
 
 class TestProgressiveMetadataResumeAfterFailed:
-    """Bug #467 Fix C: Resume works even after metadata status is 'failed'."""
+    """Bug #467 Fix C: a 'failed' status keeps its watermark. Story #2121:
+    the run itself is recovered by a reconcile (no stored list is resumed)."""
 
     def _create_metadata(self, tmp_path):
         from code_indexer.services.progressive_metadata import ProgressiveMetadata
 
         return ProgressiveMetadata(tmp_path / "metadata.json")
 
-    def test_can_resume_after_failed_status(self, tmp_path):
-        """When status='failed' but files_to_index has remaining work, resume should work."""
-        metadata = self._create_metadata(tmp_path)
-        metadata.start_indexing("voyage", "voyage-3", {"git_available": True})
-        metadata.set_files_to_index(["file1.py", "file2.py", "file3.py"])
-        metadata.mark_file_completed("file1.py")
-        metadata.fail_indexing("Process killed")
-
-        assert metadata.can_resume_interrupted_operation() is True
-
-    def test_can_resume_after_in_progress_status(self, tmp_path):
-        """Original behavior: in_progress with remaining work should resume."""
-        metadata = self._create_metadata(tmp_path)
-        metadata.start_indexing("voyage", "voyage-3", {"git_available": True})
-        metadata.set_files_to_index(["file1.py", "file2.py", "file3.py"])
-        metadata.mark_file_completed("file1.py")
-        # Status stays "in_progress" (no fail_indexing call)
-
-        assert metadata.can_resume_interrupted_operation() is True
-
-    def test_cannot_resume_when_all_files_completed(self, tmp_path):
-        """When all files are done, no resume needed."""
-        metadata = self._create_metadata(tmp_path)
-        metadata.start_indexing("voyage", "voyage-3", {"git_available": True})
-        metadata.set_files_to_index(["file1.py"])
-        metadata.mark_file_completed("file1.py")
-
-        assert metadata.can_resume_interrupted_operation() is False
-
-    def test_cannot_resume_when_no_files_to_index(self, tmp_path):
-        """When files_to_index is empty, no resume possible."""
-        metadata = self._create_metadata(tmp_path)
-        metadata.start_indexing("voyage", "voyage-3", {"git_available": True})
-        metadata.fail_indexing("error")
-
-        assert metadata.can_resume_interrupted_operation() is False
-
-    def test_remaining_files_after_failed(self, tmp_path):
-        """Remaining files list is correct after failed status."""
-        metadata = self._create_metadata(tmp_path)
-        metadata.start_indexing("voyage", "voyage-3", {"git_available": True})
-        metadata.set_files_to_index(["a.py", "b.py", "c.py", "d.py"])
-        metadata.mark_file_completed("a.py")
-        metadata.mark_file_completed("b.py")
-        metadata.fail_indexing("timeout")
-
-        remaining = metadata.get_remaining_files()
-        assert "c.py" in remaining
-        assert "d.py" in remaining
-        assert "a.py" not in remaining
-        assert "b.py" not in remaining
-
     def test_resume_timestamp_nonzero_after_failed(self, tmp_path):
         """get_resume_timestamp returns non-zero after 'failed' status."""
         metadata = self._create_metadata(tmp_path)
         metadata.start_indexing("voyage", "voyage-3", {"git_available": True})
-        metadata.set_files_to_index(["file1.py"])
-        metadata.mark_file_completed("file1.py")
+        metadata.update_progress(files_processed=1, chunks_added=1)
         metadata.fail_indexing("timeout")
 
         timestamp = metadata.get_resume_timestamp()
@@ -110,64 +58,54 @@ class TestIndexSourceConditionalReconcile:
         assert "--fts" in source, "_index_source should use --fts flag"
 
     def test_index_source_checks_metadata_status(self):
-        """Verify _index_source() reads metadata.json to decide reconcile."""
+        """Verify _index_source() decides reconcile from the recorded index
+        status of every provider (metadata_reader.read_index_states)."""
         from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 
         source = inspect.getsource(RefreshScheduler._index_source)
-        assert "metadata.json" in source, "_index_source should read metadata.json"
+        assert "read_index_states" in source, (
+            "_index_source should read the per-provider index states"
+        )
         assert "in_progress" in source, (
             "_index_source should check for in_progress status"
         )
         assert "failed" in source, "_index_source should check for failed status"
 
+    @staticmethod
+    def _needs_reconcile(source_path) -> bool:
+        """The status predicate _index_source() applies to each index state."""
+        from code_indexer.server.services.metadata_reader import read_index_states
+
+        return any(
+            state.status in ("in_progress", "failed")
+            for state in read_index_states(source_path)
+        )
+
     def test_reconcile_used_when_metadata_shows_interrupted(self, tmp_path):
-        """When metadata.json has status='in_progress', reconcile flag should be set."""
+        """When a provider's metadata has status='in_progress', reconcile is needed."""
         import json
 
-        # Create a metadata.json with interrupted state
         code_indexer_dir = tmp_path / ".code-indexer"
         code_indexer_dir.mkdir()
         metadata = {"status": "in_progress", "files_to_index": ["a.py", "b.py"]}
-        (code_indexer_dir / "metadata.json").write_text(json.dumps(metadata))
+        (code_indexer_dir / "metadata-voyage-ai.json").write_text(json.dumps(metadata))
 
-        # Check the metadata reading logic
-        metadata_path = tmp_path / ".code-indexer" / "metadata.json"
-        needs_reconcile = False
-        if metadata_path.exists():
-            with open(metadata_path) as f:
-                meta = json.load(f)
-            if meta.get("status") in ("in_progress", "failed"):
-                needs_reconcile = True
-
-        assert needs_reconcile is True
+        assert self._needs_reconcile(tmp_path) is True
 
     def test_no_reconcile_when_metadata_shows_completed(self, tmp_path):
-        """When metadata.json has status='completed', no reconcile needed."""
+        """When a provider's metadata has status='completed', no reconcile needed."""
         import json
 
         code_indexer_dir = tmp_path / ".code-indexer"
         code_indexer_dir.mkdir()
         metadata = {"status": "completed"}
-        (code_indexer_dir / "metadata.json").write_text(json.dumps(metadata))
+        (code_indexer_dir / "metadata-voyage-ai.json").write_text(json.dumps(metadata))
 
-        metadata_path = tmp_path / ".code-indexer" / "metadata.json"
-        needs_reconcile = False
-        if metadata_path.exists():
-            with open(metadata_path) as f:
-                meta = json.load(f)
-            if meta.get("status") in ("in_progress", "failed"):
-                needs_reconcile = True
-
-        assert needs_reconcile is False
+        assert self._needs_reconcile(tmp_path) is False
 
     def test_no_reconcile_when_no_metadata(self, tmp_path):
-        """When no metadata.json exists, no reconcile needed (first index)."""
-        metadata_path = tmp_path / ".code-indexer" / "metadata.json"
-        needs_reconcile = False
-        if metadata_path.exists():
-            needs_reconcile = True  # shouldn't reach here
-
-        assert needs_reconcile is False
+        """When no index metadata exists, no reconcile needed (first index)."""
+        assert self._needs_reconcile(tmp_path) is False
 
 
 class TestSmartIndexerInterruptHandling:

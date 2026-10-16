@@ -46,7 +46,10 @@ from .background_jobs_backend import (
     _owning_worker_process_is_alive,
 )
 from .ci_tokens_backend import CITokensSqliteBackend
+<<<<<<< HEAD
 from .control_plane_metadata_backend import ControlPlaneMetadataSqliteBackend
+=======
+>>>>>>> upstream/master
 from .dependency_map_dashboard_cache_backend import (
     DependencyMapDashboardCacheBackend,
 )
@@ -92,7 +95,10 @@ __all__ = [
     "PERIOD_TO_TIER",
     "BackgroundJobsSqliteBackend",
     "CITokensSqliteBackend",
+<<<<<<< HEAD
     "ControlPlaneMetadataSqliteBackend",
+=======
+>>>>>>> upstream/master
     "DependencyMapDashboardCacheBackend",
     "DependencyMapTrackingBackend",
     "DescriptionRefreshTrackingBackend",

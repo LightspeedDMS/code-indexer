@@ -62,6 +62,8 @@ def _make_access_service(
     svc = Mock()
     svc.is_admin_user.return_value = is_admin
     svc.get_accessible_repos.return_value = accessible_repos
+    # The caller has no activations of their own.
+    svc.caller_activation_sources.return_value = {}
     return svc
 
 

@@ -61,14 +61,17 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     # ahead of this function), so it is available here at app-wiring time.
     backend_registry = services.get("backend_registry")
 
-    # Create FastAPI app with metadata and lifespan
+    # Create FastAPI app with metadata and lifespan.
+    # API documentation requires an authenticated session or token: the
+    # built-in (open) docs routes are disabled here and /docs, /redoc and
+    # /openapi.json are served by routers/api_docs.py instead.
     app = FastAPI(
         title="CIDX Multi-User Server",
         description="Multi-user semantic code search server with JWT authentication",
         version="1.0.0",
-        docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
         lifespan=lifespan,
     )
 
@@ -149,9 +152,16 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     app.add_middleware(AuditRequestContextMiddleware)
     mark_server_process()
 
+<<<<<<< HEAD
     # Request admission control / backpressure. Added last so it is the OUTERMOST
     # middleware -- it sheds excess load with 429 + Retry-After before any
     # downstream processing. Opt-in; only wired when enabled so there is zero
+=======
+    # Request admission control / backpressure. Added after every processing
+    # middleware so it is OUTSIDE them all (only the header-only security
+    # headers middleware below wraps it) -- it sheds excess load with
+    # 429 + Retry-After before any downstream processing. Opt-in; only wired when enabled so there is zero
+>>>>>>> upstream/master
     # overhead by default.
     _admission_cfg = server_config.admission_control_config
     if _admission_cfg is not None and (
@@ -205,6 +215,16 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
             _admission_cfg.per_consumer_burst,
             _admission_cfg.per_consumer_refill_per_second,
         )
+
+    # Security response headers (CSP frame-ancestors, X-Frame-Options,
+    # nosniff, Referrer-Policy, strict wiki CSP, HSTS on https). Added last so
+    # it wraps every other middleware: 429 sheds and error responses get the
+    # headers too. Pure ASGI, header-only: streaming bodies pass through.
+    from code_indexer.server.middleware.security_headers import (
+        SecurityHeadersMiddleware,
+    )
+
+    app.add_middleware(SecurityHeadersMiddleware)
 
     # Add exception handlers for validation errors that FastAPI catches before middleware
     @app.exception_handler(RequestValidationError)
@@ -283,12 +303,19 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
         secret_key=secret_key,
     )
 
+<<<<<<< HEAD
     # Bare "/" has no registered page (login_router mounts only at "/login",
     # the dashboard lives under "/admin/") -- send visitors straight to the
     # unified login form instead of a dead-end 404.
     @app.get("/", include_in_schema=False)
     async def _root_redirect() -> RedirectResponse:
         return RedirectResponse(url="/login")
+=======
+    # Authenticated API documentation (/docs, /redoc, /openapi.json).
+    from code_indexer.server.routers.api_docs import api_docs_router
+
+    app.include_router(api_docs_router)
+>>>>>>> upstream/master
 
     # Initialize self-monitoring app.state attributes to None (Bug #87 fix)
     # These will be updated during lifespan startup if self-monitoring is enabled

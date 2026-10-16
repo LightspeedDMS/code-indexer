@@ -47,30 +47,37 @@ outputSchema:
   - success
 ---
 
-TL;DR: Unified group repo management (Story #992). Replaces add_repos_to_group, remove_repo_from_group, and bulk_remove_repos_from_group. Requires MCP elevation (TOTP step-up).
+TL;DR: Grant or revoke a group's access to repositories. Requires the admin role and, when elevation enforcement is on, an active elevation window (TOTP step-up via `elevate_session`).
 
 ACTIONS:
-- add: Grant group access to one or more repositories. Idempotent — already-accessible repos are skipped.
-- remove: Revoke access to a single repository. cidx-meta cannot be revoked.
-- bulk_remove: Revoke access to multiple repositories. cidx-meta is silently skipped.
+- add: Grant the group access to every name in `repos`. Names the group can already access are not counted; `added_count` reports the new grants.
+- remove: Revoke access to one repository. The name comes from `repo_name`; when `repo_name` is absent, the first element of the `repos` array is used and any further elements are ignored. cidx-meta cannot be revoked.
+- bulk_remove: Revoke access to every name in `repos`. cidx-meta is skipped without an error; `removed_count` reports the revocations made.
 
 INPUTS:
-- action (required): 'add', 'remove', or 'bulk_remove'
-- group_id (required): The unique identifier of the group
-- repos (add/bulk_remove): Array of repository names
-- repo_name (remove): Single repository name (or provide repos=[name])
+- action (required): `add`, `remove` or `bulk_remove`
+- group_id (required): Numeric group id as a string (for example `"3"`), as returned by `list_groups` or `create_group`
+- repos (add, bulk_remove; or remove when repo_name is absent): Array of repository names. For add and bulk_remove a JSON-encoded array string such as `'["example-repo"]'` is also accepted; for remove pass a real array or use `repo_name`.
+- repo_name (remove): Single repository name
+
+Repository names are golden repository aliases without the `-global` suffix.
 
 RETURNS:
-- success: Boolean
-- added_count (add): Number of newly granted repos
-- removed_count (bulk_remove): Number of repos actually removed
+- add: `{"success": true, "added_count": N}`
+- remove: `{"success": true}`
+- bulk_remove: `{"success": true, "removed_count": N}`
 
-ERRORS:
-- elevation_required: TOTP step-up needed
-- 'Group not found': Invalid group_id
-- 'cidx-meta access cannot be revoked': Attempt to revoke the protected repo
+ERRORS (all returned as `{"success": false, "error": "..."}` except the elevation codes):
+- `Permission denied: admin role required`
+- `elevation_required` / `totp_setup_required` (only when elevation enforcement is on)
+- `Invalid action '<action>'. Valid actions: [...]`
+- `Missing required parameter: group_id` / `Invalid group_id: <value>` (not an integer)
+- `Group not found: <id>`
+- `Missing required parameter: repo_names` (add or bulk_remove without `repos`) / `Missing required parameter: repo_name` (remove without a name)
+- `Repository '<name>' not found in group's access list` (remove)
+- `cidx-meta access cannot be revoked from any group` (remove)
 
 EXAMPLES:
-- Add: {"action": "add", "group_id": "grp_abc123", "repos": ["svc-a", "svc-b"]}
-- Remove: {"action": "remove", "group_id": "grp_abc123", "repo_name": "svc-a"}
-- Bulk remove: {"action": "bulk_remove", "group_id": "grp_abc123", "repos": ["svc-a", "svc-b"]}
+- Add: {"action": "add", "group_id": "3", "repos": ["example-repo", "other-repo"]}
+- Remove: {"action": "remove", "group_id": "3", "repo_name": "example-repo"}
+- Bulk remove: {"action": "bulk_remove", "group_id": "3", "repos": ["example-repo", "other-repo"]}

@@ -1,0 +1,69 @@
+<!-- SIEM Delivery halts and recovery region (keyset pages; the halted batch is never paged away) -->
+{% macro count(n) %}{{ (("{:,}".format(cap)) ~ "+") if n > cap else "{:,}".format(n) }}{% endmacro %}
+{% macro more(q, d, b) %}/admin/siem-delivery/partials/recovery?{{ {'q_after': q or '', 'd_after': d or '', 'b_after': b or ''} | urlencode }}{% endmacro %}
+{% set halt = doc.halt %}
+<h4>Halts and recovery</h4>
+{% if doc.config_error %}<p class="validation-error">Configuration invalid here: {{ doc.config_error }}</p>{% endif %}
+<div id="siem-ops-halt">
+    {% if halt.class %}
+    <p>Halt: {{ halt.class }} since {{ halt.since }}, {{ halt.signature }}{% if halt.next_probe_at %}; next probe {{ halt.next_probe_at }}{% endif %}</p>
+    {% else %}
+    <p>Not halted.</p>
+    {% endif %}
+    <form hx-post="/admin/siem-delivery/resume" hx-include="#siem-ops-csrf" hx-target="#siem-ops-result"
+          hx-confirm="Clears the {{ halt.class or 'current' }} halt and resets the quarantine window; if the cause remains, delivery halts again.">
+        <button type="submit" class="secondary">Resume</button>
+    </form>
+</div>
+{% if doc.halted_batch %}
+{% set hb = doc.halted_batch %}
+<div id="siem-ops-halted-batch" data-batch-id="{{ hb.batch_id }}">
+    <p>Halted batch {{ hb.batch_id }} ({{ hb.event_count }} events, {{ hb.state }})</p>
+    <form hx-post="/admin/siem-delivery/batches/{{ hb.batch_id | urlencode }}/acknowledge" hx-include="#siem-ops-csrf" hx-target="#siem-ops-result"
+          hx-confirm="Only after you have found ALL {{ hb.event_count }} events of batch {{ hb.batch_id }} in SecOps; they are marked delivered and never re-sent.">
+        <button type="submit" class="secondary">Acknowledge</button>
+    </form>
+    <form hx-post="/admin/siem-delivery/batches/{{ hb.batch_id | urlencode }}/rebatch" hx-include="#siem-ops-csrf" hx-target="#siem-ops-result"
+          hx-confirm="The {{ hb.event_count }} events are re-sent in new batches; SecOps may show duplicates.">
+        <button type="submit" class="secondary">Re-batch</button>
+    </form>
+</div>
+{% endif %}
+<h5>Open batches</h5>
+<table class="config-table" id="siem-ops-open-batches" data-has-more="{{ 'true' if doc.open_batches.has_more else 'false' }}">
+    <tr><th>Batch</th><th>Destination</th><th>Events</th><th>Created</th><th>Attempts</th><th>Last class</th></tr>
+    {% for b in doc.open_batches.rows %}
+    <tr data-batch-id="{{ b.batch_id }}"><td>{{ b.batch_id }}{% if b.batch_id == halt.batch_id %} (halted){% endif %}</td><td>{{ b.destination_key }}</td><td>{{ b.event_count }}</td><td>{{ b.created_at }}</td><td>{{ b.send_attempts }}</td><td>{{ b.last_class or '' }}</td></tr>
+    {% endfor %}
+</table>
+{% if doc.open_batches.has_more %}<button class="outline small" hx-get="{{ more(q_after, d_after, doc.open_batches.next_after) }}" hx-target="#siem-ops-recovery">More</button>{% endif %}
+<h5>Quarantine</h5>
+<form id="siem-ops-requeue-form" hx-post="/admin/siem-delivery/quarantine/requeue" hx-include="#siem-ops-csrf" hx-target="#siem-ops-result"
+      hx-confirm="Requeue the selected quarantined events for delivery?">
+    <table class="config-table" id="siem-ops-quarantine" data-has-more="{{ 'true' if doc.quarantine.has_more else 'false' }}">
+        <tr><th></th><th>Event</th><th>Action type</th><th>Destination</th><th>Reason</th><th>Signature</th><th>Created</th></tr>
+        {% for q in doc.quarantine.rows %}
+        <tr><td><input type="checkbox" name="event_uuid" value="{{ q.event_uuid }}" data-event-uuid="{{ q.event_uuid }}"></td><td>{{ q.event_uuid }}</td><td>{{ q.action_type }}</td><td>{{ q.destination_key }}</td><td>{{ q.quarantine_reason or '' }}</td><td>{{ q.quarantine_signature or '' }}</td><td>{{ q.created_at }}</td></tr>
+        {% endfor %}
+    </table>
+    <button type="submit" class="secondary">Requeue selected</button>
+</form>
+{% if doc.quarantine.has_more %}<button class="outline small" hx-get="{{ more(doc.quarantine.next_after, d_after, b_after) }}" hx-target="#siem-ops-recovery">More</button>{% endif %}
+<h5>Stranded destinations</h5>
+<table class="config-table" id="siem-ops-stranded" data-has-more="{{ 'true' if doc.stranded.has_more else 'false' }}">
+    <tr><th>Destination</th><th>Region / project / instance</th><th>Pending</th><th>Flags</th><th></th></tr>
+    {% for s in doc.stranded.rows %}
+    <tr data-destination-key="{{ s.destination_key }}">
+        <td>{{ s.destination_key }}</td>
+        <td>{{ s.region or '-' }} / {{ s.project_id or '-' }} / {{ s.instance_id or '-' }}</td>
+        <td>{{ count(s.pending) }}</td>
+        <td>{{ 'batched ' if s.has_batched else '' }}{{ 'quarantined' if s.has_quarantined else '' }}</td>
+        <td><button class="outline small" hx-get="/admin/siem-delivery/partials/destinations/{{ s.destination_key | urlencode }}/abandon" hx-target="#siem-ops-dialog">Retarget / Abandon</button></td>
+    </tr>
+    {% endfor %}
+</table>
+{% if doc.stranded.has_more %}<button class="outline small" hx-get="{{ more(q_after, doc.stranded.next_after, b_after) }}" hx-target="#siem-ops-recovery">More</button>{% endif %}
+<form id="siem-ops-open-destination">
+    <label>Open destination by key <input type="text" name="destination_key" spellcheck="false" autocomplete="off"></label>
+    <button type="submit" class="outline small">Open</button>
+</form>

@@ -9,7 +9,12 @@ delegate to the provided backend.
 from datetime import datetime, timezone
 from typing import Optional
 
+import pytest
+
 from code_indexer.server.auth.session_manager import PasswordChangeSessionManager
+
+# Bug #1996: the default (JSON-file) manager creates Path.home()/.cidx-server.
+pytestmark = pytest.mark.usefixtures("home_in_tmp")
 
 
 class FakeSessionsBackend:

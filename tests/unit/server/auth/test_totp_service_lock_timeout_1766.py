@@ -79,6 +79,12 @@ def _start_locker_thread(
     return thread, lock_acquired, lock_released
 
 
+<<<<<<< HEAD
+=======
+# A real second connection holds the SQLite lock (~6 s idle): the wait is
+# the behaviour under test, slower under gate load.
+@pytest.mark.timeout(45)
+>>>>>>> upstream/master
 class TestTOTPServiceRealLockContention:
     def test_generate_secret_absorbs_real_lock_via_connection_timeout(
         self, tmp_path: Path

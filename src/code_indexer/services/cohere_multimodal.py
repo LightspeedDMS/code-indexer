@@ -36,6 +36,15 @@ _SAFETY_MARGIN = 0.9
 # Maximum sleep duration for any retry path to prevent indefinite blocking
 _MAX_RETRY_SLEEP_SECONDS = 300.0
 
+# Bug #2154: the embedding-stats purpose of a request follows its Cohere
+# input_type. "index" is the generic indexing label instrument_call turns
+# into the attribution purpose ("index" or "refresh"); "query" is never
+# relabelled and never charged to the run-spend meter.
+_STATS_PURPOSE_BY_INPUT_TYPE = {
+    "search_query": "query",
+    "search_document": "index",
+}
+
 
 class CohereMultimodalClient:
     """Client for Cohere embed-v4.0-multimodal API.
@@ -185,26 +194,47 @@ class CohereMultimodalClient:
 
         return content
 
+    def request_max_retries(self) -> int:
+        """Retries one request may make after its first attempt (the retry
+        loop of _make_request; also the run-spend allowance, Story #2122)."""
+        return int(getattr(self.config, "max_retries", 3))
+
     def _make_request(
         self,
         inputs: List[Dict[str, Any]],
-        input_type: str = "search_document",
+        input_type: str,
     ) -> Dict[str, Any]:
         """Make HTTP request to Cohere embed v2 API with retry logic.
 
         Args:
             inputs: List of input dicts with 'content' key (content blocks).
-            input_type: Cohere input_type parameter.
+            input_type: Cohere input_type parameter, "search_query" or
+                "search_document" (from _map_input_type). Required: it also
+                decides the embedding-stats / run-spend purpose (Bug #2154),
+                so it never defaults.
 
         Returns:
             Parsed JSON response from the API.
 
         Raises:
-            ValueError: If API key is invalid (401 Unauthorized).
+            ValueError: If input_type is not one of the two search types
+                (raised before any HTTP attempt), or the API key is invalid
+                (401 Unauthorized).
             RuntimeError: If all retry attempts are exhausted.
         """
         import httpx
         from http import HTTPStatus
+
+        # Bug #2154: a query embedding is recorded (and run-spend metered)
+        # as "query"; a document embedding takes the generic indexing label
+        # "index", which the stats attribution turns into "refresh" in a
+        # refresh child.
+        stats_purpose = _STATS_PURPOSE_BY_INPUT_TYPE.get(input_type)
+        if stats_purpose is None:
+            raise ValueError(
+                f"Unsupported Cohere multimodal input_type {input_type!r}; "
+                f"expected one of {sorted(_STATS_PURPOSE_BY_INPUT_TYPE)}"
+            )
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -218,7 +248,7 @@ class CohereMultimodalClient:
             "output_dimension": self.config.default_dimension,
         }
 
-        max_retries = getattr(self.config, "max_retries", 3)
+        max_retries = self.request_max_retries()
         retry_delay = getattr(self.config, "retry_delay", 1.0)
         exponential_backoff = getattr(self.config, "exponential_backoff", True)
         timeout = getattr(self.config, "timeout", 30)
@@ -234,6 +264,20 @@ class CohereMultimodalClient:
         from code_indexer.server.services.embedding_call_instrumentation import (
             instrument_call,
         )
+<<<<<<< HEAD
+=======
+        from code_indexer.services.provider_request_timeout import (
+            embedding_request_timeout,
+        )
+
+        # Bug #2127: an indexing (document) request waits longer than a
+        # query, so a slow-period response is received, not abandoned (and
+        # paid for) then resent. The client is built per call, so its
+        # constructor timeout applies.
+        _timeout = embedding_request_timeout(
+            timeout, connect_timeout, indexing=input_type != "search_query"
+        )
+>>>>>>> upstream/master
 
         def _do_post_and_validate() -> httpx.Response:
             """The smallest unit including BOTH the network call and its
@@ -244,6 +288,7 @@ class CohereMultimodalClient:
             other 4xx) raises uniformly -- the retry-loop branching below
             recovers the exact same per-status behavior by inspecting the
             caught exception's status code instead."""
+<<<<<<< HEAD
             with httpx.Client(
                 timeout=httpx.Timeout(
                     connect=connect_timeout,
@@ -252,6 +297,9 @@ class CohereMultimodalClient:
                     pool=timeout,
                 )
             ) as client:
+=======
+            with httpx.Client(timeout=_timeout) as client:
+>>>>>>> upstream/master
                 _response = client.post(
                     api_endpoint,
                     headers=headers,
@@ -300,8 +348,20 @@ class CohereMultimodalClient:
                     item_count=len(inputs),
                     token_count=0,
                     batch_size=len(inputs),
+<<<<<<< HEAD
                     purpose="index",
                     fn=_do_post_and_validate,
+=======
+                    purpose=stats_purpose,
+                    fn=_do_post_and_validate,
+                    # Story #2122: _build_content_blocks puts the text block
+                    # first; an input without one can never match a
+                    # registered key, so an armed meter refuses it.
+                    inputs=[
+                        (inp.get("content") or [{}])[0].get("text", "")
+                        for inp in inputs
+                    ],
+>>>>>>> upstream/master
                 )
                 record_embedding_provider_call(
                     model=self.config.model,

@@ -3,7 +3,7 @@ name: enter_write_mode
 category: files
 required_permission: repository:write
 tl_dr: Enter write mode for a write-exception repository (e.g. cidx-meta-global).
-slim_description: "Acquire an exclusive write lock on a write-exception repository (e.g."
+slim_description: "Enter write mode on a write-exception repository such as cidx-meta-global: acquires its exclusive write lock and points reads at the live source directory until exit_write_mode is called."
 inputSchema:
   type: object
   properties:
@@ -27,10 +27,10 @@ outputSchema:
       description: Absolute path to the live source directory being edited (present when write mode was entered)
     message:
       type: string
-      description: Informational message (present for no-op results)
+      description: Informational message (present for no-op results, and when the write lock is already held)
     warning:
       type: string
-      description: Warning message (present when write mode could not be entered)
+      description: Not returned by this tool
     error:
       type: string
       description: Error message (present when success=false)
@@ -38,4 +38,20 @@ outputSchema:
   - success
 ---
 
-Enter write mode for a write-exception repository such as cidx-meta-global. WHAT IT DOES: (1) Acquires an exclusive write lock on the repository, (2) Creates a marker file that redirects reads to the live source directory, (3) Returns the source_path for the caller's reference. WRITE MODE WORKFLOW: call enter_write_mode -> use create_file/edit_file/delete_file -> call exit_write_mode. EXIT IS MANDATORY: Always call exit_write_mode when done — it triggers a synchronous refresh so the versioned snapshot reflects your changes. NON-WRITE-EXCEPTION REPOS: Returns success with a no-op message; no lock is acquired. LOCK FAILURE: Returns success=false if the lock is already held by another process. PERMISSIONS: Requires repository:write. EXAMPLE: {"repo_alias": "cidx-meta-global"}
+Enter write mode for a write-exception repository such as cidx-meta-global.
+
+WHAT IT DOES: (1) Acquires the repository's exclusive write lock, (2) writes a write-mode marker that points reads of the repository at its live source directory, (3) returns `{"success": true, "alias": "<repo_alias>", "source_path": "<live source directory>"}`.
+
+WRITE MODE WORKFLOW: call enter_write_mode -> use create_file/edit_file/delete_file -> call exit_write_mode.
+
+EXIT IS MANDATORY: Always call exit_write_mode when done. It releases the lock and runs a synchronous refresh so the versioned snapshot reflects your changes.
+
+NON-WRITE-EXCEPTION REPOS: Returns `{"success": true, "message": "no-op: '<alias>' is not a write-exception repo"}`; no lock is acquired.
+
+LOCK ALREADY HELD: Returns `{"success": false, "message": "Write lock for '<alias>' is already held by '<owner>'"}`.
+
+ERRORS: `{"success": false, "error": "..."}`, for example `Missing required parameter: repo_alias` or `RefreshScheduler not available`.
+
+PERMISSIONS: Requires repository:write.
+
+EXAMPLE: {"repo_alias": "cidx-meta-global"}

@@ -25,8 +25,15 @@ from tests.unit.server.query.query_repo_access_env import (
     GRANTED_REPO,
     GRANTED_REPOS,
     OWN_ACTIVATION,
+<<<<<<< HEAD
     USER,
     QueryAccessEnv,
+=======
+    ROWS_PER_REPO,
+    USER,
+    QueryAccessEnv,
+    build_server_db_template,
+>>>>>>> upstream/master
     global_alias,
 )
 
@@ -44,14 +51,30 @@ NON_ADMIN = _user(USER, UserRole.NORMAL_USER)
 ADMIN_USER = _user(ADMIN, UserRole.ADMIN)
 
 
+<<<<<<< HEAD
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[QueryAccessEnv]:
+=======
+@pytest.fixture(scope="module")
+def server_db_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return build_server_db_template(tmp_path_factory.mktemp("server_db_template"))
+
+
+@pytest.fixture
+def env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, server_db_template: Path
+) -> Iterator[QueryAccessEnv]:
+>>>>>>> upstream/master
     # No embedding provider key: deterministic primary-only routing and no
     # path can reach a real provider (the search boundary is faked).
     monkeypatch.delenv("CO_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path))
+<<<<<<< HEAD
     e = QueryAccessEnv(tmp_path)
+=======
+    e = QueryAccessEnv(tmp_path, server_db_template)
+>>>>>>> upstream/master
     try:
         yield e
     finally:
@@ -106,6 +129,34 @@ class TestSearchCodeWithoutAlias:
         assert _repos_of(payload) == {global_alias(r) for r in ALL_REPOS}
 
 
+<<<<<<< HEAD
+=======
+class TestSearchCodeOwnActivationCustomAlias:
+    """public #1984: a custom-alias activation of a granted repo keeps its rows."""
+
+    async def test_unscoped_search_keeps_custom_alias_activation_rows(self, env):
+        env.activate_for(USER, GRANTED_REPO, OWN_ACTIVATION)
+
+        payload = await _call(
+            env,
+            NON_ADMIN,
+            env.access_service,
+            {"query_text": "find", "limit": ALL_ROWS_LIMIT},
+        )
+
+        assert payload["success"] is True, payload
+        assert _repos_of(payload) == {global_alias(r) for r in GRANTED_REPOS} | {
+            OWN_ACTIVATION
+        }
+        own_rows = [
+            r
+            for r in payload["results"]["results"]
+            if r["repository_alias"] == OWN_ACTIVATION
+        ]
+        assert len(own_rows) == ROWS_PER_REPO
+
+
+>>>>>>> upstream/master
 class TestSearchCodeMissingAccessService:
     @pytest.mark.parametrize("user", [NON_ADMIN, ADMIN_USER], ids=["user", "admin"])
     async def test_no_alias_is_refused(self, env, user):

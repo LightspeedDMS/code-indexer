@@ -34,7 +34,18 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+<<<<<<< HEAD
 from typing import Iterable, List, NoReturn, Optional, Tuple, Union, cast
+=======
+from typing import Iterable, List, Optional, Tuple, Union, cast
+
+import anyio.to_thread
+
+from code_indexer.utils.path_confinement import (
+    has_git_segment,
+    resolves_into_git_directory,
+)
+>>>>>>> upstream/master
 
 import anyio.to_thread
 
@@ -94,8 +105,11 @@ _GREP_FILE_LIST_BATCH_SIZE = 500
 # deployment target could legitimately have a tmpfs TMPDIR and this code
 # must not assume otherwise.
 _MAX_READ_BYTES = 64 * 1024 * 1024  # 64 MiB
+<<<<<<< HEAD
 # ripgrep's message for a search path that does not exist.
 _RG_MISSING_PATH = "No such file or directory"
+=======
+>>>>>>> upstream/master
 
 # Chunk size used by _BoundedLineReader when streaming temp-file output, in
 # raw bytes (the file is opened in binary mode so this bound is exact, not
@@ -140,6 +154,20 @@ _MATCH_CONTENT_TRUNCATION_MARKER_BYTES = len(
     _MATCH_CONTENT_TRUNCATION_MARKER.encode("utf-8")
 )
 
+<<<<<<< HEAD
+=======
+# Bug #2030: grep runs with ``--null`` (see _build_grep_command), so every
+# record is ``path\0LINE:content`` (match) or ``path\0LINE-content``
+# (context). A path cannot contain NUL, so the path ends at the first NUL and
+# the separator is the first non-digit after it -- independent of any
+# ``-<digits>-`` or ``:<digits>:`` segment inside directory or file names, and
+# of separator-shaped text inside the content. Groups: 1=path, 2=line,
+# 3=content. A line without a NUL (e.g. "Binary file X matches") is not a
+# record.
+_GREP_MATCH_RECORD = re.compile(r"^([^\x00]+)\x00(\d+):(.*)$")
+_GREP_CONTEXT_RECORD = re.compile(r"^([^\x00]+)\x00(\d+)-(.*)$")
+
+>>>>>>> upstream/master
 
 def _bounded_match_content(value: str) -> str:
     """Truncate ``value`` to at most ``_MAX_MATCH_CONTENT_BYTES`` UTF-8
@@ -451,10 +479,13 @@ def _maybe_trigger_lazy_index_build(repo_path: Path) -> None:
     already running/recent. Best-effort; never raises into the caller."""
     if not _lazy_build_enabled():
         return
+<<<<<<< HEAD
     from .trigram_index_manager import trigram_prefilter_available
 
     if not trigram_prefilter_available():
         return  # would publish an empty index; see trigram_prefilter_available
+=======
+>>>>>>> upstream/master
     key = str(repo_path)
     now = time.monotonic()
     with _lazy_build_lock:
@@ -468,9 +499,16 @@ def _maybe_trigger_lazy_index_build(repo_path: Path) -> None:
 
     def _run() -> None:
         try:
+<<<<<<< HEAD
             from .trigram_index_manager import TrigramIndexManager, trigram_index_dir
 
             n = TrigramIndexManager(trigram_index_dir(repo_path)).build(repo_path)
+=======
+            from .trigram_index_manager import TrigramIndexManager
+
+            index_dir = repo_path / ".code-indexer" / "trigram_index"
+            n = TrigramIndexManager(index_dir).build(repo_path)
+>>>>>>> upstream/master
             logger.info("lazy trigram index build complete for %s (%d files)", key, n)
         except Exception as exc:  # never let the background build crash the server
             logger.warning("lazy trigram index build failed for %s: %s", key, exc)
@@ -561,7 +599,10 @@ class RegexSearchService:
         repo_path: Path,
         subprocess_max_workers: int = 2,
         alias: Optional[str] = None,
+<<<<<<< HEAD
         ripgrep_backend: Optional[RipgrepBackend] = None,
+=======
+>>>>>>> upstream/master
     ):
         """Initialize the regex search service.
 
@@ -569,10 +610,13 @@ class RegexSearchService:
             repo_path: Path to the repository root
             subprocess_max_workers: Maximum concurrent workers for subprocess execution
                 (default: 2, per Story #27 resource audit recommendation)
+<<<<<<< HEAD
             ripgrep_backend: where the ripgrep argv is executed. Defaults to
                 ``LocalRipgrepBackend`` -- ripgrep in this container, i.e.
                 exactly today's behaviour. A delegated backend runs it in
                 workspace-mcp instead, so this image need not ship the binary.
+=======
+>>>>>>> upstream/master
             alias: Issue #1601 Priority 9 (optional, server-context only):
                 the user-facing repository alias, when the caller has one
                 available (e.g. the MCP handler). A path is not
@@ -593,6 +637,7 @@ class RegexSearchService:
         # _to_repo_relative(). Without this, an unresolved symlinked repo
         # root desyncs against candidate paths that subprocesses report back
         # resolved, raising an uncaught pathlib ValueError downstream.
+<<<<<<< HEAD
         self._ripgrep_backend: RipgrepBackend = (
             ripgrep_backend
             if ripgrep_backend is not None
@@ -603,6 +648,9 @@ class RegexSearchService:
         # so resolving symlinks against THIS disk would describe a tree that is
         # not the one searched -- the root is normalized lexically instead.
         self.repo_path = self._canonical_path(Path(repo_path))
+=======
+        self.repo_path = Path(repo_path).resolve()
+>>>>>>> upstream/master
         self._subprocess_max_workers = subprocess_max_workers
         self._alias = alias
         self._search_engine = self._detect_search_engine()
@@ -618,6 +666,7 @@ class RegexSearchService:
         # Issue #1601 (AC-I3): the exact bytes read when a call was
         # read-capped, for the structured WARNING log in search().
         self._last_read_capped_bytes: Optional[int] = None
+<<<<<<< HEAD
 
     def _raise_for_rg_error(self, result: RipgrepRun, search_path: Path) -> NoReturn:
         """Raise for a failed ripgrep run.
@@ -638,6 +687,8 @@ class RegexSearchService:
         raise RipgrepExecutionError(
             f"ripgrep failed: exit_code={result.exit_code}, stderr={stderr}"
         )
+=======
+>>>>>>> upstream/master
 
     def _detect_search_engine(self) -> str:
         """Detect available search engine (ripgrep preferred).
@@ -682,6 +733,7 @@ class RegexSearchService:
     _pcre2_supported_global: Optional[bool] = None
     _pcre2_probe_lock = threading.Lock()
 
+<<<<<<< HEAD
     async def _pcre2_available(self) -> bool:
         """Whether the ripgrep that will actually run supports PCRE2.
 
@@ -694,6 +746,8 @@ class RegexSearchService:
             return await self._ripgrep_backend.supports_pcre2()
         return bool(await anyio.to_thread.run_sync(self._detect_pcre2_support))
 
+=======
+>>>>>>> upstream/master
     def _detect_pcre2_support(self) -> bool:
         """Detect whether ripgrep has PCRE2 support. Cached process-wide.
 
@@ -850,7 +904,11 @@ class RegexSearchService:
         # already async and awaited -- to be reachable from inside a
         # worker thread with no running event loop, a much larger and
         # riskier restructuring for no additional safety benefit here).
+<<<<<<< HEAD
         if pcre2 and not await self._pcre2_available():
+=======
+        if pcre2 and not await anyio.to_thread.run_sync(self._detect_pcre2_support):
+>>>>>>> upstream/master
             raise ValueError(
                 "PCRE2 not available. Install libpcre2 and ensure ripgrep "
                 "is built with PCRE2 support (rg --pcre2-version)."
@@ -861,6 +919,27 @@ class RegexSearchService:
         # stale value from a previous call.
         self._last_search_read_capped = False
         self._last_read_capped_bytes = None
+<<<<<<< HEAD
+
+        start_time = time.time()
+        start_monotonic = time.monotonic()
+
+        # Bug #1590 review round 5 finding 1: hoisted from inside the
+        # ripgrep-engine branch below. The round-4 comment there justified
+        # leaving the search_path existence check (immediately below)
+        # unbounded by claiming ``deadline`` "only becomes an absolute
+        # deadline further down, inside the ripgrep-engine branch, so
+        # bounding this earlier, engine-agnostic check would require
+        # restructuring engine dispatch" -- review round 5 proved that
+        # false: ``deadline`` depends only on ``start_monotonic`` (two
+        # lines above) and ``timeout_seconds`` (already a parameter),
+        # neither of which has anything to do with which engine gets
+        # dispatched.
+        deadline: Optional[float] = (
+            start_monotonic + timeout_seconds if timeout_seconds is not None else None
+        )
+=======
+>>>>>>> upstream/master
 
         start_time = time.time()
         start_monotonic = time.monotonic()
@@ -880,7 +959,25 @@ class RegexSearchService:
             start_monotonic + timeout_seconds if timeout_seconds is not None else None
         )
 
+        # A path inside the repository's .git is answered exactly as a
+        # missing path (lexical check: no filesystem call here).
+        if path and has_git_segment(Path(os.path.normpath(path)).parts):
+            raise ValueError(f"Path does not exist: {path}")
         search_path = self.repo_path / path if path else self.repo_path
+<<<<<<< HEAD
+=======
+        repo_path = self.repo_path
+
+        def search_root_exists() -> bool:
+            # The RESOLVED search root must exist and lie outside the
+            # repository's .git; a root resolving into .git (e.g. a committed
+            # symlink to it) is answered exactly as a missing path. Runs in
+            # a worker thread below, never on the event loop.
+            return search_path.exists() and not resolves_into_git_directory(
+                search_path, repo_path.resolve()
+            )
+
+>>>>>>> upstream/master
         # Bug #1590 review round 5 finding 1 fix: bound via the same
         # thread-watchdog idiom (_run_with_thread_watchdog) used throughout
         # this file, instead of the plain anyio.to_thread.run_sync offload
@@ -889,6 +986,7 @@ class RegexSearchService:
         # in uninterruptible kernel retry and never return; the plain
         # offload (still used below when there is no deadline at all)
         # bounds only the EVENT LOOP, not this request. No sqlite
+<<<<<<< HEAD
         # connection is ever opened by Path.exists, so the watchdog's
         # optional ``holder`` parameter is simply omitted.
         from .trigram_index_manager import _run_with_thread_watchdog
@@ -903,6 +1001,17 @@ class RegexSearchService:
             path_exists, exists_timed_out = await anyio.to_thread.run_sync(
                 _run_with_thread_watchdog,
                 search_path.exists,
+=======
+        # connection is ever opened by the existence check, so the
+        # watchdog's optional ``holder`` parameter is simply omitted.
+        from .trigram_index_manager import _run_with_thread_watchdog
+
+        if deadline is not None:
+            remaining_exists = max(0.0, deadline - time.monotonic())
+            path_exists, exists_timed_out = await anyio.to_thread.run_sync(
+                _run_with_thread_watchdog,
+                search_root_exists,
+>>>>>>> upstream/master
                 remaining_exists,
                 "regex_search_path_exists",
             )
@@ -912,7 +1021,11 @@ class RegexSearchService:
                     f"{remaining_exists:.3f}s remaining search deadline"
                 )
         else:
+<<<<<<< HEAD
             path_exists = await anyio.to_thread.run_sync(search_path.exists)
+=======
+            path_exists = await anyio.to_thread.run_sync(search_root_exists)
+>>>>>>> upstream/master
         if not path_exists:
             raise ValueError(f"Path does not exist: {path}")
 
@@ -1060,6 +1173,7 @@ class RegexSearchService:
             )
         return ""
 
+<<<<<<< HEAD
     def _canonical_path(self, path: Path) -> Path:
         """*path* in the form every containment check compares.
 
@@ -1072,6 +1186,8 @@ class RegexSearchService:
             return path.resolve()
         return Path(os.path.normpath(os.path.abspath(path)))
 
+=======
+>>>>>>> upstream/master
     def _to_repo_relative(self, raw_path: str) -> Optional[str]:
         """Convert a subprocess-reported path into a repo-relative string.
 
@@ -1095,7 +1211,11 @@ class RegexSearchService:
         if not candidate.is_absolute():
             candidate = self.repo_path / candidate
         try:
+<<<<<<< HEAD
             resolved = self._canonical_path(candidate)
+=======
+            resolved = candidate.resolve()
+>>>>>>> upstream/master
             rel = resolved.relative_to(self.repo_path)
         except ValueError:
             logger.warning(
@@ -1105,6 +1225,13 @@ class RegexSearchService:
                 self.repo_path,
             )
             return None
+<<<<<<< HEAD
+=======
+        # Matches inside the repository's .git are never returned (an
+        # include glob or a symlink can reach it).
+        if has_git_segment(rel.parts):
+            return None
+>>>>>>> upstream/master
         return str(rel)
 
     def _process_ripgrep_match_event(
@@ -1423,21 +1550,32 @@ class RegexSearchService:
                 return None
             return max(0.0, deadline - time.monotonic())
 
+<<<<<<< HEAD
         from .trigram_index_manager import trigram_prefilter_available
 
         if not trigram_prefilter_available():
             # Not consulted at all: an index found here was built from an
             # empty listing and would turn every search into zero matches.
             return None
+=======
+>>>>>>> upstream/master
         try:
             from .regex_trigram import extract_required_trigrams
             from .trigram_index_manager import (
                 TrigramIndexManager,
                 _run_with_thread_watchdog,
+<<<<<<< HEAD
                 trigram_index_dir,
             )
 
             index = TrigramIndexManager(trigram_index_dir(self.repo_path))
+=======
+            )
+
+            index = TrigramIndexManager(
+                self.repo_path / ".code-indexer" / "trigram_index"
+            )
+>>>>>>> upstream/master
             if not index.exists(timeout_seconds=_remaining_budget()):
                 # No compatible index (missing or stale/old-format). Self-heal in
                 # the background so later searches are pre-filtered; this one
@@ -1637,6 +1775,7 @@ class RegexSearchService:
         os.close(temp_fd)
 
         try:
+<<<<<<< HEAD
             # Issue #1601 (Fix direction 4a): max_output_bytes makes the
             # runner terminate rg itself if its output crosses the byte
             # ceiling WHILE STILL RUNNING, not merely bound a later read.
@@ -1657,6 +1796,20 @@ class RegexSearchService:
                 raise TimeoutError(
                     f"Search timed out after {result.timeout_seconds} seconds "
                     f"(pattern='{pattern}', path='{search_path}')"
+=======
+            # Execute with SubprocessExecutor for async + timeout protection.
+            # Issue #1601 (Fix direction 4a): max_output_bytes makes the
+            # executor terminate rg itself if its output crosses the byte
+            # ceiling WHILE STILL RUNNING, not merely bound a later read.
+            executor = SubprocessExecutor(max_workers=self._subprocess_max_workers)
+            try:
+                result = await executor.execute_with_limits(
+                    command=cmd,
+                    working_dir=str(self.repo_path),
+                    timeout_seconds=timeout_seconds or DEFAULT_SEARCH_TIMEOUT_SECONDS,
+                    output_file_path=temp_path,
+                    max_output_bytes=_MAX_READ_BYTES,
+>>>>>>> upstream/master
                 )
 
             if result.is_error:
@@ -1771,6 +1924,128 @@ class RegexSearchService:
             else:
                 self._last_read_capped_bytes = bytes_read
 
+<<<<<<< HEAD
+=======
+                if result.status == ExecutionStatus.ERROR:
+                    # Bug #173: Differentiate exit code 1 (no matches) from actual errors
+                    if result.exit_code == 1 and not result.stderr_output:
+                        # Exit code 1 with no stderr = no matches found (normal ripgrep behavior)
+                        logger.debug("ripgrep found no matches (exit code 1)")
+                        return [], 0
+                    else:
+                        # Exit code 2+ or stderr present = actual error (Finding 3.1, v10.4.4)
+                        stderr = result.stderr_output or result.error_message or ""
+                        raise RipgrepExecutionError(
+                            f"ripgrep failed: exit_code={result.exit_code}, stderr={stderr}"
+                        )
+
+                # Issue #1601 remediation (Priority 2): the read+parse is a
+                # synchronous, potentially expensive operation (file I/O,
+                # UTF-8 decode, JSON/regex parsing) -- run it in a worker
+                # thread via anyio.to_thread.run_sync so it never blocks
+                # the asyncio event loop for the whole server.
+                #
+                # Bug #1590 review round 5 finding 2 fix: when a shared
+                # ``deadline`` was supplied, additionally bound this
+                # offloaded hop with the SAME thread-watchdog idiom used
+                # elsewhere in this file. This phase calls
+                # _to_repo_relative once PER MATCH, which resolves the
+                # reported path again (candidate.resolve()) -- a second,
+                # previously undisclosed instance of the identical
+                # Path.resolve()-on-NFS class of gap round 4's R1 fix
+                # addressed for the trigram pre-filter's resolve loop; a
+                # live reproduction proved a single wedged resolve here
+                # absorbs a full multi-second wedge past an
+                # already-exhausted budget and raises nothing. When there
+                # is no deadline, this stays the plain
+                # anyio.to_thread.run_sync offload exactly as before.
+                #
+                # Bug #1590 review round 6: floored at
+                # _MIN_PARSE_TIMEOUT_SECONDS (not 0.0) -- see that
+                # constant's comment. Without the floor, a deadline that
+                # has technically already elapsed (because the prior
+                # ripgrep-subprocess phase's ceil()-rounded-up allowance
+                # let real wall-clock time run a little past it, even
+                # though ripgrep itself finished within ITS OWN
+                # allowance) hands Thread.join(timeout=0) to the
+                # watchdog, which can never "win" even against a parse
+                # that completes in milliseconds -- spuriously discarding
+                # a fully successful, already-completed result.
+                if deadline is not None:
+                    from .trigram_index_manager import _run_with_thread_watchdog
+
+                    remaining_parse = max(
+                        _MIN_PARSE_TIMEOUT_SECONDS, deadline - time.monotonic()
+                    )
+                    parse_result, parse_timed_out = await anyio.to_thread.run_sync(
+                        _run_with_thread_watchdog,
+                        lambda: self._read_and_parse_ripgrep(
+                            temp_path, max_results, context_lines
+                        ),
+                        remaining_parse,
+                        "regex_search_read_and_parse_ripgrep",
+                    )
+                    if parse_timed_out:
+                        raise TimeoutError(
+                            f"Parsing ripgrep output for pattern={pattern!r} "
+                            f"path={search_path} exceeded its "
+                            f"{remaining_parse:.3f}s remaining search deadline"
+                        )
+                else:
+                    parse_result = await anyio.to_thread.run_sync(
+                        self._read_and_parse_ripgrep,
+                        temp_path,
+                        max_results,
+                        context_lines,
+                    )
+                (
+                    matches,
+                    total,
+                    bytes_read,
+                    reader_read_capped,
+                    content_capped,
+                ) = parse_result
+                # read_capped is the OR of THREE independent signals: the
+                # executor killed the still-running subprocess because its
+                # output crossed the ceiling (result.output_capped -- a
+                # real dataclass field, accessed directly so a future
+                # rename fails loud rather than being silently masked),
+                # this read itself stopped early because the (already
+                # complete) temp file exceeded the ceiling
+                # (reader_read_capped), and/or the aggregate result-content
+                # budget stopped accumulation early (content_capped --
+                # Issue #1601 round 5 Priority 1). Any one alone means the
+                # scan was incomplete.
+                self._last_search_read_capped = (
+                    bool(result.output_capped) or reader_read_capped or content_capped
+                )
+                # Issue #1601 Priority 9: when the SUBPROCESS itself was
+                # killed by the byte cap, the real cutoff is the output
+                # file's on-disk size at that moment -- which can be far
+                # LARGER than the reader's own bytes_read if max_results
+                # stopped parsing after only the first internal chunk.
+                # Reporting bytes_read in that case would understate the
+                # true cutoff.
+                if result.output_capped:
+                    try:
+                        self._last_read_capped_bytes = os.path.getsize(temp_path)
+                    except OSError as size_error:
+                        logger.debug(
+                            "Could not stat capped output file %s (%s); "
+                            "falling back to reader bytes_read (%d)",
+                            temp_path,
+                            size_error,
+                            bytes_read,
+                        )
+                        self._last_read_capped_bytes = bytes_read
+                else:
+                    self._last_read_capped_bytes = bytes_read
+
+            finally:
+                # Issue #1601 round 5 (Priority 2): offload this
+                # synchronous, potentially-blocking call off the event loop.
+                await anyio.to_thread.run_sync(executor.shutdown, True)
+>>>>>>> upstream/master
         finally:
             # Clean up temp file. The executor's lifecycle (and the offloaded
             # shutdown that used to live here) now belongs to the backend.
@@ -1907,7 +2182,11 @@ class RegexSearchService:
             # the caller's excludes with the same two hardcoded patterns so
             # every engine agrees.
             combined_exclude_patterns = list(exclude_patterns or [])
+<<<<<<< HEAD
             combined_exclude_patterns.extend([f"{INDEX_DIRNAME}/**", ".git/**"])
+=======
+            combined_exclude_patterns.extend([".code-indexer/**", ".git/**"])
+>>>>>>> upstream/master
 
             # Write glob config to temp file
             config = {
@@ -2039,19 +2318,32 @@ class RegexSearchService:
         """Build grep command with common flags.
 
         Always includes -H flag to force filename output even when searching
-        a single file. This ensures consistent parsing of grep output where
-        the regex expects 'filename:line:content' format.
+        a single file, and ``--null`` (Bug #2030) so grep terminates every
+        filename with a NUL byte instead of the ``:``/``-`` separator. Records
+        are therefore ``path\\0LINE:content`` (match) and
+        ``path\\0LINE-content`` (context): a path can never contain NUL, so
+        parsing is independent of the path's own characters. ``--null`` is
+        the long form accepted by both GNU and BSD grep (BSD's ``-Z`` means
+        decompress).
+
+        The pattern is passed through ``-e`` and ``file_list`` (the recursive
+        search root or a batch of repo-relative files) follows a ``--``
+        end-of-options marker, so both are always read as operands, matching
+        the ripgrep command builder. Every option, including the recursive
+        mode's CIDX internal-directory excludes (Bug #158), precedes ``--``.
         """
-        cmd = ["grep", "-E", "-H"]
+        cmd = ["grep", "-E", "-H", "--null"]
         if recursive:
             cmd.append("-rn")
+            cmd.extend(["--exclude-dir", ".code-indexer"])
+            cmd.extend(["--exclude-dir", ".git"])
         else:
             cmd.append("-n")
         if not case_sensitive:
             cmd.append("-i")
         if context_lines > 0:
             cmd.extend(["-C", str(context_lines)])
-        cmd.append(pattern)
+        cmd.extend(["-e", pattern, "--"])
         if file_list:
             cmd.extend(file_list)
         return cmd
@@ -2066,7 +2358,12 @@ class RegexSearchService:
         collecting_context_after: bool,
         budget: Optional["_ResultContentBudget"] = None,
     ) -> tuple:
+<<<<<<< HEAD
         """Handle one grep match-line record ("path:linenum:content").
+=======
+        """Handle one grep match-line record ("path\\0linenum:content",
+        matched by ``_GREP_MATCH_RECORD`` -- Bug #2030).
+>>>>>>> upstream/master
 
         Mirrors ``_process_ripgrep_match_event``: capacity checked first
         (max_results, then the round-5 Priority 1 aggregate ``budget``),
@@ -2119,7 +2416,12 @@ class RegexSearchService:
         context_lines: int,
         budget: Optional["_ResultContentBudget"] = None,
     ) -> tuple:
+<<<<<<< HEAD
         """Handle one grep context-line record ("path-linenum-content").
+=======
+        """Handle one grep context-line record ("path\\0linenum-content",
+        matched by ``_GREP_CONTEXT_RECORD`` -- Bug #2030).
+>>>>>>> upstream/master
 
         Mirrors ``_process_ripgrep_context_event``'s bound + aggregate
         ``budget`` reservation (round 5 Priority 1); ``stop=True`` when
@@ -2148,8 +2450,14 @@ class RegexSearchService:
         context_lines: int,
         budget: Optional["_ResultContentBudget"] = None,
     ) -> tuple:
+<<<<<<< HEAD
         """Parse grep match/context lines into RegexMatch objects (see
         ``_ResultContentBudget`` for ``budget``). Return stays
+=======
+        """Parse grep ``--null`` match/context records into RegexMatch
+        objects (see ``_GREP_MATCH_RECORD`` for the record format, Bug #2030,
+        and ``_ResultContentBudget`` for ``budget``). Return stays
+>>>>>>> upstream/master
         (matches, total) for direct-caller compatibility."""
         if budget is None:
             budget = _ResultContentBudget()
@@ -2162,7 +2470,11 @@ class RegexSearchService:
             if line.strip() == "--":
                 collecting, context_before = False, []
                 continue
+<<<<<<< HEAD
             m = re.match(r"^(.+?):(\d+):(.*)$", line)
+=======
+            m = _GREP_MATCH_RECORD.match(line)
+>>>>>>> upstream/master
             if m:
                 stop, total, context_before, collecting = self._process_grep_match_line(
                     m, matches, total, max_results, context_before, collecting, budget
@@ -2170,7 +2482,11 @@ class RegexSearchService:
                 if stop:
                     break
                 continue
+<<<<<<< HEAD
             c = re.match(r"^(.+?)-(\d+)-(.*)$", line)
+=======
+            c = _GREP_CONTEXT_RECORD.match(line)
+>>>>>>> upstream/master
             if c:
                 context_before, collecting, stop = self._process_grep_context_line(
                     c, matches, context_before, collecting, context_lines, budget
@@ -2652,11 +2968,19 @@ class RegexSearchService:
             return all_matches[:max_results], total
 
         # No glob filters: preserve grep's direct recursive fast path.
+<<<<<<< HEAD
         cmd = self._build_grep_command(pattern, case_sensitive, context_lines, True)
         # Always exclude CIDX internal directories (Bug #158)
         cmd.extend(["--exclude-dir", INDEX_DIRNAME])
         cmd.extend(["--exclude-dir", ".git"])
         cmd.append(str(search_path))
+=======
+        # The builder adds the CIDX internal-directory excludes (Bug #158)
+        # before the ``--`` that precedes the search root operand.
+        cmd = self._build_grep_command(
+            pattern, case_sensitive, context_lines, True, [str(search_path)]
+        )
+>>>>>>> upstream/master
 
         (
             matches,

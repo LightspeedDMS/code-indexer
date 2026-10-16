@@ -1,6 +1,12 @@
 """SCIP query backend abstraction layer."""
 
+<<<<<<< HEAD
 from ...utils.index_store import index_root
+=======
+import logging
+import os
+import stat
+>>>>>>> upstream/master
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +17,23 @@ try:
 except ImportError:
     import sqlite3
 
-from .primitives import QueryResult
+from code_indexer.utils.path_confinement import (
+    has_git_segment,
+    is_readable_within_root,
+    resolve_if_within_root,
+)
+
+from .primitives import QueryResult, resolve_scip_trust_root
+
+logger = logging.getLogger(__name__)
+
+# Story #609: scip_db_version recorded once the query indexes exist.
+SCIP_DB_INDEXED_VERSION = 2
+
+
+class _OpenedFileUnverifiable(OSError):
+    """The real path of an opened file cannot be determined (e.g. this host
+    has no ``/proc`` fd links), so its containment cannot be verified."""
 
 
 @dataclass
@@ -150,7 +172,11 @@ class DatabaseBackend(SCIPBackend):
     """SQLite database backend for SCIP queries."""
 
     def __init__(
-        self, db_path: Path, project_root: str = "", scip_file: Optional[Path] = None
+        self,
+        db_path: Path,
+        project_root: str = "",
+        scip_file: Optional[Path] = None,
+        trusted_root: Optional[Path] = None,
     ):
         """
         Initialize database backend.
@@ -159,7 +185,16 @@ class DatabaseBackend(SCIPBackend):
             db_path: Path to .scip.db database file
             project_root: Project root path for QueryResult objects
             scip_file: Optional path to .scip protobuf file for hybrid mode (ALL symbol references)
+            trusted_root: Repository root that source-context reads and the
+                version-marker write are confined to. When None it is the
+                directory above ``.code-indexer/scip`` in the db's unresolved
+                path; with no such root, context is omitted and no marker is
+                written. Never taken from ``project_root``.
         """
+<<<<<<< HEAD
+=======
+        self._resolved_root = resolve_scip_trust_root(db_path, trusted_root)
+>>>>>>> upstream/master
         # Bug #1616: a .scip.db living under an immutable golden-repo
         # versioned snapshot (.versioned/{ns}/v_<ts>/...) is genuinely
         # read-only on disk. Opening it read-write "succeeds" silently
@@ -240,6 +275,7 @@ class DatabaseBackend(SCIPBackend):
         # Determine config path (Story #609).
         #
         # Bug #1630: self.project_root is the SUB-PROJECT's own directory
+<<<<<<< HEAD
         # for a sub-project database (required for _read_context_lines()
         # to resolve document-relative source paths correctly), not the
         # repo root. The scip_db_version marker, however, is a single
@@ -264,15 +300,87 @@ class DatabaseBackend(SCIPBackend):
             config_path = index_root(repo_root_candidate) / "config.json"
         else:
             config_path = index_root(project_root_path) / "config.json"
+=======
+        # for a sub-project database, not the repo root, and it may come
+        # from index metadata. The scip_db_version marker is a single
+        # repo-wide value at the ONE real <repo_root>/.code-indexer/
+        # config.json, and it is read and written only inside the trusted
+        # repository root (self._resolved_root, see __init__). Without a
+        # trusted root (a db outside the ".code-indexer/scip" layout, e.g. a
+        # synthetic fixture) the marker is skipped silently; a config path
+        # resolving outside the root is skipped with a WARNING. Either way
+        # the idempotent index creation still runs.
+        config_path = None
+        if self._resolved_root is not None:
+            config_path = resolve_if_within_root(
+                self._resolved_root / ".code-indexer" / "config.json",
+                self._resolved_root,
+            )
+            if config_path is None:
+                logger.warning(
+                    "SCIP version marker not recorded: config path does not "
+                    "resolve inside repository root %s",
+                    self._resolved_root,
+                )
+        if config_path is None:
+            ensure_indexes_created(self.conn)
+            return
+>>>>>>> upstream/master
 
-        # Fast path: Skip migration if version >= 2
+        # Fast path: skip migration once the indexed schema version is recorded
         current_version = get_scip_db_version(config_path)
-        if current_version >= 2:
+        if current_version >= SCIP_DB_INDEXED_VERSION:
             return  # Already migrated
 
         # Migration path: Create indexes and update version
         ensure_indexes_created(self.conn)
-        update_scip_db_version(config_path, 2)
+        update_scip_db_version(config_path, SCIP_DB_INDEXED_VERSION)
+
+    def _read_lines_within_root(self, candidate: Path) -> Optional[List[str]]:
+        """Return ``candidate``'s lines when the file actually opened lies
+        inside ``self._resolved_root`` and not inside the repository's .git;
+        ``None`` when it does not.
+
+        The path is checked first (so a file outside the root, or resolving
+        into .git, is never even opened), then opened, then the OPENED
+        file's real path is verified through ``/proc/self/fd`` against the
+        same rule and read from that descriptor only -- a symlink swapped
+        between check and open cannot redirect the read. Where ``/proc`` fd
+        links are unavailable the read fails closed with
+        ``_OpenedFileUnverifiable``.
+
+        Raises:
+            _OpenedFileUnverifiable: The opened file's real path cannot be
+                determined on this host.
+            OSError: An in-root file is missing, not a regular file, or
+                cannot be read.
+        """
+        root = self._resolved_root
+        assert root is not None  # callers check before reading
+        try:
+            if not is_readable_within_root(candidate, root):
+                return None
+        except ValueError:  # e.g. an embedded NUL byte in a stored path
+            return None
+        fd = os.open(candidate, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(f"not a regular file: {candidate}")
+            try:
+                opened = Path(os.readlink(f"/proc/self/fd/{fd}"))
+            except OSError as exc:
+                raise _OpenedFileUnverifiable(str(exc)) from exc
+            try:
+                opened_relative = opened.relative_to(root)
+            except ValueError:
+                return None
+            if has_git_segment(opened_relative.parts):
+                return None
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                data = handle.read()
+        finally:
+            os.close(fd)
+        return data.decode("utf-8", errors="replace").splitlines()
 
     def _read_context_lines(self, results: List[QueryResult]) -> None:
         """
@@ -285,11 +393,28 @@ class DatabaseBackend(SCIPBackend):
         Line numbers in the SCIP database are 0-based; ``context`` receives the raw
         line string with the trailing newline stripped.
 
+        SCIP context lines are read only from within the repository root.
+        Stored paths come from the database itself, so each one is confined
+        to the trusted repository root resolved once in ``__init__`` -- never
+        to ``project_root``, which may be a monorepo sub-project directory
+        (Bug #1630) or come from index metadata. With no trusted root every
+        context stays ``None``. Refusals, and reads whose opened file cannot
+        be verified on this host, are each summarised in one WARNING.
+
         Args:
             results: List of QueryResult objects to mutate in-place.
         """
-        if not self.project_root:
+        if not self.project_root or not results:
             return  # Cannot resolve relative paths without a project root
+
+        if self._resolved_root is None:
+            logger.warning(
+                "SCIP context omitted for %d result(s): index %s has no "
+                "repository root to confine source reads to",
+                len(results),
+                self.db_path,
+            )
+            return
 
         project_root_path = Path(self.project_root)
 
@@ -300,20 +425,40 @@ class DatabaseBackend(SCIPBackend):
         for idx, result in enumerate(results):
             indices_by_file[result.file_path].append(idx)
 
+        refused = 0
+        unverifiable = 0
         for rel_path, indices in indices_by_file.items():
-            abs_path = project_root_path / rel_path
+            candidate = (project_root_path / rel_path).absolute()
             try:
-                lines = abs_path.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()
+                lines = self._read_lines_within_root(candidate)
+            except _OpenedFileUnverifiable:
+                unverifiable += 1
+                continue
             except OSError:
                 # File missing or unreadable — leave context as None for these results.
+                continue
+            if lines is None:
+                refused += 1
                 continue
 
             for idx in indices:
                 line_num = results[idx].line  # 0-based
                 if 0 <= line_num < len(lines):
                     results[idx].context = lines[line_num]
+
+        if refused:
+            logger.warning(
+                "SCIP context omitted for %d stored path(s) that do not "
+                "resolve inside repository root %s",
+                refused,
+                self._resolved_root,
+            )
+        if unverifiable:
+            logger.warning(
+                "SCIP context omitted for %d file(s): opened-file "
+                "verification is unavailable on this host (no /proc fd links)",
+                unverifiable,
+            )
 
     def find_definition(self, symbol: str, exact: bool = False) -> List[QueryResult]:
         """Find definition locations using database queries."""

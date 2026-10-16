@@ -17,9 +17,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+<<<<<<< HEAD
 SRC_ROOT = str(Path(__file__).parent.parent.parent.parent.parent / "src")
+=======
+import pytest
+
+SRC_ROOT = str(Path(__file__).parent.parent.parent.parent.parent / "src")
+SUBPROCESS_TIMEOUT_SECONDS = 60
+>>>>>>> upstream/master
 
 
+# A fresh interpreter importing the server exceeds the suite's default 15 s
+# pytest-timeout under parallel gate load; the ceiling must sit above the
+# subprocess's own budget.
+@pytest.mark.timeout(SUBPROCESS_TIMEOUT_SECONDS + 15)
 def test_query_result_item_import_no_server_init():
     """Test that importing QueryResultItem doesn't initialize server app."""
     code = (
@@ -33,7 +44,11 @@ def test_query_result_item_import_no_server_init():
         [sys.executable, "-c", code],
         capture_output=True,
         text=True,
+<<<<<<< HEAD
         timeout=60,
+=======
+        timeout=SUBPROCESS_TIMEOUT_SECONDS,
+>>>>>>> upstream/master
     )
 
     assert result.returncode == 0, (

@@ -21,6 +21,17 @@ from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 
 
+@pytest.fixture(autouse=True)
+def _no_stored_url_rewrite(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GitPullUpdater is mocked here and no clone exists on disk, so the
+    credential-free rewrite of stored URLs has nothing to act on."""
+    monkeypatch.setattr(
+        "code_indexer.global_repos.refresh_scheduler."
+        "ensure_remote_url_without_credentials",
+        lambda _path: 0,
+    )
+
+
 @pytest.fixture
 def mock_golden_repos_dir(tmp_path):
     """Create temporary golden repos directory."""

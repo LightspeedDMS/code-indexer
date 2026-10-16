@@ -24,7 +24,7 @@ inputSchema:
       description: SHA-256 hash for optimistic locking (from get_file_content or previous edit)
     replace_all:
       type: boolean
-      description: 'Replace all occurrences of old_string (default: false - replace first only)'
+      description: 'Replace all occurrences of old_string (default: false - old_string must then occur exactly once, otherwise the edit is rejected)'
       default: false
   required:
   - repository_alias
@@ -58,4 +58,4 @@ outputSchema:
   - success
 ---
 
-Edit existing file using exact string replacement with optimistic locking. USE CASES: (1) Update source code, (2) Modify configurations, (3) Fix bugs. OPTIMISTIC LOCKING: content_hash prevents concurrent edit conflicts - hash from get_file_content or previous edit. STRING REPLACEMENT: old_string must match exactly (including whitespace). Use replace_all=true to replace all occurrences. REQUIREMENTS: File must exist, content_hash must match current state. PERMISSIONS: Requires repository:write. EXAMPLE: {"repository_alias": "my-repo", "file_path": "src/auth.py", "old_string": "def old_func():", "new_string": "def new_func():", "content_hash": "abc123def456"}
+Edit existing file using exact string replacement with optimistic locking. USE CASES: (1) Update source code, (2) Modify configurations, (3) Fix bugs. OPTIMISTIC LOCKING: content_hash prevents concurrent edit conflicts - hash from get_file_content or previous edit. STRING REPLACEMENT: old_string must match exactly (including whitespace; strings are compared after Unicode NFC normalization). With replace_all=false (default) old_string must occur exactly once: zero matches fail with "String '...' not found in file ..." and several matches fail with "... appears N times ... Not unique - use replace_all=True ...". Use replace_all=true to replace every occurrence; changes_made reports how many. REQUIREMENTS: File must exist, content_hash must match current state. TARGET: repository_alias is one of your activated workspaces, or a write-exception repository such as cidx-meta-global after enter_write_mode (without write mode the edit is refused with "Repo '<alias>' requires write mode..."). PERMISSIONS: Requires repository:write. EXAMPLE: {"repository_alias": "my-work", "file_path": "src/auth.py", "old_string": "def old_func():", "new_string": "def new_func():", "content_hash": "<content_hash from get_file_content>"}

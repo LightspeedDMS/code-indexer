@@ -11,9 +11,21 @@ All tests use real components following MESSI Rule #1: No mocks.
 import json
 import os
 from pathlib import Path
+from typing import Any, Dict, Iterator, Optional
 from unittest.mock import patch
 
 import pytest
+
+from tests.unit.server.telemetry.otlp_sink import OtlpHttpSink, otlp_http_config
+
+
+@pytest.fixture(autouse=True)
+def _reset_singletons_after_each_test() -> Iterator[None]:
+    """A test that enables telemetry never leaves the telemetry-manager
+    singleton (and its log-bridge handler) to the next test, even when its
+    lifespan shutdown did not finish."""
+    yield
+    reset_all_singletons()
 
 
 def reset_all_singletons():
@@ -34,6 +46,16 @@ def reset_all_singletons():
 
     reset_machine_metrics_exporter()
     reset_telemetry_manager()
+
+    # The metrics singletons hold the TelemetryManager they were built with,
+    # so they are reset with it.
+    from code_indexer.server.telemetry.job_metrics import reset_job_metrics
+    from code_indexer.server.telemetry.metrics_instrumentation import (
+        reset_application_metrics,
+    )
+
+    reset_job_metrics()
+    reset_application_metrics()
 
 
 # =============================================================================
@@ -64,7 +86,7 @@ class TestTelemetryAppIntegration:
         When the FastAPI app starts
         Then app.state.telemetry_manager should be None
         """
-        from asgi_lifespan import LifespanManager
+        from tests.unit.server.telemetry._app_lifespan import app_lifespan
         import asyncio
 
         # Create minimal server config with telemetry disabled
@@ -90,7 +112,7 @@ class TestTelemetryAppIntegration:
 
             async def check_telemetry_state():
                 # Use LifespanManager to properly trigger FastAPI lifespan events
-                async with LifespanManager(app):
+                async with app_lifespan(app):
                     # When disabled, telemetry_manager should be None
                     assert hasattr(app.state, "telemetry_manager"), (
                         "telemetry_manager attribute should exist on app.state"
@@ -126,7 +148,24 @@ class TestTelemetryDbConfigEnablesTelemetry:
             config_dir.mkdir(parents=True)
             (config_dir / "data" / "golden-repos").mkdir(parents=True)
             config_file = config_dir / "config.json"
+<<<<<<< HEAD
             config_file.write_text(json.dumps({"telemetry_config": {"enabled": True}}))
+=======
+            # Only "the config file enables telemetry" is under test, so
+            # nothing may export to a collector that does not exist: its
+            # bounded (~10 s) retry outlasts asgi_lifespan's 5 s shutdown.
+            config_file.write_text(
+                json.dumps(
+                    {
+                        "telemetry_config": {
+                            "enabled": True,
+                            "export_traces": False,
+                            "export_metrics": False,
+                        }
+                    }
+                )
+            )
+>>>>>>> upstream/master
 
             with patch.dict(os.environ, {"CIDX_SERVER_DATA_DIR": str(config_dir)}):
                 for legacy_var in _IGNORED_TELEMETRY_ENV_VARS:
@@ -145,13 +184,17 @@ class TestTelemetryDbConfigEnablesTelemetry:
         When the app starts
         Then telemetry should be enabled
         """
-        from asgi_lifespan import LifespanManager
+        from tests.unit.server.telemetry._app_lifespan import app_lifespan
         import asyncio
 
         with self._app_with_telemetry_enabled(tmp_path) as app:
 
             async def check_db_config_enables_telemetry():
+<<<<<<< HEAD
                 async with LifespanManager(app):
+=======
+                async with app_lifespan(app):
+>>>>>>> upstream/master
                     assert hasattr(app.state, "telemetry_manager"), (
                         "telemetry_manager not set on app.state"
                     )
@@ -178,6 +221,7 @@ class TestApplicationMetricsStartupWiring:
     """
 
     @staticmethod
+<<<<<<< HEAD
     def _app_with_env(tmp_path: Path, telemetry_enabled: bool = False):
         """Context manager: build a FastAPI app with telemetry.enabled set
         directly in config.json (the DB-backed value -- Story #1676 AC1:
@@ -185,15 +229,38 @@ class TestApplicationMetricsStartupWiring:
         reset."""
         from contextlib import contextmanager
 
+=======
+    def _app_with_env(
+        tmp_path: Path,
+        telemetry_enabled: bool = False,
+        collector_endpoint: Optional[str] = None,
+    ):
+        """Context manager: build a FastAPI app with telemetry.enabled set
+        directly in config.json (the DB-backed value -- Story #1676 AC1:
+        environment variables no longer control telemetry), singletons
+        reset. Enabled telemetry exports (traces and metrics stay on) to
+        `collector_endpoint`, a listening sink -- never to a dead collector."""
+        from contextlib import contextmanager
+
+        telemetry: Dict[str, Any] = {"enabled": telemetry_enabled}
+        if telemetry_enabled:
+            assert collector_endpoint, "enabled telemetry needs the otlp_sink"
+            telemetry.update(otlp_http_config(collector_endpoint))
+
+>>>>>>> upstream/master
         @contextmanager
         def _ctx():
             config_dir = tmp_path / ".cidx-server"
             config_dir.mkdir(parents=True)
             (config_dir / "data" / "golden-repos").mkdir(parents=True)
             config_file = config_dir / "config.json"
+<<<<<<< HEAD
             config_file.write_text(
                 json.dumps({"telemetry_config": {"enabled": telemetry_enabled}})
             )
+=======
+            config_file.write_text(json.dumps({"telemetry_config": telemetry}))
+>>>>>>> upstream/master
 
             with patch.dict(os.environ, {"CIDX_SERVER_DATA_DIR": str(config_dir)}):
                 reset_all_singletons()
@@ -204,13 +271,21 @@ class TestApplicationMetricsStartupWiring:
         return _ctx()
 
     def test_0_application_metrics_not_initialized_when_disabled(self, tmp_path: Path):
+<<<<<<< HEAD
         from asgi_lifespan import LifespanManager
+=======
+        from tests.unit.server.telemetry._app_lifespan import app_lifespan
+>>>>>>> upstream/master
         import asyncio
 
         with self._app_with_env(tmp_path, telemetry_enabled=False) as app:
 
             async def check_application_metrics_state():
+<<<<<<< HEAD
                 async with LifespanManager(app):
+=======
+                async with app_lifespan(app):
+>>>>>>> upstream/master
                     assert hasattr(app.state, "application_metrics"), (
                         "application_metrics attribute should exist on app.state"
                     )
@@ -220,6 +295,7 @@ class TestApplicationMetricsStartupWiring:
 
             asyncio.run(check_application_metrics_state())
 
+<<<<<<< HEAD
     def test_1_application_metrics_initialized_when_enabled(self, tmp_path: Path):
         from asgi_lifespan import LifespanManager
         import asyncio
@@ -228,6 +304,20 @@ class TestApplicationMetricsStartupWiring:
 
             async def check_application_metrics_active():
                 async with LifespanManager(app):
+=======
+    def test_1_application_metrics_initialized_when_enabled(
+        self, tmp_path: Path, otlp_sink: OtlpHttpSink
+    ):
+        from tests.unit.server.telemetry._app_lifespan import app_lifespan
+        import asyncio
+
+        with self._app_with_env(
+            tmp_path, telemetry_enabled=True, collector_endpoint=otlp_sink.endpoint
+        ) as app:
+
+            async def check_application_metrics_active():
+                async with app_lifespan(app):
+>>>>>>> upstream/master
                     assert hasattr(app.state, "application_metrics"), (
                         "application_metrics attribute should exist on app.state"
                     )
@@ -253,7 +343,11 @@ class TestJobMetricsStartupWiring:
     """
 
     def test_0_job_metrics_not_initialized_when_disabled(self, tmp_path: Path):
+<<<<<<< HEAD
         from asgi_lifespan import LifespanManager
+=======
+        from tests.unit.server.telemetry._app_lifespan import app_lifespan
+>>>>>>> upstream/master
         import asyncio
 
         with TestApplicationMetricsStartupWiring._app_with_env(
@@ -261,7 +355,11 @@ class TestJobMetricsStartupWiring:
         ) as app:
 
             async def check_job_metrics_state():
+<<<<<<< HEAD
                 async with LifespanManager(app):
+=======
+                async with app_lifespan(app):
+>>>>>>> upstream/master
                     assert hasattr(app.state, "job_metrics"), (
                         "job_metrics attribute should exist on app.state"
                     )
@@ -271,8 +369,15 @@ class TestJobMetricsStartupWiring:
 
             asyncio.run(check_job_metrics_state())
 
+<<<<<<< HEAD
     def test_1_job_metrics_initialized_when_enabled(self, tmp_path: Path):
         from asgi_lifespan import LifespanManager
+=======
+    def test_1_job_metrics_initialized_when_enabled(
+        self, tmp_path: Path, otlp_sink: OtlpHttpSink
+    ):
+        from tests.unit.server.telemetry._app_lifespan import app_lifespan
+>>>>>>> upstream/master
         import asyncio
 
         # Bare (non-"src."-prefixed) import: lifespan.py constructs JobMetrics
@@ -282,11 +387,19 @@ class TestJobMetricsStartupWiring:
         from code_indexer.server.telemetry.job_metrics import JobMetrics
 
         with TestApplicationMetricsStartupWiring._app_with_env(
+<<<<<<< HEAD
             tmp_path, telemetry_enabled=True
         ) as app:
 
             async def check_job_metrics_active():
                 async with LifespanManager(app):
+=======
+            tmp_path, telemetry_enabled=True, collector_endpoint=otlp_sink.endpoint
+        ) as app:
+
+            async def check_job_metrics_active():
+                async with app_lifespan(app):
+>>>>>>> upstream/master
                     assert hasattr(app.state, "job_metrics"), (
                         "job_metrics attribute should exist on app.state"
                     )

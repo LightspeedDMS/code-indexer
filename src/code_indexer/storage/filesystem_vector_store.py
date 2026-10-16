@@ -4,6 +4,10 @@ Stores vectors in filesystem with path-as-vector quantization and git-aware chun
 Following Story 2 requirements.
 """
 
+<<<<<<< HEAD
+=======
+import contextlib
+>>>>>>> upstream/master
 import contextvars
 import fcntl
 import hashlib
@@ -33,11 +37,20 @@ if TYPE_CHECKING:
     # `Executor` is imported only for type-checking (used solely in a type
     # annotation below) so it costs nothing at runtime CLI-startup import.
     from concurrent.futures import Executor
+<<<<<<< HEAD
+=======
+
+    from code_indexer.storage.sqlite_chunk_store import ChunkStore
+>>>>>>> upstream/master
 # Bug #1822 (DEFECT 1): unlike `Executor` above, `ThreadPoolExecutor` IS
 # needed at runtime (not just for type-checking) to construct the
 # module-level dedicated audit executor below. A bare ThreadPoolExecutor()
 # does not spawn threads until first submit(), so this stays cheap at
 # CLI-startup import time.
+<<<<<<< HEAD
+=======
+from collections import OrderedDict
+>>>>>>> upstream/master
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import numpy as np
@@ -48,8 +61,18 @@ from .vector_quantizer import VectorQuantizer
 from .projection_matrix_manager import ProjectionMatrixManager
 from .temporal_metadata_store import TemporalMetadataStore
 from .hnsw_stale_logger import log_hnsw_stale
+<<<<<<< HEAD
 from code_indexer.utils.blob_hash import git_blob_hash_bytes
 from code_indexer.utils.file_locking import fsync_directory, nfs_safe_fsync
+=======
+from code_indexer.utils.file_locking import fsync_directory, nfs_safe_fsync
+from code_indexer.utils.content_availability import CONTENT_UNAVAILABLE_KEY
+from code_indexer.utils.source_text_decoding import (
+    decode_source_text,
+    read_source_text,
+    split_source_lines,
+)
+>>>>>>> upstream/master
 from code_indexer.storage.shared.hnsw_sync_state import (
     HNSW_SYNC_SCHEMA_VERSION,
     HNSW_SYNC_STATE_FILENAME,
@@ -68,6 +91,80 @@ from code_indexer.storage.shared.chunk_layout import ChunkLayout
 # clear. The schedule has one entry for each retry after the first attempt.
 _CHUNKS_DB_WRITE_MAX_ATTEMPTS = 5
 _CHUNKS_DB_WRITE_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0)
+<<<<<<< HEAD
+=======
+
+#: Story #2119: how long the embedding-reuse lookup's read-only connection
+#: waits for a writer's lock before failing. chunks.db uses a rollback
+#: journal, so the run's own writer threads (one commit per file, 8+ threads)
+#: block a reader while they commit; commits are short, but NFS fsync stalls
+#: and back-to-back commits can starve a reader past SQLite's 5 s default.
+#: A minute absorbs that; a lock held longer still fails closed (exit 87),
+#: never a silent cache miss that would pay the provider.
+REUSE_LOOKUP_LOCK_WAIT_SECONDS = 60.0
+
+#: Story #2120 (Codex P2): lock stripes serialising, per point, the legacy
+#: SHARDED_JSON writer against the conditional gone-path delete.
+_LEGACY_POINT_LOCK_STRIPES = 64
+
+#: Story #2120 / Bug #2124: candidates per conditional gone-path delete
+#: transaction. Readers are blocked while a delete transaction commits; a
+#: batch keeps that short (about 0.4 s per 2000 rows measured on local disk)
+#: while the path index is still persisted once per call.
+_GONE_DELETE_COMMIT_BATCH = 2000
+
+
+# Bug #1991: an unreadable file is hit by every query that matches it. Its
+# WARNING is logged once per (repository, path) per process (DEBUG after),
+# remembered in a bounded insertion-ordered set (oldest evicted first).
+# Per-process log de-duplication only -- never cross-request state.
+_UNAVAILABLE_WARNED_MAX = 4096
+_unavailable_warned: "OrderedDict[Tuple[str, str], None]" = OrderedDict()
+_unavailable_warned_lock = threading.Lock()
+
+
+def _first_unavailable_report(key: Tuple[str, str]) -> bool:
+    """True the first time ``key`` is reported (within the bounded memory)."""
+    with _unavailable_warned_lock:
+        if key in _unavailable_warned:
+            return False
+        _unavailable_warned[key] = None
+        while len(_unavailable_warned) > _UNAVAILABLE_WARNED_MAX:
+            _unavailable_warned.popitem(last=False)
+        return True
+
+
+def _content_unavailable(
+    project_root: Path,
+    file_path: str,
+    indicator: str,
+    reason: str,
+    file_error: Optional[BaseException],
+    blob_error: BaseException,
+) -> Tuple[str, Dict[str, Any]]:
+    """Result for a chunk whose content could not be read (Bug #1991).
+
+    The content is EMPTY -- an exception message is never presented as code.
+    Callers detect the state via ``staleness["content_unavailable"]``; the
+    details go to the log.
+    """
+    first = _first_unavailable_report((str(project_root), file_path))
+    logging.getLogger(__name__).log(
+        logging.WARNING if first else logging.DEBUG,
+        "Chunk content unavailable for %s (%s): file read error=%r, git blob error=%r",
+        file_path,
+        reason,
+        file_error,
+        blob_error,
+    )
+    return "", {
+        "is_stale": True,
+        "staleness_indicator": indicator,
+        "staleness_reason": reason,
+        "hash_mismatch": False,
+        CONTENT_UNAVAILABLE_KEY: True,
+    }
+>>>>>>> upstream/master
 
 
 class LocalIndexNotFoundError(RuntimeError):
@@ -277,8 +374,14 @@ def _write_embed_meta_to_event_ctx(embed_meta: "Any", provider_name: str = "") -
             # with a concurrent repo's write and produce a torn triple.
             event_ctx.record_provider_cache_fields(
                 provider_name,
+<<<<<<< HEAD
                 cache_hit=embed_meta.key_found,
                 cache_mode=embed_meta.cache_mode,
+=======
+                # Bug #2112: both None when the cache was not consulted.
+                cache_hit=embed_meta.search_event_cache_hit,
+                cache_mode=embed_meta.search_event_cache_mode,
+>>>>>>> upstream/master
                 latency_ms=embed_meta.provider_latency_ms,
             )
     except Exception as _exc:  # noqa: BLE001
@@ -594,7 +697,11 @@ class PathIndex:
         self.save_snapshot(self.snapshot(), path)
 
     @classmethod
+<<<<<<< HEAD
     def load(cls, path: Path, *, strict: bool = False) -> "PathIndex":
+=======
+    def load(cls, path: Path) -> "PathIndex":
+>>>>>>> upstream/master
         """Load path index from disk. Returns an empty ``PathIndex`` if
         the file is missing OR corrupt/truncated (Bug #1575 round 6 item
         3: never raise uncaught -- a bad bin must not brick
@@ -603,10 +710,13 @@ class PathIndex:
 
         Args:
             path: File path to load from
+<<<<<<< HEAD
             strict: raise ``ValueError`` for a corrupt/unreadable file instead
                 of treating it as absent -- for a READER that would otherwise
                 serve "no files" (the listing served from the index must fall
                 back to the walk, never answer empty).
+=======
+>>>>>>> upstream/master
         """
         instance = cls()
 
@@ -617,10 +727,13 @@ class PathIndex:
             with open(path, "rb") as f:
                 serialized_data = msgpack.load(f)
         except (ValueError, msgpack.exceptions.UnpackException, OSError) as exc:
+<<<<<<< HEAD
             if strict:
                 raise ValueError(
                     f"Corrupt/unreadable path_index.bin at {path}"
                 ) from exc
+=======
+>>>>>>> upstream/master
             logging.getLogger(__name__).warning(
                 "Corrupt/unreadable path_index.bin at %s -- treating as absent (%s)",
                 path,
@@ -629,8 +742,11 @@ class PathIndex:
             return instance
 
         if not isinstance(serialized_data, dict):
+<<<<<<< HEAD
             if strict:
                 raise ValueError(f"path_index.bin at {path} is not a mapping")
+=======
+>>>>>>> upstream/master
             logging.getLogger(__name__).warning(
                 "path_index.bin at %s did not deserialize to a dict -- "
                 "treating as absent",
@@ -811,6 +927,17 @@ class FilesystemVectorStore:
         # HNSW-001 & HNSW-002: Incremental update change tracking
         # Structure: {collection_name: {'added': set(), 'updated': set(), 'deleted': set()}}
         self._indexing_session_changes: Dict[str, Dict[str, set]] = {}
+
+        # Story #2120 (Codex P2): per-point lock stripes for the legacy
+        # SHARDED_JSON layout. The writer holds its point's stripe across
+        # the vector-file write and the id-index update; the conditional
+        # delete holds every candidate's stripe across its path check and
+        # deletion, so a point a writer moves to a live path can never be
+        # deleted under its old path. Order: stripes (ascending) before
+        # _id_index_lock / _path_index_lock.
+        self._legacy_point_locks: Tuple[threading.Lock, ...] = tuple(
+            threading.Lock() for _ in range(_LEGACY_POINT_LOCK_STRIPES)
+        )
 
         # HNSW-001 (AC3): Daemon mode cache entry (optional, set by daemon service)
         # When set, enables in-memory HNSW updates for watch mode instead of disk I/O
@@ -1209,6 +1336,329 @@ class FilesystemVectorStore:
             # advanced the epoch independently).
             session.own_mutation_count += 1
 
+        # Story #1456: production write-path opt-in (see __init__ docstring).
+        # Bug #1528: the caller's TRI-STATE value is ALSO retained verbatim,
+        # because create_collection() must distinguish "no layout
+        # instruction given" (None -> env/context default) from an EXPLICIT
+        # sharded_json request (False): TEMPORAL collections default to
+        # CHUNKS_DB (temporal never writes a new legacy vector_*.json file)
+        # while SEMANTIC collections keep Story #1488's SHARDED_JSON
+        # CLI/daemon default.
+        self._new_collection_layout_explicit: Optional[bool] = (
+            use_chunks_db_for_new_collections
+        )
+        if use_chunks_db_for_new_collections is not None:
+            self._use_chunks_db_for_new_collections: bool = (
+                use_chunks_db_for_new_collections
+            )
+        else:
+            self._use_chunks_db_for_new_collections = (
+                _parse_use_chunks_db_for_new_collections_env()
+            )
+        # Per-collection in-memory intent, recorded by create_collection():
+        # True means "this session is actively building this collection as
+        # CHUNKS_DB" -- consulted BEFORE the on-disk discriminator exists
+        # (see _is_chunks_db_collection).
+        self._chunks_db_mode: Dict[str, bool] = {}
+
+        # Story #1492 AC1: mtime-keyed cache of parsed collection_meta.json
+        # (Finding C1, SEVERE -- eliminates the 4-5 redundant reads+parses
+        # per search() call). Lazy-imported here (not module-level) to
+        # match this file's existing chunk_layout import convention.
+        if collection_meta_cache is None:
+            from code_indexer.storage.shared.collection_meta_cache import (
+                CollectionMetaCache,
+            )
+
+            collection_meta_cache = CollectionMetaCache()
+        self._collection_meta_cache: Any = collection_meta_cache
+
+        # Story #1492 AC3: per-thread cache of open ChunkStore handles
+        # (Finding C5 -- avoids re-running schema DDL/dim-load/codec
+        # construction on a repeat query against the same mutable
+        # collection). threading.local()-based: NEVER shares a connection
+        # across threads (Story #1456 AC7's binding sqlite3 contract).
+        if chunk_store_cache is None:
+            from code_indexer.storage.shared.chunk_store_cache import (
+                ChunkStoreThreadCache,
+            )
+
+            chunk_store_cache = ChunkStoreThreadCache()
+        self._chunk_store_cache: Any = chunk_store_cache
+
+    def _is_chunks_db_collection(
+        self, collection_name: str, collection_path: Path
+    ) -> bool:
+        """Story #1456: the single combined authority for "should THIS
+        write/finalize operation treat this collection as CHUNKS_DB".
+
+        Two cases:
+        1. An in-progress FRESH build (THIS session's create_collection
+           recorded intent in ``self._chunks_db_mode`` -- the on-disk
+           discriminator does not exist yet, so ``resolve_chunk_layout()``
+           alone would incorrectly say SHARDED_JSON during that window).
+        2. A collection already consolidated in a PRIOR session (no
+           in-memory intent in THIS fresh instance, but the durable
+           discriminator is already committed -- the resolver correctly
+           detects it).
+
+        Read-only, post-completion consumers (search, get_point, etc.) use
+        ``resolve_chunk_layout()`` directly -- they never have an active
+        "building it right now" intent to consult.
+        """
+        if self._chunks_db_mode.get(collection_name):
+            return True
+
+        from code_indexer.storage.shared.chunk_layout import (
+            ChunkLayout,
+            resolve_chunk_layout,
+        )
+
+        # Bug #1997: this runs on the per-file hot path (get_point,
+        # upsert_points) of every incremental/resume/reconcile run against an
+        # EXISTING collection, where _chunks_db_mode is empty. Feed the
+        # resolver the stat-keyed parsed metadata instead of letting it
+        # re-read and re-parse the whole file on every call. The resolver
+        # remains the sole layout authority. This store's own metadata
+        # writes call CollectionMetaCache.invalidate() explicitly, at three
+        # sites: _atomic_write_json (collection_meta.json targets),
+        # end_indexing (after the HNSW publish + discriminator commit) and
+        # clear_collection (finally). Writers outside this store are caught
+        # by the cache's stat-identity key (see collection_meta_cache.py).
+        return bool(
+            resolve_chunk_layout(
+                collection_path,
+                cached_meta=self._collection_meta_cache.get(collection_path),
+            )
+            == ChunkLayout.CHUNKS_DB
+        )
+
+    def _id_cache_key(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> str:
+        """Compose the shared bare-``collection_name``-keyed cache key
+        (``self._id_index`` / ``self._vector_size_cache``) so a top-level
+        collection (``base_path/X``) and a nested collection sharing the
+        SAME name (``base_path/multimodal_index/X``) -- two DIFFERENT
+        physical directories -- never collide in these in-memory caches.
+
+        Returns ``collection_name`` UNCHANGED when ``subdirectory`` is
+        falsy (``None`` or ``""``) -- byte-identical to every existing
+        write-path/active-session caller, none of which ever pass a
+        non-None ``subdirectory`` (confirmed: no ``begin_indexing`` /
+        ``upsert_points`` / ``end_indexing`` call site in this codebase
+        does). Returns a composed ``f"{subdirectory}::{collection_name}"``
+        key when a subdirectory is given -- the ONLY reachable-today
+        producer of a non-None ``subdirectory`` at these cache sites is
+        ``MultiIndexQueryService``'s legacy multimodal read path, which
+        always resolves the SAME (embedder-agnostic) physical directory
+        for a given ``(collection_name, subdirectory)`` pair, so a
+        composed-key read can never collide with itself.
+        """
+        if not subdirectory:
+            return collection_name
+        return f"{subdirectory}::{collection_name}"
+
+    def _activation_scoped_cache_key(
+        self, path_str: str, *, chunk_layout_token: Optional[str] = None
+    ) -> str:
+        """Story #1458 AC11: compose the shared (HNSW/id_index) cache key
+        for ``path_str``, embedding the ``chunks_db`` layout-discriminator
+        token (AC11 Technical Requirement #1) and this instance's
+        ``activation_id`` (AC11 Technical Requirement #2 / Finding 7) when
+        present.
+
+        Returns ``path_str`` UNCHANGED when both ``chunk_layout_token`` is
+        None and ``self.activation_id`` is None -- byte-identical to the
+        pre-AC11 pure-path-derived key.
+
+        ``chunk_layout_token`` (typically ``resolve_chunk_layout(...).value``,
+        e.g. ``"sharded_json"`` or ``"chunks_db"``) is appended FIRST so a
+        post-consolidation read (the discriminator flips at the SAME path)
+        is a structural cache-miss, without requiring any active cross-node
+        invalidation broadcast -- the miss is by-construction from the
+        changed key.
+
+        ``activation_id``, when set, is appended AFTER the layout token, so
+        a different clone materialized at the SAME filesystem path
+        (deactivate-then-reactivate) is ALSO a guaranteed structural
+        cache-miss regardless of the layout-discriminator value, which alone
+        is necessary but not sufficient for that case (Finding 7).
+        """
+        key = path_str
+        if chunk_layout_token is not None:
+            key = f"{key}:{chunk_layout_token}"
+        if self.activation_id is not None:
+            key = f"{key}:{self.activation_id}"
+        return key
+
+    def hnsw_cache_key_for_collection(self, collection_path: Path) -> str:
+        """Return the EXACT shared-cache key ``search()`` stores this
+        collection's HNSW entry under.
+
+        Bug #1538: an external invalidation call site that hand-builds a bare
+        path string composes a DIFFERENT key than ``search()`` does (the key
+        embeds Story #1458 AC11's chunk-layout token and, for an activated
+        repo, its ``activation_id``), so its ``invalidate()`` is a silent
+        no-op. Every such caller must go through this method instead of
+        reconstructing the format.
+
+        The layout token is resolved FRESH from disk here -- deliberately not
+        from ``_is_chunks_db_collection()``'s in-session build intent, which
+        can diverge from the committed on-disk discriminator ``search()``
+        actually keyed against (the same reasoning ``rebuild_hnsw_filtered()``
+        documents at its own two ``invalidate()`` calls).
+        """
+        from code_indexer.storage.shared.chunk_layout import resolve_chunk_layout
+
+        return self._activation_scoped_cache_key(
+            str(Path(collection_path).resolve()),
+            chunk_layout_token=resolve_chunk_layout(collection_path).value,
+        )
+
+    def _hnsw_sync_session_key(self, collection_path: Path) -> str:
+        """Bug #1575 Part C: the RESOLVED PHYSICAL collection path is the
+        sole key for ``self._hnsw_sync_sessions`` -- this is what makes one
+        collection's rebuild/skip decision structurally unable to affect a
+        different collection's (the exact scoping hazard the old bare
+        ``_branch_isolation_did_filtered_rebuild`` boolean had).
+        """
+        return str(Path(collection_path).resolve())
+
+    def _get_or_create_hnsw_sync_session(
+        self, collection_path: Path, collection_name: str
+    ) -> HNSWSyncSession:
+        """Bug #1575 Part C: lazily create (or return the existing)
+        per-physical-collection-path ``HNSWSyncSession``.
+
+        When ``self._indexing_session_changes`` already has a live entry for
+        ``collection_name`` (an active ``begin_indexing()``...
+        ``end_indexing()`` bracket), the session's ``added``/``updated``/
+        ``deleted`` sets are the SAME set objects (aliased, not copied) as
+        that dict's -- so every ``upsert_points()``/``delete_points()`` call
+        that already populates ``_indexing_session_changes`` is transitively
+        tracked here with zero duplicate bookkeeping.
+
+        When no such tracking exists (a mutation call outside any
+        ``begin_indexing()`` bracket -- e.g. watch mode calling
+        ``upsert_points()`` directly), the session gets fresh empty sets and
+        ``complete_change_tracking`` is immediately set False: a mutation
+        this store cannot precisely attribute must never be silently
+        skipped at ``end_indexing()`` time, so it forces a full rebuild.
+        """
+        key = self._hnsw_sync_session_key(collection_path)
+        with self._hnsw_sync_sessions_lock:
+            session = self._hnsw_sync_sessions.get(key)
+            if session is not None:
+                return session
+
+            layout = (
+                ChunkLayout.CHUNKS_DB
+                if self._is_chunks_db_collection(collection_name, collection_path)
+                else ChunkLayout.SHARDED_JSON
+            )
+            prior = read_hnsw_sync_state(collection_path)
+            start_epoch = prior.mutation_epoch if prior is not None else 0
+
+            session = HNSWSyncSession(
+                collection_path=collection_path,
+                collection_name=collection_name,
+                layout=layout,
+                start_epoch=start_epoch,
+            )
+
+            tracked = self._indexing_session_changes.get(collection_name)
+            if tracked is not None:
+                session.added = tracked["added"]
+                session.updated = tracked["updated"]
+                session.deleted = tracked["deleted"]
+            else:
+                session.complete_change_tracking = False
+
+            self._hnsw_sync_sessions[key] = session
+            return session
+
+    def abort_indexing(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> None:
+        """Bug #1575 Part C: discard THIS process's in-memory
+        ``HNSWSyncSession``/session-change tracking for ``collection_name``
+        -- called when an indexing session is aborted (e.g. an exception
+        propagates before ``end_indexing()`` runs).
+
+        Deliberately does NOT touch the durable ``hnsw_sync`` state on disk:
+        it correctly remains "dirty" from whatever mutations were already
+        performed, so the next ``end_indexing()`` attempt (in this process
+        or another) safely performs a full rebuild rather than trusting an
+        abandoned in-memory session's incomplete tracking.
+        """
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        key = self._hnsw_sync_session_key(collection_path)
+        with self._hnsw_sync_sessions_lock:
+            self._hnsw_sync_sessions.pop(key, None)
+        if collection_name in self._indexing_session_changes:
+            del self._indexing_session_changes[collection_name]
+        if collection_name in self._active_subdirectories:
+            del self._active_subdirectories[collection_name]
+
+    def _mark_hnsw_dirty_before_mutation(
+        self, collection_path: Path, collection_name: str
+    ) -> None:
+        """Bug #1575 Part C mutation protocol (dirty-before-write): acquire
+        ``.index_rebuild.lock`` -> read+validate the current ``hnsw_sync``
+        state -> durably write a "dirty" epoch transition BEFORE the caller
+        performs its own storage mutation.
+
+        No-op when ``self._hnsw_sync_epoch_enabled`` is False (AC46 cluster
+        fail-closed gate) -- no session is created, so ``end_indexing()``
+        observes "session missing" and always performs a full rebuild,
+        byte-identical to pre-Part-C behavior.
+
+        If the durable write fails, the exception propagates. Every caller
+        of this method invokes it BEFORE its own storage mutation, so that
+        propagation alone is sufficient to satisfy "if the dirty write
+        fails, the mutation MUST NOT proceed".
+
+        The lock is held ONLY for this read-decide-write sequence -- it is
+        released (context manager exit) before this method returns, well
+        before any embedding-provider call or other long-running work the
+        caller might perform next.
+        """
+        if not self._hnsw_sync_epoch_enabled:
+            return
+
+        session = self._get_or_create_hnsw_sync_session(
+            collection_path, collection_name
+        )
+
+        from .background_index_rebuilder import BackgroundIndexRebuilder
+
+        rebuilder = BackgroundIndexRebuilder(collection_path)
+        with rebuilder.acquire_lock():
+            prior = read_hnsw_sync_state(collection_path)
+            next_mutation, published = compute_dirty_transition(prior)
+
+            branch = session.current_branch
+            if branch is None and prior is not None:
+                branch = prior.current_branch
+
+            new_state = HNSWSyncState(
+                schema_version=HNSW_SYNC_SCHEMA_VERSION,
+                mutation_epoch=next_mutation,
+                published_epoch=published,
+                status="dirty",
+                current_branch=branch,
+                layout=session.layout.value,
+            )
+            write_hnsw_sync_state(collection_path, new_state)
+            # Bug #1575 Part C review fix (Defect 2): record that THIS
+            # session personally caused this exact epoch advancement --
+            # the decision engine compares this count against the on-disk
+            # epoch delta since the session started to detect a mutation
+            # this session never observed (a different session/process
+            # advanced the epoch independently).
+            session.own_mutation_count += 1
+
     def _get_collection_path(
         self, collection_name: str, subdirectory: Optional[str] = None
     ) -> Path:
@@ -1267,16 +1717,32 @@ class FilesystemVectorStore:
         if not self._is_chunks_db_collection(collection_name, collection_path):
             return
 
+<<<<<<< HEAD
         chunks_db_path = collection_path / "chunks.db"
         if not chunks_db_path.exists():
             return
 
+=======
+>>>>>>> upstream/master
         from code_indexer.storage.sqlite_chunk_store import (
             ChunkStoreUnavailableError,
             is_fatal_chunk_store_write_error,
             open_chunk_store_for_path,
+<<<<<<< HEAD
         )
 
+=======
+            refuse_missing_established_store,
+        )
+
+        chunks_db_path = collection_path / "chunks.db"
+        if not chunks_db_path.exists():
+            # Story #2119: a fresh build has no store yet; an established
+            # collection whose store is missing fails the run here (87).
+            refuse_missing_established_store(chunks_db_path)
+            return
+
+>>>>>>> upstream/master
         try:
             store = open_chunk_store_for_path(chunks_db_path, str(collection_path))
             store.close()
@@ -1776,6 +2242,15 @@ class FilesystemVectorStore:
             )
 
             write_chunks_db_discriminator(collection_path)
+<<<<<<< HEAD
+=======
+
+        # Bug #1997: finalize wrote collection_meta.json through writers that
+        # do not go through _atomic_write_json (the HNSW publish in
+        # HNSWIndexManager, the discriminator commit above) -- drop the
+        # cached parse so the next reader sees exactly what was committed.
+        self._collection_meta_cache.invalidate(collection_path)
+>>>>>>> upstream/master
 
         self.logger.info(
             f"Indexing finalized for '{collection_name}': {vector_count} vectors indexed "
@@ -2462,8 +2937,23 @@ class FilesystemVectorStore:
                 )
                 return (quant_range["min"], quant_range["max"])
 
-        # Fallback: read from disk if not cached (shouldn't happen if using lifecycle properly)
+        # Not populated by _get_vector_size(): the SHARDED_JSON upsert path
+        # never calls it, so this branch runs on EVERY upsert_points() call.
+        # Bug #1997: serve the parsed metadata from the stat-keyed cache
+        # rather than re-reading and re-parsing the whole file per call.
         collection_path = self.base_path / collection_name
+        cached_meta = self._collection_meta_cache.get(collection_path)
+        if cached_meta is not None:
+            cached_range = cached_meta.get(
+                "quantization_range", {"min": -2.0, "max": 2.0}
+            )
+            try:
+                return (cached_range["min"], cached_range["max"])
+            except KeyError:
+                return (-2.0, 2.0)
+
+        # The cache yields None only for a missing / unreadable / non-object
+        # file: keep the original direct-read semantics for those cases.
         metadata_path = collection_path / "collection_meta.json"
 
         if not metadata_path.exists():
@@ -2629,6 +3119,18 @@ class FilesystemVectorStore:
         # this CHUNKS_DB write path never collides with a bare-name
         # top-level/nested collection pair (Codex NEW Finding 2).
         _upsert_cdb_path_cache_key = self._id_cache_key(collection_name, subdirectory)
+<<<<<<< HEAD
+=======
+        # Story #2120: a file's previous rows are what chunks.db holds under
+        # its path -- including rows an interrupted run committed but never
+        # recorded in path_index.bin -- not what the PathIndex remembers.
+        # Read before taking the lock (a read-only connection, no blob
+        # decoded). The PathIndex still decides shared ownership: an id
+        # another path owns (a byte-identical copy) is never deleted.
+        stored_ids_by_path = self._stored_point_ids_by_path(
+            collection_path, list(points_by_file)
+        )
+>>>>>>> upstream/master
         orphan_ids: List[str] = []
         with self._path_index_lock:
             if _upsert_cdb_path_cache_key not in self._path_indexes:
@@ -2641,10 +3143,18 @@ class FilesystemVectorStore:
 
             for file_path, file_points in points_by_file.items():
                 new_point_ids = {p["id"] for p in file_points}
+<<<<<<< HEAD
                 old_point_ids = path_index.get_point_ids(file_path)
                 orphan_point_ids = old_point_ids - new_point_ids
 
                 for orphan_id in orphan_point_ids:
+=======
+                for stale_entry in path_index.get_point_ids(file_path) - new_point_ids:
+                    path_index.remove_point(file_path, stale_entry)
+
+                stored_ids = stored_ids_by_path.get(file_path, set())
+                for orphan_id in stored_ids - new_point_ids:
+>>>>>>> upstream/master
                     path_index.remove_point(file_path, orphan_id)
                     if not path_index.has_other_owner(orphan_id):
                         orphan_ids.append(orphan_id)
@@ -3122,6 +3632,7 @@ class FilesystemVectorStore:
                 uncommitted_files=uncommitted_files,
             )
 
+<<<<<<< HEAD
             # Atomic write to filesystem. Bug #1407/#1223: fsync temporal
             # vector JSON writes for crash-durability; non-temporal writes
             # stay fsync=False (unchanged, avoids a fleet-wide perf hit).
@@ -3158,19 +3669,65 @@ class FilesystemVectorStore:
                 if file_path:
                     self._file_path_cache.setdefault(collection_name, set()).add(
                         file_path
+=======
+            # Story #2120 (Codex P2): the point's lock stripe is held across
+            # the file write and the id-index update, so the legacy
+            # conditional delete never sees (and deletes) a half-moved point.
+            with self._legacy_point_lock(point_id):
+                # Atomic write to filesystem. Bug #1407/#1223: fsync temporal
+                # vector JSON writes for crash-durability; non-temporal writes
+                # stay fsync=False (unchanged, avoids a fleet-wide perf hit).
+                self._atomic_write_json(vector_file, vector_data, fsync=is_temporal)
+
+                # Update ID index and file path cache
+                with self._id_index_lock:
+                    # Check if point existed before (for change tracking)
+                    point_existed = point_id in self._id_index.get(
+                        _upsert_cache_key, {}
+>>>>>>> upstream/master
                     )
 
-                # HNSW-001 & HNSW-002: Track changes for incremental updates
-                if collection_name in self._indexing_session_changes:
-                    if point_existed:
-                        self._indexing_session_changes[collection_name]["updated"].add(
-                            point_id
-                        )
-                    else:
-                        self._indexing_session_changes[collection_name]["added"].add(
-                            point_id
+                    # Bug #1579: capture the point's PREVIOUS on-disk
+                    # vector_file path BEFORE it gets overwritten below. The
+                    # directory a point_id lands in is derived from its
+                    # VECTOR (quantized projection), while the filename is
+                    # derived from the point_id itself -- so a re-upsert of
+                    # the same point_id with a marginally different vector
+                    # can quantize to a DIFFERENT directory, leaving the OLD
+                    # file behind as a "shifted duplicate" sharing the same
+                    # point_id. This is distinct from the orphan-cleanup
+                    # mechanism above (STEP 1-3): that only fires when a
+                    # point_id vanishes entirely from a file's chunk set (in
+                    # old_point_ids but not new_point_ids) -- a
+                    # persisting-but-relocated point_id is never in
+                    # orphan_point_ids since it stays in new_point_ids.
+                    previous_vector_file = self._id_index.get(
+                        _upsert_cache_key, {}
+                    ).get(point_id)
+
+                    self._id_index[_upsert_cache_key][point_id] = vector_file
+
+                    # Update file path cache.
+                    # Use setdefault because delete_points may have evicted the
+                    # cache entry between the initialization at begin_indexing()
+                    # and this point, causing a KeyError under concurrent
+                    # upsert+delete.
+                    if file_path:
+                        self._file_path_cache.setdefault(collection_name, set()).add(
+                            file_path
                         )
 
+<<<<<<< HEAD
+=======
+                    # HNSW-001 & HNSW-002: Track changes for incremental updates
+                    if collection_name in self._indexing_session_changes:
+                        changes = self._indexing_session_changes[collection_name]
+                        if point_existed:
+                            changes["updated"].add(point_id)
+                        else:
+                            changes["added"].add(point_id)
+
+>>>>>>> upstream/master
             # Bug #1579: delete the stale prior-location file for a relocated
             # point_id OUTSIDE the id_index lock (I/O should not happen while
             # holding _id_index_lock, matching this file's lock-minimizing
@@ -3312,6 +3869,39 @@ class FilesystemVectorStore:
                     collection_name, _count_points_subdirectory
                 )
             return len(self._id_index[_count_points_cache_key])
+<<<<<<< HEAD
+=======
+
+    def has_committed_points(self, collection_name: str) -> bool:
+        """Story #2120 (Codex P1-2): whether the collection holds committed
+        points, read from the store itself -- never from the published
+        ``collection_meta.json`` count, which lags the store (e.g. rows an
+        interrupted run committed after the last publish). Read-only and
+        side-effect free: an existing ``chunks.db`` is probed with
+        ``chunk_store_has_real_data`` (``mode=ro``, never creates a file),
+        regardless of the layout discriminator, so an interrupted first
+        build counts; a legacy SHARDED_JSON collection asks its id index
+        (which scans the vector files when ``id_index.bin`` is absent).
+        Every read error propagates: a populated collection must never be
+        mistaken for an empty one. Story #2126: nor is an ESTABLISHED
+        collection whose ``chunks.db`` is missing -- it raises
+        ``MissingEstablishedChunkStoreError`` (exit 89) instead of answering
+        "empty", which would route the run to a paid full rebuild."""
+        from code_indexer.storage.sqlite_chunk_store import (
+            chunk_store_has_real_data,
+            refuse_missing_established_store,
+        )
+
+        subdirectory = self._active_subdirectories.get(collection_name)
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        if not collection_path.is_dir():
+            return False
+        chunks_db_path = collection_path / "chunks.db"
+        if chunks_db_path.exists():
+            return chunk_store_has_real_data(chunks_db_path, on_error="raise")
+        refuse_missing_established_store(chunks_db_path)
+        return len(self._load_id_index(collection_name, subdirectory)) > 0
+>>>>>>> upstream/master
 
     def delete_points(
         self, collection_name: str, point_ids: List[str]
@@ -3531,8 +4121,142 @@ class FilesystemVectorStore:
 
         return {"status": "ok", "deleted": deleted}
 
+<<<<<<< HEAD
     def mark_repository_delegated(self) -> None:
         """This store indexes a repository that is NOT on this machine.
+=======
+    @staticmethod
+    def _legacy_stripe(point_id: str) -> int:
+        """Stripe index of a point's legacy lock (stable within a process)."""
+        return hash(point_id) % _LEGACY_POINT_LOCK_STRIPES
+
+    def _legacy_point_lock(self, point_id: str) -> threading.Lock:
+        """Story #2120 (Codex P2): the lock stripe of ``point_id`` on the
+        legacy SHARDED_JSON layout (see ``_legacy_point_locks``)."""
+        return self._legacy_point_locks[self._legacy_stripe(point_id)]
+
+    def delete_points_still_at_paths(
+        self, collection_name: str, expected: Dict[str, str]
+    ) -> int:
+        """Story #2120: delete each point of ``expected`` (point_id -> stored
+        path) only while it is still stored under that path. A point a live
+        byte-identical copy re-upserted in this run (same content-addressed
+        id, the copy's path) is never deleted with its gone twin.
+
+        Bug #2124: the whole batch is one store transaction and, outside an
+        indexing session, ONE ``path_index.bin`` persist (inside a session,
+        ``end_indexing`` persists it once) -- never one per file.
+
+        Returns the number of points deleted. Every error propagates."""
+        if not expected:
+            return 0
+        collection_path = self._get_collection_path(collection_name)
+        self._mark_hnsw_dirty_before_mutation(collection_path, collection_name)
+        subdirectory = self._active_subdirectories.get(collection_name)
+        cache_key = self._id_cache_key(collection_name, subdirectory)
+
+        if not self._is_chunks_db_collection(collection_name, collection_path):
+            # Codex P2: check-and-delete is atomic against the legacy writer:
+            # every candidate's stripe is held (ascending order, as nothing
+            # else takes more than one) across the check and the deletion.
+            stripes = sorted({self._legacy_stripe(pid) for pid in expected})
+            with contextlib.ExitStack() as held:
+                for stripe in stripes:
+                    held.enter_context(self._legacy_point_locks[stripe])
+                still_there = []
+                for point_id, path in expected.items():
+                    point = self.get_point(point_id, collection_name, self_heal=True)
+                    if (
+                        point is not None
+                        and point.get("payload", {}).get("path") == path
+                    ):
+                        still_there.append(point_id)
+                # Codex r2 P2-2: the gone path no longer owns candidates a
+                # live copy took over (a phantom owner would block that
+                # copy's orphan cleanup).
+                still_there_ids = set(still_there)
+                moved = {
+                    pid: path
+                    for pid, path in expected.items()
+                    if pid not in still_there_ids
+                }
+                if moved:
+                    with self._path_index_lock:
+                        if cache_key not in self._path_indexes:
+                            self._path_indexes[cache_key] = (
+                                self._lazy_load_path_index_tracked(
+                                    collection_name, cache_key
+                                )
+                            )
+                        for point_id, path in moved.items():
+                            self._path_indexes[cache_key].remove_point(path, point_id)
+                if not still_there:
+                    if moved:
+                        self._persist_out_of_session_path_index(
+                            collection_name, cache_key, subdirectory
+                        )
+                    return 0
+                result = self.delete_points(collection_name, still_there)
+                return int(result["deleted"])
+
+        from code_indexer.storage.sqlite_chunk_store import open_chunk_store_for_path
+
+        chunk_store = open_chunk_store_for_path(
+            collection_path / "chunks.db", str(collection_path)
+        )
+        # One transaction per _GONE_DELETE_COMMIT_BATCH candidates: a single
+        # transaction over ~200k rows held readers off for its whole length
+        # (measured 9.95 s for 50k rows); each batch blocks them briefly.
+        candidates = list(expected.items())
+        deleted: Dict[str, str] = {}
+        index_changed = False
+        try:
+            for start in range(0, len(candidates), _GONE_DELETE_COMMIT_BATCH):
+                batch = dict(candidates[start : start + _GONE_DELETE_COMMIT_BATCH])
+                with self._path_index_lock:
+                    batch_deleted = chunk_store.delete_points_still_at_paths(batch)
+                    # Recorded as soon as it is committed.
+                    deleted.update(batch_deleted)
+                    if cache_key not in self._path_indexes:
+                        self._path_indexes[cache_key] = (
+                            self._lazy_load_path_index_tracked(
+                                collection_name, cache_key
+                            )
+                        )
+                    path_index = self._path_indexes[cache_key]
+                    # Codex r2 P2-2: the gone path owns none of its candidates
+                    # any more -- deleted rows, and rows a live copy took over
+                    # (a phantom owner would block that copy's orphan cleanup).
+                    for point_id, path in batch.items():
+                        path_index.remove_point(path, point_id)
+                    index_changed = True
+        finally:
+            chunk_store.close()
+            if deleted and collection_name in self._indexing_session_changes:
+                self._indexing_session_changes[collection_name]["deleted"].update(
+                    deleted
+                )
+            if index_changed:
+                # Codex r2 P2-2: persisted on every exit path and inside a
+                # session too (an aborted session never reaches end_indexing),
+                # so path_index.bin never lags committed deletes. CHUNKS_DB
+                # upserts commit per call, so the live index describes
+                # committed rows. Outside _path_index_lock (B1 lock order);
+                # once per call, never per file (Bug #2124).
+                self._persist_out_of_session_path_index(
+                    collection_name, cache_key, subdirectory
+                )
+        return len(deleted)
+
+    def _prepare_vector_data(
+        self,
+        point_id: str,
+        vector: np.ndarray,
+        payload: Dict[str, Any],
+        repo_root: Optional[Path],
+    ) -> Dict[str, Any]:
+        """Prepare vector data with git-aware storage logic.
+>>>>>>> upstream/master
 
         Called by an indexing pass reading through a delegated content (or git)
         backend. Writes then never ask local git for the repository root, its
@@ -3618,6 +4342,10 @@ class FilesystemVectorStore:
             # Atomic rename — visible to readers only after this completes.
             # Last writer wins; all intermediate writers produce valid JSON files.
             tmp_file.replace(file_path)
+            if file_path.name == "collection_meta.json":
+                # Bug #1997: never rely on stat identity alone for our own
+                # writes -- the next cached read must see this content.
+                self._collection_meta_cache.invalidate(file_path.parent)
         except Exception:
             try:
                 tmp_file.unlink(missing_ok=True)
@@ -5053,22 +5781,68 @@ class FilesystemVectorStore:
         return points
 
     def get_existing_content_hashes(
-        self, file_path: str, collection_name: str
-    ) -> Dict[int, Dict[str, Any]]:
-        """Get existing content hashes for a file's chunks.
+        self,
+        file_path: str,
+        collection_name: str,
+        *,
+        project_id: str,
+        file_hash: str,
+        chunk_count: int,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Get the stored embeddings a file's chunks can reuse, by content.
 
         Story #470: Enables smart embedding cache by loading existing
         content_hash values for comparison before re-embedding.
 
+        Story #2119: for a CHUNKS_DB collection the lookup reads the
+        committed rows of ``chunks.db`` itself -- never ``path_index.bin``,
+        which a killed run never persisted -- in ONE read-only query: the
+        file's own content-addressed point ids
+        ``md5(f"{project_id}_{file_hash}_{i}")`` for ``i < chunk_count`` (the
+        writer's id, so an unchanged file, a byte-identical duplicate or rows
+        an interrupted run committed are all found), plus every row stored
+        under ``file_path`` (a changed file's unchanged chunks). Candidates
+        are keyed by ``content_hash``, never by chunk index, so a stored
+        chunk that moved to another index (e.g. a chunk was prepended) is
+        still reused. Every error propagates: the caller pays for an
+        embedding only on a real miss. SHARDED_JSON collections keep the
+        PathIndex lookup.
+
         Args:
             file_path: Relative file path (as stored in payload)
             collection_name: Vector collection name
+            project_id: The writer's project id for this file's points
+            file_hash: The file's content hash, as stored in ``file_hash``
+            chunk_count: Number of chunks the file has now
 
         Returns:
-            Dict mapping chunk_index -> {"content_hash": str, "vector": list, "point_id": str}
+            Dict mapping content_hash -> {"vector": list, "point_id": str}.
             Empty dict if no existing vectors or no content_hash.
         """
-        result: Dict[int, Dict[str, Any]] = {}
+        subdirectory = self._active_subdirectories.get(collection_name)
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            return self._existing_content_hashes_from_chunk_store(
+                collection_path,
+                file_path,
+                [
+                    hashlib.md5(
+                        f"{project_id}_{file_hash}_{index}".encode()
+                    ).hexdigest()
+                    for index in range(chunk_count)
+                ],
+            )
+
+        result: Dict[str, Dict[str, Any]] = {}
+
+        # Resolved via _active_subdirectories (this method has no
+        # subdirectory param) so a nested collection's lookup uses its OWN
+        # _path_indexes cache entry and hydrates via the matching get_point
+        # cache key, never a bare-name top-level collision.
+        _content_hashes_subdirectory = self._active_subdirectories.get(collection_name)
+        _content_hashes_cache_key = self._id_cache_key(
+            collection_name, _content_hashes_subdirectory
+        )
 
         # Resolved via _active_subdirectories (this method has no
         # subdirectory param) so a nested collection's lookup uses its OWN
@@ -5091,8 +5865,23 @@ class FilesystemVectorStore:
             return result
 
         for point_id in point_ids:
+<<<<<<< HEAD
             point_data = self.get_point(
                 point_id, collection_name, subdirectory=_content_hashes_subdirectory
+=======
+            # This lookup is a WRITE-path caller (it runs only inside an
+            # indexing run, right before the file's upsert), so it opts into
+            # the same bounded Bug #1969 self-heal the upsert uses: a
+            # duplicated point_id behind a corrupt id_index.bin is repaired
+            # (implicated files wiped and recorded for same-run reprocess),
+            # not reported. Every other error still propagates (Story #2119:
+            # never a silent cache miss that pays).
+            point_data = self.get_point(
+                point_id,
+                collection_name,
+                subdirectory=_content_hashes_subdirectory,
+                self_heal=True,
+>>>>>>> upstream/master
             )
             if point_data is None:
                 continue
@@ -5100,14 +5889,95 @@ class FilesystemVectorStore:
             content_hash = payload.get("content_hash")
             if not content_hash:
                 continue
-            chunk_idx = payload.get("chunk_index", 0)
-            result[chunk_idx] = {
-                "content_hash": content_hash,
+            result[content_hash] = {
                 "vector": point_data["vector"],
                 "point_id": point_data["id"],
             }
 
         return result
+
+    @staticmethod
+    def _existing_content_hashes_from_chunk_store(
+        collection_path: Path, file_path: str, own_point_ids: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Story #2119: the CHUNKS_DB half of ``get_existing_content_hashes``.
+
+        Opens ``chunks.db`` READ-ONLY (``mode=ro``, or ``immutable=1`` for a
+        proven-immutable snapshot) through the one open authority -- never a
+        second writer connection. A store that does not exist yet holds
+        nothing only in a fresh build before its first write; the missing
+        store of an established collection is fatal
+        (``refuse_missing_established_store``), never an empty cache. Any
+        read error propagates. Candidates are keyed by ``content_hash``; for
+        the same hash the file's own content-addressed row is preferred."""
+        chunk_store = FilesystemVectorStore._open_committed_chunk_store_read_only(
+            collection_path
+        )
+        if chunk_store is None:
+            return {}
+        with chunk_store:
+            records = chunk_store.read_many(own_point_ids, also_path=file_path)
+
+        own_ids = set(own_point_ids)
+        result: Dict[str, Dict[str, Any]] = {}
+        for record in records:
+            content_hash = record.get("payload", {}).get("content_hash")
+            if not content_hash:
+                continue
+            if content_hash in result and record["id"] not in own_ids:
+                continue  # the file's own content-addressed row wins
+            result[content_hash] = {
+                "vector": record["vector"],
+                "point_id": record["id"],
+            }
+        return result
+
+    @staticmethod
+    def _open_committed_chunk_store_read_only(
+        collection_path: Path,
+    ) -> Optional["ChunkStore"]:
+        """A READ-ONLY handle on the collection's committed ``chunks.db``
+        (``mode=ro``, or ``immutable=1`` for a proven-immutable snapshot,
+        through the one open authority -- never a second writer
+        connection), waiting up to ``REUSE_LOOKUP_LOCK_WAIT_SECONDS`` for a
+        writer's lock. ``None`` when no store exists yet, which holds nothing
+        only in a fresh build before its first write; the missing store of
+        an established collection is fatal (Story #2119,
+        ``refuse_missing_established_store``)."""
+        from code_indexer.storage.sqlite_chunk_store import (
+            open_chunk_store_for_path,
+            refuse_missing_established_store,
+        )
+
+        chunks_db_path = collection_path / "chunks.db"
+        if not chunks_db_path.exists():
+            refuse_missing_established_store(chunks_db_path)
+            return None
+        chunk_store = open_chunk_store_for_path(
+            chunks_db_path, str(collection_path), read_only=True
+        )
+        try:
+            chunk_store.set_busy_timeout(REUSE_LOOKUP_LOCK_WAIT_SECONDS)
+        except BaseException:
+            chunk_store.close()
+            raise
+        return chunk_store
+
+    @staticmethod
+    def _stored_point_ids_by_path(
+        collection_path: Path, paths: List[str]
+    ) -> Dict[str, Set[str]]:
+        """Story #2120: the point ids committed in chunks.db under each of
+        ``paths`` -- the authority on what a file's previous rows are, also
+        for rows an interrupted run committed but never recorded in
+        ``path_index.bin``. Every error propagates."""
+        chunk_store = FilesystemVectorStore._open_committed_chunk_store_read_only(
+            collection_path
+        )
+        if chunk_store is None:
+            return {}
+        with chunk_store:
+            return chunk_store.point_ids_by_path(paths)
 
     def _parse_filter(self, filter_conditions: Optional[Dict[str, Any]]) -> Any:
         """Parse filter to callable that evaluates payload.
@@ -5230,6 +6100,22 @@ class FilesystemVectorStore:
                             return False
                         substring = match_spec["contains"]
                         return substring.lower() in current.lower()
+
+                    # #2047: "any_ext" -- K is a path (or a list of paths, true
+                    # if any one matches) whose lowercased suffix is one of
+                    # the requested extensions (shared rule, case-insensitive;
+                    # an extensionless path never matches).
+                    if "any_ext" in match_spec:
+                        from code_indexer.services.extension_filter import (
+                            path_matches_extensions,
+                        )
+
+                        wanted = frozenset(match_spec["any_ext"])
+                        candidates = current if isinstance(current, list) else [current]
+                        return any(
+                            isinstance(p, str) and path_matches_extensions(p, wanted)
+                            for p in candidates
+                        )
 
                     # Support both "value" (exact match) and "text" (pattern match)
                     if "value" in match_spec:
@@ -7524,8 +8410,14 @@ class FilesystemVectorStore:
                 'is_stale': bool,
                 'staleness_indicator': '⚠️ Modified' | '🗑️ Deleted' | '❌ Error' | None,
                 'staleness_reason': str | None,
-                'hash_mismatch': bool (git repos only)
+                'hash_mismatch': bool (git repos only),
+                'content_unavailable': True (only when no tier could read
+                    the chunk; content is then "" -- Bug #1991)
             }
+
+        File and git-blob content are decoded with the same helper indexing
+        uses (``utils.source_text_decoding``), so non-UTF-8 sources return
+        the exact lines that were indexed.
         """
         # Get payload structure
         payload = vector_data.get("payload", {})
@@ -7578,11 +8470,12 @@ class FilesystemVectorStore:
 
             if full_path.exists():
                 try:
-                    # Read chunk from current file
+                    # Read chunk from current file, decoded exactly as indexing
+                    # decoded it (Bug #1991: a strict UTF-8 read failed on
+                    # Latin-1/CP1252 sources the indexer had accepted).
                     # Note: line_start/line_end are 1-based, convert to 0-based for Python slicing
-                    with open(full_path) as f:
-                        lines = f.readlines()
-                        chunk_content = "".join(lines[(start_line - 1) : end_line])
+                    lines = split_source_lines(read_source_text(full_path))
+                    chunk_content = "".join(lines[(start_line - 1) : end_line])
 
                     # Bug #1181 Perf Fix #3: for immutable versioned snapshots the file
                     # cannot have changed since indexing, so skip the second whole-file
@@ -7633,14 +8526,16 @@ class FilesystemVectorStore:
                             "staleness_reason": "retrieval_failed",
                             "hash_mismatch": False,
                         }
-                    except Exception:
+                    except Exception as blob_error:
                         # Complete failure
-                        return f"[Error retrieving content: {str(e)}]", {
-                            "is_stale": True,
-                            "staleness_indicator": "❌ Error",
-                            "staleness_reason": "retrieval_failed",
-                            "hash_mismatch": False,
-                        }
+                        return _content_unavailable(
+                            self.project_root,
+                            file_path,
+                            "❌ Error",
+                            "retrieval_failed",
+                            e,
+                            blob_error,
+                        )
             else:
                 # File deleted - retrieve from git blob
                 try:
@@ -7654,13 +8549,15 @@ class FilesystemVectorStore:
                         "staleness_reason": "file_deleted",
                         "hash_mismatch": False,
                     }
-                except Exception as e:
-                    return f"[File deleted, cannot retrieve: {str(e)}]", {
-                        "is_stale": True,
-                        "staleness_indicator": "🗑️ Deleted",
-                        "staleness_reason": "file_deleted",
-                        "hash_mismatch": False,
-                    }
+                except Exception as blob_error:
+                    return _content_unavailable(
+                        self.project_root,
+                        file_path,
+                        "🗑️ Deleted",
+                        "file_deleted",
+                        None,
+                        blob_error,
+                    )
 
         # Fallback: no content available
         return "[Content not available]", {
@@ -7792,22 +8689,27 @@ class FilesystemVectorStore:
             RuntimeError: If git operation fails
         """
         try:
-            # Use git cat-file to retrieve blob content
+            # Use git cat-file to retrieve blob content. Capture BYTES and
+            # decode exactly as indexing did (Bug #1991): text=True decoded
+            # strictly as UTF-8 and failed on Latin-1/CP1252 sources.
             result = subprocess.run(
                 ["git", "cat-file", "blob", blob_hash],
                 cwd=self.project_root,
                 capture_output=True,
-                text=True,
                 timeout=5,
             )
 
             if result.returncode != 0:
-                raise RuntimeError(f"Git cat-file failed: {result.stderr}")
+                stderr = result.stderr.decode("utf-8", errors="replace")
+                raise RuntimeError(f"Git cat-file failed: {stderr}")
 
             # Extract chunk lines
             # Note: line_start/line_end are 1-based, convert to 0-based for Python slicing
-            # line_end is exclusive (Python slicing convention)
-            lines = result.stdout.splitlines(keepends=True)
+            # line_end is exclusive (Python slicing convention).
+            # Split on "\n" only, matching the chunker's line arithmetic;
+            # str.splitlines() also breaks on \x85, \x0c, U+2028, ... and
+            # shifts every following line.
+            lines = split_source_lines(decode_source_text(result.stdout))
             chunk_content = "".join(lines[(start_line - 1) : end_line])
 
             return chunk_content
@@ -7976,7 +8878,38 @@ class FilesystemVectorStore:
                 if matrix_data is not None:
                     matrix_file.write_bytes(matrix_data)
                 if metadata_data is not None:
-                    metadata_file.write_bytes(metadata_data)
+                    # Bug #1997: temp file + os.replace like every other
+                    # collection_meta.json writer -- a NEW inode is what lets a
+                    # warm stat-keyed CollectionMetaCache in another process
+                    # see this rewrite even within one mtime tick.
+                    tmp_meta = metadata_file.with_name(
+                        f"collection_meta.{os.getpid()}.{threading.get_ident()}.tmp"
+                    )
+                    try:
+                        with open(tmp_meta, "wb") as tmp_fh:
+                            tmp_fh.write(metadata_data)
+                            tmp_fh.flush()
+                            os.fsync(tmp_fh.fileno())
+                        os.replace(tmp_meta, metadata_file)
+                    except Exception:
+                        tmp_meta.unlink(missing_ok=True)
+                        raise
+
+            # Bug #1644 round 3: recommit the CHUNKS_DB layout ON DISK,
+            # truthfully, for a collection that was CHUNKS_DB before the
+            # clear -- a fresh empty chunks.db plus a freshly re-committed
+            # discriminator, so ANY store instance in ANY process sees a
+            # genuinely consistent CHUNKS_DB collection. Only applicable
+            # when metadata was actually restored (remove_projection_matrix
+            # =True skips metadata restoration entirely, and the collection
+            # ceases to exist per collection_exists(), so there is nothing
+            # to make consistent in that branch).
+            if was_chunks_db and metadata_data is not None:
+                from code_indexer.storage.sqlite_chunk_store import ChunkStore
+
+                with ChunkStore(collection_path / "chunks.db"):
+                    pass
+                write_chunks_db_discriminator(collection_path)
 
             # Bug #1644 round 3: recommit the CHUNKS_DB layout ON DISK,
             # truthfully, for a collection that was CHUNKS_DB before the
@@ -7998,6 +8931,11 @@ class FilesystemVectorStore:
 
         except Exception:
             return False
+        finally:
+            # Bug #1997: the restore above is an in-place write_bytes() of a
+            # fresh file (its inode may reuse the one rmtree just freed), so
+            # never rely on stat identity alone -- drop the cached parse.
+            self._collection_meta_cache.invalidate(collection_path)
 
     def delete_collection(self, collection_name: str) -> bool:
         """Delete entire collection including structure and metadata.

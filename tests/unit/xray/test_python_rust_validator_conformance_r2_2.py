@@ -140,4 +140,7 @@ def test_shipped_seed_patterns_compile_via_real_pipeline(
         f"Rust's real compile pipeline must accept the shipped "
         f"'{pattern_name}' seed pattern"
     )
+<<<<<<< HEAD
 
+=======
+>>>>>>> upstream/master

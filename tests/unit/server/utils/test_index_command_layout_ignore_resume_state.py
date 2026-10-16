@@ -26,12 +26,31 @@ duplicate.
 
 from __future__ import annotations
 
+<<<<<<< HEAD
 from code_indexer.server.utils.index_command_layout import append_server_layout_args
 
 
 class TestAppendServerLayoutArgsIgnoresResumeState:
     def test_appends_ignore_resume_state_flag(self) -> None:
         result = append_server_layout_args(["cidx", "index"])
+=======
+from code_indexer.server.services.embedding_stats_attribution import (
+    StatsAttribution,
+)
+from code_indexer.server.utils.index_command_layout import append_server_layout_args
+
+_ATTRIBUTION = StatsAttribution(
+    golden_repo_alias="example-repo-global",
+    job_id="job-1",
+    node_id="node-a",
+    purpose="refresh",
+)
+
+
+class TestAppendServerLayoutArgsIgnoresResumeState:
+    def test_appends_ignore_resume_state_flag(self) -> None:
+        result = append_server_layout_args(["cidx", "index"], attribution=_ATTRIBUTION)
+>>>>>>> upstream/master
 
         assert "--ignore-resume-state" in result, (
             "SECURITY: every server-context `cidx index` spawn must distrust "
@@ -40,7 +59,11 @@ class TestAppendServerLayoutArgsIgnoresResumeState:
 
     def test_appends_both_flags_alongside_existing_layout_stamp(self) -> None:
         result = append_server_layout_args(
+<<<<<<< HEAD
             ["cidx", "index", "--fts", "--progress-json"]
+=======
+            ["cidx", "index", "--fts", "--progress-json"], attribution=_ATTRIBUTION
+>>>>>>> upstream/master
         )
 
         assert result == [
@@ -51,11 +74,19 @@ class TestAppendServerLayoutArgsIgnoresResumeState:
             "--new-collection-layout=chunks_db",
             "--ignore-resume-state",
             "--server-managed-provider-settings",
+<<<<<<< HEAD
+=======
+            f"--stats-attribution={_ATTRIBUTION.to_json()}",
+>>>>>>> upstream/master
         ]
 
     def test_does_not_mutate_input_list(self) -> None:
         original = ["cidx", "index", "--clear"]
+<<<<<<< HEAD
         result = append_server_layout_args(original)
+=======
+        result = append_server_layout_args(original, attribution=_ATTRIBUTION)
+>>>>>>> upstream/master
 
         assert original == ["cidx", "index", "--clear"]
         assert result is not original

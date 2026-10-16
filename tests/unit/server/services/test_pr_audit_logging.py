@@ -131,16 +131,34 @@ class TestPRCreationAuditLogging:
         # ARRANGE
         from code_indexer.server.services.git_state_manager import GitStateManager
 
+        import subprocess
+
         config = Mock(enable_pr_creation=True, default_branch="main")
         manager = GitStateManager(config=config)
+
+        # A real repository with a real local remote: branch, commit and the
+        # shared push run for real; only the forge API client is replaced.
+        def git(*args: str, cwd: Path) -> str:
+            return subprocess.run(
+                ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+            ).stdout.strip()
+
+        bare = tmp_path / "remote.git"
+        git("init", "-q", "--bare", str(bare), cwd=tmp_path)
+        repo = tmp_path / "repo"
+        git("init", "-q", "-b", "main", str(repo), cwd=tmp_path)
+        git("config", "user.email", "test@example.com", cwd=repo)
+        git("config", "user.name", "Test User", cwd=repo)
+        (repo / "file.py").write_text("print('one')\n")
+        git("add", "file.py", cwd=repo)
+        git("commit", "-q", "-m", "c1", cwd=repo)
+        git("remote", "add", "origin", str(bare), cwd=repo)
+        (repo / "file.py").write_text("print('fixed')\n")
 
         # Mock audit logger
         mock_audit_logger = Mock()
 
         with (
-            patch(
-                "code_indexer.server.services.git_state_manager.run_git_command"
-            ) as mock_git,
             patch(
                 "code_indexer.server.services.git_state_manager.GitHubPRClient"
             ) as mock_pr_client,
@@ -150,15 +168,6 @@ class TestPRCreationAuditLogging:
             patch.object(manager, "audit_logger", mock_audit_logger),
         ):
             mock_token.return_value = "token"
-            mock_git.side_effect = [
-                Mock(stdout="main\n"),  # Current branch
-                Mock(stdout=""),  # Checkout
-                Mock(stdout=""),  # Add
-                Mock(stdout=""),  # Commit
-                Mock(stdout="abc123def456\n"),  # git rev-parse HEAD (get commit hash)
-                Mock(stdout=""),  # Push
-                Mock(stdout=""),  # Return to main
-            ]
 
             mock_pr_instance = Mock()
             mock_pr_instance.create_pull_request.return_value = (
@@ -168,7 +177,7 @@ class TestPRCreationAuditLogging:
 
             # ACT
             result = manager.create_pr_after_fix(
-                repo_path=tmp_path,
+                repo_path=repo,
                 fix_description="Fix",
                 files_modified=[Path("file.py")],
                 pr_description="Auto-fix",
@@ -177,13 +186,15 @@ class TestPRCreationAuditLogging:
             )
 
             # ASSERT
-            assert result.success is True
+            assert result.success is True, result.message
             mock_audit_logger.log_pr_creation_success.assert_called_once()
 
             # Verify audit log was called with correct parameters
             call_args = mock_audit_logger.log_pr_creation_success.call_args
             assert call_args[1]["job_id"] == "job-12345"
             assert call_args[1]["pr_url"] == "https://github.com/test/repo/pull/1"
+            pushed = call_args[1]["branch_name"]
+            assert git("rev-parse", pushed, cwd=bare) == call_args[1]["commit_hash"]
 
     def test_git_state_manager_calls_audit_logger_on_failure(self, tmp_path):
         """AC7: GitStateManager calls audit logger on PR creation failure."""

@@ -52,6 +52,7 @@ def mock_config_service():
         # Use correct attribute names matching MultiSearchLimitsConfig
         mock_limits.multi_search_max_workers = 4
         mock_limits.multi_search_timeout_seconds = 30
+        mock_limits.omni_max_results_per_repo = 100
         mock_config.multi_search_limits_config = mock_limits
         mock_service.get_config.return_value = mock_config
         mock.return_value = mock_service
@@ -79,7 +80,7 @@ class TestOmniSearchAppliesTruncation:
         original_fn = handlers._apply_payload_truncation
 
         # Story #50: Tracking function is now sync (truncation helpers are sync)
-        def tracking_fn(results):
+        def tracking_fn(results, owner=None):
             truncation_calls.append(len(results))
             return original_fn(results)
 
@@ -142,7 +143,7 @@ class TestOmniSearchAppliesTruncation:
         original_fn = handlers._apply_fts_payload_truncation
 
         # Story #50: Tracking function is now sync (truncation helpers are sync)
-        def tracking_fn(results):
+        def tracking_fn(results, owner=None):
             truncation_calls.append(len(results))
             return original_fn(results)
 

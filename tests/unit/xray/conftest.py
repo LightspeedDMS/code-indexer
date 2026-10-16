@@ -51,6 +51,7 @@ def require_xray_cli_binary() -> None:
     unavailable (a Rust-less environment). A build that IS attempted but
     FAILS raises loudly via pytest.fail, never a silent skip.
     """
+<<<<<<< HEAD
     from code_indexer.xray.rust_backend import (
         _PROJECT_ROOT,
         _XRAY_CLI_PATH_ENV_VAR,
@@ -74,6 +75,13 @@ def require_xray_cli_binary() -> None:
             "exist. Fix the override or unset it to use the source-tree build."
         )
 
+=======
+    from code_indexer.xray.rust_backend import _PROJECT_ROOT, _XRAY_CLI_DEFAULT
+
+    if _XRAY_CLI_DEFAULT.exists():
+        return
+
+>>>>>>> upstream/master
     if shutil.which("cargo") is None:
         pytest.skip(
             "cargo not found on PATH -- install Rust (https://rustup.rs) to "
@@ -87,7 +95,11 @@ def require_xray_cli_binary() -> None:
         text=True,
         timeout=_XRAY_CLI_BUILD_TIMEOUT_SECONDS,
     )
+<<<<<<< HEAD
     if result.returncode != 0 or not _XRAY_CLI_SOURCE_TREE_PATH.exists():
+=======
+    if result.returncode != 0 or not _XRAY_CLI_DEFAULT.exists():
+>>>>>>> upstream/master
         pytest.fail(
             "xray-cli release binary is required for this test and the "
             f"automatic 'cargo build --release' failed (exit "

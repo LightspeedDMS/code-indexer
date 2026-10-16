@@ -221,7 +221,32 @@ class AliasManager:
         if extra:
             alias_data.update(extra)
         try:
+<<<<<<< HEAD
             self._metadata.put(KIND_ALIAS, alias_name, alias_data)
+=======
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(alias_data, f, indent=2)
+                f.flush()
+                nfs_safe_fsync(f.fileno())
+
+            # Atomic rename
+            os.replace(tmp_path, str(alias_file))
+
+            # Story #1457 AC10: fsync the parent aliases directory so the
+            # rename survives a crash, matching the durable-rename pattern
+            # established by id_index_manager.py:203-212. create_alias is
+            # the load-bearing FIRST-publish path for every brand-new
+            # temporal quarter namespace (AC6/AC11), so this gap is closed
+            # identically to swap_alias's hardening below.
+            dir_fd = os.open(str(self.aliases_dir), os.O_RDONLY)
+            try:
+                nfs_safe_fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
+            logger.info(f"Created alias: {alias_name} -> {target_path}")
+
+>>>>>>> upstream/master
         except Exception as e:
             raise RuntimeError(f"Failed to create alias {alias_name}: {e}") from e
         logger.info(f"Created alias: {alias_name} -> {target_path}")
@@ -434,12 +459,48 @@ class AliasManager:
             now = datetime.now(timezone.utc).isoformat()
             alias_data["target_path"] = new_target
             alias_data["previous_path"] = old_target
+<<<<<<< HEAD
             alias_data["swapped_at"] = now
             alias_data["last_refresh"] = now
             alias_data.pop(INDEX_STORE_ALIAS_FIELD, None)
             alias_data.pop(INDEX_VERSION_FIELD, None)
             if extra:
                 alias_data.update(extra)
+=======
+            alias_data["swapped_at"] = datetime.now(timezone.utc).isoformat()
+            alias_data["last_refresh"] = datetime.now(timezone.utc).isoformat()
+
+            # Atomic write using temp file + rename
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                dir=str(self.aliases_dir), prefix=f".{alias_name}_", suffix=".tmp"
+            )
+
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(alias_data, f, indent=2)
+                f.flush()
+                nfs_safe_fsync(f.fileno())
+
+            # Atomic rename
+            os.replace(tmp_path, str(alias_file))
+
+            # Story #1457 AC10: fsync the parent aliases directory so the
+            # rename survives a crash, matching the durable-rename pattern
+            # established by id_index_manager.py:203-212 and applied to
+            # create_alias above. swap_alias is the subsequent-publish path
+            # for every temporal refresh (AC6).
+            dir_fd = os.open(str(self.aliases_dir), os.O_RDONLY)
+            try:
+                nfs_safe_fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
+            logger.info(f"Swapped alias {alias_name}: {old_target} -> {new_target}")
+
+        except ValueError:
+            raise
+        except Exception as e:
+            # Clean up temp file on failure
+>>>>>>> upstream/master
             try:
                 self._metadata.put(KIND_ALIAS, alias_name, alias_data)
             except Exception as e:

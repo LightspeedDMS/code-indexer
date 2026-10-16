@@ -27,6 +27,7 @@ import pytest
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
+from tests.fixtures.refresh_scheduler_stores import real_metadata_store
 
 
 # ---------------------------------------------------------------------------
@@ -64,24 +65,28 @@ def mock_registry():
     registry = Mock()
     registry.list_global_repos.return_value = []
     registry.update_refresh_timestamp.return_value = None
+    registry.list_due_repos.return_value = []  # the scheduler loop iterates it
     return registry
 
 
 @pytest.fixture
 def scheduler(
+    tmp_path,
     golden_repos_dir,
     mock_config_source,
     mock_query_tracker,
     mock_cleanup_manager,
     mock_registry,
 ):
-    """Create RefreshScheduler with mock registry."""
+    """Create RefreshScheduler with mock registry and a real, empty metadata
+    store in the test's own directory."""
     return RefreshScheduler(
         golden_repos_dir=str(golden_repos_dir),
         config_source=mock_config_source,
         query_tracker=mock_query_tracker,
         cleanup_manager=mock_cleanup_manager,
         registry=mock_registry,
+        golden_repo_metadata_backend=real_metadata_store(tmp_path / "server-data"),
     )
 
 

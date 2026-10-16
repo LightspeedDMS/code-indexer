@@ -16,6 +16,7 @@ from pathlib import Path
 from ..config import VoyageAIConfig
 from .embedding_provider import EmbeddingProvider, EmbeddingResult, BatchEmbeddingResult
 from .provider_backoff import is_rate_limited
+from .provider_request_timeout import embedding_request_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,9 @@ _VOYAGE_MODEL_DIMENSIONS: Dict[str, int] = {
 # governor/cache/lane plumbing (get_provider_name/get_current_model are
 # unaffected — only the outbound HTTP call changes).
 _CONTEXTUAL_QUERY_MODELS = frozenset({"voyage-context-4"})
+
+#: The single input of health_check(test_api=True).
+_HEALTH_PROBE_TEXT = "test"
 
 # Story #1290: contextualized embeddings endpoint used by the per-commit
 # contextual temporal embedder (voyage-context-4). Distinct from
@@ -273,6 +277,12 @@ class VoyageAIClient(EmbeddingProvider):
             logger.debug("VoyageAI health probe failed: %s", exc, exc_info=True)
             return False
 
+    def request_max_retries(self) -> int:
+        """Retries one indexing request may make after its first attempt
+        (the retry loops of _make_sync_request and
+        _make_sync_contextualized_request)."""
+        return int(self.config.max_retries)
+
     def health_check(self, *, test_api: bool = False) -> bool:
         """Check if VoyageAI service is configured correctly.
 
@@ -294,8 +304,18 @@ class VoyageAIClient(EmbeddingProvider):
             # If API testing is requested, make a simple API call
             if test_api:
                 try:
-                    # Make a minimal API call with a single character
-                    self._make_sync_request(["test"])
+                    # Story #2122: the probe is a planned send of its own;
+                    # register it so an armed run-spend meter allows it.
+                    from .run_spend_meter import get_run_spend_meter, input_key
+
+                    get_run_spend_meter().register_misses(
+                        [input_key(_HEALTH_PROBE_TEXT)],
+                        max_retries=self.request_max_retries(),
+                    )
+                    # One minimal attempt at the query budget (Bug #2127): a
+                    # pre-flight probe must answer fast, never wait the
+                    # indexing budget plus retries.
+                    self._make_sync_request([_HEALTH_PROBE_TEXT], single_attempt=True)
                     return True
                 except Exception:
                     return False
@@ -312,6 +332,7 @@ class VoyageAIClient(EmbeddingProvider):
         model: Optional[str] = None,
         *,
         retry: bool = True,
+        single_attempt: bool = False,
     ) -> Dict[str, Any]:
         """Make synchronous request to VoyageAI API.
 
@@ -323,6 +344,9 @@ class VoyageAIClient(EmbeddingProvider):
                 When False (QUERY path), makes exactly ONE HTTP attempt and raises
                 immediately on any error — sleep and retry are handled OUTSIDE the
                 governor slot by execute_with_backoff in the caller.
+            single_attempt: The health probe (Bug #2127): ONE attempt at the
+                query timeout budget, no retries, still an indexing-purpose send
+                (stats tag and run-spend meter charge unchanged).
         """
         from .provider_health_monitor import ProviderHealthMonitor
 
@@ -334,11 +358,13 @@ class VoyageAIClient(EmbeddingProvider):
         def _single_attempt() -> Dict[str, Any]:
             """Execute ONE HTTP call and return the parsed JSON dict."""
             _start = time.time()
-            _timeout = httpx.Timeout(
-                connect=self.config.connect_timeout,
-                read=self.config.timeout,
-                write=self.config.timeout,
-                pool=self.config.timeout,
+            # Bug #2127: an indexing attempt (retry=True) waits longer than a
+            # query, so a slow-period response is received, not abandoned
+            # (and paid for) then resent. The health probe answers fast.
+            _timeout = embedding_request_timeout(
+                self.config.timeout,
+                self.config.connect_timeout,
+                indexing=retry and not single_attempt,
             )
             # Story #1083: auth header travels on the per-request .post() call so
             # the pooled keep-alive client stays auth-agnostic — API-key rotation
@@ -366,7 +392,14 @@ class VoyageAIClient(EmbeddingProvider):
                 as success=False, never success=True (Story #1418)."""
                 with _client_ctx as client:
                     _response = client.post(
+<<<<<<< HEAD
                         self.config.api_endpoint, json=payload, headers=_headers
+=======
+                        self.config.api_endpoint,
+                        json=payload,
+                        headers=_headers,
+                        timeout=_timeout,
+>>>>>>> upstream/master
                     )
                 _response.raise_for_status()
                 return cast(httpx.Response, _response)
@@ -400,6 +433,10 @@ class VoyageAIClient(EmbeddingProvider):
                     batch_size=len(texts),
                     purpose="query" if not retry else "index",
                     fn=_do_post_and_validate,
+<<<<<<< HEAD
+=======
+                    inputs=texts,
+>>>>>>> upstream/master
                 )
             except Exception:
                 record_embedding_provider_call(
@@ -426,10 +463,10 @@ class VoyageAIClient(EmbeddingProvider):
             )
             return result
 
-        # --- Single-attempt path (QUERY, retry=False) ---
+        # --- Single-attempt path (QUERY retry=False, or the health probe) ---
         # One call, no sleep. All errors propagate immediately to the caller
         # (execute_with_backoff handles 429 retries OUTSIDE the governor slot).
-        if not retry:
+        if not retry or single_attempt:
             _start_single = time.time()
             try:
                 return _single_attempt()
@@ -550,11 +587,9 @@ class VoyageAIClient(EmbeddingProvider):
 
         def _single_attempt() -> Dict[str, Any]:
             _start = time.time()
-            _timeout = httpx.Timeout(
-                connect=self.config.connect_timeout,
-                read=self.config.timeout,
-                write=self.config.timeout,
-                pool=self.config.timeout,
+            # Bug #2127: see _make_sync_request (indexing waits longer).
+            _timeout = embedding_request_timeout(
+                self.config.timeout, self.config.connect_timeout, indexing=retry
             )
             _headers = {
                 "Authorization": f"Bearer {self.api_key}",
@@ -574,6 +609,10 @@ class VoyageAIClient(EmbeddingProvider):
                         CONTEXTUALIZED_EMBEDDINGS_ENDPOINT,
                         json=payload,
                         headers=_headers,
+<<<<<<< HEAD
+=======
+                        timeout=_timeout,
+>>>>>>> upstream/master
                     )
                 _response.raise_for_status()
                 return cast(httpx.Response, _response)
@@ -609,6 +648,10 @@ class VoyageAIClient(EmbeddingProvider):
                     # (voyage-context-4) -- purpose is always "temporal".
                     purpose="temporal",
                     fn=_do_post_and_validate,
+<<<<<<< HEAD
+=======
+                    inputs=[chunk for doc in documents for chunk in doc],
+>>>>>>> upstream/master
                 )
             except Exception:
                 record_embedding_provider_call(

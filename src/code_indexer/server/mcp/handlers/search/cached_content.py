@@ -40,11 +40,21 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
 
     Retrieves cached content by handle with pagination support.
     Implements AC5 of Story #679.
+<<<<<<< HEAD
     """
     # Story #331 AC8: Accepted risk - cache handles are UUID4 (unguessable)
     # and short-lived (TTL-based). Cross-user cache access requires knowing
     # the exact UUID, which is not feasible. Full user-scoping tracking
     # would add complexity without meaningful security benefit.
+=======
+
+    Cached content is served only to its creator: the read is owner-checked
+    with the caller's username, so a handle the caller did not create
+    (another user's, one with no recorded creator, or a key-addressed
+    entry owned by another route) answers cache_expired, like a missing
+    handle.
+    """
+>>>>>>> upstream/master
     from code_indexer.server.cache.payload_cache import CacheNotFoundError
 
     handle = args.get("handle")
@@ -87,7 +97,11 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
         )
 
     try:
+<<<<<<< HEAD
         result = payload_cache.retrieve(handle, page=page)
+=======
+        result = payload_cache.retrieve_owned(handle, user.username, page=page)
+>>>>>>> upstream/master
         return _mcp_response(
             {
                 "success": True,
@@ -159,5 +173,24 @@ def handle_poll_search_job(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         is_admin=is_admin,
         config_service=get_config_service(),
     )
+<<<<<<< HEAD
+=======
+    if result["status"] == "completed":
+        # Bug #2109: the caller's deferred temporal search is recorded when
+        # its completed result is delivered (once; nothing for other jobs).
+        from code_indexer.server.services.search_event_recording import (
+            record_deferred_search,
+            writer_from_app,
+        )
+
+        _app = _utils.app_module.app
+        record_deferred_search(
+            getattr(_app.state, "payload_cache", None),
+            writer_from_app(_app),
+            job_id=job_id,
+            username=user.username,
+            result_count=len(result.get("results") or []),
+        )
+>>>>>>> upstream/master
     result["success"] = result["status"] != "not_found"
     return _mcp_response(result)

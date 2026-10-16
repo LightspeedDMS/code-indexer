@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import uuid
 from contextlib import contextmanager
+from typing import Iterator
 from unittest.mock import MagicMock
 
 import pytest
@@ -62,30 +63,12 @@ def _make_mock_pool(fetchone_return=None, fetchall_return=None, rowcount=1):
     return mock_pool, mock_conn, mock_cursor
 
 
-def _make_pool_if_available():
-    """Return a ConnectionPool connected to a real test database, or None."""
-    if not HAS_PSYCOPG:
-        return None
-    dsn = os.environ.get("TEST_POSTGRES_DSN", "")
-    if not dsn:
-        return None
-    try:
-        from code_indexer.server.storage.postgres.connection_pool import ConnectionPool
-
-        pool = ConnectionPool(dsn)
-        with pool.connection() as conn:
-            conn.execute("SELECT 1")
-        return pool
-    except Exception:
-        return None
-
-
 def _postgres_available() -> bool:
     """Cheap boolean availability check for ``@pytest.mark.skipif`` predicates.
 
-    Bug #1313 round-2 rework (Codex non-blocking nit): unlike
-    ``_make_pool_if_available()`` (which returns a live pool for tests to
-    actually use), this helper opens a probe pool purely to verify
+    Bug #1313 round-2 rework (Codex non-blocking nit): the live tests get
+    their pool from the class's ``_live_pool`` fixture; this helper opens a
+    probe pool purely to verify
     connectivity and closes it immediately before returning, so pytest
     collection doesn't leak a ``ConnectionPool`` that
     ``psycopg_pool.ConnectionPool.__del__`` warns about via
@@ -649,13 +632,25 @@ class TestImportsWithoutPsycopgPool:
 class TestTemporalMetadataPostgresBackendLivePg:
     """Real PostgreSQL round-trip tests. Skipped unless TEST_POSTGRES_DSN is set."""
 
+    @pytest.fixture(autouse=True)
+    def _live_pool(self, migrated_scratch_pg_dsn: str) -> Iterator[None]:
+        """A pool on this module's own migrated database (conftest), so the
+        temporal_metadata table exists whatever state TEST_POSTGRES_DSN's
+        database is in; closed after each test."""
+        from code_indexer.server.storage.postgres.connection_pool import ConnectionPool
+
+        self._pool = ConnectionPool(migrated_scratch_pg_dsn)
+        try:
+            yield
+        finally:
+            self._pool.close()
+
     def test_save_and_get_round_trip_against_real_postgres(self):
         from code_indexer.server.storage.postgres.temporal_metadata_backend import (
             TemporalMetadataPostgresBackend,
         )
 
-        pool = _make_pool_if_available()
-        assert pool is not None
+        pool = self._pool
         backend = TemporalMetadataPostgresBackend(
             pool, collection_key="live-test-key-1313"
         )
@@ -702,8 +697,7 @@ class TestTemporalMetadataPostgresBackendLivePg:
             TemporalMetadataPostgresBackend,
         )
 
-        pool = _make_pool_if_available()
-        assert pool is not None
+        pool = self._pool
         collection_key = f"live-test-batch-{uuid.uuid4().hex}"
         backend = TemporalMetadataPostgresBackend(pool, collection_key=collection_key)
 
@@ -748,8 +742,7 @@ class TestTemporalMetadataPostgresBackendLivePg:
             TemporalMetadataPostgresBackend,
         )
 
-        pool = _make_pool_if_available()
-        assert pool is not None
+        pool = self._pool
         collection_key = f"live-test-reupsert-{uuid.uuid4().hex}"
         backend = TemporalMetadataPostgresBackend(pool, collection_key=collection_key)
 
@@ -787,8 +780,7 @@ class TestTemporalMetadataPostgresBackendLivePg:
             TemporalMetadataPostgresBackend,
         )
 
-        pool = _make_pool_if_available()
-        assert pool is not None
+        pool = self._pool
         key_a = f"live-test-cleanup-a-{uuid.uuid4().hex}"
         key_b = f"live-test-cleanup-b-{uuid.uuid4().hex}"
         backend_a = TemporalMetadataPostgresBackend(pool, collection_key=key_a)
@@ -843,8 +835,7 @@ class TestTemporalMetadataPostgresBackendLivePg:
             TemporalMetadataPostgresBackend,
         )
 
-        pool = _make_pool_if_available()
-        assert pool is not None
+        pool = self._pool
         key_a = f"live-test-isolation-a-{uuid.uuid4().hex}"
         key_b = f"live-test-isolation-b-{uuid.uuid4().hex}"
         backend_a = TemporalMetadataPostgresBackend(pool, collection_key=key_a)
@@ -881,8 +872,7 @@ class TestTemporalMetadataPostgresBackendLivePg:
             TemporalMetadataPostgresBackend,
         )
 
-        pool = _make_pool_if_available()
-        assert pool is not None
+        pool = self._pool
         collection_key = f"live-test-count-{uuid.uuid4().hex}"
         backend = TemporalMetadataPostgresBackend(pool, collection_key=collection_key)
 

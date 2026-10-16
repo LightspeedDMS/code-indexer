@@ -8,9 +8,20 @@ AC2: Database health check caching with 60-second TTL
 import inspect
 import sqlite3
 import tempfile
+from contextlib import closing
 from pathlib import Path
 import pytest
 from unittest.mock import patch
+
+
+def _create_test_db(tmp_path: Path) -> str:
+    """Create a valid one-table SQLite database in the test's own tmp_path
+    (never in the shared /tmp) and return its path."""
+    db_path = str(tmp_path / "test.db")
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
+        conn.commit()
+    return db_path
 
 
 class TestPragmaIntegrityCheck:
@@ -43,28 +54,18 @@ class TestPragmaIntegrityCheck:
             "as it scans the entire database (85+ seconds for large DBs)"
         )
 
-    def test_check_integrity_returns_ok_for_healthy_database(self):
+    def test_check_integrity_returns_ok_for_healthy_database(self, tmp_path: Path):
         """Integrity check should return passed=True for healthy database."""
         from code_indexer.server.services.database_health_service import (
             DatabaseHealthService,
         )
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            db_path = f.name
+        db_path = _create_test_db(tmp_path)
 
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
-            conn.commit()
-            conn.close()
+        result = DatabaseHealthService._check_integrity(db_path)
 
-            result = DatabaseHealthService._check_integrity(db_path)
-
-            assert result.passed is True
-            assert result.error_message is None
-
-        finally:
-            Path(db_path).unlink(missing_ok=True)
+        assert result.passed is True
+        assert result.error_message is None
 
 
 @pytest.mark.slow
@@ -83,65 +84,45 @@ class TestDatabaseHealthCaching:
         assert isinstance(service._health_cache, dict)
         assert len(service._health_cache) == 0
 
-    def test_cache_stores_result_after_first_check(self):
+    def test_cache_stores_result_after_first_check(self, tmp_path: Path):
         """AC2: First health check populates the cache."""
         from code_indexer.server.services.database_health_service import (
             DatabaseHealthService,
         )
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            db_path = f.name
+        db_path = _create_test_db(tmp_path)
 
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
-            conn.commit()
-            conn.close()
+        service = DatabaseHealthService()
+        result = service.check_database_health_cached(db_path, "Test DB")
 
-            service = DatabaseHealthService()
-            result = service.check_database_health_cached(db_path, "Test DB")
+        assert result is not None
+        assert db_path in service._health_cache
+        # Cache entry: (result, timestamp)
+        cached_entry = service._health_cache[db_path]
+        assert isinstance(cached_entry, tuple)
+        assert len(cached_entry) == 2
 
-            assert result is not None
-            assert db_path in service._health_cache
-            # Cache entry: (result, timestamp)
-            cached_entry = service._health_cache[db_path]
-            assert isinstance(cached_entry, tuple)
-            assert len(cached_entry) == 2
-
-        finally:
-            Path(db_path).unlink(missing_ok=True)
-
-    def test_cache_returns_cached_within_ttl(self):
+    def test_cache_returns_cached_within_ttl(self, tmp_path: Path):
         """AC2: Requests within 60s return cached result without re-check."""
         from code_indexer.server.services.database_health_service import (
             DatabaseHealthService,
         )
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            db_path = f.name
+        db_path = _create_test_db(tmp_path)
 
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
-            conn.commit()
-            conn.close()
+        service = DatabaseHealthService()
 
-            service = DatabaseHealthService()
+        # First call
+        result1 = service.check_database_health_cached(db_path, "Test DB")
+        first_timestamp = service._health_cache[db_path][1]
 
-            # First call
-            result1 = service.check_database_health_cached(db_path, "Test DB")
-            first_timestamp = service._health_cache[db_path][1]
+        # Second call within TTL - should return same cached result
+        result2 = service.check_database_health_cached(db_path, "Test DB")
+        second_timestamp = service._health_cache[db_path][1]
 
-            # Second call within TTL - should return same cached result
-            result2 = service.check_database_health_cached(db_path, "Test DB")
-            second_timestamp = service._health_cache[db_path][1]
-
-            # Timestamp should be unchanged (no re-check)
-            assert first_timestamp == second_timestamp
-            assert result1.status == result2.status
-
-        finally:
-            Path(db_path).unlink(missing_ok=True)
+        # Timestamp should be unchanged (no re-check)
+        assert first_timestamp == second_timestamp
+        assert result1.status == result2.status
 
     def test_get_all_database_health_cached_uses_caching(self):
         """AC6: get_all_database_health_cached should use caching for all DBs."""
@@ -233,7 +214,7 @@ class TestSingletonCacheBehavior:
         finally:
             _reset_singleton_for_testing()
 
-    def test_singleton_cache_shared_across_calls(self):
+    def test_singleton_cache_shared_across_calls(self, tmp_path: Path):
         """Cache should be shared when using singleton pattern."""
         from code_indexer.server.services.database_health_service import (
             get_database_health_service,
@@ -242,15 +223,9 @@ class TestSingletonCacheBehavior:
 
         _reset_singleton_for_testing()
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            db_path = f.name
+        db_path = _create_test_db(tmp_path)
 
         try:
-            conn = sqlite3.connect(db_path)
-            conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
-            conn.commit()
-            conn.close()
-
             # First call - populates cache
             service1 = get_database_health_service()
             result1 = service1.check_database_health_cached(db_path, "Test DB")
@@ -269,10 +244,9 @@ class TestSingletonCacheBehavior:
             assert result1.status == result2.status
 
         finally:
-            Path(db_path).unlink(missing_ok=True)
             _reset_singleton_for_testing()
 
-    def test_cache_expiry_after_ttl(self):
+    def test_cache_expiry_after_ttl(self, tmp_path: Path):
         """
         AC2: Cache should expire after 60 seconds.
 
@@ -283,46 +257,36 @@ class TestSingletonCacheBehavior:
             CACHE_TTL_SECONDS,
         )
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            db_path = f.name
+        db_path = _create_test_db(tmp_path)
 
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
-            conn.commit()
-            conn.close()
+        service = DatabaseHealthService()
+        base_time = 1000000.0
 
-            service = DatabaseHealthService()
-            base_time = 1000000.0
+        # First call at t=0
+        with patch("time.time", return_value=base_time):
+            _ = service.check_database_health_cached(db_path, "Test DB")
+            timestamp1 = service._health_cache[db_path][1]
 
-            # First call at t=0
-            with patch("time.time", return_value=base_time):
-                _ = service.check_database_health_cached(db_path, "Test DB")
-                timestamp1 = service._health_cache[db_path][1]
+        # Second call at t=30s (within TTL) - should be cached
+        with patch("time.time", return_value=base_time + 30):
+            _ = service.check_database_health_cached(db_path, "Test DB")
+            timestamp2 = service._health_cache[db_path][1]
 
-            # Second call at t=30s (within TTL) - should be cached
-            with patch("time.time", return_value=base_time + 30):
-                _ = service.check_database_health_cached(db_path, "Test DB")
-                timestamp2 = service._health_cache[db_path][1]
+        assert timestamp1 == timestamp2, "Cache should still be valid at 30s"
 
-            assert timestamp1 == timestamp2, "Cache should still be valid at 30s"
+        # Third call at t=61s (after TTL) - should refresh
+        with patch("time.time", return_value=base_time + CACHE_TTL_SECONDS + 1):
+            _ = service.check_database_health_cached(db_path, "Test DB")
+            timestamp3 = service._health_cache[db_path][1]
 
-            # Third call at t=61s (after TTL) - should refresh
-            with patch("time.time", return_value=base_time + CACHE_TTL_SECONDS + 1):
-                _ = service.check_database_health_cached(db_path, "Test DB")
-                timestamp3 = service._health_cache[db_path][1]
+        # After TTL, timestamp should be updated to new time
+        assert timestamp3 == base_time + CACHE_TTL_SECONDS + 1, (
+            f"Cache should refresh after {CACHE_TTL_SECONDS}s TTL. "
+            f"Expected timestamp {base_time + CACHE_TTL_SECONDS + 1}, got {timestamp3}"
+        )
+        assert timestamp3 != timestamp1, "Cache should have been refreshed"
 
-            # After TTL, timestamp should be updated to new time
-            assert timestamp3 == base_time + CACHE_TTL_SECONDS + 1, (
-                f"Cache should refresh after {CACHE_TTL_SECONDS}s TTL. "
-                f"Expected timestamp {base_time + CACHE_TTL_SECONDS + 1}, got {timestamp3}"
-            )
-            assert timestamp3 != timestamp1, "Cache should have been refreshed"
-
-        finally:
-            Path(db_path).unlink(missing_ok=True)
-
-    def test_direct_instantiation_does_not_share_cache(self):
+    def test_direct_instantiation_does_not_share_cache(self, tmp_path: Path):
         """
         Demonstrates the bug: direct instantiation creates separate caches.
 
@@ -334,32 +298,22 @@ class TestSingletonCacheBehavior:
             DatabaseHealthService,
         )
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            db_path = f.name
+        db_path = _create_test_db(tmp_path)
 
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
-            conn.commit()
-            conn.close()
+        # First instance - populate its cache
+        service1 = DatabaseHealthService()
+        service1.check_database_health_cached(db_path, "Test DB")
+        assert db_path in service1._health_cache
 
-            # First instance - populate its cache
-            service1 = DatabaseHealthService()
-            service1.check_database_health_cached(db_path, "Test DB")
-            assert db_path in service1._health_cache
+        # Second instance - has its own empty cache
+        service2 = DatabaseHealthService()
+        assert db_path not in service2._health_cache, (
+            "New instance should have empty cache - "
+            "this demonstrates why singleton is needed"
+        )
 
-            # Second instance - has its own empty cache
-            service2 = DatabaseHealthService()
-            assert db_path not in service2._health_cache, (
-                "New instance should have empty cache - "
-                "this demonstrates why singleton is needed"
-            )
-
-            # They are different instances
-            assert service1 is not service2
-
-        finally:
-            Path(db_path).unlink(missing_ok=True)
+        # They are different instances
+        assert service1 is not service2
 
 
 @pytest.mark.slow
@@ -415,42 +369,33 @@ class TestDatabaseHealthErrorCases:
         assert result.checks["not_locked"].passed is False
         assert result.checks["not_locked"].error_message == "Connection required"
 
-    def test_check_read_fails_on_invalid_db(self):
+    def test_check_read_fails_on_invalid_db(self, tmp_path: Path):
         """_check_read should fail when database is corrupted."""
         from code_indexer.server.services.database_health_service import (
             DatabaseHealthService,
         )
 
         # Create a file that's not a valid SQLite database
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            f.write(b"This is not a valid SQLite database")
-            db_path = f.name
+        invalid_db = tmp_path / "invalid.db"
+        invalid_db.write_bytes(b"This is not a valid SQLite database")
+        db_path = str(invalid_db)
 
-        try:
-            result = DatabaseHealthService._check_read(db_path)
+        result = DatabaseHealthService._check_read(db_path)
 
-            assert result.passed is False
-            assert "Read failed" in result.error_message
-        finally:
-            Path(db_path).unlink(missing_ok=True)
+        assert result.passed is False
+        assert "Read failed" in result.error_message
 
-    def test_check_write_fails_on_readonly_db(self):
+    def test_check_write_fails_on_readonly_db(self, tmp_path: Path):
         """_check_write should fail when database is read-only."""
         import os
         from code_indexer.server.services.database_health_service import (
             DatabaseHealthService,
         )
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            db_path = f.name
+        # Create valid database then make it read-only
+        db_path = _create_test_db(tmp_path)
 
         try:
-            # Create valid database then make it read-only
-            conn = sqlite3.connect(db_path)
-            conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
-            conn.commit()
-            conn.close()
-
             # Make file read-only
             os.chmod(db_path, 0o444)
 
@@ -459,47 +404,40 @@ class TestDatabaseHealthErrorCases:
             assert result.passed is False
             assert "Write failed" in result.error_message
         finally:
-            # Restore write permission for cleanup
+            # Restore write permission so tmp_path cleanup can remove it
             os.chmod(db_path, 0o644)
-            Path(db_path).unlink(missing_ok=True)
 
-    def test_check_integrity_fails_on_corrupted_db(self):
+    def test_check_integrity_fails_on_corrupted_db(self, tmp_path: Path):
         """_check_integrity should handle corrupted databases."""
         from code_indexer.server.services.database_health_service import (
             DatabaseHealthService,
         )
 
         # Create a file that's not a valid SQLite database
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            f.write(b"This is not a valid SQLite database at all")
-            db_path = f.name
+        corrupted_db = tmp_path / "corrupted.db"
+        corrupted_db.write_bytes(b"This is not a valid SQLite database at all")
+        db_path = str(corrupted_db)
 
-        try:
-            result = DatabaseHealthService._check_integrity(db_path)
+        result = DatabaseHealthService._check_integrity(db_path)
 
-            assert result.passed is False
-            assert "Integrity check failed" in result.error_message
-        finally:
-            Path(db_path).unlink(missing_ok=True)
+        assert result.passed is False
+        assert "Integrity check failed" in result.error_message
 
-    def test_check_not_locked_fails_on_invalid_db(self):
+    def test_check_not_locked_fails_on_invalid_db(self, tmp_path: Path):
         """_check_not_locked should handle errors gracefully."""
         from code_indexer.server.services.database_health_service import (
             DatabaseHealthService,
         )
 
         # Create a file that's not a valid SQLite database
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            f.write(b"This is not a valid SQLite database")
-            db_path = f.name
+        invalid_db = tmp_path / "invalid.db"
+        invalid_db.write_bytes(b"This is not a valid SQLite database")
+        db_path = str(invalid_db)
 
-        try:
-            result = DatabaseHealthService._check_not_locked(db_path)
+        result = DatabaseHealthService._check_not_locked(db_path)
 
-            assert result.passed is False
-            assert "Lock check failed" in result.error_message
-        finally:
-            Path(db_path).unlink(missing_ok=True)
+        assert result.passed is False
+        assert "Lock check failed" in result.error_message
 
     def test_determine_status_returns_error_when_read_fails(self):
         """_determine_status should return ERROR when read check fails."""

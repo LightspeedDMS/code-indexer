@@ -19,6 +19,8 @@ from ...models.auto_discovery import (
     RepositoryDiscoveryResult,
 )
 from ..git_url_normalizer import GitUrlNormalizer, GitUrlNormalizationError
+from code_indexer.utils.credential_redaction import mask_url_credentials
+from code_indexer.utils.git_remote_url import parse_git_remote_url
 from code_indexer.server.logging_utils import format_error_log
 
 if TYPE_CHECKING:
@@ -121,7 +123,10 @@ class GitLabProvider(RepositoryProviderBase):
                     indexed_urls.add(canonical)
                 except GitUrlNormalizationError:
                     # Skip URLs that cannot be normalized (e.g., local paths)
-                    logger.debug("Skipping un-normalizable indexed URL: %r", repo_url)
+                    logger.debug(
+                        "Skipping un-normalizable indexed URL: %r",
+                        mask_url_credentials(repo_url),
+                    )
 
         return indexed_urls
 
@@ -146,7 +151,8 @@ class GitLabProvider(RepositoryProviderBase):
                     return True
             except GitUrlNormalizationError:
                 logger.debug(
-                    "Skipping un-normalizable URL during indexed check: %r", url
+                    "Skipping un-normalizable URL during indexed check: %r",
+                    mask_url_credentials(url),
                 )
         return False
 
@@ -623,31 +629,13 @@ class GitLabProvider(RepositoryProviderBase):
         """
         if not clone_url:
             raise GitLabProviderError("clone_url must not be empty")
-        url = clone_url
-        # Strip scheme (https:// or similar)
-        for prefix in ("https://", "http://", "git://"):
-            if url.startswith(prefix):
-                url = url[len(prefix) :]
-                break
-        # Handle SSH form: git@host:path
-        if "@" in url and ":" in url:
-            url = url.split(":", 1)[1]
-        else:
-            # Strip host (first path segment after scheme removal)
-            parts = url.split("/", 1)
-            if len(parts) == 2:
-                url = parts[1]
-            else:
-                url = parts[0]
-        # Strip .git suffix and leading/trailing slashes
-        if url.endswith(".git"):
-            url = url[:-4]
-        url = url.strip("/")
-        if not url:
+        parsed = parse_git_remote_url(clone_url)
+        if parsed is None or not parsed.repo_path:
             raise GitLabProviderError(
-                f"Could not derive full path from clone URL: {clone_url!r}"
+                "Could not derive full path from clone URL: "
+                f"{mask_url_credentials(clone_url)!r}"
             )
-        return url
+        return parsed.repo_path
 
     def enrich_repositories(self, clone_urls: List[str]) -> dict:
         """
@@ -683,7 +671,10 @@ class GitLabProvider(RepositoryProviderBase):
                     full_paths.append(path)
                     url_by_path[path] = url
                 except GitLabProviderError:
-                    logger.warning(f"Could not resolve full path for URL: {url!r}")
+                    logger.warning(
+                        "Could not resolve full path for URL: %r",
+                        mask_url_credentials(url),
+                    )
 
             if not full_paths:
                 continue

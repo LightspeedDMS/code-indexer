@@ -167,6 +167,7 @@ pub fn xray_drain_debug_log() -> Vec<String> {
     })
 }
 "#;
+<<<<<<< HEAD
 
 /// The evaluator is compiled into the SAME module as these preamble
 /// constants, so every name the preamble imports is reachable from user
@@ -383,3 +384,5 @@ mod import_allowlist_tests {
         }
     }
 }
+=======
+>>>>>>> upstream/master

@@ -33,6 +33,7 @@ from unittest.mock import patch
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
+<<<<<<< HEAD
 from code_indexer.xray import rust_backend
 from code_indexer.xray.rust_backend import resolve_xray_cli_path
 
@@ -41,6 +42,15 @@ def _require_xray_cli_binary() -> None:
     if not resolve_xray_cli_path().exists():
         pytest.skip(
             f"xray-cli binary not built at {resolve_xray_cli_path()}; "
+=======
+from code_indexer.xray.rust_backend import RustNativeBackend, _XRAY_CLI_DEFAULT
+
+
+def _require_xray_cli_binary() -> None:
+    if not _XRAY_CLI_DEFAULT.exists():
+        pytest.skip(
+            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
+>>>>>>> upstream/master
             "run 'cargo build --release' inside rust/ to enable this test."
         )
 
@@ -208,7 +218,11 @@ async def test_refine_false_by_default_never_invokes_refine_pass(
             "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
             return_value=str(repo_root),
         ),
+<<<<<<< HEAD
         patch.object(rust_backend, "_graph_refine_phase") as mock_refine_step,
+=======
+        patch.object(RustNativeBackend, "_run_refine_step") as mock_refine_step,
+>>>>>>> upstream/master
     ):
         result = await handler(params, _make_user())
 
@@ -245,7 +259,11 @@ async def test_refine_true_with_empty_refine_set_skips_invocation(
             "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
             return_value=str(repo_root),
         ),
+<<<<<<< HEAD
         patch.object(rust_backend, "_graph_refine_phase") as mock_refine_step,
+=======
+        patch.object(RustNativeBackend, "_run_refine_step") as mock_refine_step,
+>>>>>>> upstream/master
     ):
         result = await handler(params, _make_user())
 

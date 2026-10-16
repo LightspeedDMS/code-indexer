@@ -13,16 +13,33 @@ from ._shared import List, Optional, Protocol, Tuple, runtime_checkable
 if TYPE_CHECKING:
     from code_indexer.server.services.audit_events import AuditEvent
     from code_indexer.server.services.audit_log_query import AuditFilters
+<<<<<<< HEAD
+=======
+    from code_indexer.server.services.siem_delivery.capture import SiemDestinations
+>>>>>>> upstream/master
 
 
 @runtime_checkable
 class AuditLogBackend(Protocol):
     """Protocol for audit log service storage (AuditLogService interface)."""
 
+<<<<<<< HEAD
     def insert_events(self, events: "Sequence[AuditEvent]") -> None:
         """Insert *events* in ONE transaction; raise on failure.
 
         The single write function of the unified audit capture path.
+=======
+    def insert_events(
+        self,
+        events: "Sequence[AuditEvent]",
+        *,
+        siem_destinations: "Optional[SiemDestinations]" = None,
+    ) -> None:
+        """Insert *events* in ONE transaction; raise on failure.
+
+        The single write function of the unified audit capture path; SIEM
+        capture joins the same transaction.
+>>>>>>> upstream/master
         """
         ...
 

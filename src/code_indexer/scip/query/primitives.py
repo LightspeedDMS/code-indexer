@@ -1,12 +1,20 @@
 """SCIP primitive query operations."""
 
+<<<<<<< HEAD
 from ...utils.index_store import INDEX_DIRNAME
 from ..paths import SCIP_DIRNAME, scip_index_dir
+=======
+import logging
+>>>>>>> upstream/master
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple, TYPE_CHECKING
 
+from code_indexer.utils.path_confinement import resolve_if_within_root
+
 from .loader import SCIPLoader
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .backends import CallChain, DatabaseBackend
@@ -199,20 +207,61 @@ def _find_scip_repo_root(scip_dir: Path) -> Optional[Path]:
     the literal ``.code-indexer/scip`` segment pair in ``scip_dir``'s OWN
     name-chain avoids that false-positive class entirely, since it never
     probes any ancestor's *children* -- only ``scip_dir``'s own ancestry.
+<<<<<<< HEAD
     """
     current = scip_dir.resolve()
     for ancestor in [current] + list(current.parents):
         if ancestor.name == SCIP_DIRNAME and ancestor.parent.name == INDEX_DIRNAME:
+=======
+
+    The match runs on the UNRESOLVED absolute path, and the returned root is
+    unresolved too: symlinks inside the repository (a committed
+    ``.code-indexer/scip`` link, for instance) must not move the root to
+    wherever they point. Callers resolve the returned root themselves.
+    """
+    current = Path(scip_dir).absolute()
+    for ancestor in [current] + list(current.parents):
+        if ancestor.name == "scip" and ancestor.parent.name == ".code-indexer":
+>>>>>>> upstream/master
             return ancestor.parent.parent
     return None
 
 
+<<<<<<< HEAD
+=======
+class SCIPIndexOutsideRepositoryError(PermissionError):
+    """A SCIP index file does not resolve inside the repository it was found in."""
+
+
+def resolve_scip_trust_root(
+    db_path: Path, trusted_root: Optional[Path] = None
+) -> Optional[Path]:
+    """Return the resolved repository root that SCIP reads and writes for
+    ``db_path`` are confined to, or ``None`` when there is none.
+
+    ``trusted_root`` (the repository a caller selected) wins; otherwise the
+    root is the directory above the ``.code-indexer/scip`` pair in the db's
+    unresolved path. Index metadata never supplies it. A root that cannot be
+    resolved yields ``None`` (callers then fail closed).
+    """
+    root = trusted_root
+    if root is None:
+        root = _find_scip_repo_root(Path(db_path).parent)
+    if root is None:
+        return None
+    try:
+        return Path(root).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+>>>>>>> upstream/master
 class SCIPQueryEngine:
     """Engine for executing SCIP primitive queries."""
 
     backend: "DatabaseBackend"
 
-    def __init__(self, scip_file: Path):
+    def __init__(self, scip_file: Path, confine_to_repo_root: bool = True):
         """
         Initialize query engine with a SCIP index.
 
@@ -220,9 +269,18 @@ class SCIPQueryEngine:
 
         Args:
             scip_file: Path to .scip file OR .scip.db file
+            confine_to_repo_root: True (default, every server-side caller)
+                requires the index files to resolve inside the repository
+                they were found in (the directory above ``.code-indexer/scip``
+                in the unresolved path). The local ``cidx scip`` commands pass
+                False: a user's own ``.code-indexer`` may be a symlink that
+                leaves the checkout. Source context reads and the version
+                marker write stay confined to the repository root either way.
 
         Raises:
             FileNotFoundError: If .scip.db database file does not exist
+            SCIPIndexOutsideRepositoryError: If confined and the .scip.db
+                does not resolve inside its repository root
         """
         # Handle both .scip and .scip.db paths
         scip_file_str = str(scip_file)
@@ -242,9 +300,35 @@ class SCIPQueryEngine:
                 f"Run 'cidx scip generate' to create the database."
             )
 
+        # SCIP index files are read only from within the repository root
+        # (resolved once here, reused for every read of this engine).
+        resolved_root = resolve_scip_trust_root(self.db_path)
+        confine_root: Optional[Path] = resolved_root if confine_to_repo_root else None
+        if (
+            confine_root is not None
+            and resolve_if_within_root(self.db_path, confine_root) is None
+        ):
+            raise SCIPIndexOutsideRepositoryError(
+                f"SCIP index {self.db_path} does not resolve inside "
+                f"repository root {confine_root}"
+            )
+        protobuf_usable = self.scip_file.exists()
+        if (
+            protobuf_usable
+            and confine_root is not None
+            and resolve_if_within_root(self.scip_file, confine_root) is None
+        ):
+            logger.warning(
+                "Ignoring SCIP protobuf %s: it does not resolve inside "
+                "repository root %s",
+                self.scip_file,
+                resolved_root,
+            )
+            protobuf_usable = False
+
         # Load protobuf index only if .scip file exists (it's deleted after conversion to save space)
         self.loader = SCIPLoader()
-        if self.scip_file.exists():
+        if protobuf_usable:
             self.index = self.loader.load(self.scip_file)
             project_root = self.index.metadata.project_root
         else:
@@ -284,10 +368,17 @@ class SCIPQueryEngine:
             if repo_root is None:
                 project_root = str(scip_dir.parent.parent)
             else:
+<<<<<<< HEAD
                 scip_base_dir = scip_index_dir(repo_root)
                 relative_suffix = scip_dir.resolve().relative_to(
                     scip_base_dir.resolve()
                 )
+=======
+                # Unresolved on both sides: repo_root came from scip_dir's
+                # own unresolved ancestry, so this is a pure prefix strip.
+                scip_base_dir = repo_root / ".code-indexer" / "scip"
+                relative_suffix = scip_dir.absolute().relative_to(scip_base_dir)
+>>>>>>> upstream/master
                 if relative_suffix == Path("."):
                     project_root = str(repo_root)
                 else:
@@ -298,7 +389,8 @@ class SCIPQueryEngine:
         self.backend = DatabaseBackend(
             self.db_path,
             project_root=project_root,
-            scip_file=self.scip_file if self.scip_file.exists() else None,
+            scip_file=self.scip_file if protobuf_usable else None,
+            trusted_root=resolved_root,
         )
         self.db_conn = self.backend.conn
 

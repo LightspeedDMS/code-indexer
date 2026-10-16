@@ -35,6 +35,7 @@ from code_indexer.server.routers.groups import (
     set_group_manager,
 )
 from code_indexer.server.services.group_access_manager import GroupAccessManager
+from tests.unit.server._account_rows import install_accounts
 
 NONEXISTENT_GROUP_ID = 99999
 CIDX_META = "cidx-meta"
@@ -88,9 +89,17 @@ def mock_admin_user():
     return user
 
 
+MEMBER_ACCOUNTS = ("alice", "bob", "carol", "dave", "eve")
+
+
 @pytest.fixture
-def test_client(group_manager, mock_admin_user):
-    """FastAPI TestClient with real GroupAccessManager and overridden auth deps."""
+def test_client(group_manager, mock_admin_user, tmp_path, monkeypatch):
+    """FastAPI TestClient with real GroupAccessManager and overridden auth deps.
+
+    The member names the tests assign have real accounts (memberships are
+    only written for existing accounts).
+    """
+    install_accounts(tmp_path, monkeypatch, MEMBER_ACCOUNTS)
     app = FastAPI()
     app.include_router(router)
     set_group_manager(group_manager)

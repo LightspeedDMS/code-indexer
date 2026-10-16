@@ -566,7 +566,11 @@ fn build_refine_file_outcomes(
             findings: r
                 .findings
                 .into_iter()
+<<<<<<< HEAD
                 .map(|f| JsonFinding { pattern: f.pattern, file: f.file, line: f.line, snippet: f.snippet, line_content: f.line_content })
+=======
+                .map(|f| JsonFinding { pattern: f.pattern, file: f.file, line: f.line, snippet: f.snippet })
+>>>>>>> upstream/master
                 .collect(),
             status: refine_status_label(r.status).to_string(),
         })

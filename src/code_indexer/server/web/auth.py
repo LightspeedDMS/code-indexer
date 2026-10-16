@@ -6,8 +6,8 @@ Provides secure session management with signed cookies for the admin web interfa
 
 import secrets
 import time
-from typing import Optional, Tuple
-from dataclasses import dataclass
+from typing import Any, Callable, Optional, Tuple
+from dataclasses import dataclass, replace
 
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 from fastapi import Request, Response, HTTPException, status
@@ -38,6 +38,8 @@ class SessionData:
     csrf_token: str
     created_at: float
     session_timeout: int = SESSION_TIMEOUT_SECONDS
+    # Instant of the original sign-in; sliding refreshes never change it.
+    issued_at: Optional[float] = None
 
 
 class SessionManager:
@@ -51,7 +53,14 @@ class SessionManager:
     - httpOnly cookies
     """
 
-    def __init__(self, secret_key: str, config, web_security_config=None):
+    def __init__(
+        self,
+        secret_key: str,
+        config,
+        web_security_config=None,
+        *,
+        account_lookup: Optional[Callable[[str], Any]] = None,
+    ):
         """
         Initialize session manager.
 
@@ -59,11 +68,15 @@ class SessionManager:
             secret_key: Secret key for signing cookies
             config: Server configuration for cookie security settings
             web_security_config: Web security config with session timeouts
+            account_lookup: The server's account lookup by username (returns
+                the account or None).  When set, a session authenticates only
+                its live account, with the account's current role.
         """
         self._serializer = URLSafeTimedSerializer(secret_key)
         self._salt = "web-session"
         self._config = config
         self._web_security_config = web_security_config
+        self._account_lookup = account_lookup
 
     def _get_timeout_for_role(self, role: str) -> int:
         """Return session timeout in seconds based on user role."""
@@ -101,6 +114,7 @@ class SessionManager:
             "role": role,
             "csrf_token": csrf_token,
             "created_at": created_at,
+            "issued_at": created_at,
             "session_timeout": session_timeout,
         }
 
@@ -123,12 +137,37 @@ class SessionManager:
         """
         Get and validate session from request cookies.
 
+        The session authenticates only its live account: it is refused when
+        the account no longer exists or was created after the sign-in, and
+        its role is the account's CURRENT role, never the one in the cookie.
+        Performs the account lookup, so async callers must offload it.
+
         Args:
             request: FastAPI Request object
 
         Returns:
             SessionData if valid session exists, None otherwise
         """
+        session = self._decode_session(request)
+        if session is None:
+            return None
+        return self._bind_to_account(session)
+
+    def _bind_to_account(self, session: SessionData) -> Optional[SessionData]:
+        """Resolve *session* against the live account (never cached)."""
+        if self._account_lookup is None:
+            return session
+        from code_indexer.server.auth.dependencies import resolve_credential_account
+
+        account = resolve_credential_account(
+            self._account_lookup, session.username, session.issued_at
+        )
+        if account is None:
+            return None
+        return replace(session, role=account.role.value)
+
+    def _decode_session(self, request: Request) -> Optional[SessionData]:
+        """Decode and verify the signed session cookie (no account lookup)."""
         session_cookie = request.cookies.get(SESSION_COOKIE_NAME)
         if not session_cookie:
             return None
@@ -156,6 +195,8 @@ class SessionManager:
                 csrf_token=data["csrf_token"],
                 created_at=data["created_at"],
                 session_timeout=int(max_age),
+                # Sessions created before issued_at existed: their created_at.
+                issued_at=data.get("issued_at", data["created_at"]),
             )
 
         except SignatureExpired:
@@ -215,6 +256,8 @@ class SessionManager:
                 "role": session.role,
                 "csrf_token": session.csrf_token,
                 "created_at": time.time(),
+                # The refresh continues the same sign-in.
+                "issued_at": session.issued_at,
                 "session_timeout": session.session_timeout,
             }
             signed_value = self._serializer.dumps(session_data, salt=self._salt)
@@ -295,7 +338,8 @@ class SessionManager:
         if not submitted_token:
             return False, "CSRF token missing"
 
-        session = self.get_session(request)
+        # Token comparison only: the session guards bind the account.
+        session = self._decode_session(request)
         if not session:
             return False, "No valid session"
 
@@ -320,7 +364,11 @@ def get_session_manager() -> SessionManager:
 
 
 def init_session_manager(
-    secret_key: str, config, web_security_config=None
+    secret_key: str,
+    config,
+    web_security_config=None,
+    *,
+    account_lookup: Optional[Callable[[str], Any]] = None,
 ) -> SessionManager:
     """
     Initialize the global session manager.
@@ -329,12 +377,16 @@ def init_session_manager(
         secret_key: Secret key for signing cookies
         config: Server configuration
         web_security_config: Web security config with session timeouts
+        account_lookup: The server's account lookup by username; binds every
+            session to its live account (see ``SessionManager``)
 
     Returns:
         Initialized SessionManager
     """
     global _session_manager
-    _session_manager = SessionManager(secret_key, config, web_security_config)
+    _session_manager = SessionManager(
+        secret_key, config, web_security_config, account_lookup=account_lookup
+    )
     return _session_manager
 
 

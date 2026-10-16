@@ -125,10 +125,13 @@ def register_admin_user_routes(
 
     @app.get("/api/admin/users")
     def list_users(
-        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+        current_user: dependencies.User = Depends(dependencies.require_elevation()),
     ):
         """
         List all users (admin only).
+
+        Admin reads of user data require the caller's own elevation window,
+        like the twins ``GET /api/v1/users`` and MCP ``list_users``.
 
         Returns:
             List of all users

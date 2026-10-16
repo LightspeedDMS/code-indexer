@@ -166,7 +166,7 @@ class TestVanishedFileToctou1118:
 
         submitted: list[Any] = []
 
-        def _submit(file_path, metadata, cb):
+        def _submit(file_path, metadata, cb, after=None):
             f: Future[FileProcessingResult] = Future()
             f.set_result(
                 FileProcessingResult(
@@ -358,7 +358,7 @@ class TestVanishedFileToctou1118:
             mock_fcm_instance
         )
 
-        def _submit(file_path, metadata, cb):
+        def _submit(file_path, metadata, cb, after=None):
             f: Future[FileProcessingResult] = Future()
             if file_path == good:
                 f.set_result(
@@ -444,7 +444,7 @@ class TestVanishedFileToctou1118:
             mock_fcm_instance
         )
 
-        def _submit(file_path, metadata, cb):
+        def _submit(file_path, metadata, cb, after=None):
             f: Future[FileProcessingResult] = Future()
             if file_path == good:
                 f.set_result(

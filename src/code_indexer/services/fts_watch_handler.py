@@ -3,12 +3,18 @@ FTS Watch Handler for real-time FTS index maintenance.
 
 Monitors file system changes and updates the Tantivy FTS index incrementally
 alongside the semantic index in watch mode.
+
+Bug #2056: every change goes through the SAME code normal indexing uses
+(fts_file_documents): a changed file's documents are replaced by one per
+current chunk under its repo-relative path; a deleted (or blanked) file
+has none. No document is built here.
 """
 
 import logging
 from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 
+from .fts_file_documents import FileFtsDocuments
 from .tantivy_index_manager import TantivyIndexManager
 
 logger = logging.getLogger(__name__)
@@ -32,10 +38,28 @@ class FTSWatchHandler(FileSystemEventHandler):
         super().__init__()
         self.tantivy_manager = tantivy_index_manager
         self.config = config
+        self._documents = FileFtsDocuments(config)
 
         # Statistics
         self.files_updated_count = 0
         self.files_deleted_count = 0
+
+    def _replace_and_commit(self, file_path: Path) -> None:
+        """Replace the file's FTS documents with its current chunks (none
+        when it no longer exists) and make the change visible. ANY failure
+        -- reading or chunking the file, writing its documents, committing
+        -- may leave the index without the file's current content, so it
+        drops the index's content marker (the next `cidx index --fts`
+        rebuilds it from disk) before propagating."""
+        from .fts_file_documents import invalidate_fts_content_marker
+        from .fts_lifecycle import fts_index_dir
+
+        try:
+            self._documents.replace_in_index(self.tantivy_manager, file_path)
+            self.tantivy_manager.commit()
+        except Exception:
+            invalidate_fts_content_marker(fts_index_dir(self.config))
+            raise
 
     def on_modified(self, event):
         """Handle file modification events."""
@@ -49,29 +73,7 @@ class FTSWatchHandler(FileSystemEventHandler):
             return
 
         try:
-            # Read file content
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-
-            # Extract identifiers (simple implementation - can be enhanced)
-            identifiers = self._extract_identifiers(content, file_path)
-
-            # Detect language
-            language = self._detect_language(file_path)
-
-            # Create FTS document
-            doc = {
-                "path": str(file_path),
-                "content": content,
-                "content_raw": content,
-                "identifiers": identifiers,
-                "line_start": 1,
-                "line_end": len(content.splitlines()),
-                "language": language,
-            }
-
-            # Update document in FTS index (atomic operation)
-            self.tantivy_manager.update_document(str(file_path), doc)
+            self._replace_and_commit(file_path)
             self.files_updated_count += 1
             logger.debug(f"Updated FTS index for: {file_path}")
 
@@ -90,8 +92,7 @@ class FTSWatchHandler(FileSystemEventHandler):
             return
 
         try:
-            # Delete document from FTS index (atomic operation)
-            self.tantivy_manager.delete_document(str(file_path))
+            self._replace_and_commit(file_path)
             self.files_deleted_count += 1
             logger.debug(f"Deleted from FTS index: {file_path}")
 
@@ -117,7 +118,7 @@ class FTSWatchHandler(FileSystemEventHandler):
         # Delete old path
         if self._should_include_deleted_file(old_path):
             try:
-                self.tantivy_manager.delete_document(str(old_path))
+                self._replace_and_commit(old_path)
                 self.files_deleted_count += 1
             except Exception as e:
                 logger.warning(
@@ -148,58 +149,6 @@ class FTSWatchHandler(FileSystemEventHandler):
         except Exception as e:
             logger.warning(f"Failed to check if deleted file should be included: {e}")
             return False
-
-    def _extract_identifiers(self, content: str, file_path: Path) -> list:
-        """
-        Extract identifiers from content for identifier-based search.
-
-        This is a simple implementation that can be enhanced with
-        proper tokenization and language-specific parsing.
-        """
-        import re
-
-        # Simple regex to extract potential identifiers (alphanumeric + underscore)
-        pattern = r"\b[a-zA-Z_][a-zA-Z0-9_]*\b"
-        identifiers = list(set(re.findall(pattern, content)))
-
-        # Limit to reasonable number to avoid bloat
-        return identifiers[:1000]
-
-    def _detect_language(self, file_path: Path) -> str:
-        """Detect programming language from file extension."""
-        extension = file_path.suffix.lstrip(".").lower()
-
-        # Map extensions to language names
-        language_map = {
-            "py": "python",
-            "js": "javascript",
-            "ts": "typescript",
-            "java": "java",
-            "cpp": "cpp",
-            "c": "c",
-            "h": "c",
-            "hpp": "cpp",
-            "go": "go",
-            "rs": "rust",
-            "rb": "ruby",
-            "php": "php",
-            "swift": "swift",
-            "kt": "kotlin",
-            "scala": "scala",
-            "sh": "shell",
-            "bash": "shell",
-            "sql": "sql",
-            "md": "markdown",
-            "txt": "text",
-            "yaml": "yaml",
-            "yml": "yaml",
-            "json": "json",
-            "xml": "xml",
-            "html": "html",
-            "css": "css",
-        }
-
-        return language_map.get(extension, "unknown")
 
     def get_statistics(self) -> dict:
         """Get FTS watch handler statistics."""

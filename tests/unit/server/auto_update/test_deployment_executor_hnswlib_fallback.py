@@ -56,8 +56,8 @@ class TestCloneHnswlibStandalone:
             result = executor._clone_hnswlib_standalone()
 
             assert result is True
-            # Should add to safe.directory and clone
-            assert mock_run.call_count == 2
+            # Bug #2028: list safe.directory, add it (absent), then clone
+            assert mock_run.call_count == 3
 
     def test_clone_hnswlib_standalone_removes_existing_directory(
         self, executor: DeploymentExecutor
@@ -95,9 +95,16 @@ class TestCloneHnswlibStandalone:
             result = executor._clone_hnswlib_standalone()
 
             assert result is True
-            # First call should be safe.directory add
-            first_call = mock_run.call_args_list[0]
-            assert first_call[0][0] == [
+            # Bug #2028: listed first; added only because the listing is empty
+            listing, add = mock_run.call_args_list[0], mock_run.call_args_list[1]
+            assert listing[0][0] == [
+                "git",
+                "config",
+                "--global",
+                "--get-all",
+                "safe.directory",
+            ]
+            assert add[0][0] == [
                 "git",
                 "config",
                 "--global",
@@ -121,8 +128,9 @@ class TestCloneHnswlibStandalone:
             result = executor._clone_hnswlib_standalone()
 
             assert result is True
-            # Second call should be git clone with 60s timeout
-            second_call = mock_run.call_args_list[1]
+            # Third call (after the Bug #2028 listing + add) is the git clone
+            # with a 60s timeout
+            second_call = mock_run.call_args_list[2]
             assert second_call[0][0] == [
                 "git",
                 "clone",

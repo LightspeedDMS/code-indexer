@@ -88,6 +88,7 @@ class TestPodPullSubmit:
         job_id = self._submit(m, "add_golden_repo", metadata={"alias": "repoA"})
         assert any(item[0] == job_id for item in self.enqueued)
 
+<<<<<<< HEAD
     def test_the_exact_pod_pull_op_set(self):
         # The memory-heavy index builds (incl. semantic_backfill_reindex — a re-embed is
         # as heavy as add), PLUS two that are pod-pull WITHOUT being memory-heavy:
@@ -101,6 +102,9 @@ class TestPodPullSubmit:
         # Spelled out in full on purpose: every entry must also have a lifespan dispatch
         # executor (validate_dispatch_covers enforces that pairing at startup) and a
         # submit call that passes metadata=, so adding one is never a one-line change.
+=======
+    def test_all_five_heavy_ops_are_pod_pull(self):
+>>>>>>> upstream/master
         assert POD_PULL_OPS == frozenset(
             {
                 "add_golden_repo",
@@ -108,6 +112,7 @@ class TestPodPullSubmit:
                 "provider_temporal_index_rebuild",
                 "sync_repository",
                 "change_branch",
+<<<<<<< HEAD
                 "semantic_backfill_reindex",
                 "fts_backfill_build",
                 "global_repo_refresh",
@@ -126,3 +131,7 @@ class TestPodPullSubmit:
 
         assert "fts_backfill_build" in POD_PULL_OPS
         assert "fts_backfill_build" not in _MEMORY_HEAVY_OPS  # not memory-gated
+=======
+            }
+        )
+>>>>>>> upstream/master

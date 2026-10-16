@@ -97,6 +97,6 @@ USE CASES: (1) Check current memory pressure band (GREEN/YELLOW/RED) to understa
 
 OUTPUT: Full snapshot dict with band, used_pct, effective_limit_mb, effective_used_mb, basis, pswpin_rate, swap_used_mb, flat transition/action counters, all watermark config echoes, and pid. When the governor is not initialised (CLI mode or pre-lifespan), returns {"enabled": false, "band": null, "active": false}.
 
-PARAMETERS: None required.
+PARAMETERS: None required. Requires the admin role.
 
-RELATED TOOLS: check_health (overall server health), get_global_config (read/write config), admin_logs_query (query GOV-* structured log entries).
+RELATED TOOLS: check_health (overall server health), admin_logs_query (query GOV-* structured log entries). Watermark settings are changed in the Web UI config screen; no MCP tool writes them.

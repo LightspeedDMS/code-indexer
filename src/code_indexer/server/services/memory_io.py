@@ -159,6 +159,7 @@ def read_memory_file(path: Path) -> Tuple[Dict[str, Any], str, str]:
     return frontmatter_dict, body, content_hash
 
 
+<<<<<<< HEAD
 def _shared_precondition(
     shared: "cidx_meta_content.SharedCidxMeta",
     path: Path,
@@ -182,6 +183,64 @@ def _shared_precondition(
             f"Memory file {path} changed since it was read"
         )
     return blob_sha
+=======
+# Upper bound on the bytes read_memory_frontmatter consumes from one file.
+MAX_FRONTMATTER_BYTES = 64 * 1024
+
+
+def read_memory_frontmatter(
+    path: Path, max_bytes: int = MAX_FRONTMATTER_BYTES
+) -> Dict[str, Any]:
+    """Read only a memory file's frontmatter, never its body.
+
+    Consumes lines up to and including the closing '---' line, at most
+    max_bytes bytes, and parses them with deserialize_memory.
+
+    Raises:
+        TypeError: when path is not a Path.
+        ValueError: when max_bytes is not a positive integer.
+        MemoryFileNotFoundError: when path does not exist.
+        MemoryFileCorruptError: when the frontmatter is missing, unterminated
+            within max_bytes, not UTF-8, or not a YAML mapping.
+    """
+    if not isinstance(path, Path):
+        raise TypeError(f"path must be a Path, got {type(path).__name__}")
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
+        raise ValueError(f"max_bytes must be a positive integer, got {max_bytes!r}")
+
+    header = bytearray()
+    try:
+        with path.open("rb") as fh:
+            # Each pass consumes >= 1 byte or stops, so max_bytes + 1 passes suffice.
+            for line_no in range(max_bytes + 1):
+                line = fh.readline(max_bytes - len(header) + 1)
+                if not line:
+                    raise MemoryFileCorruptError(
+                        f"Memory file missing closing frontmatter delimiter: {path}"
+                    )
+                header += line
+                if len(header) > max_bytes:
+                    raise MemoryFileCorruptError(
+                        f"Memory file frontmatter exceeds {max_bytes} bytes: {path}"
+                    )
+                is_delimiter = line.rstrip(b"\r\n") == b"---"
+                if line_no == 0 and not is_delimiter:
+                    raise MemoryFileCorruptError(
+                        f"Memory file does not start with a '---' line: {path}"
+                    )
+                if line_no > 0 and is_delimiter:
+                    break
+    except FileNotFoundError as exc:
+        raise MemoryFileNotFoundError(f"Memory file not found: {path}") from exc
+
+    try:
+        header_text = header.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise MemoryFileCorruptError(f"Memory file is not valid UTF-8: {path}") from exc
+
+    frontmatter_dict, _body = deserialize_memory(header_text)
+    return frontmatter_dict
+>>>>>>> upstream/master
 
 
 def atomic_write_memory_file(

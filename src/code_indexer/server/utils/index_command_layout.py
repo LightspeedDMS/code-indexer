@@ -37,16 +37,27 @@ server-managed provider settings (the embedding-provider endpoint and
 daemon-mode selection), never a repository-authored override, stamped in
 this same helper for the same reason.
 
+<<<<<<< HEAD
 The content seam's backend selection travels the same way. The child cannot
 read the server's config, and must never take the choice from the repository's
 own config (tenant-writable, as above), so when the server is configured with
 ``content_backend='delegated'`` this helper stamps ``--content-backend=delegated``
 and the child builds the same backend the server did. ``local`` stamps nothing,
 so the default command line is unchanged.
+=======
+Every embedding call a server-spawned child makes must be attributable to
+the golden repo, job and node that caused it (Story #2118), so the helper
+REQUIRES an ``attribution`` and stamps it as one
+``--stats-attribution=<json>`` token. The child validates it before any
+provider call and records it on every embedding_call_stats row
+(``test_index_command_attribution_guard_2118.py`` enforces that every call
+site supplies one).
+>>>>>>> upstream/master
 """
 
 from __future__ import annotations
 
+<<<<<<< HEAD
 from typing import Any, Dict, List, Optional
 
 from code_indexer.server.startup.content_backend_wiring import (
@@ -54,6 +65,13 @@ from code_indexer.server.startup.content_backend_wiring import (
 )
 from code_indexer.server.startup.git_backend_wiring import (
     configured_git_backend_name,
+=======
+from typing import List
+
+from code_indexer.server.services.embedding_stats_attribution import (
+    STATS_ATTRIBUTION_OPTION,
+    StatsAttribution,
+>>>>>>> upstream/master
 )
 
 #: The explicit server-context layout arg. Single `--opt=value` token so it
@@ -69,6 +87,7 @@ SERVER_IGNORE_RESUME_STATE_ARG = "--ignore-resume-state"
 #: repository-authored embedding-provider endpoint or daemon-mode override.
 SERVER_MANAGED_PROVIDER_SETTINGS_ARG = "--server-managed-provider-settings"
 
+<<<<<<< HEAD
 #: Hand the server's delegated content-backend selection to the child. Only
 #: ever stamped for ``delegated``; ``local`` is the child's own default.
 SERVER_DELEGATED_CONTENT_BACKEND_ARG = "--content-backend=delegated"
@@ -140,10 +159,20 @@ def append_server_layout_args(
     layout arg, the resume-state-distrust arg, the
     server-managed-provider-settings arg and, when delegated, the
     content-backend arg appended.
+=======
+
+def append_server_layout_args(
+    cmd: List[str], *, attribution: StatsAttribution
+) -> List[str]:
+    """Return a NEW command list with the explicit CHUNKS_DB new-collection
+    layout arg, the resume-state-distrust arg, the
+    server-managed-provider-settings arg and the stats attribution appended.
+>>>>>>> upstream/master
 
     Args:
         cmd: A server-context ``cidx index`` command list (e.g.
             ``["cidx", "index", "--fts", "--progress-json"]``).
+<<<<<<< HEAD
         content_backend: The server's content-backend selection. ``None``
             (every production caller) reads it from the server config, so a
             spawn site cannot forget to pass it.
@@ -158,12 +187,23 @@ def append_server_layout_args(
         for ``delegated`` only, ``--content-backend=delegated`` and
         ``--git-backend=delegated`` appended, in that order. The input list is
         not mutated.
+=======
+        attribution: Who this run's embedding calls are charged to
+            (golden-repo alias, job id or ``nojob:<site>``, node, purpose).
+
+    Returns:
+        A new list equal to ``cmd`` with ``--new-collection-layout=chunks_db``,
+        ``--ignore-resume-state``, ``--server-managed-provider-settings`` and
+        ``--stats-attribution=<json>`` appended, in that order. The input
+        list is not mutated.
+>>>>>>> upstream/master
     """
     return [
         *cmd,
         SERVER_NEW_COLLECTION_LAYOUT_ARG,
         SERVER_IGNORE_RESUME_STATE_ARG,
         SERVER_MANAGED_PROVIDER_SETTINGS_ARG,
+<<<<<<< HEAD
         *server_backend_args(
             content_backend=content_backend,
             git_backend=git_backend,
@@ -202,3 +242,7 @@ def server_backend_args(
     if git_backend == "delegated":
         args.append(SERVER_DELEGATED_GIT_BACKEND_ARG)
     return args
+=======
+        f"{STATS_ATTRIBUTION_OPTION}={attribution.to_json()}",
+    ]
+>>>>>>> upstream/master

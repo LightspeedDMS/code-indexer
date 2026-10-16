@@ -15,8 +15,12 @@ from code_indexer.server.installer import ServerInstaller
 class TestServerInstallerSystemd:
     """Test suite for ServerInstaller systemd service creation."""
 
-    def test_create_systemd_service_basic(self):
-        """Test creating systemd service file with basic configuration."""
+    def test_create_systemd_service_basic(self, home_in_tmp):
+        """Test creating systemd service file with basic configuration.
+
+        Bug #1996: ServerInstaller() resolves Path.home()/.cidx-server at
+        construction (JWT secret dir), before server_dir is overridden.
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             # Patch home directory to use temp directory
             test_server_dir = Path(temp_dir) / ".cidx-server"
@@ -42,7 +46,7 @@ class TestServerInstallerSystemd:
             assert "[Install]" in content
             assert "WantedBy=multi-user.target" in content
 
-    def test_create_server_config_host_matches_execstart(self) -> None:
+    def test_create_server_config_host_matches_execstart(self, home_in_tmp) -> None:
         """Root-cause hygiene: create_server_config must write host=0.0.0.0 into config.json.
 
         The systemd ExecStart is hardcoded to --host 0.0.0.0 so HAProxy on another host

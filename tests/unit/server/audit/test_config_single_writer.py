@@ -1,9 +1,17 @@
 """Configuration has a single audited writer.
 
 After the audited-change refactor, ``save_config(`` is called only inside
+<<<<<<< HEAD
 ``ConfigService`` (its one publish path) and by the two bootstrap writers
 that are not operator actions (the installer and the MCP self-registration
 service).  Any other caller would publish configuration without an audit
+=======
+``ConfigService`` (its one publish path) and by the installer (a bootstrap
+writer, not an operator action).  Bug #2017: the MCP self-registration
+service stores its credential through ``ConfigService.apply_system_change``
+(the guarded committed-row change), so it is no longer a ``save_config``
+writer.  Any other caller would publish configuration without an audit
+>>>>>>> upstream/master
 row.  The scan walks the syntax tree of every module in the package, so a
 spaced call, a saved method reference and a by-name lookup are all caught.
 """
@@ -21,7 +29,10 @@ _ALLOWED = frozenset(
     {
         "server/services/config_service.py",
         "server/installer.py",
+<<<<<<< HEAD
         "server/services/mcp_self_registration_service.py",
+=======
+>>>>>>> upstream/master
     }
 )
 _WRITER = "save_config"

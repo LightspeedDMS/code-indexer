@@ -11,7 +11,11 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import Optional, Dict, List, Any
 
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import (
+    format_error_log,
+    get_log_extra,
+    public_error_message,
+)
 
 from ..auth.dependencies import get_current_user
 from ..auth.user_manager import User
@@ -72,7 +76,10 @@ def _enforce_repo_access(
 
 
 def _apply_multi_truncation(
-    grouped_results: Dict[str, List[Dict[str, Any]]], search_type: str
+    grouped_results: Dict[str, List[Dict[str, Any]]],
+    search_type: str,
+    *,
+    owner: Optional[str] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Apply payload truncation to multi-repo grouped search results (Story #683).
 
@@ -81,6 +88,8 @@ def _apply_multi_truncation(
     Args:
         grouped_results: Dict mapping repo_id to list of result dicts
         search_type: Search type ('semantic', 'fts', 'temporal')
+        owner: Username of the caller whose request created the entries; only
+            that user can fetch the returned handles.
 
     Returns:
         Modified grouped_results with truncation applied to each result
@@ -93,12 +102,16 @@ def _apply_multi_truncation(
 
     for repo_id, results in grouped_results.items():
         if search_type == "fts":
-            grouped_results[repo_id] = _apply_fts_payload_truncation(results)
+            grouped_results[repo_id] = _apply_fts_payload_truncation(
+                results, owner=owner
+            )
         elif search_type == "temporal":
-            grouped_results[repo_id] = _apply_temporal_payload_truncation(results)
+            grouped_results[repo_id] = _apply_temporal_payload_truncation(
+                results, owner=owner
+            )
         else:
             # Default to semantic truncation (handles both content and code_snippet)
-            grouped_results[repo_id] = _apply_payload_truncation(results)
+            grouped_results[repo_id] = _apply_payload_truncation(results, owner=owner)
 
     return grouped_results
 
@@ -244,6 +257,27 @@ def multi_repository_query(
     )
     _enforce_repo_access(access_filtering_service, user.username, request.repositories)
 
+<<<<<<< HEAD
+=======
+    # The SAME repository-count cap MCP omni search enforces (Bug #894,
+    # multi_search_limits_config.omni_max_repos_per_search, read fresh so a
+    # Web UI change applies at once): one fan-out bound for both doors.
+    from ..mcp.handlers._utils import _enforce_repo_count_cap
+
+    repo_count_breach = _enforce_repo_count_cap(request.repositories)
+    if repo_count_breach is not None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error_code": repo_count_breach.error_code,
+                "detail": (
+                    f"Maximum {repo_count_breach.configured_cap} repositories "
+                    f"per search, got {repo_count_breach.observed_count}"
+                ),
+            },
+        )
+
+>>>>>>> upstream/master
     try:
         # Bug #350: Track REST API call in metrics
         api_metrics_service.increment_other_api_call(username=user.username)
@@ -254,16 +288,54 @@ def multi_repository_query(
             f"{len(request.repositories)} repos, type={request.search_type}"
         )
 
+        import time
+
+        from ..middleware.correlation import get_correlation_id
+        from ..services import search_event_recording
+
         # Get service instance
         service = get_multi_search_service()
 
-        # Execute search
-        response = service.search(request)
+        # Execute search. Story #2115: inside a search event context (the
+        # embedding call sites record their cache fields into it, and the
+        # service notes the repositories it resolved). Bug #2111 / Story
+        # #2117: one row per resolved repository (repository_failed for one
+        # that failed after resolving, none for an alias that never
+        # resolved); a whole-call failure is a failure row per resolved
+        # repository with the exception's class (the context manager records
+        # it and re-raises).
+        started = time.monotonic()
+        writer = search_event_recording.writer_from_app(http_request.app)
+        origin = search_event_recording.SearchOrigin(
+            tool="POST /api/query/multi", door="rest"
+        )
+        with search_event_recording.search_event_scope(
+            username=user.username,
+            repo_alias=None,
+            search_type=request.search_type,
+            query_text=request.query,
+        ) as event_context:
+            with search_event_recording.recording_multi_repository_failure(
+                writer,
+                origin=origin,
+                context=event_context,
+                started_monotonic=started,
+                correlation_id=get_correlation_id(),
+            ):
+                response = service.search(request)
+                search_event_recording.record_multi_repository_search(
+                    writer,
+                    response.results,
+                    origin=origin,
+                    context=event_context,
+                    started_monotonic=started,
+                    correlation_id=get_correlation_id(),
+                )
 
         # Story #683: Apply payload truncation to results
         # Story #50: Now sync call (underlying handlers are sync)
         response.results = _apply_multi_truncation(
-            response.results, request.search_type
+            response.results, request.search_type, owner=user.username
         )
 
         # Log response summary
@@ -275,18 +347,21 @@ def multi_repository_query(
 
         return response
 
-    except ValueError as e:
-        # Validation error from service
-        logger.error(
-            format_error_log(
-                "WEB-GENERAL-029", "Multi-repo search validation error", error=str(e)
-            ),
-            extra=get_log_extra("WEB-GENERAL-029"),
-        )
-        raise HTTPException(status_code=422, detail=str(e))
-
     except Exception as e:
-        # Unexpected error
+        # One client-error rule: only a client error keeps its text.
+        from ..query.search_error_policy import classify_search_error
+
+        outcome = classify_search_error(e)
+        if outcome.client_error:
+            if outcome.log_as_internal:
+                logger.error(
+                    format_error_log(
+                        "WEB-GENERAL-030", "Multi-repo search refused", error=str(e)
+                    ),
+                    extra=get_log_extra("WEB-GENERAL-030"),
+                    exc_info=True,
+                )
+            raise HTTPException(status_code=422, detail=outcome.message)
         logger.error(
             format_error_log(
                 "WEB-GENERAL-030", "Multi-repo search failed", error=str(e)
@@ -294,8 +369,12 @@ def multi_repository_query(
             extra=get_log_extra("WEB-GENERAL-030"),
             exc_info=True,
         )
+        # The body is a fixed message; the detail is in the log above.
+        if outcome.timed_out:
+            raise HTTPException(status_code=504, detail=outcome.message)
         raise HTTPException(
-            status_code=500, detail=f"Multi-repository search failed: {str(e)}"
+            status_code=500,
+            detail=public_error_message("Multi-repository search failed"),
         )
 
 

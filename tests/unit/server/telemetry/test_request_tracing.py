@@ -144,11 +144,18 @@ class TestFastAPIInstrumentation:
         # means TelemetryManager never even constructs an exporter, so no
         # collector address is needed for this test at all -- relying on
         # TelemetryConfig's own default value here would be misleading.
+<<<<<<< HEAD
         config = TelemetryConfig(enabled=True, export_traces=False)
+=======
+        config = TelemetryConfig(
+            enabled=True, export_traces=False, export_metrics=False
+        )
+>>>>>>> upstream/master
         telemetry_manager = get_telemetry_manager(config)
 
         tracer_provider = telemetry_manager.tracer_provider
         assert tracer_provider is not None
+<<<<<<< HEAD
 
         # No span processor (i.e. no exporter) was ever attached when
         # export_traces is False -- confirms zero export overhead
@@ -247,6 +254,106 @@ class TestFastAPIInstrumentationOrderingMechanism1679:
         from fastapi.testclient import TestClient
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
+=======
+
+        # No span processor (i.e. no exporter) was ever attached when
+        # export_traces is False -- confirms zero export overhead
+        # regardless of whether FastAPI instrumentation is structurally
+        # applied elsewhere.
+        processors = tracer_provider._active_span_processor._span_processors
+        assert processors == (), (
+            f"Expected zero span processors when export_traces=False, "
+            f"got: {processors!r}"
+        )
+
+
+class TestFastAPIInstrumentationOrderingMechanism1679:
+    """
+    Fast (no 'slow' marker), non-subprocess characterization test of the
+    THIRD-PARTY Starlette/FastAPIInstrumentor ordering mechanism Bug #1679
+    depends on -- it does NOT exercise this project's own production code
+    path and is NOT, by itself, a regression guard for the real call site.
+
+    Uses a bare FastAPI() app (built by this test, not create_app()) with
+    an EXPLICIT local TracerProvider passed directly to
+    FastAPIInstrumentor.instrument_app(app, tracer_provider=...) -- this
+    bypasses OTEL's "global tracer provider settable only once per
+    process" constraint entirely (no subprocess needed), while still
+    exercising the REAL FastAPIInstrumentor/TracerProvider/
+    InMemorySpanExporter/TestClient machinery. No mocks.
+
+    Round-3 code review correctly identified that this class never
+    imports or calls app_wiring.py's create_fastapi_app(), lifespan.py,
+    or even this project's own instrument_fastapi() wrapper -- so it
+    would keep passing unchanged even if someone moved the real
+    instrument_fastapi(app) call back inside lifespan(), deleted it
+    entirely, or reverted the telemetry_config.enabled gate. Its value is
+    narrower: it pins that FastAPIInstrumentor+Starlette really do behave
+    the way this fix's whole design depends on (instrument-before-build
+    succeeds, instrument-after-build is a silent no-op).
+
+    The ACTUAL regression guard for the real production call site (its
+    presence, its ordering relative to app.add_middleware(), its
+    telemetry_config.enabled gate, and its absence from lifespan.py) is
+    tests/unit/server/startup/test_app_wiring_fastapi_instrumentation_ordering_1679.py,
+    which inspects the real create_fastapi_app()/lifespan source directly.
+    """
+
+    @staticmethod
+    def _build_app_with_local_tracer():
+        from fastapi import FastAPI
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+
+        app = FastAPI()
+
+        @app.get("/ping")
+        def ping():
+            return {"ok": True}
+
+        provider = TracerProvider()
+        exporter = InMemorySpanExporter()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        return app, provider, exporter
+
+    def test_instrument_before_stack_build_produces_real_spans(self):
+        """Matches the FIXED call site: instrument_fastapi(app) in
+        app_wiring.py runs immediately after FastAPI(...), before
+        Starlette ever builds the middleware stack."""
+        from fastapi.testclient import TestClient
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+        app, provider, exporter = self._build_app_with_local_tracer()
+
+        assert app.middleware_stack is None, (
+            "Precondition: Starlette must not have built its middleware "
+            "stack yet, or this test cannot distinguish before/after."
+        )
+
+        FastAPIInstrumentor.instrument_app(app, tracer_provider=provider)
+        try:
+            with TestClient(app) as client:
+                response = client.get("/ping")
+
+            assert response.status_code == 200
+            assert len(exporter.get_finished_spans()) > 0, (
+                "Expected real spans when instrumented BEFORE the "
+                "middleware stack is built (the fixed ordering)."
+            )
+        finally:
+            FastAPIInstrumentor.uninstrument_app(app)
+
+    def test_instrument_after_stack_build_produces_zero_spans(self):
+        """Reproduces the Bug #1679 mechanism directly: instrumenting
+        AFTER Starlette has already built its middleware stack (matching
+        the pre-fix call site inside lifespan()) is a structural no-op."""
+        from fastapi.testclient import TestClient
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+>>>>>>> upstream/master
         app, provider, exporter = self._build_app_with_local_tracer()
 
         # Simulate what Starlette does automatically on the very first

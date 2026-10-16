@@ -155,7 +155,11 @@ async def sso_callback(code: str, state: str, request: Request):
         # and its POST /oauth/mfa/verify completion, the same mechanism the
         # password-based OAuth authorize flow already applies.
         if _get_user_mfa_status(user.username):
+<<<<<<< HEAD
             from ..mfa_challenge import mfa_challenge_manager
+=======
+            from ..mfa_challenge import FIRST_FACTOR_SSO, mfa_challenge_manager
+>>>>>>> upstream/master
             from ...web.mfa_routes import render_oauth_mfa_challenge_page
 
             client_ip = request.client.host if request.client else "unknown"
@@ -168,6 +172,10 @@ async def sso_callback(code: str, state: str, request: Request):
                 oauth_redirect_uri=state_data["redirect_uri"],
                 oauth_code_challenge=state_data["code_challenge"],
                 oauth_state=state_data["oauth_state"],
+<<<<<<< HEAD
+=======
+                first_factor=FIRST_FACTOR_SSO,
+>>>>>>> upstream/master
             )
             return render_oauth_mfa_challenge_page(challenge_token)
 
@@ -187,9 +195,14 @@ async def sso_callback(code: str, state: str, request: Request):
 
         # Redirect back to OAuth client (Claude Code) with authorization code
         # Include state only when provided (Bug #624: state is optional per OAuth 2.1 PKCE)
-        redirect_url = f"{state_data['redirect_uri']}?code={oauth_code}"
-        if state_data["oauth_state"] is not None:
-            redirect_url = f"{redirect_url}&state={state_data['oauth_state']}"
+        # The redirect_uri was accepted by code issuance (exact match against
+        # the client's registered URIs) before this point.
+        from ..oauth.oauth_manager import authorization_response_url
+
+        redirect_url = authorization_response_url(
+            state_data["redirect_uri"],
+            {"code": oauth_code, "state": state_data["oauth_state"]},
+        )
         return RedirectResponse(url=redirect_url, status_code=302)
 
     else:
@@ -211,7 +224,7 @@ async def sso_callback(code: str, state: str, request: Request):
 
         # MFA enforcement for SSO users (same pattern as password login)
         if _get_user_mfa_status(user.username):
-            from ..mfa_challenge import mfa_challenge_manager
+            from ..mfa_challenge import FIRST_FACTOR_SSO, mfa_challenge_manager
             from ...web.mfa_routes import render_mfa_challenge_page
 
             client_ip = request.client.host if request.client else "unknown"
@@ -220,6 +233,7 @@ async def sso_callback(code: str, state: str, request: Request):
                 role=user.role.value,
                 client_ip=client_ip,
                 redirect_url=redirect_url,
+                first_factor=FIRST_FACTOR_SSO,
             )
             return render_mfa_challenge_page(challenge_token)
 

@@ -22,7 +22,11 @@ from unittest.mock import patch
 from code_indexer.config import Config
 from code_indexer.indexing.file_finder import FileFinder
 from code_indexer.utils.path_confinement import (
+<<<<<<< HEAD
     is_resolved_within_root as _real_is_resolved_within_root,
+=======
+    is_indexable_location as _real_is_indexable_location,
+>>>>>>> upstream/master
 )
 
 
@@ -167,7 +171,11 @@ class TestContainmentCheckOnlyRunsForSymlinks:
         finder = _make_finder(root)
 
         with patch(
+<<<<<<< HEAD
             "code_indexer.indexing.file_finder.is_resolved_within_root"
+=======
+            "code_indexer.indexing.file_finder.is_indexable_location"
+>>>>>>> upstream/master
         ) as mock_check:
             found = _relative_paths(finder)
 
@@ -190,8 +198,13 @@ class TestContainmentCheckOnlyRunsForSymlinks:
         finder = _make_finder(root)
 
         with patch(
+<<<<<<< HEAD
             "code_indexer.indexing.file_finder.is_resolved_within_root",
             wraps=_real_is_resolved_within_root,
+=======
+            "code_indexer.indexing.file_finder.is_indexable_location",
+            wraps=_real_is_indexable_location,
+>>>>>>> upstream/master
         ) as mock_check:
             found = _relative_paths(finder)
 

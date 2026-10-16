@@ -1,0 +1,99 @@
+"""What a failed search may tell its client.
+
+Every search front door (REST ``/api/query`` and ``/api/query/multi``, MCP
+``search_code`` and its omni path) classifies a failure through
+``classify_search_error``. It is an allow-list: only errors that describe
+the caller's own request keep their text --
+
+* ``SearchRequestError`` (incl. ``SearchRepositoryNotFoundError``) -- every
+  request-validation site on the search paths raises it,
+* ``AccessFilteringServiceUnavailableError`` (a fixed text),
+* an ``HTTPException`` with a 4xx status raised deliberately.
+
+A plain ``ValueError`` is NOT a client error: storage, JSON and provider
+code raise it too, sometimes with internal detail.
+
+Every other exception answers a fixed public message ("Search timed out"
+when a timeout is in its cause chain, else "Search failed"); the caller
+logs the full detail at ERROR with ``exc_info``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Optional
+
+from fastapi import HTTPException
+
+from code_indexer.server.logging_utils import public_error_message
+from code_indexer.server.query.semantic_query_manager import SearchRequestError
+
+SEARCH_FAILED = "Search failed"
+SEARCH_TIMED_OUT = "Search timed out"
+# Bound on the cause chain walked; a cycle or a deep chain never loops.
+_MAX_CHAIN = 8
+
+
+@dataclass(frozen=True)
+class SearchErrorOutcome:
+    """The client-facing message for a failed search, and its class.
+
+    ``log_as_internal`` is how every front door picks its log level: True
+    logs at ERROR with ``exc_info``, False at WARNING without a traceback.
+    It is True for every non-client failure, and also for
+    ``AccessFilteringServiceUnavailableError``, which keeps its fixed text in
+    the response but means a server-side service is not wired.
+    """
+
+    message: str
+    client_error: bool
+    log_as_internal: bool
+    timed_out: bool = False
+
+
+def _chain(error: BaseException) -> List[BaseException]:
+    links: List[BaseException] = []
+    current: Optional[BaseException] = error
+    while current is not None and len(links) < _MAX_CHAIN and current not in links:
+        links.append(current)
+        current = current.__cause__ or current.__context__
+    return links
+
+
+def _client_text(error: BaseException) -> Optional[str]:
+    from code_indexer.server.services.repo_access_guard import (
+        AccessFilteringServiceUnavailableError,
+    )
+
+    if isinstance(error, (SearchRequestError, AccessFilteringServiceUnavailableError)):
+        return str(error)
+    if isinstance(error, HTTPException) and 400 <= error.status_code < 500:
+        return str(error.detail)
+    return None
+
+
+def classify_search_error(error: BaseException) -> SearchErrorOutcome:
+    """Classify a failed search for its client-facing response."""
+    from code_indexer.server.services.repo_access_guard import (
+        AccessFilteringServiceUnavailableError,
+    )
+
+    text = _client_text(error)
+    if text is not None:
+        return SearchErrorOutcome(
+            message=text,
+            client_error=True,
+            log_as_internal=isinstance(error, AccessFilteringServiceUnavailableError),
+        )
+    if any(isinstance(link, TimeoutError) for link in _chain(error)):
+        return SearchErrorOutcome(
+            message=public_error_message(SEARCH_TIMED_OUT),
+            client_error=False,
+            log_as_internal=True,
+            timed_out=True,
+        )
+    return SearchErrorOutcome(
+        message=public_error_message(SEARCH_FAILED),
+        client_error=False,
+        log_as_internal=True,
+    )

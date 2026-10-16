@@ -19,7 +19,11 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+<<<<<<< HEAD
 from typing import Dict, Any, Optional, Tuple, TYPE_CHECKING
+=======
+from typing import Dict, Any, Optional, TYPE_CHECKING
+>>>>>>> upstream/master
 
 from code_indexer.global_repos.write_mode_markers import WriteModeMarkers
 from code_indexer.server.startup.content_backend_wiring import (
@@ -36,6 +40,7 @@ if TYPE_CHECKING:
     from code_indexer.server.repositories.activated_repo_manager import (
         ActivatedRepoManager,
     )
+<<<<<<< HEAD
     from code_indexer.server.services.golden_repo_writer import (
         Expected,
         GoldenRepoWriteTarget,
@@ -45,6 +50,8 @@ _UTF8_BOM = b"\xef\xbb\xbf"
 #: Why a content hash may not match, as each tool has always worded it.
 _EDIT_STALE_REASON = "File may have been modified by another process."
 _DELETE_STALE_REASON = "File may have been modified since hash was computed."
+=======
+>>>>>>> upstream/master
 
 
 def _get_activated_repo_manager() -> "ActivatedRepoManager":
@@ -339,12 +346,15 @@ class FileCRUDService:
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
 
+<<<<<<< HEAD
         # Content seam: a golden repo that is not on this pod is written
         # through the content writer. None (the local disk) by default.
         target = self._golden_write_target(repo_alias, repo_path)
         if target is not None:
             return self._create_through_writer(target, file_path, content)
 
+=======
+>>>>>>> upstream/master
         # Bug #1891: resolve + confine BEFORE any exists()/open() call.
         # _validate_crud_path() above only rejects literal ".." components
         # and absolute paths -- it does not catch a symlink already
@@ -421,6 +431,7 @@ class FileCRUDService:
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
 
+<<<<<<< HEAD
         # Content seam (see create_file).
         target = self._golden_write_target(repo_alias, repo_path)
         if target is not None:
@@ -428,6 +439,8 @@ class FileCRUDService:
                 target, file_path, old_string, new_string, content_hash, replace_all
             )
 
+=======
+>>>>>>> upstream/master
         # Bug #1891: resolve + confine BEFORE any exists()/open() call.
         # _validate_crud_path() above only rejects literal ".." components
         # and absolute paths -- it does not catch a symlink already
@@ -505,11 +518,14 @@ class FileCRUDService:
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
 
+<<<<<<< HEAD
         # Content seam (see create_file).
         target = self._golden_write_target(repo_alias, repo_path)
         if target is not None:
             return self._delete_through_writer(target, file_path, content_hash)
 
+=======
+>>>>>>> upstream/master
         # Bug #1891: resolve + confine BEFORE any exists()/open() call.
         # _validate_crud_path() above only rejects literal ".." components
         # and absolute paths -- it does not catch a symlink already

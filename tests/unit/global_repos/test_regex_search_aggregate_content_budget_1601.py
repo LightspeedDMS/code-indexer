@@ -101,7 +101,11 @@ class TestAggregateResultContentBudget:
 
         with (
             patch(
+<<<<<<< HEAD
                 "code_indexer.server.services.subprocess_executor.SubprocessExecutor",
+=======
+                "code_indexer.global_repos.regex_search.SubprocessExecutor",
+>>>>>>> upstream/master
                 return_value=mock_executor,
             ),
             patch.object(
@@ -138,7 +142,11 @@ class TestAggregateResultContentBudget:
         mock_executor = _mock_executor_copying_from(str(source_path))
 
         with patch(
+<<<<<<< HEAD
             "code_indexer.server.services.subprocess_executor.SubprocessExecutor",
+=======
+            "code_indexer.global_repos.regex_search.SubprocessExecutor",
+>>>>>>> upstream/master
             return_value=mock_executor,
         ):
             result = await service.search(pattern="x+", max_results=100)
@@ -154,12 +162,23 @@ def _write_many_grep_match_lines(
 ) -> None:
     with open(path, "w", encoding="utf-8") as f:
         for i in range(num_events):
+<<<<<<< HEAD
             f.write(f"file{i}.py:1:{'x' * content_bytes}\n")
+=======
+            # grep --null record format (Bug #2030): path\0LINE:content
+            f.write(f"file{i}.py\x001:{'x' * content_bytes}\n")
+>>>>>>> upstream/master
 
 
 def _build_grep_service(tmp_path) -> RegexSearchService:
     with patch("code_indexer.global_repos.regex_search.shutil.which") as mock_which:
+<<<<<<< HEAD
         mock_which.side_effect = lambda cmd: "/usr/bin/grep" if cmd == "grep" else None
+=======
+        mock_which.side_effect = lambda cmd: (
+            "/usr/bin/grep" if cmd == "grep" else None
+        )
+>>>>>>> upstream/master
         return RegexSearchService(tmp_path)
 
 
@@ -178,7 +197,11 @@ class TestAggregateResultContentBudgetGrepEngine:
 
         with (
             patch(
+<<<<<<< HEAD
                 "code_indexer.server.services.subprocess_executor.SubprocessExecutor",
+=======
+                "code_indexer.global_repos.regex_search.SubprocessExecutor",
+>>>>>>> upstream/master
                 return_value=mock_executor,
             ),
             patch.object(

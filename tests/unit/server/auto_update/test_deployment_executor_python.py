@@ -446,10 +446,15 @@ class TestConstants:
 
     def test_pending_redeploy_marker_constant(self):
         """Test that PENDING_REDEPLOY_MARKER constant is defined."""
-        # Note: Using ~/.cidx-server/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
-        # and /var/lib/ is not writable by non-root service users
+        # Note: Using the cidx data dir (~/.cidx-server/ by default) instead of /tmp/
+        # because systemd PrivateTmp=yes isolates /tmp and /var/lib/ is not writable
+        # by non-root service users.  Bug #1996: compare with the module's resolved
+        # data dir -- the test session points CIDX_DATA_DIR away from the real home.
+        from code_indexer.server.auto_update import deployment_executor
+
         assert (
-            PENDING_REDEPLOY_MARKER == Path.home() / ".cidx-server" / "pending-redeploy"
+            PENDING_REDEPLOY_MARKER
+            == deployment_executor._cidx_data_dir / "pending-redeploy"
         )
 
     def test_auto_update_service_name_constant(self):

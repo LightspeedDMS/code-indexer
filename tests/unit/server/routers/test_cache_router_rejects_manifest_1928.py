@@ -29,9 +29,27 @@ from code_indexer.server.routers.cache import router as cache_router
 
 
 def _make_client(payload_cache: object) -> TestClient:
+<<<<<<< HEAD
     app = FastAPI()
     app.include_router(cache_router)
     app.state.payload_cache = payload_cache
+=======
+    from datetime import datetime, timezone
+
+    from code_indexer.server.auth import dependencies
+    from code_indexer.server.auth.user_manager import User, UserRole
+
+    caller = User(
+        username="alice",
+        password_hash="unused",
+        role=UserRole.NORMAL_USER,
+        created_at=datetime.now(timezone.utc),
+    )
+    app = FastAPI()
+    app.include_router(cache_router)
+    app.state.payload_cache = payload_cache
+    app.dependency_overrides[dependencies.get_current_user] = lambda: caller
+>>>>>>> upstream/master
     return TestClient(app)
 
 
@@ -56,7 +74,11 @@ class TestCacheRouterRejectsManifestHandle:
             ),
             "handle": manifest_handle,
         }, f"body must exactly match CacheErrorResponse, no detail wrapper: {body}"
+<<<<<<< HEAD
         mock_cache.retrieve.assert_not_called()
+=======
+        mock_cache.retrieve_owned.assert_not_called()
+>>>>>>> upstream/master
 
 
 class TestCacheRouterExpiredHandleMatchesDeclaredSchema:
@@ -64,7 +86,11 @@ class TestCacheRouterExpiredHandleMatchesDeclaredSchema:
         self,
     ) -> None:
         mock_cache = MagicMock()
+<<<<<<< HEAD
         mock_cache.retrieve.side_effect = CacheNotFoundError("handle expired")
+=======
+        mock_cache.retrieve_owned.side_effect = CacheNotFoundError("handle expired")
+>>>>>>> upstream/master
         client = _make_client(mock_cache)
 
         response = client.get("/cache/some-legacy-handle")

@@ -236,3 +236,55 @@ class TestServerInstallationIntegration:
             assert saved_config["port"] == 8000
             assert saved_config["jwt_expiration_minutes"] == 10
             assert saved_config["log_level"] == "INFO"
+
+
+class TestInstallServerDocsHint:
+    """API documentation requires an authenticated session or token: every
+    install-server hint about /docs says a login is required."""
+
+    _LOGIN_HINT = "requires login"
+
+    def test_new_installation_output_says_docs_require_login(self):
+        with patch(
+            "code_indexer.server.installer.ServerInstaller"
+        ) as mock_installer_class:
+            mock_installer = MagicMock()
+            mock_installer.get_installation_info.return_value = {"installed": False}
+            mock_installer.install.return_value = (
+                8000,
+                Path("/test/.cidx-server/config.json"),
+                Path("/test/.cidx-server/start-server.sh"),
+                True,
+            )
+            mock_installer_class.return_value = mock_installer
+
+            result = CliRunner().invoke(cli, ["install-server"])
+
+        assert result.exit_code == 0, result.output
+        assert "/docs" in result.output
+        assert self._LOGIN_HINT in result.output
+
+    def test_existing_installation_output_says_docs_require_login(self):
+        with patch(
+            "code_indexer.server.installer.ServerInstaller"
+        ) as mock_installer_class:
+            mock_installer = MagicMock()
+            mock_installer.get_installation_info.return_value = {
+                "installed": True,
+                "configured": True,
+                "port": 8000,
+            }
+            mock_installer.server_dir = Path("/test/.cidx-server")
+            mock_installer_class.return_value = mock_installer
+
+            result = CliRunner().invoke(cli, ["install-server"])
+
+        assert result.exit_code == 0, result.output
+        assert "/docs" in result.output
+        assert self._LOGIN_HINT in result.output
+
+    def test_help_text_says_docs_require_login(self):
+        result = CliRunner().invoke(cli, ["install-server", "--help"])
+
+        assert result.exit_code == 0, result.output
+        assert self._LOGIN_HINT in result.output

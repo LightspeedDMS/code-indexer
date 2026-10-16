@@ -27,7 +27,8 @@ inputSchema:
     limit:
       type: integer
       default: 20
-      description: 'Maximum number of runs to return (default: 20)'
+      description: 'Maximum number of runs to return (default: 20). Applied to GitHub results only; on GitLab the single
+        page fetched from the forge is returned as is.'
   required:
   - repository_alias
 outputSchema:
@@ -47,4 +48,4 @@ outputSchema:
       type: integer
 ---
 
-TL;DR: List CI/CD runs for a golden-repo alias. Auto-detects GitHub Actions or GitLab CI from the repository remote URL. QUICK START: ci_list_runs(repository_alias='myrepo-global') returns recent runs. FORGE OVERRIDE: pass forge='github' or forge='gitlab' to skip auto-detection. AUTO-DETECT FAILURE: if the remote URL hostname is not github.com or gitlab.com, pass forge explicitly. FILTERS: branch='main', status='completed', limit=20. MIGRATION: replaces github_actions_list_runs(owner, repo) and gitlab_ci_list_pipelines(project_id). repository_alias is the golden repo alias, not owner/repo.
+TL;DR: List CI/CD runs for a golden-repo alias. Auto-detects GitHub Actions or GitLab CI from the repository remote URL. QUICK START: ci_list_runs(repository_alias='myrepo-global') returns recent runs. FORGE OVERRIDE: pass forge='github' or forge='gitlab' to skip auto-detection. AUTO-DETECT FAILURE: if the remote URL hostname is not github.com or gitlab.com, pass forge explicitly. FILTERS: branch='main', status (forge-native value, e.g. 'completed' on GitHub, 'failed' on GitLab). PAGING: one page of the most recent runs is fetched from the forge at its default page size. On GitHub that list is cut to limit (default 20); on GitLab the fetched page is returned without applying limit. The response also carries rate_limit (the forge's rate-limit headers from the call). repository_alias is the golden repo alias, not owner/repo.

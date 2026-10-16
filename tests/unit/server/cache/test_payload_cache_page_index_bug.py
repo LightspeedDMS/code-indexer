@@ -79,7 +79,7 @@ class TestSmallPayloadPageIndexBug:
 
         # Store a ~3KB payload (> preview_size_chars=2000, < max_fetch_size=5000)
         small_payload = "X" * 3000
-        handle = cache.store(small_payload)
+        handle = cache.store(small_payload, owner="testuser")
 
         mock_app_module = MagicMock()
         mock_app_module.app.state.payload_cache = cache
@@ -110,7 +110,7 @@ class TestSmallPayloadPageIndexBug:
         )
 
         small_payload = "Y" * 2500
-        handle = cache.store(small_payload)
+        handle = cache.store(small_payload, owner="testuser")
 
         mock_app_module = MagicMock()
         mock_app_module.app.state.payload_cache = cache
@@ -138,7 +138,7 @@ class TestSmallPayloadPageIndexBug:
         first_page = "A" * 5000
         second_page = "B" * 5000
         large_payload = first_page + second_page
-        handle = cache.store(large_payload)
+        handle = cache.store(large_payload, owner="testuser")
 
         mock_app_module = MagicMock()
         mock_app_module.app.state.payload_cache = cache
@@ -168,7 +168,7 @@ class TestSmallPayloadPageIndexBug:
         first_page = "A" * 5000
         second_page = "B" * 5000
         large_payload = first_page + second_page
-        handle = cache.store(large_payload)
+        handle = cache.store(large_payload, owner="testuser")
 
         mock_app_module = MagicMock()
         mock_app_module.app.state.payload_cache = cache
@@ -194,7 +194,7 @@ class TestSmallPayloadPageIndexBug:
         )
 
         small_payload = "Z" * 3000
-        handle = cache.store(small_payload)
+        handle = cache.store(small_payload, owner="testuser")
 
         mock_app_module = MagicMock()
         mock_app_module.app.state.payload_cache = cache

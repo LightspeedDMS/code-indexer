@@ -7,9 +7,32 @@ and that appropriate error messages are displayed to users.
 
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 import pytest
+
+
+@contextmanager
+def _isolated_project(base: Path) -> Iterator[Path]:
+    """Yield a fresh project directory under ``base`` with no ancestor config.
+
+    The CLI adopts the nearest ancestor ``.code-indexer/config.json``, so an
+    ``index`` run inside another project (e.g. a stray config in the system
+    temp dir) operates on that project and never reaches the flag validation
+    under test.
+    """
+    from code_indexer.config import ConfigManager
+
+    test_dir = base / "test_project"
+    test_dir.mkdir()
+    foreign_config = ConfigManager.find_config_path(test_dir)
+    assert foreign_config is None, (
+        f"an ancestor project config {foreign_config} would capture this CLI "
+        "run; the test directory must not be inside another project"
+    )
+    yield test_dir
 
 
 class TestCLIFlagValidation:
@@ -67,12 +90,7 @@ class TestCLIFlagValidation:
 
     def test_detect_deletions_with_clear_warning(self, local_tmp_path):
         """Test that --detect-deletions with --clear shows warning but continues."""
-        # Create a truly isolated test directory (not using shared infrastructure)
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as isolated_tmp:
-            test_dir = Path(isolated_tmp) / "test_project"
-            test_dir.mkdir()
+        with _isolated_project(local_tmp_path) as test_dir:
             test_file = test_dir / "test.py"
             test_file.write_text("print('hello')")
 
@@ -156,12 +174,7 @@ class TestCLIFlagValidation:
 
     def test_detect_deletions_alone_valid(self, local_tmp_path):
         """Test that --detect-deletions alone is valid."""
-        # Create a truly isolated test directory (not using shared infrastructure)
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as isolated_tmp:
-            test_dir = Path(isolated_tmp) / "test_project"
-            test_dir.mkdir()
+        with _isolated_project(local_tmp_path) as test_dir:
             test_file = test_dir / "test.py"
             test_file.write_text("print('hello')")
 
@@ -239,12 +252,7 @@ class TestCLIFlagValidation:
 
     def test_reconcile_alone_valid(self, local_tmp_path):
         """Test that --reconcile alone is valid (includes deletion detection)."""
-        # Create a truly isolated test directory (not using shared infrastructure)
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as isolated_tmp:
-            test_dir = Path(isolated_tmp) / "test_project"
-            test_dir.mkdir()
+        with _isolated_project(local_tmp_path) as test_dir:
             test_file = test_dir / "test.py"
             test_file.write_text("print('hello')")
 

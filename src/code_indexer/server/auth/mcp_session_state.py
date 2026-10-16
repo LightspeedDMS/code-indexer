@@ -162,6 +162,24 @@ class MCPSessionState:
         with self._lock:
             self._impersonated_user = target_user
 
+    def refresh_authenticated_user(self, current_user: User) -> None:
+        """Replace the stored authenticated user with *current_user*.
+
+        Called on every reuse of the session with the user authenticated for
+        THIS request, so no code path reads a role stored when the session
+        was created.  An owner who is no longer ADMIN loses any active
+        impersonation.  The caller guarantees *current_user* is the
+        session's owner (same username).
+
+        Thread-safe: Protected by internal lock.
+        """
+        with self._lock:
+            if current_user.username != self._authenticated_user.username:
+                raise AssertionError("session owner cannot change")
+            self._authenticated_user = current_user
+            if current_user.role != UserRole.ADMIN:
+                self._impersonated_user = None
+
     def clear_impersonation(self) -> None:
         """Clear any active impersonation.
 

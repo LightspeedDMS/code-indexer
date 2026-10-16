@@ -168,6 +168,10 @@ class _RealisticRefreshSchedulerDouble:
     def __init__(self, background_job_manager: BackgroundJobManager) -> None:
         self._bgm = background_job_manager
         self.claimed_execute_calls: List[Tuple[str, Optional[ProgressCallback]]] = []
+<<<<<<< HEAD
+=======
+        self.claimed_execute_job_ids: List[Optional[str]] = []
+>>>>>>> upstream/master
 
     def trigger_refresh_for_repo(
         self, alias_name: str, submitter_username: str = "system"
@@ -182,9 +186,20 @@ class _RealisticRefreshSchedulerDouble:
         return job_id
 
     def execute_refresh_for_claimed_job(
+<<<<<<< HEAD
         self, alias_name: str, progress_callback: Optional[ProgressCallback] = None
     ) -> Dict[str, Any]:
         self.claimed_execute_calls.append((alias_name, progress_callback))
+=======
+        self,
+        alias_name: str,
+        progress_callback: Optional[ProgressCallback] = None,
+        job_id: Optional[str] = None,
+        submitter_username: str = "system",
+    ) -> Dict[str, Any]:
+        self.claimed_execute_calls.append((alias_name, progress_callback))
+        self.claimed_execute_job_ids.append(job_id)
+>>>>>>> upstream/master
         return {"success": True, "alias": alias_name, "message": "refreshed"}
 
 
@@ -297,6 +312,12 @@ class TestClaimedJobDoesNotFailItsOwnDedupCheck:
             "using the submission path (trigger_refresh_for_repo)."
         )
         assert scheduler.claimed_execute_calls[0][0] == "other-repo-global"
+<<<<<<< HEAD
+=======
+        # Story #2118: the claimed job's id is recorded on the refresh's
+        # embedding_call_stats rows.
+        assert scheduler.claimed_execute_job_ids == [claimed_job_id]
+>>>>>>> upstream/master
 
 
 class TestGenuineDuplicateStillRejected:

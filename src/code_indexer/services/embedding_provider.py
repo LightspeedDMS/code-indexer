@@ -150,3 +150,13 @@ class EmbeddingProvider(ABC):
             True if batch processing is supported and efficient
         """
         pass
+
+    @abstractmethod
+    def request_max_retries(self) -> int:
+        """Retries one indexing request may make after its first attempt.
+
+        Story #2122: an armed ``cidx index`` run allows each registered miss
+        ``1 + request_max_retries()`` provider attempts, so every provider
+        must state it (a provider without it cannot be constructed).
+        """
+        pass

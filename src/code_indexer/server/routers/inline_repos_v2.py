@@ -53,6 +53,7 @@ from ..auth import dependencies
 from . import repo_access_http
 from ..managers.composite_file_listing import _list_composite_files
 from ..services.stats_service import stats_service
+<<<<<<< HEAD
 from ..services.file_service import ContentSeamSource, file_service
 from ..services.file_listing_paths import build_non_composite_path_pattern
 from code_indexer.utils.path_confinement import (
@@ -67,6 +68,11 @@ from ..services.activated_copy_content import (
     read_copy_file,
     visible_files,
 )
+=======
+from ..services.file_service import file_service
+from ..services.file_listing_paths import build_non_composite_path_pattern
+from code_indexer.utils.path_confinement import resolve_confined_path
+>>>>>>> upstream/master
 from ..services.search_service import search_service
 from ..app_helpers import _execute_repository_sync, _get_composite_details
 
@@ -199,6 +205,27 @@ def register_repos_v2_routes(
             getattr(app.state, "access_filtering_service", None), username, repo_id
         )
 
+<<<<<<< HEAD
+=======
+    def _enforce_activation_access(
+        username: str,
+        user_alias: str,
+        refusal: HTTPException,
+        activation_required: bool = True,
+    ) -> None:
+        """Require the caller's grants on the source golden repositories of
+        their own activation *user_alias* (the MCP rule), answering
+        *refusal* -- the route's response for a repository the caller cannot
+        reach -- otherwise (shared guard; fails closed with 500)."""
+        repo_access_http.enforce_activated_repo_access(
+            getattr(app.state, "access_filtering_service", None),
+            username,
+            user_alias,
+            refusal,
+            activation_required=activation_required,
+        )
+
+>>>>>>> upstream/master
     @app.get("/api/repositories/{repo_id}")
     def get_repository_details_v2(
         repo_id: str,
@@ -242,6 +269,18 @@ def register_repos_v2_routes(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid repository ID format",
             )
+
+        # A repo_id naming one of the caller's own activations is served from
+        # it (Strategy 1, whose block swallows every exception): require the
+        # activation's source grants first, refused like an unknown repo.
+        _enforce_activation_access(
+            current_user.username,
+            cleaned_repo_id,
+            repo_access_http.access_denied_error(
+                cleaned_repo_id, current_user.username
+            ),
+            activation_required=False,
+        )
 
         # Strategy 1: Try to find repository among user's activated repositories
         try:
@@ -617,6 +656,13 @@ def register_repos_v2_routes(
                         repo["user_alias"] == cleaned_repo_id
                         or repo["golden_repo_alias"] == cleaned_repo_id
                     ):
+                        _enforce_activation_access(
+                            current_user.username,
+                            repo["user_alias"],
+                            repo_access_http.access_denied_error(
+                                cleaned_repo_id, current_user.username
+                            ),
+                        )
                         repo_found = True
                         # Construct path from activated_repos_dir + username + user_alias
                         repo_path = (
@@ -639,7 +685,11 @@ def register_repos_v2_routes(
                         )
                     )
                     repo_found = True
+<<<<<<< HEAD
                     is_golden = True
+=======
+                    repo_path = Path(repo_details["clone_path"])
+>>>>>>> upstream/master
                 except RepositoryListingError:
                     pass
 
@@ -744,6 +794,13 @@ def register_repos_v2_routes(
                         repo["user_alias"] == cleaned_repo_id
                         or repo["golden_repo_alias"] == cleaned_repo_id
                     ):
+                        _enforce_activation_access(
+                            current_user.username,
+                            repo["user_alias"],
+                            repo_access_http.access_denied_error(
+                                cleaned_repo_id, current_user.username
+                            ),
+                        )
                         repo_found = True
                         break
 
@@ -891,6 +948,14 @@ def register_repos_v2_routes(
         Following CLAUDE.md Foundation #1: Uses real file system operations,
         no mocks or simulated data.
         """
+        _enforce_activation_access(
+            current_user.username,
+            repo_id,
+            HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Repository '{repo_id}' not found",
+            ),
+        )
         try:
             stats_response = stats_service.get_repository_stats(
                 repo_id, username=current_user.username
@@ -946,6 +1011,20 @@ def register_repos_v2_routes(
         If content=True and path points to a single file, return file content.
         Uses real file system operations following CLAUDE.md Foundation #1.
         """
+        # Both branches below serve the caller's own activation repo_id.
+        _enforce_activation_access(
+            current_user.username,
+            repo_id,
+            HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "Repository not found"
+                    if content and path
+                    else f"Repository '{repo_id}' not found"
+                ),
+            ),
+        )
+
         # If content requested and path is a file, return content
         if content and path:
             repo_dict = activated_repo_manager.get_repository(
@@ -962,10 +1041,13 @@ def register_repos_v2_routes(
 
             repo = ActivatedRepository.from_dict(repo_dict)
 
+<<<<<<< HEAD
             copy_source = delegated_copy_source(repo.path)
             if copy_source is not None:
                 return _copy_file_content_via_seam(copy_source, path)
 
+=======
+>>>>>>> upstream/master
             # Bug #1891: confine the resolved target to repo.path BEFORE any
             # exists()/is_file()/open() touches the filesystem. A caller-
             # supplied `path` containing parent-directory segments, an
@@ -1037,6 +1119,7 @@ def register_repos_v2_routes(
                 current_user.username, repo_id
             )
             if repo_dict and repo_dict.get("is_composite", False):
+<<<<<<< HEAD
                 # The path is relative to every component: an absolute path or
                 # a ".." component would leave the composite.
                 if path:
@@ -1047,6 +1130,8 @@ def register_repos_v2_routes(
                             status_code=status.HTTP_400_BAD_REQUEST,
                             detail="Invalid path: must be a relative path within the repository",
                         )
+=======
+>>>>>>> upstream/master
                 # Composite repository - use simple file listing.
                 # Bug #1886 (R3 revision): byte-identical to HEAD --
                 # `recursive` is a plain bool again (composite-only,

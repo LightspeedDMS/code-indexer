@@ -53,7 +53,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+<<<<<<< HEAD
 from types import SimpleNamespace
+=======
+>>>>>>> upstream/master
 import math
 from pathlib import Path
 from typing import Any, List, Tuple, cast
@@ -173,6 +176,7 @@ async def _invoke(module: Any, name: str, params: dict, user: Any) -> dict:
 
 
 @pytest.fixture(autouse=True)
+<<<<<<< HEAD
 def _no_lazy_app_construction(monkeypatch):
     """Hermetic stand-ins for the lazy app singleton's attributes these tests
     patch (``app.state.*``, ``activated_repo_manager``).
@@ -197,10 +201,20 @@ def _no_lazy_app_construction(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+=======
+>>>>>>> upstream/master
 def _admission_gate_seams():
     """Install the real check_query_admission()'s two lazy-import
     dependencies as controlled test doubles; restore process-level
     singletons on teardown so no state leaks to other test modules."""
+<<<<<<< HEAD
+=======
+    # app.py's module attributes are lazy (PEP 562): the first access runs
+    # create_app(), which calls initialize_runtime_db() on the config service.
+    # Build it here, BEFORE the stub (which has no such method) is installed,
+    # so this file passes alone and not only after another file built the app.
+    _handlers_utils.app_module.app
+>>>>>>> upstream/master
     cfg_service_module.set_config_service(_StubConfigService())  # type: ignore[arg-type]
     yield
     mg.clear_memory_governor()
@@ -511,10 +525,16 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
         mock_access_service = MagicMock()
         mock_access_service.is_admin_user.return_value = True
         with (
+<<<<<<< HEAD
             # xray_batch resolves through its own registry-backed
             # _resolve_repo_path (Bug #1315), no longer repos._resolve_golden_repo_path.
             patch.object(
                 xray_batch, "_resolve_repo_path", return_value=_FAKE_REPO_PATH
+=======
+            patch(
+                "code_indexer.server.mcp.handlers.repos._resolve_golden_repo_path",
+                return_value=_FAKE_REPO_PATH,
+>>>>>>> upstream/master
             ),
             patch.object(
                 xray_batch, "_get_background_job_manager", return_value=mock_bjm

@@ -13,6 +13,10 @@ import time
 import threading
 from pathlib import Path
 from typing import (
+<<<<<<< HEAD
+=======
+    TYPE_CHECKING,
+>>>>>>> upstream/master
     Optional,
     Union,
     Callable,
@@ -20,12 +24,19 @@ from typing import (
     Any,
     List,
     Literal,
+<<<<<<< HEAD
     Tuple,
     cast,
     TYPE_CHECKING,
+=======
+    cast,
+>>>>>>> upstream/master
 )
 
 import click
+
+if TYPE_CHECKING:
+    from .server.services.embedding_stats_attribution import StatsAttribution
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
@@ -33,12 +44,15 @@ from rich.table import Table
 # Rich progress imports removed - using MultiThreadedProgressManager instead
 
 from .config import ConfigManager, Config, ConfigCorruptionError
+<<<<<<< HEAD
 
 # CRITICAL: TYPE_CHECKING-only import -- Tantivy must NOT load eagerly at
 # CLI-startup import time (see the "Tantivy lazy import" perf rule).
 # TYPE_CHECKING imports are erased at runtime (mypy-only), so this is safe.
 if TYPE_CHECKING:
     from .services.tantivy_index_manager import TantivyIndexManager
+=======
+>>>>>>> upstream/master
 from .services.temporal.temporal_migration import migrate_legacy_temporal_collection
 from .disabled_commands import get_command_mode_icons
 from .utils.enhanced_messaging import (
@@ -219,26 +233,36 @@ _RERANK_OVERFETCH_MULTIPLIER = 4
 def _parse_file_extensions(raw: Optional[str]) -> List[str]:
     """Parse --file-extensions CLI flag into a normalized list (Story #906).
 
-    Comma-separated input. Each token is whitespace-stripped, then any leading
-    dots are stripped (so '.py' and 'py' are equivalent). Tokens that are empty
-    after BOTH normalization steps are skipped (handles inputs like '.' or
-    '.,py' that would otherwise produce empty entries). Returns [] when input
-    is None, empty, or whitespace-only.
+    Comma-separated input; EVERY token goes through the shared #2047 rule
+    (services/extension_filter.normalize_extension): stripped,
+    lowercased, one leading dot dropped. A blank token, or one that can never
+    be a file suffix, raises the same ValueError every other door raises --
+    nothing is silently dropped. Returns [] (no filter) when the flag is
+    absent or its whole value is empty, as the --file-extensions help states.
 
     Examples:
       _parse_file_extensions(None)           == []
       _parse_file_extensions("")             == []
       _parse_file_extensions("py")           == ["py"]
-      _parse_file_extensions("py,js")        == ["py", "js"]
-      _parse_file_extensions(".py,.js")      == ["py", "js"]
+      _parse_file_extensions(".py,.JS")      == ["py", "js"]
       _parse_file_extensions("py, js, ts")   == ["py", "js", "ts"]
-      _parse_file_extensions(".")            == []
-      _parse_file_extensions(".,py")         == ["py"]
+      _parse_file_extensions("py, ")         -> ValueError (blank token)
     """
-    if not raw:
+    from .services.extension_filter import normalize_extension
+
+    if raw is None or not raw.strip():
         return []
-    normalized = (ext.strip().lstrip(".") for ext in raw.split(","))
-    return [ext for ext in normalized if ext]
+    return [normalize_extension(token) for token in raw.split(",")]
+
+
+def _file_extension_condition(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    """--file-extensions as ONE vector-store condition (#2047), built by the
+    builder the server and daemon share: the store's ``any_ext`` operator on
+    the ``path`` payload, so several extensions are OR-ed and the condition
+    still intersects with --language inside ``must``. None if empty."""
+    from .services.extension_filter import vector_store_extension_condition
+
+    return vector_store_extension_condition(_parse_file_extensions(raw))
 
 
 def _log_skipped_provider_warning(provider_name: str) -> None:
@@ -1031,6 +1055,11 @@ def _display_semantic_results(
         except Exception:
             current_display_branch = "unknown"
 
+    from code_indexer.utils.content_availability import (
+        CONTENT_UNAVAILABLE_MARKER,
+        is_content_unavailable,
+    )
+
     for i, result in enumerate(results, 1):
         payload = result["payload"]
         score = result["score"]
@@ -1039,6 +1068,8 @@ def _display_semantic_results(
         file_path = payload.get("path", "unknown")
         language = payload.get("language", "unknown")
         content = payload.get("content", "")
+        # Bug #1991: content could not be read -- show a marker, never "".
+        unavailable = is_content_unavailable(result)
 
         # Staleness info (if available)
         staleness_info = result.get("staleness", {})
@@ -1065,7 +1096,9 @@ def _display_semantic_results(
                 )
             else:
                 console.print(f"{i}. {score:.3f} {file_path_with_lines}")
-            if content:
+            if unavailable:
+                console.print(f"  {CONTENT_UNAVAILABLE_MARKER}", markup=False)
+            elif content:
                 # Show full content with line numbers in quiet mode (no truncation)
                 content_lines = content.split("\n")
 
@@ -1136,7 +1169,11 @@ def _display_semantic_results(
             # Note: Fixed-size chunking no longer provides semantic metadata
 
             # Content display with line numbers (full chunk, no truncation)
-            if content:
+            if unavailable:
+                console.print("\n📖 Content:")
+                console.print("─" * 50)
+                console.print(f"  {CONTENT_UNAVAILABLE_MARKER}", markup=False)
+            elif content:
                 # Create content header with line range
                 if line_start is not None and line_end is not None:
                     if line_start == line_end:
@@ -1411,16 +1448,12 @@ def _execute_semantic_search(
                         {"key": "path", "match": {"text": path_filter[0]}}
                     )
 
-            # Story #906: --file-extensions wiring into filter_conditions_list.
-            # The "language" field IS cidx's file-extension field (test helper
-            # _must_extension_conditions matches c.get("key") == "language").
-            # Multiple extensions appended as DIRECT must-entries (cidx
-            # vector_store OR-merges multiple direct entries with same key).
-            # Composes with --language as INTERSECTION.
-            for ext in _parse_file_extensions(file_extensions):
-                filter_conditions_list.append(
-                    {"key": "language", "match": {"value": ext}}
-                )
+            # Story #906 / #2047: --file-extensions is ONE any_ext condition
+            # on the "path" payload (shared builder, values OR-ed); inside
+            # `must` it composes with --language as INTERSECTION.
+            extension_condition = _file_extension_condition(file_extensions)
+            if extension_condition is not None:
+                filter_conditions_list.append(extension_condition)
 
             # Build filter conditions preserving both must and must_not conditions
             query_filter_conditions = (
@@ -1435,6 +1468,7 @@ def _execute_semantic_search(
                 query_text=query,
                 limit=limit * 2,
                 collection_name=collection_name,
+                # #2047: the service applies the filtered window.
                 filter_conditions=query_filter_conditions,
             )
 
@@ -1463,6 +1497,7 @@ def _execute_semantic_search(
                 query_text=query,
                 limit=limit * 2,
                 collection_name=collection_name,
+                # #2047: the service applies the filtered window.
                 filter_conditions=filter_conditions if filter_conditions else None,
             )
 
@@ -1547,11 +1582,11 @@ def _execute_semantic_search(
         return results
 
     except Exception as e:
-        if not quiet:
-            console.print(f"[yellow]⚠️  Semantic search failed: {e}[/yellow]")
+        # #2109: a failed search is reported by the caller, never returned
+        # as an empty result.
         logger = logging.getLogger(__name__)
         logger.error(f"Semantic search error: {e}", exc_info=True)
-        return []
+        raise
 
 
 def _display_hybrid_results(
@@ -2140,8 +2175,8 @@ def init(
 
     \b
     INITIALIZATION MODES:
-      🏠 Local Mode (default): Creates local configuration with VoyageAI embeddings
-      ☁️  Remote Mode: Connects to existing CIDX server (--remote option)
+      • Local Mode (default): Creates local configuration with VoyageAI embeddings
+      • Remote Mode: Connects to existing CIDX server (--remote option)
 
     \b
     CONFIGURATION OPTIONS:
@@ -2891,6 +2926,15 @@ def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
     migrated stale status self-heals on the very next index run with no
     special-casing needed here. The migration copy is therefore a plain,
     unconditional byte-for-byte copy with no status manipulation.
+<<<<<<< HEAD
+=======
+
+    Story #2121: resume-from-list is retired. A stored status of
+    in_progress/failed now routes the next run to a reconcile of the store
+    against disk (the stored list fields are dropped on load), so the copy
+    must still carry the status unchanged: normalizing it would skip that
+    recovery.
+>>>>>>> upstream/master
     """
     provider_metadata = config_dir / f"metadata-{provider_name}.json"
     if provider_metadata.exists():
@@ -2937,11 +2981,24 @@ def _install_embedding_stats_writer_for_index() -> None:
     bootstrap_dir = os.environ.get("CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR")
     if bootstrap_dir:
         try:
+<<<<<<< HEAD
+=======
+            from .server.services.embedding_stats_writer import (
+                CrossProcessBootstrapWriter,
+            )
+>>>>>>> upstream/master
             from .server.storage.postgres.embedding_stats_child_wiring import (
                 install_embedding_stats_writer_from_bootstrap,
             )
 
             writer = install_embedding_stats_writer_from_bootstrap(bootstrap_dir)
+<<<<<<< HEAD
+=======
+            # A cancelled job SIGTERMs this child; flush its buffered stats
+            # first so the refresh volume alarm counts the spend.
+            if isinstance(writer, CrossProcessBootstrapWriter):
+                writer.install_sigterm_flush()
+>>>>>>> upstream/master
             # Best-effort final flush on normal process exit (sys.exit(0/1),
             # uncaught exception) -- atexit does NOT fire on SIGKILL/OOM,
             # which is the accepted fail-open tradeoff documented on
@@ -2964,6 +3021,7 @@ def _install_embedding_stats_writer_for_index() -> None:
             )
 
             EmbeddingStatsWriter.set_active(NoOpWriter())
+<<<<<<< HEAD
 
         # EVO-66113: read per-job correlation tags from the env vars
         # threaded by the parent and install them as process-level
@@ -2990,6 +3048,8 @@ def _install_embedding_stats_writer_for_index() -> None:
                 "embed stats tags (non-fatal): %s",
                 exc,
             )
+=======
+>>>>>>> upstream/master
     else:
         from .server.services.embedding_stats_writer import (
             EmbeddingStatsWriter,
@@ -2999,6 +3059,26 @@ def _install_embedding_stats_writer_for_index() -> None:
         EmbeddingStatsWriter.set_active(NoOpWriter())
 
 
+<<<<<<< HEAD
+=======
+def _parse_stats_attribution_option(
+    ctx: click.Context, param: click.Parameter, value: Optional[str]
+) -> Optional["StatsAttribution"]:
+    """Click callback for `cidx index --stats-attribution` (Story #2118).
+
+    Parses at argument-parsing time, so a malformed value fails the run
+    (usage error, exit 2) before any provider call. No value: None."""
+    if value is None:
+        return None
+    from .server.services.embedding_stats_attribution import StatsAttribution
+
+    try:
+        return StatsAttribution.from_json(value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
+
+
+>>>>>>> upstream/master
 def reject_sharded_json_for_temporal(
     *, index_commits: bool, new_collection_layout: Optional[str]
 ) -> None:
@@ -3246,6 +3326,7 @@ def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
     "timeout, retries, ...) is left untouched.",
 )
 @click.option(
+<<<<<<< HEAD
     "--content-backend",
     type=click.Choice(["local", "delegated"]),
     default="local",
@@ -3266,6 +3347,16 @@ def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
     "here. 'delegated' asks the git-backend plugin the server is configured "
     "with (git-mcp), for a repository this machine does not hold. Stamped by "
     "the server on the commands it spawns.",
+=======
+    "--stats-attribution",
+    default=None,
+    hidden=True,
+    callback=_parse_stats_attribution_option,
+    help="Internal: JSON {golden_repo_alias, job_id, node_id, purpose} that "
+    "attributes every embedding call of this run in embedding_call_stats. "
+    "Stamped by the server on every `cidx index` it spawns; a malformed "
+    "value fails the run before any provider call.",
+>>>>>>> upstream/master
 )
 @click.pass_context
 @require_mode("local")
@@ -3291,8 +3382,12 @@ def index(
     migrate_chunks_to_sqlite: bool = False,
     ignore_resume_state: bool = False,
     server_managed_provider_settings: bool = False,
+<<<<<<< HEAD
     content_backend: str = "local",
     git_backend: str = "local",
+=======
+    stats_attribution=None,
+>>>>>>> upstream/master
 ):
     """Index the codebase for semantic search.
 
@@ -3320,8 +3415,8 @@ def index(
       • Processing speed and time estimates
       • Error reporting for failed files
       • Throttling status indicators (VoyageAI only):
-        ⚡ Full speed - no throttling detected
-        🔴 Server throttling - API rate limits detected, backing off automatically
+        - Full speed: no throttling detected
+        - Server throttling: API rate limits detected, backing off automatically
 
     \b
     SMART INDEXING:
@@ -3409,6 +3504,18 @@ def index(
     # this covers plain semantic indexing too -- see the helper's
     # docstring).
     _install_embedding_stats_writer_for_index()
+<<<<<<< HEAD
+=======
+    # Story #2118: attribute every embedding call of this run (already
+    # validated by the option callback). Process-wide, because the calls run
+    # on VectorCalculationManager pool threads.
+    if stats_attribution is not None:
+        from .server.services.embedding_call_instrumentation import (
+            set_process_default_attribution,
+        )
+
+        set_process_default_attribution(stats_attribution)
+>>>>>>> upstream/master
 
     # H2: When --progress-json is active, redirect the module-level console to
     # stderr so Rich human-readable output does not corrupt the JSON stream on stdout.
@@ -3484,6 +3591,7 @@ def index(
         console.print(f"❌ {exc}", style="red")
         sys.exit(1)
 
+<<<<<<< HEAD
     # Temporal indexing reads only history, and with --git-backend delegated it
     # reads it through the git seam (git-mcp). Delegated CONTENT with LOCAL git
     # means the repository is not on this machine and nothing can read its
@@ -3499,6 +3607,8 @@ def index(
         )
         sys.exit(1)
 
+=======
+>>>>>>> upstream/master
     # Validate --diff-context flag (must happen before daemon delegation)
     if diff_context is not None and not index_commits:
         console.print(
@@ -4039,6 +4149,7 @@ def index(
                 resolve_temporal_collection_from_config(config)
                 _temporal_coll_name = resolve_temporal_collection_name(
                     cast(str, config.temporal.active_embedder)
+<<<<<<< HEAD
                 )
                 # None keeps local git; delegated reads the history through
                 # the git seam, and fails here, before any work, if the plugin
@@ -4047,6 +4158,8 @@ def index(
                     None
                     if git_backend == "local"
                     else _build_index_git_backend(git_backend)
+=======
+>>>>>>> upstream/master
                 )
                 temporal_indexer = TemporalIndexer(
                     config_manager,
@@ -4387,7 +4500,9 @@ def index(
             # `no discovered_files` check below.
 
             # Lazy import FTS components
-            from .services.tantivy_index_manager import TantivyIndexManager
+            from .services.fts_lifecycle import (
+                rebuild_fts_index as rebuild_fts_index_from_disk,
+            )
             from .indexing.file_finder import FileFinder
 
             console.print("🔍 Discovering files...")
@@ -4414,21 +4529,9 @@ def index(
             console.print("🔧 Rebuilding FTS index...")
             console.print(f"📄 Found {len(discovered_files)} files")
 
-            # Initialize Tantivy manager
-            fts_index_dir = config.codebase_dir / ".code-indexer" / "tantivy_index"
-            tantivy_manager = TantivyIndexManager(fts_index_dir)
-
-            # Clear and recreate FTS index
-            import shutil
-
-            if fts_index_dir.exists():
-                console.print("🧹 Clearing existing FTS index...")
-                shutil.rmtree(fts_index_dir)
-
-            tantivy_manager.initialize_index(create_new=True)
-            console.print("✅ FTS index initialized")
-
-            # Re-index all completed files to FTS
+            # Bug #2056: THE one rebuild (fts_lifecycle) -- under the repo
+            # indexing lock, normal indexing's chunk-level documents, marked
+            # content-current only when every file was indexed.
             from rich.progress import (
                 Progress,
                 BarColumn,
@@ -4447,6 +4550,7 @@ def index(
                     "Rebuilding FTS index...", total=len(discovered_files)
                 )
 
+<<<<<<< HEAD
                 indexed_count = 0
                 failed_count = 0
 
@@ -4488,20 +4592,30 @@ def index(
 
                     except Exception as e:
                         failed_count += 1
+=======
+                def _on_file(file_path: Path, error: Optional[str]) -> None:
+                    if error is not None:
+>>>>>>> upstream/master
                         console.print(
-                            f"⚠️  Failed to index {file_path}: {e}", style="yellow"
+                            f"⚠️  Failed to index {file_path}: {error}", style="yellow"
                         )
-
                     progress.advance(task)
 
-                # Commit all documents
-                tantivy_manager.commit()
+                fts_rebuild_result = rebuild_fts_index_from_disk(
+                    config, discovered_files, _on_file
+                )
+
+            # Files missing from FTS (fts_lifecycle's per-file rule): the
+            # rebuild succeeded but stays unmarked; it raised (exit 1 below)
+            # when it could index no file at all.
+            if fts_rebuild_result.missing_message:
+                console.print(
+                    f"⚠️  {fts_rebuild_result.missing_message}", style="yellow"
+                )
 
             # Show completion summary
             console.print("\n✅ FTS index rebuilt successfully")
-            console.print(f"📄 Files indexed: {indexed_count}")
-            if failed_count > 0:
-                console.print(f"⚠️  Failed files: {failed_count}", style="yellow")
+            console.print(f"📄 Files indexed: {fts_rebuild_result.indexed_files}")
 
             sys.exit(0)
 
@@ -4537,6 +4651,16 @@ def index(
         console.print(f"❌ {_idx_lock_exc}", style="red")
         sys.exit(1)
 
+<<<<<<< HEAD
+=======
+    # Story #2122: meter every provider input of this semantic run. Only
+    # misses the reuse resolver registered may be sent; a refusal raises
+    # RunSpendDefect (a BaseException) and the run exits 88.
+    from .services.run_spend_meter import RunSpendDefect, get_run_spend_meter
+
+    get_run_spend_meter().arm()
+
+>>>>>>> upstream/master
     try:
         config = _load_config_for_index()
         # Bug #1979: captured before any provider is touched, so the
@@ -4748,6 +4872,9 @@ def index(
                 return "INTERRUPT"
             return None
 
+        # Story #2121: set once a file-plan line was printed on --progress-json.
+        json_file_plan_emitted = False
+
         if progress_json:
             # AC6: --progress-json active — emit JSON lines, suppress Rich display
             from .services.progress_phase_allocator import (
@@ -4764,8 +4891,10 @@ def index(
                 slot_tracker=None,
             ):
                 """JSON-emitting progress callback for --progress-json mode."""
+                nonlocal json_file_plan_emitted
                 if total and total > 0 and info:
                     _emit_json(current=current, total=total, info=info or "")
+                    json_file_plan_emitted = True
 
             # M4: Attach no-op implementations so indexing code that calls these
             # attributes does not raise AttributeError in --progress-json mode.
@@ -4950,6 +5079,24 @@ def index(
                     enable_fts=fts,
                     trust_resume_state=not ignore_resume_state,
                 )
+                # Story #2122: a defect the indexer swallowed still ends the
+                # run here, before any other exit decision.
+                get_run_spend_meter().raise_if_tripped()
+
+                # Story #2121: a run that planned no file prints its empty
+                # plan on --progress-json (machine channel only).
+                if (
+                    progress_json
+                    and not json_file_plan_emitted
+                    and not stats.cancelled
+                    and stats.files_processed == 0
+                    and stats.failed_files == 0
+                ):
+                    from .services.progress_phase_allocator import (
+                        emit_empty_plan_json,
+                    )
+
+                    emit_empty_plan_json()
 
                 # Show final completion state (if not interrupted)
                 if display_initialized and not handler.interrupted:
@@ -4958,13 +5105,17 @@ def index(
                     rich_live_manager.stop_display()
                     console.print("\n✅ Completed")
 
-        except Exception as e:
+        except (Exception, RunSpendDefect) as e:
             # Clean up progress manager and Rich Live display before error message
             if display_initialized:
                 progress_manager.stop_progress()
                 rich_live_manager.stop_display()
             console.print(f"❌ Indexing failed: {e}", style="red")
-            sys.exit(1)
+            # Bug #2022: a fatal chunk-store failure exits with a reserved
+            # per-kind code so the server can tell corruption apart.
+            from .services.index_failure_exit_codes import index_failure_exit_code
+
+            sys.exit(index_failure_exit_code(e))
 
         # Clean up progress manager and Rich Live display before completion summary
         if display_initialized:
@@ -5007,13 +5158,25 @@ def index(
             sys.exit(1)
 
         if stats.failed_files > 0:
+            # Bug #2155: only retries of recorded failures failed again, on a
+            # populated store -- a partial outcome (failures stay recorded).
+            from .services.index_failure_exit_codes import (
+                OWED_RETRIES_FAILED_AGAIN_MESSAGE,
+                failed_only_on_owed_retries,
+            )
+
+            owed_only = failed_only_on_owed_retries(
+                stats, vector_store_client, collection_name
+            )
             console.print(f"⚠️  Failed files: {stats.failed_files}", style="yellow")
             if stats.files_processed == 0 and stats.failed_files > 0:
-                console.print(
-                    "❌ All files failed to index — index is empty.",
-                    style="red",
-                )
-                sys.exit(1)
+                if not owed_only:
+                    console.print(
+                        "❌ All files failed to index — index is empty.",
+                        style="red",
+                    )
+                    sys.exit(1)
+                console.print(OWED_RETRIES_FAILED_AGAIN_MESSAGE, style="yellow")
 
         # Show final indexing status
         final_status = smart_indexer.get_indexing_status()
@@ -5080,6 +5243,9 @@ def index(
                     f"{_extra_stats.chunks_created} chunks",
                     style="green",
                 )
+        # Story #2122: an additional provider's pass (or its health probe)
+        # may have swallowed a defect; it still ends the run with exit 88.
+        get_run_spend_meter().raise_if_tripped()
 
         # Bug #1979: clear=true is "index from scratch" -- a configured
         # provider skipped for ANY reason (missing key, a failed health
@@ -5109,6 +5275,7 @@ def index(
                 )
                 sys.exit(1)
 
+<<<<<<< HEAD
     except Exception as e:
         console.print(f"❌ Indexing failed: {e}", style="red")
         sys.exit(1)
@@ -5205,6 +5372,30 @@ def _populate_fts_index_from_disk(
     if console is not None:
         console.print(f"✅ FTS index repopulated from {count} files", style="green")
     return count
+=======
+    except (Exception, RunSpendDefect) as e:
+        console.print(f"❌ Indexing failed: {e}", style="red")
+        from .services.index_failure_exit_codes import index_failure_exit_code
+
+        sys.exit(index_failure_exit_code(e))
+    finally:
+        try:
+            # Story #2122: the run's final --progress-json record, on every
+            # exit path (success, failure, exit 88).
+            if progress_json:
+                from .services.progress_phase_allocator import emit_run_spend_json
+
+                _spend = get_run_spend_meter().snapshot()
+                emit_run_spend_json(_spend.inputs_sent, _spend.attempts)
+        finally:
+            # Story #2122: the run is over (its exit code is decided): leave
+            # no armed or tripped meter behind in this process.
+            get_run_spend_meter().disarm()
+            # Codex Finding 1a: release the foreground index-mutation lock on
+            # EVERY exit path (normal return, sys.exit -> SystemExit, or any
+            # exception) so it is never leaked past the mutation lifecycle.
+            _index_mutation_lock_ctx.__exit__(None, None, None)
+>>>>>>> upstream/master
 
 
 @cli.command()
@@ -5272,7 +5463,7 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
     # Auto-detect existing indexes
     from .cli_watch_helpers import detect_existing_indexes
 
-    available_indexes = detect_existing_indexes(project_root)
+    available_indexes = detect_existing_indexes(project_root, config_manager.load())
     detected_count = sum(available_indexes.values())
 
     if detected_count == 0:
@@ -5433,8 +5624,9 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
         if available_indexes["fts"] or fts:
             # Lazy import FTS components
             from .services.fts_watch_handler import FTSWatchHandler
-            from .services.tantivy_index_manager import TantivyIndexManager
+            from .services.fts_lifecycle import open_fts_index_for_watch
 
+<<<<<<< HEAD
             fts_index_dir = config.codebase_dir / ".code-indexer" / "tantivy_index"
             tantivy_manager = TantivyIndexManager(fts_index_dir)
 
@@ -5498,6 +5690,24 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
             # SmartIndexer._populate_fts_from_all_files().
             if fts_needs_full_population:
                 _populate_fts_index_from_disk(config, tantivy_manager, console)
+=======
+            # Bugs #1763/#2056: the SAME decision and rebuild as
+            # `cidx index --fts` (fts_lifecycle) -- a stale schema, no
+            # current content marker, an empty or absolute-path index is
+            # rebuilt from disk with normal indexing's documents and marked.
+            # Any failure propagates to this command's error handling.
+            tantivy_manager, watch_fts_rebuild = open_fts_index_for_watch(config)
+            if watch_fts_rebuild is not None:
+                console.print(
+                    f"✅ FTS index rebuilt from "
+                    f"{watch_fts_rebuild.indexed_files} files",
+                    style="green",
+                )
+                if watch_fts_rebuild.missing_message:
+                    console.print(
+                        f"⚠️  {watch_fts_rebuild.missing_message}", style="yellow"
+                    )
+>>>>>>> upstream/master
 
             fts_watch_handler = FTSWatchHandler(
                 tantivy_index_manager=tantivy_manager,
@@ -5854,7 +6064,12 @@ def _annotate_staleness(
         New list of result dicts with a ``staleness`` key on each entry that
         had a matching enhanced result.  Entries with no match are included
         unchanged (no ``staleness`` key).
+
+        Bug #1991: a result whose store-reported staleness says its content
+        could not be read keeps that staleness (the mtime check cannot see it).
     """
+    from code_indexer.utils.content_availability import staleness_after_local_check
+
     if preserve_order:
         # Reranked path: iterate results in caller order, look up staleness by
         # (path, line_number) composite key so sibling chunks from the same file
@@ -5867,11 +6082,14 @@ def _annotate_staleness(
             enhanced = enhanced_by_chunk.get((path, line_start))
             result_copy = original.copy()
             if enhanced:
-                result_copy["staleness"] = {
-                    "is_stale": enhanced.is_stale,
-                    "staleness_indicator": enhanced.staleness_indicator,
-                    "staleness_delta_seconds": enhanced.staleness_delta_seconds,
-                }
+                result_copy["staleness"] = staleness_after_local_check(
+                    original,
+                    {
+                        "is_stale": enhanced.is_stale,
+                        "staleness_indicator": enhanced.staleness_indicator,
+                        "staleness_delta_seconds": enhanced.staleness_delta_seconds,
+                    },
+                )
             annotated.append(result_copy)
         return annotated
     else:
@@ -5892,11 +6110,14 @@ def _annotate_staleness(
             if matched is None:
                 continue
             result_copy = matched.copy()
-            result_copy["staleness"] = {
-                "is_stale": enhanced.is_stale,
-                "staleness_indicator": enhanced.staleness_indicator,
-                "staleness_delta_seconds": enhanced.staleness_delta_seconds,
-            }
+            result_copy["staleness"] = staleness_after_local_check(
+                matched,
+                {
+                    "is_stale": enhanced.is_stale,
+                    "staleness_indicator": enhanced.staleness_indicator,
+                    "staleness_delta_seconds": enhanced.staleness_delta_seconds,
+                },
+            )
             annotated.append(result_copy)
         annotated.sort(key=lambda r: (r["staleness"]["is_stale"], -r.get("score", 0.0)))
         return annotated
@@ -6041,11 +6262,13 @@ def _annotate_staleness(
     default=None,
     type=str,
     help=(
-        'Comma-separated list of file extensions to include (e.g., "py,js,ts"). '
+        'Comma-separated list of file extensions to include (e.g., "py,js,ts"), '
+        "OR-ed, case-insensitive, in semantic, --fts and hybrid search. "
         "Leading dot optional (.py and py both work). "
         "Whitespace around commas is tolerated. "
         "Composes with --language as intersection (both filters must match). "
-        "Empty string is treated as no filter."
+        "Empty string is treated as no filter; a blank entry, or one "
+        "containing '.' or '/', is an error."
     ),
 )
 # --show-unchanged removed: Story 2 - all temporal results are changes now
@@ -6175,6 +6398,12 @@ def query(
     Results show file paths, matched content, and similarity scores.
     Filter conflicts are automatically detected and warnings are displayed.
     """
+    # #2047: reject an invalid --file-extensions token before any search runs.
+    try:
+        _parse_file_extensions(file_extensions)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--file-extensions") from exc
+
     # AC5: Validate --chunk-type requires temporal flags (Story #476)
     if chunk_type and not (time_range or time_range_all):
         console = Console()
@@ -6280,6 +6509,8 @@ def query(
                 exclude_paths=exclude_paths,
                 min_score=min_score,
                 accuracy=accuracy,
+                # #2047: sent as the REST file_extensions field.
+                file_extensions=_parse_file_extensions(file_extensions) or None,
             )
 
             # AC4: Format and display multi-repo results
@@ -6431,6 +6662,10 @@ def query(
                             edit_distance=edit_distance,
                             snippet_lines=snippet_lines,
                             regex=regex,
+                            # #2047: the daemon applies the same rule
+                            # (validated up front by this command).
+                            file_extensions=_parse_file_extensions(file_extensions)
+                            or None,
                         )
                         sys.exit(exit_code)
         except Exception:
@@ -6985,6 +7220,8 @@ def query(
                         path_filters=list(path_filter) if path_filter else None,
                         exclude_paths=list(exclude_paths) if exclude_paths else None,
                         use_regex=regex,  # Pass regex flag
+                        # #2047: same extension rule as the semantic half.
+                        file_extensions=_parse_file_extensions(file_extensions) or None,
                     )
                 except Exception as e:
                     console.print(f"[yellow]⚠️  FTS search failed: {e}[/yellow]")
@@ -7022,8 +7259,11 @@ def query(
                 try:
                     semantic_results = semantic_future.result()
                 except Exception as e:
-                    console.print(f"[yellow]⚠️  Semantic search failed: {e}[/yellow]")
-                    semantic_results = []
+                    # #2109: a failed semantic half fails the query.
+                    console.print(
+                        f"❌ Semantic search failed: {e}", style="red", markup=False
+                    )
+                    sys.exit(1)
 
             # Story #694: apply reranker stage to each sub-list independently.
             if effective_rerank_query:
@@ -7091,6 +7331,8 @@ def query(
                         list(exclude_languages) if exclude_languages else None
                     ),
                     use_regex=regex,  # Pass regex flag
+                    # #2047: same extension rule as semantic search.
+                    file_extensions=_parse_file_extensions(file_extensions) or None,
                 )
 
                 # Story #694: apply reranker stage if effective_rerank_query is set.
@@ -7173,6 +7415,11 @@ def query(
 
             from .remote.query_execution import execute_remote_query
             from .server.models.api_models import QueryResultItem
+            from .utils.content_availability import (
+                CONTENT_UNAVAILABLE_KEY,
+                CONTENT_UNAVAILABLE_MARKER,
+                is_content_unavailable,
+            )
 
             # NOTE: Remote query API currently supports single language only
             # Use first language from tuple, ignore additional languages for remote mode
@@ -7187,6 +7434,8 @@ def query(
                 min_score=min_score,
                 include_source=True,
                 accuracy=accuracy,
+                # #2047: sent as the REST file_extensions field.
+                file_extensions=_parse_file_extensions(file_extensions) or None,
             )
 
             # Cast to help MyPy understand the actual return type
@@ -7234,6 +7483,15 @@ def query(
                         ),
                     }
 
+                # Bug #1991: the server could not read this chunk's content.
+                if getattr(result_item, "content_unavailable", False):
+                    existing = converted_result.get("staleness")
+                    staleness: Dict[str, Any] = (
+                        dict(existing) if isinstance(existing, dict) else {}
+                    )
+                    staleness[CONTENT_UNAVAILABLE_KEY] = True
+                    converted_result["staleness"] = staleness
+
                 converted_results.append(converted_result)
 
             # Use existing display logic for local queries
@@ -7277,7 +7535,9 @@ def query(
                         )
                     else:
                         console.print(f"{score:.3f} {file_path_with_lines}")
-                    if content:
+                    if is_content_unavailable(result):
+                        console.print(f"  {CONTENT_UNAVAILABLE_MARKER}", markup=False)
+                    elif content:
                         # Show content with line numbers
                         content_lines = content.split("\n")
                         if line_start is not None:
@@ -7320,7 +7580,12 @@ def query(
                                 staleness_detail = f"Local file newer by {delta_days}d"
                             console.print(f"Staleness: {staleness_detail}")
 
-                    if content:
+                    if is_content_unavailable(result):
+                        console.print("Content:")
+                        console.print("-" * 40)
+                        console.print(f"  {CONTENT_UNAVAILABLE_MARKER}", markup=False)
+                        console.print("-" * 40)
+                    elif content:
                         if not quiet:
                             console.print(f"Relevance: {score:.3f}/1.0")
                         console.print("Content:")
@@ -7702,16 +7967,12 @@ def query(
                         {"key": "path", "match": {"text": path_filter[0]}}
                     )
 
-            # Story #906: --file-extensions wiring into filter_conditions_list.
-            # The "language" field IS cidx's file-extension field (test helper
-            # _must_extension_conditions matches c.get("key") == "language").
-            # Multiple extensions appended as DIRECT must-entries (cidx
-            # vector_store OR-merges multiple direct entries with same key).
-            # Composes with --language as INTERSECTION.
-            for ext in _parse_file_extensions(file_extensions):
-                filter_conditions_list.append(
-                    {"key": "language", "match": {"value": ext}}
-                )
+            # Story #906 / #2047: --file-extensions is ONE any_ext condition
+            # on the "path" payload (shared builder, values OR-ed); inside
+            # `must` it composes with --language as INTERSECTION.
+            extension_condition = _file_extension_condition(file_extensions)
+            if extension_condition is not None:
+                filter_conditions_list.append(extension_condition)
 
             # Build filter conditions preserving both must and must_not conditions
             query_filter_conditions = (
@@ -7741,6 +8002,7 @@ def query(
                     query_text=query,
                     limit=_semantic_fetch_limit,
                     collection_name=collection_name,
+                    # #2047: the service applies the filtered window.
                     filter_conditions=query_filter_conditions,
                 )
                 # Use multi-index timing from service
@@ -7830,6 +8092,7 @@ def query(
                     query_text=query,
                     limit=limit * 2,
                     collection_name=collection_name,
+                    # #2047: the service applies the filtered window.
                     filter_conditions=filter_conditions if filter_conditions else None,
                 )
                 # Use multi-index timing from service
@@ -9385,13 +9648,10 @@ def _status_impl(ctx):
                 git_available = metadata.get("git_available", False)
                 project_id = metadata.get("project_id", "unknown")
 
-                # Check if indexing is incomplete (regardless of whether it's running or stopped)
-                has_incomplete_indexing = (
-                    metadata.get("status") == "in_progress"
-                    and len(metadata.get("files_to_index", [])) > 0
-                    and metadata.get("current_file_index", 0)
-                    < len(metadata.get("files_to_index", []))
-                )
+                # Check if indexing is incomplete (regardless of whether it's running or stopped).
+                # Story #2121: no file list is stored; the interrupted status and
+                # the recorded plan size (total_files_to_index) are what remain.
+                has_incomplete_indexing = metadata.get("status") == "in_progress"
 
                 index_details = f"Last indexed: {last_indexed}"
                 if git_available:
@@ -9400,9 +9660,7 @@ def _status_impl(ctx):
                 index_details += f" | Project: {project_id}"
 
                 if has_incomplete_indexing:
-                    total_files = metadata.get(
-                        "total_files_to_index", len(metadata.get("files_to_index", []))
-                    )
+                    total_files = metadata.get("total_files_to_index", 0)
                     files_processed = metadata.get("files_processed", 0)
                     remaining = max(
                         0, total_files - files_processed
@@ -10431,7 +10689,7 @@ def fix_config(
 @click.option(
     "--issuer-url",
     type=str,
-    help="OAuth issuer URL for remote access (e.g., https://your-domain.com:8383)",
+    help="OAuth issuer URL for remote access (e.g., https://cidx.example.com)",
 )
 @click.option(
     "--voyage-api-key",
@@ -10458,13 +10716,13 @@ def install_server(
     • Finds available port starting from 8090 (or --port if specified)
     • Generates server configuration (config.json)
     • Creates executable startup script (start-server.sh)
-    • Seeds initial admin user (admin/admin)
+    • Leaves accounts to the server: its first start creates the initial
+      admin user (admin/admin), only when no users exist
     • Displays startup instructions
 
     \b
     WHAT IT CREATES:
     • ~/.cidx-server/config.json           # Server configuration
-    • ~/.cidx-server/users.json            # User database with hashed passwords
     • ~/.cidx-server/logs/                 # Server logs directory
     • ~/.cidx-server/start-server.sh       # Executable startup script
 
@@ -10477,7 +10735,7 @@ def install_server(
     • Repository idle timeout: 10 minutes
 
     \b
-    INITIAL CREDENTIALS:
+    INITIAL CREDENTIALS (created by the first server start, only when no users exist):
     Username: admin
     Password: admin
     Role: admin (full access to all features)
@@ -10493,6 +10751,7 @@ def install_server(
     \b
     API DOCUMENTATION:
     Once running, access Swagger UI at: http://localhost:<port>/docs
+    (requires login: sign in to the Web UI first, or send a bearer token)
 
     \b
     EXAMPLES:
@@ -10543,6 +10802,7 @@ def install_server(
                 console.print(
                     f"   http://127.0.0.1:{existing_port}/docs", style="white"
                 )
+                console.print("   (requires login)", style="dim")
                 console.print()
                 console.print("💡 Use --force to reinstall", style="dim yellow")
                 return
@@ -10594,6 +10854,10 @@ def install_server(
 
         # Initial credentials
         console.print("🔑 Initial Admin Credentials:", style="cyan bold")
+        console.print(
+            "   Created by the first server start, only when no users exist",
+            style="dim",
+        )
         console.print("   Username: admin", style="white")
         console.print("   Password: admin", style="white")
         console.print("   Role: admin (full access)", style="white")
@@ -10635,6 +10899,11 @@ def install_server(
         )
         console.print(
             f"   OpenAPI spec: http://127.0.0.1:{allocated_port}/openapi.json",
+            style="dim",
+        )
+        console.print(
+            "   API documentation requires login: sign in to the Web UI first, "
+            "or send a bearer token.",
             style="dim",
         )
         console.print()
@@ -11977,6 +12246,7 @@ def server_start(ctx, server_dir: Optional[str]):
         console.print()
         console.print("📚 API Documentation:", style="cyan")
         console.print(f"   {result['server_url']}/docs", style="white")
+        console.print("   (requires login)", style="dim")
 
     except Exception as e:
         console.print(f"❌ Error: {str(e)}", style="red")
@@ -12336,6 +12606,7 @@ def server_restart(ctx, server_dir: Optional[str]):
         console.print()
         console.print("📚 API Documentation:", style="cyan")
         console.print(f"   {result['server_url']}/docs", style="white")
+        console.print("   (requires login)", style="dim")
 
     except KeyboardInterrupt:
         console.print("\n❌ Operation cancelled by user", style="red")
@@ -13671,7 +13942,12 @@ def discover(ctx, source: str):
             sys.exit(1)
 
         # Create client and discover repositories
-        console.print(f"🔍 Discovering repositories from: {source}", style="blue")
+        from .utils.credential_redaction import mask_url_credentials
+
+        console.print(
+            f"🔍 Discovering repositories from: {mask_url_credentials(source)}",
+            style="blue",
+        )
 
         async def discover_repositories():
             client = ReposAPIClient(
@@ -14886,10 +15162,12 @@ def _display_repository_info(
 
     # Basic Information Section
     console.print("\n[bold]Basic Information:[/bold]")
+    from .utils.credential_redaction import mask_url_credentials
+
     basic_info = [
         f"  Alias: {repo_info.get('alias', 'N/A')}",
         f"  Golden Repository: {repo_info.get('golden_repository', 'N/A')}",
-        f"  Git URL: {repo_info.get('git_url', 'N/A')}",
+        f"  Git URL: {mask_url_credentials(repo_info.get('git_url', 'N/A'))}",
         f"  Current Branch: {repo_info.get('current_branch', 'N/A')}",
         f"  Activated: {repo_info.get('activation_date', 'N/A')}",
     ]
@@ -17823,8 +18101,11 @@ def admin_repos_add(
 
         try:
             if not json_output:
+                from .utils.credential_redaction import mask_url_credentials
+
                 console.print(
-                    f"📁 Adding golden repository '{alias}' from {git_url}...",
+                    f"📁 Adding golden repository '{alias}' from "
+                    f"{mask_url_credentials(git_url)}...",
                     style="blue",
                 )
 
@@ -18241,8 +18522,11 @@ def admin_repos_show(ctx, alias: str, json_output: bool):
 
             # Basic information
             console.print(f"[bold]Alias:[/bold] {target_repo.get('alias', 'N/A')}")
+            from .utils.credential_redaction import mask_url_credentials
+
             console.print(
-                f"[bold]Repository URL:[/bold] {target_repo.get('repo_url', 'N/A')}"
+                "[bold]Repository URL:[/bold] "
+                f"{mask_url_credentials(target_repo.get('repo_url', 'N/A'))}"
             )
             console.print(
                 f"[bold]Default Branch:[/bold] {target_repo.get('default_branch', 'N/A')}"
@@ -18904,8 +19188,11 @@ def admin_repos_delete(ctx, alias: str, confirm: bool, force: bool, json_output:
                         f"\n⚠️  This will permanently delete the golden repository '{alias}'.",
                         style="yellow bold",
                     )
+                    from .utils.credential_redaction import mask_url_credentials
+
                     console.print(
-                        f"📍 Repository: {target_repo.get('repo_url', 'N/A')}"
+                        "📍 Repository: "
+                        f"{mask_url_credentials(target_repo.get('repo_url', 'N/A'))}"
                     )
                     console.print(
                         f"📂 Description: {target_repo.get('description', 'No description')}"

@@ -62,14 +62,49 @@ class UsersPostgresBackend:
             conn.execute(
                 """
                 INSERT INTO users
-                (username, password_hash, role, email, created_at, password_changed_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                (username, password_hash, role, email, created_at,
+                 password_changed_at, account_created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                (username, password_hash, role, email, now, now),
+                (username, password_hash, role, email, now, now, now),
             )
             conn.commit()
 
         logger.info("Created user: %s", username)
+
+    def has_any_user(self) -> bool:
+        """True when the store holds at least one user."""
+        with self._pool.connection() as conn:
+            row = conn.execute("SELECT 1 FROM users LIMIT 1").fetchone()
+        return row is not None
+
+    def create_user_if_store_empty(
+        self, username: str, password_hash: str, role: str
+    ) -> bool:
+        """Create the user only while the store holds no users at all.
+
+        SHARE ROW EXCLUSIVE conflicts with itself and with every row write,
+        so the check and the insert see a stable table: of any number of
+        concurrent callers (on any node) on an empty store exactly one creates
+        its user.  Reads are not blocked.  Returns True when created.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                conn.execute("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE")
+                if conn.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+                    return False
+                conn.execute(
+                    """
+                    INSERT INTO users
+                    (username, password_hash, role, email, created_at,
+                     password_changed_at, account_created_at)
+                    VALUES (%s, %s, %s, NULL, %s, %s, %s)
+                    """,
+                    (username, password_hash, role, now, now, now),
+                )
+        logger.info("Created user: %s", username)
+        return True
 
     def get_user(self, username: str) -> Optional[Dict[str, Any]]:
         """Get user with all related data (api_keys, mcp_credentials)."""
@@ -77,7 +112,7 @@ class UsersPostgresBackend:
             row = conn.execute(
                 """
                 SELECT username, password_hash, role, email, created_at,
-                       oidc_identity, password_changed_at
+                       oidc_identity, password_changed_at, account_created_at
                 FROM users
                 WHERE username = %s
                 """,
@@ -99,6 +134,7 @@ class UsersPostgresBackend:
                 "created_at": row[4],
                 "oidc_identity": self._parse_json(row[5]),
                 "password_changed_at": row[6],
+                "account_created_at": row[7],
                 "api_keys": api_keys,
                 "mcp_credentials": mcp_credentials,
             }

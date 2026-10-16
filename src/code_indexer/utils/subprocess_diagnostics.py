@@ -38,7 +38,15 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Sequence as _Sequence
 from typing import Optional, Sequence, Union
+<<<<<<< HEAD
 import re
+=======
+
+from code_indexer.utils.credential_redaction import (
+    redact_command,
+    redact_command_output,
+)
+>>>>>>> upstream/master
 
 # Bug #1832: dependency_map_analyzer.py:2813 already established a 1000-char
 # cap (`(result.stderr or "")[:1000]`) as the in-tree precedent -- reuse
@@ -59,6 +67,7 @@ def _cap(text: Optional[str], max_chars: int) -> str:
     return text[: max(0, max_chars)]
 
 
+<<<<<<< HEAD
 # A URL of the form <scheme>://<userinfo>@<host>... -- the userinfo half is where a
 # token lands when a repo URL carries one (e.g. https://oauth2:glpat-xxx@gitlab.com/...).
 # The scp-like `git@host:path` form has no scheme and no secret, so it is left alone.
@@ -117,10 +126,13 @@ def _redact_and_cap(text: Optional[str], max_chars: int) -> str:
     return _cap(redact_url_credentials(text or ""), max_chars)
 
 
+=======
+>>>>>>> upstream/master
 def _format_cmd(cmd: Union[str, Sequence[str], None]) -> str:
     """cmd mirrors Popen's args and may be a str, a non-str/bytes
     sequence, or (for a genuinely unknown command) None. Only join real
     sequences -- joining a str's characters would corrupt it into
+<<<<<<< HEAD
     space-separated letters.
 
     Credentials embedded in a URL argument are redacted: the command text is
@@ -131,6 +143,14 @@ def _format_cmd(cmd: Union[str, Sequence[str], None]) -> str:
     if isinstance(cmd, _Sequence) and not isinstance(cmd, (str, bytes)):
         return redact_url_credentials(" ".join(str(part) for part in cmd))
     return redact_url_credentials(str(cmd))
+=======
+    space-separated letters."""
+    if cmd is None:
+        return "<unknown>"
+    if isinstance(cmd, _Sequence) and not isinstance(cmd, (str, bytes)):
+        return " ".join(str(part) for part in cmd)
+    return str(cmd)
+>>>>>>> upstream/master
 
 
 def format_subprocess_failure_diagnostic(
@@ -146,6 +166,7 @@ def format_subprocess_failure_diagnostic(
     which can be empty when the failing command's real diagnostic lands
     on stdout instead (Bug #1832).
 
+<<<<<<< HEAD
     This is the single formatting boundary every public entry point in this
     module funnels through, so credential redaction is applied HERE -- to argv
     and to both captured streams alike -- rather than to argv only. See
@@ -154,6 +175,19 @@ def format_subprocess_failure_diagnostic(
         f"command='{_format_cmd(cmd)}' exit_code={returncode} "
         f"stdout={_redact_and_cap(stdout, max_chars)!r} "
         f"stderr={_redact_and_cap(stderr, max_chars)!r}"
+=======
+    Bug #2012: the command and both streams are credential-redacted (URL
+    userinfo, token-bearing option values) -- a diagnostic is logged and
+    returned, so it must never carry what the command was given.
+    """
+    safe_cmd = redact_command(cmd) if cmd is not None else None
+    safe_stdout = redact_command_output(stdout, cmd or ())
+    safe_stderr = redact_command_output(stderr, cmd or ())
+    return (
+        f"command='{_format_cmd(safe_cmd)}' exit_code={returncode} "
+        f"stdout={_cap(safe_stdout, max_chars)!r} "
+        f"stderr={_cap(safe_stderr, max_chars)!r}"
+>>>>>>> upstream/master
     )
 
 

@@ -7,7 +7,11 @@ Split out of the monolithic sqlite_backends.py module (issue #1935 Part 1).
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+<<<<<<< HEAD
 from typing import Any, Dict, List, Optional
+=======
+from typing import Any, Callable, Dict, List, Optional
+>>>>>>> upstream/master
 
 from ..database_manager import DatabaseConnectionManager
 
@@ -194,7 +198,14 @@ class OAuthSqliteBackend:
         state: str,
     ) -> str:
         """Generate a one-time PKCE authorization code."""
+<<<<<<< HEAD
         from code_indexer.server.auth.oauth.oauth_manager import OAuthError
+=======
+        from code_indexer.server.auth.oauth.oauth_manager import (
+            AUTHORIZATION_CODE_LIFETIME,
+            OAuthError,
+        )
+>>>>>>> upstream/master
 
         if not code_challenge or code_challenge.strip() == "":
             raise OAuthError("code_challenge required")
@@ -206,7 +217,11 @@ class OAuthSqliteBackend:
             raise OAuthError(f"Invalid redirect_uri: {redirect_uri}")
 
         code = self._secrets.token_urlsafe(32)
+<<<<<<< HEAD
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+=======
+        expires_at = datetime.now(timezone.utc) + AUTHORIZATION_CODE_LIFETIME
+>>>>>>> upstream/master
 
         def _do_insert(conn: sqlite3.Connection) -> None:
             conn.execute(
@@ -225,12 +240,27 @@ class OAuthSqliteBackend:
         return code
 
     def exchange_code_for_token(
+<<<<<<< HEAD
         self, code: str, code_verifier: str, client_id: str
     ) -> Dict[str, Any]:
         """Exchange a PKCE authorization code for access and refresh tokens."""
         from code_indexer.server.auth.oauth.oauth_manager import (
             OAuthError,
             PKCEVerificationError,
+=======
+        self,
+        code: str,
+        code_verifier: str,
+        client_id: str,
+        account_check: Optional[Callable[[str, datetime], bool]] = None,
+    ) -> Dict[str, Any]:
+        """Exchange a PKCE authorization code for access and refresh tokens;
+        *account_check* (account name, code issue instant) runs first."""
+        from code_indexer.server.auth.oauth.oauth_manager import (
+            OAuthError,
+            PKCEVerificationError,
+            check_code_account,
+>>>>>>> upstream/master
         )
 
         token_id = self._secrets.token_urlsafe(32)
@@ -239,16 +269,23 @@ class OAuthSqliteBackend:
         now = datetime.now(timezone.utc)
         hard_expires_at = now + timedelta(days=self.HARD_EXPIRATION_DAYS)
 
+<<<<<<< HEAD
         result: Dict[str, Any] = {}
 
         def _do_exchange(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
+=======
+        # 1. Read and validate the code outside any transaction.
+        with self._conn_manager.guarded_connection() as read_conn:
+            cursor = read_conn.cursor()
+>>>>>>> upstream/master
             cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
             cursor.execute(
                 "SELECT * FROM oauth_codes WHERE code = ? AND client_id = ?",
                 (code, client_id),
             )
             code_row = cursor.fetchone()
+<<<<<<< HEAD
             if not code_row:
                 raise OAuthError("Invalid authorization code")
             if code_row["used"]:
@@ -270,6 +307,45 @@ class OAuthSqliteBackend:
                 raise PKCEVerificationError("PKCE verification failed")
 
             conn.execute("UPDATE oauth_codes SET used = 1 WHERE code = ?", (code,))
+=======
+        if not code_row:
+            raise OAuthError("Invalid authorization code")
+        if code_row["used"]:
+            raise OAuthError("Authorization code already used")
+        expires_at_dt = datetime.fromisoformat(code_row["expires_at"])
+        if datetime.now(timezone.utc) > expires_at_dt:
+            raise OAuthError("Authorization code expired")
+
+        # PKCE verification
+        code_challenge = code_row["code_challenge"]
+        computed_challenge = (
+            self._base64.urlsafe_b64encode(
+                self._hashlib.sha256(code_verifier.encode()).digest()
+            )
+            .decode()
+            .rstrip("=")
+        )
+        if computed_challenge != code_challenge:
+            raise PKCEVerificationError("PKCE verification failed")
+
+        # 2. Account check, holding no lock on the store.
+        check_code_account(account_check, code_row["user_id"], expires_at_dt)
+
+        result: Dict[str, Any] = {}
+
+        # 3. Consume the code (only if still unused) and issue the token in
+        #    one transaction; a code consumed meanwhile mints nothing.
+        def _do_exchange(conn: sqlite3.Connection) -> None:
+            if datetime.now(timezone.utc) > expires_at_dt:
+                raise OAuthError("Authorization code expired")
+            consumed = conn.execute(
+                "UPDATE oauth_codes SET used = 1"
+                " WHERE code = ? AND client_id = ? AND used = 0",
+                (code, client_id),
+            )
+            if consumed.rowcount != 1:
+                raise OAuthError("Authorization code already used")
+>>>>>>> upstream/master
 
             token_expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
 
@@ -355,8 +431,19 @@ class OAuthSqliteBackend:
     def refresh_access_token(
         self, refresh_token: str, client_id: str
     ) -> Dict[str, Any]:
+<<<<<<< HEAD
         """Exchange a refresh token for new access and refresh tokens."""
         from code_indexer.server.auth.oauth.oauth_manager import OAuthError
+=======
+        """Exchange a refresh token for new access and refresh tokens.
+
+        The token is redeemable only by the client it was issued to (RFC 6749
+        section 6); any other client gets ``invalid_grant`` and the token
+        stays valid for its own client."""
+        from code_indexer.server.auth.oauth.oauth_manager import (
+            AuthorizationGrantRefused,
+        )
+>>>>>>> upstream/master
 
         new_access_token = self._secrets.token_urlsafe(48)
         new_refresh_token = self._secrets.token_urlsafe(48)
@@ -367,22 +454,47 @@ class OAuthSqliteBackend:
             cursor = conn.cursor()
             cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
             cursor.execute(
+<<<<<<< HEAD
                 "SELECT * FROM oauth_tokens WHERE refresh_token = ?", (refresh_token,)
             )
             row = cursor.fetchone()
             if not row:
                 raise OAuthError("Invalid refresh token")
+=======
+                "SELECT token_id, hard_expires_at FROM oauth_tokens "
+                "WHERE refresh_token = ? AND client_id = ?",
+                (refresh_token, client_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise AuthorizationGrantRefused("Invalid refresh token")
+            # Past its hard expiry the token mints nothing (a naive stored
+            # value is UTC); checked inside the rotating transaction.
+            hard_expires_at = datetime.fromisoformat(row["hard_expires_at"])
+            if hard_expires_at.tzinfo is None:
+                hard_expires_at = hard_expires_at.replace(tzinfo=timezone.utc)
+            if now >= hard_expires_at:
+                raise AuthorizationGrantRefused("Refresh token has expired")
+>>>>>>> upstream/master
 
             conn.execute(
                 """UPDATE oauth_tokens
                    SET access_token = ?, refresh_token = ?, expires_at = ?, last_activity = ?
+<<<<<<< HEAD
                    WHERE refresh_token = ?""",
+=======
+                   WHERE refresh_token = ? AND client_id = ?""",
+>>>>>>> upstream/master
                 (
                     new_access_token,
                     new_refresh_token,
                     new_expires_at.isoformat(),
                     now.isoformat(),
                     refresh_token,
+<<<<<<< HEAD
+=======
+                    client_id,
+>>>>>>> upstream/master
                 ),
             )
 

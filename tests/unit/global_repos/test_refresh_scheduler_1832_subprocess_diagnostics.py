@@ -14,7 +14,10 @@ test_refresh_scheduler_backoff.py.
 from __future__ import annotations
 
 import logging
+<<<<<<< HEAD
 import subprocess
+=======
+>>>>>>> upstream/master
 from unittest.mock import Mock, patch
 
 import pytest
@@ -53,6 +56,7 @@ def scheduler(tmp_path):
     )
 
 
+<<<<<<< HEAD
 def _failing_clone():
     """subprocess.run fake for a clone that fails with stdout-only output.
 
@@ -71,6 +75,8 @@ def _failing_clone():
     return _run
 
 
+=======
+>>>>>>> upstream/master
 class TestAttemptRecloneDiagnostic:
     def test_empty_stderr_nonempty_stdout_surfaces_in_critical_log(
         self, scheduler, tmp_path, caplog
@@ -80,7 +86,16 @@ class TestAttemptRecloneDiagnostic:
         with (
             patch(
                 "code_indexer.global_repos.refresh_scheduler.subprocess.run",
+<<<<<<< HEAD
                 side_effect=_failing_clone(),
+=======
+                return_value=Mock(
+                    args=["git", "clone", REPO_URL, "dest"],
+                    returncode=1,
+                    stdout=_DISCRIMINATING_STDOUT,
+                    stderr="",
+                ),
+>>>>>>> upstream/master
             ),
             caplog.at_level(logging.CRITICAL),
         ):

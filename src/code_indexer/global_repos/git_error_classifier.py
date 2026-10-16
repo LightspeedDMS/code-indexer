@@ -9,6 +9,14 @@ Story #295: Auto-Recovery for Corrupted Golden Repo Git Object Database.
 """
 
 from typing import List, Optional, Sequence, Union
+<<<<<<< HEAD
+=======
+
+from code_indexer.utils.credential_redaction import (
+    redact_command,
+    redact_command_output,
+)
+>>>>>>> upstream/master
 
 
 class GitFetchError(Exception):
@@ -38,6 +46,7 @@ class GitFetchError(Exception):
         returncode: Optional[int] = None,
         cmd: Optional[Union[str, Sequence[str]]] = None,
     ):
+<<<<<<< HEAD
         super().__init__(message)
         self.category = category
         # stderr keeps its exact prior meaning: the raw, uncapped stderr
@@ -48,6 +57,20 @@ class GitFetchError(Exception):
         self.stdout = stdout
         self.returncode = returncode
         self.cmd = cmd
+=======
+        # Bug #2012: everything this error carries is logged or re-raised, so
+        # it is stored credential-redacted (URL userinfo, token-bearing
+        # values). Classification happens on the raw stderr BEFORE this
+        # error is built, so categories are unaffected.
+        super().__init__(redact_command_output(message, cmd or ()))
+        self.category = category
+        # stderr keeps its uncapped meaning (refresh_scheduler.py reads it
+        # directly), only redacted.
+        self.stderr = redact_command_output(stderr, cmd or ())
+        self.stdout = redact_command_output(stdout, cmd or ())
+        self.returncode = returncode
+        self.cmd = redact_command(cmd) if cmd is not None else None
+>>>>>>> upstream/master
 
 
 # Patterns indicating a permanent, non-recoverable access/existence failure

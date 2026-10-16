@@ -182,7 +182,36 @@ class TestRepositoryDeletionTDD:
                 "/api/admin/golden-repos/active-job-repo", headers=auth_headers
             )
 
+<<<<<<< HEAD
         # Should succeed with 204 -- job cancellation happens inside the manager
+=======
+        # Patch the REAL manager instances captured as closure parameters by
+        # Story #409's route extraction (see
+        # test_successful_repository_deletion_returns_204 above for
+        # golden_repo_manager).
+        with (
+            patch.object(
+                client.app.state.golden_repo_manager,
+                "remove_golden_repo",
+                mock_manager.remove_golden_repo,
+            ),
+            patch.object(
+                client.app.state.background_job_manager,
+                "get_jobs_by_operation_and_params",
+                mock_job_manager.get_jobs_by_operation_and_params,
+            ),
+            patch.object(
+                client.app.state.background_job_manager,
+                "cancel_job",
+                mock_job_manager.cancel_job,
+            ),
+        ):
+            response = client.delete(
+                "/api/admin/golden-repos/active-job-repo", headers=auth_headers
+            )
+
+        # FAILING TEST: Should cancel jobs and then delete successfully
+>>>>>>> upstream/master
         assert response.status_code == 204
         # Verify the manager was called with the alias and submitter_username
         mock_manager.remove_golden_repo.assert_called_once_with(

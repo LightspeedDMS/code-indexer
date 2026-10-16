@@ -1,8 +1,14 @@
 """Bug #1746 Change 3: SmartIndexer must call abort_indexing() -- NOT
 end_indexing() -- when a fatal ChunkStoreUnavailableError (Change 1/2)
 propagates out of process_files_high_throughput(), across every real entry
+<<<<<<< HEAD
 point that calls it directly (_do_full_index, _do_incremental_index,
 _do_resume_interrupted). The fatal error must propagate UNWRAPPED (not
+=======
+point that calls it directly (_do_full_index, _do_incremental_index), and
+on the interrupted-run recovery (smart_index -> reconcile, Story #2121).
+The fatal error must propagate UNWRAPPED (not
+>>>>>>> upstream/master
 folded into the generic RuntimeError these methods otherwise wrap every
 exception in) so a caller can identify it specifically.
 
@@ -261,6 +267,7 @@ class TestIncrementalIndexAbortsOnFatalError:
         )
 
 
+<<<<<<< HEAD
 class TestResumeInterruptedAbortsOnFatalError:
     """AC: Given a resumed indexing run raises the fatal chunk-store error
     during processing, abort_indexing() is called and end_indexing() is
@@ -272,11 +279,18 @@ class TestResumeInterruptedAbortsOnFatalError:
         meta["files_to_index"] = [str(git_repo / "initial.py")]
         meta["current_file_index"] = 0
         indexer.progressive_metadata._save_metadata()
+=======
+class TestInterruptedRunRecoveryAbortsOnFatalError:
+    """Story #2121: an interrupted run is recovered by the reconcile. Given
+    that recovery raises the fatal chunk-store error during processing,
+    abort_indexing() is called and end_indexing() is NOT called."""
+>>>>>>> upstream/master
 
     def test_fatal_chunk_store_error_calls_abort_not_end(
         self, tmp_path: Path, git_repo: Path, mock_vector_store: MagicMock
     ) -> None:
         indexer = _make_indexer(git_repo, tmp_path, mock_vector_store)
+<<<<<<< HEAD
         self._seed_for_resume(indexer, git_repo)
 
         _assert_fatal_error_aborts_not_ends(
@@ -291,6 +305,27 @@ class TestResumeInterruptedAbortsOnFatalError:
                 model_name="voyage-code-3",
             ),
         )
+=======
+        # The recovery's fresh start writes these into the metadata JSON.
+        indexer.embedding_provider.get_provider_name.return_value = "voyage-ai"  # type: ignore[attr-defined]
+        indexer.embedding_provider.get_current_model.return_value = "voyage-code-3"  # type: ignore[attr-defined]
+        indexer.progressive_metadata.metadata["status"] = "in_progress"
+        indexer.progressive_metadata._save_metadata()
+        # Nothing stored yet: initial.py is missing from the store, so the
+        # recovery reaches process_branch_changes_high_throughput.
+        mock_vector_store.scroll_points.return_value = ([], None)
+        fatal_error = ChunkStoreUnavailableError("chunks.db unwritable")
+
+        with patch.object(
+            indexer, "process_branch_changes_high_throughput", side_effect=fatal_error
+        ):
+            with pytest.raises(ChunkStoreUnavailableError) as exc_info:
+                indexer.smart_index(force_full=False)
+
+        assert exc_info.value is fatal_error
+        mock_vector_store.abort_indexing.assert_called_once_with("test_collection")
+        mock_vector_store.end_indexing.assert_not_called()
+>>>>>>> upstream/master
 
 
 def _run_reconcile_with_side_effect(

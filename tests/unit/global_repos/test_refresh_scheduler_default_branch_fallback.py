@@ -1,24 +1,30 @@
 """
-Unit tests for the three-layer default_branch fallback fix (Bug #469 orphan alias).
+Unit tests for how the branch guard resolves the expected branch (Bug #469
+orphan alias, Bug #2148).
 
 Context
 -------
 The branch guard in refresh_scheduler._execute_refresh determines the expected
-default branch before verifying (and resetting) the base clone.  Prior to this
-fix, if repo_info had no 'default_branch' key AND golden_repos_metadata had no
-row for the alias (orphan global_repos row), the value silently fell back to the
-hard-coded string "main".
+branch before verifying (and resetting) the base clone.
 
-For repos whose actual remote default is "master" (e.g. dotnet-playground) that
-caused `git checkout main` to fail with:
-    "pathspec 'main' did not match any file(s) known to git"
-and an ERROR log entry on every refresh cycle (~90-min interval).
+Bug #469 (orphan alias): with no golden_repos_metadata row the value used to
+fall back to the hard-coded string "main", so a repo whose remote default is
+"master" (e.g. example-master-repo) logged a failing `git checkout main` ERROR
+on every refresh cycle. A `git symbolic-ref refs/remotes/origin/HEAD` fallback
+was added for that.
 
-Fix: add a third authoritative fallback that reads
-    git symbolic-ref --short refs/remotes/origin/HEAD
-which returns "origin/master" or "origin/main" etc.  Strip the "origin/" prefix
-to get the authoritative default_branch.  If that also fails, skip the
-branch-reset step entirely (no-op rather than crashing with a misleading error).
+Bug #2148: that fallback is itself a guess. On a cluster node the per-node
+SQLite read found no row, origin/HEAD said "main", and a repo registered on a
+non-default branch was switched to "main". The ONLY authority is now the
+registered branch in golden_repos_metadata, read through
+``RefreshScheduler.golden_repo_metadata`` (the backend registry: PostgreSQL in
+cluster, cidx_server.db in solo). Neither repo_info nor origin/HEAD ever picks
+the branch; with no registered branch (Bug #469 orphan aliases have no row)
+the refresh switches nothing, logs a WARNING naming the alias and the reason,
+and continues on the clone's current branch.
+
+golden_repos_metadata is keyed by the BARE alias (the scheduler looks up
+``alias_name.removesuffix("-global")``), so scenarios seed the repo stem.
 
 Design note on internal-method patching
 ----------------------------------------
@@ -28,31 +34,28 @@ the same isolation boundary used by test_refresh_scheduler_branch_guard.py
 (the established project precedent).  These methods exercise real CoW filesystem
 operations and indexing that are not relevant to the branch-guard logic under
 test; patching them is the accepted way to isolate _execute_refresh's
-branch-guard path.
-
-Tests
------
-Parametrized scenarios 1–6: 2 unconditional asserts each (checkout, has_changes).
-Test 7 (standalone, uses caplog): 3 unconditional asserts (checkout, symbolic-ref
-invoked, no ERROR logged) — caplog is not available in parametrized fixtures.
+branch-guard path. The metadata store is the REAL solo SQLite store, seeded
+the way registration seeds it.
 """
 
 import logging
 import subprocess
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
-
-_DB_PATCH = (
-    "code_indexer.global_repos.refresh_scheduler.GoldenRepoMetadataSqliteBackend"
+from code_indexer.server.storage.sqlite_backends import (
+    GoldenRepoMetadataSqliteBackend,
 )
 
+NO_ROW = "no golden repo metadata row"
+NO_BRANCH = "no registered branch recorded"
+SCHEDULER_LOGGER = "code_indexer.global_repos.refresh_scheduler"
 
 # ---------------------------------------------------------------------------
 # Low-level helpers
@@ -65,16 +68,31 @@ def _proc(returncode: int = 0, stdout: str = "", stderr: str = "") -> Mock:
     return m
 
 
-def _build_db_backend(db_get_repo_return: Optional[Dict]) -> MagicMock:
-    backend = MagicMock()
-    backend.get_repo.return_value = db_get_repo_return
-    return backend
+def _seed_registered_branch(
+    golden_repos_dir, repo_stem: str, registered_branch: Optional[str]
+) -> None:
+    """Seed the real solo store (cidx_server.db next to golden-repos).
+
+    None = no row at all (orphan alias); "" = a row without a branch.
+    """
+    backend = GoldenRepoMetadataSqliteBackend(
+        str(golden_repos_dir.parent / "cidx_server.db")
+    )
+    backend.ensure_table_exists()
+    if registered_branch is None:
+        return
+    backend.add_repo(
+        alias=repo_stem,
+        repo_url=f"git@example.com:org/{repo_stem}.git",
+        default_branch=registered_branch,
+        clone_path=str(golden_repos_dir / repo_stem),
+        created_at="2026-01-01T00:00:00+00:00",
+    )
 
 
 def _make_subprocess_handler(
     current_branch: str,
     symbolic_ref_stdout: str,
-    symbolic_ref_returncode: int,
     checkout_calls: List,
     symbolic_ref_calls: List,
 ):
@@ -83,7 +101,7 @@ def _make_subprocess_handler(
             return _proc(stdout=current_branch)
         if cmd == ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]:
             symbolic_ref_calls.append(cmd)
-            return _proc(returncode=symbolic_ref_returncode, stdout=symbolic_ref_stdout)
+            return _proc(stdout=symbolic_ref_stdout)
         if cmd[:2] == ["git", "checkout"]:
             checkout_calls.append(cmd)
             return _proc()
@@ -92,23 +110,16 @@ def _make_subprocess_handler(
     return handler
 
 
-def _make_updater(
-    master_path: str,
-    has_changes_calls: List,
-    track_has_changes: bool,
-) -> Mock:
-    """Build a mock updater; record has_changes calls only when requested."""
+def _make_updater(master_path: str, has_changes_calls: List) -> Mock:
+    """Build a mock updater that records has_changes calls."""
     updater = Mock()
     updater.get_source_path.return_value = master_path
-    if track_has_changes:
 
-        def _side():
-            has_changes_calls.append(True)
-            return True
+    def _side():
+        has_changes_calls.append(True)
+        return True
 
-        updater.has_changes.side_effect = _side
-    else:
-        updater.has_changes.return_value = True
+    updater.has_changes.side_effect = _side
     return updater
 
 
@@ -135,28 +146,14 @@ def _refresh_context(scheduler, golden_repos_dir, alias_name: str, updater):
             return_value=str(golden_repos_dir / ".versioned" / repo_stem / "v_2"),
         ),
         patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
+        # Story #2118: the mocked snapshot path above holds no index to count.
+        patch("code_indexer.server.services.index_spend_alarm.record_published_points"),
         patch(
             "code_indexer.global_repos.refresh_scheduler.GitPullUpdater",
             return_value=updater,
         ),
     ):
         yield
-
-
-def _execute_with_patches(
-    scheduler,
-    golden_repos_dir,
-    alias_name,
-    updater,
-    db_get_repo_return,
-    handler,
-):
-    with (
-        _refresh_context(scheduler, golden_repos_dir, alias_name, updater),
-        patch(_DB_PATCH, return_value=_build_db_backend(db_get_repo_return)),
-        patch("subprocess.run", side_effect=handler),
-    ):
-        scheduler._execute_refresh(alias_name)
 
 
 def _run_scenario(
@@ -168,39 +165,48 @@ def _run_scenario(
     repo_info_extra: Dict[str, Any],
     current_branch: str,
     symbolic_ref_stdout: str,
-    symbolic_ref_returncode: int,
-    db_get_repo_return: Optional[Dict],
-    track_has_changes: bool,
+    registered_branch: Optional[str],
+    expected_warning: Optional[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> tuple:
-    """Wire and run one scenario; returns (checkout_calls, symbolic_ref_calls, has_changes_calls)."""
+    """Wire and run one scenario; returns (checkout_calls, symbolic_ref_calls,
+    has_changes_calls). The refresh never raises. With *expected_warning*,
+    exactly one registered-branch WARNING names the alias and that reason;
+    without it, none is logged."""
     repo_stem = alias_name.removesuffix("-global")
     (golden_repos_dir / repo_stem).mkdir(parents=True, exist_ok=True)
+    _seed_registered_branch(golden_repos_dir, repo_stem, registered_branch)
     mock_registry.get_global_repo.return_value = {
         "alias_name": alias_name,
-        "repo_url": f"git@github.com:org/{repo_stem}.git",
+        "repo_url": f"git@example.com:org/{repo_stem}.git",
         **repo_info_extra,
     }
     checkout_calls: List = []
     symbolic_ref_calls: List = []
     has_changes_calls: List = []
-    updater = _make_updater(
-        str(golden_repos_dir / repo_stem), has_changes_calls, track_has_changes
-    )
+    updater = _make_updater(str(golden_repos_dir / repo_stem), has_changes_calls)
     handler = _make_subprocess_handler(
-        current_branch,
-        symbolic_ref_stdout,
-        symbolic_ref_returncode,
-        checkout_calls,
-        symbolic_ref_calls,
+        current_branch, symbolic_ref_stdout, checkout_calls, symbolic_ref_calls
     )
-    _execute_with_patches(
-        scheduler,
-        golden_repos_dir,
-        alias_name,
-        updater,
-        db_get_repo_return,
-        handler,
-    )
+    with (
+        _refresh_context(scheduler, golden_repos_dir, alias_name, updater),
+        patch("subprocess.run", side_effect=handler),
+        caplog.at_level(logging.WARNING, logger=SCHEDULER_LOGGER),
+    ):
+        scheduler._execute_refresh(alias_name)
+    branch_warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+        and r.name == SCHEDULER_LOGGER
+        and "Registered branch of" in r.getMessage()
+    ]
+    if expected_warning is None:
+        assert branch_warnings == [], branch_warnings
+    else:
+        assert len(branch_warnings) == 1, branch_warnings
+        assert alias_name in branch_warnings[0], branch_warnings
+        assert expected_warning in branch_warnings[0], branch_warnings
     return checkout_calls, symbolic_ref_calls, has_changes_calls
 
 
@@ -238,10 +244,11 @@ def scheduler(golden_repos_dir, mock_registry):
 
 
 # ---------------------------------------------------------------------------
-# Parametrized scenarios 1–6
-# Each row: repo_info_extra, db_get_repo_return, symbolic_ref_stdout,
-#   symbolic_ref_returncode, expected_checkout_calls,
-#   track_has_changes, expected_has_changes_called
+# Parametrized scenarios 1-6
+# Each row: repo_info_extra, registered_branch, symbolic_ref_stdout,
+#   expected_checkout_calls, expected_warning (None = the registered branch
+#   is known, so no unknown-branch WARNING). The refresh always proceeds.
+# The clone is always on "feature/x".
 # ---------------------------------------------------------------------------
 
 _SCENARIOS = [
@@ -249,85 +256,71 @@ _SCENARIOS = [
         {"default_branch": "develop"},
         None,
         "origin/main",
-        0,
-        [["git", "checkout", "develop"]],
-        False,
-        False,
-        id="1_repo_info_wins",
-    ),
-    pytest.param(
-        {},
-        {"default_branch": "trunk"},
-        "origin/main",
-        0,
-        [["git", "checkout", "trunk"]],
-        False,
-        False,
-        id="2_db_wins",
-    ),
-    pytest.param(
-        {},
-        None,
-        "origin/master\n",
-        0,
-        [["git", "checkout", "master"]],
-        False,
-        False,
-        id="3_symbolic_ref_db_none",
-    ),
-    pytest.param(
-        {},
-        {"alias": "my-repo"},
-        "origin/master\n",
-        0,
-        [["git", "checkout", "master"]],
-        False,
-        False,
-        id="4_symbolic_ref_db_no_field",
-    ),
-    pytest.param(
-        {},
-        None,
-        "",
-        128,
         [],
-        True,
-        True,  # no checkout; refresh must continue (has_changes called)
-        id="5_all_fallbacks_fail",
+        NO_ROW,
+        id="1_repo_info_is_not_an_authority",
+    ),
+    pytest.param(
+        {},
+        "trunk",
+        "origin/main",
+        [["git", "checkout", "trunk"]],
+        None,
+        id="2_registered_branch_wins",
     ),
     pytest.param(
         {},
         None,
-        "origin/develop\n",
-        0,
+        "origin/master\n",
+        [],
+        NO_ROW,
+        id="3_no_row_never_guesses_origin_head",
+    ),
+    pytest.param(
+        {},
+        "",
+        "origin/master\n",
+        [],
+        NO_BRANCH,
+        id="4_row_without_branch_never_guesses_origin_head",
+    ),
+    pytest.param(
+        {},
+        "feature/x",
+        "origin/main",
+        [],
+        None,
+        id="5_registered_non_default_branch_is_kept",
+    ),
+    pytest.param(
+        {"default_branch": "main"},
+        "develop",
+        "origin/main",
         [["git", "checkout", "develop"]],
-        False,
-        False,  # NOT "origin/develop"
-        id="6_strips_origin_prefix",
+        None,
+        id="6_registered_branch_beats_repo_info_and_origin_head",
     ),
 ]
 
 
 @pytest.mark.parametrize(
-    "repo_info_extra,db_get_repo_return,symbolic_ref_stdout,"
-    "symbolic_ref_returncode,expected_checkout_calls,"
-    "track_has_changes,expected_has_changes_called",
+    "repo_info_extra,registered_branch,symbolic_ref_stdout,"
+    "expected_checkout_calls,expected_warning",
     _SCENARIOS,
 )
 def test_default_branch_fallback_scenarios(
     scheduler,
     golden_repos_dir,
     mock_registry,
+    caplog,
     repo_info_extra,
-    db_get_repo_return,
+    registered_branch,
     symbolic_ref_stdout,
-    symbolic_ref_returncode,
     expected_checkout_calls,
-    track_has_changes,
-    expected_has_changes_called,
+    expected_warning,
 ):
-    """Parametrized driver for scenarios 1–6.  Exactly 2 unconditional asserts."""
-    checkout_calls, _, has_changes_calls = _run_scenario(
+    """Parametrized driver for scenarios 1-6."""
+    checkout_calls, symbolic_ref_calls, has_changes_calls = _run_scenario(
         scheduler,
         golden_repos_dir,
         mock_registry,
@@ -335,24 +328,24 @@ def test_default_branch_fallback_scenarios(
         repo_info_extra=repo_info_extra,
         current_branch="feature/x",
         symbolic_ref_stdout=symbolic_ref_stdout,
-        symbolic_ref_returncode=symbolic_ref_returncode,
-        db_get_repo_return=db_get_repo_return,
-        track_has_changes=track_has_changes,
+        registered_branch=registered_branch,
+        expected_warning=expected_warning,
+        caplog=caplog,
     )
 
     assert checkout_calls == expected_checkout_calls, (
         f"Expected {expected_checkout_calls}, got {checkout_calls}"
     )
-    assert bool(has_changes_calls) == expected_has_changes_called, (
-        f"Expected has_changes_called={expected_has_changes_called}, "
-        f"got {bool(has_changes_calls)}"
+    assert symbolic_ref_calls == [], (
+        f"origin/HEAD must never be used to guess the branch: {symbolic_ref_calls}"
     )
+    # Known or unknown registered branch, the refresh continues past the
+    # branch guard to the pull.
+    assert has_changes_calls == [True], has_changes_calls
 
 
 # ---------------------------------------------------------------------------
-# Test 7: dotnet-playground production bug
-# 3 asserts: no-checkout + symbolic-ref-invoked + no-ERROR-logged.
-# The third assert requires caplog which is not available in parametrized fixtures.
+# Test 7: orphan alias whose remote default is 'master' (Bug #469)
 # ---------------------------------------------------------------------------
 
 
@@ -360,38 +353,30 @@ def test_previous_bug_scenario_master_default(
     scheduler, golden_repos_dir, mock_registry, caplog
 ):
     """
-    Reproduces the exact production failure: dotnet-playground-global is an
-    orphan alias (global_repos row, no golden_repos_metadata partner).
-    Remote default is 'master'.  Base clone already on 'master'.
+    example-master-repo-global is an orphan alias (global_repos row, no
+    golden_repos_metadata partner). Remote default is 'master'.  Base clone
+    already on 'master'.
 
-    After the fix:
-    - NO git checkout (current branch already matches resolved default)
-    - git symbolic-ref WAS invoked (third-fallback layer discovers 'master')
-    - NO ERROR logged (pre-fix produced ERROR every ~90-min refresh cycle)
+    - A WARNING names the alias and the missing row, and the refresh
+      continues on the clone's branch (Bug #2148: nothing is guessed)
+    - NO git checkout (pre-#469 checked out a hard-coded 'main' every cycle)
+    - git symbolic-ref NOT invoked (origin/HEAD is not an authority)
     """
-    with caplog.at_level(
-        logging.ERROR,
-        logger="code_indexer.global_repos.refresh_scheduler",
-    ):
-        checkout_calls, symbolic_ref_calls, _ = _run_scenario(
-            scheduler,
-            golden_repos_dir,
-            mock_registry,
-            alias_name="dotnet-playground-global",
-            repo_info_extra={},
-            current_branch="master",
-            symbolic_ref_stdout="origin/master",
-            symbolic_ref_returncode=0,
-            db_get_repo_return=None,
-            track_has_changes=False,
-        )
+    checkout_calls, symbolic_ref_calls, has_changes_calls = _run_scenario(
+        scheduler,
+        golden_repos_dir,
+        mock_registry,
+        alias_name="example-master-repo-global",
+        repo_info_extra={},
+        current_branch="master",
+        symbolic_ref_stdout="origin/master",
+        registered_branch=None,
+        expected_warning=NO_ROW,
+        caplog=caplog,
+    )
 
-    assert checkout_calls == [], (
-        f"Expected no checkout (current already matches default), got {checkout_calls}"
+    assert checkout_calls == [], f"Expected no checkout, got {checkout_calls}"
+    assert symbolic_ref_calls == [], (
+        f"Expected git symbolic-ref never called, got {symbolic_ref_calls}"
     )
-    assert len(symbolic_ref_calls) == 1, (
-        f"Expected git symbolic-ref called once, got {symbolic_ref_calls}"
-    )
-    assert [r.message for r in caplog.records if r.levelno >= logging.ERROR] == [], (
-        "Expected no ERROR log entries"
-    )
+    assert has_changes_calls == [True], "the refresh must continue to the pull"

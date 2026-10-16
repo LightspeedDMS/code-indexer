@@ -39,6 +39,9 @@ from code_indexer.server.startup.content_backend_wiring import (
 if TYPE_CHECKING:
     from ..repositories.activated_repo_manager import ActivatedRepoManager
 
+if TYPE_CHECKING:
+    from ..repositories.activated_repo_manager import ActivatedRepoManager
+
 logger = logging.getLogger(__name__)
 
 

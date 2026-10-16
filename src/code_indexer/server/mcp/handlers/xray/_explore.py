@@ -19,6 +19,20 @@ from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
 )
+<<<<<<< HEAD
+=======
+from code_indexer.server.services.search_event_recording import (
+    SearchOrigin,
+    XRayRecorder,
+    bind_xray_recorder,
+    run_recorded_xray,
+    tracked_job_cancelled,
+    writer_from_app,
+)
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
+>>>>>>> upstream/master
 from code_indexer.xray.sandbox import validate_rust_evaluator
 
 from ._infra import (
@@ -32,6 +46,10 @@ from ._infra import (
     _get_job_tracker,
     _get_xray_cell_limiter,
     _get_xray_executor,
+<<<<<<< HEAD
+=======
+    _lazy_singleton_app_or_none,
+>>>>>>> upstream/master
     _pattern_scope_alias,
     _resolve_effective_timeout,
     _resolve_evaluator_code_off_loop,
@@ -49,6 +67,21 @@ _MAX_DEBUG_NODES_MIN = 1
 _MAX_DEBUG_NODES_MAX = 500
 
 
+<<<<<<< HEAD
+=======
+def _explore_event_recorder(user: User, alias: str, pattern: str) -> XRayRecorder:
+    """Story #2107: bind this request's search-event fields for one explore job."""
+    return bind_xray_recorder(
+        writer_from_app(_lazy_singleton_app_or_none()),
+        origin=SearchOrigin(tool="xray_explore", door="mcp"),
+        username=user.username,
+        repo_alias=alias,
+        pattern=pattern,
+        correlation_id=get_correlation_id(),
+    )
+
+
+>>>>>>> upstream/master
 def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
     repo_path: "Path",
     driver_regex: str,
@@ -66,6 +99,10 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
     max_debug_nodes: int,
     job_id_holder: "Optional[list]" = None,
     bjm: "Optional[Any]" = None,
+<<<<<<< HEAD
+=======
+    record_event: "Optional[XRayRecorder]" = None,
+>>>>>>> upstream/master
 ):
     """Return a job function closure for xray_explore.
 
@@ -107,6 +144,7 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
             # forever.
             if job_id_holder:
                 _get_job_tracker().update_status(job_id_holder[0], status="running")
+<<<<<<< HEAD
             result = _Engine().run(
                 repo_path=repo_path,
                 driver_regex=driver_regex,
@@ -125,6 +163,43 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
                 include_ast_debug=True,
                 max_debug_nodes=max_debug_nodes,
                 on_process_spawned=_on_spawned,
+=======
+
+            def _run() -> Dict[str, Any]:
+                return _Engine().run(  # type: ignore[no-any-return]
+                    repo_path=repo_path,
+                    driver_regex=driver_regex,
+                    evaluator_code=evaluator_code,
+                    search_target=search_target,
+                    include_patterns=list(include_patterns),
+                    exclude_patterns=list(exclude_patterns),
+                    case_sensitive=case_sensitive,
+                    context_lines=context_lines,
+                    multiline=multiline,
+                    pcre2=pcre2,
+                    path=path,
+                    timeout_seconds=effective_timeout,
+                    progress_callback=progress_callback,
+                    max_files=max_results,
+                    include_ast_debug=True,
+                    max_debug_nodes=max_debug_nodes,
+                    on_process_spawned=_on_spawned,
+                )
+
+            # Story #2107/#2117: only the engine run is recorded (its result,
+            # or a failure row when it raises); a cancelled job records
+            # nothing.
+            jid = job_id_holder[0] if job_id_holder else None
+            cancelled = (
+                (lambda: tracked_job_cancelled(_get_job_tracker(), jid))
+                if jid is not None
+                else None
+            )
+            result = (
+                _run()
+                if record_event is None
+                else run_recorded_xray(record_event, _run, cancelled)
+>>>>>>> upstream/master
             )
         finally:
             if bjm is not None and job_id_holder:
@@ -185,6 +260,12 @@ def _submit_one_explore_omni(
         repo_path=Path(single_path_str),
         job_id_holder=[jid],
         bjm=bjm,
+<<<<<<< HEAD
+=======
+        record_event=_explore_event_recorder(
+            user, single_alias, explore_fn_kwargs["driver_regex"]
+        ),
+>>>>>>> upstream/master
         **explore_fn_kwargs,
     )
 
@@ -599,6 +680,10 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
         repo_path=Path(repo_path_str),
         job_id_holder=[job_id],
         bjm=bjm,
+<<<<<<< HEAD
+=======
+        record_event=_explore_event_recorder(user, repo_alias_parsed, driver_regex),
+>>>>>>> upstream/master
         **explore_kwargs,
     )
 

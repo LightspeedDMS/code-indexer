@@ -1,20 +1,17 @@
-"""Watch mode helper functions for auto-detection and orchestration.
-
-This module provides functions for:
-1. Auto-detecting existing indexes (semantic, FTS, temporal)
-2. Orchestrating watch mode with detected indexes
+"""Watch mode helper: auto-detection of existing indexes (semantic, FTS,
+temporal) for `cidx watch`.
 
 Story: 02_Feat_WatchModeAutoDetection/01_Story_WatchModeAutoUpdatesAllIndexes.md
 """
 
 import logging
-import time
 from pathlib import Path
-from typing import Dict
-from rich.console import Console
+from typing import TYPE_CHECKING, Dict
+
+if TYPE_CHECKING:
+    from .config import Config
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 
 def _any_temporal_collection_exists(index_base: Path, project_root: Path) -> bool:
@@ -67,30 +64,45 @@ def _any_temporal_collection_exists(index_base: Path, project_root: Path) -> boo
         return False
 
 
-def detect_existing_indexes(project_root: Path) -> Dict[str, bool]:
+def semantic_collection_name(config: "Config") -> str:
+    """The semantic collection `cidx index` writes for `config`: the
+    configured provider's embedding model, made filesystem-safe exactly as
+    FilesystemVectorStore.resolve_collection_name() does.
+
+    Raises:
+        ValueError: unknown embedding provider.
+    """
+    if config.embedding_provider == "voyage-ai":
+        model = config.voyage_ai.model
+    elif config.embedding_provider == "cohere":
+        model = config.cohere.model
+    else:
+        raise ValueError(f"Unknown embedding provider: {config.embedding_provider}")
+    return model.replace("/", "_").replace(":", "_")
+
+
+def detect_existing_indexes(project_root: Path, config: "Config") -> Dict[str, bool]:
     """Detect which indexes exist and should be watched.
 
     Args:
         project_root: Path to project root directory
+        config: The project's configuration (its embedding model names the
+            semantic collection)
 
     Returns:
         Dict mapping index type to existence boolean:
         {
-            "semantic": bool,  # code-indexer-HEAD collection
-            "fts": bool,       # tantivy-fts index
-            "temporal": bool,  # code-indexer-temporal collection
+            "semantic": bool,  # .code-indexer/index/<embedding model>
+            "fts": bool,       # .code-indexer/tantivy_index (meta.json)
+            "temporal": bool,  # a temporal collection
         }
-
-    Examples:
-        >>> result = detect_existing_indexes(Path("/project"))
-        >>> result["semantic"]
-        True
-        >>> result["fts"]
-        False
     """
+    from .services.fts_lifecycle import fts_index_dir_for_repo
+
     index_base = project_root / ".code-indexer" / "index"
 
     return {
+<<<<<<< HEAD
         "semantic": (index_base / "code-indexer-HEAD").exists(),
         "fts": (index_base / "tantivy-fts").exists(),
         "temporal": _any_temporal_collection_exists(index_base, project_root),
@@ -304,3 +316,9 @@ def start_watch_mode(
     for handler in handlers:
         if hasattr(handler, "stop"):
             handler.stop()
+=======
+        "semantic": (index_base / semantic_collection_name(config)).is_dir(),
+        "fts": (fts_index_dir_for_repo(project_root) / "meta.json").exists(),
+        "temporal": _any_temporal_collection_exists(index_base, project_root),
+    }
+>>>>>>> upstream/master

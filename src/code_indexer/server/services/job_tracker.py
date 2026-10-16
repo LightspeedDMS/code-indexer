@@ -344,6 +344,26 @@ _SELECT_COLUMNS = (
 # Upper bound for backend list_jobs when enumerating candidates for bulk deletion.
 _CLEANUP_JOB_FETCH_LIMIT = 10000
 
+# Bug #2123: non-terminal statuses get_recent_jobs reads from the shared store
+# (not from this node's memory), so a job running on ANOTHER node is always
+# listed, however many newer jobs exist.  Read in the order jobs move through
+# them; a later read replaces an earlier entry for the same job_id, so a job
+# claimed between two reads is still listed, with its most advanced status.
+_ACTIVE_LIST_STATUSES = ("pending", "resolving_prerequisites", "running")
+
+# Bug #2123: rows per query when reading those active jobs from the store.
+# Every active row is read: pages continue until a short page.
+_ACTIVE_JOBS_PAGE_SIZE = 500
+
+# Bug #2123: pages allowed beyond those the per-status row count (taken just
+# before paging) needs, for rows that arrive while paging.  Count // page size
+# + this margin is the paging loop's hard ceiling; reaching it logs WARNING.
+_ACTIVE_JOBS_PAGE_MARGIN = 2
+
+# Bug #2123: max job ids per batched store-status query when resolving this
+# node's in-memory jobs (keeps each IN list below SQLite's parameter limit).
+_STORE_STATUS_LOOKUP_CHUNK = 500
+
 # Statuses considered terminal for a background job.  Once a row reaches one
 # of these, complete_job/fail_job must never resurrect or overwrite it — the
 # first terminal write always wins (Bug #1258).  Mirrors the terminal-status
@@ -369,6 +389,12 @@ _TERMINAL_JOB_STATUSES = (
     "interrupted",
 )
 
+<<<<<<< HEAD
+=======
+# The statuses complete_job() may write (same set as DistributedJobClaimer).
+_COMPLETION_STATUSES = ("completed", "completed_partial")
+
+>>>>>>> upstream/master
 # Bug #1950: known error-message markers that identify a job terminated by
 # a server restart/shutdown rather than a genuine failure. The system
 # already writes one of these distinct messages at the moment a job is
@@ -647,18 +673,26 @@ class JobTracker:
         self._upsert_job(snapshot)
 
     def complete_job(
-        self, job_id: str, result: Optional[Dict[str, Any]] = None
+        self,
+        job_id: str,
+        result: Optional[Dict[str, Any]] = None,
+        status: str = "completed",
     ) -> None:
         """
         Mark job as completed.
 
-        Sets status="completed" and completed_at, persists to SQLite,
+        Sets status and completed_at, persists to SQLite,
         then removes from in-memory dict.
 
         Args:
             job_id: Job to complete.
             result: Optional result dict stored as JSON in SQLite.
+            status: The completion variant: "completed", or
+                "completed_partial" for work that finished with part of it
+                still owed (Bug #679; a partial refresh, Bug #2125).
         """
+        if status not in _COMPLETION_STATUSES:
+            raise ValueError(f"not a completion status: {status!r}")
         now = datetime.now(timezone.utc)
 
         with self._lock:
@@ -666,11 +700,11 @@ class JobTracker:
 
         if job is None:
             self._finalize_absent_job(
-                job_id, terminal_status="completed", now=now, result=result
+                job_id, terminal_status=status, now=now, result=result
             )
             return
 
-        job.status = "completed"
+        job.status = status
         job.completed_at = now
         job.progress = 100
         if result is not None:
@@ -873,7 +907,7 @@ class JobTracker:
         )
         persisted.status = terminal_status
         persisted.completed_at = now
-        if terminal_status == "completed":
+        if terminal_status in _COMPLETION_STATUSES:
             persisted.progress = 100
             if result is not None:
                 persisted.result = result
@@ -1003,8 +1037,35 @@ class JobTracker:
         Updates seen_ids in-place for each accepted row to prevent intra-query
         duplicates. Caller is responsible for pre-validating limit > 0.
         """
+<<<<<<< HEAD
+=======
+        rows: List[Dict[str, Any]] = []
+        for job in self._select_sqlite_job_dicts(
+            None, cutoff_iso, limit, exclude_operation_types
+        ):
+            if job["job_id"] not in seen_ids:
+                seen_ids.add(job["job_id"])
+                rows.append(job)
+        return rows
+
+    def _select_sqlite_job_dicts(
+        self,
+        status: Optional[str],
+        cutoff_iso: Optional[str],
+        limit: int,
+        exclude_operation_types: Optional[List[str]],
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Direct-SQLite SELECT (most-recently-created first, from ``offset``)
+        with optional exact-status, created_at cutoff and operation_type
+        exclusion filters."""
+>>>>>>> upstream/master
         where_parts: List[str] = []
         params: List[Any] = []
+
+        if status is not None:
+            where_parts.append("status = ?")
+            params.append(status)
 
         if cutoff_iso:
             where_parts.append("created_at >= ?")
@@ -1020,15 +1081,20 @@ class JobTracker:
         where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
         sql = (
             f"SELECT {_SELECT_COLUMNS} FROM background_jobs "
-            f"{where_clause} ORDER BY created_at DESC LIMIT ?"
+            f"{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?"
         )
+<<<<<<< HEAD
         params.append(limit)
+=======
+        params.extend([limit, offset])
+>>>>>>> upstream/master
         # Bug #1532 follow-up: route the raw connection through
         # guarded_connection() so close_all() cannot close it mid-read.
         # Only the actual DB access needs the lock; fetchall() materializes
         # the rows into plain Python data before the lock is released.
         with self._conn_manager.guarded_connection() as conn:
             fetched = conn.execute(sql, params).fetchall()
+<<<<<<< HEAD
         rows: List[Dict[str, Any]] = []
         for row in fetched:
             job = _row_to_tracked_job(row)
@@ -1036,6 +1102,127 @@ class JobTracker:
                 seen_ids.add(job.job_id)
                 rows.append(_tracked_job_to_dict(job))
         return rows
+=======
+        return [_tracked_job_to_dict(_row_to_tracked_job(row)) for row in fetched]
+
+    def _count_store_jobs_by_status(self) -> Dict[str, int]:
+        """Row count of each _ACTIVE_LIST_STATUSES status in the shared store
+        (backend or SQLite) -- an index-backed count of the active statuses
+        only, never a GROUP BY over the whole table."""
+        statuses = list(_ACTIVE_LIST_STATUSES)
+        if self._backend is not None:
+            counts: Dict[str, int] = self._backend.count_jobs_by_status(
+                statuses=statuses
+            )
+            return counts
+        placeholders = ", ".join("?" * len(statuses))
+        with self._conn_manager.guarded_connection() as conn:
+            fetched = conn.execute(
+                "SELECT status, COUNT(*) FROM background_jobs "
+                f"WHERE status IN ({placeholders}) GROUP BY status",
+                statuses,
+            ).fetchall()
+        return {row[0]: int(row[1]) for row in fetched}
+
+    def _fetch_active_page(
+        self,
+        status: str,
+        page_size: int,
+        offset: int,
+        exclude_operation_types: Optional[List[str]],
+    ) -> List[Dict[str, Any]]:
+        """One page of ``status`` rows from the shared store."""
+        if self._backend is not None:
+            page: List[Dict[str, Any]] = self._backend.list_jobs(
+                status=status,
+                limit=page_size,
+                offset=offset,
+                exclude_operation_types=exclude_operation_types or None,
+            )
+            return page
+        return self._select_sqlite_job_dicts(
+            status, None, page_size, exclude_operation_types, offset=offset
+        )
+
+    def _list_active_jobs_from_store(
+        self, exclude_operation_types: Optional[List[str]]
+    ) -> List[Dict[str, Any]]:
+        """Bug #2123: EVERY non-terminal job in the SHARED store, whichever
+        node runs it, so the list holds every active job the card counts.
+
+        Pages each status in _ACTIVE_LIST_STATUSES until a short page.  The
+        loop is bounded: at most (rows counted just before paging) //
+        _ACTIVE_JOBS_PAGE_SIZE + _ACTIVE_JOBS_PAGE_MARGIN pages per status;
+        reaching that ceiling without a short page logs WARNING.  A later
+        status read replaces an earlier entry for the same job_id, so a job
+        that moves on between reads keeps its most advanced status."""
+        page_size = _ACTIVE_JOBS_PAGE_SIZE
+        counts = self._count_store_jobs_by_status()
+        rows_by_id: Dict[str, Dict[str, Any]] = {}
+        for status in _ACTIVE_LIST_STATUSES:
+            max_pages = int(counts.get(status, 0)) // page_size + (
+                _ACTIVE_JOBS_PAGE_MARGIN
+            )
+            for page_number in range(max_pages):
+                page = self._fetch_active_page(
+                    status, page_size, page_number * page_size, exclude_operation_types
+                )
+                for row in page:
+                    rows_by_id[row["job_id"]] = row
+                if len(page) < page_size:
+                    break
+            else:
+                logger.warning(
+                    "JobTracker.get_recent_jobs: '%s' jobs still filled every "
+                    "page at the paging ceiling (%d pages of %d); jobs that "
+                    "arrived while paging may be missing from this render",
+                    status,
+                    max_pages,
+                    page_size,
+                )
+        return list(rows_by_id.values())
+
+    def _store_statuses(self, job_ids: List[str]) -> Dict[str, str]:
+        """Status of each given job that has a store row, in batched queries
+        of at most _STORE_STATUS_LOOKUP_CHUNK ids."""
+        statuses: Dict[str, str] = {}
+        chunk = _STORE_STATUS_LOOKUP_CHUNK
+        for start in range(0, len(job_ids), chunk):
+            ids = job_ids[start : start + chunk]
+            if self._backend is not None:
+                statuses.update(self._backend.get_job_statuses(ids))
+                continue
+            placeholders = ", ".join("?" * len(ids))
+            with self._conn_manager.guarded_connection() as conn:
+                fetched = conn.execute(
+                    "SELECT job_id, status FROM background_jobs "
+                    f"WHERE job_id IN ({placeholders})",
+                    ids,
+                ).fetchall()
+            statuses.update({row[0]: row[1] for row in fetched})
+        return statuses
+
+    def _memory_jobs_absent_from_store(
+        self, candidates: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Bug #2123: resolve in-memory jobs missing from the store's active
+        rows with ONE batched lookup.  A job whose store row exists and is no
+        longer active (finished or cancelled elsewhere, e.g. a
+        register_job_if_no_conflict copy another node ran) is evicted from
+        _active_jobs, so memory converges; only jobs with no store row at all
+        (not yet persisted) are returned for listing."""
+        statuses = self._store_statuses([j["job_id"] for j in candidates])
+        finished = [
+            job_id
+            for job_id, status in statuses.items()
+            if status not in _ACTIVE_LIST_STATUSES
+        ]
+        if finished:
+            with self._lock:
+                for job_id in finished:
+                    self._active_jobs.pop(job_id, None)
+        return [j for j in candidates if j["job_id"] not in statuses]
+>>>>>>> upstream/master
 
     def get_recent_jobs(
         self,
@@ -1044,9 +1231,16 @@ class JobTracker:
         exclude_operation_types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Merge active in-memory jobs + recent historical jobs from the store.
+        Merge active jobs + recent historical jobs from the store.
 
-        Active jobs are always included regardless of the time filter.
+        Active jobs are always included regardless of the time filter: EVERY
+        running/pending job in the shared store (Bug #2123: a job running on
+        another node is not in this node's memory and, once newer jobs exist,
+        not in the history window either -- the dashboard card counted it
+        while the list hid it).  The store row wins for every job it holds;
+        this node's in-memory jobs are added only when the store has no row
+        for them (e.g. not yet persisted), so a stale memory copy of a job
+        claimed, finished or cancelled elsewhere never overrides the store.
         Historical jobs are filtered by created_at within the time window.
 
         Args:
@@ -1075,8 +1269,18 @@ class JobTracker:
                 j for j in active_snapshot if j.get("operation_type") not in excl_set
             ]
 
-        seen_ids = {j["job_id"] for j in active_snapshot}
-        result = list(active_snapshot)
+        seen_ids: set = set()
+        result: List[Dict[str, Any]] = []
+        for job_dict in self._list_active_jobs_from_store(exclude_operation_types):
+            if job_dict["job_id"] not in seen_ids:
+                seen_ids.add(job_dict["job_id"])
+                result.append(job_dict)
+        # Memory supplies only jobs the store does not hold, resolved with one
+        # batched lookup (finished leftovers are evicted from memory there).
+        candidates = [j for j in active_snapshot if j["job_id"] not in seen_ids]
+        for job_dict in self._memory_jobs_absent_from_store(candidates):
+            seen_ids.add(job_dict["job_id"])
+            result.append(job_dict)
 
         cutoff_iso: Optional[str] = None
         if time_filter != "all":
@@ -1277,9 +1481,15 @@ class JobTracker:
 
         Bug #1950: writes status='interrupted' (not 'failed') -- a job
         orphaned by this same process's own restart is a restart artifact,
+<<<<<<< HEAD
         never a genuine failure, so it must not poison /health's
         get_failed_job_count() (which counts ONLY status='failed', with no
         time window) forever.
+=======
+        never a genuine failure, so it must not count toward /health's
+        failed jobs (status='failed' rows completed within the last 24h,
+        Bug #1964).
+>>>>>>> upstream/master
         """
         now_iso = datetime.now(timezone.utc).isoformat()
         orphan_error = "orphaned - server restarted"

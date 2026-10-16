@@ -644,17 +644,16 @@ class TestMultiIndexQueryService:
             embedding_provider=mock_embedding_provider,
         )
 
-        # Query should return code results even if multimodal times out
-        results, timing = service.query(
-            query_text="test query", limit=10, collection_name="code_index"
+        # A timed-out index is reported, never answered with a short result.
+        from code_indexer.services.multi_index_query_service import (
+            MultiIndexQueryTimeoutError,
         )
 
-        # Should return list (backward compatible)
-        assert isinstance(results, list)
-
-        # Should have code_index results even though multimodal failed
-        assert len(results) == 1
-        assert results[0]["payload"]["path"] == "file.py"
+        with pytest.raises(MultiIndexQueryTimeoutError) as excinfo:
+            service.query(
+                query_text="test query", limit=10, collection_name="code_index"
+            )
+        assert excinfo.value.index_types == ["multimodal"]
 
     def test_timeout_returns_partial_results(
         self, project_root, mock_vector_store, mock_embedding_provider
@@ -694,16 +693,15 @@ class TestMultiIndexQueryService:
             embedding_provider=mock_embedding_provider,
         )
 
-        results, timing = service.query(
-            query_text="test query", limit=10, collection_name="code_index"
+        from code_indexer.services.multi_index_query_service import (
+            MultiIndexQueryTimeoutError,
         )
 
-        # Should return list (backward compatible)
-        assert isinstance(results, list)
-
-        # Should have multimodal results even though code_index failed
-        assert len(results) == 1
-        assert results[0]["payload"]["path"] == "guide.md"
+        with pytest.raises(MultiIndexQueryTimeoutError) as excinfo:
+            service.query(
+                query_text="test query", limit=10, collection_name="code_index"
+            )
+        assert excinfo.value.index_types == ["code"]
 
     def test_backward_compatibility_same_results(
         self, project_root, mock_vector_store, mock_embedding_provider

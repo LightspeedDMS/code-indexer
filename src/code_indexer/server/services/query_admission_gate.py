@@ -64,12 +64,19 @@ class AdmissionDecision:
     retry_after_seconds: Optional[int] = None
 
 
+<<<<<<< HEAD
 def check_query_admission(*, record_denial: bool = True) -> AdmissionDecision:
     """Should this request be admitted now, given current memory pressure?
+=======
+def check_query_admission() -> AdmissionDecision:
+    """Should this query-path request be admitted now, given current
+    memory pressure?
+>>>>>>> upstream/master
 
     See module docstring for the full fail-open contract. Never raises:
     the entire body (including the get_memory_governor() lookup) runs
     under one try/except so ANY unexpected failure fails open.
+<<<<<<< HEAD
 
     Args:
         record_denial: whether a denial bumps the governor's
@@ -82,6 +89,8 @@ def check_query_admission(*, record_denial: bool = True) -> AdmissionDecision:
             make a pod under sustained pressure report a rejection storm that
             no user ever saw. Such callers pass False: same decision, same
             kill switch, same fail-open contract, no metric pollution.
+=======
+>>>>>>> upstream/master
     """
     try:
         from code_indexer.server.services.memory_governor import (
@@ -106,8 +115,12 @@ def check_query_admission(*, record_denial: bool = True) -> AdmissionDecision:
         if governor.admission_allowed(cfg.job_admission_memory_max_used_pct):
             return AdmissionDecision(allowed=True, retry_after_seconds=None)
 
+<<<<<<< HEAD
         if record_denial:
             governor.increment_query_admissions_denied()
+=======
+        governor.increment_query_admissions_denied()
+>>>>>>> upstream/master
         retry_after = math.ceil(governor.last_red_min_dwell_seconds)
         return AdmissionDecision(allowed=False, retry_after_seconds=retry_after)
     except Exception as exc:  # noqa: BLE001 -- fail-open contract, see module docstring

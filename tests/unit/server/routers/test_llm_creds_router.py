@@ -94,11 +94,17 @@ class TestTestConnection:
         assert data["error"] is not None
 
     def test_test_connection_network_error(self, client):
-        """Connection error maps to success=False with error text."""
+        """A provider connection error maps to success=False with its text."""
+        from code_indexer.server.services.llm_creds_client import (
+            LlmCredsConnectionError,
+        )
+
         with patch(
             "code_indexer.server.routers.llm_creds.LlmCredsClient"
         ) as MockClient:
-            MockClient.return_value.health.side_effect = ConnectionError("refused")
+            MockClient.return_value.health.side_effect = LlmCredsConnectionError(
+                "refused"
+            )
 
             response = client.post(
                 "/api/llm-creds/test-connection",
@@ -224,6 +230,10 @@ class TestSaveConfig:
         ) as mock_cs:
             mock_cs.return_value.get_config.return_value = mock_config
             mock_cs.return_value.config_manager = MagicMock()
+            # As the real service: the change is applied to the committed row.
+            mock_cs.return_value.apply_audited_change.side_effect = (
+                lambda mutate, **_kw: mutate(mock_config)
+            )
 
             response = client.post(
                 "/api/llm-creds/save-config",
@@ -390,6 +400,10 @@ class TestSaveConfig:
             svc = mock_cs.return_value
             svc.get_config.return_value = mock_config
             svc.config_manager = MagicMock()
+            # As the real service: the change is applied to the committed row.
+            svc.apply_audited_change.side_effect = lambda mutate, **_kw: mutate(
+                mock_config
+            )
 
             response = client.post(
                 "/api/llm-creds/save-config",

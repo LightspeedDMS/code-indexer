@@ -17,14 +17,31 @@ from code_indexer.server.services.file_crud_service import (
     file_crud_service,
 )
 from code_indexer.server.logging_utils import format_error_log
+<<<<<<< HEAD
 from code_indexer.server.services.activated_write_reindex import (
     attach_reindex_outcome,
 )
+=======
+from code_indexer.server.routers import repo_access_http
+>>>>>>> upstream/master
 
 logger = logging.getLogger(__name__)
 
 # Create router with prefix and tags
 router = APIRouter(prefix="/api/v1/repos/{alias}", tags=["files"])
+
+
+def _require_activation_access(alias: str, user: User) -> None:
+    """An alias that is not a registered global write exception names the
+    caller's own activation: require the caller's grants on its source
+    golden repositories (the MCP rule), refusing like an alias never
+    activated. Called first in each (sync) route body, outside its broad
+    except."""
+    if file_crud_service.is_write_exception(alias):
+        return
+    repo_access_http.enforce_activated_repo_access(
+        repo_access_http.module_app_access_filtering_service(), user.username, alias
+    )
 
 
 # Request/Response Models
@@ -117,6 +134,7 @@ def create_file(
     Raises:
         HTTPException: On various error conditions
     """
+    _require_activation_access(alias, user)
     try:
         service = file_crud_service
         result = service.create_file(
@@ -210,6 +228,7 @@ def edit_file(
     Raises:
         HTTPException: On various error conditions
     """
+    _require_activation_access(alias, user)
     try:
         service = file_crud_service
         result = service.edit_file(
@@ -306,6 +325,7 @@ def delete_file(
     Raises:
         HTTPException: On various error conditions
     """
+    _require_activation_access(alias, user)
     try:
         service = file_crud_service
         result = service.delete_file(

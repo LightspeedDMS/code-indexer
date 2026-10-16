@@ -324,7 +324,11 @@ class TestEnsureCliHnswlibCapability:
             r.message for r in caplog.records if r.levelname == "ERROR"
         )
         assert cli_python in error_text
+<<<<<<< HEAD
         assert "docs/hnswlib-custom-build.md" in error_text
+=======
+        assert "docs/server/hnswlib-custom-build.md" in error_text
+>>>>>>> upstream/master
 
 
 # ---------------------------------------------------------------------------

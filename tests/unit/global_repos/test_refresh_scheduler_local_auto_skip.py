@@ -40,6 +40,10 @@ from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
+from tests.fixtures.refresh_scheduler_stores import (
+    make_registered_repos_due,
+    real_metadata_store,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -57,10 +61,12 @@ def golden_repos_dir(tmp_path):
 
 @pytest.fixture
 def mock_registry():
-    """Registry mock with sensible defaults."""
+    """Registry mock with sensible defaults; every registered repo is due,
+    so the loop's per-repo skip is actually exercised."""
     registry = MagicMock()
     registry.list_global_repos.return_value = []
     registry.get_global_repo.return_value = None
+    make_registered_repos_due(registry)
     return registry
 
 
@@ -73,14 +79,15 @@ def mock_config_source():
 
 
 @pytest.fixture
-def scheduler(golden_repos_dir, mock_registry, mock_config_source):
-    """RefreshScheduler with injected mock registry."""
+def scheduler(tmp_path, golden_repos_dir, mock_registry, mock_config_source):
+    """RefreshScheduler with injected mock registry and a real metadata store."""
     return RefreshScheduler(
         golden_repos_dir=str(golden_repos_dir),
         config_source=mock_config_source,
         query_tracker=MagicMock(spec=QueryTracker),
         cleanup_manager=MagicMock(spec=CleanupManager),
         registry=mock_registry,
+        golden_repo_metadata_backend=real_metadata_store(tmp_path / "server-data"),
     )
 
 

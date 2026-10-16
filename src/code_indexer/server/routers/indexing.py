@@ -15,11 +15,22 @@ from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.repositories.background_jobs import JobStatus
+from code_indexer.server.routers import repo_access_http
 
 logger = logging.getLogger(__name__)
 
 # Create router with prefix and tags
 router = APIRouter(prefix="/api/v1/repos/{alias}", tags=["indexing"])
+
+
+def _require_activation_access(alias: str, user: User) -> None:
+    """Every route here serves the caller's own activation *alias*: require
+    the caller's grants on its source golden repositories (the MCP rule),
+    refusing like an alias never activated. Called first in each (sync)
+    route body, outside its broad except."""
+    repo_access_http.enforce_activated_repo_access(
+        repo_access_http.module_app_access_filtering_service(), user.username, alias
+    )
 
 
 # Request/Response Models
@@ -101,6 +112,7 @@ def trigger_reindex(
     user: User = Depends(get_current_user),
 ) -> TriggerReindexResponse:
     """Trigger re-indexing for specified index types."""
+    _require_activation_access(alias, user)
     try:
         # Import here to avoid circular dependencies
         from code_indexer.server.services.activated_repo_index_manager import (
@@ -181,6 +193,7 @@ def get_index_status(
     user: User = Depends(get_current_user),
 ) -> GetIndexStatusResponse:
     """Get index status for all index types."""
+    _require_activation_access(alias, user)
     try:
         # Import here to avoid circular dependencies
         from code_indexer.server.services.activated_repo_index_manager import (
@@ -311,6 +324,7 @@ def get_temporal_status(
             "message": str
         }
     """
+    _require_activation_access(alias, user)
     try:
         # Import here to avoid circular dependencies
         from code_indexer.server.services.dashboard_service import DashboardService

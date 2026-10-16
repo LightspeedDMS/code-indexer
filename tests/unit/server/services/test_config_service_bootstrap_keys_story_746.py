@@ -103,8 +103,11 @@ def test_all_server_config_fields_are_classified() -> None:
             "host",  # Story #1197 — runtime (cluster-propagated via shared DB row)
             "port",  # Story #1197 — runtime (cluster-propagated via shared DB row)
             "hnsw_orphan_repair_sweep_config",  # Story #1360 — runtime Web UI setting
+<<<<<<< HEAD
             "fts_backfill_sweep_config",  # EVO-66445 — persisted runtime config (dict->dataclass on load; no Config-screen control yet)
             "semantic_backfill_sweep_config",  # semantic backfill sweep — persisted runtime config, as fts_backfill_sweep_config
+=======
+>>>>>>> upstream/master
             "search_timeouts_config",  # Story #1398 — runtime Web UI setting (search/embedding/rerank timeouts)
             "embedding_stats_config",  # Story #1418 Phase 3 — runtime Web UI setting (embedding/reranker call tracking)
             "temporal_indexing_config",  # Story #1404 — runtime Web UI setting (global temporal indexing floor date)
@@ -112,10 +115,14 @@ def test_all_server_config_fields_are_classified() -> None:
             "fleet_migration_config",  # Story #1458 — runtime Web UI setting (fleet migration scheduler enable/interval)
             "temporal_legacy_migration_config",  # Issue #1548 — runtime Web UI setting (legacy temporal shard relocation gates)
             "indexing_watchdog_config",  # Bug #1530 — runtime Web UI setting (indexing watchdog thresholds)
+<<<<<<< HEAD
             # Content seam step 5a -- runtime, not bootstrap: the read source
             # and dual-write switch must flip on every node together, which a
             # per-pod config.json cannot guarantee.
             "control_plane_metadata_config",
+=======
+            "siem_delivery_config",  # runtime Web UI setting (SIEM delivery destination)
+>>>>>>> upstream/master
         }
     )
 

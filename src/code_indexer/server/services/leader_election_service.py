@@ -72,6 +72,9 @@ class LeaderElectionService:
         self._on_lose_leadership: Optional[Callable[[], None]] = None
         # Story #539: Protect leadership state mutations from concurrent access
         self._state_lock = threading.Lock()
+        # Bug #2005: the disabled-dead-peer-detection WARNING is logged once
+        # per service instance, not on every start_monitoring().
+        self._dead_peer_check_done = False
         # Bug #1249: collapse a PG-outage error storm into a single ERROR +
         # DEBUG follow-ups instead of logging a fresh traceback every tick.
         self._db_throttle = DbOutageThrottle(
@@ -162,17 +165,23 @@ class LeaderElectionService:
             )
             return False
 
+        from code_indexer.server.storage.postgres.dead_peer_detection import (
+            LEADER_CLIENT_KEEPALIVE_PARAMS,
+            apply_dead_peer_detection,
+        )
+
         try:
+            # Bug #2005: both socket ends must detect a dead peer quickly.
+            # Client keepalives / tcp_user_timeout let THIS node step down on
+            # a partition; the server-side tcp_keepalives_* / tcp_user_timeout
+            # session GUCs (sent via libpq `options`) make PostgreSQL drop a
+            # crashed leader's backend -- and so release the advisory lock --
+            # within ~60s instead of the ~2h OS default.
             conn = psycopg.connect(
-                self._connection_string,
+                apply_dead_peer_detection(
+                    self._connection_string, LEADER_CLIENT_KEEPALIVE_PARAMS
+                ),
                 autocommit=True,
-                # TCP keepalive: detect dead connections within ~25 seconds
-                # (idle=10s, interval=5s, probes=3) to prevent ghost leader
-                # on network partition.
-                keepalives=1,
-                keepalives_idle=10,
-                keepalives_interval=5,
-                keepalives_count=3,
             )
             with conn.cursor() as cur:
                 cur.execute("SELECT pg_try_advisory_lock(%s)", (_LOCK_ID,))
@@ -287,6 +296,7 @@ class LeaderElectionService:
             )
             return
 
+        self._warn_if_dead_peer_detection_disabled()
         self._stop_event.clear()
         self._monitor_thread = threading.Thread(
             target=self._monitor_loop,
@@ -317,6 +327,35 @@ class LeaderElectionService:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _warn_if_dead_peer_detection_disabled(self) -> None:
+        """Bug #2005: operator DSN values win over our dead-peer settings.
+
+        If one of them is zero (detection off / OS default), say so once at
+        start; leadership still works, it just fails over slowly.
+        """
+        from code_indexer.server.storage.postgres.dead_peer_detection import (
+            LEADER_CLIENT_KEEPALIVE_PARAMS,
+            zeroed_dead_peer_settings,
+        )
+
+        with self._state_lock:
+            if self._dead_peer_check_done:
+                return
+            self._dead_peer_check_done = True
+
+        zeroed = zeroed_dead_peer_settings(
+            self._connection_string, LEADER_CLIENT_KEEPALIVE_PARAMS
+        )
+        if zeroed:
+            logger.warning(
+                "LeaderElectionService [%s]: postgres_dsn sets %s to 0, which "
+                "turns off dead-peer detection on the leader lock connection; "
+                "leader failover after a crashed node is then unbounded (up to "
+                "the OS TCP keepalive timeout, about 2 hours)",
+                self._node_id,
+                ", ".join(zeroed),
+            )
 
     def _monitor_loop(self, check_interval: int) -> None:
         """

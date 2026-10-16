@@ -617,3 +617,73 @@ class TestExceptionHierarchy:
     def test_provider_error_status_code_defaults_to_none(self):
         err = LlmCredsProviderError("Generic error")
         assert err.status_code is None
+
+
+# ---------------------------------------------------------------------------
+# A key that cannot travel in an HTTP header
+# ---------------------------------------------------------------------------
+
+_UNSAFE_KEYS = [
+    "example-key\n0000Ab12",
+    "example key-0000Ab12",
+    "example-key\x7f0000Ab12",
+    "example-kéy-0000Ab12",
+]
+
+
+def _key_spellings(key: str):
+    return [key, repr(key)[1:-1], repr(key.encode("utf-8", "backslashreplace"))[2:-1]]
+
+
+class TestHeaderUnsafeApiKey:
+    """A stored key the HTTP layer would reject (and quote back, escaped, in
+    its error) is refused by the client itself, before any request, with a
+    fixed message. Construction never raises: server startup builds the
+    client outside any error handler."""
+
+    @pytest.mark.parametrize("key", _UNSAFE_KEYS)
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda c: c.health(),
+            lambda c: c.checkout(vendor="anthropic", consumer_id="cidx-server"),
+            lambda c: c.checkin(lease_id="lease-1"),
+        ],
+        ids=["health", "checkout", "checkin"],
+    )
+    def test_request_refused_without_echoing_the_key(self, key, call):
+        sent = []
+
+        def handler(request):
+            sent.append(request)
+            return _json_response({"status": "ok"})
+
+        client = LlmCredsClient(
+            provider_url="http://fake-provider",
+            api_key=key,
+            transport=_make_transport(handler),
+        )
+
+        with pytest.raises(LlmCredsProviderError) as raised:
+            call(client)
+
+        assert str(raised.value) == "provider API key must be printable ASCII"
+        for spelling in _key_spellings(key):
+            assert spelling not in str(raised.value)
+        assert sent == []
+
+    def test_printable_key_is_sent(self):
+        seen = []
+
+        def handler(request):
+            seen.append(request.headers["x-api-key"])
+            return _json_response({"status": "ok"})
+
+        client = LlmCredsClient(
+            provider_url="http://fake-provider",
+            api_key="example-key-!~0000Ab12",
+            transport=_make_transport(handler),
+        )
+
+        assert client.health() is True
+        assert seen == ["example-key-!~0000Ab12"]

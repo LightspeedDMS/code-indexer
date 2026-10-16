@@ -10,6 +10,7 @@ Table: xray_evaluator_cache
   compiled_at   TIMESTAMPTZ       — when the .so was compiled
   compile_ms    BIGINT            — compilation time in milliseconds
 
+<<<<<<< HEAD
 `so_bytes` is NOT a loadable `.so`. It is the opaque envelope produced by
 `rust_backend.wrap_so_for_cluster_cache` — magic + digest + payload, with the
 digest bound to the `source_hash` key and the rustc version — and it is
@@ -48,6 +49,19 @@ explicitly out of scope here (Bug #1784 review MINOR-4) -- this docstring
 exists only to describe current behavior accurately. Note that laziness is
 bounded in the direction that matters: rows can only accumulate while
 store() is being called, which is precisely when the sweeps run.
+=======
+TTL is enforced ON READ ONLY: fetch() passes a cutoff timestamp in the WHERE
+clause so a stale row can never be SERVED, regardless of whether it has been
+physically deleted yet. Deletion itself is LAZY -- _cleanup_expired() is
+called only as a side effect of store(), so an idle cluster (no new
+evaluator ever compiled) leaves expired rows sitting in the table
+indefinitely; nothing proactively sweeps them. This is a correctness/
+capacity distinction, not just phrasing: "ages out via TTL" would wrongly
+imply automatic deletion. Adding a scheduled cleanup pass is a legitimate
+future improvement but is explicitly out of scope here (Bug #1784 review
+MINOR-4) -- this docstring exists only to describe current behavior
+accurately.
+>>>>>>> upstream/master
 
 Bug #1784: `source_hash` is treated by this module purely as an OPAQUE TEXT
 key — no schema change was needed to fix the bug. The VALUE callers pass is

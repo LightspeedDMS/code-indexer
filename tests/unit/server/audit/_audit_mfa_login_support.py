@@ -18,6 +18,10 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence
 from code_indexer.server.services import audit_capture
 from code_indexer.server.services.audit_events import AuditEvent
 from code_indexer.server.services.audit_log_service import AuditLogService
+<<<<<<< HEAD
+=======
+from code_indexer.server.services.siem_delivery.capture import SiemDestinations
+>>>>>>> upstream/master
 
 CAPTURE_LOGGER = "code_indexer.server.services.audit_capture"
 
@@ -41,9 +45,20 @@ class _ThreadRecordingService(AuditLogService):
         self.insert_threads: List[int] = []
         super().__init__(db_path)
 
+<<<<<<< HEAD
     def insert_events(self, events: Sequence[AuditEvent]) -> None:
         self.insert_threads.append(threading.get_ident())
         super().insert_events(events)
+=======
+    def insert_events(
+        self,
+        events: Sequence[AuditEvent],
+        *,
+        siem_destinations: Optional[SiemDestinations] = None,
+    ) -> None:
+        self.insert_threads.append(threading.get_ident())
+        super().insert_events(events, siem_destinations=siem_destinations)
+>>>>>>> upstream/master
 
 
 class AuditStore:

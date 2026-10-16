@@ -98,8 +98,13 @@ class ResourceManagedGoldenRepoOperations:
                 rm.track_temp_file(temp_validation_dir)
 
                 # Log operation start
+                from code_indexer.utils.credential_redaction import (
+                    mask_url_credentials,
+                )
+
                 git_log_file.write(
-                    f"Starting golden repo addition: {repo_url} -> {alias}\n"
+                    "Starting golden repo addition: "
+                    f"{mask_url_credentials(repo_url)} -> {alias}\n"
                 )
                 git_log_file.flush()
 

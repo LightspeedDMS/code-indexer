@@ -360,7 +360,7 @@ def test_elevate_rate_limit_lockout_returns_429(client):
     """
     from code_indexer.server.auth.login_rate_limiter import LoginRateLimiter
 
-    fresh_limiter = LoginRateLimiter(max_attempts=3, lockout_duration_minutes=15)
+    fresh_limiter = LoginRateLimiter(max_attempts=3)
     totp_svc = _fake_totp(totp_ok=False)  # always fails verification
     esm = _fake_esm()
 
@@ -397,7 +397,7 @@ def test_elevate_success_clears_rate_counter(client):
     """
     from code_indexer.server.auth.login_rate_limiter import LoginRateLimiter
 
-    fresh_limiter = LoginRateLimiter(max_attempts=3, lockout_duration_minutes=15)
+    fresh_limiter = LoginRateLimiter(max_attempts=3)
     esm = _fake_esm()
 
     with (

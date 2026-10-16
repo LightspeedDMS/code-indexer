@@ -1,53 +1,56 @@
-"""Tests for cli._parse_file_extensions (Story #906).
+"""Tests for cli._parse_file_extensions (Story #906, #2047).
 
-Direct unit tests of the parsing helper. These replace the prior CliRunner-spy
-tests that were xfailed because Bundle 4 (#904) refactored the CLI's embedder
-chain in a way the spy fixture could not cleanly mock without violating the
-project's clean-code rule against module-level test seams in production code.
-
-The parsing logic is a pure function and is the only part of #906 with
-edge-case complexity worth direct testing. The threading from parsed list
-into filter_conditions_list is a 4-line append loop verified by code review
-at the 2 wiring sites in cli.py.
-
-End-to-end "did the user-facing flag actually reach the vector store" coverage
-is tracked as a separate follow-up integration test (real cidx subprocess
-against a tiny corpus).
+Every comma-separated token of a non-empty value is validated by the shared
+#2047 rule (services/extension_filter.py): stripped, lowercased, ONE
+leading dot dropped. A blank token, or one that can never be a file suffix,
+raises the same ValueError every other door raises -- nothing is silently
+dropped. An absent flag or a wholly empty value is no filter (documented in
+the --file-extensions help). End-to-end coverage:
+tests/unit/cli/test_file_extensions_or_2047.py.
 """
 
 import pytest
 
 from code_indexer.cli import _parse_file_extensions
+from code_indexer.services.extension_filter import normalize_extensions
 
 
 @pytest.mark.parametrize(
     "raw, expected",
     [
-        # None / empty / whitespace inputs -> []
         (None, []),
         ("", []),
         ("   ", []),
-        # Single extension
         ("py", ["py"]),
-        # Multi-value comma list
         ("py,js", ["py", "js"]),
         ("py,js,ts", ["py", "js", "ts"]),
-        # Leading-dot tolerance
         (".py", ["py"]),
-        (".py,.js", ["py", "js"]),
-        # Whitespace tolerance
+        (".py,.JS", ["py", "js"]),
         ("py, js, ts", ["py", "js", "ts"]),
         ("  py  ,  js  ", ["py", "js"]),
-        # Mixed leading-dots + whitespace
         (" .py , .js , ts ", ["py", "js", "ts"]),
-        # Edge cases: dot-only or dot-plus-comma normalize to empty/skipped
-        (".", []),
-        (".,py", ["py"]),
-        ("py,.", ["py"]),
-        (",,,", []),
-        # Empty tokens between commas dropped
-        ("py,,js", ["py", "js"]),
+        ("c++", ["c++"]),
     ],
 )
 def test_parse_file_extensions(raw, expected):
     assert _parse_file_extensions(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw, bad_token",
+    [
+        (".", "."),
+        ("py, ", " "),
+        (",,,", ""),
+        ("py,,js", ""),
+        (".,py", "."),
+        ("..py", "..py"),
+        ("py,tar.gz", "tar.gz"),
+    ],
+)
+def test_invalid_token_raises_the_shared_error(raw, bad_token):
+    with pytest.raises(ValueError) as cli_error:
+        _parse_file_extensions(raw)
+    with pytest.raises(ValueError) as shared_error:
+        normalize_extensions([bad_token])
+    assert str(cli_error.value) == str(shared_error.value)

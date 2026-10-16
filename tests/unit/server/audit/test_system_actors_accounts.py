@@ -134,6 +134,7 @@ def test_mcp_self_registration_credential_is_a_system_actor(
     from code_indexer.server.services.mcp_self_registration_service import (
         MCPSelfRegistrationService,
     )
+<<<<<<< HEAD
     from code_indexer.server.utils.config_manager import ServerConfigManager
 
     users = make_user_manager(tmp_path)
@@ -142,6 +143,17 @@ def test_mcp_self_registration_credential_is_a_system_actor(
     (tmp_path / "server").mkdir()
     config_manager.save_config(config_manager.create_default_config())
     service = MCPSelfRegistrationService(config_manager, MCPCredentialManager(users))
+=======
+    from code_indexer.server.services.config_service import ConfigService
+
+    users = make_user_manager(tmp_path)
+    users.create_user("admin", "SecureP@ssw0rd!XyZ789", UserRole.ADMIN)
+    (tmp_path / "server").mkdir()
+    # the production wiring (service_init): the ConfigService itself
+    config_service = ConfigService(server_dir_path=str(tmp_path / "server"))
+    config_service.load_config()  # writes the default config.json
+    service = MCPSelfRegistrationService(config_service, MCPCredentialManager(users))
+>>>>>>> upstream/master
     creds = service.get_or_create_credentials()
     assert creds is not None
     (row,) = store.rows("mcp_credential_created")

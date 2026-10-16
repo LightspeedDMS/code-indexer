@@ -21,8 +21,11 @@ from code_indexer.server.services.pace_maker_guard import (  # Story #997
     enforce_pace_maker_config,
 )
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+from code_indexer.server.utils.html_sanitizer import (
+    RESEARCH_ASSISTANT_ALLOWLIST,
+    sanitize_html,
+)
 
-import bleach  # type: ignore[import-untyped]
 import markdown  # type: ignore[import-untyped]
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
@@ -341,53 +344,7 @@ class ResearchAssistantService:
             ],
         )
 
-        # Define allowed HTML tags and attributes for sanitization
-        allowed_tags = [
-            "p",
-            "br",
-            "strong",
-            "em",
-            "code",
-            "pre",
-            "blockquote",
-            "h1",
-            "h2",
-            "h3",
-            "h4",
-            "h5",
-            "h6",
-            "ul",
-            "ol",
-            "li",
-            "a",
-            "table",
-            "thead",
-            "tbody",
-            "tr",
-            "th",
-            "td",
-            "div",
-            "span",
-            "hr",
-        ]
-
-        allowed_attrs = {
-            "a": ["href", "title"],
-            "code": ["class"],
-            "div": ["class"],
-            "span": ["class"],
-            "pre": ["class"],
-        }
-
-        # Sanitize HTML to prevent XSS attacks
-        clean_html = bleach.clean(
-            html,
-            tags=allowed_tags,
-            attributes=allowed_attrs,
-            protocols=["http", "https", "mailto"],
-        )
-
-        return clean_html  # type: ignore[no-any-return]
+        return sanitize_html(html, RESEARCH_ASSISTANT_ALLOWLIST)
 
     def _get_or_create_claude_session_id(self, session_id: str) -> str:
         """

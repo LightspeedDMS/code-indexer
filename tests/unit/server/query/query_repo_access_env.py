@@ -19,6 +19,11 @@ Repository aliases, URLs and usernames are neutral placeholders.
 from __future__ import annotations
 
 import importlib
+<<<<<<< HEAD
+=======
+import shutil
+import sqlite3
+>>>>>>> upstream/master
 import subprocess
 import time
 from contextlib import contextmanager
@@ -88,6 +93,36 @@ def global_alias(repo: str) -> str:
     return f"{repo}-global"
 
 
+<<<<<<< HEAD
+=======
+SERVER_DB_NAME = "cidx_server.db"
+
+
+def build_server_db_template(directory: Path) -> Path:
+    """Build the real server schema once into *directory*; return its path.
+
+    The schema-only database holds no rows and no paths, so one build can be
+    byte-copied into every test's own data dir (QueryAccessEnv then writes
+    its per-test rows, absolute repo paths included, into its copy only).
+    initialize_database closes its connection; the WAL is then checkpointed
+    and the last connection closed, so the main file alone is the complete
+    database and no -wal/-shm sidecar is left to copy.
+    """
+    db_path = directory / SERVER_DB_NAME
+    DatabaseSchema(str(db_path)).initialize_database()
+    conn = sqlite3.connect(str(db_path))
+    try:
+        # Row is (busy, wal_frames, checkpointed_frames).
+        busy = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+    finally:
+        conn.close()
+    assert busy == 0, "template database checkpoint was blocked"
+    sidecars = sorted(p.name for p in directory.glob(f"{SERVER_DB_NAME}-*"))
+    assert not sidecars, f"template database left sidecars: {sidecars}"
+    return db_path
+
+
+>>>>>>> upstream/master
 def _init_git_repo(path: Path) -> None:
     """Create a real one-commit git repository on branch 'main' at *path*."""
     path.mkdir(parents=True)
@@ -113,11 +148,21 @@ def _init_git_repo(path: Path) -> None:
 class QueryAccessEnv:
     """Real services wired the way the server wires them."""
 
+<<<<<<< HEAD
     def __init__(self, tmp_path: Path) -> None:
         self.data_dir = tmp_path / "data"
         self.data_dir.mkdir()
         db_path = str(self.data_dir / "cidx_server.db")
         DatabaseSchema(db_path).initialize_database()
+=======
+    def __init__(self, tmp_path: Path, server_db_template: Path) -> None:
+        self.data_dir = tmp_path / "data"
+        self.data_dir.mkdir()
+        db_path = str(self.data_dir / SERVER_DB_NAME)
+        # This test's own byte copy of the schema built once by
+        # build_server_db_template (closed and checkpointed).
+        shutil.copyfile(server_db_template, db_path)
+>>>>>>> upstream/master
         # Real config service rooted at this temp server dir (its
         # data/cidx_server.db is the DB above), never the operator's home.
         config_service = ConfigService(server_dir_path=str(tmp_path))
@@ -182,7 +227,15 @@ class QueryAccessEnv:
         admins = gam.get_group_by_name("admins")
         assert admins is not None, "bootstrap must create the 'admins' group"
         gam.assign_user_to_group(ADMIN, admins.id, assigned_by="test")
+<<<<<<< HEAD
         self.access_service = AccessFilteringService(gam)
+=======
+        self.group_manager = gam
+        self.group_id = group.id
+        self.access_service = AccessFilteringService(
+            gam, activated_repo_manager=self.activated_repo_manager
+        )
+>>>>>>> upstream/master
 
         self.searched_paths: List[str] = []
         self.failing_repos: Set[str] = set()
@@ -213,10 +266,21 @@ class QueryAccessEnv:
         """
         app_module = importlib.import_module("code_indexer.server.app")
         namespace = vars(app_module)
+<<<<<<< HEAD
+=======
+        # Every lazy name a query path probes must be installed: probing a
+        # missing one (e.g. golden_repo_manager in the category-map lookup)
+        # constructs the full application, which replaces the stand-in app
+        # mid-request and silently drops the access service.
+>>>>>>> upstream/master
         installs = {
             "app": self.app_stand_in(access_service),
             "semantic_query_manager": self.query_manager,
             "activated_repo_manager": self.activated_repo_manager,
+<<<<<<< HEAD
+=======
+            "golden_repo_manager": self.golden_repo_manager,
+>>>>>>> upstream/master
         }
         previous = {name: namespace[name] for name in installs if name in namespace}
         namespace.update(installs)

@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Optional, Dict, List, Union
 
 from .host_validation import validate_server_host
+<<<<<<< HEAD
+=======
+from .siem_delivery_config import SiemDeliveryConfig
+>>>>>>> upstream/master
 
 logger = logging.getLogger(__name__)
 
@@ -380,7 +384,11 @@ class SearchTimeoutsConfig:
     from the MCP tool-call layer and the embedding/reranking pipeline into a
     single Web-UI-editable config section, following the exact
     SearchLimitsConfig pattern. Each field replaces one specific hardcoded
+<<<<<<< HEAD
     constant -- see docs/architecture-invariants.md for the full mapping.
+=======
+    constant -- see docs/architecture/invariants/query-path.md for the full mapping.
+>>>>>>> upstream/master
     """
 
     # Replaces protocol.py's SEARCH_HANDLER_TIMEOUT_SECONDS (Bug #1319):
@@ -750,6 +758,7 @@ class IndexingConfig:
     # boundaries and skipped (with a WARNING) at command-build sites.
     temporal_all_branches_enabled: bool = False
 
+<<<<<<< HEAD
     # EVO-65484: gate the synchronous meta-description / lifecycle generation that
     # runs inside every golden-repo add worker (via the orchestrator -> Claude seam).
     # Default True (unchanged behavior). Set False to skip it: when that seam is
@@ -759,6 +768,8 @@ class IndexingConfig:
     # never affects search/index correctness, only the generated description.
     golden_description_generation_enabled: bool = True
 
+=======
+>>>>>>> upstream/master
     # Story #223 - AC1: Configurable file extensions for indexing.
     # 60 unique extensions with leading dots matching CLI Config.file_extensions defaults.
     indexable_extensions: List[str] = field(
@@ -907,7 +918,10 @@ class ClaudeIntegrationConfig:
     # Loopback (127.0.0.0/8 and ::1/128) is always appended by the wrapper at runtime.
     # Default empty = only loopback is reachable (fail-closed posture).
     # Example: ["10.5.0.0/24", "192.168.100.0/24"] for a cluster spanning two subnets.
-    # Bootstrap-only: lives in config.json (not runtime DB). Restart required after change.
+    # A RUNTIME setting: claude_integration_config is not a bootstrap key, so
+    # with a runtime database this list is stored in the runtime row, not in
+    # config.json. Reset to Defaults keeps it (config_reset, Bug #2094).
+    # Note: scripts/cidx-curl.sh reads it from config.json.
     ra_curl_allowed_cidrs: List[str] = field(default_factory=list)
 
 
@@ -1089,7 +1103,11 @@ class BackgroundJobsConfig:
     # RESTART_REQUIRED_FIELDS in web/routes.py), not live-reloaded.
     temporal_lane_concurrency: int = 2
 
+<<<<<<< HEAD
     # Memory-aware admission for heavy index jobs (EVO-64538 / C10).
+=======
+    # Memory-aware admission for heavy index jobs.
+>>>>>>> upstream/master
     # A fixed pool size (above) is memory-blind: under bulk golden-repo indexing
     # the combined HNSW + FTS + embedding footprint of pool_size concurrent jobs
     # can exceed the process/cgroup memory limit and OOM the server. When the
@@ -1337,6 +1355,7 @@ class AliasLockConfig:
     db_backed_enabled_promoted: bool = False
 
 
+<<<<<<< HEAD
 #: metadata_read_source values: where alias pointers and write-mode markers
 #: are READ from (content seam step 5a).
 METADATA_READ_SOURCE_REGISTRY = "registry"
@@ -1489,6 +1508,8 @@ class SemanticBackfillSweepConfig:
     attempt_cooldown_seconds: int = 86400
 
 
+=======
+>>>>>>> upstream/master
 @dataclass
 class XRayConfig:
     """
@@ -1713,6 +1734,7 @@ class CowDaemonConfig:
     # individual round-trip so a lost/dropped daemon response fails loudly
     # instead of hanging the caller forever.
     request_timeout_seconds: int = _COW_DAEMON_DEFAULT_REQUEST_TIMEOUT_SECONDS
+<<<<<<< HEAD
 
 
 @dataclass
@@ -1732,6 +1754,8 @@ class WorkspaceMcpConfig:
     mount_point: str = ""  # shared-volume root both source and dest must resolve under
     timeout_seconds: int = _COW_DAEMON_DEFAULT_TIMEOUT_SECONDS
     poll_interval_seconds: int = _COW_DAEMON_DEFAULT_POLL_INTERVAL_SECONDS
+=======
+>>>>>>> upstream/master
 
 
 @dataclass
@@ -1882,8 +1906,9 @@ class AdmissionControlConfig:
     number of in-flight (non-exempt) requests PER WORKER PROCESS and/or
     rate-limits each caller individually, shedding excess with an immediate
     ``429 Too Many Requests`` + ``Retry-After`` so clients back off and retry
-    instead of piling up toward queue collapse. Health/docs endpoints are always
-    exempt so readiness probes and schema fetches are never rejected.
+    instead of piling up toward queue collapse. Health endpoints are always
+    exempt so readiness probes are never rejected; API documentation requires
+    an authenticated session or token and is admitted like any other request.
 
     Opt-in (both switches default False) because the right cap is
     deployment-specific (roughly timeout x per-worker service rate). The two
@@ -1991,6 +2016,11 @@ class ServerConfig:
 
     # Story #1360 (Epic #1333 S3) - HNSW orphan repair fleet sweep configuration
     hnsw_orphan_repair_sweep_config: Optional[HNSWOrphanRepairSweepConfig] = None
+<<<<<<< HEAD
+=======
+    # SIEM delivery (Google SecOps) runtime configuration
+    siem_delivery_config: Optional[SiemDeliveryConfig] = None
+>>>>>>> upstream/master
     # Issue #1530 - Indexing-subprocess activity watchdog configuration
     indexing_watchdog_config: Optional[IndexingWatchdogConfig] = None
 
@@ -2003,6 +2033,7 @@ class ServerConfig:
     # Issue #1546 Phase 2 - DB-backed golden-repo alias lock rollout gate
     alias_lock_config: Optional[AliasLockConfig] = None
 
+<<<<<<< HEAD
     # Content seam step 5a - aliases and write-mode markers in the registry
     control_plane_metadata_config: Optional[ControlPlaneMetadataConfig] = None
 
@@ -2011,6 +2042,8 @@ class ServerConfig:
     #: Semantic (vector) index self-heal backfill — ships OFF (cost gate).
     semantic_backfill_sweep_config: Optional[SemanticBackfillSweepConfig] = None
 
+=======
+>>>>>>> upstream/master
     # Story #977 - X-Ray precision AST-aware code search configuration (runtime, not bootstrap)
     xray_config: Optional[XRayConfig] = None
 
@@ -2102,7 +2135,8 @@ class ServerConfig:
     scip_backend: str = "local"
 
     # Story #923 - Admin TOTP step-up elevation enforcement (runtime, never bootstrap)
-    # Kill switch: False = elevation enforcement disabled (503 returned on protected routes).
+    # Kill switch: False = elevation enforcement disabled (protected routes pass
+    # through with no elevation check; only POST /auth/elevate answers 503).
     # Idle timeout and max age mirror ElevatedSessionManager defaults.
     elevation_enforcement_enabled: bool = False
     elevation_idle_timeout_seconds: int = 300  # 5 minutes idle
@@ -2349,11 +2383,16 @@ class ServerConfig:
         # Story #1360 (Epic #1333 S3) - Initialize HNSW orphan repair sweep config
         if self.hnsw_orphan_repair_sweep_config is None:
             self.hnsw_orphan_repair_sweep_config = HNSWOrphanRepairSweepConfig()
+<<<<<<< HEAD
         # EVO-66445 - Initialize FTS backfill sweep config
         if self.fts_backfill_sweep_config is None:
             self.fts_backfill_sweep_config = FtsBackfillSweepConfig()
         if self.semantic_backfill_sweep_config is None:
             self.semantic_backfill_sweep_config = SemanticBackfillSweepConfig()
+=======
+        if self.siem_delivery_config is None:
+            self.siem_delivery_config = SiemDeliveryConfig()
+>>>>>>> upstream/master
         # Issue #1530 - Initialize indexing watchdog config
         if self.indexing_watchdog_config is None:
             self.indexing_watchdog_config = IndexingWatchdogConfig()
@@ -2368,9 +2407,12 @@ class ServerConfig:
         # Issue #1546 Phase 2 - Initialize alias lock rollout-gate config
         if self.alias_lock_config is None:
             self.alias_lock_config = AliasLockConfig()
+<<<<<<< HEAD
         # Content seam step 5a - control-plane metadata read source / dual-write
         if self.control_plane_metadata_config is None:
             self.control_plane_metadata_config = ControlPlaneMetadataConfig()
+=======
+>>>>>>> upstream/master
         # Story #977 - Initialize X-Ray config
         if self.xray_config is None:
             self.xray_config = XRayConfig()
@@ -3085,6 +3127,7 @@ class ServerConfigManager:
                 )
             )
 
+<<<<<<< HEAD
         # EVO-66445: Convert fts_backfill_sweep_config dict to FtsBackfillSweepConfig
         # (fields() filter for rolling-upgrade safety, same pattern as above).
         if "fts_backfill_sweep_config" in config_dict and isinstance(
@@ -3105,6 +3148,22 @@ class ServerConfigManager:
             config_dict["semantic_backfill_sweep_config"] = SemanticBackfillSweepConfig(
                 **{k: v for k, v in _sem_dict.items() if k in _sem_allowed}
             )
+=======
+        # SIEM delivery section: same round-trip conversion (unknown keys
+        # filtered for rolling-upgrade safety).
+        if "siem_delivery_config" in config_dict and isinstance(
+            config_dict["siem_delivery_config"], dict
+        ):
+            _siem_allowed = {f.name for f in fields(SiemDeliveryConfig)}
+            config_dict["siem_delivery_config"] = SiemDeliveryConfig(
+                **{
+                    k: v
+                    for k, v in config_dict["siem_delivery_config"].items()
+                    if k in _siem_allowed
+                }
+            )
+
+>>>>>>> upstream/master
         # Issue #1530: Convert indexing_watchdog_config dict to
         # IndexingWatchdogConfig. Same rationale/pattern as
         # hnsw_orphan_repair_sweep_config above.
@@ -3160,6 +3219,7 @@ class ServerConfigManager:
                 **{k: v for k, v in _alc_dict.items() if k in _alc_allowed}
             )
 
+<<<<<<< HEAD
         # Content seam step 5a: same dict-to-dataclass conversion, unknown
         # keys filtered for rolling-upgrade safety.
         if "control_plane_metadata_config" in config_dict and isinstance(
@@ -3171,6 +3231,8 @@ class ServerConfigManager:
                 **{k: v for k, v in _cpm_dict.items() if k in _cpm_allowed}
             )
 
+=======
+>>>>>>> upstream/master
         # Story #977: Convert xray_config dict to XRayConfig
         if "xray_config" in config_dict and isinstance(
             config_dict["xray_config"], dict

@@ -28,7 +28,17 @@ from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.search_embed_event_emit import emit_embed_event
 from code_indexer.server.services.search_event_context import _search_event_ctx
 
+<<<<<<< HEAD
 from .._utils import _coerce_int, _get_golden_repos_dir
+=======
+from code_indexer.server.services.memory_candidate_retriever import MemoryCandidate
+
+from .._utils import (
+    _coerce_int,
+    _get_access_filtering_service,
+    _get_golden_repos_dir,
+)
+>>>>>>> upstream/master
 from ._shared import _CIDX_META_DIR_NAME, _DEFAULT_SEARCH_LIMIT, _MEMORY_SEMANTIC_MODES
 
 # Issue #1935: literal package name (not __name__) so every submodule's
@@ -37,6 +47,34 @@ from ._shared import _CIDX_META_DIR_NAME, _DEFAULT_SEARCH_LIMIT, _MEMORY_SEMANTI
 logger = logging.getLogger("code_indexer.server.mcp.handlers.search")
 
 
+<<<<<<< HEAD
+=======
+def _visible_candidates(
+    candidates: List[MemoryCandidate], username: str
+) -> List[MemoryCandidate]:
+    """Keep only the candidates the caller may see, before any body is read.
+
+    Visibility is AccessFilteringService.filter_visible_memory_ids (one call
+    per request). Without an access service no candidate is visible.
+    """
+    if not candidates:
+        return []
+    access_service = _get_access_filtering_service()
+    if access_service is None:
+        logger.warning(
+            "Memory retrieval: access filtering service unavailable; "
+            "no memories returned for this request."
+        )
+        return []
+    visible = set(
+        access_service.filter_visible_memory_ids(
+            [c.memory_id for c in candidates], username
+        )
+    )
+    return [c for c in candidates if c.memory_id in visible]
+
+
+>>>>>>> upstream/master
 def _configured_embedding_timeout_seconds() -> int:
     """Return the Web-UI-configured embedding provider HTTP timeout
     (Issue #1398), replacing the previously hardcoded VoyageAIConfig
@@ -122,8 +160,13 @@ def _compute_memory_query_vector(
         if _event_ctx is not None:
             _event_ctx.record_provider_cache_fields(
                 "voyage-ai",
+<<<<<<< HEAD
                 cache_hit=_embed_meta.key_found,
                 cache_mode=_embed_meta.cache_mode,
+=======
+                cache_hit=_embed_meta.search_event_cache_hit,
+                cache_mode=_embed_meta.search_event_cache_mode,
+>>>>>>> upstream/master
                 latency_ms=_embed_meta.provider_latency_ms,
             )
         # Story #1293: emit the durable search_embed_event row for this inline
@@ -201,8 +244,13 @@ def _compute_shared_query_vector(
         if _event_ctx is not None:
             _event_ctx.record_provider_cache_fields(
                 "voyage-ai",
+<<<<<<< HEAD
                 cache_hit=_embed_meta.key_found,
                 cache_mode=_embed_meta.cache_mode,
+=======
+                cache_hit=_embed_meta.search_event_cache_hit,
+                cache_mode=_embed_meta.search_event_cache_mode,
+>>>>>>> upstream/master
                 latency_ms=_embed_meta.provider_latency_ms,
             )
         # Story #1293: emit the durable search_embed_event row for this inline
@@ -303,9 +351,16 @@ def _run_memory_retrieval(
         search_mode=search_mode,
     )
     filtered_candidates = pipeline.apply_voyage_floor(memory_candidates)
+<<<<<<< HEAD
 
     assembled = pipeline.build_relevant_memories(
         memory_candidates=filtered_candidates,
+=======
+    visible_candidates = _visible_candidates(filtered_candidates, user.username)
+
+    assembled = pipeline.build_relevant_memories(
+        memory_candidates=visible_candidates,
+>>>>>>> upstream/master
         query=query_text,
         config_service=config_service,
         reranker_status=reranker_status,

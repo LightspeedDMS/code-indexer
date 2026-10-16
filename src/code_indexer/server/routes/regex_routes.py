@@ -27,6 +27,20 @@ from code_indexer.server.services.repo_access_guard import (
     RepoAccessDeniedError,
     require_repo_access,
 )
+<<<<<<< HEAD
+=======
+
+from code_indexer.server.services.search_event_log_writer import SearchEventLogWriter
+from code_indexer.server.services.search_event_recording import (
+    SearchOrigin,
+    record_regex_search,
+    recording_failure,
+    writer_from_app,
+)
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id,
+)
+>>>>>>> upstream/master
 
 # Module-level import so test patches against
 # code_indexer.server.routes.regex_routes.RegexSearchService work correctly.
@@ -36,6 +50,9 @@ from code_indexer.server.startup.ripgrep_backend_wiring import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Story #2117: the tool and door every REST regex search event carries.
+REST_REGEX_ORIGIN = SearchOrigin(tool="POST /api/regex/search", door="rest")
 
 router = APIRouter(prefix="/api/regex", tags=["regex"])
 
@@ -163,19 +180,31 @@ async def _execute_single_search(
     repo_path_str: str,
     timeout_seconds: Optional[int] = None,
     user: Optional[User] = None,
+    *,
+    alias: Optional[str] = None,
+    event_writer: Any = None,
 ) -> Dict[str, Any]:
     """Execute a single-repo regex search.
 
     Returns a dict with matches + metadata.
     Raises ValueError, TimeoutError, or RipgrepExecutionError on failure.
+
+    Story #2108: when `user` and `alias` are given, a completed search records
+    one regex search event for `alias` through `event_writer` (a failed
+    search raises before recording).
     """
+    import time
     from pathlib import Path
 
+    started = time.monotonic()
     if user is not None:
         api_metrics_service.increment_regex_search(username=user.username)
 
     repo_path = Path(repo_path_str)
+<<<<<<< HEAD
 
+=======
+>>>>>>> upstream/master
     # Issue #1609: RegexSearchService.__init__ performs synchronous
     # filesystem calls (Path.resolve(), shutil.which()) that must never
     # run directly on the event-loop thread inside an `async def` (this
@@ -183,6 +212,7 @@ async def _execute_single_search(
     # call itself via anyio.to_thread.run_sync, mirroring the granular
     # per-call offload pattern already established elsewhere in this
     # search path (see regex_search.py's search() method).
+<<<<<<< HEAD
     def _new_service() -> RegexSearchService:
         root, backend = server_regex_target(repo_path)
         return RegexSearchService(root, ripgrep_backend=backend)
@@ -199,7 +229,35 @@ async def _execute_single_search(
         multiline=body.multiline,
         pcre2=body.pcre2,
         timeout_seconds=timeout_seconds,
+=======
+    service = await anyio.to_thread.run_sync(
+        functools.partial(RegexSearchService, repo_path)
+>>>>>>> upstream/master
     )
+    # Story #2117: a search that ran on a resolved repository and failed is a
+    # failure row (its exception's class); the error propagates.
+    with recording_failure(
+        event_writer if user is not None and alias is not None else None,
+        origin=REST_REGEX_ORIGIN,
+        search_type="regex",
+        username=user.username if user is not None else "",
+        repo_alias=alias,
+        query_text=body.pattern,
+        started_monotonic=started,
+        correlation_id=get_current_correlation_id(),
+    ):
+        result = await service.search(
+            pattern=body.pattern,
+            path=body.path,
+            include_patterns=body.include_patterns,
+            exclude_patterns=body.exclude_patterns,
+            case_sensitive=body.case_sensitive,
+            context_lines=body.context_lines,
+            max_results=body.max_results,
+            multiline=body.multiline,
+            pcre2=body.pcre2,
+            timeout_seconds=timeout_seconds,
+        )
 
     matches = [
         {
@@ -213,7 +271,7 @@ async def _execute_single_search(
         for m in result.matches
     ]
 
-    return {
+    response = {
         "matches": matches,
         "total_matches": result.total_matches,
         "truncated": result.truncated,
@@ -221,6 +279,18 @@ async def _execute_single_search(
         "search_engine": result.search_engine,
         "search_time_ms": result.search_time_ms,
     }
+    if user is not None and alias is not None:
+        record_regex_search(
+            event_writer,
+            origin=REST_REGEX_ORIGIN,
+            username=user.username,
+            repo_alias=alias,
+            pattern=body.pattern,
+            result_count=len(matches),
+            started_monotonic=started,
+            correlation_id=get_current_correlation_id(),
+        )
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -233,8 +303,12 @@ async def _execute_omni_search(
     aliases: List[str],
     user: User,
     timeout_seconds: Optional[int] = None,
+    event_writer: Optional[SearchEventLogWriter] = None,
 ) -> Dict[str, Any]:
-    """Fan out search across multiple repos, collecting results and errors."""
+    """Fan out search across multiple repos, collecting results and errors.
+
+    Story #2108: each repository searched records its own regex search event.
+    """
     import time
 
     start_time = time.time()
@@ -260,7 +334,12 @@ async def _execute_omni_search(
 
         try:
             result = await _execute_single_search(
-                body, repo_path_str, timeout_seconds=timeout_seconds, user=user
+                body,
+                repo_path_str,
+                timeout_seconds=timeout_seconds,
+                user=user,
+                alias=alias,
+                event_writer=event_writer,
             )
             repos_searched += 1
             search_engine = result.get("search_engine", search_engine)
@@ -400,7 +479,11 @@ async def regex_search(
                 },
             )
         result = await _execute_omni_search(
-            body, aliases, user, timeout_seconds=effective_timeout
+            body,
+            aliases,
+            user,
+            timeout_seconds=effective_timeout,
+            event_writer=writer_from_app(request.app),
         )
         return result
 
@@ -419,7 +502,12 @@ async def regex_search(
 
     try:
         result = await _execute_single_search(
-            body, repo_path_str, timeout_seconds=effective_timeout, user=user
+            body,
+            repo_path_str,
+            timeout_seconds=effective_timeout,
+            user=user,
+            alias=body.repository_alias,
+            event_writer=writer_from_app(request.app),
         )
         return result
     except ValueError as e:

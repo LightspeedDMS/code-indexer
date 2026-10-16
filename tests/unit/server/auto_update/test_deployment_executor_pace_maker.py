@@ -216,6 +216,11 @@ class TestEnsurePaceMakerSudoEnv:
     ) -> None:
         """When server_user is set, install.sh command must include 'env NONINTERACTIVE=1'."""
         executor = _make_executor()
+        # Bug #1996: the service user is read from the unit file under
+        # SYSTEMD_UNIT_DIR -- give the test its own instead of the host's.
+        unit_dir = tmp_path / "units"
+        unit_dir.mkdir()
+        (unit_dir / f"{executor.service_name}.service").write_text("[Service]\n")
         p1, p3 = (
             patch(
                 "code_indexer.server.auto_update.deployment_executor.Path.home",
@@ -229,6 +234,10 @@ class TestEnsurePaceMakerSudoEnv:
         with (
             p1,
             p3,
+            patch(
+                "code_indexer.server.auto_update.deployment_executor.SYSTEMD_UNIT_DIR",
+                unit_dir,
+            ),
             patch.object(
                 DeploymentExecutor, "_extract_service_user", return_value="code-indexer"
             ),

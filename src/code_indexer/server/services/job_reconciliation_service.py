@@ -343,6 +343,7 @@ class JobReconciliationService:
         base_sql = (
             "UPDATE background_jobs "
             "SET    status = 'failed', "
+            "       completed_at = NOW(), "
             "       error  = COALESCE(error, 'Reclaimed by JobReconciliationService: "
             "stuck in active state beyond max_execution_time (Bug #1141)') "
             "WHERE  status = 'running' "

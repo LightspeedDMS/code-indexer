@@ -8,9 +8,22 @@ PR history, cleanup history, cleanup workspaces, and cleanup status.
 from __future__ import annotations
 
 import logging
+<<<<<<< HEAD
+=======
+import time
+from dataclasses import dataclass, field
+>>>>>>> upstream/master
 from typing import Dict, Any, Optional
 
 from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.services.search_event_context import get_search_event_ctx
+from code_indexer.server.services.search_event_recording import (
+    SearchOrigin,
+    in_scip_search_scope,
+    record_scip_search,
+    scip_callchain_query_text,
+    writer_from_app,
+)
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
@@ -24,8 +37,10 @@ from code_indexer.server.services.query_admission_gate import (
 from code_indexer.server.mcp import reranking as _mcp_reranking
 from code_indexer.scip.database.queries import MAX_DEPTH_CAP as _MAX_CALLCHAIN_DEPTH
 
+from ..auth.elevation_decorator import require_mcp_elevation
 from . import _utils
 from ._utils import (
+    _admin_role_first,
     _mcp_response,
     _coerce_int,
     _coerce_float,
@@ -261,11 +276,49 @@ def _validate_audit_pagination(limit: Any, offset: Any) -> tuple:
     return limit_int, offset_int
 
 
+@dataclass(frozen=True)
+class _ScipCall:
+    """Story #2117: one MCP SCIP search -- its tool name and start time."""
+
+    tool: str
+    started_monotonic: float = field(default_factory=time.monotonic)
+
+
+def _scip_response(
+    payload: Dict[str, Any],
+    user: User,
+    repository_alias: Any,
+    query_text: str,
+    call: _ScipCall,
+    error: Optional[BaseException] = None,
+) -> Dict[str, Any]:
+    """Record one SCIP search (Story #2116/#2117) and return its response:
+    `error` is the exception a search that raised failed with (its class is
+    the row's error class; a rejection records nothing)."""
+    record_scip_search(
+        writer_from_app(_utils._lazy_module_attr_or_none("app")),
+        payload,
+        origin=SearchOrigin(tool=call.tool, door="mcp"),
+        username=user.username,
+        repo_alias=repository_alias if isinstance(repository_alias, str) else None,
+        query_text=query_text,
+        started_monotonic=call.started_monotonic,
+        correlation_id=get_correlation_id(),
+        error=error,
+        # Bug #2111: a search without an alias -- the SCIP service noted on
+        # this handler's context (in_scip_search_scope) each repository it
+        # searched and that repository's count.
+        context=get_search_event_ctx(),
+    )
+    return _mcp_response(payload)
+
+
 # ---------------------------------------------------------------------------
 # Public SCIP query handlers
 # ---------------------------------------------------------------------------
 
 
+@in_scip_search_scope
 def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Find definition locations for a symbol across all indexed projects.
 
@@ -280,6 +333,7 @@ def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with definition results
     """
+    call = _ScipCall("scip_definition")
     try:
         symbol = params.get("symbol")
         exact = params.get("exact", False)
@@ -333,24 +387,38 @@ def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #685: Apply SCIP payload truncation to context fields
         # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
+        results_dicts = _apply_scip_payload_truncation(
+            results_dicts, owner=user.username
+        )
 
-        return _mcp_response(
+        return _scip_response(
             {
                 "success": True,
                 "symbol": symbol,
                 "total_results": len(results_dicts),
                 "results": results_dicts,
-            }
+            },
+            user,
+            repository_alias,
+            symbol,
+            call,
         )
     except Exception as e:
         logger.exception(
             f"Error in scip_definition: {e}",
             extra={"correlation_id": get_correlation_id()},
         )
-        return _mcp_response({"success": False, "error": str(e), "results": []})
+        return _scip_response(
+            {"success": False, "error": str(e), "results": []},
+            user,
+            params.get("repository_alias"),
+            str(params.get("symbol") or ""),
+            call,
+            error=e,
+        )
 
 
+@in_scip_search_scope
 def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Find all references to a symbol across all indexed projects.
 
@@ -368,6 +436,7 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with reference results
     """
+    call = _ScipCall("scip_references")
     try:
         symbol = params.get("symbol")
         requested_limit = _coerce_int(params.get("limit"), 100)
@@ -438,7 +507,9 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #685: Apply SCIP payload truncation to context fields
         # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
+        results_dicts = _apply_scip_payload_truncation(
+            results_dicts, owner=user.username
+        )
 
         # Story #659: Apply cross-encoder reranking after retrieval, before return.
         # Guard: skip entirely when no rerank_query to avoid overhead.
@@ -458,7 +529,7 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "rerank_time_ms": 0,
             }
 
-        return _mcp_response(
+        return _scip_response(
             {
                 "success": True,
                 "symbol": symbol,
@@ -469,16 +540,28 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "reranker_provider": _rerank_meta["reranker_provider"],
                     "rerank_time_ms": _rerank_meta["rerank_time_ms"],
                 },
-            }
+            },
+            user,
+            repository_alias,
+            symbol,
+            call,
         )
     except Exception as e:
         logger.exception(
             f"Error in scip_references: {e}",
             extra={"correlation_id": get_correlation_id()},
         )
-        return _mcp_response({"success": False, "error": str(e), "results": []})
+        return _scip_response(
+            {"success": False, "error": str(e), "results": []},
+            user,
+            params.get("repository_alias"),
+            str(params.get("symbol") or ""),
+            call,
+            error=e,
+        )
 
 
+@in_scip_search_scope
 def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get dependencies for a symbol across all indexed projects.
 
@@ -494,6 +577,7 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with dependency results
     """
+    call = _ScipCall("scip_dependencies")
     try:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 1)
@@ -578,24 +662,38 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #685: Apply SCIP payload truncation to context fields
         # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
+        results_dicts = _apply_scip_payload_truncation(
+            results_dicts, owner=user.username
+        )
 
-        return _mcp_response(
+        return _scip_response(
             {
                 "success": True,
                 "symbol": symbol,
                 "total_results": len(results_dicts),
                 "results": results_dicts,
-            }
+            },
+            user,
+            repository_alias,
+            symbol,
+            call,
         )
     except Exception as e:
         logger.exception(
             f"Error in scip_dependencies: {e}",
             extra={"correlation_id": get_correlation_id()},
         )
-        return _mcp_response({"success": False, "error": str(e), "results": []})
+        return _scip_response(
+            {"success": False, "error": str(e), "results": []},
+            user,
+            params.get("repository_alias"),
+            str(params.get("symbol") or ""),
+            call,
+            error=e,
+        )
 
 
+@in_scip_search_scope
 def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get dependents (symbols that depend on target symbol) across all indexed projects.
 
@@ -611,6 +709,7 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with dependent results
     """
+    call = _ScipCall("scip_dependents")
     try:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 1)
@@ -695,24 +794,38 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #685: Apply SCIP payload truncation to context fields
         # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
+        results_dicts = _apply_scip_payload_truncation(
+            results_dicts, owner=user.username
+        )
 
-        return _mcp_response(
+        return _scip_response(
             {
                 "success": True,
                 "symbol": symbol,
                 "total_results": len(results_dicts),
                 "results": results_dicts,
-            }
+            },
+            user,
+            repository_alias,
+            symbol,
+            call,
         )
     except Exception as e:
         logger.exception(
             f"Error in scip_dependents: {e}",
             extra={"correlation_id": get_correlation_id()},
         )
-        return _mcp_response({"success": False, "error": str(e), "results": []})
+        return _scip_response(
+            {"success": False, "error": str(e), "results": []},
+            user,
+            params.get("repository_alias"),
+            str(params.get("symbol") or ""),
+            call,
+            error=e,
+        )
 
 
+@in_scip_search_scope
 def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Analyze impact of changes to a symbol.
 
@@ -731,6 +844,10 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     if not _admission.allowed:
         return _mcp_response(memory_pressure_mcp_payload(_admission))
 
+<<<<<<< HEAD
+=======
+    call = _ScipCall("scip_impact")
+>>>>>>> upstream/master
     try:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 3)
@@ -803,26 +920,36 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             username=user.username,
         )
 
-        return _mcp_response(
+        return _scip_response(
             {
                 "success": True,
                 **result,
-            }
+            },
+            user,
+            repository_alias,
+            symbol,
+            call,
         )
     except Exception as e:
         logger.exception(
             f"Error in scip_impact: {e}", extra={"correlation_id": get_correlation_id()}
         )
-        return _mcp_response(
+        return _scip_response(
             {
                 "success": False,
                 "error": str(e),
                 "affected_symbols": [],
                 "affected_files": [],
-            }
+            },
+            user,
+            params.get("repository_alias"),
+            str(params.get("symbol") or ""),
+            call,
+            error=e,
         )
 
 
+@in_scip_search_scope
 def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Find call chains between two symbols.
 
@@ -838,6 +965,7 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with call chain results
     """
+    call = _ScipCall("scip_callchain")
     try:
         from_symbol = params.get("from_symbol")
         to_symbol = params.get("to_symbol")
@@ -932,7 +1060,13 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 f"scip_callchain timeout for {from_symbol!r} -> "
                 f"{to_symbol!r}: {timeout_errors}"
             )
+<<<<<<< HEAD
             return _mcp_response(
+=======
+            from code_indexer.scip.database.queries import QueryTimeoutError
+
+            return _scip_response(
+>>>>>>> upstream/master
                 {
                     "success": False,
                     "error": (
@@ -942,7 +1076,16 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "from_symbol": from_symbol,
                     "to_symbol": to_symbol,
                     "chains": [],
+<<<<<<< HEAD
                 }
+=======
+                },
+                user,
+                params.get("repository_alias"),
+                scip_callchain_query_text(from_symbol, to_symbol),
+                call,
+                error=QueryTimeoutError(str(timeout_errors[0])),
+>>>>>>> upstream/master
             )
 
         unique_chains = _deduplicate_and_sort_chains(all_chains)
@@ -966,7 +1109,11 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
         )
 
+<<<<<<< HEAD
         return _mcp_response(
+=======
+        return _scip_response(
+>>>>>>> upstream/master
             {
                 "success": True,
                 "from_symbol": from_symbol,
@@ -978,16 +1125,30 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "repository_filter": repository_alias if repository_alias else "all",
                 "chains": returned_chains,
                 "diagnostic": diagnostic,
-            }
+            },
+            user,
+            repository_alias,
+            scip_callchain_query_text(from_symbol, to_symbol),
+            call,
         )
     except Exception as e:
         logger.exception(
             f"Error in scip_callchain: {e}",
             extra={"correlation_id": get_correlation_id()},
         )
-        return _mcp_response({"success": False, "error": str(e), "chains": []})
+        return _scip_response(
+            {"success": False, "error": str(e), "chains": []},
+            user,
+            params.get("repository_alias"),
+            scip_callchain_query_text(
+                params.get("from_symbol"), params.get("to_symbol")
+            ),
+            call,
+            error=e,
+        )
 
 
+@in_scip_search_scope
 def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get smart context for a symbol.
 
@@ -1004,6 +1165,7 @@ def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     from code_indexer.scip.database.queries import QueryTimeoutError
 
+    call = _ScipCall("scip_context")
     try:
         symbol = params.get("symbol")
         limit = _coerce_int(params.get("limit"), 20)
@@ -1051,30 +1213,46 @@ def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             timeout_seconds=_SCIP_CONTEXT_TIMEOUT_SECONDS,
         )
 
-        return _mcp_response(
+        return _scip_response(
             {
                 "success": True,
                 **result,
-            }
+            },
+            user,
+            repository_alias,
+            symbol,
+            call,
         )
     except QueryTimeoutError as e:
         logger.warning(
             f"scip_context timeout for symbol: {params.get('symbol')}: {e}",
             extra={"correlation_id": get_correlation_id()},
         )
-        return _mcp_response(
+        return _scip_response(
             {
                 "success": False,
                 "error": f"Query timeout exceeded: {e}",
                 "files": [],
-            }
+            },
+            user,
+            params.get("repository_alias"),
+            str(params.get("symbol") or ""),
+            call,
+            error=e,
         )
     except Exception as e:
         logger.exception(
             f"Error in scip_context: {e}",
             extra={"correlation_id": get_correlation_id()},
         )
-        return _mcp_response({"success": False, "error": str(e), "files": []})
+        return _scip_response(
+            {"success": False, "error": str(e), "files": []},
+            user,
+            params.get("repository_alias"),
+            str(params.get("symbol") or ""),
+            call,
+            error=e,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1162,8 +1340,14 @@ def get_scip_audit_log(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+@_admin_role_first
+@require_mcp_elevation()
 def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get SCIP self-healing PR creation history (admin only)."""
+    """Get SCIP self-healing PR creation history (admin only).
+
+    Audit-log content: the caller's own elevation window is required, like
+    REST ``GET /api/admin/scip-pr-history``.
+    """
     try:
         if user.role != UserRole.ADMIN:
             return _mcp_response(
@@ -1214,8 +1398,14 @@ def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@_admin_role_first
+@require_mcp_elevation()
 def handle_scip_cleanup_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get SCIP workspace cleanup history (admin only)."""
+    """Get SCIP workspace cleanup history (admin only).
+
+    Audit-log content: the caller's own elevation window is required, like
+    REST ``GET /api/admin/scip-git-cleanup-history``.
+    """
     try:
         if user.role != UserRole.ADMIN:
             return _mcp_response(

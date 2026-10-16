@@ -10,6 +10,7 @@ from ..config import OVERRIDE_FILENAME, Config, override_config_from_bytes
 from .fetch_planner import plan_fetch_batches
 from .file_facts import ContentUnavailableError
 from ..services.override_filter_service import OverrideFilterService
+<<<<<<< HEAD
 from ..utils.path_confinement import is_resolved_within_root
 
 if TYPE_CHECKING:
@@ -19,6 +20,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _GITIGNORE_SKIP_DIRS = frozenset({".git", "__pycache__", ".mypy_cache", "node_modules"})
+=======
+from ..utils.path_confinement import is_indexable_location
+from ..utils.source_text_decoding import decode_source_bytes
+>>>>>>> upstream/master
 
 
 class FileFinder:
@@ -30,9 +35,12 @@ class FileFinder:
         # run), never per candidate file -- every containment check below
         # reuses this same value.
         self.resolved_codebase_dir = Path(self.config.codebase_dir).resolve()
+<<<<<<< HEAD
         # Set for the duration of a delegated pass (see set_manifest). While set,
         # discovery reads the manifest and never the local disk.
         self._manifest: Optional["RepoManifest"] = None
+=======
+>>>>>>> upstream/master
         self._create_gitignore_spec()
         # Kept so ending a delegated pass restores it without re-reading a disk
         # that, on a delegated pod, may not hold the repository.
@@ -336,7 +344,14 @@ class FileFinder:
     def _add_gitignore_patterns(self, directory: Path, patterns: list) -> None:
         """Add patterns from .gitignore files recursively."""
         gitignore_path = directory / ".gitignore"
-        if gitignore_path.exists():
+        # A .gitignore is read only from a location the indexer may read: never
+        # one resolving into the repository's .git (nor, in server context,
+        # one resolving outside the codebase root).
+        if gitignore_path.exists() and is_indexable_location(
+            gitignore_path,
+            self.resolved_codebase_dir,
+            self.config.confined_to_codebase_root,
+        ):
             try:
                 with open(gitignore_path, "r", encoding="utf-8", errors="ignore") as f:
                     text = f.read()
@@ -380,18 +395,11 @@ class FileFinder:
                 if b"\x00" in chunk:
                     return False
 
-                # Try to decode as UTF-8
+                # Same encoding fallback indexing and retrieval use (Bug #1991)
                 try:
-                    chunk.decode("utf-8")
+                    decode_source_bytes(chunk)
                     return True
-                except UnicodeDecodeError:
-                    # Try other common encodings
-                    for encoding in ["latin-1", "cp1252"]:
-                        try:
-                            chunk.decode(encoding)
-                            return True
-                        except UnicodeDecodeError:
-                            continue
+                except ValueError:
                     return False
 
         except (OSError, IOError):
@@ -406,6 +414,7 @@ class FileFinder:
         need to reach into a private method."""
         return self._should_include_file(file_path)
 
+<<<<<<< HEAD
     def file_size(self, file_path: Path) -> Optional[int]:
         """The size discovery judges ``file_path`` by, or None when unknown.
 
@@ -431,6 +440,8 @@ class FileFinder:
         """
         return self._over_size_limit(self.file_size(file_path))
 
+=======
+>>>>>>> upstream/master
     def _should_include_file(self, file_path: Path) -> bool:
         """Check if a file should be included in indexing."""
         try:
@@ -444,6 +455,7 @@ class FileFinder:
             # file, so that path still needs both checks to run.
             base_result = self._get_base_filtering_result(file_path)
             if not self.override_filter_service and not base_result:
+<<<<<<< HEAD
                 return False
 
             # Server context only (config.confined_to_codebase_root): reject
@@ -483,6 +495,39 @@ class FileFinder:
             if size is None or self._over_size_limit(size):
                 return False
 
+=======
+                return False
+
+            # Server context (config.confined_to_codebase_root): reject any
+            # candidate whose resolved location (following symlinks,
+            # collapsing '..') is not strictly inside the resolved codebase
+            # root -- a symlink in-tree can have an eligible name/extension
+            # while its real target lies outside the codebase directory
+            # entirely. Local CLI indexing follows such symlinks. In EVERY
+            # context a symlink resolving into the repository's own .git
+            # (e.g. ``link.py -> .git/config``) is refused.
+            #
+            # os.walk() is called with followlinks=False, which means it
+            # never descends into a symlinked directory -- every
+            # directory in file_path's chain (as actually walked) is
+            # therefore a real, non-symlink directory, and file_path can
+            # only escape the codebase root through its OWN final
+            # component being a symlink. is_symlink() is a single lstat
+            # on that final component; the full resolve()+location
+            # check (several stats, one per path component) only runs
+            # when it fires, instead of unconditionally on every file.
+            if file_path.is_symlink() and not is_indexable_location(
+                file_path,
+                self.resolved_codebase_dir,
+                self.config.confined_to_codebase_root,
+            ):
+                return False
+
+            # Check file size
+            if file_path.stat().st_size > self.config.indexing.max_file_size:
+                return False
+
+>>>>>>> upstream/master
             # Apply override filtering if available
             if self.override_filter_service:
                 relative_path = file_path.relative_to(self.config.codebase_dir)
@@ -632,6 +677,7 @@ class FileFinder:
             for file_name in files:
                 file_path = root_path / file_name
 
+<<<<<<< HEAD
                 # Skip dangling symlinks — e.g. Node cpSync converts
                 # relative symlinks to absolute ones pointing at a now-
                 # deleted temp clone dir. stat()/read() on these raises
@@ -639,6 +685,8 @@ class FileFinder:
                 if file_path.is_symlink() and not file_path.exists():
                     continue
 
+=======
+>>>>>>> upstream/master
                 # Debug: Log file being checked. Wrapped in try/except
                 # OSError so a symlink loop or broken link does not crash
                 # the walk before containment filtering gets to run.

@@ -1026,6 +1026,7 @@ class TemporalIndexer:
         entirely in temporal_incremental_gate.py's set-difference against
         each embedder's own completed_commits.
         """
+<<<<<<< HEAD
         if self._git_backend is not None:
             return commit_history(
                 self._git_backend,
@@ -1034,6 +1035,11 @@ class TemporalIndexer:
                 since_date=since_date,
                 max_commits=max_commits,
             )
+=======
+        # Use null byte delimiters to prevent pipe characters in commit messages from breaking parsing
+        # Use %B (full body) instead of %s (subject only) to capture multi-paragraph commit messages
+        # Use record separator (%x1e) at end of each record to enable correct parsing with multi-line messages
+>>>>>>> upstream/master
         cmd = [
             "git",
             "log",

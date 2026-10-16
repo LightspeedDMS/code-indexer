@@ -671,7 +671,11 @@ Status values:
                     format_error_log(
                         "MCP-GENERAL-158",
                         f"Job {job_id}: SCIP retry failed for {project_path}: "
+<<<<<<< HEAD
                         f"{redact_url_credentials(indexer_result.stderr)}",
+=======
+                        f"{indexer_result.stderr}",
+>>>>>>> upstream/master
                     )
                 )
                 return False

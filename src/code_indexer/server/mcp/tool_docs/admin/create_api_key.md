@@ -13,7 +13,11 @@ inputSchema:
   required: []
 ---
 
+<<<<<<< HEAD
 TL;DR: Create a new API key for programmatic access. Requires MCP elevation (TOTP step-up). Create a new API key for the authenticated user. Returns the full key value (one-time display - save it immediately).
+=======
+TL;DR: Create a new API key for programmatic access. Requires MCP elevation (TOTP step-up) when elevation enforcement is on. Create a new API key for the authenticated user. Returns the full key value (one-time display - save it immediately).
+>>>>>>> upstream/master
 
 USE CASES:
 - Generate new API key for programmatic access
@@ -33,4 +37,8 @@ ERRORS:
 - elevation_required: TOTP step-up needed
 - totp_setup_required: TOTP not yet configured for this account (setup_url provided)
 
+<<<<<<< HEAD
 EXAMPLE: {"description": "CI/CD automation"} Returns: {"success": true, "key_id": "key_xyz", "api_key": "cidx_sk_abc123...", "description": "CI/CD automation"}
+=======
+EXAMPLE: {"description": "CI/CD automation"} Returns: {"success": true, "key_id": "key_xyz", "api_key": "cidx_sk_abc123...", "description": "CI/CD automation"}
+>>>>>>> upstream/master

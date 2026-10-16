@@ -69,6 +69,18 @@ class TestMultiSearchConfigFromConfig:
         assert config.max_workers == 8
         assert config.query_timeout_seconds == 30
 
+    def test_from_config_uses_configured_omni_max_results_per_repo_default(
+        self, tmp_path
+    ):
+        """from_config reads omni_max_results_per_repo (default 100)."""
+        from code_indexer.server.services.config_service import ConfigService
+
+        service = ConfigService(server_dir_path=str(tmp_path))
+        service.load_config()
+
+        config = MultiSearchConfig.from_config(service)
+        assert config.max_results_per_repo == 100
+
 
 class TestGetMultiSearchServiceConfig:
     """Test get_multi_search_service uses ConfigService (Story #25)."""
@@ -92,6 +104,7 @@ class TestGetMultiSearchServiceConfig:
             mock_config = MagicMock()
             mock_config.multi_search_limits_config.multi_search_max_workers = 6
             mock_config.multi_search_limits_config.multi_search_timeout_seconds = 45
+            mock_config.multi_search_limits_config.omni_max_results_per_repo = 150
             mock_service.get_config.return_value = mock_config
             mock_get_config.return_value = mock_service
 
@@ -101,6 +114,7 @@ class TestGetMultiSearchServiceConfig:
             # Verify config was used
             assert service.config.max_workers == 6
             assert service.config.query_timeout_seconds == 45
+            assert service.config.max_results_per_repo == 150
 
             # Cleanup
             multi_query_routes._multi_search_service = None

@@ -148,9 +148,18 @@ class TestDeploymentLockPermissionError:
 
         get_default_lock_path() must return a path anchored to CIDX_DATA_DIR
         (e.g. ~/.cidx-server/) which is shared between service units.
+
+        Bug #1996: asserted against the module's resolved data dir, not a
+        "/tmp" prefix -- the test session (and the gate's per-chunk dirs)
+        legitimately point CIDX_DATA_DIR at a temp directory.
         """
+        from code_indexer.server.auto_update import deployment_lock
+
         lock_path = get_default_lock_path()
-        assert not str(lock_path).startswith("/tmp"), (
-            f"Default lock path must NOT be under /tmp (PrivateTmp isolation). "
-            f"Got: {lock_path}"
+        assert lock_path == deployment_lock._cidx_data_dir / "cidx-auto-update.lock", (
+            f"Default lock path must be anchored to CIDX_DATA_DIR. Got: {lock_path}"
+        )
+        assert lock_path != Path("/tmp/cidx-auto-update.lock"), (
+            "Default lock path must NOT be the hardcoded /tmp lock "
+            "(PrivateTmp isolation)"
         )

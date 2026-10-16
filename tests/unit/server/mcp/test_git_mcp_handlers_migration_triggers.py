@@ -12,7 +12,10 @@ This follows Anti-Mock Rule #1: Real systems only, minimal mocking.
 """
 
 import json
+import os
+import subprocess
 from datetime import datetime
+from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 import pytest
@@ -33,16 +36,41 @@ def mock_user():
     )
 
 
+USERNAME = "testuser"
+REPO_ALIAS = "test-repo"
+
+
 @pytest.fixture
-def real_git_service_with_mocked_migration():
+def activated_clone(tmp_path: Path) -> Path:
+    """A real activated clone at ``<activated_repos_dir>/<user>/<alias>``
+    whose stored origin carries credentials: pull and fetch remove them from
+    the stored URL before any network call, so the clone must exist."""
+    clone = tmp_path / "activated-repos" / USERNAME / REPO_ALIAS
+    clone.mkdir(parents=True)
+    for args in (
+        ["init", "-q"],
+        ["remote", "add", "origin", "https://user:pw@example.com/o/r.git"],
+    ):
+        subprocess.run(["git", *args], cwd=clone, check=True, capture_output=True)
+    return clone
+
+
+@pytest.fixture
+def real_git_service_with_mocked_migration(activated_clone: Path):
     """
     Create REAL GitOperationsService with migration trigger mocked.
 
     This follows Anti-Mock Rule #1: Use real implementation, mock only the
-    specific behavior we're testing (migration trigger).
+    specific behavior we're testing (migration trigger). The low-level git
+    network calls are stubbed; the stored-URL sanitization that precedes
+    them runs for real against ``activated_clone``.
     """
     # Create real GitOperationsService instance
     service = GitOperationsService()
+    # The real ActivatedRepoManager resolves the clone under this directory.
+    service.activated_repo_manager.activated_repos_dir = os.path.realpath(
+        activated_clone.parent.parent
+    )
 
     # Mock only the migration trigger method
     service._trigger_migration_if_needed = MagicMock()
@@ -72,9 +100,9 @@ def real_git_service_with_mocked_migration():
         }
     )
 
-    # Mock activated_repo_manager to return test path
+    # Mock activated_repo_manager to return the real clone's path
     service.activated_repo_manager.get_activated_repo_path = MagicMock(
-        return_value="/tmp/test-repo"
+        return_value=str(activated_clone)
     )
 
     return service
@@ -93,6 +121,17 @@ def _extract_response_data(mcp_response: dict) -> dict:
     """Extract actual response data from MCP wrapper."""
     content = mcp_response["content"][0]
     return cast(dict, json.loads(content["text"]))
+
+
+def _stored_origin(clone: Path) -> str:
+    """The clone's stored origin URL."""
+    return subprocess.run(
+        ["git", "config", "--get", "remote.origin.url"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 class TestGitPushMigrationTrigger:
@@ -220,7 +259,11 @@ class TestGitPullMigrationTrigger:
     """Test that git_pull handler triggers migration (Bug #639)."""
 
     def test_git_pull_calls_wrapper_method(
-        self, mock_user, real_git_service_with_mocked_migration, mock_repo_manager
+        self,
+        mock_user,
+        real_git_service_with_mocked_migration,
+        mock_repo_manager,
+        activated_clone,
     ):
         """
         Test that git_pull MCP handler calls pull_from_remote wrapper (which triggers migration).
@@ -246,9 +289,11 @@ class TestGitPullMigrationTrigger:
 
             # Verify it was called with correct parameters
             call_args = real_git_service_with_mocked_migration._trigger_migration_if_needed.call_args
-            assert call_args[0][0] == "/tmp/test-repo"  # repo_path
+            assert call_args[0][0] == str(activated_clone)  # repo_path
             assert call_args[0][1] == "testuser"  # username
             assert call_args[0][2] == "test-repo"  # repo_alias
+            # The stored origin was made credential-free before the pull.
+            assert _stored_origin(activated_clone) == "https://example.com/o/r.git"
 
     def test_git_pull_migration_trigger_called_before_pull(
         self, mock_user, real_git_service_with_mocked_migration, mock_repo_manager
@@ -290,7 +335,11 @@ class TestGitFetchMigrationTrigger:
     """Test that git_fetch handler triggers migration (Bug #639)."""
 
     def test_git_fetch_calls_wrapper_method(
-        self, mock_user, real_git_service_with_mocked_migration, mock_repo_manager
+        self,
+        mock_user,
+        real_git_service_with_mocked_migration,
+        mock_repo_manager,
+        activated_clone,
     ):
         """
         Test that git_fetch MCP handler calls fetch_from_remote wrapper (which triggers migration).
@@ -315,9 +364,11 @@ class TestGitFetchMigrationTrigger:
 
             # Verify it was called with correct parameters
             call_args = real_git_service_with_mocked_migration._trigger_migration_if_needed.call_args
-            assert call_args[0][0] == "/tmp/test-repo"  # repo_path
+            assert call_args[0][0] == str(activated_clone)  # repo_path
             assert call_args[0][1] == "testuser"  # username
             assert call_args[0][2] == "test-repo"  # repo_alias
+            # The stored origin was made credential-free before the fetch.
+            assert _stored_origin(activated_clone) == "https://example.com/o/r.git"
 
     def test_git_fetch_migration_trigger_called_before_fetch(
         self, mock_user, real_git_service_with_mocked_migration, mock_repo_manager

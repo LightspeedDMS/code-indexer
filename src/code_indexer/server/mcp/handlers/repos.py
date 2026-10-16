@@ -23,15 +23,22 @@ from code_indexer.server.services.query_admission_gate import (
 )
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
+<<<<<<< HEAD
 from code_indexer.server.repositories.repository_listing_manager import (
     RepositoryStatisticsUnavailableError,
 )
+=======
+>>>>>>> upstream/master
 from code_indexer.config import write_json_atomic
 from code_indexer.server.services.repository_health_aggregator import (
     compute_repository_health,
     get_shared_health_service,
 )
 from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
+from code_indexer.utils.credential_redaction import (
+    mask_url_credentials,
+    with_masked_repo_url,
+)
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
@@ -57,6 +64,13 @@ from ._utils import (
 from ..auth.elevation_decorator import require_mcp_elevation
 from ._temporal_index_cmd import _build_temporal_index_cmd  # noqa: F401
 from ._provider_temporal_job import _provider_temporal_index_job  # noqa: F401
+<<<<<<< HEAD
+=======
+from ._provider_job_paths import (
+    _resolve_provider_job_repo_path,  # noqa: F401
+    _resolve_versioned_to_base_clone,
+)
+>>>>>>> upstream/master
 
 # _GLOBAL_SUFFIX is used in _resolve_branch_repo_path to strip the alias-manager
 # suffix before passing the base alias to golden_repo_manager.get_actual_repo_path().
@@ -88,6 +102,8 @@ def discover_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 if r.get("alias", r.get("name", "")) in accessible_aliases
             ]
 
+        # Repository URLs are returned with their userinfo redacted.
+        repos = [with_masked_repo_url(r) for r in repos]
         return _mcp_response({"success": True, "repositories": repos})
     except Exception as e:
         logger.warning("discover_repositories failed: %s", e, exc_info=True)
@@ -470,11 +486,22 @@ def check_hnsw_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
         index_base_path = clone_path / ".code-indexer" / "index"
 
+<<<<<<< HEAD
         if _utils.app_module.background_job_manager is None:
             return _mcp_response(
                 {"success": False, "error": "Background job manager not initialized"}
             )
 
+=======
+        clone_path = Path(repo.clone_path)
+        index_base_path = clone_path / ".code-indexer" / "index"
+
+        if _utils.app_module.background_job_manager is None:
+            return _mcp_response(
+                {"success": False, "error": "Background job manager not initialized"}
+            )
+
+>>>>>>> upstream/master
         def health_check_job() -> Dict[str, Any]:
             result = compute_repository_health(
                 repository_alias,
@@ -540,7 +567,7 @@ def _get_global_repo_status(
     status = {
         "user_alias": repo_entry["alias_name"],
         "golden_repo_alias": repo_entry.get("repo_name"),
-        "repo_url": repo_entry.get("repo_url"),
+        "repo_url": mask_url_credentials(repo_entry.get("repo_url")),
         "is_global": True,
         "path": repo_entry.get("index_path"),
         "last_refresh": repo_entry.get("last_refresh"),
@@ -666,7 +693,7 @@ def _append_global_repos_to_status(status_summary: list, user: User) -> None:
                 "golden_repo_alias": repo["repo_name"],
                 "current_branch": None,
                 "is_global": True,
-                "repo_url": repo.get("repo_url"),
+                "repo_url": mask_url_credentials(repo.get("repo_url")),
                 "last_refresh": repo.get("last_refresh"),
                 "index_path": repo.get("index_path"),
                 "created_at": repo.get("created_at"),
@@ -763,7 +790,7 @@ def _load_global_repos_normalized() -> list:
                     "golden_repo_alias": repo["repo_name"],
                     "current_branch": None,
                     "is_global": True,
-                    "repo_url": repo.get("repo_url"),
+                    "repo_url": mask_url_credentials(repo.get("repo_url")),
                     "last_refresh": repo.get("last_refresh"),
                 }
             )
@@ -1395,6 +1422,9 @@ def handle_list_global_repos(args: Dict[str, Any], user: User) -> Dict[str, Any]
                 )
                 repos = [r for r in repos if r.get("repo_name", "") in accessible_names]
 
+        # Repository URLs are returned with their userinfo redacted, for
+        # administrators and granted users alike.
+        repos = [with_masked_repo_url(r) for r in repos]
         return _mcp_response({"success": True, "repos": repos})
     except Exception as e:
         logger.warning("handle_list_global_repos failed: %s", e, exc_info=True)
@@ -1689,6 +1719,7 @@ def _build_provider_api_key_env(provider_name: str) -> dict:
 # _build_temporal_index_cmd moved to ._temporal_index_cmd (see re-export
 # import above) purely to keep this file under the 2500-line anti-file-bloat
 # limit; no behavior change.
+<<<<<<< HEAD
 
 
 def _resolve_provider_job_repo_path(repo_path: str, repo_alias: str) -> tuple:
@@ -1760,6 +1791,8 @@ def _resolve_provider_job_repo_path(repo_path: str, repo_alias: str) -> tuple:
         repo_path,
     )
     return str(base_clone), resolved_alias, True
+=======
+>>>>>>> upstream/master
 
 
 def _post_provider_index_snapshot(
@@ -1964,68 +1997,6 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
         raise
 
 
-def _resolve_versioned_to_base_clone(repo_path: str, repo_alias: str) -> tuple:
-    """Resolve versioned snapshot path to base clone for background jobs.
-
-    Uses direct path arithmetic (not _resolve_golden_repo_base_clone) because
-    background workers have no access to server app state.
-
-    Returns (actual_path, repo_alias, is_versioned, error_msg).
-    error_msg is None on success.
-    """
-    if not repo_path or not isinstance(repo_path, str):
-        return repo_path, repo_alias, False, "Invalid repo_path"
-    if not Path(repo_path).is_absolute():
-        return repo_path, repo_alias, False, f"repo_path must be absolute: {repo_path}"
-
-    resolved = Path(repo_path).resolve()
-    # Bug #1084 B1: detect snapshots via the single canonical predicate
-    # (replaces the local-only ".versioned" in parts test).
-    is_versioned = is_versioned_snapshot(str(resolved))
-    if not is_versioned:
-        return str(resolved), repo_alias, False, None
-
-    parts = resolved.parts
-    versioned_idx = parts.index(".versioned")
-    if versioned_idx + 1 >= len(parts):
-        return str(resolved), repo_alias, True, f"Malformed versioned path: {repo_path}"
-
-    alias_name = parts[versioned_idx + 1]
-    golden_repos_dir = Path(*parts[:versioned_idx])
-    base_clone = golden_repos_dir / alias_name
-
-    try:
-        base_clone.resolve().relative_to(golden_repos_dir.resolve())
-    except ValueError:
-        return (
-            str(resolved),
-            repo_alias,
-            True,
-            f"Path escape in versioned path: {repo_path}",
-        )
-
-    if not repo_alias:
-        repo_alias = f"{alias_name}-global"
-
-    if not base_clone.exists():
-        return (
-            str(resolved),
-            repo_alias,
-            True,
-            (
-                f"Base clone not found at {base_clone} for versioned snapshot {repo_path}. "
-                "Cannot index versioned snapshot (immutable)."
-            ),
-        )
-
-    logger.info(
-        "Provider index: using base clone %s instead of versioned snapshot %s",
-        base_clone,
-        repo_path,
-    )
-    return str(base_clone), repo_alias, True, None
-
-
 def _run_provider_subprocess(
     cmd: list,
     actual_path: str,
@@ -2086,10 +2057,14 @@ def _run_provider_subprocess(
     )
 
     env_with_stats = build_embedding_stats_child_env(
+<<<<<<< HEAD
         get_config_service().get_config(),
         base_env=env,
         golden_repo_alias=golden_repo_alias,
         job_id=job_id,
+=======
+        get_config_service().get_config(), base_env=env
+>>>>>>> upstream/master
     )
     sanitized_env = build_cidx_subprocess_env(env_with_stats)
     # Bug #1575 Part C independent re-review: this is the SHARED
@@ -2132,9 +2107,13 @@ def _provider_index_job(
     provider_name: str,
     clear: bool = False,
     progress_callback=None,
+    job_id: Optional[str] = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Background job worker for provider index add/recreate."""
+    """Background job worker for provider index add/recreate.
+
+    ``job_id`` is injected by BackgroundJobManager (it declares the name) and
+    recorded on the child's embedding_call_stats rows (Story #2118)."""
     import os
 
     if not repo_path or not provider_name:
@@ -2168,7 +2147,25 @@ def _provider_index_job(
 
     # Story #1488: server states the new-collection layout explicitly
     # (CHUNKS_DB) rather than inheriting the CLI/daemon SHARDED_JSON default.
+<<<<<<< HEAD
     cmd = append_server_layout_args(["cidx", "index", "--progress-json"])
+=======
+    from code_indexer.server.services.embedding_stats_attribution import (
+        build_server_stats_attribution,
+    )
+
+    # Story #2118: the base clone is golden_repos_dir/<alias> (submit_job
+    # consumes repo_alias for tracking, so it may be empty here).
+    cmd = append_server_layout_args(
+        ["cidx", "index", "--progress-json"],
+        attribution=build_server_stats_attribution(
+            alias=f"{Path(actual_path).name}-global",
+            job_id=job_id,
+            site="provider_index",
+            purpose="index",
+        ),
+    )
+>>>>>>> upstream/master
     if clear:
         cmd.append("--clear")
 
@@ -2217,6 +2214,19 @@ def _provider_request_error_response(
                 "available_providers": [p["name"] for p in providers],
             }
         )
+<<<<<<< HEAD
+=======
+    if kind == ops.INVALID_FILTER:
+        return _mcp_response({"success": False, "error": error.detail})
+    if kind == ops.CATEGORIES_UNAVAILABLE:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "Repository category service not available; "
+                "the category filter cannot be applied",
+            }
+        )
+>>>>>>> upstream/master
     if kind == ops.REPO_NOT_FOUND:
         return _mcp_response({"error": f"Repository '{repo_alias}' not found"})
     if kind == ops.JOB_MANAGER_UNAVAILABLE:

@@ -125,6 +125,7 @@ def _base_clone_is_confirmed_absent(base_clone: Path) -> bool:
     genuinely absent. Any OTHER OSError (permission denied, a stale NFS
     handle, an I/O error) means "cannot confirm absence" -- returns False
     so the caller stays fail-closed rather than risking a false-positive
+<<<<<<< HEAD
     reclaim of a live repo's data under a flaky/stale mount.
 
     Content seam: with content_backend='delegated' the base clone is with
@@ -142,6 +143,9 @@ def _base_clone_is_confirmed_absent(base_clone: Path) -> bool:
             base_clone,
         )
         return False
+=======
+    reclaim of a live repo's data under a flaky/stale mount."""
+>>>>>>> upstream/master
     try:
         os.stat(base_clone)
     except (FileNotFoundError, NotADirectoryError):

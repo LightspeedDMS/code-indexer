@@ -10,6 +10,7 @@ identification when git is not available.
 import hashlib
 import logging
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -295,9 +296,17 @@ class FileIdentifier:
         """
         rel_path = str(file_path.relative_to(self.project_dir))
 
+        # Issue #2013: taken immediately BEFORE the content is read. Point
+        # writers store it as `indexed_timestamp`, so reconcile's racy-
+        # timestamp check covers the second the file was READ in (the points
+        # are written later, after the embedding round-trip).
+        content_read_timestamp = time.time()
+        file_hash = self._get_file_content_hash(file_path)
+
         metadata = {
             "project_id": self.get_project_id(),
             "file_path": rel_path,
+<<<<<<< HEAD
             # The sha256 is the one value that cannot come from the manifest: it is
             # a different algorithm, it is stored, and it is the point-UUID
             # signature when git is unavailable. So it needs the bytes. Deferring
@@ -309,8 +318,12 @@ class FileIdentifier:
                 if (content is None and defer_content_hash)
                 else self._get_file_content_hash(file_path, content)
             ),
+=======
+            "file_hash": file_hash,
+>>>>>>> upstream/master
             "indexed_at": datetime.now(timezone.utc).isoformat() + "Z",
             "git_available": self.git_available,
+            "content_read_timestamp": content_read_timestamp,
         }
 
         if self.git_available:

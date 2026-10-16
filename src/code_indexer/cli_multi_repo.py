@@ -20,6 +20,7 @@ def execute_multi_repo_query(
     exclude_paths: tuple = (),
     min_score: Optional[float] = None,
     accuracy: str = "balanced",
+    file_extensions: Optional[List[str]] = None,
 ) -> dict:
     """Execute multi-repository query via /api/query/multi endpoint.
 
@@ -34,6 +35,7 @@ def execute_multi_repo_query(
         exclude_paths: Path patterns to exclude
         min_score: Minimum similarity score
         accuracy: Search accuracy profile
+        file_extensions: #2047 values, sent as the REST file_extensions field
 
     Returns:
         Dictionary with results per repository
@@ -101,6 +103,8 @@ def execute_multi_repo_query(
             query_params["min_score"] = min_score
         if accuracy:
             query_params["accuracy"] = accuracy
+        if file_extensions:
+            query_params["file_extensions"] = list(file_extensions)
 
         # Call execute_multi_repo_query method
         results: dict = query_client.execute_multi_repo_query(

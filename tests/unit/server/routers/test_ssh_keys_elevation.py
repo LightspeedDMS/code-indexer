@@ -1,8 +1,9 @@
 """
 Structural elevation gate tests for ssh_keys router (Task 2 / P0-B).
 
-Verifies that write endpoints AND the key-list GET have require_elevation() wired.
-GET /{name}/public does NOT have elevation (public key material is not sensitive).
+Verifies that write endpoints AND both GETs (key list, GET /{name}/public) have
+require_elevation() wired: reading a key, or learning that a name exists,
+needs an elevation window, like listing keys.
 Both GET endpoints have admin auth (get_current_admin_user_hybrid).
 No HTTP calls — inspects FastAPI route descriptors directly.
 """
@@ -21,8 +22,8 @@ _ROUTE_CASES = [
     ("/api/ssh-keys/{name}/hosts", "POST", True),
     # Key list exposes private paths — must be gated
     ("/api/ssh-keys", "GET", True),
-    # Public key is not sensitive — admin auth only, no elevation
-    ("/api/ssh-keys/{name}/public", "GET", False),
+    # Public key read confirms a key name — gated for parity with the list
+    ("/api/ssh-keys/{name}/public", "GET", True),
 ]
 
 

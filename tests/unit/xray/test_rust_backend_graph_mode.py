@@ -20,7 +20,11 @@ from typing import Any, Dict
 
 import pytest
 
+<<<<<<< HEAD
 from code_indexer.xray.rust_backend import RustNativeBackend
+=======
+from code_indexer.xray.rust_backend import RustNativeBackend, _XRAY_CLI_DEFAULT
+>>>>>>> upstream/master
 
 # Cross-file graph-mode evaluator: `helper()` is declared ONLY in B.java and
 # called ONLY from A.java. A single-file (legacy) scan of B.java alone would
@@ -68,6 +72,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 
 
 def _require_xray_cli_binary() -> None:
+<<<<<<< HEAD
     """Ensure the real xray-cli release binary is available, or skip loudly.
 
     Delegates to the shared tests/unit/xray/conftest.py helper, which
@@ -83,6 +88,14 @@ def _require_xray_cli_binary() -> None:
     from tests.unit.xray.conftest import require_xray_cli_binary
 
     require_xray_cli_binary()
+=======
+    """Skip this test if the real xray-cli release binary is not built locally."""
+    if not _XRAY_CLI_DEFAULT.exists():
+        pytest.skip(
+            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
+            "run 'cargo build --release' inside rust/ to enable this test."
+        )
+>>>>>>> upstream/master
 
 
 def _write_cross_file_fixture(repo_root: Path) -> None:

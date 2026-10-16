@@ -124,7 +124,11 @@ class TestReadCappedLogCarriesAlias:
         with patch.object(regex_search_module, "_MAX_READ_BYTES", _TEST_BYTE_CEILING):
             mock_executor = _mock_success_executor_copying_from(str(source_path))
             with patch(
+<<<<<<< HEAD
                 "code_indexer.server.services.subprocess_executor.SubprocessExecutor",
+=======
+                "code_indexer.global_repos.regex_search.SubprocessExecutor",
+>>>>>>> upstream/master
                 return_value=mock_executor,
             ):
                 with caplog.at_level(logging.WARNING, logger=_REGEX_SEARCH_LOGGER_NAME):

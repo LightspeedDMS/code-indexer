@@ -7,18 +7,16 @@ dashboard can display the repository name in the Recent Activity section.
 """
 
 import pytest
-import tempfile
-import shutil
 from pathlib import Path
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
 
 
 @pytest.fixture
-def temp_dirs():
-    """Create temporary directories for testing."""
-    temp_dir = Path(tempfile.mkdtemp())
-    golden_repos_dir = temp_dir / "golden-repos"
-    job_storage = temp_dir / "jobs"
+def temp_dirs(tmp_path):
+    """Create temporary directories for testing, in the test's own tmp_path
+    (the scheduler/manager stores resolve next to golden-repos)."""
+    golden_repos_dir = tmp_path / "golden-repos"
+    job_storage = tmp_path / "jobs"
     golden_repos_dir.mkdir(parents=True)
     job_storage.mkdir(parents=True)
 
@@ -26,8 +24,6 @@ def temp_dirs():
         "golden_repos_dir": str(golden_repos_dir),
         "job_storage": str(job_storage / "jobs.json"),
     }
-
-    shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @pytest.fixture
@@ -99,7 +95,10 @@ def test_add_golden_repo_result_contains_alias(managers, temp_dirs):
     # Wait for job completion (synchronously execute for testing)
     import time
 
-    max_wait = 10
+    # The job runs real `cidx init` / `cidx index --fts` subprocesses; under
+    # machine load the index step alone has taken ~9s, so a 10s deadline
+    # asserted on a still-running job.  The loop exits as soon as it finishes.
+    max_wait = 60
     waited = 0
     while waited < max_wait:
         job = managers["job_manager"].jobs.get(job_id)

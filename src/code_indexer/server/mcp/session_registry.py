@@ -34,6 +34,7 @@ Usage:
 """
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timezone
 from threading import Lock
@@ -50,6 +51,35 @@ logger = logging.getLogger(__name__)
 # Default TTL settings (Story #731)
 DEFAULT_SESSION_TTL_SECONDS = 3600  # 1 hour
 DEFAULT_CLEANUP_INTERVAL_SECONDS = 900  # 15 minutes
+
+
+class MCPSessionOwnerMismatch(Exception):
+    """The requested MCP session id belongs to a different user.
+
+    The session is never reused by, or handed to, another user.  The /mcp
+    endpoint answers HTTP 404, which per the MCP Streamable HTTP transport
+    makes a client start a new session (initialize without a session id).
+    The message names no user.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__("MCP session not found for this user")
+        self.session_id = session_id
+
+
+def _same_account(owner: User, caller: User) -> bool:
+    """True when *caller* is the very account that owns the session.
+
+    The name alone is not enough: an account deleted and recreated with the
+    same name is a different account (a different ``account_created_at``)
+    and never inherits the earlier account's session or impersonation.
+    Accounts with no recorded creation instant (``None`` on both sides)
+    match by name, as before the instant was recorded.
+    """
+    return (
+        owner.username == caller.username
+        and owner.account_created_at == caller.account_created_at
+    )
 
 
 class SessionRegistry:
@@ -103,20 +133,40 @@ class SessionRegistry:
         """
         Get existing session or create new one.
 
-        If a session with the given ID already exists, returns it (preserving
-        any existing impersonation state) and updates the last activity timestamp.
-        Otherwise, creates a new session with the authenticated user.
+        A session id is bound to the user it was created for.  If a session
+        with the given ID already exists and belongs to *authenticated_user*,
+        returns it (preserving any existing impersonation state), refreshes
+        its stored user with the one authenticated for this request (so its
+        role is current) and updates the last activity timestamp.  A session
+        belonging to a different account -- another name, or the same name
+        deleted and recreated (see :func:`_same_account`) -- is never reused
+        or inherited and is left untouched: a WARNING naming only a short
+        digest of the session id is logged and
+        :class:`MCPSessionOwnerMismatch` is raised.  Otherwise, creates a new
+        session with the authenticated user.
 
         Args:
             session_id: Unique MCP session identifier
-            authenticated_user: The user who authenticated for this session
+            authenticated_user: The user authenticated for this request
 
         Returns:
             MCPSessionState for the session (existing or newly created)
+
+        Raises:
+            MCPSessionOwnerMismatch: the session belongs to another user
         """
         with self._lock:
             if session_id in self._sessions:
                 session = self._sessions[session_id]
+                if not _same_account(session.authenticated_user, authenticated_user):
+                    # Trace only a short digest: never the id, never a name.
+                    logger.warning(
+                        "Refused MCP session id owned by another account "
+                        "(session digest %s)",
+                        hashlib.sha256(session_id.encode()).hexdigest()[:12],
+                    )
+                    raise MCPSessionOwnerMismatch(session_id)
+                session.refresh_authenticated_user(authenticated_user)
                 session.touch()  # Update activity timestamp (Story #731)
                 return session
 

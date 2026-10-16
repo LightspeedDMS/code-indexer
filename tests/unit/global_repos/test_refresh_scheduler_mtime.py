@@ -7,7 +7,6 @@ C5: _create_new_index() git guards (no git commands when no .git dir).
 
 import os
 import shutil
-import tempfile
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -25,6 +24,7 @@ from code_indexer.global_repos.cleanup_manager import CleanupManager
 
 
 @pytest.fixture
+<<<<<<< HEAD
 def temp_golden_repos_dir():
     """Create temporary golden repos directory.
 
@@ -40,6 +40,15 @@ def temp_golden_repos_dir():
     golden_repos_dir.mkdir()
     yield str(golden_repos_dir)
     shutil.rmtree(temp_dir, ignore_errors=True)
+=======
+def temp_golden_repos_dir(tmp_path):
+    """Golden repos directory in the test's own tmp_path.  Its parent is
+    where the scheduler's lazy stores resolve, so it must never be a shared
+    directory such as /tmp (a mkdtemp() dir put cidx_server.db in /tmp)."""
+    golden_dir = tmp_path / "golden-repos"
+    golden_dir.mkdir()
+    return str(golden_dir)
+>>>>>>> upstream/master
 
 
 @pytest.fixture

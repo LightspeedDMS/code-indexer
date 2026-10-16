@@ -550,6 +550,7 @@ def _get_job_tracker() -> Any:
 
 
 def _resolve_repo_path(alias: str) -> Optional[str]:
+<<<<<<< HEAD
     """Resolve a global repo alias to its on-disk path.
 
     Uses the SAME registry-backed resolution as search_code/regex_search
@@ -565,6 +566,22 @@ def _resolve_repo_path(alias: str) -> Optional[str]:
     fallback resolves.
     """
     return cast(Optional[str], _utils._resolve_global_repo_path_or_index(alias))
+=======
+    """Resolve a global repo alias to its versioned snapshot path.
+
+    Delegates to repos._resolve_golden_repo_path so the alias manager is
+    exercised through the canonical code path.
+
+    Returns None when the alias is unknown.
+
+    The import is local (not module-level) because
+    `code_indexer.server.mcp.handlers.repos` itself imports from this
+    package's sibling modules, which would otherwise form an import cycle.
+    """
+    from code_indexer.server.mcp.handlers.repos import _resolve_golden_repo_path
+
+    return cast(Optional[str], _resolve_golden_repo_path(alias))
+>>>>>>> upstream/master
 
 
 def _get_background_job_manager() -> Any:
@@ -698,9 +715,20 @@ def _validate_xray_search_patterns(
 # inline budget = payload_max_fetch_size_chars; inline_entry_truncated).
 
 
+<<<<<<< HEAD
 def _truncate_xray_result(result: Dict[str, Any]) -> Dict[str, Any]:
     """Apply PayloadCache truncation to matches[]/evaluation_errors[].
 
+=======
+def _truncate_xray_result(
+    result: Dict[str, Any], *, owner: Optional[str] = None
+) -> Dict[str, Any]:
+    """Apply PayloadCache truncation to matches[]/evaluation_errors[].
+
+    `owner` is the username of the requesting user; only that user can
+    fetch the cached pages.
+
+>>>>>>> upstream/master
     See xray_truncation.truncate_result_fields() for the shared
     mechanics -- INCLUDING its own `payload_cache is None -> return a
     bounded, cache_unavailable=True result` guard (Bug #1928 P3), so a
@@ -721,7 +749,11 @@ def _truncate_xray_result(result: Dict[str, Any]) -> Dict[str, Any]:
     )
     try:
         return xray_truncation.truncate_result_fields(
+<<<<<<< HEAD
             result, payload_cache, ["matches", "evaluation_errors"]
+=======
+            result, payload_cache, ["matches", "evaluation_errors"], owner=owner
+>>>>>>> upstream/master
         )
     except xray_truncation.PageSetStoreError as exc:
         logger.error("xray_search truncation: page-set store failed: %s", exc)

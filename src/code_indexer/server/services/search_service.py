@@ -18,6 +18,8 @@ from ..models.api_models import (
 from ...config import ConfigManager
 from ...backends.backend_factory import BackendFactory
 from ...services.embedding_factory import EmbeddingProviderFactory
+from ...services.filtered_window import filtered_window_kwargs
+from ...utils.content_availability import is_content_unavailable
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.search_embed_event_emit import (
     emit_embed_error_event,
@@ -41,6 +43,21 @@ logger = logging.getLogger(__name__)
 _HNSW_CACHE_USE_SERVER_DEFAULT = object()
 
 
+def _app_state_attr(name: str) -> Any:
+    """``app.state.<name>`` when the server app exists, else None.
+
+    Bug #1996: peeks at the lazily built app (``peek_app``) instead of
+    reading ``app`` from the module, which would run the full
+    ``create_app()`` -- e.g. inside a standalone ``cidx query`` process.
+    """
+    from ..app import peek_app
+
+    app = peek_app()
+    if app is None:
+        return None
+    return getattr(cast("FastAPI", app).state, name, None)
+
+
 def _get_http_client_factory() -> Any:
     """Get http_client_factory from app.state for fault-injection-aware HTTP clients.
 
@@ -54,9 +71,13 @@ def _get_http_client_factory() -> Any:
     http_client_factory=None and falls back to per-call client creation, which
     is correct for the non-server path. Matches the _get_query_executor() pattern.
     """
+<<<<<<< HEAD
     from ..app import app as _app
 
     return getattr(cast("FastAPI", _app).state, "http_client_factory", None)
+=======
+    return _app_state_attr("http_client_factory")
+>>>>>>> upstream/master
 
 
 def _get_query_executor() -> Any:
@@ -76,9 +97,13 @@ def _get_query_executor() -> Any:
     Extracted as a module-level function so unit tests can patch it without
     setting up the full app.state (mirrors _get_http_client_factory()).
     """
+<<<<<<< HEAD
     from ..app import app as _app
 
     return getattr(cast("FastAPI", _app).state, "query_executor", None)
+=======
+    return _app_state_attr("query_executor")
+>>>>>>> upstream/master
 
 
 def _get_repo_config_cache() -> Any:
@@ -94,9 +119,13 @@ def _get_repo_config_cache() -> Any:
     Extracted as a module-level function so unit tests can patch it without
     setting up the full app.state (mirrors _get_query_executor()).
     """
+<<<<<<< HEAD
     from ..app import app as _app
 
     return getattr(cast("FastAPI", _app).state, "repo_config_cache", None)
+=======
+    return _app_state_attr("repo_config_cache")
+>>>>>>> upstream/master
 
 
 def _load_repo_config(repo_path: str) -> Any:
@@ -224,6 +253,10 @@ class SemanticSearchService:
         hnsw_cache: object = _HNSW_CACHE_USE_SERVER_DEFAULT,
         precomputed_query_vector: Optional[List[float]] = None,
         activation_id: Optional[str] = None,
+<<<<<<< HEAD
+=======
+        file_extensions: Optional[List[str]] = None,
+>>>>>>> upstream/master
     ) -> SemanticSearchResponse:
         """
         Perform semantic search in repository using direct path.
@@ -238,6 +271,8 @@ class SemanticSearchService:
             precomputed_query_vector: Optional pre-computed Voyage embedding vector.
                 When supplied (Story #883 Phase C), the vector is forwarded to
                 _perform_semantic_search to avoid a duplicate Voyage API call.
+            file_extensions: #2047 values, pushed into the vector store as
+                one ``any_ext`` condition (see _perform_semantic_search).
 
         Returns:
             Semantic search response with ranked results
@@ -274,6 +309,10 @@ class SemanticSearchService:
             no_embedding_cache_shortcut=search_request.no_embedding_cache_shortcut,
             activation_id=activation_id,
             enable_multimodal=True,
+<<<<<<< HEAD
+=======
+            file_extensions=file_extensions,
+>>>>>>> upstream/master
         )
 
         return SemanticSearchResponse(
@@ -288,6 +327,10 @@ class SemanticSearchService:
         search_request: SemanticSearchRequest,
         provider_name: Optional[str] = None,
         activation_id: Optional[str] = None,
+<<<<<<< HEAD
+=======
+        file_extensions: Optional[List[str]] = None,
+>>>>>>> upstream/master
     ) -> SemanticSearchResponse:
         """
         Perform semantic search using an explicitly named embedding provider.
@@ -299,6 +342,8 @@ class SemanticSearchService:
             repo_path: Direct path to repository directory
             search_request: Search request parameters
             provider_name: Override embedding provider name (e.g. 'cohere', 'voyage-ai')
+            file_extensions: #2047 values, pushed into the vector store as
+                one ``any_ext`` condition (see _perform_semantic_search).
 
         Returns:
             Semantic search response with ranked results
@@ -319,6 +364,10 @@ class SemanticSearchService:
             provider_name_override=provider_name,
             no_embedding_cache_shortcut=search_request.no_embedding_cache_shortcut,
             activation_id=activation_id,
+<<<<<<< HEAD
+=======
+            file_extensions=file_extensions,
+>>>>>>> upstream/master
         )
 
         return SemanticSearchResponse(
@@ -333,15 +382,22 @@ class SemanticSearchService:
         language: Optional[str],
         exclude_language: Optional[str],
         exclude_path: Optional[str],
+        file_extensions: Optional[List[str]] = None,
     ) -> dict:
         """
         Build filter_conditions dict for FilesystemVectorStore.search().
 
         Uses LanguageMapper for proper language-to-extension mapping,
-        following the same pattern as the CLI (cli.py).
+        following the same pattern as the CLI (cli.py). ``file_extensions``
+        (#2047) becomes the ONE ``any_ext`` condition the CLI builds too
+        (services/extension_filter.vector_store_extension_condition); inside
+        ``must`` it intersects with the other filters.
 
         Returns an empty dict when no filters are given (no filtering applied).
         """
+        from code_indexer.services.extension_filter import (
+            vector_store_extension_condition,
+        )
         from code_indexer.services.language_mapper import LanguageMapper
 
         mapper = LanguageMapper()
@@ -365,6 +421,10 @@ class SemanticSearchService:
         if language:
             lang_filter = mapper.build_language_filter(language)
             must.append(lang_filter)
+
+        extension_condition = vector_store_extension_condition(file_extensions)
+        if extension_condition is not None:
+            must.append(extension_condition)
 
         if exclude_language:
             extensions = mapper.get_extensions(exclude_language)
@@ -415,6 +475,10 @@ class SemanticSearchService:
         no_embedding_cache_shortcut: bool = False,
         activation_id: Optional[str] = None,
         enable_multimodal: bool = False,
+<<<<<<< HEAD
+=======
+        file_extensions: Optional[List[str]] = None,
+>>>>>>> upstream/master
     ) -> List[SearchResultItem]:
         """
         Perform real semantic search using repository-specific configuration.
@@ -441,6 +505,13 @@ class SemanticSearchService:
                 (REST/MCP) never queried multimodal collections the CLI
                 already indexes. Default False so every existing caller is
                 unaffected.
+<<<<<<< HEAD
+=======
+            file_extensions: #2047 values. Pushed into the store as ONE
+                ``any_ext`` condition (_build_filter_conditions) in a single
+                store query whose candidate window is widened and read with
+                early exit (services/filtered_window) -- see its RECALL RULE.
+>>>>>>> upstream/master
 
         Returns:
             List of search results ranked by semantic similarity
@@ -449,31 +520,34 @@ class SemanticSearchService:
             RuntimeError: If embedding generation or vector search fails
         """
         try:
-            # Load repository-specific configuration.
-            # Story #1082: served from the drift-safe RepoConfigCache when the
-            # server lifespan has wired it (NO-TTL for proven-immutable
-            # .versioned/ snapshots, SHORT-TTL otherwise); identical direct load
-            # under CLI in-process. Removes per-query json.load + path resolve()
-            # from the GIL-bound hot path.
-            config = _load_repo_config(repo_path)
+            # #2109: only OPENING the repository's index may skip the repo.
+            # The config load and BackendFactory raise ValueError when the
+            # repo has no valid index (e.g. an orphaned repo registered
+            # without a valid .code-indexer/ directory). A ValueError from
+            # any LATER step (a missing provider key, a store argument
+            # conflict) is a failure: it reaches the outer handler and is
+            # raised, never answered with an empty result.
+            try:
+                # Story #1082: served from the drift-safe RepoConfigCache when
+                # the server lifespan has wired it; identical direct load
+                # under CLI in-process.
+                config = _load_repo_config(repo_path)
 
-            # py-spy logging-lock fix (follow-up to Bug #1078): the per-query
-            # "Loaded repository config" INFO log was removed from this hot path.
+                # Story #526 / Bug #881 Phase 3: fan-out callers pass
+                # hnsw_cache=None to prevent global cache pollution; the
+                # single-repo hot path uses the server singleton.
+                # resolved_hnsw_cache is Any: the parameter is typed `object`
+                # to hold the sentinel.
+                if hnsw_cache is _HNSW_CACHE_USE_SERVER_DEFAULT:
+                    from ..app import _server_hnsw_cache
 
-            # Create backend using BackendFactory (Story #526: pass server cache).
-            # Bug #881 Phase 3: fan-out callers pass hnsw_cache=None to prevent
-            # global cache pollution; single-repo hot path uses server singleton.
-            # resolved_hnsw_cache is Any: the parameter is typed `object` to hold
-            # the sentinel, but the resolved value is Optional[HNSWIndexCache].
-            # The type system cannot narrow from sentinel identity check to the
-            # concrete cache type without Any.
-            if hnsw_cache is _HNSW_CACHE_USE_SERVER_DEFAULT:
-                from ..app import _server_hnsw_cache
+                    resolved_hnsw_cache: Any = _server_hnsw_cache
+                else:
+                    resolved_hnsw_cache = hnsw_cache
 
-                resolved_hnsw_cache: Any = _server_hnsw_cache
-            else:
-                resolved_hnsw_cache = hnsw_cache
+                from ..services.memory_governor import get_memory_governor
 
+<<<<<<< HEAD
             from ..services.memory_governor import get_memory_governor
 
             backend = BackendFactory.create(
@@ -484,6 +558,25 @@ class SemanticSearchService:
                 activation_id=activation_id,
             )
             vector_store_client = backend.get_vector_store_client()
+=======
+                backend = BackendFactory.create(
+                    config=config,
+                    project_root=Path(repo_path),
+                    hnsw_cache=resolved_hnsw_cache,
+                    memory_governor=get_memory_governor(),
+                    activation_id=activation_id,
+                )
+                vector_store_client = backend.get_vector_store_client()
+            except ValueError as e:
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-171",
+                        f"Skipping repo {repo_path}: no valid index configured",
+                        error=str(e),
+                    )
+                )
+                return []
+>>>>>>> upstream/master
 
             # py-spy logging-lock fix: per-query "Using backend" INFO removed.
 
@@ -509,6 +602,7 @@ class SemanticSearchService:
                 language=language,
                 exclude_language=exclude_language,
                 exclude_path=exclude_path,
+                file_extensions=file_extensions,
             )
 
             # Real vector search - different parameter patterns for different backends
@@ -523,6 +617,12 @@ class SemanticSearchService:
                 # Map accuracy to HNSW ef parameter
                 accuracy_to_ef = {"fast": 20, "balanced": 50, "high": 200}
                 ef_value = accuracy_to_ef.get(accuracy, 50) if accuracy else 50
+                # ANY filter: ONE store query over the candidate window the
+                # CLI and daemon share (empty without filters: unchanged).
+                # Only for the DIRECT store search below (store limit =
+                # limit); the multimodal path's MultiIndexQueryService
+                # derives its own window from the store limit it sends.
+                extension_window = filtered_window_kwargs(filter_conditions, limit)
 
                 # Story #883 Component 1 / Bug #1148: reuse a precomputed vector when
                 # provided (avoids a second API call in the parallel memory branch and
@@ -548,6 +648,7 @@ class SemanticSearchService:
                     # falls back to a per-call pool).
                     parallel_executor=_get_query_executor(),
                     no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    **extension_window,
                 )
                 if precomputed_query_vector is not None:
                     # Omni per-repo reuse: supply the precomputed vector so FSV skips
@@ -589,7 +690,12 @@ class SemanticSearchService:
                     # the multimodal-collection call ALWAYS forces
                     # no_embedding_cache_shortcut=True, isolating its cache
                     # interaction from the code path regardless of the
+<<<<<<< HEAD
                     # caller's own flag (Bug #1480).
+=======
+                    # caller's own flag (Bug #1480). #2047: no window here --
+                    # the service derives it from the store limit it sends.
+>>>>>>> upstream/master
                     code_kwargs = dict(
                         ef=ef_value,
                         parallel_executor=_get_query_executor(),
@@ -619,6 +725,13 @@ class SemanticSearchService:
                     )
             else:
                 # Backend: sequential execution with pre-computed embedding.
+                # #2047: this call cannot apply filter conditions -- refuse a
+                # filtered query rather than answer it unfiltered.
+                if filter_conditions:
+                    raise RuntimeError(
+                        f"{type(vector_store_client).__name__} cannot apply "
+                        "filter conditions"
+                    )
                 # Bug #1078: gate through concurrency governor to cap concurrent
                 # provider HTTP calls per account-level rate budget.
                 from code_indexer.server.services.governed_call import (
@@ -656,8 +769,13 @@ class SemanticSearchService:
                     # a torn triple.
                     _event_ctx.record_provider_cache_fields(
                         embedding_service.get_provider_name(),
+<<<<<<< HEAD
                         cache_hit=_embed_meta.key_found,
                         cache_mode=_embed_meta.cache_mode,
+=======
+                        cache_hit=_embed_meta.search_event_cache_hit,
+                        cache_mode=_embed_meta.search_event_cache_mode,
+>>>>>>> upstream/master
                         latency_ms=_embed_meta.provider_latency_ms,
                     )
                 # Story #1293: emit the durable search_embed_event row for this
@@ -673,6 +791,7 @@ class SemanticSearchService:
 
             # py-spy logging-lock fix: per-query "Found N results" INFO removed.
 
+<<<<<<< HEAD
             formatted_results = self._format_search_results(
                 search_results, include_source
             )
@@ -695,16 +814,173 @@ class SemanticSearchService:
                         for r in formatted_results
                         if _matcher.matches_any_pattern(r.file_path, _path_patterns)
                     ]
+=======
+            return self._format_search_results(search_results, include_source)
 
-            return formatted_results
+        except TimeoutError:
+            # #2109: keep the timeout type (e.g. MultiIndexQueryTimeoutError)
+            # so the front doors can answer it as a timeout.
+            raise
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-170",
+                    f"Semantic search failed for repo {repo_path}: {e}",
+                )
+            )
+            raise RuntimeError(f"Semantic search failed: {e}") from e
+>>>>>>> upstream/master
+
+    def _format_search_results(
+        self, search_results: List[Dict[str, Any]], include_source: bool
+    ) -> List[SearchResultItem]:
+        """Format raw vector-store search result dicts into SearchResultItem list.
+
+        Extracted from _perform_semantic_search's inline "Format results for
+        response" block (Bug #1480 follow-up) so query_multimodal_only can
+        reuse identical formatting logic without duplicating it.
+        """
+        formatted_results = []
+        for result in search_results:
+            if not isinstance(result, dict):
+                continue  # Skip malformed results
+            payload = result.get("payload", {})
+            score = result.get("score", 0.0)
+
+            # Extract source code if requested
+            source_content = None
+            if include_source:
+                if "content" in payload:
+                    source_content = payload["content"]
+
+            search_item = SearchResultItem(
+                file_path=payload.get("path", ""),
+                line_start=payload.get("line_start", 0),
+                line_end=payload.get("line_end", 0),
+                score=score,
+                content=source_content or payload.get("snippet", ""),
+                language=self._detect_language_from_path(payload.get("path", "")),
+                file_last_modified=payload.get("file_last_modified"),
+                indexed_timestamp=payload.get("indexed_timestamp"),
+                content_unavailable=is_content_unavailable(result),
+            )
+            formatted_results.append(search_item)
+
+        return formatted_results
+
+    def query_multimodal_only(
+        self,
+        repo_path: str,
+        query: str,
+        limit: int,
+        path_filter: Optional[str] = None,
+        language: Optional[str] = None,
+        exclude_language: Optional[str] = None,
+        exclude_path: Optional[str] = None,
+        accuracy: Optional[str] = None,
+        activation_id: Optional[str] = None,
+        file_extensions: Optional[List[str]] = None,
+    ) -> List[SearchResultItem]:
+        """Query ONLY the multimodal collection(s) for a repo (Bug #1480 follow-up).
+
+        ``file_extensions`` (#2047) is pushed into the store exactly as on
+        the code-collection path (_perform_semantic_search).
+
+        The parallel/failover query strategies dispatch per-provider via
+        SemanticSearchService.search_repository_path_with_provider(), which
+        never fans out to multimodal collections (only search_repository_path's
+        enable_multimodal=True primary_only path does). This method lets
+        SemanticQueryManager fold in a SINGLE multimodal fan-out for those two
+        strategies without re-querying the code collection.
+
+        Multimodal provider selection is entirely internal to
+        MultiIndexQueryService/_get_multimodal_provider, keyed off which
+        multimodal collection exists on disk -- no provider_name_override is
+        needed or accepted here.
+
+        Returns an empty list when the vector store is not a
+        FilesystemVectorStore, or when no multimodal collection exists for
+        this repo.
+        """
+        try:
+            config = _load_repo_config(repo_path)
+
+            from ..app import _server_hnsw_cache
+
+            resolved_hnsw_cache: Any = _server_hnsw_cache
+
+            from ..services.memory_governor import get_memory_governor
+
+            backend = BackendFactory.create(
+                config=config,
+                project_root=Path(repo_path),
+                hnsw_cache=resolved_hnsw_cache,
+                memory_governor=get_memory_governor(),
+                activation_id=activation_id,
+            )
+            vector_store_client = backend.get_vector_store_client()
+
+            from ...storage.filesystem_vector_store import FilesystemVectorStore
+
+            if not isinstance(vector_store_client, FilesystemVectorStore):
+                return []
+
+            embedding_service = EmbeddingProviderFactory.create(
+                config=config,
+                http_client_factory=_get_http_client_factory(),
+            )
+
+            from ...services.multi_index_query_service import (
+                MultiIndexQueryService,
+            )
+
+            mm = MultiIndexQueryService(
+                project_root=Path(repo_path),
+                vector_store=vector_store_client,
+                embedding_provider=embedding_service,
+            )
+            if not mm.has_multimodal_index():
+                return []
+
+            filter_conditions = self._build_filter_conditions(
+                path_filter=path_filter,
+                language=language,
+                exclude_language=exclude_language,
+                exclude_path=exclude_path,
+                file_extensions=file_extensions,
+            )
+
+            accuracy_to_ef = {"fast": 20, "balanced": 50, "high": 200}
+            ef_value = accuracy_to_ef.get(accuracy, 50) if accuracy else 50
+
+            # collection_name is only used by MultiIndexQueryService's legacy
+            # multimodal_index/ subdirectory fallback path -- the real
+            # collection(s) queried here are resolved internally, keyed off
+            # MULTIMODAL_MODELS, independent of this value.
+            collection_name = vector_store_client.resolve_collection_name(
+                config, embedding_service
+            )
+
+            search_results, _ = mm.query_multimodal_index_only(
+                query_text=query,
+                limit=limit,
+                collection_name=collection_name,
+                filter_conditions=filter_conditions or None,
+                ef=ef_value,
+                parallel_executor=_get_query_executor(),
+                # #2047: the service applies the filtered window from the
+                # store limit it sends.
+                no_embedding_cache_shortcut=True,
+            )
+
+            return self._format_search_results(search_results, include_source=True)
 
         except ValueError as e:
-            # Graceful handling for repos with missing/incomplete index configuration
-            # (e.g. orphaned repos registered without a valid .code-indexer/ directory)
             logger.warning(
                 format_error_log(
                     "MCP-GENERAL-171",
-                    f"Skipping repo {repo_path}: no valid index configured",
+                    f"Skipping multimodal-only query for repo {repo_path}: "
+                    "no valid index configured",
                     error=str(e),
                 )
             )
@@ -713,10 +989,14 @@ class SemanticSearchService:
             logger.error(
                 format_error_log(
                     "MCP-GENERAL-170",
+<<<<<<< HEAD
                     f"Semantic search failed for repo {repo_path}: {e}",
+=======
+                    f"Multimodal-only search failed for repo {repo_path}: {e}",
+>>>>>>> upstream/master
                 )
             )
-            raise RuntimeError(f"Semantic search failed: {e}")
+            raise RuntimeError(f"Multimodal-only search failed: {e}")
 
     def _format_search_results(
         self, search_results: List[Dict[str, Any]], include_source: bool

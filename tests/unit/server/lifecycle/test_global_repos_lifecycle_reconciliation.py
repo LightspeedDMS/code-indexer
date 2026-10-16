@@ -8,20 +8,31 @@ The reconciliation must run in a background thread (non-blocking) so it doesn't
 delay server startup. Failures must not block startup (AC7).
 """
 
+import logging
+import threading
 import time
+
 import pytest
 from unittest.mock import patch
 
 from code_indexer.server.lifecycle.global_repos_lifecycle import (
     GlobalReposLifecycleManager,
 )
+from tests.fixtures.refresh_scheduler_stores import (
+    initialize_server_database,
+    scheduler_iteration_failures,
+)
 
 
 @pytest.fixture
 def golden_repos_dir(tmp_path):
-    """Create a temporary golden-repos directory."""
+    """Create a temporary golden-repos directory.  The manager's scheduler
+    resolves its registry and metadata stores from golden_repos_dir.parent,
+    so that server database is initialized first, as the server does at
+    startup (without it every loop iteration fails: no such table)."""
     golden_dir = tmp_path / "golden-repos"
     golden_dir.mkdir(parents=True)
+    initialize_server_database(tmp_path)
     return golden_dir
 
 
@@ -49,39 +60,53 @@ class TestGlobalReposLifecycleReconciliation:
             side_effect=capture_reconcile,
         ):
             manager.start()
-
             # Give the background thread time to invoke reconcile_golden_repos
             deadline = time.time() + 2.0
             while not reconcile_called and time.time() < deadline:
                 time.sleep(0.05)
-
             manager.stop()
 
         assert len(reconcile_called) >= 1, (
             "reconcile_golden_repos() must be called during startup"
         )
 
-    def test_reconcile_failure_does_not_block_start(self, golden_repos_dir):
+    def test_reconcile_failure_does_not_block_start(self, golden_repos_dir, caplog):
         """
         AC7: If reconcile_golden_repos raises on the RefreshScheduler,
-        startup must still complete normally and manager must be running.
+        startup must still complete normally, the manager must be running,
+        and the scheduler loop must run its iterations without error.
         """
         manager = GlobalReposLifecycleManager(str(golden_repos_dir))
+        registry = manager.refresh_scheduler.registry
+        real_due = registry.list_due_repos
+        due_query_reached = threading.Event()
 
-        with patch.object(
-            manager.refresh_scheduler,
-            "reconcile_golden_repos",
-            side_effect=RuntimeError("reconciliation failed"),
+        def signal_due_query(*args, **kwargs):
+            try:
+                return real_due(*args, **kwargs)
+            finally:
+                due_query_reached.set()
+
+        with (
+            caplog.at_level(logging.ERROR),
+            patch.object(
+                manager.refresh_scheduler,
+                "reconcile_golden_repos",
+                side_effect=RuntimeError("reconciliation failed"),
+            ),
+            patch.object(registry, "list_due_repos", side_effect=signal_due_query),
         ):
             # Must not raise
             manager.start()
+            try:
+                # Manager must be running despite reconciliation failure
+                assert manager.is_running(), (
+                    "Lifecycle manager must be running even after reconciliation failure"
+                )
+                assert due_query_reached.wait(timeout=5), (
+                    "scheduler loop never reached its due-repo query"
+                )
+            finally:
+                manager.stop()
 
-            # Give background thread time to run (and fail)
-            time.sleep(0.1)
-
-            # Manager must be running despite reconciliation failure
-            assert manager.is_running(), (
-                "Lifecycle manager must be running even after reconciliation failure"
-            )
-
-            manager.stop()
+        assert scheduler_iteration_failures(caplog.records) == []

@@ -15,7 +15,16 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+<<<<<<< HEAD
 from typing import Dict, List, Optional, Any, Callable, Tuple, cast
+=======
+from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable, Tuple, cast
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.embedding_stats_attribution import (
+        StatsAttribution,
+    )
+>>>>>>> upstream/master
 
 from code_indexer.config import Config
 
@@ -543,6 +552,7 @@ class ActivatedRepoIndexManager:
                 "error": str(e),
             }
 
+<<<<<<< HEAD
     def _index_store_failure(
         self, repo_alias: str, step: str, error: Exception
     ) -> Dict[str, Any]:
@@ -563,6 +573,8 @@ class ActivatedRepoIndexManager:
             "error": error_msg,
         }
 
+=======
+>>>>>>> upstream/master
     #: Bug #1978: per-type and overall caps on the summarized job "error"
     #: field -- a verbose subprocess diagnostic (the common case for a
     #: permission or provider failure) must reach the job record, but never
@@ -749,7 +761,10 @@ class ActivatedRepoIndexManager:
         env: Optional[dict] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
         poll_interval: float = SHORT_POLL_SECONDS,
+<<<<<<< HEAD
         golden_repo_alias: Optional[str] = None,
+=======
+>>>>>>> upstream/master
     ) -> "subprocess.CompletedProcess[str]":
         """Run a cidx subprocess with provider-config seeding and health-event draining.
 
@@ -792,10 +807,13 @@ class ActivatedRepoIndexManager:
         CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is merged in here ONCE,
         unconditionally (both storage modes), before the existing
         build_cidx_subprocess_env() PYTHONPATH sanitization.
+<<<<<<< HEAD
 
         EVO-66105: golden_repo_alias is threaded through to
         build_embedding_stats_child_env for per-repo VoyageAI cost
         correlation. node_id is auto-resolved from server_config.
+=======
+>>>>>>> upstream/master
         """
         from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
             build_embedding_stats_child_env,
@@ -805,9 +823,13 @@ class ActivatedRepoIndexManager:
         )
 
         env_with_stats = build_embedding_stats_child_env(
+<<<<<<< HEAD
             get_config_service().get_config(),
             base_env=env,
             golden_repo_alias=golden_repo_alias,
+=======
+            get_config_service().get_config(), base_env=env
+>>>>>>> upstream/master
         )
         resolved_env = build_cidx_subprocess_env(env_with_stats)
         # Bug #1575 Part C independent re-review: this is the SHARED
@@ -849,12 +871,35 @@ class ActivatedRepoIndexManager:
             ),
         }
 
+<<<<<<< HEAD
+=======
+    @staticmethod
+    def _stats_attribution(repo_path: str) -> "StatsAttribution":
+        """Story #2118: attribution of an activated repo's `cidx index`
+        children. The repo directory is ``activated-repos/<user>/<alias>``;
+        these paths run without a job handle, so nojob:activated_repo_index
+        is recorded."""
+        from code_indexer.server.services.embedding_stats_attribution import (
+            build_server_stats_attribution,
+        )
+
+        return build_server_stats_attribution(
+            alias=Path(repo_path).name,
+            job_id=None,
+            site="activated_repo_index",
+            purpose="index",
+        )
+
+>>>>>>> upstream/master
     def _execute_semantic_indexing(
         self,
         repo_path: str,
         clear: bool,
         cancel_check: Optional[Callable[[], bool]] = None,
+<<<<<<< HEAD
         repo_alias: Optional[str] = None,
+=======
+>>>>>>> upstream/master
     ) -> Dict[str, Any]:
         """Execute semantic indexing using SmartIndexer.
 
@@ -881,13 +926,22 @@ class ActivatedRepoIndexManager:
             args = ["cidx", "index"]
             if clear:
                 args.append("--clear")
+<<<<<<< HEAD
             args = append_server_layout_args(args)
+=======
+            args = append_server_layout_args(
+                args, attribution=self._stats_attribution(repo_path)
+            )
+>>>>>>> upstream/master
             clear_start_time = time.time()
             result = self._run_subprocess_with_telemetry(
                 args,
                 repo_path,
                 cancel_check=cancel_check,
+<<<<<<< HEAD
                 golden_repo_alias=repo_alias,
+=======
+>>>>>>> upstream/master
             )
 
             if result.returncode != 0:
@@ -1003,12 +1057,16 @@ class ActivatedRepoIndexManager:
                 f"Branch-delta reindex failed for '{repo_path}': {error_detail}"
             )
 
+<<<<<<< HEAD
     def _execute_fts_indexing(
         self,
         repo_path: str,
         clear: bool,
         repo_alias: Optional[str] = None,
     ) -> Dict[str, Any]:
+=======
+    def _execute_fts_indexing(self, repo_path: str, clear: bool) -> Dict[str, Any]:
+>>>>>>> upstream/master
         """Execute FTS indexing using TantivyIndexManager.
 
         Bug #1419: guards against running on a repo with no
@@ -1026,7 +1084,14 @@ class ActivatedRepoIndexManager:
 
             # Story #1488: server states the new-collection layout explicitly
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+<<<<<<< HEAD
             args = append_server_layout_args(["cidx", "index", "--fts"])
+=======
+            args = append_server_layout_args(
+                ["cidx", "index", "--fts"],
+                attribution=self._stats_attribution(repo_path),
+            )
+>>>>>>> upstream/master
             if clear:
                 args.append("--clear")
 
@@ -1075,7 +1140,14 @@ class ActivatedRepoIndexManager:
 
             # Story #1488: server states the new-collection layout explicitly
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+<<<<<<< HEAD
             args = append_server_layout_args(["cidx", "index", "--index-commits"])
+=======
+            args = append_server_layout_args(
+                ["cidx", "index", "--index-commits"],
+                attribution=self._stats_attribution(repo_path),
+            )
+>>>>>>> upstream/master
             if clear:
                 args.append("--clear")
 

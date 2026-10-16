@@ -7,7 +7,11 @@ from pathlib import Path
 from ..config import IndexingConfig
 from .image_extractor import ImageExtractorFactory
 from ..logging import AdaptiveLogger
+<<<<<<< HEAD
 from .text_decoding import decode_like_text_mode
+=======
+from ..utils.source_text_decoding import read_source_text
+>>>>>>> upstream/master
 
 
 class TextChunker:
@@ -968,6 +972,7 @@ class TextChunker:
             f.flush()
 
         try:
+<<<<<<< HEAD
             # Bytes first, then decode. `content` lets a caller that has ALREADY
             # read this file hand the bytes over, instead of the file being
             # opened again: one indexing pass opens a file up to three times
@@ -982,6 +987,10 @@ class TextChunker:
 
             if text is None:
                 raise ValueError(f"Could not decode file {file_path}")
+=======
+            # Shared with query-time retrieval (Bug #1991).
+            text = read_source_text(file_path)
+>>>>>>> upstream/master
 
             with open(debug_file, "a") as f:
                 f.write(

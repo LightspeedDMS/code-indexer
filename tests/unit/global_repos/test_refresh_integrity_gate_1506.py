@@ -15,22 +15,34 @@ module (`code_indexer.global_repos.refresh_integrity_gate`):
    technique Bug #1486's own test suite empirically confirmed produces a
    database that still OPENS and even answers simple queries, but fails
    integrity_check). No sqlite3 mocking anywhere in this file.
+<<<<<<< HEAD
 3. Self-heals a corrupt chunks.db by reflink-restoring it from the
    corresponding collection in a "last known good" snapshot directory, using
    the SAME `cp --reflink=auto` CoW primitive (`LocalCloneBackend`) already
    used throughout this codebase -- proven via a REAL restore (no mocking of
    the clone backend), verified by reading the restored file back with a
    real ChunkStore.
+=======
+3. Self-heals a corrupt chunks.db by restoring it from the corresponding
+   collection in a "last known good" snapshot directory with an atomic
+   single-file copy (Bug #2157) -- proven via a REAL restore, verified by
+   reading the restored file back with a real ChunkStore.
+>>>>>>> upstream/master
 """
 
 from __future__ import annotations
 
 import json
+<<<<<<< HEAD
 import sqlite3
 from pathlib import Path
 
 import pytest
 
+=======
+from pathlib import Path
+
+>>>>>>> upstream/master
 from code_indexer.storage.shared.chunk_layout import (
     ChunkLayout,
     resolve_chunk_layout,
@@ -39,10 +51,16 @@ from code_indexer.storage.shared.chunk_layout import (
 from code_indexer.storage.sqlite_chunk_store import ChunkStore
 
 from code_indexer.global_repos.refresh_integrity_gate import (
+<<<<<<< HEAD
     count_collection_points,
     discover_chunks_db_collection_dirs,
     flush_and_check_chunks_db_integrity,
     restore_chunks_db_via_reflink,
+=======
+    discover_chunks_db_collection_dirs,
+    flush_and_check_chunks_db_integrity,
+    restore_chunks_db_file,
+>>>>>>> upstream/master
     run_refresh_integrity_gate,
 )
 
@@ -234,12 +252,17 @@ class TestFlushAndCheckChunksDbIntegrity:
         assert detail != "ok"
 
 
+<<<<<<< HEAD
 class TestRestoreChunksDbViaReflink:
     def test_restores_corrupt_file_from_healthy_snapshot(self, tmp_path: Path) -> None:
         from code_indexer.server.storage.shared.clone_backend import (
             LocalCloneBackend,
         )
 
+=======
+class TestRestoreChunksDbFile:
+    def test_restores_corrupt_file_from_healthy_snapshot(self, tmp_path: Path) -> None:
+>>>>>>> upstream/master
         healthy_collection = tmp_path / "healthy" / "coll"
         healthy_chunks_db = _make_chunks_db_collection(
             healthy_collection, _real_records(10)
@@ -252,10 +275,14 @@ class TestRestoreChunksDbViaReflink:
         # Overwrite with garbage to simulate the corrupted master_path file.
         corrupt_chunks_db.write_bytes(b"not a valid sqlite database at all")
 
+<<<<<<< HEAD
         clone_backend = LocalCloneBackend()
         restore_chunks_db_via_reflink(
             clone_backend, healthy_chunks_db, corrupt_chunks_db
         )
+=======
+        restore_chunks_db_file(healthy_chunks_db, corrupt_chunks_db)
+>>>>>>> upstream/master
 
         # Verify via a REAL ChunkStore read -- the restored file is a valid,
         # readable chunks.db with the healthy snapshot's data.
@@ -264,6 +291,7 @@ class TestRestoreChunksDbViaReflink:
             record = store.read("point-0000")
         assert record["chunk_text"].startswith("def function_0")
 
+<<<<<<< HEAD
     def test_raises_without_a_clone_backend(self, tmp_path: Path) -> None:
         import pytest
 
@@ -271,6 +299,21 @@ class TestRestoreChunksDbViaReflink:
             restore_chunks_db_via_reflink(
                 None, tmp_path / "healthy.db", tmp_path / "corrupt.db"
             )
+=======
+    def test_missing_source_raises_and_leaves_target_intact(
+        self, tmp_path: Path
+    ) -> None:
+        import pytest
+
+        target = tmp_path / "corrupt.db"
+        target.write_bytes(b"previous content")
+
+        with pytest.raises(FileNotFoundError):
+            restore_chunks_db_file(tmp_path / "healthy.db", target)
+
+        assert target.read_bytes() == b"previous content"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["corrupt.db"]
+>>>>>>> upstream/master
 
 
 class TestRunRefreshIntegrityGate:
@@ -281,7 +324,10 @@ class TestRunRefreshIntegrityGate:
         result = run_refresh_integrity_gate(
             source_index_dir=source_index_dir,
             healthy_index_dir=None,
+<<<<<<< HEAD
             clone_backend=None,
+=======
+>>>>>>> upstream/master
         )
 
         assert result.passed is True
@@ -297,17 +343,23 @@ class TestRunRefreshIntegrityGate:
         result = run_refresh_integrity_gate(
             source_index_dir=source_index_dir,
             healthy_index_dir=None,
+<<<<<<< HEAD
             clone_backend=None,
+=======
+>>>>>>> upstream/master
         )
 
         assert result.passed is True
         assert len(result.checked_collections) == 1
 
     def test_fails_and_self_heals_from_healthy_snapshot(self, tmp_path: Path) -> None:
+<<<<<<< HEAD
         from code_indexer.server.storage.shared.clone_backend import (
             LocalCloneBackend,
         )
 
+=======
+>>>>>>> upstream/master
         healthy_index_dir = tmp_path / "healthy_snapshot" / ".code-indexer" / "index"
         _make_chunks_db_collection(healthy_index_dir / "coll", _real_records(50))
 
@@ -320,7 +372,10 @@ class TestRunRefreshIntegrityGate:
         result = run_refresh_integrity_gate(
             source_index_dir=source_index_dir,
             healthy_index_dir=healthy_index_dir,
+<<<<<<< HEAD
             clone_backend=LocalCloneBackend(),
+=======
+>>>>>>> upstream/master
         )
 
         assert result.passed is False
@@ -348,7 +403,10 @@ class TestRunRefreshIntegrityGate:
         result = run_refresh_integrity_gate(
             source_index_dir=source_index_dir,
             healthy_index_dir=None,
+<<<<<<< HEAD
             clone_backend=None,
+=======
+>>>>>>> upstream/master
         )
 
         assert result.passed is False
@@ -366,10 +424,13 @@ class TestRunRefreshIntegrityGate:
         confidently copy corruption over master_path) and must surface
         this as a more severe condition than an ordinary single-sided
         failure."""
+<<<<<<< HEAD
         from code_indexer.server.storage.shared.clone_backend import (
             LocalCloneBackend,
         )
 
+=======
+>>>>>>> upstream/master
         healthy_index_dir = tmp_path / "healthy_snapshot" / ".code-indexer" / "index"
         healthy_chunks_db = _make_chunks_db_collection(
             healthy_index_dir / "coll", _real_records(50)
@@ -386,7 +447,10 @@ class TestRunRefreshIntegrityGate:
         result = run_refresh_integrity_gate(
             source_index_dir=source_index_dir,
             healthy_index_dir=healthy_index_dir,
+<<<<<<< HEAD
             clone_backend=LocalCloneBackend(),
+=======
+>>>>>>> upstream/master
         )
 
         assert result.passed is False
@@ -400,6 +464,7 @@ class TestRunRefreshIntegrityGate:
         assert source_chunks_db.read_bytes() == corrupt_bytes_before
 
     def test_self_heal_restore_re_verified_post_restore_failure_is_reported(
+<<<<<<< HEAD
         self, tmp_path: Path
     ) -> None:
         """Codex review Finding 3: even after the reflink clone call
@@ -419,6 +484,30 @@ class TestRunRefreshIntegrityGate:
             def create_clone_at_path(self, source: str, dest: str) -> None:
                 shutil.copyfile(source, dest)
                 _flip_bytes_at_midpoint(Path(dest))
+=======
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Codex review Finding 3: even after the restore copy completes
+        without raising, the RESTORED destination must be re-verified via a
+        fresh integrity_check before self-heal is reported as successful. A
+        restore whose destination fails this post-check must be reported as
+        a self-heal FAILURE, never a success."""
+        import os
+        import shutil
+
+        real_copyfileobj = shutil.copyfileobj
+
+        def copy_then_corrupt(source, destination, *args) -> None:
+            """Fault injection: the copy completes without raising but the
+            destination is corrupt (e.g. corruption during the copy)."""
+            real_copyfileobj(source, destination, *args)
+            destination.flush()
+            _flip_bytes_at_midpoint(
+                Path(os.readlink(f"/proc/self/fd/{destination.fileno()}"))
+            )
+
+        monkeypatch.setattr(shutil, "copyfileobj", copy_then_corrupt)
+>>>>>>> upstream/master
 
         healthy_index_dir = tmp_path / "healthy_snapshot" / ".code-indexer" / "index"
         _make_chunks_db_collection(healthy_index_dir / "coll", _real_records(50))
@@ -432,7 +521,10 @@ class TestRunRefreshIntegrityGate:
         result = run_refresh_integrity_gate(
             source_index_dir=source_index_dir,
             healthy_index_dir=healthy_index_dir,
+<<<<<<< HEAD
             clone_backend=_CorruptingCloneBackend(),
+=======
+>>>>>>> upstream/master
         )
 
         assert result.passed is False
@@ -455,10 +547,13 @@ class TestMetadataRestoreAfterSelfHeal:
     fooled into believing chunks.db is already caught up."""
 
     def test_self_heal_also_restores_metadata_json_files(self, tmp_path: Path) -> None:
+<<<<<<< HEAD
         from code_indexer.server.storage.shared.clone_backend import (
             LocalCloneBackend,
         )
 
+=======
+>>>>>>> upstream/master
         # Healthy last-known-good snapshot: chunks.db reflects the OLD
         # commit, and its sibling metadata file (one level up from
         # .code-indexer/index/) records that same OLD commit.
@@ -487,7 +582,10 @@ class TestMetadataRestoreAfterSelfHeal:
         result = run_refresh_integrity_gate(
             source_index_dir=source_index_dir,
             healthy_index_dir=healthy_index_dir,
+<<<<<<< HEAD
             clone_backend=LocalCloneBackend(),
+=======
+>>>>>>> upstream/master
         )
 
         assert result.passed is False
@@ -502,6 +600,7 @@ class TestMetadataRestoreAfterSelfHeal:
         # stale "new commit fully indexed" claim.
         restored_metadata = json.loads(source_metadata.read_text())
         assert restored_metadata["current_commit"] == "old_sha"
+<<<<<<< HEAD
 
 
 # ---------------------------------------------------------------------------
@@ -590,3 +689,5 @@ class TestCollapseRefusal:
         assert any(
             "shrank coll from 100 to 3" in r.getMessage() for r in caplog.records
         )
+=======
+>>>>>>> upstream/master

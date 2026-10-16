@@ -23,7 +23,20 @@ from collections import defaultdict
 from concurrent.futures import as_completed, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+<<<<<<< HEAD
 from typing import List, Dict, Any, Optional, Callable, Tuple
+=======
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    List,
+    Optional,
+    Tuple,
+)
+>>>>>>> upstream/master
 from queue import Queue, Empty
 import threading
 
@@ -40,6 +53,7 @@ from ..storage.filesystem_vector_store import FilesystemVectorStore
 
 logger = logging.getLogger(__name__)
 
+<<<<<<< HEAD
 
 def multimodal_indexing_enabled() -> bool:
     """EVO-65484: whether to build the multimodal (image) index during indexing.
@@ -54,6 +68,10 @@ def multimodal_indexing_enabled() -> bool:
     """
     return os.getenv("CIDX_MULTIMODAL_INDEXING_ENABLED", "true").lower() != "false"
 
+=======
+if TYPE_CHECKING:
+    from .fts_file_documents import FtsWriteFailures
+>>>>>>> upstream/master
 
 # Export imports for tests
 __all__ = [
@@ -66,6 +84,30 @@ __all__ = [
 ]
 
 
+def _first_copies_then_duplicates(
+    files: List[Path], hash_results: Dict[Path, tuple]
+) -> List[Path]:
+    """Story #2119: ``files`` reordered so the first file of every file-hash
+    group comes first (original order), then every later byte-identical copy
+    (original order). A file without a hash result (it vanished during the
+    hash phase) stays in the first part; the submission loop skips it."""
+    seen_hashes: set = set()
+    first_copies: List[Path] = []
+    later_copies: List[Path] = []
+    for file_path in files:
+        hashed = hash_results.get(file_path)
+        if hashed is None:
+            first_copies.append(file_path)
+            continue
+        file_hash = hashed[0]["file_hash"]
+        if file_hash in seen_hashes:
+            later_copies.append(file_path)
+        else:
+            seen_hashes.add(file_hash)
+            first_copies.append(file_path)
+    return first_copies + later_copies
+
+
 @dataclass
 class BranchIndexingResult:
     """Results of branch indexing operation."""
@@ -75,6 +117,11 @@ class BranchIndexingResult:
     content_points_reused: int = 0
     processing_time: float = 0.0
     cancelled: bool = False
+    #: Story #2120 (Codex P1-1): processing failures of the changed files,
+    #: carried to the caller (relative paths; ``failed_files`` may exceed
+    #: ``len(failed_paths)`` when a failure has no attributable path).
+    failed_files: int = 0
+    failed_paths: FrozenSet[str] = frozenset()
 
 
 @dataclass
@@ -89,6 +136,13 @@ class ChunkTask:
 
 class HighThroughputProcessor(GitAwareDocumentProcessor):
     """Processor that maximizes throughput by pre-queuing all chunks."""
+
+    #: Bug #2056: files whose FTS documents could not be replaced during the
+    #: current `--fts` run (set fresh by SmartIndexer for each run, passed to
+    #: every FileChunkingManager). The run's FTS finish retries them from
+    #: disk; files still failing are missing from FTS (the per-file rule of
+    #: fts_lifecycle: reported, index left unmarked).
+    _fts_write_failures: Optional["FtsWriteFailures"] = None
 
     def __init__(self, *args, progress_log=None, **kwargs):
         """Initialize the processor with cancellation support and structured logging."""
@@ -448,9 +502,13 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 codebase_dir=self.config.codebase_dir,
                 fts_manager=fts_manager,
                 multimodal_client=multimodal_client,
+<<<<<<< HEAD
                 manifest=self.repo_manifest,
                 content_source=self._build_content_source(files),
                 image_source=self._build_image_source(multimodal_client),
+=======
+                fts_write_failures=self._fts_write_failures,
+>>>>>>> upstream/master
             ) as file_manager:
                 # Bug #1746 Change 4 (M1 fix): preflight the target chunk
                 # store's writability BEFORE any file is hashed, chunked,
@@ -778,6 +836,20 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 # Change 4 preflight check already run) right after
                 # entering the FileChunkingManager context above, before
                 # the hash phase -- both stay in scope here.
+<<<<<<< HEAD
+
+                # Bug #1969 Round 6 (P1-3): relative paths of files that
+                # failed THIS run, so the self-heal-reprocess sidecar clear
+                # logic can attribute a failure to a specific path instead
+                # of only knowing an aggregate count. Declared before the
+                # submission loop (not just the futures-collection loop
+                # below) so a submission-time failure -- e.g.
+                # `submit_file_for_processing` itself raising, before any
+                # future even exists -- is attributed too, not just a
+                # failure discovered later via a completed future.
+                _failed_relative_paths: set = set()
+=======
+>>>>>>> upstream/master
 
                 # Bug #1969 Round 6 (P1-3): relative paths of files that
                 # failed THIS run, so the self-heal-reprocess sidecar clear
@@ -790,7 +862,15 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 # failure discovered later via a completed future.
                 _failed_relative_paths: set = set()
 
-                for file_path in files:
+                # Story #2119: byte-identical files share content-addressed
+                # point ids. The first file of each file-hash group is
+                # submitted first; each later copy waits for it, so its reuse
+                # lookup finds the rows the first copy committed instead of
+                # paying for the same chunks in the same run. Only the order
+                # changes; totals and per-file progress do not.
+                first_copy_futures: Dict[str, Any] = {}
+
+                for file_path in _first_copies_then_duplicates(files, hash_results):
                     if self.cancelled:
                         break
 
@@ -812,12 +892,15 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         # This prevents "collection_name is required when multiple collections exist" error
                         file_metadata["collection_name"] = collection_name
 
-                        # Submit for processing
+                        # Submit for processing (a copy runs after its first copy)
+                        content_key = file_metadata["file_hash"]
                         file_future = file_manager.submit_file_for_processing(
                             file_path,
                             file_metadata,
                             progress_callback,
+                            after=first_copy_futures.get(content_key),
                         )
+                        first_copy_futures.setdefault(content_key, file_future)
                         file_futures.append(file_future)
 
                         # Track file size (no duplicate stat() call)
@@ -1033,6 +1116,76 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
         return stats
 
+<<<<<<< HEAD
+=======
+    def _create_vector_point(
+        self, chunk_task: ChunkTask, embedding: List[float]
+    ) -> Dict[str, Any]:
+        """Create vector point from chunk task and embedding."""
+
+        # Use existing metadata creation logic
+        metadata_info = None
+        if chunk_task.file_metadata["git_available"]:
+            metadata_info = {
+                "commit_hash": chunk_task.file_metadata.get("commit_hash"),
+                "branch": chunk_task.file_metadata.get("branch"),
+                "git_hash": chunk_task.file_metadata.get("git_hash"),
+            }
+        else:
+            metadata_info = {
+                "file_mtime": chunk_task.file_metadata.get("file_mtime"),
+                "file_size": chunk_task.file_metadata.get("file_size"),
+            }
+
+        # Import here to avoid circular imports
+        from .metadata_schema import GitAwareMetadataSchema
+
+        # Create payload
+        payload = GitAwareMetadataSchema.create_git_aware_metadata(
+            path=self._normalize_path_for_storage(chunk_task.file_path),
+            content=chunk_task.chunk_data["text"],
+            language=chunk_task.chunk_data["file_extension"],
+            file_size=chunk_task.file_path.stat().st_size,
+            chunk_index=chunk_task.chunk_data["chunk_index"],
+            total_chunks=chunk_task.chunk_data["total_chunks"],
+            project_id=chunk_task.file_metadata["project_id"],
+            file_hash=chunk_task.file_metadata["file_hash"],
+            git_metadata=(
+                metadata_info if chunk_task.file_metadata["git_available"] else None
+            ),
+            line_start=chunk_task.chunk_data.get("line_start"),
+            line_end=chunk_task.chunk_data.get("line_end"),
+            # Issue #2013: the file READ time (None -> schema default "now").
+            indexed_timestamp=chunk_task.file_metadata.get("content_read_timestamp"),
+        )
+
+        # Add filesystem metadata for non-git projects
+        if not chunk_task.file_metadata["git_available"] and metadata_info:
+            if "file_mtime" in metadata_info:
+                payload["filesystem_mtime"] = metadata_info["file_mtime"]
+            if "file_size" in metadata_info:
+                payload["filesystem_size"] = metadata_info["file_size"]
+
+        # Create point ID
+        point_id = self._create_point_id(
+            chunk_task.file_metadata, chunk_task.chunk_data["chunk_index"]
+        )
+        payload["point_id"] = point_id
+        payload["unique_key"] = self._create_unique_key(
+            chunk_task.file_metadata, chunk_task.chunk_data["chunk_index"]
+        )
+
+        # Create vector point
+        point = self.vector_store_client.create_point(
+            point_id=point_id,
+            vector=embedding,
+            payload=payload,
+            embedding_model=self.embedding_provider.get_current_model(),
+        )
+        # Ensure we return a Dict[str, Any] as expected
+        return dict(point) if point else {}
+
+>>>>>>> upstream/master
     # =============================================================================
     # BRANCH-AWARE HIGH-THROUGHPUT PROCESSING
     # =============================================================================
@@ -1150,6 +1303,8 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 result.files_processed = stats.files_processed
                 result.content_points_created = stats.chunks_created
                 result.cancelled = stats.cancelled
+                result.failed_files = stats.failed_files
+                result.failed_paths = frozenset(stats.failed_paths)
 
                 if result.cancelled:
                     logger.info("High-throughput branch processing was cancelled")
@@ -1370,6 +1525,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 )
                 return False
 
+<<<<<<< HEAD
     def _hide_file_in_branch_thread_safe(
         self, file_path: str, branch: str, collection_name: str
     ):
@@ -1378,8 +1534,108 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         # Use shared lock to ensure thread safety for visibility updates
         with self._visibility_lock:
             # Get all content points for this file with error handling
+=======
+    def _get_file_commit_thread_safe(self, file_path: str) -> str:
+        """Thread-safe version of getting file commit hash."""
+        import subprocess
+        import time
+
+        try:
+            # Check if this is a git repository
+            is_git_repo = self._is_git_repository_thread_safe()
+
+            if not is_git_repo:
+                # For non-git projects, always use timestamp-based IDs for consistency
+                try:
+                    file_path_obj = self.config.codebase_dir / file_path
+                    file_stat = file_path_obj.stat()
+                    return f"working_dir_{file_stat.st_mtime}_{file_stat.st_size}"
+                except Exception:
+                    return f"working_dir_{time.time()}_error"
+
+            # For git repositories, use git-aware logic
+            if self._file_differs_from_committed_version_thread_safe(file_path):
+                # File has working directory changes
+                try:
+                    file_path_obj = self.config.codebase_dir / file_path
+                    file_stat = file_path_obj.stat()
+                    return f"working_dir_{file_stat.st_mtime}_{file_stat.st_size}"
+                except Exception:
+                    return f"working_dir_{time.time()}_error"
+
+            # File matches committed version - use commit hash
+            with self._git_lock:
+                try:
+                    result = subprocess.run(
+                        ["git", "log", "-1", "--format=%H", "--", file_path],
+                        cwd=self.config.codebase_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    commit = result.stdout.strip() if result.returncode == 0 else ""
+                    return commit if commit else "unknown"
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"Git log timeout for {file_path}")
+                    return "unknown"
+                except Exception as e:
+                    logger.warning(f"Git log failed for {file_path}: {e}")
+                    return "unknown"
+        except Exception:
+            return "unknown"
+
+    def _file_differs_from_committed_version_thread_safe(self, file_path: str) -> bool:
+        """Thread-safe check if working directory file differs from committed version."""
+        import subprocess
+
+        with self._git_lock:
             try:
-                content_points, _ = self.vector_store_client.scroll_points(
+                result = subprocess.run(
+                    ["git", "diff", "--quiet", "HEAD", "--", file_path],
+                    cwd=self.config.codebase_dir,
+                    capture_output=True,
+                    timeout=10,
+                )
+                return result.returncode != 0
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Git diff timeout for {file_path}")
+                return False
+            except Exception as e:
+                logger.warning(f"Git diff failed for {file_path}: {e}")
+                return False
+
+    def _is_git_repository_thread_safe(self) -> bool:
+        """Thread-safe check if current directory is a git repository."""
+        import subprocess
+
+        with self._git_lock:
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "--git-dir"],
+                    cwd=self.config.codebase_dir,
+                    capture_output=True,
+                    timeout=5,
+                )
+                return result.returncode == 0
+            except subprocess.TimeoutExpired:
+                logger.warning("Git rev-parse timeout")
+                return False
+            except Exception as e:
+                logger.warning(f"Git rev-parse failed: {e}")
+                return False
+
+    def _fetch_file_content_points(
+        self, file_path: str, collection_name: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Every content point of one file, paged (a file can have more
+        points than one page). None when any page cannot be fetched, so a
+        caller never reports success after updating only part of a file."""
+        content_points: List[Dict[str, Any]] = []
+        offset = None
+        while True:
+>>>>>>> upstream/master
+            try:
+                page, next_offset = self.vector_store_client.scroll_points(
                     filter_conditions={
                         "must": [
                             {"key": "type", "match": {"value": "content"}},
@@ -1387,6 +1643,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         ]
                     },
                     limit=1000,
+                    offset=offset,
                     collection_name=collection_name,
                     # Bug #1969 Round 5 (R4-F2): this is a write-adjacent
                     # path (it mutates hidden_branches on these points, or
@@ -1396,13 +1653,34 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     # untouched.
                     self_heal=True,
                 )
-                if not isinstance(content_points, list):
-                    logger.error(
-                        f"Unexpected scroll_points return type: {type(content_points)}"
-                    )
-                    return False
             except Exception as e:
                 logger.error(f"Failed to get content points for {file_path}: {e}")
+                return None
+            if not isinstance(page, list):
+                logger.error(f"Unexpected scroll_points return type: {type(page)}")
+                return None
+            content_points.extend(page)
+            if next_offset is None or not page:
+                return content_points
+            # Termination: a store that hands back the offset it was given
+            # would loop forever -- fail loudly instead.
+            if next_offset == offset:
+                logger.error(
+                    f"Pagination stuck at offset {offset} for {file_path}; "
+                    "visibility update aborted"
+                )
+                return None
+            offset = next_offset
+
+    def _hide_file_in_branch_thread_safe(
+        self, file_path: str, branch: str, collection_name: str
+    ):
+        """Thread-safe version of hiding file in branch."""
+
+        # Use shared lock to ensure thread safety for visibility updates
+        with self._visibility_lock:
+            content_points = self._fetch_file_content_points(file_path, collection_name)
+            if content_points is None:
                 return False
 
             # Update each content point to add branch to hidden_branches if not already present
@@ -1415,9 +1693,12 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         {"id": point["id"], "payload": {"hidden_branches": new_hidden}}
                     )
 
-            # Batch update the points with new hidden_branches arrays
+            # Batch update the points with new hidden_branches arrays.
+            # Payload-only: _batch_update_points upserts point by point, and
+            # each upsert drops the file's OTHER chunk points as orphans, so a
+            # multi-chunk file would collapse to one point.
             if points_to_update:
-                return self.vector_store_client._batch_update_points(
+                return self.vector_store_client._batch_update_payload_only(
                     points_to_update, collection_name
                 )
 
@@ -1547,6 +1828,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
     ):
         """Thread-safe version of ensuring file is visible in branch."""
         with self._visibility_lock:
+<<<<<<< HEAD
             # Get all content points for this file with error handling
             try:
                 content_points, _ = self.vector_store_client.scroll_points(
@@ -1573,6 +1855,10 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     return False
             except Exception as e:
                 logger.error(f"Failed to get content points for {file_path}: {e}")
+=======
+            content_points = self._fetch_file_content_points(file_path, collection_name)
+            if content_points is None:
+>>>>>>> upstream/master
                 return False
 
             # Update each content point to remove branch from hidden_branches if present
@@ -1586,8 +1872,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     )
 
             # Batch update the points with new hidden_branches arrays
+            # (payload-only, see _hide_file_in_branch_thread_safe).
             if points_to_update:
-                return self.vector_store_client._batch_update_points(
+                return self.vector_store_client._batch_update_payload_only(
                     points_to_update, collection_name
                 )
 

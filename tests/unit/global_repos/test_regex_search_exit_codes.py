@@ -114,6 +114,25 @@ class TestRipgrepExitCodeHandling:
                 timeout_seconds=10,
             )
 
+<<<<<<< HEAD
+=======
+            with patch("builtins.open", create=True) as mock_open:
+                mock_open.return_value.__enter__.return_value.read.return_value = ""
+
+                call_thread_id = threading.get_ident()
+                with caplog.at_level(logging.DEBUG):
+                    await ripgrep_service._search_ripgrep(
+                        pattern="test",
+                        search_path=test_repo,
+                        include_patterns=None,
+                        exclude_patterns=None,
+                        case_sensitive=True,
+                        context_lines=0,
+                        max_results=100,
+                        timeout_seconds=10,
+                    )
+
+>>>>>>> upstream/master
         # No WARNING logs should be present (scoped to this call's records —
         # see _call_records for why a bare caplog.records scan is flaky).
         warning_logs = [
@@ -149,6 +168,27 @@ class TestRipgrepExitCodeHandling:
                 max_results=100,
                 timeout_seconds=10,
             )
+<<<<<<< HEAD
+=======
+            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
+            mock_executor.shutdown = MagicMock()
+
+            with patch("builtins.open", create=True) as mock_open:
+                mock_open.return_value.__enter__.return_value.read.return_value = ""
+
+                call_thread_id = threading.get_ident()
+                with caplog.at_level(logging.DEBUG):
+                    result = await ripgrep_service._search_ripgrep(
+                        pattern="nonexistent_pattern",
+                        search_path=test_repo,
+                        include_patterns=None,
+                        exclude_patterns=None,
+                        case_sensitive=True,
+                        context_lines=0,
+                        max_results=100,
+                        timeout_seconds=10,
+                    )
+>>>>>>> upstream/master
 
         # Should return empty results
         assert result == ([], 0), "Exit code 1 should return empty results"
@@ -256,6 +296,27 @@ class TestRipgrepExitCodeHandling:
                 max_results=100,
                 timeout_seconds=10,
             )
+<<<<<<< HEAD
+=======
+            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
+            mock_executor.shutdown = MagicMock()
+
+            with patch("builtins.open", create=True) as mock_open:
+                mock_open.return_value.__enter__.return_value.read.return_value = ""
+
+                call_thread_id = threading.get_ident()
+                with caplog.at_level(logging.DEBUG):
+                    result = await ripgrep_service._search_ripgrep(
+                        pattern="nonexistent",
+                        search_path=test_repo,
+                        include_patterns=None,
+                        exclude_patterns=None,
+                        case_sensitive=True,
+                        context_lines=0,
+                        max_results=100,
+                        timeout_seconds=10,
+                    )
+>>>>>>> upstream/master
 
         # Should return empty results
         assert result == ([], 0), "Exit code 1 should return empty results"

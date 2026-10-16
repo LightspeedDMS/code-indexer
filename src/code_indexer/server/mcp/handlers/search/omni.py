@@ -75,12 +75,23 @@ def _build_multi_search_request(
     params: Dict[str, Any],
     search_type: str,
     limit: int,
+<<<<<<< HEAD
 ) -> Any:  # Returns MultiSearchRequest — local import, not in module type contract
     """Build a MultiSearchRequest from MCP params.
+=======
+) -> (
+    Any
+):  # Returns InternalMultiSearchRequest — local import, not in module type contract
+    """Build the server-side multi-search request from MCP params.
+
+    Only the listed parameters are taken from the caller; the internal
+    fields (query vector, its digest, deadline) are set by the server.
+>>>>>>> upstream/master
 
     Args:
         limit: pre-validated via _coerce_int(default=10) and _compute_effective_limit
     """
+<<<<<<< HEAD
     from ....multi.models import MultiSearchRequest
 
     return MultiSearchRequest(  # type: ignore[arg-type, call-arg]  # search_type validated to Literal values by _resolve_search_type; precomputed_query_vector has default None but exclude=True confuses mypy
@@ -101,6 +112,44 @@ def _build_multi_search_request(
         no_embedding_cache_shortcut=params.get("no_embedding_cache_shortcut", False),
         temporal_embedder=params.get("temporal_embedder"),
     )
+=======
+    from pydantic import ValidationError
+
+    from ....multi.models import InternalMultiSearchRequest
+    from ....query.semantic_query_manager import SearchRequestError
+
+    try:
+        return InternalMultiSearchRequest(  # type: ignore[arg-type, call-arg]  # search_type validated to Literal values by _resolve_search_type; exclude=True defaults confuse mypy
+            repositories=repo_aliases,
+            query=params.get("query_text", ""),
+            search_type=search_type,  # type: ignore[arg-type]
+            limit=limit,
+            min_score=(
+                _coerce_float(params.get("min_score"), 0.0)
+                if params.get("min_score") is not None
+                else None
+            ),
+            language=params.get("language"),
+            path_filter=params.get("path_filter"),
+            exclude_language=params.get("exclude_language"),
+            exclude_path=params.get("exclude_path"),
+            # #2047: the same file_extensions rule as single-repository search.
+            file_extensions=params.get("file_extensions"),
+            accuracy=params.get("accuracy", "balanced"),
+            no_embedding_cache_shortcut=params.get(
+                "no_embedding_cache_shortcut", False
+            ),
+            temporal_embedder=params.get("temporal_embedder"),
+        )
+    except ValidationError as e:
+        # Each error describes only the caller's own parameters.
+        raise SearchRequestError(
+            "; ".join(
+                f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+                for err in e.errors()
+            )
+        ) from e
+>>>>>>> upstream/master
 
 
 def _flatten_multi_results(
@@ -254,10 +303,22 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     config = MultiSearchConfig.from_config(get_config_service())
     from ....app import _server_hnsw_cache as _hnsw_cache
 
+<<<<<<< HEAD
+=======
+    # Bug #2111 / Story #2117: MultiSearchService notes on the request's
+    # search event context the repositories it resolved (searched, or failed
+    # after resolving); the rows are one per resolved repository and an
+    # alias that never resolved writes none.
+    from code_indexer.server.services.search_event_context import (
+        get_search_event_ctx,
+    )
+
+>>>>>>> upstream/master
     service = MultiSearchService.get_instance(config, hnsw_index_cache=_hnsw_cache)
     try:
         response = service.search(request)
     except Exception as e:
+<<<<<<< HEAD
         logger.warning(
             format_error_log(
                 "MCP-GENERAL-031",
@@ -265,6 +326,29 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
         )
         return _empty_omni_response(errors={"service_error": str(e)})
+=======
+        # The response carries a fixed message; the detail goes to the log.
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-031",
+                f"MultiSearchService failed: {e}",
+            ),
+            exc_info=True,
+        )
+        # The whole call failed: every repository it resolved failed.
+        _event_ctx = get_search_event_ctx()
+        if _event_ctx is not None and _event_ctx.searched_repositories is not None:
+            _event_ctx.note_repositories(
+                searched=[],
+                failed=list(_event_ctx.searched_repositories)
+                + list(_event_ctx.failed_repositories or []),
+            )
+        from ....query.search_error_policy import classify_search_error
+
+        return _empty_omni_response(
+            errors={"service_error": classify_search_error(e).message}
+        )
+>>>>>>> upstream/master
 
     category_map = _load_category_map("_omni_search_code")
     all_results = _flatten_multi_results(
@@ -279,7 +363,11 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     fts_truncation_meta: Dict[str, Any] = {}
     if final_results:
         final_results, fts_truncation_meta = _apply_search_truncation(
+<<<<<<< HEAD
             final_results, search_mode, params
+=======
+            final_results, search_mode, params, owner=user.username
+>>>>>>> upstream/master
         )
 
     access_filtering_service = _get_access_filtering_service()

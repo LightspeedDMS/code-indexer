@@ -48,9 +48,20 @@ import json
 import sqlite3
 from dataclasses import asdict
 from pathlib import Path
+<<<<<<< HEAD
 
 from code_indexer.server.services.config_service import ConfigService
 from code_indexer.server.utils.config_manager import LifecycleAnalysisConfig
+=======
+from typing import Any
+
+from code_indexer.server.services.config_service import ConfigService
+from code_indexer.server.utils.config_manager import LifecycleAnalysisConfig
+from tests.unit.server.siem.backends import (  # noqa: F401  (real-PG fixtures)
+    _pg_session_pool,
+    pg_pool,
+)
+>>>>>>> upstream/master
 
 # Named seed/expected version constants (avoid unexplained magic numbers).
 _SEED_VERSION_LEGACY_ROW = 5
@@ -241,6 +252,7 @@ class TestAliasLockDbBackedPromotionMigration:
         )
 
 
+<<<<<<< HEAD
 class TestAliasLockDbBackedPromotionMigrationPgBackend:
     """Requirement 1 ("must work for BOTH backends"): the PostgreSQL/cluster
     branch of the promotion migration. _save_runtime_to_pg issues
@@ -329,3 +341,66 @@ class TestAliasLockDbBackedPromotionMigrationPgBackend:
 
         assert svc._pool.connection.call_count == connection_calls_after_first
         assert config.alias_lock_config.db_backed_enabled is True
+=======
+def _pg_service(tmp_path: Path, pool: Any) -> ConfigService:
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    svc = ConfigService(server_dir_path=str(server_dir))
+    svc.load_config()
+    svc.set_connection_pool(pool)  # seeds the committed row
+    return svc
+
+
+def _make_pre_phase3_pg_row(pool: Any) -> None:  # Any: the pg_pool fixture's pool
+    """The committed alias-lock section as a pre-Phase-3 release left it."""
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE server_config SET config_json = jsonb_set(config_json, "
+            "'{alias_lock_config}', '{\"db_backed_enabled\": false}'::jsonb) "
+            "WHERE config_key = 'runtime'"
+        )
+
+
+class TestAliasLockDbBackedPromotionMigrationPgBackend:
+    """Requirement 1 ("must work for BOTH backends"): the PostgreSQL/cluster
+    branch, against a REAL PostgreSQL (skipped without TEST_POSTGRES_DSN).
+
+    Bug #2017: the promotion re-decides on the RE-READ committed row and
+    writes it with a compare-and-set, so the assertions are on the committed
+    row and the process cache, not on the object passed in."""
+
+    def test_pre_phase3_row_is_promoted_in_the_committed_row(
+        self,
+        tmp_path: Path,
+        pg_pool: Any,  # noqa: F811  (the imported fixture)
+    ) -> None:
+        svc = _pg_service(tmp_path, pg_pool)
+        _make_pre_phase3_pg_row(pg_pool)
+        version, raw = svc._read_committed_runtime()
+
+        svc._apply_alias_lock_db_backed_promotion(svc.get_config(), raw)
+
+        after, section = svc.read_committed_section("alias_lock_config")
+        assert after == version + 1
+        assert section["db_backed_enabled"] is True
+        assert section["db_backed_enabled_promoted"] is True
+        cached = svc.get_config().alias_lock_config
+        assert cached.db_backed_enabled is True
+        assert cached.db_backed_enabled_promoted is True
+
+    def test_already_promoted_row_is_never_rewritten(
+        self,
+        tmp_path: Path,
+        pg_pool: Any,  # noqa: F811  (the imported fixture)
+    ) -> None:
+        svc = _pg_service(tmp_path, pg_pool)
+        _make_pre_phase3_pg_row(pg_pool)
+        _version, raw = svc._read_committed_runtime()
+        svc._apply_alias_lock_db_backed_promotion(svc.get_config(), raw)
+        promoted_version, promoted_raw = svc._read_committed_runtime()
+
+        # the real merge supplies the (now marked) committed row on reload
+        svc._apply_alias_lock_db_backed_promotion(svc.get_config(), promoted_raw)
+
+        assert svc._read_committed_runtime() == (promoted_version, promoted_raw)
+>>>>>>> upstream/master

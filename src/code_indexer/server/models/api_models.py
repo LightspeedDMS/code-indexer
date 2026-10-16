@@ -7,11 +7,34 @@ Following CLAUDE.md Foundation #1: No mocks - these represent real data structur
 
 from typing import Dict, List, Optional, Any
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 from enum import Enum
 
 
-class QueryResultItem(BaseModel):
+class _OmitFalseContentUnavailable(BaseModel):
+    """Result-model base carrying the Bug #1991 ``content_unavailable`` flag.
+
+    The key is serialized only when true, so ordinary results keep exactly
+    the JSON shape they had before the flag existed.
+    """
+
+    content_unavailable: bool = Field(
+        default=False,
+        description="Present and true only when the matched chunk's content "
+        "could not be read; the snippet/content is then empty (Bug #1991)",
+    )
+
+    # Deliberately NO return annotation: an annotated return type replaces
+    # the model's typed serialization schema (OpenAPI) with that type.
+    @model_serializer(mode="wrap")
+    def _omit_false_content_unavailable(self, handler: SerializerFunctionWrapHandler):
+        data: Dict[str, Any] = handler(self)
+        if not data.get("content_unavailable"):
+            data.pop("content_unavailable", None)
+        return data
+
+
+class QueryResultItem(_OmitFalseContentUnavailable):
     """Individual query result item."""
 
     file_path: str
@@ -118,6 +141,29 @@ class AuditHealthInfo(BaseModel):
     )
 
 
+<<<<<<< HEAD
+=======
+class SearchEventLogHealthInfo(BaseModel):
+    """Per-process search event log telemetry (Bug #2114)."""
+
+    events_dropped_since_start: int = Field(
+        ...,
+        description="Search events this server process dropped because its "
+        "recording queue was full, since it started. Dropped searches are "
+        "missing from Query Analytics exports. Per-process; read it together "
+        "with node_id.",
+    )
+    seconds_since_last_drop: Optional[float] = Field(
+        default=None,
+        description="Seconds since this process last dropped a search event "
+        "(null when it never has).",
+    )
+    node_id: str = Field(
+        ..., description="node_id stamped on this process's search event rows."
+    )
+
+
+>>>>>>> upstream/master
 class HealthCheckResponse(BaseModel):
     """Health check endpoint response."""
 
@@ -170,6 +216,15 @@ class HealthCheckResponse(BaseModel):
         "Informational only -- it never factors into `status` or "
         "`failure_reasons`, so an audit store hiccup can never drain a node.",
     )
+<<<<<<< HEAD
+=======
+    search_events: Optional[SearchEventLogHealthInfo] = Field(
+        default=None,
+        description="Bug #2114: search events this process dropped on queue "
+        "overflow (null when the search event log is not running). A drop in "
+        "the last 15 minutes also adds a DEGRADED reason (never unhealthy).",
+    )
+>>>>>>> upstream/master
 
 
 class RepositoryFilesInfo(BaseModel):
@@ -294,7 +349,31 @@ class SemanticSearchRequest(BaseModel):
     )
 
 
-class SearchResultItem(BaseModel):
+# Hard cap on candidates a single internal search may retrieve. Rerank and
+# access-filter over-fetch raise the retrieval limit above the public
+# per-request cap (100) up to this value. Single source of truth; re-exported
+# by code_indexer.server.mcp.reranking.
+MAX_CANDIDATE_LIMIT = 200
+
+
+class InternalSemanticSearchRequest(SemanticSearchRequest):
+    """Server-internal semantic search request.
+
+    Built by server code (query manager, multi-repo search) from an internal
+    retrieval limit that may include rerank/access-filter over-fetch. Never a
+    public request body: the public SemanticSearchRequest keeps its le=100
+    contract, while this type allows up to MAX_CANDIDATE_LIMIT.
+    """
+
+    limit: int = Field(
+        default=10,
+        ge=1,
+        le=MAX_CANDIDATE_LIMIT,
+        description="Maximum number of candidates to retrieve (internal)",
+    )
+
+
+class SearchResultItem(_OmitFalseContentUnavailable):
     """Individual search result."""
 
     score: float = Field(..., description="Relevance score between 0.0 and 1.0")
@@ -333,6 +412,7 @@ class FileListQueryParams(BaseModel):
     sort_by: Optional[str] = Field(
         default="path", description="Sort field: path, size, modified_at"
     )
+<<<<<<< HEAD
     indexed_only: bool = Field(
         default=False,
         description=(
@@ -342,6 +422,8 @@ class FileListQueryParams(BaseModel):
             "Falls back to the full walk when no index is present."
         ),
     )
+=======
+>>>>>>> upstream/master
     direct_children_of: Optional[str] = Field(
         default=None,
         description=(
@@ -370,6 +452,14 @@ class ActivatedRepositorySummary(BaseModel):
     )
     recent_activations: List[Dict[str, Any]] = Field(
         ..., description="Recently activated repositories"
+    )
+    revoked_activations: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Activations whose source repositories the caller no longer has "
+            "access to: user_alias and access_revoked only, so they can be "
+            "found and deactivated"
+        ),
     )
 
 

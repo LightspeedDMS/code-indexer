@@ -48,7 +48,11 @@ ROUTE_EXEMPT: Dict[str, str] = {
     "POST /admin/partials/query-results": READ_ONLY,
     "POST /api/v1/repos/{alias}/git/reset": WORKSPACE_GIT,
     "POST /api/v1/repos/{alias}/git/clean": WORKSPACE_GIT,
+<<<<<<< HEAD
     "DELETE /api/v1/repos/{alias}/git/branches/{name}": WORKSPACE_GIT,
+=======
+    "DELETE /api/v1/repos/{alias}/git/branches/{name:path}": WORKSPACE_GIT,
+>>>>>>> upstream/master
     **{
         f"POST /api/api-keys/{provider}/{probe}": _PROBE_ONLY
         for provider in ("anthropic", "voyageai", "cohere")
@@ -111,10 +115,13 @@ ROUTE_EXEMPT: Dict[str, str] = {
     "POST /api/admin/diagnostics/dedup-warnings/clear-all": (
         "clears the active storage-migration duplicate warnings"
     ),
+<<<<<<< HEAD
     "POST /api/admin/metadata-outbox/abandon": (
         "drops undrained rollback-window file replays of alias/write-mode "
         "metadata (registry unchanged; each dropped key is logged by name)"
     ),
+=======
+>>>>>>> upstream/master
     "POST /api/admin/reaper/trigger": (
         "starts one cycle of the idle activated-repository reaper, which "
         "applies the configured idle policy (same as its scheduled run)"

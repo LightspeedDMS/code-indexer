@@ -950,15 +950,19 @@ class GitAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
             ConfirmationRequiredError: If confirmation is required
         """
-        data: Dict[str, Any] = {"branch_name": branch_name}
+        from urllib.parse import quote
+
+        # The token travels in a header, never in the URL (URLs are logged).
+        headers: Dict[str, str] = {}
         if confirmation_token:
-            data["confirmation_token"] = confirmation_token
+            headers["X-Confirmation-Token"] = confirmation_token
 
         try:
             response = self._authenticated_request(
-                "POST",
-                f"/api/v1/repos/{repository_alias}/git/branch-delete",
-                json=data,
+                "DELETE",
+                f"/api/v1/repos/{repository_alias}/git/branches/"
+                f"{quote(branch_name, safe='')}",
+                headers=headers,
             )
 
             if response.status_code == 200:

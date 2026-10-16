@@ -21,16 +21,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Sequence, Union, cast
 
 from code_indexer.utils.git_runner import run_git_command
+<<<<<<< HEAD
 from code_indexer.server.services.delegated_refusal import (
     DelegatedRepositoryUnsupportedError,
 )
+=======
+from code_indexer.utils.source_text_decoding import decode_source_text
+>>>>>>> upstream/master
 from code_indexer.server.services.git_argv_safety import (
     validate_revision,
     validate_revision_range,
 )
+<<<<<<< HEAD
 
 if TYPE_CHECKING:
     from code_indexer.server.storage.shared.git_backend import GitBackend
+=======
+>>>>>>> upstream/master
 
 
 logger = logging.getLogger(__name__)
@@ -361,6 +368,7 @@ class GitOperationsService:
         # docstring for the invariant.
         branch = validate_revision_range(branch, self.repo_path, param_name="branch")
 
+<<<<<<< HEAD
         if self._git_backend is not None and not (author or until or path):
             # git-mcp's typed log takes revisions, --since and a count; a path,
             # author or --until filter runs the local argv below via git_exec.
@@ -377,6 +385,8 @@ class GitOperationsService:
                 return GitLogResult(commits=[], total_count=0, truncated=False)
             return self._log_result(output, limit)
 
+=======
+>>>>>>> upstream/master
         # Build git log command
         cmd = ["git", "log", f"--format={self.LOG_FORMAT}"]
 
@@ -495,11 +505,14 @@ class GitOperationsService:
         assert _validated_commit_hash is not None  # required parameter, never None
         commit_hash = _validated_commit_hash
 
+<<<<<<< HEAD
         if self._git_backend is not None:
             return self._show_commit_through_backend(
                 commit_hash, include_diff=include_diff, include_stats=include_stats
             )
 
+=======
+>>>>>>> upstream/master
         # First, resolve the commit hash to full SHA
         try:
             resolve_result = run_git_command(
@@ -779,9 +792,12 @@ class GitOperationsService:
         assert _validated_revision is not None  # required parameter, never None
         revision = _validated_revision
 
+<<<<<<< HEAD
         if self._git_backend is not None:
             return self._file_at_revision_through_backend(path, revision)
 
+=======
+>>>>>>> upstream/master
         # First resolve the revision to full SHA and verify it exists
         try:
             # Use rev-parse --verify to check the revision actually exists
@@ -794,14 +810,17 @@ class GitOperationsService:
         except subprocess.CalledProcessError:
             raise ValueError(f"Invalid revision: {revision}")
 
-        # Get file content using git show
+        # Get file content using git show. Capture BYTES and decode with the
+        # same encoding fallback indexing uses (Bug #1991): a strict UTF-8
+        # text-mode read failed on Latin-1/CP1252 files.
         cmd = ["git", "show", f"{resolved_revision}:{path}"]
 
         try:
-            result = run_git_command(cmd, cwd=self.repo_path, check=True)
-            content = result.stdout
+            result = run_git_command(cmd, cwd=self.repo_path, check=True, text=False)
+            raw_content: bytes = result.stdout
+            content = decode_source_text(raw_content)
         except subprocess.CalledProcessError as e:
-            stderr = e.stderr or ""
+            stderr = (e.stderr or b"").decode("utf-8", errors="replace")
             # Check for invalid revision errors (bad object, not a commit object)
             if "bad revision" in stderr or "unknown revision" in stderr:
                 raise ValueError(f"Invalid revision: {revision}")
@@ -813,7 +832,9 @@ class GitOperationsService:
             revision=revision,
             resolved_revision=resolved_revision,
             content=content,
-            size_bytes=len(content.encode("utf-8")),
+            # The blob's real size; re-encoding the decoded text would
+            # over-count Latin-1/CP1252 files (Bug #1991).
+            size_bytes=len(raw_content),
         )
 
     def _file_at_revision_through_backend(
@@ -1190,6 +1211,18 @@ class GitOperationsService:
             raise ValueError(
                 f"end_line ({end_line}) must be >= start_line ({start_line})"
             )
+        # revision is a free-form revision expression, and `git blame`
+        # itself also accepts a two-dot/three-dot range (restricting the
+        # blame to that range, with boundary commits marked `^`); it must
+        # not start with '-' or contain a control character. Beyond that,
+        # git itself resolves or rejects the value exactly as it would
+        # with no validation at all. See
+        # code_indexer.server.services.git_argv_safety module docstring
+        # for the invariant.
+        revision = validate_revision_range(
+            revision, self.repo_path, param_name="revision"
+        )
+
         # revision is a free-form revision expression, and `git blame`
         # itself also accepts a two-dot/three-dot range (restricting the
         # blame to that range, with boundary commits marked `^`); it must

@@ -62,8 +62,11 @@ class DuplicateRepositorySyncError(SyncJobError):
     """Raised when attempting to sync a repository that's already being synced."""
 
     def __init__(self, repository_url: str, existing_job_id: str):
+        from code_indexer.utils.credential_redaction import mask_url_credentials
+
         super().__init__(
-            f"Repository '{repository_url}' is already being synced by job '{existing_job_id}'"
+            f"Repository '{mask_url_credentials(repository_url)}' is already "
+            f"being synced by job '{existing_job_id}'"
         )
         self.repository_url = repository_url
         self.existing_job_id = existing_job_id

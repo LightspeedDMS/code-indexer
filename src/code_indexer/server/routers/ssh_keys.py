@@ -317,12 +317,20 @@ def api_delete_ssh_key(
     return delete_ssh_key(name, actor=current_user.username)
 
 
-@router.get("/{name}/public")
+@router.get(
+    "/{name}/public",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def api_get_public_key(
     name: str,
     _current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> Response:
-    """Get public key content."""
+    """Get public key content.
+
+    Elevation-gated like ``GET /api/ssh-keys``: without a window neither the
+    key nor whether the name exists is revealed. The Web SSH Keys page calls
+    this from fetch() with its session cookie, so its own window applies.
+    """
     return get_public_key(name)
 
 

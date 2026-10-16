@@ -15,7 +15,11 @@ inputSchema:
       - cohere
     purpose:
       type: string
+<<<<<<< HEAD
       description: 'Filter by purpose: ''index'', ''refresh'', ''query'', ''temporal'', ''key_test'', or ''cache_shadow_audit'''
+=======
+      description: 'Filter by purpose: ''index'', ''refresh'', ''query'', ''temporal'', ''temporal_refresh'' (temporal calls of a golden-repo refresh), ''key_test'', or ''cache_shadow_audit'''
+>>>>>>> upstream/master
     golden_repo_alias:
       type: string
       description: Filter by golden repo alias

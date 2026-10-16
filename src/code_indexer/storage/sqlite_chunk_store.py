@@ -50,13 +50,33 @@ Two write/open modes
 
 from __future__ import annotations
 
+<<<<<<< HEAD
+=======
+import errno
+>>>>>>> upstream/master
 import json
 import logging
 import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+<<<<<<< HEAD
 from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union
+=======
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Union,
+    cast,
+)
+>>>>>>> upstream/master
 
 import numpy as np
 import zstandard
@@ -128,12 +148,37 @@ class ChunkStoreUnavailableError(ChunkStoreError):
     """
 
 
+<<<<<<< HEAD
+=======
+class MissingEstablishedChunkStoreError(ChunkStoreUnavailableError):
+    """Story #2126: the ``chunks.db`` of an ESTABLISHED collection is missing
+    (raised only by ``refuse_missing_established_store``). Its own fatal kind
+    (exit 89): neither corruption nor an environment failure, because its
+    repair -- restoring the store from the published snapshot -- differs
+    from both."""
+
+
+>>>>>>> upstream/master
 _LOCK_CONTENTION_SUBSTRINGS = (
     "database is locked",
     "database table is locked",
 )
 
 
+<<<<<<< HEAD
+=======
+def is_chunk_store_lock_contention(exc: BaseException) -> bool:
+    """True when ``exc`` is SQLite reporting that another connection holds
+    the chunks.db lock beyond the busy timeout ("database is locked" /
+    "database table is locked") -- transient, unlike every other
+    ``sqlite3.DatabaseError``."""
+    if not isinstance(exc, sqlite3.DatabaseError):
+        return False
+    message = str(exc).lower()
+    return any(substring in message for substring in _LOCK_CONTENTION_SUBSTRINGS)
+
+
+>>>>>>> upstream/master
 def is_fatal_chunk_store_write_error(exc: BaseException) -> bool:
     """Bug #1746 code review findings H1+H2: classify whether ``exc``
     (raised from an attempted chunk-store open/write) represents a FATAL
@@ -164,6 +209,7 @@ def is_fatal_chunk_store_write_error(exc: BaseException) -> bool:
         not ``PermissionError``.
 
     Not fatal (returns False): everything else, including the two lock
+<<<<<<< HEAD
     messages above.
     """
     if isinstance(exc, sqlite3.DatabaseError):
@@ -171,11 +217,88 @@ def is_fatal_chunk_store_write_error(exc: BaseException) -> bool:
         if any(substring in message for substring in _LOCK_CONTENTION_SUBSTRINGS):
             return False
         return True
+=======
+    messages above. A ``ChunkStoreUnavailableError`` (e.g. Story #2119's
+    refusal to recreate a missing established store) is fatal by definition.
+    """
+    if isinstance(exc, ChunkStoreUnavailableError):
+        return True
+    if isinstance(exc, sqlite3.DatabaseError):
+        return not is_chunk_store_lock_contention(exc)
+>>>>>>> upstream/master
     if isinstance(exc, OSError):
         return True
     return False
 
 
+<<<<<<< HEAD
+=======
+def refuse_missing_established_store(db_path: Union[str, Path]) -> None:
+    """Story #2119: raise when ``db_path`` (a collection's ``chunks.db``) is
+    missing although its collection is ESTABLISHED, i.e. the CHUNKS_DB layout
+    discriminator is committed in ``collection_meta.json`` (the layout
+    authority, ``resolve_chunk_layout``). Every creator of a store commits
+    that discriminator only after the store exists (``end_indexing``,
+    ``clear_collection``, fleet migration), and the destructive rebuilds
+    clear it first, so a missing store under a committed discriminator was
+    lost, never pending. A read-write open would silently recreate it empty,
+    and every later reuse lookup would read "nothing stored" and pay again.
+
+    Raises ``MissingEstablishedChunkStoreError`` (a
+    ``ChunkStoreUnavailableError``) chained from ``FileNotFoundError``: its
+    own kind (exit 89, Story #2126), never corruption (86), whose repair is
+    a restore from the published snapshot. Returns quietly when the store
+    exists or the collection is not established (a fresh build)."""
+    path = Path(db_path)
+    if path.exists():
+        return
+    from code_indexer.storage.shared.chunk_layout import (
+        ChunkLayout,
+        resolve_chunk_layout,
+    )
+
+    if resolve_chunk_layout(path.parent) != ChunkLayout.CHUNKS_DB:
+        return
+    missing = FileNotFoundError(errno.ENOENT, "chunk store missing", str(path))
+    raise MissingEstablishedChunkStoreError(
+        f"Chunk store {path} of an established CHUNKS_DB collection is "
+        f"missing; refusing to recreate it empty"
+    ) from missing
+
+
+#: SQLite result codes (and their extended codes) that report the database
+#: file itself as damaged.
+_CORRUPTION_RESULT_CODE_PREFIXES = ("SQLITE_CORRUPT", "SQLITE_NOTADB")
+
+#: SQLite's own messages for those codes, for interpreters (< 3.11) whose
+#: sqlite3 errors carry no ``sqlite_errorname``.
+_CORRUPTION_MESSAGES = (
+    "disk image is malformed",
+    "malformed database schema",
+    "not a database",
+)
+
+
+def sqlite_error_reports_corruption(exc: BaseException) -> bool:
+    """Bug #2022: True only when SQLite itself reports the database as
+    damaged (SQLITE_CORRUPT / SQLITE_NOTADB). I/O errors, lock contention,
+    busy, full, read-only and every other error are NOT corruption: a store
+    is never restored over on their account."""
+    if not isinstance(exc, sqlite3.DatabaseError):
+        return False
+    error_name = getattr(exc, "sqlite_errorname", None)
+    if isinstance(error_name, str):
+        return error_name.startswith(_CORRUPTION_RESULT_CODE_PREFIXES)
+    return message_reports_sqlite_corruption(str(exc))
+
+
+def message_reports_sqlite_corruption(message: str) -> bool:
+    """True when *message* contains one of SQLite's corruption messages."""
+    lowered = message.lower()
+    return any(text in lowered for text in _CORRUPTION_MESSAGES)
+
+
+>>>>>>> upstream/master
 class CorruptChunkDataError(ChunkStoreError):
     """Raised when a stored chunk's opaque ``data`` blob or ``vector`` blob
     cannot be decoded -- a data-integrity failure (Codex-15 finding).
@@ -204,6 +327,12 @@ CREATE TABLE IF NOT EXISTS chunk_store_meta (
     value TEXT NOT NULL
 );
 """
+<<<<<<< HEAD
+=======
+# The same DDL one statement at a time, for running inside an explicit
+# transaction (executescript() would commit it first).
+_SCHEMA_STATEMENTS = tuple(s.strip() for s in _SCHEMA_SQL.split(";") if s.strip())
+>>>>>>> upstream/master
 
 _RESERVED_KEYS = ("id", "vector")
 
@@ -310,6 +439,13 @@ class ChunkStore:
         self._durable_synchronous = durable_synchronous
         self._compressor = zstandard.ZstdCompressor()
         self._decompressor = zstandard.ZstdDecompressor()
+<<<<<<< HEAD
+=======
+        if not immutable and not read_only:
+            # Story #2119: a read-write open would create a missing file;
+            # never for an established collection (see the guard).
+            refuse_missing_established_store(self.db_path)
+>>>>>>> upstream/master
         self._conn = self._open_connection()
         self._expected_dim = expected_dim
         if not immutable and not read_only:
@@ -398,9 +534,38 @@ class ChunkStore:
         return conn
 
     def _ensure_schema(self) -> None:
+<<<<<<< HEAD
         self._conn.executescript(_SCHEMA_SQL)
         self._ensure_type_column()
         self._conn.commit()
+=======
+        if self._has_chunks_table():
+            # Existing store: idempotent no-op DDL, no write lock taken.
+            self._conn.executescript(_SCHEMA_SQL)
+            self._ensure_type_column()
+            self._conn.commit()
+            return
+        # Fresh store: the whole schema in ONE durable transaction (each
+        # autocommitted DDL statement would be its own fsync round -- 15
+        # fdatasync calls instead of 3 under synchronous=FULL). IMMEDIATE so a
+        # racing creator waits for this one instead of deadlocking on the
+        # read->write lock upgrade; its IF NOT EXISTS DDL then no-ops.
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            for statement in _SCHEMA_STATEMENTS:
+                self._conn.execute(statement)
+            self._ensure_type_column()
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+
+    def _has_chunks_table(self) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks'"
+        ).fetchone()
+        return row is not None
+>>>>>>> upstream/master
 
     def _ensure_type_column(self) -> None:
         """Bug #1575 Part A (AC5): backward-compatible migration adding an
@@ -608,7 +773,11 @@ class ChunkStore:
             self._expected_dim = int(f32.shape[0])
             self._persist_dim(self._expected_dim)
 
+<<<<<<< HEAD
         return f32.tobytes()
+=======
+        return cast(bytes, f32.tobytes())
+>>>>>>> upstream/master
 
     @staticmethod
     def _decode_vector(blob: bytes) -> np.ndarray:
@@ -621,7 +790,11 @@ class ChunkStore:
     def _encode_data(self, record: Dict[str, Any]) -> bytes:
         passthrough = {k: v for k, v in record.items() if k not in _RESERVED_KEYS}
         raw = json.dumps(passthrough).encode("utf-8")
+<<<<<<< HEAD
         return self._compressor.compress(raw)
+=======
+        return cast(bytes, self._compressor.compress(raw))
+>>>>>>> upstream/master
 
     def _decode_data(self, blob: bytes) -> Dict[str, Any]:
         raw = self._decompressor.decompress(blob)
@@ -737,6 +910,65 @@ class ChunkStore:
             return None
         return self._row_to_record(row[0], row[1], row[2])
 
+<<<<<<< HEAD
+=======
+    def set_busy_timeout(self, seconds: float) -> None:
+        """Story #2119: wait up to ``seconds`` for another connection's lock
+        before a statement raises "database is locked" (SQLite's own busy
+        handler, ``PRAGMA busy_timeout``; Python's default is 5 s). With the
+        rollback journal this store uses, a reader is blocked while a writer
+        commits."""
+        if not seconds > 0:
+            raise ValueError(f"busy timeout must be positive, got {seconds!r}")
+        self._conn.execute(f"PRAGMA busy_timeout = {int(seconds * 1000)}")
+
+    def read_many(
+        self, point_ids: Sequence[str], *, also_path: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Story #2119: full records (vector included) of every stored row
+        whose ``point_id`` is in ``point_ids`` and, when ``also_path`` is
+        given, of every row stored under exactly that ``path`` -- the
+        embedding-reuse lookup of one file in ONE statement per
+        ``_QUERY_IN_CHUNK_SIZE`` ids (the path clause rides on the first).
+        Each row is returned once.
+
+        Raises ``CorruptChunkDataError`` and ``sqlite3`` errors as they are:
+        a caller deciding whether to pay for an embedding must never read an
+        error as "nothing stored". A store without a ``chunks`` table holds
+        nothing and returns ``[]``.
+        """
+        if not self._chunks_table_exists():
+            return []
+        ids = list(point_ids)
+        batches = [
+            ids[start : start + _QUERY_IN_CHUNK_SIZE]
+            for start in range(0, len(ids), _QUERY_IN_CHUNK_SIZE)
+        ] or [[]]
+        results: List[Dict[str, Any]] = []
+        seen: set = set()
+        for batch_number, batch in enumerate(batches):
+            clauses: List[str] = []
+            params: List[str] = []
+            if batch:
+                clauses.append(f"point_id IN ({','.join('?' for _ in batch)})")
+                params.extend(batch)
+            if also_path is not None and batch_number == 0:
+                clauses.append("path = ?")
+                params.append(also_path)
+            if not clauses:
+                continue
+            rows = self._conn.execute(
+                f"SELECT point_id, vector, data FROM chunks WHERE {' OR '.join(clauses)}",
+                params,
+            ).fetchall()
+            for point_id, vector_blob, data_blob in rows:
+                if point_id in seen:
+                    continue
+                seen.add(point_id)
+                results.append(self._row_to_record(point_id, vector_blob, data_blob))
+        return results
+
+>>>>>>> upstream/master
     def stream_all(self):
         """Yield every stored record, one at a time.
 
@@ -1057,6 +1289,31 @@ class ChunkStore:
                     )
         return results
 
+<<<<<<< HEAD
+=======
+    def point_ids_by_path(self, paths: Iterable[str]) -> Dict[str, Set[str]]:
+        """Story #2120: the point ids stored under each of ``paths`` (exact
+        stored strings), read through the indexed ``path`` column in chunks
+        of ``_QUERY_IN_CHUNK_SIZE`` -- never a full-table scan, and no blob
+        is decoded. Paths with no row are absent from the result. Read-only;
+        every error propagates. A store without a ``chunks`` table holds
+        nothing and returns ``{}``."""
+        if not self._chunks_table_exists():
+            return {}
+        paths_list = list(paths)
+        result: Dict[str, Set[str]] = {}
+        for start in range(0, len(paths_list), _QUERY_IN_CHUNK_SIZE):
+            batch = paths_list[start : start + _QUERY_IN_CHUNK_SIZE]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self._conn.execute(
+                f"SELECT point_id, path FROM chunks WHERE path IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for point_id, path in rows:
+                result.setdefault(path, set()).add(point_id)
+        return result
+
+>>>>>>> upstream/master
     def _row_to_payload_only_record(
         self, point_id: str, data_blob: bytes
     ) -> Dict[str, Any]:
@@ -1279,6 +1536,48 @@ class ChunkStore:
         self._conn.commit()
         return deleted_total
 
+<<<<<<< HEAD
+=======
+    def delete_points_still_at_paths(self, expected: Dict[str, str]) -> Dict[str, str]:
+        """Story #2120: delete each ``point_id`` of ``expected`` only while
+        its stored ``path`` still equals ``expected[point_id]`` -- a row a
+        live byte-identical copy took over (same content-addressed id, its
+        own path) is kept. Bug #2124: the whole batch is ONE ``BEGIN
+        IMMEDIATE`` transaction (one commit), whatever its size.
+
+        Returns ``{point_id: path}`` of the rows actually deleted. Rolls back
+        and re-raises on any error: nothing is deleted then."""
+        self._require_mutable()
+        if not expected:
+            return {}
+        point_ids = list(expected)
+        deleted: Dict[str, str] = {}
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            for start in range(0, len(point_ids), self._DELETE_CHUNK_SIZE):
+                chunk = point_ids[start : start + self._DELETE_CHUNK_SIZE]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = self._conn.execute(
+                    f"SELECT point_id, path FROM chunks "
+                    f"WHERE point_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                matching = [
+                    (point_id, path)
+                    for point_id, path in rows
+                    if path is not None and path == expected[point_id]
+                ]
+                self._conn.executemany(
+                    "DELETE FROM chunks WHERE point_id = ? AND path = ?", matching
+                )
+                deleted.update(matching)
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        return deleted
+
+>>>>>>> upstream/master
     def delete_stray_points_fail_closed(self, point_ids: list) -> int:
         """Delete point_ids inside a SINGLE transaction, fail-closed (Story
         #1457 AC7).

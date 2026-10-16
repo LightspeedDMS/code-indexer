@@ -86,8 +86,21 @@ class _StubBackend:
         to_ts: Optional[float] = None,
         limit: int = 100,
         offset: int = 0,
+        door: Optional[str] = None,
+        outcome: Optional[str] = None,
+        tool: Optional[str] = None,
+        correlation_id: Optional[str] = None,
     ):
         rows = list(self._rows)
+        # Story #2117 exact-match filters, as the real backends apply them.
+        for column, value in (
+            ("door", door),
+            ("outcome", outcome),
+            ("tool", tool),
+            ("correlation_id", correlation_id),
+        ):
+            if value is not None:
+                rows = [r for r in rows if r.get(column) == value]
         if username is not None:
             rows = [r for r in rows if r["username"] == username]
         if search_type is not None:
@@ -228,6 +241,15 @@ class TestSearchEventsEndpointBasic:
         assert resp.status_code == 400, (
             f"Expected 400 for limit=1001, got {resp.status_code}: {resp.text}"
         )
+
+    @pytest.mark.parametrize("name, cap", [("tool", 100), ("correlation_id", 128)])
+    def test_over_long_filter_returns_422(self, client_and_writer, name, cap):
+        """Story #2117: the tool and correlation id filters are bounded."""
+        client, _ = client_and_writer
+        resp = client.get(f"/api/admin/search-events?{name}={'x' * (cap + 1)}")
+        assert resp.status_code == 422, resp.text
+        resp = client.get(f"/api/admin/search-events?{name}={'x' * cap}")
+        assert resp.status_code == 200, resp.text
 
     def test_requires_admin_auth_when_no_override(self):
         """Without auth override, unauthenticated request gets 401 or 403."""

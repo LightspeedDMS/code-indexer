@@ -14,6 +14,10 @@ Refactoring is tracked separately.
 """
 
 import asyncio
+<<<<<<< HEAD
+=======
+import functools
+>>>>>>> upstream/master
 import logging
 import time
 from pathlib import Path
@@ -26,6 +30,15 @@ from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.mcp import reranking as _mcp_reranking
 from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.services.config_service import get_config_service
+<<<<<<< HEAD
+=======
+from code_indexer.server.services.search_event_recording import (
+    SearchOrigin,
+    record_regex_search,
+    recording_failure,
+    writer_from_app,
+)
+>>>>>>> upstream/master
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
@@ -66,6 +79,12 @@ from ._shared import (
 
 logger = logging.getLogger("code_indexer.server.mcp.handlers.search")
 
+<<<<<<< HEAD
+=======
+# Story #2117: the tool and door every MCP regex search event carries.
+REGEX_SEARCH_ORIGIN = SearchOrigin(tool="regex_search", door="mcp")
+
+>>>>>>> upstream/master
 
 async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handle omni-regex search across multiple repositories.
@@ -300,7 +319,11 @@ async def _rerank_truncate_and_filter_regex_matches(
         None, lambda: _mcp_reranking._apply_reranking_sync(**rerank_kwargs)
     )
 
+<<<<<<< HEAD
     matches = _apply_regex_payload_truncation(matches)
+=======
+    matches = _apply_regex_payload_truncation(matches, owner=user.username)
+>>>>>>> upstream/master
 
     cidx_meta_access_filtered = False
     if repository_alias and "cidx-meta" in repository_alias:
@@ -328,9 +351,12 @@ async def _execute_regex_search_impl(
         raw RegexSearchResult dataclass.
     """
     from code_indexer.global_repos.regex_search import RegexSearchService
+<<<<<<< HEAD
     from code_indexer.server.startup.ripgrep_backend_wiring import (
         server_regex_target,
     )
+=======
+>>>>>>> upstream/master
 
     config = get_config_service().get_config()
     search_limits = config.search_limits_config
@@ -357,20 +383,32 @@ async def _execute_regex_search_impl(
     # call itself via anyio.to_thread.run_sync, mirroring the granular
     # per-call offload pattern already established elsewhere in this
     # search path (see regex_search.py's search() method).
+<<<<<<< HEAD
     def _new_service() -> RegexSearchService:
         root, backend = server_regex_target(repo_path)
         return RegexSearchService(
             root,
+=======
+    service = await anyio.to_thread.run_sync(
+        functools.partial(
+            RegexSearchService,
+            repo_path,
+>>>>>>> upstream/master
             subprocess_max_workers=subprocess_max_workers,
             # Issue #1601 Priority 9: thread the already-in-scope alias
             # through so the service's read-capped WARNING log surfaces the
             # real user-facing alias, not just the (possibly
             # versioned-snapshot) repo_path.
             alias=repository_alias,
+<<<<<<< HEAD
             ripgrep_backend=backend,
         )
 
     service = await anyio.to_thread.run_sync(_new_service)
+=======
+        )
+    )
+>>>>>>> upstream/master
     search_result = await service.search(
         pattern=args["pattern"],
         path=args.get("path"),
@@ -460,11 +498,18 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
     _admission = check_query_admission()
     if not _admission.allowed:
         return _mcp_response(memory_pressure_mcp_payload(_admission))
+<<<<<<< HEAD
 
     from code_indexer.server.services.search_error_formatter import SearchErrorFormatter
     from code_indexer.server.startup.content_backend_wiring import (
         is_content_seam_delegated,
     )
+=======
+    # Story #2108: the recorded search event's total latency starts here.
+    regex_started = time.monotonic()
+
+    from code_indexer.server.services.search_error_formatter import SearchErrorFormatter
+>>>>>>> upstream/master
 
     repository_alias, err = _validate_regex_args(args)
     if err is not None:
@@ -536,6 +581,7 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             and _arm is not None
         ):
             resolved = _arm.get_activated_repo_path(user.username, repository_alias)
+<<<<<<< HEAD
             # Content seam: the copy is on workspace-mcp, which the regex
             # backend searches at this path (a missing copy fails there,
             # loudly); this pod has nothing to stat.
@@ -544,6 +590,9 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
                 and not is_content_seam_delegated()
                 and not Path(resolved).exists()
             ):
+=======
+            if resolved and not Path(resolved).exists():
+>>>>>>> upstream/master
                 resolved = None
         else:
             golden_repos_dir = _get_golden_repos_dir()
@@ -558,9 +607,27 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
                 }
             )
 
+<<<<<<< HEAD
         matches, rerank_meta, sr = await _execute_regex_search(
             args, Path(resolved), repository_alias, user
         )
+=======
+        # Story #2117: the repository resolved; a search that raises from
+        # here is one failure row.
+        with recording_failure(
+            writer_from_app(_utils._lazy_module_attr_or_none("app")),
+            origin=REGEX_SEARCH_ORIGIN,
+            search_type="regex",
+            username=user.username,
+            repo_alias=repository_alias,
+            query_text=str(args["pattern"]),
+            started_monotonic=regex_started,
+            correlation_id=get_correlation_id(),
+        ):
+            matches, rerank_meta, sr = await _execute_regex_search(
+                args, Path(resolved), repository_alias, user
+            )
+>>>>>>> upstream/master
         # Bug #337 regression fix: when cidx-meta access filtering actually
         # ran (rerank_meta["cidx_meta_access_filtered"], set in
         # _rerank_truncate_and_filter_regex_matches), sr.total_matches is
@@ -579,6 +646,19 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             if rerank_meta.get("cidx_meta_access_filtered")
             else sr.total_matches
         )
+<<<<<<< HEAD
+=======
+        record_regex_search(
+            writer_from_app(_utils._lazy_module_attr_or_none("app")),
+            origin=REGEX_SEARCH_ORIGIN,
+            username=user.username,
+            repo_alias=repository_alias,
+            pattern=args["pattern"],
+            result_count=len(matches),
+            started_monotonic=regex_started,
+            correlation_id=get_correlation_id(),
+        )
+>>>>>>> upstream/master
         return _mcp_response(
             {
                 "success": True,

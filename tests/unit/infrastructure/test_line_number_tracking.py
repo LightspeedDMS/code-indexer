@@ -235,8 +235,17 @@ if __name__ == "__main__":
 class TestLineNumbersInProcessorMetadata:
     """Test that processor includes line numbers in metadata."""
 
+<<<<<<< HEAD
     def test_document_processor_instantiates_with_line_tracking(self):
         """DocumentProcessor can be built with a line-tracking chunker config."""
+=======
+    def test_process_file_parallel_includes_line_metadata(self):
+        """Test that process_file_parallel includes line numbers in chunk metadata."""
+        # This test will fail until we implement the feature
+        # It's designed to test the processor's metadata handling
+
+        # Mock dependencies
+>>>>>>> upstream/master
         from code_indexer.indexing.processor import DocumentProcessor
         from code_indexer.config import Config
         from unittest.mock import Mock

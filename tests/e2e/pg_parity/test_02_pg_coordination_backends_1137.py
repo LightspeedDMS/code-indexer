@@ -82,6 +82,7 @@ import httpx
 import pyotp
 import pytest
 
+from tests.e2e._stub_systemd_unit import write_stub_systemd_unit
 from tests.e2e.helpers import (
     login,
     require_postgres,
@@ -205,7 +206,11 @@ def _pg_golden_repos_dir() -> Path:
     Mirrors production's own topology exactly: on every real multi-node
     cluster sharing a PostgreSQL backend, each node ALSO bind/NFS-mounts its
     own ``<server_dir>/data/golden-repos`` onto the SAME shared directory
+<<<<<<< HEAD
     (see ``docs/cluster-setup.md``'s "Golden Repository Shared Storage"
+=======
+    (see ``docs/server/cluster-setup.md``'s "Golden Repository Shared Storage"
+>>>>>>> upstream/master
     section) -- ``golden_repos_dir`` has no independent config override, it
     is derived unconditionally from ``CIDX_SERVER_DATA_DIR``
     (``lifespan.py``).  This helper is the single source of truth for that
@@ -1047,12 +1052,20 @@ def test_ac2_pg_api_metrics_drain_on_shutdown(
 
         shutil.rmtree(data_dir, ignore_errors=True)
     _write_throwaway_config(data_dir, _THROWAWAY_PORT)
+    # Bug #1996: its own stub unit with its own bind values (never the
+    # harness's stub for another server, nor the host's real unit).
+    unit_dir = data_dir / "systemd-units"
+    write_stub_systemd_unit(unit_dir, _THROWAWAY_PORT, host=_THROWAWAY_HOST)
 
     url = f"http://{_THROWAWAY_HOST}:{_THROWAWAY_PORT}"
     env = dict(os.environ)
     env["PYTHONPATH"] = str(src_dir)
     env["CIDX_SERVER_DATA_DIR"] = str(data_dir)
     env["CIDX_DATA_DIR"] = str(data_dir)
+<<<<<<< HEAD
+=======
+    env["SYSTEMD_UNIT_DIR"] = str(unit_dir)
+>>>>>>> upstream/master
     voyage = os.environ.get("E2E_VOYAGE_API_KEY") or os.environ.get(
         "VOYAGE_API_KEY", ""
     )

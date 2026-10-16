@@ -95,10 +95,14 @@ class TestAutoUpdateStatusFile:
             with patch("json.dump") as mock_json_dump:
                 executor._write_status_file("pending_restart", "Testing restart")
 
-                # Note: Using ~/.cidx-server/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
-                # and /var/lib/ is not writable by non-root service users
+                # Note: Using the cidx data dir (~/.cidx-server/ by default) instead of
+                # /tmp/ because systemd PrivateTmp=yes isolates /tmp and /var/lib/ is
+                # not writable by non-root service users.  Bug #1996: the test session
+                # points CIDX_DATA_DIR away from the real home.
+                from code_indexer.server.auto_update import deployment_executor
+
                 mock_file.assert_called_once_with(
-                    Path.home() / ".cidx-server" / "auto-update-status.json", "w"
+                    deployment_executor._cidx_data_dir / "auto-update-status.json", "w"
                 )
                 # Check that json.dump was called with correct structure
                 call_args = mock_json_dump.call_args[0]

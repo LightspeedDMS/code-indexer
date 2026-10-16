@@ -140,7 +140,11 @@ PHASE 1 (driver, regex): the `pattern` regex narrows the file set. For `search_t
 
 PHASE 2 (evaluator, AST): for each candidate file, tree-sitter parses the file once, then your `evaluator_code` runs as a Rust native evaluator (compiled to a dynamic library). The evaluator receives the file root AST node as an `OwnedNode` and returns `Vec<EvalFinding>` -- a list of findings, each with a pattern name, line number, and code snippet. The server enriches each finding with `file_path` and `language`.
 
+<<<<<<< HEAD
 Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately when `await_seconds` is 0 (default); poll `GET /api/jobs/{job_id}` for results. Set `await_seconds > 0` to have the server poll the background job for up to that many seconds and return the inline result if it completes, falling back to `{job_id}` otherwise (inline-wait is capped at up to 45 seconds, lowered from 120.0 by Bug #1070 -- see the `await_seconds` row in the Parameters table below).
+=======
+Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately when `await_seconds` is 0 (default); poll `GET /api/jobs/{job_id}` for results. Set `await_seconds > 0` to have the server poll the background job for up to that many seconds and return the inline result if it completes, falling back to `{job_id}` otherwise (inline-wait is capped at up to 45 seconds -- see the `await_seconds` row in the Parameters table below).
+>>>>>>> upstream/master
 
 ## Quick Start
 
@@ -169,7 +173,7 @@ Key points:
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | repository_alias | str OR list[str] | yes | -- | Single alias for single-repo search. Array (or JSON-encoded array string) for omni multi-repo search. Multi-repo returns one job id per resolved alias plus an `errors[]` list for unresolved aliases. |
-| pattern | str | yes | -- | Regular expression applied in Phase 1. Renamed from `driver_regex` in v10.3.x. |
+| pattern | str | yes | -- | Regular expression applied in Phase 1. |
 | evaluator_code | str | no | (default acceptor) | Rust code defining `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`. See "Evaluator API" below. When omitted, the server substitutes a default that produces one finding per Phase 1 hit. |
 | search_target | "content" or "filename" | yes | -- | "content" -- Phase 1 regex applies to file text. "filename" -- Phase 1 regex applies to relative paths. |
 | include_patterns | list[str] | no | [] | Glob patterns for files to include. Empty means include all. See "Glob Pattern Semantics" below. |
@@ -180,12 +184,66 @@ Key points:
 | multiline | bool | no | false | Multi-line regex matching in the content driver. |
 | pcre2 | bool | no | false | PCRE2 engine for the content driver (lookahead/lookbehind). |
 | timeout_seconds | int | no | 120 | Per-job wall-clock cap. Range 10..600. |
+<<<<<<< HEAD
 | max_results | int | no | null | Cap on candidate files evaluated. When hit: `partial=true`, `max_files_reached=true`. Renamed from `max_files` in v10.3.x. |
 | await_seconds | float | no | 0 | Server-side inline-wait window (accepts floats, e.g. 2.5). 0 = return job id immediately. Range 0.0..45.0 (lowered from 120.0 by Bug #1070 -- async handlers risk a 504 at the ALB 60s timeout; the server enforces the 45.0 ceiling via `_AWAIT_SECONDS_MAX` in `handlers/xray.py`). Values > 30.0 emit a server warning. Out-of-range or wrong-type values return error code `await_seconds_invalid`. |
+=======
+| max_results | int | no | null | Cap on candidate files evaluated. When hit: `partial=true`, `max_files_reached=true`. |
+| await_seconds | float | no | 0 | Server-side inline-wait window (accepts floats, e.g. 2.5). 0 = return job id immediately. Range 0.0..45.0. Values > 30.0 emit a server warning. Out-of-range or wrong-type values return error code `await_seconds_invalid`. |
+>>>>>>> upstream/master
 | pattern_name | str | no | null | Name of a stored xray evaluator pattern (from the cidx-meta library). Mutually exclusive with `evaluator_code`. When provided, the server loads and resolves the pattern, applying `pattern_params` overrides. Error `mutually_exclusive_params` if both are provided. |
 | pattern_params | object | no | null | Parameter overrides for the resolved pattern. Only valid when `pattern_name` is provided. Keys must match declared parameter names (UPPER_SNAKE_CASE); values must be type-compatible. |
 
-> **REST API field names differ**: The REST endpoint `POST /api/xray/search` uses `driver_regex` (not `pattern`) and `max_files` (not `max_results`). The MCP tool uses the renamed fields shown above. When calling the REST API directly, use the original field names.
+> **REST API field names differ**: The REST endpoint `POST /api/xray/search` uses `driver_regex` (not `pattern`) and `max_files` (not `max_results`). The MCP tool uses the field names shown above.
+
+## Glob Pattern Semantics
+
+`include_patterns`/`exclude_patterns` are gitignore-style globs, normalized identically for both
+`search_target` modes and for indexed and unindexed repositories alike:
+
+- A leading `./` is stripped (`./src/*.ts` behaves like `src/*.ts`).
+- A "bare token" with no `/`, no glob metacharacter, and no `.` (e.g. `docs`, `Makefile`) is
+  ambiguous -- it could be a directory name or an extension-less filename -- so it matches BOTH the
+  name itself at any depth AND everything recursively under it (`**/docs`, `**/docs/**`).
+- A pattern with no `/` at all is never anchored to a directory level, even when it carries a glob
+  metacharacter or a `.` (unlike the bare-token case above, which requires the ABSENCE of both) --
+  `*.java` matches the basename at any depth: `Foo.java`, `src/Foo.java`, and `src/sub/Foo.java` all
+  match.
+- A pattern ending in `/` with exactly one path segment (e.g. `docs/`) behaves IDENTICALLY to the
+  bare token above -- the trailing slash adds no meaning for a single segment.
+- The same any-depth rule applies when that single segment ALSO carries a wildcard (e.g.
+  `tests*/`, `build-*/`, `*.d/`) -- it is never root-anchored: `tests*/` matches `tests/foo.py`
+  (root), `a/tests/foo.py` (nested), and `lib/src/tests_unit/foo.py` (deeply nested, different
+  `tests*` variant) alike, not only files directly under a root-level `tests`-prefixed directory.
+- A pattern ending in `/` with MORE than one path segment (e.g. `src/main/`) is different: it is an
+  explicit, ROOT-ANCHORED directory marker -- unlike every case above, it does NOT match at any
+  depth. `src/main/` matches `src/main` and everything under it starting from the repository root
+  only; `modA/src/main/App.java` (nested under a submodule) is NOT matched. The same rule makes
+  `src/*/` match only files inside a NAMED subdirectory of `src/` (`src/sub/x.java`,
+  `src/sub/sub2/x.java`), never a file directly in `src/` itself (`src/x.java` does NOT match).
+- `*` matches a single path segment; a leading `*/` is rewritten to `**/` (matches at any depth)
+  regardless of how many further `/` the rest of the pattern contains, and regardless of whether the
+  pattern ends in a wildcard or a bare trailing `/` -- `*/tests/*` and `*/tests/` both match
+  `tests/foo.py` (zero segments before `tests`), `src/tests/foo.py` (one segment), and
+  `a/b/tests/foo.py` (two-or-more segments) alike. `**` matches multiple path segments recursively.
+- Brace groups are supported, including nested and multiple groups in one pattern (e.g.
+  `*.{ts,tsx}`), capped at 64 expanded variants per pattern -- exceeding the cap is an invalid
+  pattern (see below), not a silent truncation.
+
+## Invalid Pattern Errors
+
+A malformed `include_patterns`/`exclude_patterns` entry is rejected up front, before evaluator
+validation or any background job is submitted -- it is never silently skipped or allowed to widen
+the search. The response is returned immediately (synchronously, no `job_id`):
+
+```json
+{"error": "include_patterns_invalid", "message": "<reason>"}
+```
+
+(or `exclude_patterns_invalid` for that field). Triggers: the field is present but not a list
+(including falsy-but-not-a-list values like `""` or `0`); a non-string list item (e.g. `[null]`);
+an unbalanced brace group (e.g. `*.{ts,md`); gitignore negation/comment syntax used as a standalone
+pattern (`!*.md`, `#x`); or a brace group expanding to more than 64 variants.
 
 ## Glob Pattern Semantics
 
@@ -824,7 +882,7 @@ Each `error_type` carries a distinct `error_message` shape:
 
 ```json
 {
-  "file_path": "docs/architecture.md",
+  "file_path": "docs/architecture/overview.md",
   "line_number": 0,
   "error_type": "UnsupportedLanguage",
   "error_message": "No grammar for extension '.md'"
@@ -865,7 +923,11 @@ To fetch the full content, use the discoverable `cidx_fetch_cached_payload` MCP 
 
 When `truncated: false` (or absent), the full `matches[]` and `evaluation_errors[]` arrays are returned inline, unmodified.
 
+<<<<<<< HEAD
 **Cache degradation and failure** (Bug #1928 final round): `cache_unavailable: true` means PayloadCache was down when the result was built -- you still get a bounded, honest inline page 1 (`truncated: true`, `cache_handle: null`), just no further pages to fetch until the cache is back. `success: false, error: "cache_store_failed"` means the cache was reachable but the atomic page-set write itself failed; the job result still carries every non-array metadata field the search already produced, alongside the failure -- only `matches[]`/`evaluation_errors[]` are genuinely undeliverable.
+=======
+**Cache degradation and failure**: `cache_unavailable: true` means PayloadCache was down when the result was built -- you still get a bounded, honest inline page 1 (`truncated: true`, `cache_handle: null`), just no further pages to fetch until the cache is back. `success: false, error: "cache_store_failed"` means the cache was reachable but the atomic page-set write itself failed; the job result still carries every non-array metadata field the search already produced, alongside the failure -- only `matches[]`/`evaluation_errors[]` are genuinely undeliverable.
+>>>>>>> upstream/master
 
 ## Iterating on Your Evaluator
 

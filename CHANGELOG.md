@@ -5,6 +5,263 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<<<<<<< HEAD
+=======
+## [12.89.0] - 2026-10-14
+
+### Upgrade notes
+
+- Server: wiki pages no longer pass through scripts, event handlers, embedded frames, objects, forms, SVG markup or `style` attributes from repository Markdown; ordinary Markdown (headings, links, code, tables, images, details) renders as before. Table column alignment set through inline styles is dropped. Wiki pages cached before the upgrade are rendered again on first view.
+- Server: wiki asset routes serve images, stylesheets, fonts and PDFs only; `.js` files are no longer served as wiki assets.
+- Server: every response carries `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, so Web UI pages can no longer be shown inside a frame on another site. `Strict-Transport-Security` is sent only when the server itself sees an HTTPS request; behind a TLS-terminating proxy on another host, configure HSTS on that proxy.
+- Server: the `Server: uvicorn` response header is no longer sent. The auto-updater adds `--no-server-header` to installed single-line uvicorn service units at the next deploy; a unit whose `ExecStart` spans several lines is left unchanged and the deploy logs a warning.
+
+### Security
+
+- Server: memories returned alongside MCP `search_code` results are limited to those the caller may see: global memories, and repository or file memories whose repository the caller can access. A memory's scope is read from the memory itself at query time, and a memory whose scope cannot be read is not returned.
+- Server: wiki HTML from repository content is sanitised with an allowlist before it is served, links that open a new window carry `rel="noopener noreferrer"`, the wiki index pages escape file names, and wiki asset responses carry a sandbox `Content-Security-Policy` and `X-Content-Type-Options: nosniff` with a fixed content type per file extension. Wiki pages are served with a strict `Content-Security-Policy` (scripts from the server only).
+- Server: every response carries `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin` and framing protection.
+- Server: the administrator MFA setup page and the "No MFA configured" responses escape the user name and every other value they display.
+
+## [12.88.0] - 2026-10-14
+
+### Upgrade notes
+
+- Server: MCP connectors (OAuth clients) authorized more than 30 days ago must authorize again the next time they refresh their token; the 30-day limit on a refresh token is now enforced at refresh.
+- Server: cached result handles issued before the upgrade answer `cache_expired` (at most the cache lifetime, 15 minutes by default); the client runs the search again. The payload cache gains a nullable `owner` column (PostgreSQL migration 075; SQLite adds it in place at startup).
+- Server (cluster): during a rolling restart, nodes not yet upgraded keep the previous behaviour until they restart.
+
+### Security
+
+- Server: OAuth authorization redirects only to a redirect URI registered for the client (exact match), before any login or consent step; the consent page shows the destination host and carries a CSRF check, and "Deny" redirects through the server. A refresh token is accepted only from the client it was issued to, is rotated atomically (one use per token, on SQLite and PostgreSQL), and stops working 30 days after it was issued.
+- Server: administrator reads of user data and search history require TOTP elevation (when elevation enforcement is enabled) on every door: REST (`GET /api/admin/users`, search-event list, export and download routes, activated repositories, SCIP PR and cleanup history, `GET /api/v1/groups/{group_id}`), MCP (`get_group`, `scip_pr_history`, `scip_cleanup_history`) and the Web UI (analytics export, SSH keys, logs, group membership).
+- Server: MCP git write tools refuse a shared global repository unless it is in write mode; they act on the user's own activated repository otherwise.
+- Server: cached result handles are served only to the authenticated user who created them (REST `GET /cache/{handle}` now requires login; MCP `get_cached_content` and `cidx_fetch_cached_payload` check the owner). A handle that belongs to another user answers like an unknown one.
+- Server: CI tools accept run, job and pipeline identifiers only as positive integers, and GitLab project paths only as valid path segments; forge requests are built only from validated values.
+
+## [12.87.0] - 2026-10-13
+
+### Fixed
+
+- Server: a git repository whose owed refresh retry fails again now backs off further (5 minutes doubling up to 6 hours) instead of retrying every 5 minutes indefinitely.
+- Indexing: a run whose only failures are files that already failed in an earlier run, against an index that already has content, now ends partial (exit 0, the files stay recorded for retry) instead of failed, so the server publishes, keeps the existing index and backs the retry off. A newly failing file still fails the run.
+- Server (cluster): restoring a repository's chunk store or indexing metadata from its published snapshot now works on cluster storage, where the clone service only clones directories; it previously failed and reported the repository as needing an operator. The restore also removes the replaced database's journal files, so they can no longer be applied to the restored store.
+
+## [12.86.0] - 2026-10-12
+
+### Upgrade notes
+
+- Indexing: documents with images that a multimodal provider embedded under 12.85.0 are sent to that provider once more, the next time a run plans them (for example a forced re-sync), because their stored key now covers the image bytes as well as the text. After that they are reused like any other content.
+- Server: a golden repository that has no metadata row now logs one WARNING per refresh, because its registered branch cannot be checked.
+
+### Fixed
+
+- Server: Cohere multimodal embeddings made for searches are recorded as query spend instead of indexing spend, so searches no longer make the refresh volume alarm report itself blind (DEGRADED).
+- Indexing: documents with images reuse their stored multimodal embeddings before any provider call, as text already did, so a forced re-sync or reconcile no longer pays for unchanged documents again. A changed image under unchanged text is sent once.
+- Server: a repository whose chunk store went missing now recovers even when a refresh has nothing new to index. The integrity check before publishing restores the store from the published snapshot, as the indexing step already did for refreshes with changes; that refresh still ends failed, and the next one publishes, embedding only content changed since the snapshot. A store that cannot be restored is reported on `/health` as needing an operator. A refresh that fails this check names the reason in its job error, on a single server and in a cluster.
+- Server (cluster): a refresh keeps a golden repository's base clone on its registered branch, which was previously read only from single-server storage. If the shared metadata store is not available, the refresh stops before pulling instead of guessing a branch. A repository registered from a source with no branch checked out is left as it is.
+
+## [12.85.0] - 2026-10-12
+
+### Upgrade notes
+
+- CLI: interrupted `cidx index` runs no longer resume from a stored file list. The next run reconciles the index against disk and indexes only the missing or changed files, including files added while the run was interrupted. The incremental watermark is now the time a run started listing files, so files written during a run are picked up next time.
+- Server: the first start after upgrading builds one new index on the search event log table (`idx_sel_user_ts`; about 1-2 s per million rows, once). Later starts are unaffected.
+- Server: the search event log gains a nullable `query_text_truncated` column (PostgreSQL migration 073; SQLite adds it in place at startup). Rows recorded before the upgrade show it blank in the export.
+- Server: embedding call statistics gain repository, job and node attribution and new indexes, and golden repository metadata gains a nullable `published_points` column (PostgreSQL migrations 067-069; SQLite adds them in place). A repository's published size is recorded at its next verified publish; until then its volume alarm uses the minimum threshold.
+- Server: the search event log gains nullable `tool`, `door`, `outcome` and `error_class` columns (PostgreSQL migration 074; SQLite adds them in place at startup). Rows recorded before the upgrade show them blank in the export and still count in the dashboard hit-rate cards.
+
+### Added
+
+- Server: embedding spend from indexing and refreshes is attributed to its repository, job and node in the embedding call statistics.
+- Server: a refresh embedding volume alarm. When a repository's refreshes embed more in 24 hours than the larger of 10,000 items and a quarter of its published size, scheduled and system-triggered refreshes of that repository are paused and retried hourly, and `/health` reports it as DEGRADED; administrator-requested refreshes still run. If the spend cannot be read, `/health` says the alarm is blind instead of reporting no spend.
+- Indexing: every `cidx index` run meters the inputs it sends to the embedding provider and refuses to send anything it did not plan to embed (exit code 88). A server refresh reports the run's `inputs_sent` and `attempts` in its job result, and a failed refresh includes them in its error. An indexing run that is cancelled or stopped records the embedding spend it already made before it exits, so the volume alarm counts it.
+
+### Fixed
+
+- Indexing: content already embedded is never paid for twice. Before calling the provider, indexing reuses the embeddings stored for unchanged content (matched by content, so inserting a chunk does not re-embed the chunks after it), including after an interrupted run; byte-identical files in one run are embedded once.
+- Indexing: a populated index is never cleared implicitly. Missing or corrupt metadata, a change of git availability or project id, or a missing resume point now reconciles the index against disk instead of rebuilding it from scratch; only `--clear` rebuilds. Modified files are no longer deleted before they are re-indexed, and files removed from a non-git project are deleted after the run in one batch.
+- Server (cluster): the dashboard job list now shows every running and pending job in the cluster, not only those of the node serving the page, so it always agrees with the Running card.
+- Server: a refresh of a repository that is refreshed only by triggers (for example trace repositories) is now retried automatically, with an escalating interval, when it fails or when some files could not be indexed; previously it stayed stale until new data arrived. A refresh that published but left files unindexed is now reported as partial (`partial`, `failed_files` in the job result, job status `completed_partial`); such jobs count as completed in job statistics and are included by the "completed" filter of the dashboard, the jobs page and the REST jobs list; the jobs page also offers a "Completed (partial)" filter on its own. Owed work never delays new-data refreshes or scheduled refreshes.
+- Query Analytics Export: a failed database read now marks the export "failed" and shows the reason in Export History; "completed with 0 rows" now always means a successful empty read. `GET /api/admin/search-events` answers 500 on a read failure instead of an empty page. A completed export no longer shows a stale "interrupted" message. (LightspeedDMS/code-indexer#2105)
+- Query Analytics Export: exports now contain every matching row instead of stopping at the newest 50,000. Rows are written oldest first and read in bounded batches; the cache-hit filter is applied in the database before any limit, and an unrecognised cache-hit filter value is rejected (HTTP 422). Results larger than one Excel sheet continue on further sheets ("Searches 1", "Searches 2", ...). An export covers the searches recorded before it started. (LightspeedDMS/code-indexer#2106)
+- Query Analytics Export: X-Ray searches (MCP and REST search, explore and batch) and regex searches (MCP `regex_search`, REST `POST /api/regex/search`, one row per searched repository) are now recorded, so the `xray` and `regex` Search Type filters return data. (LightspeedDMS/code-indexer#2107, LightspeedDMS/code-indexer#2108)
+- Query Analytics Export: temporal searches are recorded as `temporal` on MCP and REST. A temporal search handed off to a background job is recorded once per user when its completed result is fetched (`poll_search_job`, `GET /api/query/result/{job_id}`). (LightspeedDMS/code-indexer#2109)
+- Query Analytics Export: the recorded search type is the mode that actually ran (a hybrid request without a full-text index is recorded as `semantic`). MCP `search_code` rejects an unknown `search_mode`. The export page's Search Type options come from the same list the writers use. (LightspeedDMS/code-indexer#2110)
+- Query Analytics Export: a search is recorded with its real outcome. A search that ran and failed (no embedding provider available, every repository failed, an X-Ray evaluator that does not compile, a timeout) is recorded as a failure instead of a success; rejected requests and cancelled jobs write no row. Asynchronous REST searches are recorded with their real result count when the job completes, and multi-repository searches record their real result count instead of 0. (LightspeedDMS/code-indexer#2113)
+- Query Analytics Export: a search over several repositories (a list, JSON array or wildcard on MCP `search_code`, REST `/api/query` without an alias, `/api/query/multi`, SCIP multi and alias-free SCIP searches, X-Ray batch) writes one row per repository it searched, with that repository's own result count and cache result. A repository that failed gets a failure row, and a bare alias promoted to its global repository is stored as the `-global` alias. (LightspeedDMS/code-indexer#2111)
+- Query Analytics Export: "Hits only" and "Misses only" now cover only searches that consulted an embedding cache; "Misses only" no longer includes full-text, regex, X-Ray, SCIP, git history or CI log searches, or searches that bypassed the cache. Those appear only under "All". (LightspeedDMS/code-indexer#2112)
+- Query Analytics Export: every search row records the tool, the door (MCP, REST or Web), the outcome (success or failure) and, for a failure, a short error class, with matching export and event-list filters; the correlation id is filterable too. The export page states the retention in effect, the oldest stored search, the 500-character query text limit, that exports have no row limit, and that the cache filter applies only to embedding-based searches. (LightspeedDMS/code-indexer#2117)
+- Query Analytics Export: search events dropped because the recording queue was full are now counted per server process and reported as `search_events` in `/api/system/health`, MCP `check_health` and `/health` (DEGRADED for 15 minutes after the last drop, never UNHEALTHY), as the OTEL counter `cidx.search_event_log.dropped_events`, and as a notice on the export page. Query text cut at its 500-character limit is now marked in a new `query_text_truncated` column, also in the Excel export. (LightspeedDMS/code-indexer#2114)
+- Query Analytics Export: the Web UI query page and its results partial, wiki search and REST `POST /api/query/multi` are now recorded; multi-repository searches write one row per searched repository. (LightspeedDMS/code-indexer#2115)
+- Query Analytics Export: SCIP searches (MCP `scip_*` search tools, REST `/scip/*`, `/api/scip/multi/*`), git history search (`git_search_commits`, `git_search_diffs`) and CI log search (`ci_search_logs`) are now recorded as `scip`, `git_history` and `ci_logs`, and the Search Type filter offers them. (LightspeedDMS/code-indexer#2116)
+- Server: a refresh whose chunk store has gone missing restores it from the published snapshot instead of failing until an operator acts, and the next refresh pays only for content changed since the snapshot. Without a usable snapshot the refresh stays failed, retries on a backoff without provider calls, and `/health` names the repository and the reason. A missing store can no longer trigger a full paid rebuild. `cidx index` exits 89 for a missing store of an established collection.
+- Indexing: embedding requests (Voyage text, contextualized and multimodal; Cohere text and multimodal) now wait 4x the configured provider timeout (120 s by default), so a provider slow period no longer abandons and resends each batch up to four times. Query requests keep the configured timeout and now always apply it per request, so a query can no longer inherit a longer timeout from a shared client another call created.
+
+## [12.84.0] - 2026-10-08
+
+### Upgrade notes
+
+- Full-text indexes built before this version are rebuilt once from disk on their next normal indexing run or server refresh (no embedding calls). If you roll back below this version and later upgrade again, run `cidx index --rebuild-fts-index` on each project, or let the next refresh rebuild it.
+
+### Added
+
+- Each server worker runs a stall watchdog. When a worker stops responding, its stack dump and bounded heartbeat evidence (thread table, memory, swap and I/O pressure, NFS mounts) are combined into `logs/worker-stall-<pid>-<UTC>.log`, either by the surviving worker or by its replacement at startup. Disk use is bounded, and a watchdog that cannot start never blocks server startup or shutdown.
+- The CLI reference, the MCP tool reference and the error-code reference are generated from code, and lint fails on a reference to a documentation path that does not exist.
+
+### Fixed
+
+- REST and MCP git push share one implementation. A successful REST push no longer answers 500, and `set_upstream` works for new branches. Push, pull, fetch and the scheduled repository refresh supply a registered credential only at run time, through a credential helper scoped to the host of the remote's effective URL, over https only, and never on the command line, in configuration or in a file. Stored remote URLs are made credential-free first, and an operation stops if that fails. Git output and errors never contain the supplied credential in any encoding. Local git lookups before a network operation are time-bounded.
+- Repository URLs are shown with their credentials masked on every REST, MCP and Web response, error message, log line, stored job record and cidx-meta description. Server-managed clones store their remote URL without credentials; existing clones are rewritten on their next operation. Credential fields containing a line break or NUL are refused. Git remote URLs are parsed by one shared parser.
+- Content inside a `.git` directory, including content reached through a symlink, is never read, listed, searched, X-Rayed, rendered by the wiki or indexed; such a path is answered exactly like a missing file.
+- Access logs mask query parameters whose names identify secrets. Every server log handler redacts messages, arguments, tracebacks and extra fields, including URL credentials, private keys and JWTs, and withholds a record entirely when redaction fails. Spans and log records are redacted at the telemetry exporter. Langfuse uses its own tracer provider and masks exported payloads. Redaction runs in linear time on large inputs.
+- Server start-up creates the initial administrator only when the user store holds no accounts and no legacy `users.json` import is pending, in one atomic step on SQLite and PostgreSQL. The installer no longer creates accounts.
+- Git reset, clean and branch delete confirmation tokens are stored in the shared payload cache, bound to user, repository, operation and parameters, valid for 300 seconds and usable once, so they work across workers and nodes. REST accepts them in the `X-Confirmation-Token` header, and branch names containing a slash can be deleted.
+- Mutating git operations (stage, unstage, commit, amend, merge, merge abort, mark resolved, reset, clean, checkout file, branch create, switch and delete, stash and push) are refused on a global repository's immutable versioned snapshot; activate the repository to change it. Cleaning untracked files keeps the repository's index directory, and the pre-refresh local-changes check ignores only untracked index files, so a tracked change is still reset.
+- A remote git operation on an activated repository with no clone on disk answers not found (REST 404, MCP `success=false`) instead of an internal error.
+- Search failures are reported, not returned as empty results. REST `/api/query` answers a timeout with 504 and a failure with 500; MCP `search_code`, omni search, REST `/api/query/multi` and the Web query page report them as errors; `cidx query` exits non-zero, including in daemon mode. One rule decides which errors are client errors: those keep their message, and every other failure returns a fixed message with a correlation id and is logged as an ERROR. An unavailable access-filtering service keeps its fixed message and is logged as an internal failure. Multi-repository searches report a timeout as a timeout and every other failure as a failure.
+- A parallel multi-provider search fills requests for more than 40 results: each provider fetches at least the requested number.
+- The full-text index stays consistent with the indexed content. Every writer (normal indexing, bootstrap, `--rebuild-fts-index`, the daemon rebuild and `cidx watch`) replaces a changed file's documents with all of its current chunks, including reused chunks. The index is marked complete only when a run settles with every file indexed, so a run that is killed, cancelled or fails, or a watch failure, leaves it to be rebuilt by the next run.
+- The CLI copies daemon results before closing the connection, so `cidx watch` and other daemon commands no longer lose their result or leave the daemon unreachable. A stale daemon socket is removed only after a probe shows no daemon answers on it.
+- `.code-indexer/error_*.log` is created only when an error is written. Errors for a project inside a versioned snapshot are logged to the server log directory instead.
+- "Reset to Defaults" resets runtime tunables only and keeps bootstrap and launch settings, stored credentials, security controls and deployment identity.
+- The group tool-grant routes report whether per-group MCP tool grants are enforced, and writing a grant that is not enforced logs a warning.
+- The CI/CD MCP tools resolve repository access, grants and tokens in a worker thread, off the event loop. An empty GitLab base URL means gitlab.com.
+- Bulk provider-index add accepts only `category:<name>` filters and refuses the request when the category service is unavailable.
+- Server shutdown detaches the async logging queue on every exit, stays bounded and off the event loop, and finishes before honouring a cancellation.
+- The auto-updater runs its git commands non-interactively, and after a deploy that changed the auto-updater itself, it removes its pending-redeploy marker only after the server restarted successfully.
+- The installer verifies the started server with the unauthenticated `/healthz` endpoint.
+- A new chunk store creates its schema in one transaction.
+- `file_extensions` follows one rule in semantic, FTS and hybrid search on every door: REST `/api/query`, MCP `search_code` (single repository and omni), REST `/api/query/multi`, and the CLI in standalone and daemon mode. Values are case-insensitive, the leading dot is optional, several values are OR-ed (the CLI used to AND them), files without an extension never match, and the filter is intersected with `language`. A non-list, an empty value, or a value containing `.` or `/` is rejected (HTTP 422, MCP error, CLI usage error). FTS pushes the values into the existing index field (no re-index); semantic search filters inside the vector store in one query per repository over the first 400 candidates. An extension-filtered request uses 80% of the search handler timeout as its budget: no further repository search starts after it, and a short answer is never wrong and is logged at INFO. Any filtered semantic search (`language`, path, exclude-path or `file_extensions`) on the server, the standalone CLI and the CLI daemon searches the same first 400 candidates (or twice the requested store limit, if larger) and returns up to `limit` matches, so a selective filter no longer comes back empty while matches exist; unfiltered searches are unchanged. REST `/api/query` semantic search now applies `language` (it was ignored); REST FTS now splits `exclude_path` on commas into independent patterns (as in Bug #1095); FTS `language` combined with `exclude_language` now intersects (the `language` inclusion used to be dropped); and REST `/api/query/multi` enforces the same repository-count cap as MCP omni search (`omni_max_repos_per_search`, HTTP 422 `repo_count_cap_exceeded`).
+
+### Documentation
+
+- The documentation is reorganised into audience folders and rewritten: getting started, query, temporal, SCIP and meta-repository guides, server operator guides (deployment, upgrades, cluster, storage, auth, accounts, administration, settings reference, SIEM), remote CLI, forge and write tools, embedding providers and REST API guides, the architecture set with split invariants, and corrected MCP tool documents. Examples use neutral sample data.
+
+## [12.83.0] - 2026-10-06
+
+### Fixed
+
+- Repeated failed logins for a username are throttled instead of locking the account. Every login door (REST, Web, OAuth) and the TOTP step-up reserve each attempt before the password or code is checked, so concurrent requests cannot exceed the allowance. The 5th attempt starts a 5 s window that doubles with each further admitted attempt, capped at 120 s, and 15 idle minutes forget the count. A refused attempt gets HTTP 429 with `Retry-After`; there is no permanent lock and no unlock step, and while a name is throttled its owner can still sign in with an API key, MCP credentials or SSO. Unknown usernames are handled exactly like known ones. MFA codes (TOTP or recovery) answered at a login challenge count on the same key until the login completes, and a refused attempt does not consume the challenge; a challenge started by an SSO sign-in counts its codes under its own key, and audit rows record the challenge's first factor. Throttle state is shared across workers and nodes; a reservation waits at most 2 s and each process admits at most 10 new reservations per second, answering 503 "busy" beyond that. The legacy lockout tables are no longer written. PostgreSQL migrations 065 and 066.
+- Deleting a user removes every row keyed to that username (group membership, MFA and recovery codes, SSO links, OAuth and refresh tokens, git, API and MCP credentials) and submits removal of the user's activated repositories. Creating an account first purges any rows left for its name and is refused while the previous account's repositories are still being removed. Accounts record their creation time, and access tokens, refreshed cookies, Web sessions and refresh-token rotation are refused when the original sign-in predates the account. Group membership requires an existing account. The legacy `users.json` import runs once, never overwrites an existing account, and is skipped in cluster mode.
+- A Web session resolves its account on every request and is refused when the account no longer exists or was created after the session was issued; the role always comes from the account. OAuth authorization codes, access tokens and refresh grants are honoured only for the live account they were issued to, MFA completion re-checks the account, and an authorization code is redeemed at most once, consumed in the same transaction that issues the token.
+- An MCP session is used only by the account that created it (same username and account creation time): any other caller gets a new session, and a request on a session whose owner no longer matches the calling account is answered "Session not found", for single and batch requests. Impersonation is authorized against the authenticated caller of each request and is dropped once the session owner is no longer an administrator. Each tool call resolves its effective user once and binds its audit principal from that value, so audit rows for actions taken while impersonating record the administrator as actor and the impersonated user as subject, on both storage backends, in the audit query surfaces and in SIEM delivery (PostgreSQL migration 063). Setting, switching or clearing impersonation is recorded as the administrator with no subject. Tool listings use the same principal per tool as the dispatcher.
+- A caller's own activated repository, under any alias, is served only while the caller holds grants on every source repository of that activation; other users' aliases are answered like unknown ones. The rule applies to query results (rows record their source repositories, so stored temporal results are checked against that provenance), to the MCP dispatcher's repository check (also within an acting-users scope), to the REST routes that resolve an activated repository (git, files, indexing, activated repositories, repository details, branches and sync, and the v2 details, branches, sync, stats and files routes) and to the user wiki. On those REST routes members of the admins group are not subject to it; a failed access lookup is refused (on MCP with a fixed message). An activation alias that ends in `-global` or matches a golden repository name requires both the name grant and the source grants. Repository listings show a revoked activation by alias only, marked `access_revoked`, bulk sync status omits it, and the CLI client accepts such entries. Another user's wiki and the owner parameter on index status require admins-group membership. On MCP, parameters that can only name a golden repository are judged by golden name, repository parameters must be a string or a list of strings, every authorization step runs off the event loop in one worker-thread hop, and the wiki analytics search filter always searches the wiki's golden repository.
+- SCIP context and impact queries search only the repositories the caller may access, with or without an alias. Every SCIP query requires an access filtering service and a caller identity before any filesystem access; MCP returns an access-control-unavailable error when either is missing. SCIP context lines and the index version marker are read only from within the repository root; indexes that resolve outside the selected repository are not discovered or opened, and special files are skipped. The local CLI keeps reading relocated indexes.
+- The API documentation routes (`/docs`, `/redoc`, `/openapi.json`) require an authenticated Web session or a valid bearer token. Unauthenticated documentation pages redirect to the login page within the reverse-proxy root path and the schema returns 401; behind a root path the schema lists it as its server.
+- Server logs on the Web UI (the log page, its list and its export) require the caller's own TOTP elevation window, matching the MCP `admin_logs_query` tool; the export prompts for TOTP when the window has lapsed. Listing SSH keys on the MCP `list_ssh_keys` tool and the Web SSH Keys page requires elevation, matching the REST `GET /api/ssh-keys` route, and showing an SSH public key requires elevation on MCP `manage_ssh_key` and REST, with the same answer for a missing key as for an existing one. With elevation enforcement turned off, listing behaves as before. Returning from the elevation page keeps the page's query string, and copying a public key copies only a successful response.
+- MFA recovery codes are generated only by a POST from an elevated session carrying a valid CSRF token, on both the admin and the self-service route; a GET shows a confirmation page and changes nothing. The self-service route requires the caller's own elevation window when enforcement is on, and the admin route verifies that the target account exists.
+- The OIDC client secret, the Langfuse tracing secret and each Langfuse pull-project secret are write-only on the configuration page: the page and its data carry only set/not-set flags, and a section save with a blank secret keeps the stored one. Langfuse pull projects are merged by public key; a save that would leave a project without a secret, or that repeats a public key, is refused with HTTP 400 and publishes nothing.
+- Stored GitHub/GitLab CI tokens and integration API keys are shown on the Config page, in its settings data and in diagnostics only as a fixed-width mask with at most their last 4 characters; secrets shorter than 20 characters show "configured". Persisted diagnostic results carry no token-prefix field, and git credential listings use the same rule for the token suffix. A blank or masked Codex API key in a Config page save keeps the stored key.
+- LLM-creds provider: a blank or masked provider API key in a save keeps the stored key. A stored key is reused only with the provider URL it was saved with, so changing the URL requires entering the key, for saves and for connection tests; a connection test using the stored key requires elevation. A submitted key must be printable ASCII without whitespace, and errors and logs carry only fixed text or masked provider messages. The generic Config section save refuses `claude_auth_mode`, `llm_creds_provider_url` and `llm_creds_provider_api_key`; only the LLM-creds save route changes them.
+- Subprocess command lines and captured output are credential-redacted wherever they are logged or embedded in an error: URL userinfo, values of token- and password-style options, secret-named `KEY=value` arguments and Authorization header values are masked. This covers subprocess failure diagnostics, git update logs, cancellable subprocess errors and timeouts, the refresh cancellation log, base-clone checkout errors during a golden-repo refresh, and `GitFetchError`, which stores its message, output and command redacted. What subprocesses receive is unchanged.
+- The grep fallback of `regex_search` passes the pattern with `-e` and places every search path after `--`, in recursive and glob-batch mode, matching the ripgrep command.
+- Cancelling a golden-repository refresh stops every subprocess it starts (git, re-clone, repair, repository metrics, semantic, temporal and SCIP indexing, snapshot and cidx-meta backup steps) through the database-backed cancel check. The process group is terminated by one shared helper (TERM, then KILL for survivors, never the server's own group), cancellation is re-checked up to the alias swap so a cancelled refresh never publishes, and the job ends cancelled. An unreadable cancel flag is logged and never stops the job. Workers no longer keep in-memory copies of other processes' running jobs, so a job interrupted by a restart is no longer reported as running.
+- Forced reconciles converge and publish only real changes. Every completed indexing run records the commit it indexed and a run sequence, so repositories are no longer force-reconciled every cycle. The stale-index signal reads every provider's metadata: a run left in progress or failed publishes once its reconcile completes, and commit drift with every provider completed publishes only when the reconcile changed the index. A signal that persists after a successful forced reconcile is retried at most three times per commit, with one ERROR when the bound is reached; failed, skipped or cancelled attempts do not count (PostgreSQL migration 064). A repository with nothing to index completes as an empty run.
+- The reconcile fails the run when the indexed-files snapshot cannot be read completely. Chunk-store lock contention is retried a bounded number of times and then fails, every other read error fails the run with the index failure exit code, and a repeated pagination cursor raises. A reconcile never proceeds on an empty or partial snapshot, so it does not re-embed files that are already indexed or mark an unread store verified.
+- Reconcile on a non-git repository no longer re-embeds unchanged files: the stored and on-disk content ids are built by one helper. A file whose modification time is not safely older than the second it was read in is verified against its stored content hash, and an unreadable file is reported as failed instead of losing its points.
+- A commit that only deletes files no longer leads to an "inconsistent state" wipe and a full re-index: delete-only runs keep their counters and advance the commit watermark, and an ambiguous stored state is resolved by a reconcile instead of a wipe. On git projects, a file newly excluded by filters or extensions is hidden on the current branch and removed from full-text search even when nothing else changed; a file made eligible again is shown and its full-text entry restored. Visibility changes are payload-only updates across all of a file's points.
+- Search results for source files that are not UTF-8 return the decoded code. Indexing and content retrieval share one decoder, git-blob retrieval splits lines on newlines only so retrieved line ranges match the indexed ones, and the file-at-revision tools decode the same way. A file that cannot be read returns empty content with a `content_unavailable` flag (REST, MCP and the CLI in local, daemon and remote mode; omitted when false).
+- Full-text queries ignore dangling `+` and `-` operators instead of returning zero results with a warning per repository. Operator-only tokens are dropped with any AND/OR/NOT they leave dangling; outside boolean queries a leading `+`/`-` is ignored and the word is searched literally. A query that reduces to nothing returns no results without a warning, and an unparseable required term fails the query instead of broadening it.
+- Internal searches use an internal request model bounded by `MAX_CANDIDATE_LIMIT` (200), so rerank and access-filter over-fetch above the public cap of 100 no longer fails validation and the reranker receives its full candidate pool. The public request models keep their limit of 100, every multi-repository search path (semantic, FTS, regex, temporal) is bounded by the same limit, and the configured per-repository omni result limit is applied.
+- The Web UI Query page runs every non-SCIP query, for global and activated repositories alike, through the same mode-aware query path as MCP with every form filter (search mode, min score, case sensitivity, fuzzy, regex, time range, at-commit). A global repository is queried as the signed-in user, and the results badge names the mode that ran. The page shows the query layer's warning (for example a temporal query on a repository without a temporal index) instead of an empty result, and reports a missing query service instead of failing. A query the page could not complete, or an expected refusal, is logged once as a WARNING without a traceback, naming the exception class, with the message included only for the fixed "repository not found" refusals; other errors still log an ERROR with a traceback.
+- `/health` reports degraded only for jobs that failed within the last 24 hours (`failed_jobs_window` in the response), not for every failure in the 30-day job history. Stuck jobs reclaimed as failed in cluster mode record their completion time.
+- Listing the configured embedding providers reads the VoyageAI key only from the environment, so a configuration without `VOYAGE_API_KEY` lists its providers instead of failing; this restores the golden-repo provider list and the temporal provider count in that case.
+
+### Documentation
+
+- The TOTP elevation guide and the SIEM event catalog describe the progressive login throttle as the rule now enforced; comments, docstrings and test text were updated to match the code.
+
+### Tests
+
+- The isolated-app test helper restores all process state that `create_app()` changes, with guard tests that fail when a binding or a reference to the throwaway directory is left behind; the config-page secrets route tests build their app through it.
+- The elevation inventory registers the admin MFA recovery-code route, and the SSH-group and group-change tests use a real account store.
+- The repository search test checks the real internal search request (type, fields and a limit above 100) instead of mocking the public request class.
+- The index-source reconcile tests read every provider's recorded status through `read_index_states`, as the refresh does.
+- The MFA concurrency test counts code reservations and checked codes instead of response statuses, and a login-throttle test pins that re-pointing the store moves every thread to the new database file.
+- The E2E log audit accepts the single expected warning for a cidx-meta collection with no index yet, anchored on the golden cidx-meta path and the exact message.
+
+## [12.82.0] - 2026-10-04
+
+### Added
+
+- SIEM delivery: the Web UI configuration screen has Arming and Recovery panels. The arming panel shows readiness (sharing its predicates with arming itself), runs the canary, confirms that the canary is visible in the tenant and enables delivery. The recovery panel lists quarantined rows, open batches and stranded destinations with keyset paging, and offers resume, requeue, acknowledge, rebatch, retarget and abandon. Every write is admin-only, requires TOTP elevation (following the global enforcement switch) and a per-session CSRF token, and calls the same service functions as the REST endpoints; abandon requires the confirmation word ABANDON.
+
+### Fixed
+
+- Configuration changes from different processes no longer overwrite each other: every runtime configuration row write is a compare-and-set on the row version (SQLite `BEGIN IMMEDIATE`, PostgreSQL a version-guarded `UPDATE`). A change re-reads the committed row, applies its mutation and retries a bounded number of times before failing loudly; a stale whole-configuration save is refused. Startup migrations, the launch restart generation and first-boot seeding (both outcomes adopt the committed row) follow the same rule (#2017).
+- SIEM delivery: a canary confirms only the configuration lifetime it was run for. Arming and capture require the canary's configuration epoch to equal the committed epoch, which is renewed when the destination is disabled, cleared or changed or the trusted CA changes; replacing or removing the credential clears the canary state. Capture stops in the saving process immediately and in other processes within one cycle. Canary runs are ordered by a durable run number rather than clocks. PostgreSQL migrations 056 and 057 (#2018).
+- A failed restart request releases the restart-in-progress flag and reports that no restart was requested, so the restart can be retried.
+- SIEM delivery: the stranded-destinations count is capped without sorting a destination's backlog on either backend.
+- Refresh self-heals a corrupt source chunk store. `cidx index` exits 86 only when SQLite reports the store damaged and 87 for environment faults (I/O, locked, busy, disk full, permission). On corruption the refresh restores the affected collection from the published snapshot under the alias write lock, only for a confirmed corrupt verdict, and records an integrity strike; an inconclusive check backs off instead. Repeated failures back off per alias, persisted in `refresh_failure_backoff_state` (PostgreSQL migrations 058 to 061). Deferred system refresh triggers survive process death and are leased so that one node submits them, ordered by a store-wide generation instead of clocks. The cidx-meta refresh debouncer keeps a refresh owed until it is submitted or durably deferred, and only its current timer acts (#2022).
+- The auto-updater adds git `safe.directory` entries only when absent, and each deploy collapses existing duplicates of its managed paths to a single entry (#2028).
+- `regex_search` parses grep output with NUL-terminated file paths, so paths containing `-<digits>-` or `:<digits>:` no longer split context and match lines at the wrong place (#2030).
+- Adding a golden repository is refused while a removal of the same alias is still running. The removal deletes the registry row before the clone directory, so an add accepted in that window lost its fresh clone to the removal.
+
+### Documentation
+
+- A Google Security Operations guide covering the delivered events, every SIEM delivery setting, the service account, arming with the canary, searching, health and troubleshooting, plus an event catalog with example UDM for every delivered event type. The SIEM delivery docs describe the Web UI arming and recovery flow and an operator curl runbook.
+
+### Tests
+
+- Test lanes isolate the developer's server home and fail a run that changes it; unit-test databases stay inside per-test directories.
+- Scheduler-loop tests fail on any scheduler iteration error unless they expect one; live PostgreSQL storage tests no longer depend on database state.
+- Unit tests no longer build the full server application by accident.
+- Refresh-store and golden-repo metadata tests copy SQLite databases built once from the production initializer instead of creating each schema from scratch; CLI output checks no longer depend on console width or temporary path length.
+- The regex_search MCP tests close their event loop, the offload test no longer depends on test order, and grep-only tests run without ripgrep.
+- Server tests that start a fresh interpreter or build the full application carry an explicit pytest timeout above their own subprocess budget, so the suite-wide 15 second ceiling no longer fires first when the server lanes run in parallel.
+
+## [12.81.0] - 2026-10-02
+
+### Fixed
+
+- Cluster PostgreSQL connections ask the server to detect a dead client: per-session TCP keepalive and `tcp_user_timeout` settings are sent through the libpq `options` startup parameter, alongside client keepalives. A crashed node's backend, and the leader election advisory lock it held, is released roughly 60 seconds after the last packet instead of after the operating system's 2 hour keepalive default. Applied to the leader election connection, the connection pool, the alias lock store and the migration runner. Values already in `postgres_dsn` are kept and `PGOPTIONS` seeds the options when the DSN has none. Requires PostgreSQL 12 or later and a direct connection (#2005).
+- A CLI query no longer constructs the server application: the search service reads application state only when the server has already built it. The audit log file is opened on first use, and the session and user managers honour `CIDX_SERVER_DATA_DIR` (#1996).
+
+### Tests
+
+- Every test session points the server data directories and the systemd unit directory at a scratch home before any server module is imported, and a write guard fails a test that writes into the real server home. `e2e-automation.sh` gives each phase a fresh client server home, validates every directory it deletes against the account's real server home, and gives every e2e server a stub systemd unit with its own bind settings (#1996).
+- The Phase 7 log audit excuses a SIEM credential probe warning only for the log rows proven to fall inside the scripted outage of the outage test.
+- The query repository-access tests build their schema database and search indexes once per module and copy them per test.
+
+## [12.80.0] - 2026-10-01
+
+### Added
+
+- SIEM delivery: the Google SecOps service-account key is pasted or uploaded in the SIEM Delivery section of the Web UI configuration screen. It is validated (RSA service-account key with the expected token endpoint), stored encrypted in the database and never returned; only its identity is shown. In cluster mode the encryption key is derived from the shared cluster secret, and a stored key check reports a key mismatch distinctly. The key-file path setting is removed.
+- SIEM delivery: an optional additional trusted CA bundle (CA certificates only, not expired) is added to the default trust for the token and import requests. Certificate and hostname verification stay on, and environment proxy settings are honoured. Credential and CA changes require TOTP elevation and are audited by identity or fingerprint. Upload forms are size-capped before parsing.
+
+### Fixed
+
+- SIEM delivery: abandoning queued rows works when no destination is configured, so rows left behind by a decommission can be cleared. Abandon and retarget move only rows that existed when the operation started, re-check the committed destination every round and refuse while a send to that destination is in flight.
+- Incremental, resume and crash-recovery indexing no longer re-read and re-parse the collection metadata file for every indexed file; the parsed metadata is reused through the collection metadata cache, which now keys on size and inode as well as modification time. A crash-recovery reconcile of a large repository after a restart no longer runs for hours (#1997).
+- Reconcile analysis is linear in the number of files, failed-path de-duplication is linear, and a stored absolute path outside the codebase root no longer aborts reconcile; such a path is removed only when its file no longer exists (#1998).
+- The daemon cache eviction thread stops immediately when the daemon stops, instead of at its next 60-second wake-up.
+
+### Tests
+
+- Server unit tests in the gate's fast mode disable per-commit fsync on every SQLite connection and no longer wait out the primary-instance lock bound when a second application is built in the same process (#1995).
+- Unit tests stop any daemon cache eviction thread they start; the SIEM TLS test relays use the selectors module.
+
+## [12.79.0] - 2026-10-01
+
+### Added
+
+- SIEM delivery to Google SecOps. Pilot audit events (logins on the REST, MCP and Web doors, MFA changes, group and permission changes, and admin actions) are captured into a durable delivery queue in the same transaction as their audit row and delivered to a configured Google SecOps instance as UDM events. Capture never fails an audit write: a capture problem is counted and reported, not raised.
+- Delivery is single-flight across the fleet with fenced leases, persists every request body and resends it byte for byte after an unknown outcome, isolates a rejected row by bisection under a fleet-wide hourly quarantine cap, halts on credential failures and duplicate responses, and recovers through automatic probes. Events whose mapping failed are re-projected automatically when the mapping changes.
+- Delivery is armed only after a canary event per mapping is accepted and searchable, through a single atomic arming step. Disabling or changing the destination is enforced within a bounded window and any capture after that boundary is counted.
+- A "SIEM Delivery" section in the Web UI configuration page (runtime setting, stored in the database). Destinations are limited to the documented regional Google SecOps endpoints; credentials are service-account key files referenced by path.
+- Admin API under `/api/admin/siem-delivery`: stats, quarantine listing, canary, resume, acknowledge, rebatch, retarget, abandon and quarantine requeue. Write actions require TOTP elevation.
+- A delivery backlog or halt reports DEGRADED on `/health`, the Web status block and OTEL gauges. Terminal delivery rows are pruned by data retention in paced transactions.
+- New dependency: `google-auth`, loaded only when delivery requests a token.
+- Operator guide: `docs/siem-delivery.md`.
+
+### Tests
+
+- End-to-end Phase 7 drives the delivery scenarios through the REST, MCP and Web front doors against a loopback mock of the SecOps ingestion API with fault modes, which runs only behind the non-production fault-injection gate.
+- SIEM delivery unit tests run against SQLite and PostgreSQL and fail if a test touches the real server data directory.
+
+>>>>>>> upstream/master
 ## [12.78.0] - 2026-09-30
 
 ### Security
@@ -2402,7 +2659,11 @@ This is a standalone abstraction only -- no production call site is rewired yet;
 
 ### Fixed
 
+<<<<<<< HEAD
 - Bug #1511 (performance): `_ensure_source_tree_readable_for_clone`'s original per-file Python `os.walk`+`os.stat`+`os.chmod` loop was proven live via py-spy to hang repository activation for 30+ minutes on staging for a golden repo with hundreds of thousands of small index/shard files over NFS (evolution's temporal quarter-shard directories) -- one or two network round trips per file. Replaced with two batched `find ... -exec chmod ... {} +` calls (directories: `g+rx,o+rx`; files: `g+r,o+r`, kept separate so a combined pass could never set execute on an already-executable plain file), preserving the same additive-only, never-strip, log-and-continue-on-failure contract with drastically fewer round trips.
+=======
+- Bug #1511 (performance): `_ensure_source_tree_readable_for_clone`'s original per-file Python `os.walk`+`os.stat`+`os.chmod` loop was proven live via py-spy to hang repository activation for 30+ minutes on staging for a golden repo with hundreds of thousands of small index/shard files over NFS (example-repo's temporal quarter-shard directories) -- one or two network round trips per file. Replaced with two batched `find ... -exec chmod ... {} +` calls (directories: `g+rx,o+rx`; files: `g+r,o+r`, kept separate so a combined pass could never set execute on an already-executable plain file), preserving the same additive-only, never-strip, log-and-continue-on-failure contract with drastically fewer round trips.
+>>>>>>> upstream/master
 
 ## [11.96.0] - 2026-08-02
 
@@ -2416,7 +2677,11 @@ This is a standalone abstraction only -- no production call site is rewired yet;
 ### Fixed
 
 - Bug #1508: `RefreshScheduler` no longer trusts `has_changes()==False` alone to skip a refresh cycle. A new `_check_stale_index_metadata()` check cross-references `.code-indexer/metadata.json`'s recorded `status`/`current_commit` against the actual working-tree HEAD -- an interrupted indexing run (`status` still `in_progress`/`failed`) or a drifted `current_commit` now forces a reconcile pass even when git itself reports no new commits, closing the class of bug where git-pull success permanently masked a stale index.
+<<<<<<< HEAD
 - Bug #1511: CoW-daemon-backed snapshot creation preflight-widens source-tree read permissions (`_ensure_source_tree_readable_for_clone`) immediately before dispatching to `CowDaemonBackend`, fixing a fleet-wide failure where the daemon process (running as a different OS user than the golden-repo file owner) could not open golden-repo files for reading, permanently blocking snapshot/clone creation with `Permission denied`. Confirmed live on staging: activating `evolution` failed with exactly this error before the fix.
+=======
+- Bug #1511: CoW-daemon-backed snapshot creation preflight-widens source-tree read permissions (`_ensure_source_tree_readable_for_clone`) immediately before dispatching to `CowDaemonBackend`, fixing a fleet-wide failure where the daemon process (running as a different OS user than the golden-repo file owner) could not open golden-repo files for reading, permanently blocking snapshot/clone creation with `Permission denied`. Confirmed live on staging: activating `example-repo` failed with exactly this error before the fix.
+>>>>>>> upstream/master
 - Bug #1512: PostgreSQL's `cleanup_orphaned_jobs_on_startup()` now also reclaims `running` jobs with `executing_node IS NULL` (SQL `NULL = <node>` never matches, so such a row was permanently unreachable by every node's node-scoped cleanup, forever blocking that repo's per-alias unique-active-job constraint). SQLite backend needed no change -- solo mode is single-node by definition.
 
 ## [11.94.0] - 2026-08-02
@@ -2442,7 +2707,11 @@ This is a standalone abstraction only -- no production call site is rewired yet;
 
 ### Fixed
 
+<<<<<<< HEAD
 - Bug #1510: the cluster's shared cow-storage NFS mount is downgraded from NFSv4.1 to NFSv3 with `nolock`, fixing the chronic server-side lock-manager state loss (`dmesg`: `NFS: <server>: lost N locks`) that directly caused SQLite `disk I/O error`s during golden-repo refresh. An initial attempt added `nolock` to the NFSv4.1 mount alone and was empirically proven ineffective -- NFSv4 integrates locking into its own OPEN/LOCK state machine, bypassing the separate NLM protocol `nolock` controls. NFSv3 is where `nolock` genuinely disables server-side lock negotiation, matching this project's existing golden-repos mount precedent. Live-validated against a real evolution golden-repo refresh on the 3-node staging cluster: zero lock-loss messages and zero disk I/O errors during indexing (previously a near-continuous failure pattern).
+=======
+- Bug #1510: the cluster's shared cow-storage NFS mount is downgraded from NFSv4.1 to NFSv3 with `nolock`, fixing the chronic server-side lock-manager state loss (`dmesg`: `NFS: <server>: lost N locks`) that directly caused SQLite `disk I/O error`s during golden-repo refresh. An initial attempt added `nolock` to the NFSv4.1 mount alone and was empirically proven ineffective -- NFSv4 integrates locking into its own OPEN/LOCK state machine, bypassing the separate NLM protocol `nolock` controls. NFSv3 is where `nolock` genuinely disables server-side lock negotiation, matching this project's existing golden-repos mount precedent. Live-validated against a real example-repo golden-repo refresh on the 3-node staging cluster: zero lock-loss messages and zero disk I/O errors during indexing (previously a near-continuous failure pattern).
+>>>>>>> upstream/master
 
 ## [11.90.0] - 2026-08-01
 
@@ -2531,6 +2800,7 @@ This is a standalone abstraction only -- no production call site is rewired yet;
 - **Epic #1454 (Chunk Storage Consolidation)**: consolidates legacy per-chunk `vector_*.json` sharded storage into a single SQLite `chunks.db` per collection (dramatically reducing activation-time file-copy cost from file-count-proportional to collection-count-proportional), relocates temporal quarter data to a golden-owned sister location (out of the mutable repo tree), and introduces a fleet-wide migration mechanism to consolidate already-indexed golden repos. Migration is gated behind a default-OFF, Web-UI-configurable `fleet_migration_config.enabled` operator flag -- ships inert until explicitly enabled, after confirming the reader-capable release has baked fleet-wide (Story #1460).
 - **#1477**: hardened the fleet migration scheduler with a per-repo consecutive-failure quarantine circuit breaker (mirroring the existing description-refresh quarantine pattern), closing a starvation bug where a single permanently-failing repo (corrupt legacy data, persistent backend read/write outages) could block every alphabetically-later repo in the fleet forever. Includes a bounded-recursion on-disk state signature for genuine-repair auto-clear, an unconditional cheap backend health probe before any destructive migration attempt (cluster-safe by construction, no per-node memory), and an atomic PostgreSQL upsert for the failure counter (closing a lost-update race under concurrent cluster writers).
 
+<<<<<<< HEAD
 ## [11.80.0] - 2026-08-20
 
 ### Fixed
@@ -2552,6 +2822,8 @@ This is a standalone abstraction only -- no production call site is rewired yet;
     (`FtsBackfillSweepConfig`), idempotent + re-discovery-based (no durable cursor),
     FTS-only rebuild (no embedding cost).
 
+=======
+>>>>>>> upstream/master
 ## [11.79.0] - 2026-07-22
 
 ### Fixed
@@ -2786,7 +3058,11 @@ This is a standalone abstraction only -- no production call site is rewired yet;
 
 ### Fixed
 
+<<<<<<< HEAD
 - **#1380** (priority-1): temporal query recall spent 95-98% of wall-clock time (65-93s on warm-cache queries against a real 4-quarter index) in `_reconstruct_full_commit_message()`, a sequential `git show -s --format=%B <hash>` subprocess call issued once per deduped candidate commit whose winning chunk was non-head, per shard, BEFORE the final `limit` truncation (48-89 git calls observed for `limit=5`). Removed entirely; non-head dedup winners now source their message from `dedup_by_commit()`'s already-free `_head_commit_message` stash. Verified live against the real evolution golden repo's temporal index: warm queries dropped to 1.7-3.6s sequential, 24.6-29.7s for 15 concurrent (down from 43-95s concurrent). Zero git subprocess calls proven both structurally and via live `strace`.
+=======
+- **#1380** (priority-1): temporal query recall spent 95-98% of wall-clock time (65-93s on warm-cache queries against a real 4-quarter index) in `_reconstruct_full_commit_message()`, a sequential `git show -s --format=%B <hash>` subprocess call issued once per deduped candidate commit whose winning chunk was non-head, per shard, BEFORE the final `limit` truncation (48-89 git calls observed for `limit=5`). Removed entirely; non-head dedup winners now source their message from `dedup_by_commit()`'s already-free `_head_commit_message` stash. Verified live against the real example-repo golden repo's temporal index: warm queries dropped to 1.7-3.6s sequential, 24.6-29.7s for 15 concurrent (down from 43-95s concurrent). Zero git subprocess calls proven both structurally and via live `strace`.
+>>>>>>> upstream/master
 - **EVO-64244** (PR #1352): `HNSWIndexCache.get_or_load` negatively-cached a loader's `(None, id_mapping)` result (returned when `hnsw_index.bin` doesn't exist yet, e.g. a repo mid-(re)index) for the full TTL, so "HNSW index not found" persisted even after the index finished building. A `None` result is no longer stored. Also: the cache had no invalidation path for the common case of a repo reindexed via a background job or separate worker/CLI subprocess (only two narrow call sites existed: branch-isolation filtered rebuild, and the orphan-repair sweep) -- a multi-worker server could silently serve a stale, pre-rebuild HNSW index for up to the TTL after a normal reindex. `get_or_load` now takes an optional `index_file` path and invalidates a cache HIT when the on-disk file's mtime is newer than what was cached at load time.
 - **#1379**: two unit tests hardcoded the legacy pre-Story-#1171 temporal storage layout and failed against the current quarterly-sharded, per-embedder collection layout. Test-fixture-only fix; production code unaffected (confirmed via manual repro).
 - **#1381**: two test-infrastructure flakes found while validating the above under full-suite concurrent load (both passed reliably in isolation). `test_no_git_commands_for_non_git_repo` globally patched `subprocess.run`, exploitable by any unrelated concurrent thread spawning a real `git` subprocess (same class as #1375) -- fixed via a per-instance `RefreshScheduler._run_subprocess()` injection seam. `test_dispatch_parallel_with_jitter_zero_jitter_disables_jitter` asserted a hard real-wall-clock bound sensitive to CPU contention under concurrent chunked execution -- fixed via a deterministic `time.sleep`-never-called assertion scoped to the dispatcher module's own namespace.
@@ -3085,7 +3361,7 @@ This is a standalone abstraction only -- no production call site is rewired yet;
 
 ### Fixed
 - **#1286 (P1): Temporal shard migration is now a guaranteed lossless verified move.** The Story #1172 monolith->quarterly-shard migration silently dropped embedded vectors, wrote a false `migration_complete.marker`, and deleted the source vector files before verification -- irreversible data loss. Migration now verifies losslessness (exact count/point-id reconciliation) BEFORE deleting the monolith, hard-aborts on ANY unplaceable vector (missing id_index / missing JSON / unresolved timestamp) before building shards (no silent skips), derives the shard quarter from the immutable payload `commit_timestamp` first (git log fallback, per-SHA-resilient so one bad SHA can't poison a batch), and recovers by re-extracting vectors from the monolith with ZERO re-embedding. Covered by a real-VoyageAI E2E suite (no mocks).
-- **#1285 (P2): Activation CoW clone timeout is config-driven with partial-clone cleanup.** Large golden-repo activations (evolution/phoenix, ~1M-file index) failed at a hardcoded 120s subprocess timeout; it now honors `cow_clone_timeout` (default raised 600->3600) across LocalCloneBackend and CowDaemonBackend, and a timed-out activation removes its partial clone before re-raising so retries are not blocked.
+- **#1285 (P2): Activation CoW clone timeout is config-driven with partial-clone cleanup.** Large golden-repo activations (example-repo-1/example-repo-2, ~1M-file index) failed at a hardcoded 120s subprocess timeout; it now honors `cow_clone_timeout` (default raised 600->3600) across LocalCloneBackend and CowDaemonBackend, and a timed-out activation removes its partial clone before re-raising so retries are not blocked.
 - **#1283 (P2): Web UI "Create API Key" no longer returns 401.** `POST/GET/DELETE /api/keys` used Bearer-only `get_current_user`; they now use `get_current_user_hybrid`, which accepts both the `Authorization: Bearer` header and the web session cookie, matching the other Web-UI-facing REST routes.
 - **#1284 (P3): Stale-mock dimension guard test fixed and un-hidden.** `TestLayer3APIValidation` mocked 3-dim embeddings that a newer dimension guard rejected before the None-detection path was reached; mocks are now dimension-correct (1024-dim) and the test is no longer `--deselect`'d by `fast-automation.sh`.
 - **#1287 (P4): e2e log-audit gate two-queue flush race fixed.** The Phase 3 gate captured its watermark after draining only `SQLiteLogHandler`, leaving the `async_logging` queue-listener undrained; a new `flush_log_pipeline()` drains both. The benign `cidx-meta-global` "FTS index not available" condition (auto-bootstrapped internal repo) is allowlisted, scoped to that exact alias.
@@ -3155,7 +3431,7 @@ This is a standalone abstraction only -- no production call site is rewired yet;
 ## [11.7.0] - 2026-06-29
 
 ### Fixed
-- **#1240: temporal migration flooded the SQLite logs.db (one WARNING per skipped point) -> "database is locked" storm on large corrupt indexes.** `_build_quarter_buckets` logged a WARNING for every skipped point across all three drop paths (missing_id_index, missing_json, timestamp_unresolved). On a large repo with a partially-corrupt temporal index (production `evolution`: ~1,914 orphans in one collection; ~34,000 migration log rows total) this overwhelmed the single-node SQLite log store and surfaced as Logs-DB lock-contention events on the dashboard. Fix: demote the four per-point `logger.warning` calls in `_build_quarter_buckets` to `logger.debug`; the per-collection aggregate summary WARNING (which reports the counts: structural orphans, missing_id_index, missing_json) is retained, so operators keep the actionable signal while the per-point detail moves to DEBUG. drop_counts accounting, the reason-aware guard, and all bucketing behavior are unchanged. (Root-cause logging-architecture follow-up tracked in #1241: fully-async batched log writer.)
+- **#1240: temporal migration flooded the SQLite logs.db (one WARNING per skipped point) -> "database is locked" storm on large corrupt indexes.** `_build_quarter_buckets` logged a WARNING for every skipped point across all three drop paths (missing_id_index, missing_json, timestamp_unresolved). On a large repo with a partially-corrupt temporal index (production `example-repo`: ~1,914 orphans in one collection; ~34,000 migration log rows total) this overwhelmed the single-node SQLite log store and surfaced as Logs-DB lock-contention events on the dashboard. Fix: demote the four per-point `logger.warning` calls in `_build_quarter_buckets` to `logger.debug`; the per-collection aggregate summary WARNING (which reports the counts: structural orphans, missing_id_index, missing_json) is retained, so operators keep the actionable signal while the per-point detail moves to DEBUG. drop_counts accounting, the reason-aware guard, and all bucketing behavior are unchanged. (Root-cause logging-architecture follow-up tracked in #1241: fully-async batched log writer.)
 
 ## [11.6.0] - 2026-06-28
 
@@ -9890,7 +10166,7 @@ All users must migrate to v8.0:
 5. Re-initialize: `cidx init`
 6. Re-index: `cidx index`
 
-See [Migration Guide](docs/migration-to-v8.md) for complete instructions.
+See [Migration Guide](docs/archive/migration-to-v8.md) for complete instructions.
 
 ### Removed
 
@@ -10010,7 +10286,7 @@ See [Migration Guide](docs/migration-to-v8.md) for complete instructions.
 ### Links
 
 - [GitHub Repository](https://github.com/LightspeedDMS/code-indexer)
-- [Migration Guide](docs/migration-to-v8.md)
+- [Migration Guide](docs/archive/migration-to-v8.md)
 - [Documentation](https://github.com/LightspeedDMS/code-indexer/blob/master/README.md)
 - [Issue Tracker](https://github.com/LightspeedDMS/code-indexer/issues)
 
@@ -10470,7 +10746,7 @@ cidx query "todo" --fts --regex  # Default case-insensitive
 - ✅ Works: `def`, `login.*`, `test_.*`, `HTTP.*`
 - ❌ Doesn't work: `def\s+\w+`, `public.*class` (spans multiple tokens with whitespace)
 
-**Performance** (Evolution Codebase):
+**Performance** (example-repo codebase):
 - FTS Python API: 1-4ms per query (warm index)
 - FTS CLI: ~1080ms per query (includes startup overhead)
 - Grep: ~150ms average for comparison

@@ -71,8 +71,12 @@ import httpx
 import pyotp
 import pytest
 
+from tests.e2e._stub_systemd_unit import write_stub_systemd_unit
 from tests.e2e.conftest import E2EConfig
 from tests.e2e.helpers import run_cidx
+
+# T5's throwaway server binds all interfaces (non-loopback probe).
+_THROWAWAY_BIND_HOST = "0.0.0.0"
 
 # ---------------------------------------------------------------------------
 # Skip guard: skip the entire module when admin credentials are absent
@@ -506,7 +510,7 @@ class TestAC1CliElevationRetry:
         self, elevation_enrolled: _EnrolledContext
     ) -> None:
         """T2: 403 -> prompt -> /auth/elevate 401 -> sys.exit(1); user NOT created."""
-        from code_indexer.api_clients.elevation import with_elevation_retry
+        from code_indexer.api_clients.elevation import elevate, with_elevation_retry
 
         ctx = elevation_enrolled
         token = ctx.admin_token  # pre-enrollment token (no MFA challenge)
@@ -525,6 +529,10 @@ class TestAC1CliElevationRetry:
             assert exc_info.value.code == 1, (
                 f"T2 expected SystemExit(1), got code={exc_info.value.code}"
             )
+            # Reading the user list requires the caller's own elevation
+            # window; open one for this token with a never-used code.
+            otp = _fresh_otp(ctx.secret, avoid=pyotp.TOTP(ctx.secret).now())
+            assert elevate(session, ctx.base_url, token, otp)
             assert not _user_exists(ctx.base_url, ctx.admin_token, username), (
                 "T2: wrong OTP must NOT create the user (no retry on elevation_failed)"
             )
@@ -680,6 +688,14 @@ class TestAC2MaintenanceLocalhostOnly:
         env["CIDX_TEST_FAST_SQLITE"] = "1"
         env["CIDX_SERVER_DATA_DIR"] = str(data_dir)
         env["CIDX_DATA_DIR"] = str(data_dir)
+<<<<<<< HEAD
+=======
+        # Bug #1996: its own stub unit with its own bind values (never the
+        # harness's stub for the shared server, nor the host's real unit).
+        unit_dir = data_dir / "systemd-units"
+        write_stub_systemd_unit(unit_dir, port, host=_THROWAWAY_BIND_HOST)
+        env["SYSTEMD_UNIT_DIR"] = str(unit_dir)
+>>>>>>> upstream/master
 
         proc = subprocess.Popen(
             [
@@ -688,7 +704,7 @@ class TestAC2MaintenanceLocalhostOnly:
                 "uvicorn",
                 "code_indexer.server.app:app",
                 "--host",
-                "0.0.0.0",
+                _THROWAWAY_BIND_HOST,
                 "--port",
                 str(port),
                 "--log-level",

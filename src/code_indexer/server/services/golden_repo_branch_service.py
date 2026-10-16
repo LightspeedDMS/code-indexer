@@ -309,7 +309,83 @@ class GoldenRepoBranchService:
             )
 
             default_branch = self._get_default_branch(repo_path)
+<<<<<<< HEAD
             return _parse_branch_listing(result.stdout, default_branch)
+=======
+
+            for line in result.stdout.strip().split("\n"):
+                if not line.strip():
+                    continue
+
+                try:
+                    parts = line.split("|")
+                    if len(parts) >= 5:
+                        raw_name = parts[0]
+
+                        # Skip origin/HEAD symbolic ref and bare remote
+                        # name (not real branches)
+                        if raw_name in ("origin/HEAD", "origin"):
+                            continue
+
+                        # Determine if remote branch, strip origin/ prefix
+                        is_remote = raw_name.startswith("origin/")
+                        branch_name = (
+                            raw_name[len("origin/") :] if is_remote else raw_name
+                        )
+
+                        # Deduplicate: local branches take precedence over remote ones
+                        if branch_name in seen_names:
+                            continue
+                        seen_names.add(branch_name)
+
+                        commit_hash = parts[1]
+                        commit_date_str = parts[2]
+                        author_name = parts[3]
+                        # commit_message = parts[4]  # Not currently used
+
+                        # Parse commit timestamp
+                        commit_timestamp = None
+                        try:
+                            commit_timestamp = _parse_git_date(commit_date_str)
+                            if commit_timestamp.tzinfo is None:
+                                commit_timestamp = commit_timestamp.replace(
+                                    tzinfo=timezone.utc
+                                )
+                        except (ValueError, AttributeError) as e:
+                            logger.warning(
+                                format_error_log(
+                                    "DEPLOY-GENERAL-024",
+                                    f"Failed to parse commit date '{commit_date_str}': {e}",
+                                )
+                            )
+
+                        # Classify branch type
+                        branch_type = classify_branch_type(branch_name)
+
+                        branch_info = GoldenRepoBranchInfo(
+                            name=branch_name,
+                            is_default=(branch_name == default_branch),
+                            last_commit_hash=commit_hash,
+                            last_commit_timestamp=commit_timestamp,
+                            last_commit_author=author_name,
+                            branch_type=branch_type,
+                        )
+                        branches.append(branch_info)
+
+                except (IndexError, ValueError) as e:
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-025",
+                            f"Failed to parse git output line '{line}': {e}",
+                        )
+                    )
+                    continue
+
+            # Sort branches: default first, then by name
+            branches.sort(key=lambda b: (not b.is_default, b.name))
+
+            return branches
+>>>>>>> upstream/master
 
         except subprocess.CalledProcessError as e:
             error_msg = f"Git operation failed: {redact_url_credentials(e.stderr or e.stdout or str(e))}"

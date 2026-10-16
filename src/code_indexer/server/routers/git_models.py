@@ -100,14 +100,27 @@ class GitPushRequest(BaseModel):
 
     remote: str = Field("origin", description="Remote name")
     branch: Optional[str] = Field(None, description="Branch name (optional)")
-    set_upstream: bool = Field(True, description="Set upstream tracking after push")
+    set_upstream: bool = Field(
+        True,
+        description=(
+            "Push with git's --set-upstream, so each pushed local branch "
+            "tracks its remote branch. With no branch named, the current "
+            "branch must already have an upstream (otherwise 400)."
+        ),
+    )
 
 
 class GitPushResponse(BaseModel):
     """Response model for git push."""
 
     success: bool = Field(..., description="Operation success status")
-    branch: str = Field(..., description="Branch that was pushed")
+    branch: Optional[str] = Field(
+        None,
+        description=(
+            "Branch or refspec as requested; null when none was given "
+            "(git pushes per its push.default)"
+        ),
+    )
     remote: str = Field(..., description="Remote name")
     commits_pushed: int = Field(..., description="Number of commits pushed")
 
@@ -165,6 +178,9 @@ class GitResetResponse(BaseModel):
         None, description="Whether confirmation is required"
     )
     token: Optional[str] = Field(None, description="Confirmation token if required")
+    message: Optional[str] = Field(
+        None, description="Why a presented confirmation token was rejected"
+    )
 
 
 class GitCleanRequest(BaseModel):
@@ -184,6 +200,9 @@ class GitCleanResponse(BaseModel):
         None, description="Whether confirmation is required"
     )
     token: Optional[str] = Field(None, description="Confirmation token if required")
+    message: Optional[str] = Field(
+        None, description="Why a presented confirmation token was rejected"
+    )
 
 
 class GitMergeAbortResponse(BaseModel):
@@ -248,3 +267,6 @@ class GitBranchDeleteResponse(BaseModel):
         None, description="Whether confirmation is required"
     )
     token: Optional[str] = Field(None, description="Confirmation token if required")
+    message: Optional[str] = Field(
+        None, description="Why a presented confirmation token was rejected"
+    )

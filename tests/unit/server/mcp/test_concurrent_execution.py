@@ -56,6 +56,7 @@ def mock_omni_search_dependencies(search_side_effect=None):
         mock_limits = Mock()
         mock_limits.multi_search_max_workers = 4
         mock_limits.multi_search_timeout_seconds = 30
+        mock_limits.omni_max_results_per_repo = 100
         mock_config_obj = Mock()
         mock_config_obj.multi_search_limits_config = mock_limits
         mock_service.get_config.return_value = mock_config_obj

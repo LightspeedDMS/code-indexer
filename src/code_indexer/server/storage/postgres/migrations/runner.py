@@ -87,8 +87,14 @@ class MigrationRunner:
                 "psycopg (v3) is required for PostgreSQL migrations. "
                 "Install it with: pip install psycopg"
             )
+        from code_indexer.server.storage.postgres.dead_peer_detection import (
+            apply_dead_peer_detection,
+        )
+
         self._connection_string = connection_string
-        self._conn = psycopg.connect(connection_string)
+        # Bug #2005: a node dying mid-migration must not keep the session
+        # pg_advisory_lock (and block every other node's startup) for ~2h.
+        self._conn = psycopg.connect(apply_dead_peer_detection(connection_string))
         self._sql_dir = _SQL_DIR
 
     def discover_migrations(self) -> List[Path]:

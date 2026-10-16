@@ -155,6 +155,10 @@ def _impersonating_admin(group_manager):
     class Session:
         is_impersonating = True
         effective_user = effective
+<<<<<<< HEAD
+=======
+        authenticated_user = admin
+>>>>>>> upstream/master
 
     return admin, Session()
 

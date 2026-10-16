@@ -27,6 +27,13 @@ from ..models.api_models import (
     VolumeInfo,
 )
 from code_indexer.server.services import audit_capture
+<<<<<<< HEAD
+=======
+from code_indexer.server.services.search_event_health import (
+    process_search_event_health,
+    search_event_drop_reasons,
+)
+>>>>>>> upstream/master
 from ...config import ConfigManager
 from .database_health_service import (
     DatabaseHealthStatus,
@@ -264,6 +271,10 @@ class HealthCheckService:
             last_golden_repo_reconcile_auto_heal=auto_heal_event,
             fleet_migration_dedup_state=dedup_state_summary,
             audit=_audit_health_info(),
+<<<<<<< HEAD
+=======
+            search_events=process_search_event_health(),
+>>>>>>> upstream/master
         )
 
     def _check_database_health(self) -> ServiceHealthInfo:
@@ -490,6 +501,81 @@ class HealthCheckService:
         )
         return True, False, [reason]
 
+<<<<<<< HEAD
+=======
+    def _collect_siem_delivery_failures(self) -> Tuple[bool, bool, List[str]]:
+        """SIEM delivery reasons: DEGRADED only, never an error.
+
+        A SecOps outage is fleet state; an error here would make /healthz
+        answer 503 and drain every node.  O(1): reads the scheduler's
+        in-memory view only.  A process that never reached the SIEM startup
+        block reports nothing (fail-open on this hot path).
+        """
+        try:
+            from ..app import app as app_module
+            from .siem_delivery.health import siem_health_reasons
+
+            state = app_module.state
+            if not hasattr(state, "siem_delivery_startup_error"):
+                return False, False, []
+            scheduler = getattr(state, "siem_delivery_scheduler", None)
+            reasons = siem_health_reasons(
+                scheduler.health_inputs() if scheduler is not None else None,
+                getattr(state, "siem_delivery_startup_error", None),
+            )
+        except Exception as exc:
+            logger.warning(
+                "SIEM delivery health collection failed (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+            return False, False, []
+        return bool(reasons), False, reasons
+
+    def _collect_index_spend_alarm_failures(self) -> Tuple[bool, bool, List[str]]:
+        """Story #2118 refresh embedding volume alarm: DEGRADED only.
+
+        Alarming aliases with their 24 h sums, or "blind" (aggregate read
+        failed, stats recording disabled, unattributed index-time rows, or
+        the alarm was never built on this node: lifespan stored None). The
+        aggregate is cached 60 s by the alarm; every caller of this method
+        is a sync route, so the DB read runs off the event loop. A process
+        that never reached the lifespan block reports nothing. A collection
+        error reports blind -- never a silent "healthy".
+        """
+        blind = "Refresh embedding volume alarm blind: "
+        try:
+            from ..app import app as app_module
+
+            state = app_module.state
+            if not hasattr(state, "index_spend_alarm"):
+                return False, False, []
+            alarm = state.index_spend_alarm
+            if alarm is None:
+                reasons = [blind + "the alarm was not started on this node"]
+            else:
+                reasons = alarm.cached_report().health_reasons()
+        except Exception as exc:
+            reasons = [blind + f"health collection failed: {type(exc).__name__}"]
+        return bool(reasons), False, reasons
+
+    def _collect_unrepairable_refresh_failures(self) -> Tuple[bool, bool, List[str]]:
+        """Story #2126: repositories whose refresh no automatic repair can
+        fix (shared DB state, so every node reports them). DEGRADED only: a
+        per-repository condition must never drain the node. Every caller of
+        this method is a sync route, so the read runs off the event loop. A
+        process without a backend registry (it never ran lifespan) reports
+        nothing; an unreadable store is reported, never silently healthy."""
+        from ..app import app as app_module
+        from .refresh_repair_health import unrepairable_refresh_health_reasons
+
+        registry = getattr(app_module.state, "backend_registry", None)
+        if registry is None:
+            return False, False, []
+        reasons = unrepairable_refresh_health_reasons(registry)
+        return bool(reasons), False, reasons
+
+>>>>>>> upstream/master
     def _read_fleet_migration_unrecoverable_aliases(self) -> List[str]:
         """
         Read every golden_alias currently recorded with the PERMANENT
@@ -1426,6 +1512,30 @@ class HealthCheckService:
         has_error = has_error or hos_err
         failure_reasons.extend(hos_reasons)
 
+<<<<<<< HEAD
+=======
+        # SIEM delivery: DEGRADED only (err is always False by construction).
+        siem_warn, _siem_err, siem_reasons = self._collect_siem_delivery_failures()
+        has_warning = has_warning or siem_warn
+        failure_reasons.extend(siem_reasons)
+
+        # Story #2118: refresh embedding volume alarm -- DEGRADED only.
+        isa_warn, _isa_err, isa_reasons = self._collect_index_spend_alarm_failures()
+        has_warning = has_warning or isa_warn
+        failure_reasons.extend(isa_reasons)
+
+        # Story #2126: refreshes no automatic repair can fix -- DEGRADED only.
+        urf_warn, _urf_err, urf_reasons = self._collect_unrepairable_refresh_failures()
+        has_warning = has_warning or urf_warn
+        failure_reasons.extend(urf_reasons)
+
+        # Bug #2114: search events dropped recently on this node -- DEGRADED
+        # only (a full recording queue never drains a node).
+        sed_reasons = search_event_drop_reasons(process_search_event_health())
+        has_warning = has_warning or bool(sed_reasons)
+        failure_reasons.extend(sed_reasons)
+
+>>>>>>> upstream/master
         # Bug #1539's cidx-meta conflict-resolution quarantine escalation
         # (Bug #1555 Defect B) is RETIRED: Bug #1555's root-cause fix made
         # CidxMetaBackupSync.sync() a plain mirror-push that can never

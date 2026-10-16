@@ -27,6 +27,10 @@ from code_indexer.server.telemetry.instrumentation import (
 )
 from code_indexer.server.telemetry.manager import TelemetryManager
 from code_indexer.server.utils.config_manager import TelemetryConfig
+<<<<<<< HEAD
+=======
+from tests.unit.server.telemetry.otlp_sink import OtlpHttpSink
+>>>>>>> upstream/master
 
 
 @pytest.fixture(autouse=True)
@@ -125,7 +129,13 @@ class TestTelemetryManagerShutdownUninstallsHttpx:
     (as happen throughout the test suite) never leave it dangling.
     """
 
+<<<<<<< HEAD
     def test_shutdown_uninstalls_httpx_when_it_was_instrumented(self):
+=======
+    def test_shutdown_uninstalls_httpx_when_it_was_instrumented(
+        self, otlp_sink: OtlpHttpSink
+    ):
+>>>>>>> upstream/master
         instrument_httpx()
         assert _is_httpx_instrumented() is True
 
@@ -134,7 +144,12 @@ class TestTelemetryManagerShutdownUninstallsHttpx:
                 enabled=True,
                 export_traces=True,
                 export_metrics=False,
+<<<<<<< HEAD
                 collector_endpoint="http://127.0.0.1:1",
+=======
+                collector_endpoint=otlp_sink.endpoint,
+                collector_protocol="http",
+>>>>>>> upstream/master
             )
         )
         try:
@@ -144,7 +159,13 @@ class TestTelemetryManagerShutdownUninstallsHttpx:
 
         assert _is_httpx_instrumented() is False
 
+<<<<<<< HEAD
     def test_shutdown_is_a_no_op_when_httpx_was_never_instrumented(self):
+=======
+    def test_shutdown_is_a_no_op_when_httpx_was_never_instrumented(
+        self, otlp_sink: OtlpHttpSink
+    ):
+>>>>>>> upstream/master
         assert _is_httpx_instrumented() is False
 
         manager = TelemetryManager(
@@ -152,7 +173,12 @@ class TestTelemetryManagerShutdownUninstallsHttpx:
                 enabled=True,
                 export_traces=True,
                 export_metrics=False,
+<<<<<<< HEAD
                 collector_endpoint="http://127.0.0.1:1",
+=======
+                collector_endpoint=otlp_sink.endpoint,
+                collector_protocol="http",
+>>>>>>> upstream/master
             )
         )
         manager.shutdown()

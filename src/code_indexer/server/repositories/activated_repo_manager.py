@@ -14,16 +14,20 @@ from code_indexer.server.repositories.user_dir_permissions import (
 from code_indexer.server.utils.cancellable_subprocess import (
     SubprocessCancelledError,
 )
+<<<<<<< HEAD
 from code_indexer.server.storage.shared.git_backend import (
     DETACHED_HEAD_MARKER,
     GitBackend,
     LocalGitBackend,
 )
+=======
+>>>>>>> upstream/master
 from code_indexer.server.storage.shared.snapshot_manager import (
     _ensure_source_tree_readable_for_clone,
 )
 from code_indexer.server.storage.shared.clone_backend import (
     CloneDestinationExistsError,
+<<<<<<< HEAD
     LocalCloneBackend,
 )
 from code_indexer.server.repositories.activated_working_copy import (
@@ -40,6 +44,14 @@ from code_indexer.utils.subprocess_diagnostics import (
     format_called_process_error_diagnostic,
     format_completed_process_diagnostic,
     redact_url_credentials,
+=======
+)
+from code_indexer.server.storage.json_column import parse_json_column
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.credential_redaction import mask_url_credentials
+from code_indexer.utils.subprocess_diagnostics import (
+    format_completed_process_diagnostic,
+>>>>>>> upstream/master
 )
 from code_indexer.config import write_json_atomic
 from code_indexer.validation.user_validation import RESERVED_ACTIVATED_REPOS_DIR_NAMES
@@ -66,6 +78,14 @@ from .background_jobs import BackgroundJobManager
 from ..services.committer_resolution_service import CommitterResolutionService
 from ..services.deactivation_query_drain import wait_for_activated_repo_query_drain
 from ..services.job_tracker import DuplicateJobError
+<<<<<<< HEAD
+=======
+from ..git.git_subprocess_env import (
+    build_non_interactive_git_env,
+    ensure_remote_url_without_credentials,
+    remote_url_without_credentials,
+)
+>>>>>>> upstream/master
 from ...config import GitServiceConfig
 from ...services.git_hook_manager import GitHookManager
 
@@ -112,9 +132,12 @@ _SYNC_STATUS_GIT_TIMEOUT_SECONDS = 30
 # sync_with_golden_repository's existing "first 10 for response size" cap.
 _MAX_REPORTED_CONFLICT_PATHS = 10
 
+<<<<<<< HEAD
 #: ``git status --porcelain`` XY codes of an unmerged path (git-status(1)).
 _UNMERGED_PORCELAIN_CODES = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
 
+=======
+>>>>>>> upstream/master
 
 class ActivatedRepoCloneNotStartedError(ActivatedRepoError):
     """Bug #1618: raised by `_clone_with_copy_on_write`'s two pre-clone
@@ -377,6 +400,7 @@ class ActivatedRepoManager:
         """
         self._query_tracker = query_tracker
 
+<<<<<<< HEAD
     def _working_copies(self) -> WorkingCopies:
         """Where this server's activated working copies are (content seam).
 
@@ -394,6 +418,8 @@ class ActivatedRepoManager:
         """Whether the activated working copy at *repo_dir* exists."""
         return self._working_copies().exists(repo_dir)
 
+=======
+>>>>>>> upstream/master
     def set_shared_repos_dir(self, shared_dir: str) -> None:
         """Set NFS shared directory for activated repo clones in cluster mode."""
         shared_activated = Path(shared_dir) / "activated-repos"
@@ -760,7 +786,11 @@ class ActivatedRepoManager:
                         repo_data = json.load(f)
                     user_alias = repo_data.get("user_alias", "")
                     repo_dir = self._safe_user_scoped_path(username, user_alias)
+<<<<<<< HEAD
                     if working_copies.exists(repo_dir):
+=======
+                    if os.path.exists(repo_dir):
+>>>>>>> upstream/master
                         repo_data.setdefault("username", username)
                         repos.append(repo_data)
                 except (json.JSONDecodeError, KeyError, IOError) as e:
@@ -1133,10 +1163,14 @@ class ActivatedRepoManager:
             # created -- an unsafe username/user_alias raises here.
             composite_path_str = self._safe_user_scoped_path(username, user_alias)
             user_dir = self._safe_user_dir(username)
+<<<<<<< HEAD
             delegated = self._working_copies().is_delegated
             # Content seam: workspace-mcp creates the copies' parents itself.
             if not delegated:
                 ensure_activated_user_dir(user_dir)
+=======
+            ensure_activated_user_dir(user_dir)
+>>>>>>> upstream/master
 
             composite_path = Path(composite_path_str)
 
@@ -1426,7 +1460,22 @@ class ActivatedRepoManager:
         """
         matching_repos: List[Dict[str, Any]] = []
 
+<<<<<<< HEAD
         for user_dir_name in self._activated_usernames():
+=======
+        if not os.path.exists(self.activated_repos_dir):
+            return matching_repos
+
+        for user_dir_name in os.listdir(self.activated_repos_dir):
+            if user_dir_name in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+                # A server-owned entry (e.g. '.trash'), not a username --
+                # skip it rather than treat it as a user directory.
+                continue
+            user_repos_dir = os.path.join(self.activated_repos_dir, user_dir_name)
+            if not os.path.isdir(user_repos_dir):
+                continue
+
+>>>>>>> upstream/master
             user_repos = self.list_activated_repositories(user_dir_name)
 
             for repo_data in user_repos:
@@ -1531,7 +1580,11 @@ class ActivatedRepoManager:
         # orphan branch relies on -- no new path-handling logic is added.
         if self._load_metadata(username, user_alias) is None:
             repo_dir = self.get_activated_repo_path(username, user_alias)
+<<<<<<< HEAD
             if not self._working_copy_exists(repo_dir):
+=======
+            if not os.path.exists(repo_dir):
+>>>>>>> upstream/master
                 raise ActivatedRepoError(
                     f"Activated repository '{user_alias}' not found for user '{username}'"
                 )
@@ -1598,7 +1651,10 @@ class ActivatedRepoManager:
         self._ensure_branch_hook_self_heal(repo_dir)
 
         try:
-            # Step 1: Determine if we should attempt to fetch from remote
+            # Step 1: Determine if we should attempt to fetch from remote.
+            # The stored origin converges to its credential-free URL; the
+            # golden repository's credentials are supplied at run time.
+            credentials_url = self.prepare_remote_operation(username, user_alias)
             should_fetch, remote_info = self._should_fetch_from_remote(repo_dir)
             fetch_attempted = False
             fetch_successful = False
@@ -1609,18 +1665,36 @@ class ActivatedRepoManager:
                     f"Attempting to fetch from remote for repository '{user_alias}'"
                 )
                 fetch_attempted = True
+<<<<<<< HEAD
                 # EVO-64678: via the git seam. A non-zero exit now surfaces as
                 # CalledProcessError, caught here so the fallback path and the
                 # warning message keep their exact previous shape.
                 try:
                     self._git_backend.fetch(repo_dir, "origin", timeout=60)
+=======
+                fetch_result = subprocess.run(
+                    ["git", "fetch", "origin"],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    env=build_non_interactive_git_env(credentials_url),
+                )
+
+                if fetch_result.returncode == 0:
+>>>>>>> upstream/master
                     fetch_successful = True
                     self.logger.info(
                         f"Successfully fetched from remote for repository '{user_alias}'"
                     )
                 except subprocess.CalledProcessError as e:
                     self.logger.warning(
+<<<<<<< HEAD
                         f"Git fetch failed for repository '{user_alias}': {format_called_process_error_diagnostic(e)}. "
+=======
+                        f"Git fetch failed for repository '{user_alias}': "
+                        f"{format_completed_process_diagnostic(fetch_result)}. "
+>>>>>>> upstream/master
                         f"Attempting local branch switching as fallback."
                     )
 
@@ -1683,7 +1757,12 @@ class ActivatedRepoManager:
                         )
                     except subprocess.CalledProcessError as e:
                         self.logger.warning(
+<<<<<<< HEAD
                             f"Failed to create branch '{branch_name}': {format_called_process_error_diagnostic(e)}"
+=======
+                            f"Failed to create branch '{branch_name}': "
+                            f"{format_completed_process_diagnostic(create_result)}"
+>>>>>>> upstream/master
                         )
 
                 except subprocess.TimeoutExpired:
@@ -1834,6 +1913,7 @@ class ActivatedRepoManager:
             except Exception:
                 raise GitOperationError(f"Failed to get current branch: {str(e)}")
 
+<<<<<<< HEAD
     def _remote_branch_listed(self, repo_dir: str, remote_branch: str) -> bool:
         """Whether ``git branch -r --list <remote_branch>`` lists it."""
         if not self._working_copies().is_delegated:
@@ -1852,6 +1932,8 @@ class ActivatedRepoManager:
             return False
         return remote_branch in remotes
 
+=======
+>>>>>>> upstream/master
     def _detect_conflict_paths(
         self, repo_dir: str, username: str, user_alias: str
     ) -> Tuple[Optional[bool], Optional[str]]:
@@ -1877,8 +1959,11 @@ class ActivatedRepoManager:
               FOREVER), exactly when a fabricated "synced" would be most
               misleading.
         """
+<<<<<<< HEAD
         if self._working_copies().is_delegated:
             return self._detect_conflict_paths_delegated(repo_dir, username, user_alias)
+=======
+>>>>>>> upstream/master
         try:
             diff_result = subprocess.run(
                 ["git", "diff", "--name-only", "--diff-filter=U"],
@@ -1907,12 +1992,15 @@ class ActivatedRepoManager:
             return None, None
 
         unmerged_paths = [line for line in diff_result.stdout.splitlines() if line]
+<<<<<<< HEAD
         return self._conflict_result(unmerged_paths)
 
     @staticmethod
     def _conflict_result(
         unmerged_paths: List[str],
     ) -> Tuple[Optional[bool], Optional[str]]:
+=======
+>>>>>>> upstream/master
         if not unmerged_paths:
             return False, None
 
@@ -1921,6 +2009,7 @@ class ActivatedRepoManager:
         )
         return True, details
 
+<<<<<<< HEAD
     def _detect_conflict_paths_delegated(
         self, repo_dir: str, username: str, user_alias: str
     ) -> Tuple[Optional[bool], Optional[str]]:
@@ -1949,6 +2038,8 @@ class ActivatedRepoManager:
         ]
         return self._conflict_result(unmerged_paths)
 
+=======
+>>>>>>> upstream/master
     def _rev_parse_ref(
         self, repo_path: str, ref: str, username: str, user_alias: str
     ) -> Optional[str]:
@@ -1960,6 +2051,7 @@ class ActivatedRepoManager:
         refs/remotes/origin fallback); the caller logs once if ALL
         candidates miss.
         """
+<<<<<<< HEAD
         if self._working_copies().is_delegated:
             try:
                 return self._git_backend.rev_parse(
@@ -1977,6 +2069,8 @@ class ActivatedRepoManager:
                     e,
                 )
                 return None
+=======
+>>>>>>> upstream/master
         try:
             result = subprocess.run(
                 ["git", "rev-parse", ref],
@@ -2152,7 +2246,11 @@ class ActivatedRepoManager:
             raise ActivatedRepoError(
                 f"Invalid repository alias '{user_alias}' for user '{username}'"
             )
+<<<<<<< HEAD
         if metadata is None or not self._working_copy_exists(repo_dir):
+=======
+        if metadata is None or not os.path.exists(repo_dir):
+>>>>>>> upstream/master
             raise ActivatedRepoError(
                 f"Activated repository '{user_alias}' not found for user '{username}'"
             )
@@ -2257,6 +2355,10 @@ class ActivatedRepoManager:
                     f"Cannot migrate remotes for '{user_alias}': golden repo alias '{golden_repo_alias}' not found"
                 )
 
+            # The stored origin converges to its credential-free URL (the
+            # sync below fetches from the local golden remote).
+            self.prepare_remote_operation(username, user_alias)
+
             # Step 1: Fetch from golden (local golden repository) - Story #636
             self.logger.info(
                 f"Syncing repository '{user_alias}' with golden repository"
@@ -2273,13 +2375,22 @@ class ActivatedRepoManager:
                 # Check if this is a network/access error or missing remote
                 if "not a git repository" in fetch_stderr.lower():
                     raise GitOperationError(
+<<<<<<< HEAD
                         f"Golden repository not accessible for sync: "
                         f"{format_called_process_error_diagnostic(e)}"
+=======
+                        "Golden repository not accessible for sync: "
+                        f"{format_completed_process_diagnostic(fetch_result)}"
+>>>>>>> upstream/master
                     )
                 else:
                     self.logger.warning(
                         f"Git fetch failed for repository '{user_alias}': "
+<<<<<<< HEAD
                         f"{format_called_process_error_diagnostic(e)}"
+=======
+                        f"{format_completed_process_diagnostic(fetch_result)}"
+>>>>>>> upstream/master
                     )
                     # Continue with local-only sync message
                     return {
@@ -2331,7 +2442,11 @@ class ActivatedRepoManager:
                 else:
                     raise GitOperationError(
                         f"Sync failed for repository '{user_alias}': "
+<<<<<<< HEAD
                         f"{format_called_process_error_diagnostic(e)}"
+=======
+                        f"{format_completed_process_diagnostic(merge_result)}"
+>>>>>>> upstream/master
                     )
 
             # Step 4: Update metadata timestamp
@@ -2427,7 +2542,12 @@ class ActivatedRepoManager:
                 )
             except subprocess.CalledProcessError as e:
                 raise GitOperationError(
+<<<<<<< HEAD
                     f"Failed to list local branches: {format_called_process_error_diagnostic(e)}"
+=======
+                    "Failed to list local branches: "
+                    f"{format_completed_process_diagnostic(local_branches_result)}"
+>>>>>>> upstream/master
                 )
 
             # Get list of remote branches
@@ -2832,12 +2952,15 @@ class ActivatedRepoManager:
         period on an already-failed/cancelled cleanup path, not a timeout
         on the indexing job itself (Bug #1218 invariant).
         """
+<<<<<<< HEAD
         working_copies = self._working_copies()
         if isinstance(working_copies, DelegatedWorkingCopies):
             # workspace-mcp's clone is synchronous: nothing materializes after
             # the call returned, so one removal is the whole cleanup.
             self._discard_delegated_copy(working_copies, activated_repo_path)
             return
+=======
+>>>>>>> upstream/master
         existed_before_cleanup = os.path.exists(activated_repo_path)
         shutil.rmtree(activated_repo_path, ignore_errors=True)
         removed_something = existed_before_cleanup
@@ -2888,6 +3011,7 @@ class ActivatedRepoManager:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+<<<<<<< HEAD
     def _serve_golden_index_here(self, golden_repo_alias: str) -> Optional[str]:
         """The golden repository's served path, with this pod holding its
         published index, for an activation to seed a copy from (the index may
@@ -3055,6 +3179,8 @@ class ActivatedRepoManager:
         else:
             shutil.rmtree(activated_repo_path, ignore_errors=True)
 
+=======
+>>>>>>> upstream/master
     def _do_activate_repository(
         self,
         username: str,
@@ -3120,9 +3246,13 @@ class ActivatedRepoManager:
             user_dir = self._safe_user_dir(username)
             # The CoW daemon (a different OS user, reached via the service
             # group) must be able to create the clone inside this directory.
+<<<<<<< HEAD
             # Content seam: workspace-mcp creates the copy's parents itself.
             if not self._working_copies().is_delegated:
                 ensure_activated_user_dir(user_dir)
+=======
+            ensure_activated_user_dir(user_dir)
+>>>>>>> upstream/master
 
             update_progress(30, "Creating user directory structure")
 
@@ -3183,6 +3313,7 @@ class ActivatedRepoManager:
             # Switch to requested branch if different from default
             if branch_name != golden_repo.default_branch:
                 update_progress(70, f"Switching to branch '{branch_name}'")
+<<<<<<< HEAD
                 # EVO-64678: via the git seam; CalledProcessError is caught here
                 # so the rollback + error message are byte-for-byte unchanged.
                 try:
@@ -3194,6 +3325,24 @@ class ActivatedRepoManager:
                         timeout=60,
                     )
                 except subprocess.CalledProcessError as e:
+=======
+                # Bug #1514: self-heal the activated repo's OWN stale-path
+                # post-checkout hook (inherited byte-for-byte from the CoW
+                # clone) BEFORE this checkout fires it -- the first
+                # checkout on a freshly-cloned activated repo happens
+                # before any indexing ever runs, so ensure_hook_installed()
+                # never gets a chance to self-heal via the indexing flow.
+                self._ensure_branch_hook_self_heal(activated_repo_path)
+                result = subprocess.run(
+                    ["git", "checkout", "-B", branch_name, f"origin/{branch_name}"],
+                    cwd=activated_repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+
+                if result.returncode != 0:
+>>>>>>> upstream/master
                     # Activation failure: branch checkout failed — roll back
                     # the cloned directory.  Path is trusted: activated_repo_path
                     # = self.activated_repos_dir / username / user_alias,
@@ -3204,7 +3353,12 @@ class ActivatedRepoManager:
                     # rename-to-trash path does not apply.
                     self._discard_failed_activation(activated_repo_path)
                     raise GitOperationError(
+<<<<<<< HEAD
                         f"Failed to switch to branch '{branch_name}': {format_called_process_error_diagnostic(e)}"
+=======
+                        f"Failed to switch to branch '{branch_name}': "
+                        f"{format_completed_process_diagnostic(result)}"
+>>>>>>> upstream/master
                     )
                 update_progress(80, f"Successfully switched to branch '{branch_name}'")
             else:
@@ -3240,7 +3394,12 @@ class ActivatedRepoManager:
                     )
                 except subprocess.CalledProcessError as e:
                     self.logger.warning(
+<<<<<<< HEAD
                         f"Failed to set git config user.email: {format_called_process_error_diagnostic(e)}"
+=======
+                        "Failed to set git config user.email: "
+                        f"{format_completed_process_diagnostic(result)}"
+>>>>>>> upstream/master
                     )
 
                 # Set git config user.name (generic for all CIDX users)
@@ -3250,7 +3409,12 @@ class ActivatedRepoManager:
                     )
                 except subprocess.CalledProcessError as e:
                     self.logger.warning(
+<<<<<<< HEAD
                         f"Failed to set git config user.name: {format_called_process_error_diagnostic(e)}"
+=======
+                        "Failed to set git config user.name: "
+                        f"{format_completed_process_diagnostic(result)}"
+>>>>>>> upstream/master
                     )
 
                 self.logger.info(
@@ -4370,6 +4534,49 @@ class ActivatedRepoManager:
                 cleanup below, which would otherwise shutil.rmtree a
                 pre-existing directory this call never created.
         """
+        scheduler = (
+            getattr(self.golden_repo_manager, "_refresh_scheduler", None)
+            if golden_repo_alias is not None
+            else None
+        )
+        _lock_acquired = False
+        if scheduler is not None:
+            # Bug #1393 direction 2: fail fast if a refresh is ALREADY
+            # executing for this golden repo. WriteLockManager alone cannot
+            # catch this because _execute_refresh() only CHECKS
+            # is_write_locked() -- it never holds the lock itself while
+            # running.
+            try:
+                scheduler.check_refresh_not_in_progress(golden_repo_alias)
+            except DuplicateJobError as e:
+                # Bug #1618: this branch runs BEFORE any clone is attempted --
+                # use the distinct subtype so the caller's cleanup handler
+                # can skip the Bug #1349 orphan-cleanup grace loop, which is
+                # meaningless here (no clone, no possible orphan directory).
+                raise ActivatedRepoCloneNotStartedError(
+                    f"Cannot activate golden repository '{golden_repo_alias}': "
+                    f"a refresh is currently in progress for it ({e}). "
+                    "Retry activation once the refresh completes."
+                )
+
+            # Bug #1393 direction 1: become a write-lock HOLDER so a refresh
+            # that starts AFTER this point yields via its existing
+            # is_write_locked() check (refresh_scheduler.py), exactly like
+            # golden_repo_manager.change_branch already does for its own
+            # "touch the golden repo source tree" operation.
+            if not scheduler.acquire_write_lock(
+                golden_repo_alias, owner_name="activation_clone"
+            ):
+                # Bug #1618: this branch also runs BEFORE any clone is
+                # attempted -- same distinct subtype/rationale as the
+                # DuplicateJobError branch above.
+                raise ActivatedRepoCloneNotStartedError(
+                    f"Cannot clone golden repository '{golden_repo_alias}': "
+                    "write lock is already held by another writer. "
+                    "Retry activation once it completes."
+                )
+            _lock_acquired = True
+
         try:
             working_copies = self._working_copies()
         except ActivatedRepoError as e:
@@ -4439,7 +4646,16 @@ class ActivatedRepoManager:
             # (default 3600s / 1 hour, sized for very large repos e.g.
             # evolution ~1M files, phoenix 40GB) instead of a fixed low
             # literal.
+<<<<<<< HEAD
             clone_timeout = self._clone_timeout()
+=======
+            rc = getattr(self.golden_repo_manager, "resource_config", None)
+            clone_timeout = (
+                getattr(rc, "cow_clone_timeout", self._COW_CLONE_TIMEOUT_DEFAULT)
+                if rc is not None
+                else self._COW_CLONE_TIMEOUT_DEFAULT
+            )
+>>>>>>> upstream/master
             # Issue #1511 (second call site): the CoW daemon runs as a
             # different OS user (on a different host) than the process that
             # wrote the golden-repo's index files, which commonly end up at
@@ -4453,6 +4669,7 @@ class ActivatedRepoManager:
             # path, so the failure reproduced live on staging. Gated
             # identically by class name (LocalCloneBackend / OntapCloneBackend
             # are intentionally left untouched).
+<<<<<<< HEAD
             if isinstance(working_copies, DelegatedWorkingCopies):
                 self._clone_delegated_working_copy(
                     working_copies,
@@ -4464,6 +4681,8 @@ class ActivatedRepoManager:
                     golden_repo_alias=golden_repo_alias,
                 )
                 return True
+=======
+>>>>>>> upstream/master
             if type(self._clone_backend).__name__ == "CowDaemonBackend":
                 _ensure_source_tree_readable_for_clone(source_path)
             self._clone_backend.create_clone_at_path(
@@ -4515,7 +4734,12 @@ class ActivatedRepoManager:
                     )
                 except subprocess.CalledProcessError as e:
                     raise ActivatedRepoError(
+<<<<<<< HEAD
                         f"Failed to set core.bare=false: {format_called_process_error_diagnostic(e)}"
+=======
+                        "Failed to set core.bare=false: "
+                        f"{format_completed_process_diagnostic(result)}"
+>>>>>>> upstream/master
                     )
 
                 # Move git internals to .git subdirectory
@@ -4549,7 +4773,12 @@ class ActivatedRepoManager:
                     )
                 except subprocess.CalledProcessError as e:
                     self.logger.warning(
+<<<<<<< HEAD
                         f"git checkout -f HEAD failed (non-fatal): {format_called_process_error_diagnostic(e)}"
+=======
+                        "git checkout -f HEAD failed (non-fatal): "
+                        f"{format_completed_process_diagnostic(result)}"
+>>>>>>> upstream/master
                     )
 
                 self.logger.info(
@@ -4559,12 +4788,117 @@ class ActivatedRepoManager:
             # Step 3: Fix git status for CoW cloned files (only if git repo)
             git_dir = os.path.join(dest_path, ".git")
             if os.path.exists(git_dir):
+<<<<<<< HEAD
                 self._refresh_cloned_git_index(dest_path)
+=======
+                # Bug #1343: `cp --reflink` ALWAYS allocates a new inode (and
+                # ctime) for every copied file, even with preserve_attrs=True
+                # (mtime preserved). Git's DEFAULT core.checkStat compares
+                # inode/ctime/dev/uid/gid in addition to mtime+size, so the
+                # inode change alone stat-invalidates the copied .git/index
+                # and forces update-index/status to open+hash every tracked
+                # file. core.checkStat=minimal (mtime+size only) is the
+                # decisive lever -- set it BEFORE the refresh below AND
+                # before _configure_git_structure's `git status` (persisted
+                # in dest_path/.git/config, read by both call sites).
+                checkstat_result = subprocess.run(
+                    ["git", "config", "--local", "core.checkStat", "minimal"],
+                    cwd=dest_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+
+                if checkstat_result.returncode != 0:
+                    self.logger.warning(
+                        "git config core.checkStat=minimal failed (non-fatal): "
+                        f"{format_completed_process_diagnostic(checkstat_result)}"
+                    )
+
+                # Step 2a: Run git update-index --refresh to sync index with file timestamps
+                self.logger.info(
+                    "Running git update-index --refresh to fix CoW clone timestamps"
+                )
+                result = subprocess.run(
+                    ["git", "update-index", "--refresh"],
+                    cwd=dest_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+
+                if result.returncode != 0:
+                    self.logger.warning(
+                        "git update-index --refresh failed (non-fatal): "
+                        f"{format_completed_process_diagnostic(result)}"
+                    )
+
+                # Step 2b (Bug #1343 / AC-6): `git restore .` used to run here
+                # unconditionally to "clean up" CoW clone timestamp changes.
+                # That was compensating for stat-noise caused by the OLD
+                # default core.checkStat flagging inode/ctime churn as a
+                # modification even when content was byte-identical. Now that
+                # core.checkStat=minimal + preserve_attrs=True make the
+                # refresh above a pure stat pass, a byte-identical clone is
+                # already clean and there is nothing to restore. Blindly
+                # calling `git restore .` unconditionally would SILENTLY
+                # DISCARD any genuinely different content -- a real content
+                # difference immediately after a CoW clone would be abnormal,
+                # so surface it with a WARNING instead of destroying it.
+                status_result = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=dest_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+
+                if status_result.returncode == 0:
+                    # Bug #1347: `git status --porcelain` always reports the
+                    # untracked `.code-indexer/` index directory (`??` lines)
+                    # after every activation -- that is expected, normal
+                    # state, not a sign of trouble. `git restore` only ever
+                    # affects TRACKED files, so an untracked entry was never
+                    # at risk of being discarded. Filter out untracked (`??`)
+                    # lines and warn ONLY on genuine tracked-change lines.
+                    tracked_lines = [
+                        line
+                        for line in status_result.stdout.splitlines()
+                        if line.strip() and not line.startswith("??")
+                    ]
+                    if tracked_lines:
+                        self.logger.warning(
+                            "git status reports unexpected TRACKED changes "
+                            "after CoW clone refresh; NOT running git "
+                            "restore (would discard content): "
+                            + "; ".join(tracked_lines)
+                        )
+>>>>>>> upstream/master
 
             # Step 3: Fix cidx config paths (only if .code-indexer/ exists)
             code_indexer_dir = os.path.join(dest_path, ".code-indexer")
             if os.path.exists(code_indexer_dir):
+<<<<<<< HEAD
                 self._fix_cloned_cidx_config(dest_path)
+=======
+                self.logger.info(
+                    "Running cidx fix-config --force to update cloned config paths"
+                )
+                result = subprocess.run(
+                    ["cidx", "fix-config", "--force"],
+                    cwd=dest_path,
+                    capture_output=True,
+                    text=True,
+                    env=build_cidx_subprocess_env(),
+                    timeout=60,
+                )
+
+                if result.returncode != 0:
+                    self.logger.warning(
+                        "cidx fix-config failed (non-fatal): "
+                        f"{format_completed_process_diagnostic(result)}"
+                    )
+>>>>>>> upstream/master
 
             # Step 4: Configure git structure if this is a git repository
             if os.path.exists(git_dir):
@@ -4618,6 +4952,7 @@ class ActivatedRepoManager:
                 scheduler.release_write_lock(
                     golden_repo_alias, owner_name="activation_clone"
                 )
+<<<<<<< HEAD
 
     def _fix_cloned_cidx_config(self, dest_path: str) -> None:
         """``cidx fix-config --force`` in a fresh copy (non-fatal on failure)."""
@@ -4813,6 +5148,8 @@ class ActivatedRepoManager:
             self._discard_delegated_copy(working_copies, dest_path)
         elif os.path.exists(dest_path):
             shutil.rmtree(dest_path, ignore_errors=True)
+=======
+>>>>>>> upstream/master
 
     def _setup_origin_remote_for_local_repo(
         self, source_path: str, dest_path: str
@@ -4841,7 +5178,12 @@ class ActivatedRepoManager:
                 )
             except subprocess.CalledProcessError as e:
                 self.logger.warning(
+<<<<<<< HEAD
                     f"Could not verify git remotes for {dest_path}: {format_called_process_error_diagnostic(e)}"
+=======
+                    f"Could not verify git remotes for {dest_path}: "
+                    f"{format_completed_process_diagnostic(result)}"
+>>>>>>> upstream/master
                 )
 
             # Fetch from origin to ensure all remote branches are available
@@ -4849,7 +5191,12 @@ class ActivatedRepoManager:
                 self._git_backend.fetch(dest_path, "origin", timeout=60)
             except subprocess.CalledProcessError as e:
                 self.logger.warning(
+<<<<<<< HEAD
                     f"Could not fetch from origin in {dest_path}: {format_called_process_error_diagnostic(e)}"
+=======
+                    f"Could not fetch from origin in {dest_path}: "
+                    f"{format_completed_process_diagnostic(result)}"
+>>>>>>> upstream/master
                 )
 
         except subprocess.TimeoutExpired:
@@ -4863,6 +5210,38 @@ class ActivatedRepoManager:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+    def prepare_remote_operation(self, username: str, user_alias: str) -> Optional[str]:
+        """Prepare a git network operation on an activated repository.
+
+        Repository credentials are supplied to git at run time and never
+        stored in a clone's configuration: the activated clone's stored
+        origin URL is rewritten to its credential-free form when it still
+        carries credentials (idempotent), and the golden repository's
+        registered URL is returned so the caller hands its credentials to
+        git at run time. None when the golden repository is not registered.
+        Raises GitCommandError, naming what failed or timed out, when the
+        stored URLs cannot all be made credential-free: no credentials are
+        selected for such a clone. Local git calls only -- call from a
+        worker/request thread.
+
+        Raises FileNotFoundError, before any sanitization, when the
+        repository has no clone on disk: that is a client error (the
+        repository is not activated), not a failed sanitization.
+        """
+        repo_dir = self._safe_user_scoped_path(username, user_alias)
+        if not os.path.isdir(repo_dir):
+            raise FileNotFoundError(
+                f"Activated repository '{user_alias}' not found for user '{username}'"
+            )
+        # Raises GitCommandError when the stored URLs cannot be sanitized.
+        ensure_remote_url_without_credentials(repo_dir)
+        repo_data = self._load_metadata(username, user_alias)
+        golden_alias = repo_data.get("golden_repo_alias") if repo_data else None
+        if not golden_alias:
+            return None
+        golden_repo = self.golden_repo_manager.get_golden_repo(golden_alias)
+        return golden_repo.repo_url if golden_repo is not None else None
+
     def _add_or_update_remote(self, repo_path: str, remote_name: str, url: str) -> None:
         """
         Add or update a git remote (helper method to eliminate duplication).
@@ -4875,6 +5254,7 @@ class ActivatedRepoManager:
         Raises:
             ActivatedRepoError: If remote configuration fails
         """
+<<<<<<< HEAD
         # Try to add remote (EVO-64678: via the git seam; the "already exists"
         # branch is driven off the CalledProcessError's stderr, unchanged)
         try:
@@ -4883,6 +5263,21 @@ class ActivatedRepoManager:
             )
         except subprocess.CalledProcessError as add_error:
             add_stderr = add_error.stderr or ""
+=======
+        # Repository credentials are supplied to git at run time and never
+        # stored in a clone's configuration: the stored URL is credential-free.
+        url = remote_url_without_credentials(url)
+        # Try to add remote
+        result = subprocess.run(
+            ["git", "remote", "add", remote_name, url],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=self.GIT_COMMAND_TIMEOUT,
+        )
+
+        if result.returncode != 0:
+>>>>>>> upstream/master
             # If remote already exists, update it
             if "already exists" in add_stderr:
                 try:
@@ -4891,12 +5286,21 @@ class ActivatedRepoManager:
                     )
                 except subprocess.CalledProcessError as set_url_error:
                     raise ActivatedRepoError(
+<<<<<<< HEAD
                         f"Failed to update {remote_name} remote: {format_called_process_error_diagnostic(set_url_error)}"
+=======
+                        f"Failed to update {remote_name} remote: "
+                        f"{format_completed_process_diagnostic(result)}"
+>>>>>>> upstream/master
                     )
             else:
                 raise ActivatedRepoError(
                     f"Failed to add {remote_name} remote: "
+<<<<<<< HEAD
                     f"{format_called_process_error_diagnostic(add_error)}"
+=======
+                    f"{format_completed_process_diagnostic(result)}"
+>>>>>>> upstream/master
                 )
 
     def _configure_git_structure(self, source_path: str, dest_path: str) -> None:
@@ -4931,7 +5335,8 @@ class ActivatedRepoManager:
                     source_path, "origin", timeout=self.GIT_COMMAND_TIMEOUT
                 )
                 self.logger.info(
-                    f"Extracted GitHub/GitLab URL from golden repo: {github_url}"
+                    "Extracted GitHub/GitLab URL from golden repo: "
+                    f"{mask_url_credentials(github_url)}"
                 )
             except subprocess.CalledProcessError:
                 # Fallback: If golden repo has no origin, use local path
@@ -4954,17 +5359,38 @@ class ActivatedRepoManager:
                 )
             except subprocess.CalledProcessError as e:
                 raise ActivatedRepoError(
+<<<<<<< HEAD
                     f"Failed to fetch from golden remote: {format_called_process_error_diagnostic(e)}"
                 )
 
             # Step 5: Verify git structure is working
             self._verify_git_structure(dest_path)
+=======
+                    "Failed to fetch from golden remote: "
+                    f"{format_completed_process_diagnostic(result)}"
+                )
+
+            # Step 5: Verify git structure is working
+            result = subprocess.run(
+                ["git", "status"],
+                cwd=dest_path,
+                capture_output=True,
+                text=True,
+                timeout=self.GIT_COMMAND_TIMEOUT,
+            )
+
+            if result.returncode != 0:
+                raise ActivatedRepoError(
+                    "Git repository structure invalid: "
+                    f"{format_completed_process_diagnostic(result)}"
+                )
+>>>>>>> upstream/master
 
             self.logger.info(
                 f"Dual remote git structure configured successfully for: {dest_path}"
             )
             self.logger.info(
-                f"  origin -> {github_url}",
+                f"  origin -> {mask_url_credentials(github_url)}",
                 extra={"correlation_id": get_correlation_id()},
             )
             self.logger.info(
@@ -5088,7 +5514,12 @@ class ActivatedRepoManager:
                         )
                     except subprocess.CalledProcessError as e:
                         raise ActivatedRepoError(
+<<<<<<< HEAD
                             f"Failed to remove existing golden remote: {format_called_process_error_diagnostic(e)}"
+=======
+                            "Failed to remove existing golden remote: "
+                            f"{format_completed_process_diagnostic(remove_result)}"
+>>>>>>> upstream/master
                         )
 
                 # Rename origin to golden
@@ -5098,14 +5529,20 @@ class ActivatedRepoManager:
                     )
                 except subprocess.CalledProcessError as e:
                     raise ActivatedRepoError(
+<<<<<<< HEAD
                         f"Failed to rename origin to golden: {format_called_process_error_diagnostic(e)}"
+=======
+                        "Failed to rename origin to golden: "
+                        f"{format_completed_process_diagnostic(rename_result)}"
+>>>>>>> upstream/master
                     )
 
                 # Add new origin pointing to GitHub
                 self._add_or_update_remote(repo_dir, "origin", github_url)
 
                 self.logger.info(
-                    f"Migration complete: origin={github_url}, golden={golden_repo_path}"
+                    f"Migration complete: origin={mask_url_credentials(github_url)}, "
+                    f"golden={golden_repo_path}"
                 )
                 return True
 
@@ -5132,6 +5569,7 @@ class ActivatedRepoManager:
         except Exception as e:
             raise ActivatedRepoError(f"Failed to migrate legacy remotes: {str(e)}")
 
+<<<<<<< HEAD
     def _publishing_owner(self, username: str) -> Dict[str, Any]:
         """``_run_branch_delta_index`` keyword that makes the delta reindex of
         a REGISTERED copy serve the recorded index first and publish after
@@ -5140,12 +5578,17 @@ class ActivatedRepoManager:
             return {}
         return {"publish_for": username}
 
+=======
+>>>>>>> upstream/master
     def _run_branch_delta_index(
         self,
         repo_path: str,
         user_alias: str,
         cancel_check: Optional[Callable[[], bool]] = None,
+<<<<<<< HEAD
         publish_for: Optional[str] = None,
+=======
+>>>>>>> upstream/master
     ) -> None:
         """
         Run branch-aware delta semantic reindex on an activated repo (Bug #1203).
@@ -5187,6 +5630,7 @@ class ActivatedRepoManager:
             extra={"correlation_id": get_correlation_id()},
         )
         try:
+<<<<<<< HEAD
             if publish_for is not None:
                 self.serve_index_here(publish_for, user_alias)
             self._index_manager.run_branch_delta_index(
@@ -5194,6 +5638,11 @@ class ActivatedRepoManager:
             )
             if publish_for is not None:
                 self.publish_index(publish_for, user_alias)
+=======
+            self._index_manager.run_branch_delta_index(
+                repo_path, cancel_check=cancel_check
+            )
+>>>>>>> upstream/master
         except RuntimeError as exc:
             # Bug #1346: a user-initiated cancel (SubprocessCancelledError,
             # a RuntimeError subclass) is NOT a genuine reindex failure --
@@ -5280,10 +5729,13 @@ class ActivatedRepoManager:
         if not repo_dir:
             self.logger.warning("Skipping git hook self-heal: repo_dir is empty/None")
             return
+<<<<<<< HEAD
         if self._working_copies().is_delegated:
             # The copy and its .git/hooks are on workspace-mcp; cidx installs
             # no hook there (its checkouts run in git-mcp).
             return
+=======
+>>>>>>> upstream/master
         try:
             metadata_file = Path(repo_dir) / ".code-indexer" / "metadata.json"
             git_hook_manager = GitHookManager(
@@ -5360,26 +5812,29 @@ class ActivatedRepoManager:
                 return False, "Empty origin URL"
 
             # Local file paths - fetching not needed for CoW repos
+            safe_origin = mask_url_credentials(origin_url)
             if origin_url.startswith("/") or origin_url.startswith("file://"):
                 self.logger.debug(
-                    f"Origin is local path: {origin_url}, skipping fetch",
+                    f"Origin is local path: {safe_origin}, skipping fetch",
                     extra={"correlation_id": get_correlation_id()},
                 )
-                return False, f"Local repository: {origin_url}"
+                return False, f"Local repository: {safe_origin}"
 
             # Relative paths - also local
             if not origin_url.startswith(("http://", "https://", "git@", "ssh://")):
                 self.logger.debug(
-                    f"Origin appears to be local path: {origin_url}, skipping fetch"
+                    f"Origin appears to be local path: {safe_origin}, skipping fetch"
                 )
-                return False, f"Local repository: {origin_url}"
+                return False, f"Local repository: {safe_origin}"
 
             # Remote URLs - attempt fetch
             self.logger.debug(
-                f"Origin is remote URL: {origin_url}, will attempt fetch",
+                f"Origin is remote URL: {mask_url_credentials(origin_url)}, "
+                "will attempt fetch",
                 extra={"correlation_id": get_correlation_id()},
             )
-            return True, f"Remote repository: {origin_url}"
+            # Returned into error messages: userinfo redacted.
+            return True, f"Remote repository: {mask_url_credentials(origin_url)}"
 
         except subprocess.TimeoutExpired:
             return False, "Timeout checking remote URL"
@@ -5421,7 +5876,12 @@ class ActivatedRepoManager:
                 )
             except subprocess.CalledProcessError as e:
                 self.logger.debug(
+<<<<<<< HEAD
                     f"Failed to switch to remote tracking branch '{branch_name}': {format_called_process_error_diagnostic(e)}"
+=======
+                    f"Failed to switch to remote tracking branch '{branch_name}': "
+                    f"{format_completed_process_diagnostic(result)}"
+>>>>>>> upstream/master
                 )
                 return False
 
@@ -5547,7 +6007,22 @@ class ActivatedRepoManager:
         matching_repos: List[Dict[str, Any]] = []
 
         # Get all users who have activated repositories
+<<<<<<< HEAD
         for user_dir_name in self._activated_usernames():
+=======
+        if not os.path.exists(self.activated_repos_dir):
+            return matching_repos
+
+        for user_dir_name in os.listdir(self.activated_repos_dir):
+            if user_dir_name in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+                # A server-owned entry (e.g. '.trash'), not a username --
+                # skip it rather than treat it as a user directory.
+                continue
+            user_repos_dir = os.path.join(self.activated_repos_dir, user_dir_name)
+            if not os.path.isdir(user_repos_dir):
+                continue
+
+>>>>>>> upstream/master
             # List activated repositories for this user
             user_repos = self.list_activated_repositories(user_dir_name)
 

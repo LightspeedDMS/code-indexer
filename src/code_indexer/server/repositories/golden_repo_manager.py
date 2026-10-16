@@ -25,7 +25,10 @@ from typing import (
     List,
     Literal,
     Optional,
+<<<<<<< HEAD
     Tuple,
+=======
+>>>>>>> upstream/master
     Any,
     TYPE_CHECKING,
     cast,
@@ -44,6 +47,7 @@ if TYPE_CHECKING:
     from code_indexer.server.services.audit_outcome import AuditActor
 
 from pydantic import BaseModel
+<<<<<<< HEAD
 from code_indexer.server.logging_utils import (
     format_error_log,
     mask_url_credentials,
@@ -61,6 +65,14 @@ from code_indexer.server.utils.index_command_layout import (
     server_backend_args,
 )
 from code_indexer.utils.git_runner import run_git_command
+=======
+from code_indexer.server.logging_utils import format_error_log, mask_url_credentials
+from code_indexer.server.git.git_subprocess_env import (
+    build_non_interactive_git_env,
+    ensure_remote_url_without_credentials,
+    remote_url_without_credentials,
+)
+>>>>>>> upstream/master
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 # Story #876 D4 — cluster-atomic lifecycle registration hook.
@@ -79,7 +91,10 @@ from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
 # create_span() no-ops (yields a _NoOpSpan) when OTEL tracing is
 # unavailable/uninitialized.
 from code_indexer.server.telemetry.spans import create_span
+<<<<<<< HEAD
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
+=======
+>>>>>>> upstream/master
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +300,7 @@ def _make_hnsw_orphan_event_logger(alias: str):
     return _log_event
 
 
+<<<<<<< HEAD
 class DelegatedRepositoryRemoval:
     """What a removal did to a golden clone held by workspace-mcp.
 
@@ -327,6 +343,8 @@ class DelegatedRepositoryRemoval:
 _INDEX_ARTIFACT_ALIAS_BUSY = "ECONFLICT"
 
 
+=======
+>>>>>>> upstream/master
 class GoldenRepoError(Exception):
     """Base exception for golden repository operations."""
 
@@ -754,10 +772,13 @@ class GoldenRepoManager:
             temporal_options: Temporal indexing configuration options
             submitter_username: The authenticated caller, recorded on the job
                 and as the audit actor.
+<<<<<<< HEAD
             workspace_id: Optional workspace-mcp workspace id (EVO-65021) to
                 retain on the golden repo so the delegated SCIP indexer can
                 address sandbox-mcp (``sb-{workspace_id}``). None when the
                 caller does not (yet) know it.
+=======
+>>>>>>> upstream/master
 
         Returns:
             Job ID for tracking add operation progress
@@ -783,7 +804,10 @@ class GoldenRepoManager:
                 temporal_options=temporal_options,
                 submitter_username=submitter_username,
                 skip_pre_flight_git_validation=skip_pre_flight_git_validation,
+<<<<<<< HEAD
                 workspace_id=workspace_id,
+=======
+>>>>>>> upstream/master
             )
         except Exception:
             record_repo_outcome(
@@ -816,7 +840,10 @@ class GoldenRepoManager:
         temporal_options: Optional[Dict],
         submitter_username: str,
         skip_pre_flight_git_validation: bool,
+<<<<<<< HEAD
         workspace_id: Optional[str] = None,
+=======
+>>>>>>> upstream/master
     ) -> str:
         """Validate the request and submit the background add job."""
         # Check maintenance mode first (Story #734)
@@ -857,6 +884,7 @@ class GoldenRepoManager:
         if self._resolve_golden_repo(alias) is not None:
             raise GoldenRepoError(f"Golden repository alias '{alias}' already exists")
 
+<<<<<<< HEAD
         # GAP-5: Also check the global registry -- a prior removal that failed
         # mid-way could have left a global registry entry (and alias pointer)
         # even though the golden_repos row is gone. Re-adding without cleaning
@@ -907,15 +935,37 @@ class GoldenRepoManager:
             self._refuse_local_git_under_delegated_content()
         if enable_temporal:
             self._refuse_temporal_under_delegated_content()
+=======
+        # The removal job deletes the registry row FIRST (Bug #1317) and the
+        # clone directory LAST, so the alias looks free while its removal is
+        # still running. An add accepted in that window has its fresh clone
+        # rmtree'd by the removal. Checked AFTER the row check: a removal can
+        # only be submitted while the row exists, so once the row is gone no
+        # new removal can start behind this check. JobTracker is the
+        # cluster-visible record of active jobs.
+        if self.job_tracker is not None:
+            try:
+                self.job_tracker.check_operation_conflict(
+                    "remove_golden_repo", repo_alias=alias
+                )
+            except DuplicateJobError as removal_active:
+                raise GoldenRepoError(
+                    f"Golden repository '{alias}' is still being removed "
+                    f"(job {removal_active.existing_job_id}); add it again "
+                    "after that job completes"
+                ) from removal_active
+>>>>>>> upstream/master
 
         # Skip git validation for local:// URLs (Story #538) or when caller
         # explicitly opts out (Story #1092: batch-create fast path).
         if not skip_pre_flight_git_validation and not repo_url.startswith("local://"):
             if not self._validate_git_repository(repo_url):
                 raise GitOperationError(
-                    f"Invalid or inaccessible git repository: {repo_url}"
+                    "Invalid or inaccessible git repository: "
+                    f"{mask_url_credentials(repo_url)}"
                 )
 
+<<<<<<< HEAD
         # EVO-64545 (pod-pull): the real clone+index+register+activate work now
         # lives in execute_add_golden_repo_work() so any pod's IndexJobClaimLoop
         # can run it from the job row's metadata. This thin wrapper preserves the
@@ -924,6 +974,14 @@ class GoldenRepoManager:
         # job_id into any worker whose signature declares a `job_id` param,
         # straight from the dequeued (job_id, func, args, kwargs) tuple --
         # race-free, so no post-submit mutable holder is needed.
+=======
+        # Pod-pull: the real clone+index+register+activate work now
+        # lives in execute_add_golden_repo_work() so any pod's IndexJobClaimLoop
+        # can run it from the job row's metadata. This thin wrapper preserves the
+        # exact solo/local-pool path.
+        # Story #2118: declaring job_id makes BackgroundJobManager inject this
+        # job's id, recorded on the embedding_call_stats rows of its children.
+>>>>>>> upstream/master
         def background_worker(progress_callback=None, job_id=None) -> Dict[str, Any]:
             return self.execute_add_golden_repo_work(
                 repo_url=repo_url,
@@ -932,12 +990,19 @@ class GoldenRepoManager:
                 enable_temporal=enable_temporal,
                 temporal_options=temporal_options,
                 submitter_username=submitter_username,
+<<<<<<< HEAD
                 workspace_id=workspace_id,
+=======
+>>>>>>> upstream/master
                 progress_callback=progress_callback,
                 job_id=job_id,
             )
 
+<<<<<<< HEAD
         # Submit to BackgroundJobManager. EVO-64545: pass reconstruction params
+=======
+        # Submit to BackgroundJobManager. Pod-pull: pass reconstruction params
+>>>>>>> upstream/master
         # as metadata so in cluster mode the row is left PENDING and claimable +
         # runnable on any pod (pod-pull); solo mode runs background_worker locally.
         job_id = self.background_job_manager.submit_job(
@@ -953,7 +1018,10 @@ class GoldenRepoManager:
                 "enable_temporal": enable_temporal,
                 "temporal_options": temporal_options,
                 "submitter_username": submitter_username,
+<<<<<<< HEAD
                 "workspace_id": workspace_id,
+=======
+>>>>>>> upstream/master
             },
         )
         return cast(str, job_id)
@@ -967,21 +1035,31 @@ class GoldenRepoManager:
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
         submitter_username: str,
+<<<<<<< HEAD
         workspace_id: Optional[str] = None,
         progress_callback: Optional[Callable[..., Any]] = None,
         job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """EVO-64545: reusable clone + index + register + global-activate body for
+=======
+        progress_callback: Optional[Callable[..., Any]] = None,
+        job_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """reusable clone + index + register + global-activate body for
+>>>>>>> upstream/master
         add_golden_repo, extracted verbatim from the former background_worker
         closure so a pod-pull IndexJobClaimLoop can execute it on any pod from the
         job row's metadata. Retry-safe: a partial clone is cleaned up on failure
         and a duplicate alias is rejected up front by the caller.
         """
+<<<<<<< HEAD
         # EVO-64616 defense-in-depth: this is the persistence boundary (clone +
         # _sqlite_backend.add_repo + GoldenRepo record) and is reachable directly
         # from a pod-pull job's metadata, so strip here too — a credential must
         # never reach the stored record even if a caller passed an unstripped URL.
         repo_url = self._strip_credentials_if_delegated(repo_url)
+=======
+>>>>>>> upstream/master
 
         def _cleanup_failed_clone(clone_path: Optional[str]) -> None:
             """Remove a partially-cloned directory so retries don't fail with
@@ -1072,6 +1150,7 @@ class GoldenRepoManager:
                 # Remove such an orphan up front (guards inside the helper never
                 # touch in-place content or a committed registration).
                 self._remove_orphan_clone_for_retry(repo_url, alias)
+<<<<<<< HEAD
                 if self.repositories_are_delegated() and not self._is_local_path(
                     repo_url
                 ):
@@ -1080,6 +1159,8 @@ class GoldenRepoManager:
                     # above proved nothing was there and no row names it, so
                     # the path is this job's to clean if it fails from here.
                     _clone_path_for_cleanup = os.path.join(self.golden_repos_dir, alias)
+=======
+>>>>>>> upstream/master
                 # Clone repository
                 clone_path = self._clone_repository(repo_url, alias, default_branch)
                 # EVO-64228 (review MAJOR): in index-in-place mode clone_path IS
@@ -1111,9 +1192,13 @@ class GoldenRepoManager:
                     temporal_options=temporal_options,
                     progress_callback=progress_callback,
                     orphan_event_callback=_make_hnsw_orphan_event_logger(alias),
+<<<<<<< HEAD
                     golden_repo_alias=alias,
                     job_id=job_id,
                     local_content=is_pod_local_repo(repo_url, alias),
+=======
+                    job_id=job_id,
+>>>>>>> upstream/master
                 )
 
                 # Create golden repository record
@@ -1331,8 +1416,11 @@ class GoldenRepoManager:
         Returns True iff an orphan clone was removed.
         """
         clone_path = os.path.join(self.golden_repos_dir, alias)
+<<<<<<< HEAD
         if self.repositories_are_delegated() and not repo_url.startswith("local://"):
             return self._remove_delegated_orphan_for_retry(repo_url, alias, clone_path)
+=======
+>>>>>>> upstream/master
         if not os.path.exists(clone_path):
             return False
         if self._is_in_place_registration(repo_url, clone_path):
@@ -1363,6 +1451,7 @@ class GoldenRepoManager:
                 "directory still exists after removal"
             )
         return True
+<<<<<<< HEAD
 
     def _remove_delegated_orphan_for_retry(
         self, repo_url: str, alias: str, clone_path: str
@@ -1488,6 +1577,8 @@ class GoldenRepoManager:
                 f"{hook_error}. Golden repository added but lifecycle "
                 f"detection rebuild was not scheduled."
             )
+=======
+>>>>>>> upstream/master
 
     def _register_lifecycle_after_registration(
         self, alias: str, submitter_username: str
@@ -2249,12 +2340,15 @@ class GoldenRepoManager:
         Use BackgroundJobManager to track progress and results.  Records one
         ``golden_repo_removed`` row naming *submitter_username* (the
         authenticated caller; there is no default).
+<<<<<<< HEAD
 
         Pre-flight cleanup: cancels any active background jobs (add, refresh,
         global_repo_refresh) for this alias before submitting the removal job,
         preventing race conditions where a concurrent refresh interferes with
         removal. This logic lives here (not in the REST/MCP handlers) so every
         API surface gets the same pre-flight cleanup automatically (GAP-5 fix).
+=======
+>>>>>>> upstream/master
 
         Args:
             alias: Alias of the repository to remove
@@ -2329,6 +2423,7 @@ class GoldenRepoManager:
 
     def _submit_removal_job(self, alias: str, submitter_username: str) -> str:
         """Submit the background removal job for a verified *alias*."""
+<<<<<<< HEAD
 
         # GAP-5: Cancel any active background jobs for this repository BEFORE
         # submitting the removal job. A concurrent refresh or add that is still
@@ -2369,6 +2464,8 @@ class GoldenRepoManager:
                 alias,
                 job_cancel_error,
             )
+=======
+>>>>>>> upstream/master
 
         # Create no-args wrapper for background execution
         def background_worker() -> Dict[str, Any]:
@@ -2629,12 +2726,16 @@ class GoldenRepoManager:
             try:
                 if repo_exists_on_disk:
                     assert actual_path is not None
+<<<<<<< HEAD
                     if delegated_removal is not None:
                         cleanup_successful = self._cleanup_repository_files(
                             actual_path, delegated=True
                         )
                     else:
                         cleanup_successful = self._cleanup_repository_files(actual_path)
+=======
+                    cleanup_successful = self._cleanup_repository_files(actual_path)
+>>>>>>> upstream/master
                 else:
                     cleanup_successful = True
 
@@ -2647,12 +2748,17 @@ class GoldenRepoManager:
                 # MUST happen before the write lock is released below (codex
                 # review, turn 11): releasing first would open a window for a
                 # new refresh to write into the still-unquarantined wreckage.
+<<<<<<< HEAD
                 # Never under delegation: the remains are index state plus
                 # entries cidx cannot prove are its own (_remove_pod_index_state
                 # left them on purpose), and a rename would move them anyway.
                 if (
                     not cleanup_successful
                     and delegated_removal is None
+=======
+                if (
+                    not cleanup_successful
+>>>>>>> upstream/master
                     and repo_exists_on_disk
                     and actual_path
                     and os.path.exists(actual_path)
@@ -2683,9 +2789,12 @@ class GoldenRepoManager:
             # Bug #1523: this signal is unchanged -- an incomplete cleanup is
             # still reported as a resource leak; it just no longer suppresses
             # the detach steps above.
+<<<<<<< HEAD
             repository_note = (
                 delegated_removal.note() if delegated_removal is not None else ""
             )
+=======
+>>>>>>> upstream/master
             if not cleanup_successful:
                 raise GitOperationError(
                     "Repository metadata removed but cleanup incomplete. "
@@ -2695,10 +2804,13 @@ class GoldenRepoManager:
 
             # Mark golden repo as deleted
             cascade_results["golden_repo_deleted"] = True
+<<<<<<< HEAD
             if delegated_removal is not None:
                 delegated_removal.record(cascade_results)
             if index_versions_deleted is not None:
                 cascade_results["index_versions_deleted"] = index_versions_deleted
+=======
+>>>>>>> upstream/master
 
             # Build enhanced message with cascade deletion counts
             activated_count = len(cascade_results["activated_repos_deleted"])
@@ -2711,11 +2823,14 @@ class GoldenRepoManager:
                 message += (
                     f" (WARNING: {failed_count} activated repos failed to delete)"
                 )
+<<<<<<< HEAD
             if index_versions_deleted is not None:
                 message += (
                     f" (deleted {index_versions_deleted} published index versions)"
                 )
             message += repository_note
+=======
+>>>>>>> upstream/master
 
             return {
                 "success": True,
@@ -2746,15 +2861,27 @@ class GoldenRepoManager:
         """
         try:
             # Use git ls-remote to check if repository is accessible.
+<<<<<<< HEAD
             # EVO-64678: via the git seam; ls_remote() maps a non-zero exit to
             # False, and a timeout still propagates to the handler below.
             reachable: bool = self._git_backend.ls_remote(
                 repo_url, timeout=self.resource_config.git_clone_timeout
+=======
+            # Repository credentials are supplied at run time, never on argv.
+            result = subprocess.run(
+                ["git", "ls-remote", remote_url_without_credentials(repo_url)],
+                capture_output=True,
+                text=True,
+                timeout=self.resource_config.git_clone_timeout,
+                env=build_non_interactive_git_env(repo_url),
+>>>>>>> upstream/master
             )
             return reachable
         except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
             logger.debug(
-                "Repository accessibility check failed for %s: %s", repo_url, e
+                "Repository accessibility check failed for %s: %s",
+                mask_url_credentials(repo_url),
+                mask_url_credentials(str(e)),
             )
             return False
 
@@ -3211,11 +3338,13 @@ class GoldenRepoManager:
                     # AC4 Story #163: Auto-create folder for local:// URLs
                     os.makedirs(clone_path, exist_ok=True)
                     logging.info(
-                        f"Created local repository directory for {repo_url}: {clone_path}"
+                        "Created local repository directory for "
+                        f"{mask_url_credentials(repo_url)}: {clone_path}"
                     )
                 else:
                     logging.info(
-                        f"Using existing local directory for {repo_url}: {clone_path}"
+                        "Using existing local directory for "
+                        f"{mask_url_credentials(repo_url)}: {clone_path}"
                     )
                 return clone_path
 
@@ -3347,10 +3476,16 @@ class GoldenRepoManager:
         self, clone_path: str, resolved_source_path: str, git_env: dict
     ) -> bool:
         """Add (or replace) an `origin` remote pointing at resolved_source_path."""
+<<<<<<< HEAD
         add_result = run_git_command(
             ["git", "remote", "add", "origin", resolved_source_path],
             cwd=Path(clone_path),
             check=False,
+=======
+        add_result = subprocess.run(
+            ["git", "remote", "add", "origin", resolved_source_path],
+            cwd=clone_path,
+>>>>>>> upstream/master
             capture_output=True,
             text=True,
             timeout=self._GIT_LOCAL_REMOTE_TIMEOUT_SECONDS,
@@ -3360,10 +3495,16 @@ class GoldenRepoManager:
             return True
 
         # origin already existed from the copied source config -- replace it.
+<<<<<<< HEAD
         set_url_result = run_git_command(
             ["git", "remote", "set-url", "origin", resolved_source_path],
             cwd=Path(clone_path),
             check=False,
+=======
+        set_url_result = subprocess.run(
+            ["git", "remote", "set-url", "origin", resolved_source_path],
+            cwd=clone_path,
+>>>>>>> upstream/master
             capture_output=True,
             text=True,
             timeout=self._GIT_LOCAL_REMOTE_TIMEOUT_SECONDS,
@@ -3373,17 +3514,27 @@ class GoldenRepoManager:
             logging.warning(
                 "Bug #1534: failed to configure origin remote for golden clone %s: %s",
                 clone_path,
+<<<<<<< HEAD
                 redact_url_credentials(set_url_result.stderr),
+=======
+                set_url_result.stderr,
+>>>>>>> upstream/master
             )
             return False
         return True
 
     def _fetch_origin_for_golden_clone(self, clone_path: str, git_env: dict) -> bool:
         """Fetch origin so the remote-tracking ref exists locally."""
+<<<<<<< HEAD
         fetch_result = run_git_command(
             ["git", "fetch", "origin"],
             cwd=Path(clone_path),
             check=False,
+=======
+        fetch_result = subprocess.run(
+            ["git", "fetch", "origin"],
+            cwd=clone_path,
+>>>>>>> upstream/master
             capture_output=True,
             text=True,
             timeout=self._GIT_LOCAL_FETCH_TIMEOUT_SECONDS,
@@ -3393,7 +3544,11 @@ class GoldenRepoManager:
             logging.warning(
                 "Bug #1534: failed to fetch origin for golden clone %s: %s",
                 clone_path,
+<<<<<<< HEAD
                 redact_url_credentials(fetch_result.stderr),
+=======
+                fetch_result.stderr,
+>>>>>>> upstream/master
             )
             return False
         return True
@@ -3414,7 +3569,11 @@ class GoldenRepoManager:
             logging.warning(
                 "Bug #1534: failed to detect current branch for golden clone %s: %s",
                 clone_path,
+<<<<<<< HEAD
                 redact_url_credentials(branch_result.stderr),
+=======
+                branch_result.stderr,
+>>>>>>> upstream/master
             )
             return None
 
@@ -3433,10 +3592,16 @@ class GoldenRepoManager:
         self, clone_path: str, branch: str, git_env: dict
     ) -> None:
         """Configure `branch` to track `origin/branch` (requires a prior fetch)."""
+<<<<<<< HEAD
         upstream_result = run_git_command(
             ["git", "branch", f"--set-upstream-to=origin/{branch}", branch],
             cwd=Path(clone_path),
             check=False,
+=======
+        upstream_result = subprocess.run(
+            ["git", "branch", f"--set-upstream-to=origin/{branch}", branch],
+            cwd=clone_path,
+>>>>>>> upstream/master
             capture_output=True,
             text=True,
             timeout=self._GIT_LOCAL_REMOTE_TIMEOUT_SECONDS,
@@ -3448,7 +3613,11 @@ class GoldenRepoManager:
                 "%s branch %s: %s",
                 clone_path,
                 branch,
+<<<<<<< HEAD
                 redact_url_credentials(upstream_result.stderr),
+=======
+                upstream_result.stderr,
+>>>>>>> upstream/master
             )
 
     def _clone_remote_repository(
@@ -3473,6 +3642,7 @@ class GoldenRepoManager:
             # Clone full repository with complete history for semantic search.
             # Only pass --branch when explicitly requested; omitting it lets git
             # resolve the remote HEAD, which works for any default branch name.
+<<<<<<< HEAD
             # EVO-64678: routed through the git seam (default LocalGitBackend ==
             # today's behavior). CalledProcessError is caught here, before the
             # outer SubprocessError handler, so the failure message keeps its
@@ -3486,6 +3656,24 @@ class GoldenRepoManager:
                     timeout=self.resource_config.git_pull_timeout,
                 )
             except subprocess.CalledProcessError as e:
+=======
+            cmd = ["git", "-c", "core.fsync=none", "clone"]
+            if branch:
+                cmd.extend(["--branch", branch])
+            # The clone's stored origin is the credential-free URL; repository
+            # credentials are supplied to git at run time, never on argv.
+            cmd.extend([remote_url_without_credentials(repo_url), clone_path])
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.resource_config.git_pull_timeout,
+                env=build_non_interactive_git_env(repo_url),
+            )
+
+            if result.returncode != 0:
+>>>>>>> upstream/master
                 raise GitOperationError(
                     f"Git clone failed with code {e.returncode}: {redact_url_credentials(e.stderr)}"
                 )
@@ -3598,6 +3786,7 @@ class GoldenRepoManager:
                 f"'{versioned_ns_dir}' for '{alias}': {dir_error}"
             )
 
+<<<<<<< HEAD
     def _delete_delegated_repository_for_removal(
         self, alias: str
     ) -> Optional[DelegatedRepositoryRemoval]:
@@ -3708,6 +3897,9 @@ class GoldenRepoManager:
     def _cleanup_repository_files(
         self, clone_path: str, *, delegated: bool = False
     ) -> bool:
+=======
+    def _cleanup_repository_files(self, clone_path: str) -> bool:
+>>>>>>> upstream/master
         """
         Clean up repository files and directories using orchestrated cleanup.
 
@@ -3945,9 +4137,13 @@ class GoldenRepoManager:
         temporal_options: Optional[Dict] = None,
         progress_callback=None,
         orphan_event_callback: Optional[Any] = None,
+<<<<<<< HEAD
         golden_repo_alias: Optional[str] = None,
         job_id: Optional[str] = None,
         local_content: bool = False,
+=======
+        job_id: Optional[str] = None,
+>>>>>>> upstream/master
     ) -> None:
         """
         Execute the required workflow after successful repository cloning.
@@ -3968,8 +4164,11 @@ class GoldenRepoManager:
                 subprocess's stderr -- forwarded verbatim to
                 run_with_popen_progress. A channel entirely separate from
                 progress_callback (see _make_hnsw_orphan_event_logger).
+<<<<<<< HEAD
             golden_repo_alias: EVO-66113 optional alias to tag embed stats records.
             job_id: EVO-66113 optional job id for embed stats correlation.
+=======
+>>>>>>> upstream/master
 
         Raises:
             GitOperationError: If any workflow step fails
@@ -3978,6 +4177,7 @@ class GoldenRepoManager:
             f"Executing post-clone workflow for {clone_path} (force_init={force_init})"
         )
 
+<<<<<<< HEAD
         # EVO-64616: with a DELEGATED clone, git-mcp writes the repo on a different
         # NFS client than this cidx process. The delegated backend returns as soon
         # as git-mcp reports success, but this node's NFS client can briefly still
@@ -3987,6 +4187,21 @@ class GoldenRepoManager:
         # node can actually enter the directory, refreshing the local NFS caches,
         # before spawning any child. A no-op for a local clone (visible first try).
         self._await_clone_path_locally_visible(clone_path)
+=======
+        # Story #2118: the clone directory is golden_repos_dir/<alias>; every
+        # child of this registration is charged to that golden repo's global
+        # alias, the add job (nojob:golden_repo_add outside one), purpose index.
+        from code_indexer.server.services.embedding_stats_attribution import (
+            build_server_stats_attribution,
+        )
+
+        stats_attribution = build_server_stats_attribution(
+            alias=f"{Path(clone_path).name}-global",
+            job_id=job_id,
+            site="golden_repo_add",
+            purpose="index",
+        )
+>>>>>>> upstream/master
 
         # Build init command with optional --force flag
         # --no-override-file prevents creating .code-indexer-override.yaml in golden repos
@@ -4020,9 +4235,13 @@ class GoldenRepoManager:
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
             temporal_command = append_server_layout_args(
                 ["cidx", "index", "--index-commits", "--progress-json"],
+<<<<<<< HEAD
                 **repo_layout_kwargs(
                     None, golden_repo_alias, local_content=local_content
                 ),
+=======
+                attribution=stats_attribution,
+>>>>>>> upstream/master
             )
 
             # Story #1404: global temporal indexing floor date, composed
@@ -4137,10 +4356,14 @@ class GoldenRepoManager:
                 error_label=error_label,
             )
             _popen_kwargs["env"] = build_embedding_stats_child_env(
+<<<<<<< HEAD
                 _get_config_service_for_stats().get_config(),
                 base_env=env,
                 golden_repo_alias=golden_repo_alias,
                 job_id=job_id,
+=======
+                _get_config_service_for_stats().get_config(), base_env=env
+>>>>>>> upstream/master
             )
             # Bug #1388: only pass orphan_event_callback when not None, for
             # the same reason as env above -- defensive compatibility with
@@ -4150,13 +4373,6 @@ class GoldenRepoManager:
             try:
                 run_with_popen_progress(**_popen_kwargs)
             except IndexingSubprocessError as e:
-                # Check for "No files found" — acceptable for golden repo registration
-                combined = "".join(_popen_stdout) + "".join(_popen_stderr)
-                if "No files found to index" in combined:
-                    logging.warning(
-                        "PATH A: Repository has no indexable files — acceptable for golden repo registration"
-                    )
-                    return
                 raise GitOperationError(str(e)) from e
 
         try:
@@ -4313,9 +4529,13 @@ class GoldenRepoManager:
             _run_popen_with_telemetry(
                 append_server_layout_args(
                     ["cidx", "index", "--fts", "--progress-json"],
+<<<<<<< HEAD
                     **repo_layout_kwargs(
                         None, golden_repo_alias, local_content=local_content
                     ),
+=======
+                    attribution=stats_attribution,
+>>>>>>> upstream/master
                 ),
                 phase_name="semantic",
                 error_label="semantic+FTS indexing",
@@ -4867,6 +5087,23 @@ class GoldenRepoManager:
         # repo registered by ANOTHER worker/node is recognized here too.
         return self._resolve_golden_repo(alias) is not None
 
+    def existing_golden_aliases(self, names: List[str]) -> set[str]:
+        """
+        Return which of *names* are golden repository aliases.
+
+        One query bounded to *names* against the storage backend (SQLite
+        solo, PostgreSQL in cluster), never a listing of every repository
+        and never the per-worker cache (public #1984).
+
+        Args:
+            names: Candidate aliases.
+
+        Returns:
+            The subset of *names* that exist as golden repository aliases.
+        """
+        found: set[str] = self._sqlite_backend.existing_aliases(names)
+        return found
+
     def get_wiki_enabled(self, alias: str) -> bool:
         """Check if wiki is enabled for a golden repo (Story #280)."""
         try:
@@ -5144,8 +5381,14 @@ class GoldenRepoManager:
     _CB_FIX_TIMEOUT: int = 60  # 1 min for cidx fix-config
 
     def _cb_git_fetch_and_validate(
-        self, base_clone_path: str, target_branch: str, git_timeout: int
+        self,
+        base_clone_path: str,
+        target_branch: str,
+        git_timeout: int,
+        *,
+        credentials_url: Optional[str],
     ) -> None:
+<<<<<<< HEAD
         """Fetch remote and validate that target_branch exists (AC3)."""
         # EVO-64678: both git calls route through the seam. Both ran with
         # check=True, and the seam raises CalledProcessError on a non-zero exit,
@@ -5155,6 +5398,20 @@ class GoldenRepoManager:
             remote="origin",
             no_fsync=True,
             timeout=git_timeout,
+=======
+        """Fetch remote and validate that target_branch exists (AC3).
+
+        ``credentials_url`` is the registered repository URL; its credentials
+        are supplied to git at run time."""
+        subprocess.run(
+            ["git", "-c", "core.fsync=none", "fetch", "origin"],
+            cwd=base_clone_path,
+            capture_output=True,
+            text=True,
+            timeout=git_timeout,
+            check=True,
+            env=build_non_interactive_git_env(credentials_url),
+>>>>>>> upstream/master
         )
         remote_branches = set(
             self._git_backend.list_branches(
@@ -5171,14 +5428,31 @@ class GoldenRepoManager:
             )
 
     def _cb_checkout_and_pull(
-        self, base_clone_path: str, target_branch: str, git_timeout: int
+        self,
+        base_clone_path: str,
+        target_branch: str,
+        git_timeout: int,
+        *,
+        credentials_url: Optional[str],
     ) -> None:
+<<<<<<< HEAD
         """Checkout target branch and pull latest commits."""
         # EVO-64678: both git calls route through the seam; check=True semantics
         # are preserved (the seam raises CalledProcessError on non-zero exit).
         self._git_backend.checkout(
             base_clone_path,
             target_branch,
+=======
+        """Checkout target branch and pull latest commits.
+
+        ``credentials_url`` is the registered repository URL; its credentials
+        are supplied to the pull at run time."""
+        subprocess.run(
+            ["git", "checkout", target_branch],
+            cwd=base_clone_path,
+            capture_output=True,
+            text=True,
+>>>>>>> upstream/master
             timeout=git_timeout,
         )
         self._git_backend.pull(
@@ -5187,6 +5461,11 @@ class GoldenRepoManager:
             branch=target_branch,
             no_fsync=True,
             timeout=git_timeout,
+<<<<<<< HEAD
+=======
+            check=True,
+            env=build_non_interactive_git_env(credentials_url),
+>>>>>>> upstream/master
         )
 
     def _cb_cidx_index(self, base_clone_path: str) -> None:
@@ -5211,10 +5490,45 @@ class GoldenRepoManager:
             # silently inherited the unsafe enabled default in postgres/
             # cluster mode. Merged via the shared resolver used by every
             # other server-side `cidx index` spawn site.
+<<<<<<< HEAD
             _cb_env = build_cidx_subprocess_env()
             _cb_env.update(resolve_hnsw_sync_epoch_env_var())
             result = subprocess.run(
                 append_server_layout_args(["cidx", "index", "--fts"]),
+=======
+            from code_indexer.server.services.config_service import (
+                get_config_service as _get_config_service_for_stats,
+            )
+            from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+                build_embedding_stats_child_env,
+            )
+
+            # Story #2118: the child needs CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR
+            # to write its attributed embedding_call_stats rows (as every
+            # other server `cidx index` spawn does).
+            _cb_env = build_cidx_subprocess_env(
+                build_embedding_stats_child_env(
+                    _get_config_service_for_stats().get_config()
+                )
+            )
+            _cb_env.update(resolve_hnsw_sync_epoch_env_var())
+            from code_indexer.server.services.embedding_stats_attribution import (
+                build_server_stats_attribution,
+            )
+
+            # Story #2118: the base clone is golden_repos_dir/<alias>; a branch
+            # change re-index runs outside any job handle here.
+            result = subprocess.run(
+                append_server_layout_args(
+                    ["cidx", "index", "--fts"],
+                    attribution=build_server_stats_attribution(
+                        alias=f"{Path(base_clone_path).name}-global",
+                        job_id=None,
+                        site="golden_repo_change_branch",
+                        purpose="index",
+                    ),
+                ),
+>>>>>>> upstream/master
                 cwd=base_clone_path,
                 capture_output=True,
                 text=True,
@@ -5440,6 +5754,18 @@ class GoldenRepoManager:
             )
             from code_indexer.server.utils.registry_factory import (
                 is_postgres_storage_mode,
+<<<<<<< HEAD
+=======
+            )
+
+            # Get list of files in target branch via git ls-files on the snapshot
+            result = subprocess.run(
+                ["git", "ls-files"],
+                cwd=snapshot_path,
+                capture_output=True,
+                text=True,
+                timeout=60,
+>>>>>>> upstream/master
             )
 
             # Get list of files in target branch via git ls-files on the snapshot.
@@ -5456,6 +5782,11 @@ class GoldenRepoManager:
                 )
                 return
 
+<<<<<<< HEAD
+=======
+            branch_files = set(result.stdout.splitlines())
+
+>>>>>>> upstream/master
             # Bug #1575 Part C review fix (Defect 3a bypass 1): thread the
             # postgres/cluster-mode signal, matching
             # FilesystemBackend.get_vector_store_client()'s existing
@@ -5697,8 +6028,17 @@ class GoldenRepoManager:
 
             base = golden_repo.clone_path
             previous_branch = golden_repo.default_branch
-            self._cb_git_fetch_and_validate(base, target_branch, git_t)
-            self._cb_checkout_and_pull(base, target_branch, git_t)
+            # The base clone (never a versioned snapshot) converges to a
+            # credential-free origin; credentials are supplied at run time.
+            # A failed sanitization raises GitCommandError here, before any
+            # credentialed git call.
+            ensure_remote_url_without_credentials(base)
+            self._cb_git_fetch_and_validate(
+                base, target_branch, git_t, credentials_url=golden_repo.repo_url
+            )
+            self._cb_checkout_and_pull(
+                base, target_branch, git_t, credentials_url=golden_repo.repo_url
+            )
             try:
                 # Story #482 PATH D: coarse progress markers around each major step.
                 # _cb_cidx_index/_cb_cow_snapshot are shared callbacks used elsewhere;
@@ -5739,8 +6079,12 @@ class GoldenRepoManager:
                     scheduler.raise_if_write_lock_ownership_lost(
                         alias, owner_name="branch_change"
                     )
+<<<<<<< HEAD
                 published = self._publish_index(base, snapshot)
                 self._cb_swap_alias(alias, snapshot, published)
+=======
+                self._cb_swap_alias(alias, snapshot)
+>>>>>>> upstream/master
                 if progress_callback is not None:
                     progress_callback(
                         100,
@@ -5889,7 +6233,11 @@ class GoldenRepoManager:
             submitter_username=submitter_username,
             is_admin=True,
             repo_alias=alias,
+<<<<<<< HEAD
             # EVO-64545 (pod-pull): the executor is the bound change_branch method
+=======
+            # Pod-pull: the executor is the bound change_branch method
+>>>>>>> upstream/master
             # reconstructed from these params on whichever pod claims the row.
             metadata={"alias": alias, "target_branch": target_branch},
         )
@@ -6077,6 +6425,7 @@ class GoldenRepoManager:
         if "temporal" in index_types:
             self._refuse_temporal_under_delegated_content()
 
+<<<<<<< HEAD
         # EVO-66113: BackgroundJobManager._execute_job injects the assigned
         # job_id into any worker whose signature declares a `job_id` param,
         # straight from the dequeued (job_id, func, args, kwargs) tuple --
@@ -6084,8 +6433,22 @@ class GoldenRepoManager:
         _golden = self._resolve_golden_repo(alias)
         _layout = repo_layout_kwargs(getattr(_golden, "repo_url", None), alias)
 
+=======
+>>>>>>> upstream/master
         def background_worker(progress_callback=None, job_id=None) -> Dict[str, Any]:
             """Execute add index operations in a single background thread with write lock + CoW."""
+            from code_indexer.server.services.embedding_stats_attribution import (
+                build_server_stats_attribution,
+            )
+
+            # Story #2118: declaring job_id makes BackgroundJobManager inject
+            # this job's id; every child is charged to it, purpose index.
+            stats_attribution = build_server_stats_attribution(
+                alias=f"{alias}-global",
+                job_id=job_id,
+                site="golden_repo_add_index",
+                purpose="index",
+            )
             # Acquire write lock (Bug #473 Fix 1)
             scheduler = getattr(self, "_refresh_scheduler", None)
             lock_acquired = False
@@ -6192,10 +6555,14 @@ class GoldenRepoManager:
                         error_label=error_label,
                     )
                     _shared_kwargs["env"] = build_embedding_stats_child_env(
+<<<<<<< HEAD
                         _get_config_service_for_stats().get_config(),
                         base_env=env,
                         golden_repo_alias=alias,
                         job_id=job_id,
+=======
+                        _get_config_service_for_stats().get_config(), base_env=env
+>>>>>>> upstream/master
                     )
                     # Bug #1575 Part C independent re-review: this closure
                     # is the SHARED convergence point for the semantic and
@@ -6257,7 +6624,11 @@ class GoldenRepoManager:
 
                         command = append_server_layout_args(
                             ["cidx", "index", "--clear", "--progress-json"],
+<<<<<<< HEAD
                             **_layout,
+=======
+                            attribution=stats_attribution,
+>>>>>>> upstream/master
                         )
                         _run_with_popen_progress(
                             command,
@@ -6282,7 +6653,11 @@ class GoldenRepoManager:
 
                         command = append_server_layout_args(
                             ["cidx", "index", "--rebuild-fts-index"],
+<<<<<<< HEAD
                             **_layout,
+=======
+                            attribution=stats_attribution,
+>>>>>>> upstream/master
                         )
                         from code_indexer.storage.shared.hnsw_sync_state import (
                             resolve_hnsw_sync_epoch_env_var as _resolve_fts_hnsw_epoch,
@@ -6291,7 +6666,22 @@ class GoldenRepoManager:
                         # Bug #1575 Part C independent re-review: this
                         # spawn previously never set
                         # CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV at all.
+<<<<<<< HEAD
                         _fts_env = build_cidx_subprocess_env()
+=======
+                        # Story #2118: same stats bootstrap env as every
+                        # other attributed `cidx index` child.
+                        from code_indexer.server.services.config_service import (
+                            get_config_service as _get_cfg_for_fts_stats,
+                        )
+                        from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+                            build_embedding_stats_child_env as _fts_stats_env,
+                        )
+
+                        _fts_env = build_cidx_subprocess_env(
+                            _fts_stats_env(_get_cfg_for_fts_stats().get_config())
+                        )
+>>>>>>> upstream/master
                         _fts_env.update(_resolve_fts_hnsw_epoch())
                         result = subprocess.run(
                             command,
@@ -6356,7 +6746,11 @@ class GoldenRepoManager:
                                 *_clear_flags,
                                 "--progress-json",
                             ],
+<<<<<<< HEAD
                             **_layout,
+=======
+                            attribution=stats_attribution,
+>>>>>>> upstream/master
                         )
 
                         max_commits = temporal_options.get("max_commits")

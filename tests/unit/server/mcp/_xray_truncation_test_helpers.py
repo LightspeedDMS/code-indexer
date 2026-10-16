@@ -103,6 +103,7 @@ def make_finding(i: int) -> Dict[str, Any]:
     }
 
 
+<<<<<<< HEAD
 def fetch_all_pages(
     payload_cache: PayloadCache, cache_handle: str
 ) -> List[Dict[str, Any]]:
@@ -111,6 +112,21 @@ def fetch_all_pages(
     pages: List[Dict[str, Any]] = []
     for page_num in range(1, MAX_PAGES_SAFETY + 1):
         result = xt.fetch_cached_page(payload_cache, cache_handle, page_num)
+=======
+# The user whose request creates (and therefore may fetch) the cached pages.
+OWNER = "alice"
+
+
+def fetch_all_pages(
+    payload_cache: PayloadCache, cache_handle: str, owner: str = OWNER
+) -> List[Dict[str, Any]]:
+    """Walk every page via xt.fetch_cached_page as `owner` (the creator),
+    asserting each page's `content` parses standalone. Returns the parsed
+    page dicts in order."""
+    pages: List[Dict[str, Any]] = []
+    for page_num in range(1, MAX_PAGES_SAFETY + 1):
+        result = xt.fetch_cached_page(payload_cache, cache_handle, page_num, owner)
+>>>>>>> upstream/master
         parsed = json_module.loads(result["content"])
         pages.append(parsed)
         if not result["has_more"]:

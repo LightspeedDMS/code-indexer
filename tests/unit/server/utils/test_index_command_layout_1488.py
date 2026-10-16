@@ -18,12 +18,33 @@ server-managed provider settings are used.
 
 import pytest
 
+<<<<<<< HEAD
 from code_indexer.server.utils.index_command_layout import append_server_layout_args
 
 
 class TestAppendServerLayoutArgs:
     def test_appends_chunks_db_layout_flag(self) -> None:
         result = append_server_layout_args(["cidx", "index"])
+=======
+from code_indexer.server.services.embedding_stats_attribution import (
+    StatsAttribution,
+)
+from code_indexer.server.utils.index_command_layout import append_server_layout_args
+
+_ATTRIBUTION = StatsAttribution(
+    golden_repo_alias="example-repo-global",
+    job_id="job-1",
+    node_id="node-a",
+    purpose="index",
+)
+#: Story #2118: one `--opt=value` token carrying the attribution JSON.
+_STATS_ARG = f"--stats-attribution={_ATTRIBUTION.to_json()}"
+
+
+class TestAppendServerLayoutArgs:
+    def test_appends_chunks_db_layout_flag(self) -> None:
+        result = append_server_layout_args(["cidx", "index"], attribution=_ATTRIBUTION)
+>>>>>>> upstream/master
 
         assert result == [
             "cidx",
@@ -31,11 +52,20 @@ class TestAppendServerLayoutArgs:
             "--new-collection-layout=chunks_db",
             "--ignore-resume-state",
             "--server-managed-provider-settings",
+<<<<<<< HEAD
+=======
+            _STATS_ARG,
+>>>>>>> upstream/master
         ]
 
     def test_preserves_prior_tokens_and_order(self) -> None:
         result = append_server_layout_args(
+<<<<<<< HEAD
             ["cidx", "index", "--fts", "--reconcile", "--progress-json"]
+=======
+            ["cidx", "index", "--fts", "--reconcile", "--progress-json"],
+            attribution=_ATTRIBUTION,
+>>>>>>> upstream/master
         )
 
         assert result == [
@@ -47,15 +77,24 @@ class TestAppendServerLayoutArgs:
             "--new-collection-layout=chunks_db",
             "--ignore-resume-state",
             "--server-managed-provider-settings",
+<<<<<<< HEAD
+=======
+            _STATS_ARG,
+>>>>>>> upstream/master
         ]
 
     def test_does_not_mutate_input_list(self) -> None:
         original = ["cidx", "index", "--clear"]
+<<<<<<< HEAD
         result = append_server_layout_args(original)
+=======
+        result = append_server_layout_args(original, attribution=_ATTRIBUTION)
+>>>>>>> upstream/master
 
         assert original == ["cidx", "index", "--clear"]
         assert result is not original
 
+<<<<<<< HEAD
 
 class TestContentBackendStamp:
     """The server's content-backend selection reaches every spawned child.
@@ -302,3 +341,15 @@ class TestPodLocalRepos:
             assert stamped == [*TestGitBackendStamp._BASE, "--content-backend=delegated"]
         else:
             assert stamped == before == TestGitBackendStamp._BASE
+=======
+    def test_stamped_attribution_round_trips(self) -> None:
+        result = append_server_layout_args(["cidx", "index"], attribution=_ATTRIBUTION)
+
+        prefix = "--stats-attribution="
+        [stamped] = [token for token in result if token.startswith(prefix)]
+        assert StatsAttribution.from_json(stamped[len(prefix) :]) == _ATTRIBUTION
+
+    def test_requires_attribution(self) -> None:
+        with pytest.raises(TypeError):
+            append_server_layout_args(["cidx", "index"])  # type: ignore[call-arg]
+>>>>>>> upstream/master

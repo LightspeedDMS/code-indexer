@@ -19,10 +19,13 @@ from .indexers.go import GoIndexer
 from .status import ProjectStatus
 from .database.schema import DatabaseManager
 from .database.builder import SCIPDatabaseBuilder
+from .protobuf import scip_pb2
+from ..utils.path_confinement import resolves_into_git_directory
 
 logger = logging.getLogger(__name__)
 
 
+<<<<<<< HEAD
 # EVO-65021: BSD sysexits ``EX_UNAVAILABLE`` — the exit code the delegated
 # sandbox scip wrapper returns for a language it has no indexer for. cidx itself
 # also emits an equivalent stderr marker when a discovered language is outside
@@ -54,6 +57,36 @@ def indexer_result_is_unsupported_language(indexer_result: IndexerResult) -> boo
         return True
     stderr = (getattr(indexer_result, "stderr", "") or "").lower()
     return any(marker in stderr for marker in _UNSUPPORTED_LANGUAGE_MARKERS)
+=======
+def drop_git_backed_documents(
+    scip_file: Path, project_dir: Path, repo_root: Path
+) -> int:
+    """Remove from ``scip_file`` every document whose source, resolved
+    against ``project_dir``, lies inside the repository's own .git (e.g. a
+    committed ``link.py -> .git/config`` that a language indexer followed),
+    so no SCIP document is ever built from such a file. Rewrites the file
+    only when something was removed; returns the number removed."""
+    index = scip_pb2.Index()  # type: ignore[attr-defined]
+    index.ParseFromString(scip_file.read_bytes())
+    resolved_root = repo_root.resolve()
+    kept = [
+        doc
+        for doc in index.documents
+        if not resolves_into_git_directory(
+            project_dir / doc.relative_path, resolved_root
+        )
+    ]
+    removed = len(index.documents) - len(kept)
+    if removed:
+        del index.documents[:]
+        index.documents.extend(kept)
+        scip_file.write_bytes(index.SerializeToString())
+        logger.info(
+            "SCIP: excluded %d document(s) resolving into the repository's .git",
+            removed,
+        )
+    return removed
+>>>>>>> upstream/master
 
 
 @dataclass
@@ -382,6 +415,9 @@ class SCIPGenerator:
                 if indexer_result.output_file:
                     try:
                         scip_file = indexer_result.output_file
+                        drop_git_backed_documents(
+                            scip_file, project_dir, self.repo_root
+                        )
                         db_manager = DatabaseManager(scip_file)
                         db_manager.create_schema()
 
@@ -523,6 +559,7 @@ class SCIPGenerator:
             if indexer_result.is_success() and indexer_result.output_file:
                 try:
                     scip_file = indexer_result.output_file
+                    drop_git_backed_documents(scip_file, project_dir, self.repo_root)
                     db_manager = DatabaseManager(scip_file)
                     db_manager.create_schema()
 

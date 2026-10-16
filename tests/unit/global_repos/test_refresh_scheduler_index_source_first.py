@@ -29,6 +29,17 @@ from code_indexer.global_repos.global_registry import GlobalRegistry
 from code_indexer.config import ConfigManager
 
 
+@pytest.fixture(autouse=True)
+def _no_stored_url_rewrite(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GitPullUpdater is mocked here and no clone exists on disk, so the
+    credential-free rewrite of stored URLs has nothing to act on."""
+    monkeypatch.setattr(
+        "code_indexer.global_repos.refresh_scheduler."
+        "ensure_remote_url_without_credentials",
+        lambda _path: 0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------

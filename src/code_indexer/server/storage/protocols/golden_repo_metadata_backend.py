@@ -6,6 +6,11 @@ pure typing-construct relocation, zero behaviour change.
 
 from __future__ import annotations
 
+<<<<<<< HEAD
+=======
+from typing import Callable, Tuple
+
+>>>>>>> upstream/master
 from ._shared import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 
@@ -32,7 +37,10 @@ class GoldenRepoMetadataBackend(Protocol):
         created_at: str,
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
+<<<<<<< HEAD
         workspace_id: Optional[str] = None,
+=======
+>>>>>>> upstream/master
     ) -> None: ...
 
     def get_repo(self, alias: str) -> Optional[Dict[str, Any]]: ...
@@ -43,6 +51,13 @@ class GoldenRepoMetadataBackend(Protocol):
 
     def repo_exists(self, alias: str) -> bool: ...
 
+<<<<<<< HEAD
+=======
+    # public #1984: which of *names* are golden aliases, from one lookup
+    # bounded to those names (never a listing of every repository).
+    def existing_aliases(self, names: List[str]) -> set[str]: ...
+
+>>>>>>> upstream/master
     def update_enable_temporal(self, alias: str, enable: bool) -> bool: ...
 
     # Bug #1414: temporal_options is the Web UI's sole write target
@@ -53,8 +68,11 @@ class GoldenRepoMetadataBackend(Protocol):
 
     def update_repo_url(self, alias: str, repo_url: str) -> bool: ...
 
+<<<<<<< HEAD
     def update_workspace_id(self, alias: str, workspace_id: Optional[str]) -> bool: ...
 
+=======
+>>>>>>> upstream/master
     def update_category(
         self, alias: str, category_id: Optional[int], auto_assigned: bool = True
     ) -> bool: ...
@@ -123,6 +141,96 @@ class GoldenRepoMetadataBackend(Protocol):
         self, golden_alias: str
     ) -> Optional[Dict[str, Any]]: ...
 
+<<<<<<< HEAD
+=======
+    # Consecutive forced reconciles that left the same stale-index signal
+    # unchanged, so the refresh scheduler stops forcing after a bound.
+    def record_forced_reconcile(self, golden_alias: str, signal: str) -> int: ...
+
+    def get_forced_reconcile_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]: ...
+
+    def clear_forced_reconcile_state(self, golden_alias: str) -> None: ...
+
+    # Bug #2022: per-repo refresh failure backoff for repeated failures the
+    # self-heal cannot repair (refresh_scheduler.py).
+    # Story #2126: unrepairable_reason says why the failure cannot self-heal
+    # (an operator is needed); every recorded failure replaces it.
+    def record_refresh_failure_backoff(
+        self,
+        golden_alias: str,
+        detail: str,
+        unrepairable_reason: Optional[str] = None,
+    ) -> int: ...
+
+    def get_refresh_failure_backoff_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]: ...
+
+    def list_unrepairable_refresh_failures(self) -> List[Dict[str, str]]: ...
+
+    # Durable marker for a system trigger deferred by that backoff. A
+    # scheduler leases a due trigger (it stays pending until a verified
+    # publish resolves it, so a crash only delays it to the lease end).
+    def mark_refresh_trigger_pending(
+        self, golden_alias: str, due_at: float
+    ) -> bool: ...
+
+    def list_due_refresh_triggers(self, now: float) -> List[Dict[str, Any]]: ...
+
+    def lease_pending_refresh_trigger(
+        self, golden_alias: str, now: float, until: float
+    ) -> bool: ...
+
+    def resolve_refresh_failure_backoff(
+        self, golden_alias: str, covered_generation: int
+    ) -> None: ...
+
+    def clear_refresh_trigger(
+        self, golden_alias: str, covered_generation: int
+    ) -> bool: ...
+
+    def escalate_refresh_trigger(
+        self, golden_alias: str, covered_generation: int
+    ) -> Optional[int]: ...
+
+    # Story #2118: a system refresh deferred by the refresh volume alarm is a
+    # pending trigger WITHOUT a strike; published_points (bare alias) is the
+    # alarm's reference size, NULL until a verified publish records it.
+    def mark_volume_alarm_deferral(self, golden_alias: str, due_at: float) -> None: ...
+
+    # Bug #2125: an OWED retry (files still owed after a partial publish, or
+    # a trigger-only refresh that failed on an ordinary error) is a pending
+    # trigger escalated by its own owed_retry_count, never a failure.
+    def record_owed_refresh_retry(
+        self,
+        golden_alias: str,
+        detail: str,
+        covered_generation: Optional[int],
+        min_count: int,
+        retry_seconds: Callable[[int], float],
+    ) -> Tuple[int, float]: ...
+
+    # Bug #2125: a publish that still owes work resolves its covered
+    # generation AND owes a retry in ONE transaction.
+    def resolve_and_record_owed_retry(
+        self,
+        golden_alias: str,
+        covered_generation: int,
+        detail: str,
+        retry_seconds: Callable[[int], float],
+    ) -> Tuple[int, float]: ...
+
+    def set_published_points(self, alias: str, points: int) -> bool: ...
+
+    def get_published_points(self, alias: str) -> Optional[int]: ...
+
+    def get_published_points_many(
+        self, aliases: List[str]
+    ) -> Dict[str, Optional[int]]: ...
+
+>>>>>>> upstream/master
     # Bug #1769: local-repo `cidx init` repair per-repo failure
     # quarantine state (see global_repos/refresh_scheduler.py's
     # _repair_uninitialized_local_repo()).

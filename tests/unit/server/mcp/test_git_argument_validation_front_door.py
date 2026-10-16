@@ -36,10 +36,17 @@ path that git itself reports as unmatched (asserted on git's own
 "did not match" text, which only appears when the separator is present),
 and a real filename containing LF stages normally.
 
+<<<<<<< HEAD
 `git_branch_switch` uses a non-`-global` repository alias: a `-global`
 alias is rejected by an unrelated golden-repo guard before the handler
 ever reaches the service, which would make that test pass regardless of
 the fix under test.
+=======
+Every git WRITE tool here uses a non-`-global` repository alias: git
+write tools refuse a `-global` alias (a shared golden repository) before
+the handler ever reaches the service, which would make those tests pass
+regardless of the fix under test.
+>>>>>>> upstream/master
 
 `git_reset` and `git_branch_delete` route every `ValueError` (their
 confirmation-token machinery raises one on an invalid token) through a
@@ -294,7 +301,11 @@ class TestGitBranchCreateFrontDoor:
                     params={
                         "name": "git_branch_create",
                         "arguments": {
+<<<<<<< HEAD
                             "repository_alias": "example-repo-global",
+=======
+                            "repository_alias": "example-repo",
+>>>>>>> upstream/master
                             "branch_name": "--track",
                         },
                     },
@@ -328,7 +339,11 @@ class TestGitStageFrontDoor:
                     params={
                         "name": "git_stage",
                         "arguments": {
+<<<<<<< HEAD
                             "repository_alias": "example-repo-global",
+=======
+                            "repository_alias": "example-repo",
+>>>>>>> upstream/master
                             "file_paths": file_paths,
                         },
                     },
@@ -409,7 +424,11 @@ class TestGitMergeFrontDoor:
                     params={
                         "name": "git_merge",
                         "arguments": {
+<<<<<<< HEAD
                             "repository_alias": "example-repo-global",
+=======
+                            "repository_alias": "example-repo",
+>>>>>>> upstream/master
                             "source_branch": "-Xtheirs",
                         },
                     },
@@ -457,7 +476,11 @@ class TestGitResetFrontDoor:
                     params={
                         "name": "git_reset",
                         "arguments": {
+<<<<<<< HEAD
                             "repository_alias": "example-repo-global",
+=======
+                            "repository_alias": "example-repo",
+>>>>>>> upstream/master
                             "mode": "mixed",
                             "commit_hash": "-x",
                         },
@@ -498,7 +521,11 @@ class TestGitBranchDeleteFrontDoor:
                     params={
                         "name": "git_branch_delete",
                         "arguments": {
+<<<<<<< HEAD
                             "repository_alias": "example-repo-global",
+=======
+                            "repository_alias": "example-repo",
+>>>>>>> upstream/master
                             "branch_name": "-D",
                         },
                     },

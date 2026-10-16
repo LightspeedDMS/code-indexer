@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 """Bug #1763 code review, CRITICAL-2: `cidx watch`'s FTS handler
 initialization block self-heals a stale-schema Tantivy index (Bug #1761's
 _PATH_EXACT_FIELD) independently of SmartIndexer.smart_index() -- it does
@@ -19,18 +20,41 @@ the standalone helper `watch()`'s FTS handler init block calls (see
 `src/code_indexer/cli.py`, right after `tantivy_manager.initialize_index()`
 in the FTS handler init section), driven directly with real files, a real
 TantivyIndexManager, and no test doubles at all.
+=======
+"""Bug #1763 code review, CRITICAL-2: `cidx watch`'s FTS index start
+self-heals a stale-schema Tantivy index (Bug #1761's _PATH_EXACT_FIELD)
+independently of SmartIndexer.smart_index() -- it does NOT always run
+through smart_index() first (e.g. semantic indexing is not enabled for this
+watch session, or this is not the initial sync). Before the fix, the watch
+start wiped a stale index and never repopulated it -- every untouched
+file's FTS entries were gone.
+
+`cidx watch` is a long-running interactive command, so these tests drive
+the exact function `watch()` calls to open its FTS index --
+`fts_lifecycle.open_fts_index_for_watch()`, the same decision and rebuild
+as `cidx index --fts` (Bug #2056) -- with real files, a real Tantivy index
+and no test doubles.
+>>>>>>> upstream/master
 """
 
 from __future__ import annotations
 
+<<<<<<< HEAD
 import shutil
+=======
+>>>>>>> upstream/master
 from pathlib import Path
 from typing import Any, Dict, List
 
 import tantivy
 
+<<<<<<< HEAD
 from code_indexer.cli import _populate_fts_index_from_disk
 from code_indexer.config import Config
+=======
+from code_indexer.config import Config
+from code_indexer.services.fts_lifecycle import open_fts_index_for_watch
+>>>>>>> upstream/master
 from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
 # Tantivy IndexWriter heap size for the raw-tantivy legacy-index builder
@@ -81,14 +105,31 @@ def _build_legacy_fts_index(index_dir: Path, documents: List[Dict[str, Any]]) ->
     writer.wait_merging_threads()
 
 
+<<<<<<< HEAD
 def test_populate_fts_index_from_disk_adds_every_file(tmp_path: Path) -> None:
     """Direct unit coverage: _populate_fts_index_from_disk() must discover
     and add every file on disk, matching SmartIndexer.
     _populate_fts_from_all_files()'s contract."""
+=======
+def _start_watch_fts(config: Config) -> None:
+    fts_manager, _rebuilt_files = open_fts_index_for_watch(config)
+    fts_manager.close()
+
+
+def _search(fts_index_dir: Path, token: str) -> List[Dict[str, Any]]:
+    verify_manager = TantivyIndexManager(fts_index_dir)
+    verify_manager.open_for_search()
+    return verify_manager.search(token, limit=5)
+
+
+def test_watch_start_without_index_adds_every_file(tmp_path: Path) -> None:
+    """A watch start with no FTS index builds it from every file on disk."""
+>>>>>>> upstream/master
     codebase = tmp_path / "proj"
     codebase.mkdir()
     (codebase / "alpha.py").write_text("ALPHA_MARKER_1763 = 1\n")
     (codebase / "beta.py").write_text("BETA_MARKER_1763 = 1\n")
+<<<<<<< HEAD
 
     config = Config(codebase_dir=codebase)
     fts_index_dir = codebase / ".code-indexer" / "tantivy_index"
@@ -146,6 +187,25 @@ def test_watch_style_stale_schema_self_heal_survives_untouched_doc(
     untouched file, seeded in a legacy-schema on-disk index, survives
     `cidx watch`'s exact stale-schema-detect -> wipe -> repopulate
     sequence (see _run_watch_style_self_heal above)."""
+=======
+    config = Config(codebase_dir=codebase)
+
+    _start_watch_fts(config)
+
+    fts_index_dir = codebase / ".code-indexer" / "tantivy_index"
+    alpha_results = _search(fts_index_dir, "ALPHA_MARKER_1763")
+    beta_results = _search(fts_index_dir, "BETA_MARKER_1763")
+    assert [r["path"] for r in alpha_results] == ["alpha.py"]
+    assert [r["path"] for r in beta_results] == ["beta.py"]
+
+
+def test_watch_stale_schema_self_heal_keeps_untouched_files(
+    tmp_path: Path,
+) -> None:
+    """Proves CRITICAL-2 is fixed: an untouched file indexed in a
+    legacy-schema index is still searchable after the watch start's
+    stale-schema rebuild."""
+>>>>>>> upstream/master
     codebase = tmp_path / "proj"
     codebase.mkdir()
     (codebase / "existing.py").write_text("EXISTING_MARKER_1763 = 1\n")
@@ -166,6 +226,7 @@ def test_watch_style_stale_schema_self_heal_survives_untouched_doc(
             }
         ],
     )
+<<<<<<< HEAD
 
     config = Config(codebase_dir=codebase)
     _run_watch_style_self_heal(config, fts_index_dir)
@@ -238,6 +299,30 @@ def test_watch_style_directory_present_meta_json_absent_gets_repopulated(
     fts_index_exists=False for this directory shape, driving
     fts_needs_full_population=True and a real repopulation from disk.
     """
+=======
+    assert TantivyIndexManager(fts_index_dir).schema_needs_rebuild()
+
+    _start_watch_fts(Config(codebase_dir=codebase))
+
+    existing_results = _search(fts_index_dir, "EXISTING_MARKER_1763")
+    other_results = _search(fts_index_dir, "OTHER_MARKER_1763")
+    assert [r["path"] for r in existing_results] == ["existing.py"], (
+        "CRITICAL-2: existing.py's FTS entry was lost by the stale-schema "
+        f"self-heal. Got: {existing_results}"
+    )
+    assert [r["path"] for r in other_results] == ["other.py"]
+
+
+def test_watch_directory_present_meta_json_absent_gets_repopulated(
+    tmp_path: Path,
+) -> None:
+    """MEDIUM-5 (#1763 code review): a previously failed/partial rmtree --
+    or any other reason the tantivy_index directory exists without ever
+    having been fully initialized -- leaves the directory PRESENT with no
+    `meta.json`. That shape is "no index" (meta.json is the marker file),
+    so the watch start builds it from disk instead of silently opening a
+    brand-new EMPTY index."""
+>>>>>>> upstream/master
     codebase = tmp_path / "proj"
     codebase.mkdir()
     (codebase / "existing.py").write_text("EXISTING_MARKER_MEDIUM5 = 1\n")
@@ -248,6 +333,7 @@ def test_watch_style_directory_present_meta_json_absent_gets_repopulated(
     # directory): present on disk, contains a stray file, but crucially
     # has no meta.json.
     (fts_index_dir / "leftover.tmp").write_text("partial rmtree residue")
+<<<<<<< HEAD
     assert fts_index_dir.exists()
     assert not (fts_index_dir / "meta.json").exists()
 
@@ -262,3 +348,14 @@ def test_watch_style_directory_present_meta_json_absent_gets_repopulated(
         f"must be repopulated, not left silently empty. Got: {results}"
     )
     assert results[0]["path"] == "existing.py"
+=======
+    assert not (fts_index_dir / "meta.json").exists()
+
+    _start_watch_fts(Config(codebase_dir=codebase))
+
+    results = _search(fts_index_dir, "EXISTING_MARKER_MEDIUM5")
+    assert [r["path"] for r in results] == ["existing.py"], (
+        "MEDIUM-5: a directory-present-but-meta.json-absent FTS index "
+        f"must be repopulated, not left silently empty. Got: {results}"
+    )
+>>>>>>> upstream/master

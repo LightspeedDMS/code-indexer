@@ -41,7 +41,11 @@ WHY THIS WORKS:
 
 IF YOU THINK SOMETHING IS BROKEN:
 ----------------------------------
+<<<<<<< HEAD
 1. Test with: curl https://cidx.example.com:8383/.well-known/oauth-authorization-server
+=======
+1. Test with: curl https://cidx.example.com/.well-known/oauth-authorization-server
+>>>>>>> upstream/master
 2. Should return OAuth metadata JSON with issuer, endpoints, etc.
 3. If working, DO NOT CHANGE ANYTHING
 4. If broken, check server logs first, don't modify code blindly
@@ -55,15 +59,30 @@ VERIFIED WORKING:
 """
 
 from fastapi import APIRouter, HTTPException, status, Depends, Request, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import base64
 import functools
+<<<<<<< HEAD
 
 import anyio
 
 from .oauth_manager import OAuthManager, OAuthError, PKCEVerificationError
+=======
+import math
+
+import anyio
+
+from .oauth_manager import (
+    AuthorizationGrantRefused,
+    OAuthManager,
+    OAuthError,
+    PKCEVerificationError,
+    authorization_response_url,
+    is_registered_redirect_uri,
+)
+>>>>>>> upstream/master
 from ..user_manager import User, UserManager
 from ..mcp_credential_manager import MCPCredentialManager
 from ..audit_logger import password_audit_logger
@@ -84,6 +103,7 @@ def _authenticate_or_reject(
 ) -> Optional[User]:
     """Check the password; record the refused attempt when it fails.
 
+<<<<<<< HEAD
     The typed name is recorded only when it names an existing account.
     """
     user = user_manager.authenticate_user(username, password)
@@ -104,10 +124,105 @@ def _reject_challenge(username: Optional[str], *, account_exists: bool) -> None:
         username,
         account_exists=account_exists,
         method=_PASSWORD_LOGIN_METHOD,
+=======
+    Runs off the event loop.  The attempt is first RESERVED in the
+    per-username progressive throttle shared with REST and Web logins (one
+    row-locked transaction, so concurrent requests cannot slip past it);
+    while the backoff window runs it is refused with 429 before the password
+    is checked (no audit row).  The typed name is recorded only when it
+    names an existing account.
+    """
+    from .. import login_rate_limiter as _login_throttle
+
+    throttle = _login_throttle.login_rate_limiter
+    try:
+        attempt = throttle.begin_attempt(username)
+    except _login_throttle.ThrottleStoreBusy:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Login is busy, try again shortly.",
+            headers={"Retry-After": "1"},
+        )
+    if not attempt.admitted:
+        wait = math.ceil(attempt.retry_after_seconds)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many attempts, try again in {wait} seconds.",
+            headers={"Retry-After": str(wait)},
+        )
+    try:
+        username.encode("utf-8")
+        storable = True
+    except UnicodeEncodeError:
+        # A JSON body can carry a lone surrogate: no account can have such a
+        # name (and the user store cannot even look it up), so it is an
+        # ordinary refused login for an unknown account.
+        storable = False
+    user = user_manager.authenticate_user(username, password) if storable else None
+    if user is None:
+        account_exists = storable and user_manager.get_user(username) is not None
+        if not account_exists:
+            # An unknown name costs one password hash too (same helper as
+            # REST), so response time does not reveal whether it exists.
+            from ..auth_error_handler import auth_error_handler
+
+            auth_error_handler.perform_dummy_password_work()
+        reject_login(
+            username,
+            account_exists=account_exists,
+            method=_PASSWORD_LOGIN_METHOD,
+            stage="credentials",
+            reason=_login_throttle.failure_reason(attempt),
+        )
+    # Every MFA code at a login challenge is reserved on its throttle key
+    # before it is checked; a correct password clears nothing here, only a
+    # completed login does (_clear_login_history).
+    return user
+
+
+def _clear_login_history(username: str, *, scope: str) -> None:
+    """A login COMPLETED (first factor, plus code when MFA is configured):
+    clear the throttle history of that login's key *scope* only (the
+    password-login key, or an SSO challenge's own key).  A store error is
+    logged and never fails the already-issued login.  Sync; run off the
+    loop."""
+    from .. import login_rate_limiter as _login_throttle
+
+    _login_throttle.login_rate_limiter.clear_completed_login(username, scope=scope)
+
+
+def _reject_challenge(
+    username: Optional[str],
+    *,
+    account_exists: bool,
+    method: str = _PASSWORD_LOGIN_METHOD,
+) -> None:
+    """Record a login refused because its MFA challenge is unusable
+    (*method*: the challenge's first factor when it is known)."""
+    reject_login(
+        username,
+        account_exists=account_exists,
+        method=method,
+>>>>>>> upstream/master
         stage="challenge",
         reason="challenge_invalid_or_expired",
     )
 
+<<<<<<< HEAD
+=======
+
+def _unregistered_redirect_page() -> HTMLResponse:
+    """RFC 6749 section 4.1.2.1: a redirect_uri not registered for the client
+    is reported to the user and never redirected to."""
+    from code_indexer.server.web.mfa_routes import _error_html_page
+
+    return _error_html_page(
+        "Invalid Authorization Request",
+        "The application's redirect address is not registered for it.",
+        status.HTTP_400_BAD_REQUEST,
+    )
+
+>>>>>>> upstream/master
 
 # Get the backend-aware OAuth manager from app.state (set during startup in app_wiring.py)
 def get_oauth_manager(request: Request) -> OAuthManager:
@@ -115,6 +230,7 @@ def get_oauth_manager(request: Request) -> OAuthManager:
     return request.app.state.oauth_manager  # type: ignore[no-any-return]
 
 
+<<<<<<< HEAD
 def get_user_manager() -> UserManager:
     """Return the app-wired (backend-aware) UserManager.
 
@@ -149,6 +265,16 @@ def get_mcp_credential_manager() -> MCPCredentialManager:
     if wired is not None:
         return wired
     return MCPCredentialManager(user_manager=get_user_manager())
+=======
+def get_user_manager(request: Request) -> UserManager:
+    """The server's account store: OAuth sign-in authenticates live accounts."""
+    return request.app.state.user_manager  # type: ignore[no-any-return]
+
+
+def get_mcp_credential_manager(request: Request) -> MCPCredentialManager:
+    """MCPCredentialManager over the server's account store."""
+    return MCPCredentialManager(user_manager=get_user_manager(request))
+>>>>>>> upstream/master
 
 
 # Pydantic models for request/response
@@ -286,6 +412,8 @@ def get_authorize_form(
                 "error_description": "Client ID not found",
             },
         )
+    if not is_registered_redirect_uri(client, redirect_uri):
+        return _unregistered_redirect_page()
 
     # Check for existing session (Phase 5: Separate authentication from authorization)
     from code_indexer.server.web import get_session_manager
@@ -315,9 +443,15 @@ def get_authorize_form(
 
     # Authenticated - show consent screen (Phase 5: Separate authorization from authentication)
     from code_indexer.server.web.routes import templates
+    from code_indexer.server.web.mfa_routes import _page_csrf_token, _with_csrf_cookie
+    from .oauth_manager import redirect_host
 
+    # The consent POST requires this Web UI CSRF token.
+    csrf = _page_csrf_token(request)
     # state is optional per OAuth 2.1 PKCE — only include in template context when present
     template_context: dict = {
+        "csrf_token": csrf,
+        "redirect_host": redirect_host(redirect_uri),
         "request": request,
         "username": session.username,
         "client_id": client_id,
@@ -327,10 +461,18 @@ def get_authorize_form(
         "response_type": response_type,
         "state": state,  # None is a valid value; template handles empty state gracefully
     }
+<<<<<<< HEAD
     return templates.TemplateResponse(
         request,
         "oauth_authorize_consent.html",
         template_context,
+=======
+    return _with_csrf_cookie(
+        templates.TemplateResponse(
+            request, "oauth_authorize_consent.html", template_context
+        ),
+        csrf,
+>>>>>>> upstream/master
     )
 
 
@@ -343,6 +485,7 @@ def authorize_consent(
     response_type: str = Form(...),
     state: Optional[str] = Form(None),
     consent: str = Form(...),
+    csrf_token: Optional[str] = Form(None),
     manager: OAuthManager = Depends(get_oauth_manager),
 ):
     """POST /oauth/authorize/consent - Handle consent form submission (Phase 5: Login Consolidation).
@@ -350,7 +493,20 @@ def authorize_consent(
     User is already authenticated via unified login. This endpoint only handles authorization (consent).
     Generates OAuth authorization code and redirects back to client.
     state is optional per OAuth 2.1 with PKCE (Bug #624).
+    The Web UI CSRF token rendered on the consent page is required.
     """
+    from code_indexer.server.web.mfa_routes import _csrf_refusal
+
+    csrf_err = _csrf_refusal(request, csrf_token)
+    if csrf_err is not None:
+        return csrf_err
+
+    # Only a redirect_uri registered for the client is ever redirected to or
+    # carried into the login redirect, for Allow and Deny alike (RFC 6749
+    # section 4.1.2.1).
+    if not is_registered_redirect_uri(manager.get_client(client_id), redirect_uri):
+        return _unregistered_redirect_page()
+
     # Check for existing session (required)
     from code_indexer.server.web import get_session_manager
     from urllib.parse import urlencode, quote
@@ -387,10 +543,15 @@ def authorize_consent(
             detail="code_challenge required (PKCE)",
         )
 
-    # Check consent
     if consent != "allow":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="User denied consent"
+        denied = {
+            "error": "access_denied",
+            "error_description": "The user denied the authorization request",
+            "state": state,
+        }
+        return RedirectResponse(
+            url=authorization_response_url(redirect_uri, denied),
+            status_code=status.HTTP_302_FOUND,
         )
 
     try:
@@ -414,9 +575,9 @@ def authorize_consent(
         )
 
         # Redirect back to client — include state only when provided (Bug #624)
-        redirect_url = f"{redirect_uri}?code={code}"
-        if state is not None:
-            redirect_url = f"{redirect_url}&state={state}"
+        redirect_url = authorization_response_url(
+            redirect_uri, {"code": code, "state": state}
+        )
         return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
 
     except OAuthError as e:
@@ -501,6 +662,21 @@ async def authorize_endpoint(
     # Note: state is intentionally NOT validated as required here.
     # Per OAuth 2.1 with PKCE, state is optional (Bug #624).
 
+<<<<<<< HEAD
+=======
+    # Only a redirect_uri registered for the client is authenticated for,
+    # challenged for (MFA) or redirected to (RFC 6749 section 4.1.2.1).
+    client = await anyio.to_thread.run_sync(manager.get_client, client_id)
+    if not is_registered_redirect_uri(client, redirect_uri):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "invalid_request",
+                "error_description": "redirect_uri is not registered for this client",
+            },
+        )
+
+>>>>>>> upstream/master
     # Authenticate user (password hashing and the refusal's audit row run off
     # the event loop).
     user = await anyio.to_thread.run_sync(
@@ -550,6 +726,14 @@ async def authorize_endpoint(
                     state=state,
                 ),
             )
+<<<<<<< HEAD
+=======
+        )
+        from ..login_rate_limiter import SCOPE_LOGIN
+
+        await anyio.to_thread.run_sync(
+            functools.partial(_clear_login_history, user.username, scope=SCOPE_LOGIN)
+>>>>>>> upstream/master
         )
 
         # Audit log
@@ -564,9 +748,9 @@ async def authorize_endpoint(
         if is_form_request:
             # Browser-based flow: redirect to callback URL with code
             # Include state only when provided (Bug #624: state is optional)
-            redirect_url = f"{redirect_uri}?code={code}"
-            if state is not None:
-                redirect_url = f"{redirect_url}&state={state}"
+            redirect_url = authorization_response_url(
+                redirect_uri, {"code": code, "state": state}
+            )
             return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
         else:
             # Programmatic flow: return JSON response
@@ -587,6 +771,7 @@ def oauth_mfa_verify(
     totp_code: Optional[str] = Form(None),
     recovery_code: Optional[str] = Form(None),
     manager: OAuthManager = Depends(get_oauth_manager),
+    user_manager: UserManager = Depends(get_user_manager),
 ):
     """Verify TOTP/recovery code and complete OAuth authorization (Story #562).
 
@@ -604,6 +789,25 @@ def oauth_mfa_verify(
             detail="MFA service not available",
         )
 
+    client_ip = http_request.client.host if http_request.client else "unknown"
+
+    # The code is an attempt on the account's LOGIN throttle key, reserved
+    # before it is checked; a refusal keeps the challenge for after the
+    # window.
+    from code_indexer.server.web.mfa_routes import (
+        render_oauth_mfa_challenge_page,
+        reserve_challenge_attempt,
+    )
+
+    attempt = None
+    pending = mfa_challenge_manager.get_challenge(challenge_token, client_ip)
+    if pending is not None:
+        attempt, refusal = reserve_challenge_attempt(
+            challenge_token, pending, render_oauth_mfa_challenge_page
+        )
+        if refusal is not None:
+            return refusal
+
     # Consume-first: atomically remove token before verifying
     challenge = mfa_challenge_manager.consume(challenge_token)
     if challenge is None:
@@ -613,11 +817,15 @@ def oauth_mfa_verify(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="MFA challenge expired or invalid. Please re-authenticate.",
         )
+    first_factor = challenge.first_factor
 
     # Validate client IP matches
-    client_ip = http_request.client.host if http_request.client else "unknown"
     if challenge.client_ip != client_ip:
+<<<<<<< HEAD
         _reject_challenge(challenge.username, account_exists=True)
+=======
+        _reject_challenge(challenge.username, account_exists=True, method=first_factor)
+>>>>>>> upstream/master
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="MFA challenge expired or invalid. Please re-authenticate.",
@@ -626,11 +834,35 @@ def oauth_mfa_verify(
     # Verify that this is an OAuth challenge (has OAuth context).
     # Note: oauth_state is NOT checked here — state is optional per OAuth 2.1 PKCE (Bug #624).
     if not challenge.oauth_client_id:
+<<<<<<< HEAD
         _reject_challenge(challenge.username, account_exists=True)
+=======
+        _reject_challenge(challenge.username, account_exists=True, method=first_factor)
+>>>>>>> upstream/master
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid challenge type for OAuth flow.",
         )
+
+    # Only the live account that passed the first factor may be authorized.
+    from code_indexer.server.auth.dependencies import resolve_credential_account
+
+    if (
+        resolve_credential_account(
+            user_manager.get_user, challenge.username, challenge.created_at
+        )
+        is None
+    ):
+        _reject_challenge(challenge.username, account_exists=False, method=first_factor)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="MFA challenge expired or invalid. Please re-authenticate.",
+        )
+
+    # A challenge usable here (same IP, consumed) was usable when peeked
+    # above, so its code attempt is reserved; never check one unreserved.
+    if attempt is None:
+        raise RuntimeError("MFA code reached its check without a reservation")
 
     # Verify TOTP or recovery code
     verified = False
@@ -644,12 +876,23 @@ def oauth_mfa_verify(
         verified = totp_svc.verify_code(challenge.username, totp_code)
 
     if not verified:
+<<<<<<< HEAD
         reject_login(
             challenge.username,
             account_exists=True,  # issued only after a successful first factor
             method=_PASSWORD_LOGIN_METHOD,
             stage="mfa_code",
             reason="mfa_code_invalid",
+=======
+        from .. import login_rate_limiter as _login_throttle
+
+        reject_login(
+            challenge.username,
+            account_exists=True,  # issued only after a successful first factor
+            method=first_factor,
+            stage="mfa_code",
+            reason=_login_throttle.failure_reason(attempt, "mfa_code_invalid"),
+>>>>>>> upstream/master
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -660,7 +903,11 @@ def oauth_mfa_verify(
     try:
         code = complete_login(
             challenge.username,
+<<<<<<< HEAD
             method=_PASSWORD_LOGIN_METHOD,
+=======
+            method=first_factor,
+>>>>>>> upstream/master
             mfa=mfa,
             flow="oauth_code",
             issue=lambda: manager.generate_authorization_code(
@@ -671,6 +918,8 @@ def oauth_mfa_verify(
                 state=challenge.oauth_state,
             ),
         )
+        # Both factors passed: the login is complete; clear its own key.
+        _clear_login_history(challenge.username, scope=challenge.throttle_scope)
 
         # Audit log
         ip_address = http_request.client.host if http_request.client else "unknown"
@@ -683,13 +932,49 @@ def oauth_mfa_verify(
         )
 
         # Include state only when provided (Bug #624: state is optional per OAuth 2.1 PKCE)
-        redirect_url = f"{challenge.oauth_redirect_uri}?code={code}"
-        if challenge.oauth_state is not None:
-            redirect_url = f"{redirect_url}&state={challenge.oauth_state}"
+        redirect_url = authorization_response_url(
+            challenge.oauth_redirect_uri, {"code": code, "state": challenge.oauth_state}
+        )
         return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
 
     except OAuthError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+def _deliver_to_live_account(
+    manager: OAuthManager,
+    user_manager: UserManager,
+    result: Dict[str, Any],
+    *,
+    client_id: str,
+    grant_type: str,
+    ip_address: str,
+    user_agent: Optional[str],
+) -> Dict[str, Any]:
+    """Return an issued token only when it belongs to the live account it was
+    issued to; otherwise revoke it so no credential reaches the client."""
+    from code_indexer.server.auth.dependencies import resolve_credential_account
+
+    token_info = manager.validate_token(result["access_token"])
+    account = (
+        resolve_credential_account(
+            user_manager.get_user, token_info["user_id"], token_info["created_at"]
+        )
+        if token_info
+        else None
+    )
+    if account is None:
+        manager.revoke_token(result["access_token"], token_type_hint="access_token")
+        raise AuthorizationGrantRefused("Grant does not belong to a current account")
+    oauth_token_rate_limiter.record_successful_attempt(client_id)
+    password_audit_logger.log_oauth_token_exchange(
+        username=account.username,
+        client_id=client_id,
+        grant_type=grant_type,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    return result
 
 
 @router.post("/token", response_model=TokenResponse)
@@ -703,6 +988,7 @@ def token_endpoint(
     refresh_token: Optional[str] = Form(None),
     manager: OAuthManager = Depends(get_oauth_manager),
     mcp_credential_manager: MCPCredentialManager = Depends(get_mcp_credential_manager),
+    user_manager: UserManager = Depends(get_user_manager),
 ):
     """Token endpoint for authorization code exchange with rate limiting and audit logging.
 
@@ -749,25 +1035,29 @@ def token_endpoint(
                     detail="code and code_verifier required for authorization_code grant",
                 )
 
-            result = manager.exchange_code_for_token(
-                code=code, code_verifier=code_verifier, client_id=client_id
+            from code_indexer.server.auth.dependencies import (
+                resolve_credential_account,
             )
 
-            # Record success
-            oauth_token_rate_limiter.record_successful_attempt(client_id)
-
-            # Audit log (extract username from token validation)
-            token_info = manager.validate_token(result["access_token"])
-            if token_info:
-                password_audit_logger.log_oauth_token_exchange(
-                    username=token_info["user_id"],
-                    client_id=client_id,
-                    grant_type="authorization_code",
-                    ip_address=ip_address,
-                    user_agent=user_agent,
+            # The code's account must be live and not newer than the code.
+            result = manager.exchange_code_for_token(
+                code=code,
+                code_verifier=code_verifier,
+                client_id=client_id,
+                account_check=lambda user_id, issued_at: resolve_credential_account(
+                    user_manager.get_user, user_id, issued_at
                 )
-
-            return result
+                is not None,
+            )
+            return _deliver_to_live_account(
+                manager,
+                user_manager,
+                result,
+                client_id=client_id,
+                grant_type="authorization_code",
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
 
         elif grant_type == "refresh_token":
             if not refresh_token:
@@ -780,22 +1070,15 @@ def token_endpoint(
             result = manager.refresh_access_token(
                 refresh_token=refresh_token, client_id=client_id
             )
-
-            # Record success
-            oauth_token_rate_limiter.record_successful_attempt(client_id)
-
-            # Audit log
-            token_info = manager.validate_token(result["access_token"])
-            if token_info:
-                password_audit_logger.log_oauth_token_exchange(
-                    username=token_info["user_id"],
-                    client_id=client_id,
-                    grant_type="refresh_token",
-                    ip_address=ip_address,
-                    user_agent=user_agent,
-                )
-
-            return result
+            return _deliver_to_live_account(
+                manager,
+                user_manager,
+                result,
+                client_id=client_id,
+                grant_type="refresh_token",
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
 
         elif grant_type == "client_credentials":
             if not client_secret:
@@ -811,22 +1094,15 @@ def token_endpoint(
                 scope=None,
                 mcp_credential_manager=mcp_credential_manager,
             )
-
-            # Record success
-            oauth_token_rate_limiter.record_successful_attempt(client_id)
-
-            # Audit log
-            token_info = manager.validate_token(result["access_token"])
-            if token_info:
-                password_audit_logger.log_oauth_token_exchange(
-                    username=token_info["user_id"],
-                    client_id=client_id,
-                    grant_type="client_credentials",
-                    ip_address=ip_address,
-                    user_agent=user_agent,
-                )
-
-            return result
+            return _deliver_to_live_account(
+                manager,
+                user_manager,
+                result,
+                client_id=client_id,
+                grant_type="client_credentials",
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
 
         else:
             oauth_token_rate_limiter.record_failed_attempt(client_id)
@@ -834,6 +1110,13 @@ def token_endpoint(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Unsupported grant_type: {grant_type}",
             )
+    except AuthorizationGrantRefused as e:
+        oauth_token_rate_limiter.record_failed_attempt(client_id)
+        # RFC 6749 section 5.2: error fields at the top level of the body.
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "invalid_grant", "error_description": str(e)},
+        )
     except PKCEVerificationError as e:
         oauth_token_rate_limiter.record_failed_attempt(client_id)
         raise HTTPException(

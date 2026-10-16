@@ -14,8 +14,9 @@ inputSchema:
 ---
 [ADMIN ONLY] Get health metrics for configured embedding providers. Matches the REST provider-health routes, which require the admin role.
 
-Returns per-provider metrics: p50/p95/p99 latency, error rate, availability,
-health score, and status (healthy/degraded/down).
+Returns `{"success": true, "provider_health": {"<provider>": {...}}}`. Each provider entry has status (healthy, degraded, down or sinbinned), health_score, p50_latency_ms, p95_latency_ms, p99_latency_ms, error_rate, availability, total_requests, successful_requests, failed_requests and window_minutes (the measurement window).
+
+Errors: a caller without the admin role gets `{"success": false, "error": "Permission denied: admin role required"}`; other failures return `{"error": "<message>"}` with no `success` key.
 
 Examples:
 - All providers: `get_provider_health()`

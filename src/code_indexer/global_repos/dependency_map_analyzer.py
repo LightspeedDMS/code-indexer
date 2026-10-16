@@ -33,7 +33,10 @@ from code_indexer.global_repos.yaml_emitter_utils import yaml_quote_if_unsafe
 from code_indexer.utils.subprocess_diagnostics import (
     format_completed_process_diagnostic,
 )
+<<<<<<< HEAD
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
+=======
+>>>>>>> upstream/master
 
 # Story #848: lazy server imports for Pass 2 CliDispatcher wiring.
 # These are None in pure CLI contexts (no server package) and populated when
@@ -2908,6 +2911,7 @@ Rules:
             if raw_stdout_len == 0:
                 logger.warning(
                     f"Claude CLI returned EMPTY stdout. "
+<<<<<<< HEAD
                     f"stderr (first 1000 chars): {redact_url_credentials((result.stderr or '')[:1000])}"
                 )
             elif raw_stdout_len < 100:
@@ -2917,6 +2921,17 @@ Rules:
             else:
                 logger.debug(
                     f"Claude CLI stdout (first 500 chars): {redact_url_credentials(result.stdout[:500])}"
+=======
+                    f"stderr (first 1000 chars): {(result.stderr or '')[:1000]}"
+                )
+            elif raw_stdout_len < 100:
+                logger.warning(
+                    f"Claude CLI returned very short stdout: {result.stdout!r}"
+                )
+            else:
+                logger.debug(
+                    f"Claude CLI stdout (first 500 chars): {result.stdout[:500]}"
+>>>>>>> upstream/master
                 )
 
             if result.returncode != 0:
@@ -2924,7 +2939,11 @@ Rules:
                     f"Claude CLI failed: {format_completed_process_diagnostic(result)}"
                 )
                 raise subprocess.CalledProcessError(
+<<<<<<< HEAD
                     result.returncode, cmd, redact_url_credentials(result.stdout), redact_url_credentials(result.stderr)
+=======
+                    result.returncode, cmd, result.stdout, result.stderr
+>>>>>>> upstream/master
                 )
 
             return self._strip_code_fences(result.stdout)

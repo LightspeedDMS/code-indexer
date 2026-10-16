@@ -75,9 +75,12 @@ _CIDX_META_DIR_NAME = "cidx-meta"
 # logging potentially large or sensitive query strings at INFO level.
 _QUERY_LOG_TRUNCATION_LIMIT = 100
 
+<<<<<<< HEAD
 # Issue #1159 spec A8: query_text stored in SearchEventRecord is capped at 500 codepoints.
 _QUERY_TEXT_MAX_CODEPOINTS = 500
 
+=======
+>>>>>>> upstream/master
 # Bug #881 Phase 1: max number of expanded aliases shown in the omni post-expansion log.
 _OMNI_LOG_MAX_ALIASES_SHOWN = 10
 
@@ -142,10 +145,24 @@ def _filter_errors_for_user(errors: dict, user: User) -> dict:
 
 
 def _apply_search_truncation(
+<<<<<<< HEAD
     results: list, search_mode: str, params: Dict[str, Any]
 ) -> Tuple[list, Dict[str, Any]]:
     """Apply payload truncation based on search mode.
 
+=======
+    results: list,
+    search_mode: str,
+    params: Dict[str, Any],
+    *,
+    owner: Optional[str] = None,
+) -> Tuple[list, Dict[str, Any]]:
+    """Apply payload truncation based on search mode.
+
+    `owner` is the username of the caller whose search created the handles;
+    only that user can fetch them.
+
+>>>>>>> upstream/master
     Returns:
         (results, meta) 2-tuple.  For fts/hybrid modes, meta contains:
           - preview_size_chars: int  -- threshold from payload_cache config
@@ -157,7 +174,11 @@ def _apply_search_truncation(
     MCP consumer can see how many rows were truncated and at what threshold.
     """
     if search_mode in ["fts", "hybrid"]:
+<<<<<<< HEAD
         truncated = _apply_fts_payload_truncation(results)
+=======
+        truncated = _apply_fts_payload_truncation(results, owner=owner)
+>>>>>>> upstream/master
         # Build meta only when a payload_cache is active.  _apply_fts_payload_truncation
         # returns the original list unchanged when there is no cache, so rows_capped
         # would be 0 anyway -- return empty meta to avoid surfacing a misleading 0.
@@ -180,9 +201,15 @@ def _apply_search_truncation(
         }
         return truncated, meta
     elif _is_temporal_query(params):
+<<<<<<< HEAD
         return _apply_temporal_payload_truncation(results), {}
     else:
         return _apply_payload_truncation(results), {}
+=======
+        return _apply_temporal_payload_truncation(results, owner=owner), {}
+    else:
+        return _apply_payload_truncation(results, owner=owner), {}
+>>>>>>> upstream/master
 
 
 def _resolve_search_type(params: Dict[str, Any], user: User) -> str:
@@ -288,7 +315,11 @@ def _apply_rerank_and_filter(
 
     search_mode = params.get("search_mode", "semantic")
     results, fts_truncation_meta = _apply_search_truncation(
+<<<<<<< HEAD
         results, search_mode, params
+=======
+        results, search_mode, params, owner=user.username
+>>>>>>> upstream/master
     )
     # AC4 (Bug #1202): surface fts truncation metadata alongside rerank meta.
     if fts_truncation_meta:

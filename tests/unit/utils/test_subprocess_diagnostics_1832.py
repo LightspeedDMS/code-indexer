@@ -132,6 +132,7 @@ class TestFormatCompletedProcessDiagnostic:
         result.stderr = ""
         diagnostic = format_completed_process_diagnostic(result)
         assert "diagnostic text" in diagnostic
+<<<<<<< HEAD
 
 
 class TestCredentialRedactionInCommandText:
@@ -402,3 +403,5 @@ class TestRedactionAcceptsWhateverAnFStringWouldAccept:
             f"https://oauth2:{pat}@gitlab.com/o/r.git".encode()
         )
         assert pat not in out
+=======
+>>>>>>> upstream/master

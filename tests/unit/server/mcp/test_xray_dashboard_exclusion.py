@@ -259,9 +259,15 @@ def test_dashboard_passes_exclusion_to_job_tracker():
         # Story #1400 Phase 9: async-hybrid temporal query jobs are also
         # dashboard-hidden, sharing this same exclusion list.
         "temporal_query",
+<<<<<<< HEAD
     }, (
         f"Expected xray_search, xray_explore, and xray_search_batch in exclusion list, got: {exclude}"
     )
+=======
+        # SIEM delivery's per-cycle tick jobs are hidden the same way.
+        "siem_delivery_tick",
+    }, f"Unexpected dashboard exclusion list: {exclude}"
+>>>>>>> upstream/master
 
 
 # ---------------------------------------------------------------------------
@@ -287,15 +293,19 @@ def test_pg_backend_list_jobs_receives_exclude_kwarg(temp_dir: str):
         exclude_operation_types=["xray_search", "xray_explore"],
     )
 
-    mock_backend.list_jobs.assert_called_once()
-    call_kwargs = mock_backend.list_jobs.call_args.kwargs
-    assert "exclude_operation_types" in call_kwargs, (
-        "list_jobs must receive exclude_operation_types kwarg so SQL LIMIT fires "
-        "AFTER exclusion, not before"
-    )
-    assert call_kwargs["exclude_operation_types"] == ["xray_search", "xray_explore"], (
-        f"Wrong value passed: {call_kwargs['exclude_operation_types']}"
-    )
+    # Bug #2123: the active (per-status) reads and the history read are each a
+    # list_jobs call; every one of them must push the exclusion into SQL.
+    assert mock_backend.list_jobs.call_args_list
+    for call in mock_backend.list_jobs.call_args_list:
+        call_kwargs = call.kwargs
+        assert "exclude_operation_types" in call_kwargs, (
+            "list_jobs must receive exclude_operation_types kwarg so SQL LIMIT "
+            "fires AFTER exclusion, not before"
+        )
+        assert call_kwargs["exclude_operation_types"] == [
+            "xray_search",
+            "xray_explore",
+        ], f"Wrong value passed: {call_kwargs['exclude_operation_types']}"
 
 
 # ---------------------------------------------------------------------------
@@ -313,8 +323,16 @@ def test_pg_backend_dashboard_not_underfilled_when_xray_heavy(temp_dir: str):
         for i in range(15)
     ]
     mock_backend = MagicMock()
-    # Correctly-fixed backend returns only non-xray rows
-    mock_backend.list_jobs.return_value = non_xray_jobs
+    # Correctly-fixed backend returns only non-xray rows.  Faithful to a real
+    # store (Bug #2123): the canned rows are all completed, so a
+    # status-filtered (active) read returns none; save_job is a no-op here,
+    # so the store holds none of the registered jobs.
+    mock_backend.list_jobs.side_effect = lambda **kw: (
+        [] if kw.get("status") else non_xray_jobs
+    )
+    mock_backend.get_job.return_value = None
+    mock_backend.get_job_statuses.return_value = {}
+    mock_backend.count_jobs_by_status.return_value = {}
 
     db_path = str(Path(temp_dir) / "pg_underfill_test.db")
     DatabaseSchema(db_path).initialize_database()

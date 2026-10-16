@@ -25,6 +25,10 @@ elsewhere to confirm daemon_mode=False (the default) is untouched.
 from __future__ import annotations
 
 import json
+<<<<<<< HEAD
+=======
+import time
+>>>>>>> upstream/master
 
 from code_indexer.services.progressive_metadata import ProgressiveMetadata
 from code_indexer.services.provider_rebuild_check import (
@@ -68,7 +72,11 @@ def test_daemon_mode_completed_fresh_bare_metadata_accepted_as_rebuilt(tmp_path)
     metadata.start_indexing("voyage-ai", "example-model", {})
 
     since_timestamp = metadata.metadata["last_index_timestamp"]
+<<<<<<< HEAD
     metadata.complete_indexing()
+=======
+    metadata.complete_indexing(time.time())
+>>>>>>> upstream/master
 
     completed = json.loads(metadata_path.read_text())
     assert completed["status"] == "completed"
@@ -90,7 +98,11 @@ def test_daemon_mode_does_not_use_per_provider_filename(tmp_path):
     per_provider_path = tmp_path / "metadata-voyage-ai.json"
     metadata = ProgressiveMetadata(per_provider_path)
     metadata.start_indexing("voyage-ai", "example-model", {})
+<<<<<<< HEAD
     metadata.complete_indexing()
+=======
+    metadata.complete_indexing(time.time())
+>>>>>>> upstream/master
 
     assert find_providers_not_rebuilt_since(
         tmp_path,

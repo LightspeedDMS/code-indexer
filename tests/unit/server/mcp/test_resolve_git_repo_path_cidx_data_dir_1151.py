@@ -72,14 +72,17 @@ class TestResolveGitRepoPathHonorsCidxServerDataDir:
         assert error_msg is None, f"Expected success but got error: {error_msg}"
         assert path == str(repo_path)
 
-    def test_resolver_default_works_when_env_unset(self, tmp_path, monkeypatch):
+    def test_resolver_default_works_when_env_unset(
+        self, tmp_path, monkeypatch, home_in_tmp
+    ):
         """When CIDX_SERVER_DATA_DIR is unset, default ~/.cidx-server is used.
 
         Production-default behavior must be unchanged by the fix.
         We cannot create repos under the real ~/.cidx-server in a unit test,
         so we verify the resolver falls back to ActivatedRepoManager's own
         default by asserting the error message is the expected "not found"
-        rather than a crash/wrong error.
+        rather than a crash/wrong error.  Bug #1996: HOME is a temp dir, so
+        the default resolves away from the developer's real server home.
         """
         from code_indexer.server.mcp.handlers._legacy import _resolve_git_repo_path
 

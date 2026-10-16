@@ -17,8 +17,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+<<<<<<< HEAD
 from .conftest import FakeRipgrepBackend
 
+=======
+>>>>>>> upstream/master
 from code_indexer.global_repos.regex_search import RegexSearchService
 
 _TEST_MAX_RESULTS = 100
@@ -62,6 +65,7 @@ class TestEarlyTerminationCleanup:
             mock_which.return_value = "/usr/bin/rg"
             service = RegexSearchService(tmp_path)
 
+<<<<<<< HEAD
         # Seam: the backend reports output_capped, so no executor mock is needed
         # and nothing global is patched. The temp path the service created is
         # read back off the backend's recorded call. Content is irrelevant here
@@ -101,12 +105,23 @@ class TestEarlyTerminationCleanup:
         mock_executor = _mock_output_capped_executor(
             "file.py:1:def func():\n", captured_path
         )
+=======
+        captured_path: dict = {}
+        # Content is irrelevant to this test (it only proves cleanup +
+        # read_capped propagation, not parse correctness) -- empty avoids
+        # needing a well-formed ripgrep --json event.
+        mock_executor = _mock_output_capped_executor("", captured_path)
+>>>>>>> upstream/master
 
         with patch(
             "code_indexer.global_repos.regex_search.SubprocessExecutor",
             return_value=mock_executor,
         ):
+<<<<<<< HEAD
             await service._search_grep(
+=======
+            await service._search_ripgrep(
+>>>>>>> upstream/master
                 pattern="func",
                 search_path=tmp_path,
                 include_patterns=None,
@@ -122,3 +137,46 @@ class TestEarlyTerminationCleanup:
             "temp file leaked on the early-termination (output_capped) path"
         )
         assert service._last_search_read_capped is True
+<<<<<<< HEAD
+=======
+
+    @pytest.mark.asyncio
+    async def test_grep_temp_file_removed_when_output_capped(self, tmp_path):
+        """_search_grep must remove its temp file even when the executor
+        reports output_capped=True (the subprocess was killed mid-write)."""
+        with patch("code_indexer.global_repos.regex_search.shutil.which") as mock_which:
+            mock_which.side_effect = (
+                lambda cmd: "/usr/bin/grep" if cmd == "grep" else None
+            )
+            service = RegexSearchService(tmp_path)
+
+        captured_path: dict = {}
+        # grep --null record format (Bug #2030): path\0LINE:content
+        mock_executor = _mock_output_capped_executor(
+            "file.py\x001:def func():\n", captured_path
+        )
+
+        with patch(
+            "code_indexer.global_repos.regex_search.SubprocessExecutor",
+            return_value=mock_executor,
+        ):
+            matches, _total = await service._search_grep(
+                pattern="func",
+                search_path=tmp_path,
+                include_patterns=None,
+                exclude_patterns=None,
+                case_sensitive=True,
+                context_lines=0,
+                max_results=_TEST_MAX_RESULTS,
+                timeout_seconds=_TEST_TIMEOUT_SECONDS,
+            )
+
+        # Guards the fixture itself: output in a format the grep parser no
+        # longer accepts would parse zero records and pass silently.
+        assert [m.file_path for m in matches] == ["file.py"]
+        assert "path" in captured_path, "executor was never invoked"
+        assert not os.path.exists(captured_path["path"]), (
+            "temp file leaked on the early-termination (output_capped) path"
+        )
+        assert service._last_search_read_capped is True
+>>>>>>> upstream/master

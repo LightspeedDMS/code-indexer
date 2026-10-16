@@ -16,6 +16,10 @@ from tenacity import (
     retry_if_exception,
     before_sleep_log,
 )
+from code_indexer.server.clients.ci_identifiers import (
+    ci_id_segment,
+    encode_gitlab_project_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +102,18 @@ class GitLabCIClient:
         """
         return self._last_rate_limit
 
+    def _project_url(self, project_id: str, *segments: str) -> str:
+        """API URL under /api/v4/projects/{project}/; the project id or path
+        is ONE encoded segment (namespace%2Fproject), every other segment is
+        a fixed name or a validated identifier."""
+        return "/".join(
+            [
+                f"{self.base_url}/api/v4/projects",
+                encode_gitlab_project_id(project_id),
+                *segments,
+            ]
+        )
+
     @retry(
         stop=stop_after_attempt(4),  # 1 initial + 3 retries
         wait=wait_exponential(multiplier=1, min=1, max=4),  # 1s, 2s, 4s
@@ -138,22 +154,14 @@ class GitLabCIClient:
             GitLabAuthenticationError: When authentication fails (401)
             GitLabProjectNotFoundError: When project not found (404)
         """
-        # URL-encode project ID (namespace/project -> namespace%2Fproject)
-        encoded_project_id = project_id.replace("/", "%2F")
+        url = self._project_url(project_id, "pipelines")
 
-        # Build API URL
-        url = f"{self.base_url}/api/v4/projects/{encoded_project_id}/pipelines"
-
-        # Build query parameters
-        params = []
+        # Query parameters, encoded by httpx
+        params = {}
         if ref:
-            params.append(f"ref={ref}")
+            params["ref"] = ref
         if status:
-            params.append(f"status={status}")
-
-        # Add query string if parameters exist
-        if params:
-            url = f"{url}?{'&'.join(params)}"
+            params["status"] = status
 
         # Build headers
         headers = {
@@ -162,7 +170,7 @@ class GitLabCIClient:
         }
 
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            response = await client.get(url, headers=headers)
+            response = await client.get(url, headers=headers, params=params)
 
             # AC10: Check for authentication failure
             if response.status_code == 401:
@@ -237,11 +245,10 @@ class GitLabCIClient:
             - coverage: Code coverage percentage (if available)
             - jobs: List of jobs with stages
         """
-        # URL-encode project ID
-        encoded_project_id = project_id.replace("/", "%2F")
-
         # Get pipeline details
-        pipeline_url = f"{self.base_url}/api/v4/projects/{encoded_project_id}/pipelines/{pipeline_id}"
+        pipeline_url = self._project_url(
+            project_id, "pipelines", ci_id_segment(pipeline_id, "pipeline_id")
+        )
 
         headers = {
             "PRIVATE-TOKEN": self.token,
@@ -258,7 +265,7 @@ class GitLabCIClient:
             pipeline_data = pipeline_response.json()
 
             # Get jobs for this pipeline
-            jobs_url = f"{self.base_url}/api/v4/projects/{encoded_project_id}/pipelines/{pipeline_id}/jobs"
+            jobs_url = f"{pipeline_url}/jobs"
             jobs_response = await client.get(jobs_url, headers=headers)
 
             jobs = []
@@ -324,11 +331,10 @@ class GitLabCIClient:
             - line: The matching log line
             - line_number: Line number in the job logs
         """
-        # URL-encode project ID
-        encoded_project_id = project_id.replace("/", "%2F")
-
         # First, get list of jobs for this pipeline
-        jobs_url = f"{self.base_url}/api/v4/projects/{encoded_project_id}/pipelines/{pipeline_id}/jobs"
+        jobs_url = self._project_url(
+            project_id, "pipelines", ci_id_segment(pipeline_id, "pipeline_id"), "jobs"
+        )
 
         headers = {
             "PRIVATE-TOKEN": self.token,
@@ -358,7 +364,9 @@ class GitLabCIClient:
                 stage = job["stage"]
 
                 # Get logs for this job
-                logs_url = f"{self.base_url}/api/v4/projects/{encoded_project_id}/jobs/{job_id}/trace"
+                logs_url = self._project_url(
+                    project_id, "jobs", ci_id_segment(job_id, "job_id"), "trace"
+                )
                 logs_response = await client.get(logs_url, headers=headers)
 
                 if logs_response.status_code != 200:
@@ -405,11 +413,8 @@ class GitLabCIClient:
         Returns:
             Full log output as text
         """
-        # URL-encode project ID
-        encoded_project_id = project_id.replace("/", "%2F")
-
-        url = (
-            f"{self.base_url}/api/v4/projects/{encoded_project_id}/jobs/{job_id}/trace"
+        url = self._project_url(
+            project_id, "jobs", ci_id_segment(job_id, "job_id"), "trace"
         )
 
         headers = {
@@ -453,10 +458,9 @@ class GitLabCIClient:
             - success: Boolean indicating retry was triggered
             - pipeline_id: The pipeline ID that was retried
         """
-        # URL-encode project ID
-        encoded_project_id = project_id.replace("/", "%2F")
-
-        url = f"{self.base_url}/api/v4/projects/{encoded_project_id}/pipelines/{pipeline_id}/retry"
+        url = self._project_url(
+            project_id, "pipelines", ci_id_segment(pipeline_id, "pipeline_id"), "retry"
+        )
 
         headers = {
             "PRIVATE-TOKEN": self.token,
@@ -502,10 +506,9 @@ class GitLabCIClient:
             - success: Boolean indicating cancellation was triggered
             - pipeline_id: The pipeline ID that was cancelled
         """
-        # URL-encode project ID
-        encoded_project_id = project_id.replace("/", "%2F")
-
-        url = f"{self.base_url}/api/v4/projects/{encoded_project_id}/pipelines/{pipeline_id}/cancel"
+        url = self._project_url(
+            project_id, "pipelines", ci_id_segment(pipeline_id, "pipeline_id"), "cancel"
+        )
 
         headers = {
             "PRIVATE-TOKEN": self.token,

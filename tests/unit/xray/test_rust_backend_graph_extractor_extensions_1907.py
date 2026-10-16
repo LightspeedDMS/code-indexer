@@ -23,12 +23,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+<<<<<<< HEAD
 from code_indexer.xray.rust_backend import (
+=======
+import pytest
+
+from code_indexer.xray.rust_backend import (
+    _XRAY_CLI_DEFAULT,
+>>>>>>> upstream/master
     get_graph_extractor_extensions,
 )
 
 
 def _require_xray_cli_binary() -> None:
+<<<<<<< HEAD
     """Ensure the real xray-cli release binary is available, or skip loudly.
 
     Delegates to the shared tests/unit/xray/conftest.py helper, which
@@ -44,6 +52,13 @@ def _require_xray_cli_binary() -> None:
     from tests.unit.xray.conftest import require_xray_cli_binary
 
     require_xray_cli_binary()
+=======
+    if not _XRAY_CLI_DEFAULT.exists():
+        pytest.skip(
+            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
+            "run 'cargo build --release' inside rust/ to enable this test."
+        )
+>>>>>>> upstream/master
 
 
 def test_get_graph_extractor_extensions_reports_java_and_kotlin() -> None:

@@ -33,9 +33,9 @@ Reports concerning the following areas are especially valued:
 - The X-Ray evaluator sandbox (AST whitelist, restricted builtins, process isolation).
 - Multi-user and multi-tenant data isolation across golden and activated repositories.
 
-Relevant architecture is documented under [docs/security/](docs/security/),
-[docs/totp-elevation.md](docs/totp-elevation.md), and
-[docs/oidc-setup-and-configuration.md](docs/oidc-setup-and-configuration.md).
+Relevant architecture is documented in [docs/server/admin-guide.md](docs/server/admin-guide.md),
+[docs/server/auth/login-and-elevation.md](docs/server/auth/login-and-elevation.md), and
+[docs/server/auth/oidc.md](docs/server/auth/oidc.md).
 
 ## Coordinated Disclosure
 
