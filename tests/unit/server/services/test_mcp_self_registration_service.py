@@ -34,7 +34,12 @@ def mock_config_manager():
 @pytest.fixture
 def mock_mcp_credential_manager():
     """Mock MCPCredentialManager."""
+    from tests.unit.server.services._principal_account_store import (
+        principal_account_store,
+    )
+
     manager = MagicMock()
+    manager.user_manager = principal_account_store()
     return manager
 
 
@@ -45,10 +50,12 @@ def service(mock_config_manager, mock_mcp_credential_manager):
         MCPSelfRegistrationService,
     )
 
-    return MCPSelfRegistrationService(
+    svc = MCPSelfRegistrationService(
         config_manager=mock_config_manager,
         mcp_credential_manager=mock_mcp_credential_manager,
     )
+    svc.set_group_manager(MagicMock())
+    return svc
 
 
 class TestEnsureRegistered:
@@ -76,7 +83,9 @@ class TestEnsureRegistered:
         # Setup: Claude CLI available
         mock_run.side_effect = [
             Mock(returncode=0),  # claude --version succeeds
-            Mock(returncode=1),  # claude mcp get cidx-local fails (not registered)
+            Mock(returncode=1, stdout=""),  # claude mcp get cidx-local: not registered
+            Mock(returncode=1, stdout=""),  # register_in_claude_code reads the entry
+            Mock(returncode=1),  # claude mcp remove (nothing to remove)
             Mock(returncode=0),  # claude mcp add succeeds
         ]
 
@@ -102,7 +111,7 @@ class TestEnsureRegistered:
 
         # Verify credential was generated
         mock_mcp_credential_manager.generate_credential_audited.assert_called_once_with(
-            "admin",
+            "cidx-analysis-agent",
             "cidx-local-auto",
             actor=SystemComponent.MCP_SELF_REGISTRATION,
         )
@@ -184,7 +193,7 @@ class TestGetOrCreateCredentials:
 
         # Setup: Credential still valid in manager
         mock_mcp_credential_manager.get_credential_by_client_id.return_value = (
-            "admin",
+            "cidx-analysis-agent",
             {"client_id": "mcp_stored123"},
         )
 
@@ -226,7 +235,7 @@ class TestGetOrCreateCredentials:
 
         # Verify credential was generated
         mock_mcp_credential_manager.generate_credential_audited.assert_called_once_with(
-            "admin",
+            "cidx-analysis-agent",
             "cidx-local-auto",
             actor=SystemComponent.MCP_SELF_REGISTRATION,
         )
@@ -275,7 +284,7 @@ class TestRegisterInClaudeCode:
         self, mock_run, service, mock_config_manager
     ):
         """AC10: Constructs correct subprocess command."""
-        mock_run.return_value = Mock(returncode=0)
+        mock_run.return_value = Mock(returncode=0, stdout="")
 
         # Setup config with port
         mock_config = MagicMock()
@@ -291,8 +300,22 @@ class TestRegisterInClaudeCode:
 
         assert result is True
 
-        # Verify subprocess command
-        mock_run.assert_called_once()
+        # Verify subprocess commands: read the entry, remove it, then add
+        assert mock_run.call_count == 3
+        assert mock_run.call_args_list[0][0][0] == [
+            "claude",
+            "mcp",
+            "get",
+            "cidx-local",
+        ]
+        assert mock_run.call_args_list[1][0][0] == [
+            "claude",
+            "mcp",
+            "remove",
+            "cidx-local",
+            "--scope",
+            "user",
+        ]
         args = mock_run.call_args[0][0]
 
         # Verify command structure
@@ -318,7 +341,7 @@ class TestRegisterInClaudeCode:
     @patch("subprocess.run")
     def test_handles_subprocess_failure(self, mock_run, service, mock_config_manager):
         """AC11: Handles subprocess failure."""
-        mock_run.return_value = Mock(returncode=1)
+        mock_run.return_value = Mock(returncode=1, stdout="")
 
         mock_config = MagicMock()
         mock_config.port = 8000
@@ -357,7 +380,9 @@ class TestGracefulDegradation:
         # Setup: CLI available, not registered, but mcp add fails
         mock_run.side_effect = [
             Mock(returncode=0),  # claude --version succeeds
-            Mock(returncode=1),  # claude mcp get fails (not registered)
+            Mock(returncode=1, stdout=""),  # claude mcp get: not registered
+            Mock(returncode=1, stdout=""),  # register_in_claude_code reads the entry
+            Mock(returncode=1),  # claude mcp remove (nothing to remove)
             Mock(returncode=1),  # claude mcp add FAILS
         ]
 
@@ -370,10 +395,41 @@ class TestGracefulDegradation:
             "name": "cidx-local-auto",
         }
 
+        from code_indexer.server.utils.config_manager import MCPSelfRegistrationConfig
+
         mock_config = MagicMock()
         mock_config.port = 8000
+        mock_config.mcp_self_registration = MCPSelfRegistrationConfig()
         mock_config_manager.load_config.return_value = mock_config
 
         result = service.ensure_registered()
 
         assert result is False
+
+
+@pytest.mark.parametrize("error", ["timeout", "called_process"])
+def test_a_failed_cli_call_never_logs_the_credential(
+    service, mock_config_manager, caplog, error
+):
+    import logging
+    import subprocess
+
+    secret = "mcp_sec_example_never_logged"
+    encoded = base64.b64encode(f"mcp_example:{secret}".encode()).decode()
+    header = f"Authorization: Basic {encoded}"
+    mock_config = MagicMock()
+    mock_config.port = 8000
+    mock_config_manager.load_config.return_value = mock_config
+
+    def _run(argv, **kwargs):
+        if argv[:3] == ["claude", "mcp", "add"]:
+            if error == "timeout":
+                raise subprocess.TimeoutExpired(argv, 30, output=header, stderr=header)
+            raise subprocess.CalledProcessError(1, argv, output=header, stderr=header)
+        return Mock(returncode=1, stdout="")
+
+    creds = {"client_id": "mcp_example", "client_secret": secret}
+    with patch("subprocess.run", side_effect=_run), caplog.at_level(logging.DEBUG):
+        assert service.register_in_claude_code(creds) is False
+    assert secret not in caplog.text and encoded not in caplog.text, caplog.text
+    assert "claude mcp add" in caplog.text

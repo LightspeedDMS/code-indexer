@@ -502,7 +502,12 @@ class TestTryBuildMcpConfigFile:
         mock_config.mcp_self_registration = MCPSelfRegistrationConfig()
         mock_config_manager.load_config.return_value = mock_config
 
+        from tests.unit.server.services._principal_account_store import (
+            principal_account_store,
+        )
+
         mock_credential_manager = MagicMock()
+        mock_credential_manager.user_manager = principal_account_store()
         mock_credential_manager.generate_credential_audited.return_value = {
             "client_id": "test-client-id",
             "client_secret": "test-client-secret",
@@ -512,6 +517,7 @@ class TestTryBuildMcpConfigFile:
             config_manager=mock_config_manager,
             mcp_credential_manager=mock_credential_manager,
         )
+        real_service.set_group_manager(MagicMock())
 
         fake_config_service = MagicMock()
         fake_config_service.get_config.return_value.port = 8123

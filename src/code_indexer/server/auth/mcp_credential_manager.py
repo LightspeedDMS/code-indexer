@@ -255,7 +255,7 @@ class MCPCredentialManager:
         return credential
 
     def revoke_credential_audited(
-        self, user_id: str, credential_id: str, *, actor: str
+        self, user_id: str, credential_id: str, *, actor: AuditActor
     ) -> bool:
         """:meth:`revoke_credential`, recording ``mcp_credential_revoked``."""
         try:

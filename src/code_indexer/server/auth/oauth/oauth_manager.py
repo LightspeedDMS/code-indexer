@@ -87,6 +87,22 @@ def redirect_host(redirect_uri: str) -> str:
     return host or redirect_uri
 
 
+class _CredentialsWithoutAnalysisAgent:
+    """The analysis agents' credential is valid only on /mcp itself: it is
+    never exchanged for a bearer token, on any backend."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def verify_credential(self, client_id: str, client_secret: str) -> Optional[str]:
+        from code_indexer.server.services.analysis_agent_principal import (
+            ANALYSIS_AGENT_USERNAME,
+        )
+
+        owner: Optional[str] = self._inner.verify_credential(client_id, client_secret)
+        return None if owner == ANALYSIS_AGENT_USERNAME else owner
+
+
 class OAuthManager:
     ACCESS_TOKEN_LIFETIME_HOURS = 8
     REFRESH_TOKEN_LIFETIME_DAYS = 30
@@ -525,6 +541,10 @@ class OAuthManager:
         Raises:
             OAuthError: If credentials are invalid or missing
         """
+        if mcp_credential_manager is not None:
+            mcp_credential_manager = _CredentialsWithoutAnalysisAgent(
+                mcp_credential_manager
+            )
         if self._backend:
             return self._backend.handle_client_credentials_grant(  # type: ignore[no-any-return]
                 client_id=client_id,

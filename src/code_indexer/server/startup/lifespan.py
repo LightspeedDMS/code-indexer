@@ -311,6 +311,61 @@ def _apply_fault_injection_state(app: Any, startup_config: Any) -> None:
     wire_fault_injection(app, startup_config)
 
 
+def _wire_group_manager_into_mcp_self_registration(group_manager: Any) -> None:
+    """Give the MCP self-registration service the group store it needs to
+    provision the analysis agents' principal (built after the service)."""
+    from code_indexer.server.services.mcp_self_registration_service import (
+        MCPSelfRegistrationService,
+    )
+
+    service = MCPSelfRegistrationService.get_instance()
+    if service is not None:
+        service.set_group_manager(group_manager)
+
+
+async def _migrate_analysis_agent_credential() -> None:
+    """Run the analysis agents' credential migration once at startup, off the
+    event loop; a failure is logged at ERROR and never fails startup."""
+    import anyio.to_thread
+
+    from code_indexer.server.services.mcp_self_registration_service import (
+        MCPSelfRegistrationService,
+    )
+
+    service = MCPSelfRegistrationService.get_instance()
+    if service is None:
+        return
+    try:
+        await anyio.to_thread.run_sync(
+            service.migrate_at_startup, abandon_on_cancel=True
+        )
+    except Exception:
+        logger.error(
+            "Startup migration of the analysis agents' MCP credential failed",
+            exc_info=True,
+        )
+
+
+def _start_analysis_agent_credential_migration(app: Any, group_manager: Any) -> None:
+    """Wire the group store, then run the credential migration in the
+    background (its CLI calls must never delay readiness); call only after
+    audit capture is bound, so its audit rows are written."""
+    _wire_group_manager_into_mcp_self_registration(group_manager)
+    app.state.analysis_agent_credential_migration_task = asyncio.create_task(
+        _migrate_analysis_agent_credential()
+    )
+
+
+async def _stop_analysis_agent_credential_migration(app: Any) -> None:
+    """Cancel a still-running startup credential migration at shutdown."""
+    task = getattr(app.state, "analysis_agent_credential_migration_task", None)
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
 def _wire_query_tracker_into_semantic_query_manager(
     app: Any, query_tracker: Any
 ) -> None:
@@ -1351,6 +1406,7 @@ def make_lifespan(
                 ),
             )
             group_manager.set_audit_service(audit_service)
+            _start_analysis_agent_credential_migration(app, group_manager)
             # Inject into the module-level singleton so all log/query
             # calls from password_audit_logger also route to SQLite.  Off the
             # event loop: switching modes closes the flat-file handler.
@@ -5315,6 +5371,8 @@ def make_lifespan(
         start_stored_secret_sweep(app, Path(server_data_dir), backend_registry)
 
         yield  # Server is now running
+
+        await _stop_analysis_agent_credential_migration(app)
 
         try:
             await stop_stored_secret_sweep(app)

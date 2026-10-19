@@ -302,7 +302,10 @@ AUDIT_ACTION_CATALOG: Dict[str, ActionSpec] = {
     # --- Users ---
     "user_created": _spec(
         "user",
-        {"role": _ROLE, "provisioning": _enum("admin", "self_registration", "sso")},
+        {
+            "role": _ROLE,
+            "provisioning": _enum("admin", "self_registration", "sso", "system"),
+        },
     ),
     "user_deleted": _spec("user", {"deleted_role": _ROLE}),
     "user_role_changed": _spec("user", {"old_role": _ROLE, "new_role": _ROLE}),
@@ -325,14 +328,14 @@ AUDIT_ACTION_CATALOG: Dict[str, ActionSpec] = {
     ),
     "git_credential_configured": _spec("git_credential", _GIT_CREDENTIAL),
     "git_credential_deleted": _spec("git_credential", _GIT_CREDENTIAL),
-    # --- Golden repositories (job-based: a row means "submitted") ---
-    "golden_repo_added": _spec(
-        "repo",
     # --- Shared X-Ray pattern library (cidx-meta) ---
     "xray_pattern_stored": _spec(
         "xray_pattern",
         {"overwrite": BOOL, "global_scope": BOOL, "repo": REPO_ALIAS},
     ),
+    # --- Golden repositories (job-based: a row means "submitted") ---
+    "golden_repo_added": _spec(
+        "repo",
         {"job_id": OPAQUE_ID, "repo_host": HOSTNAME, "branch": GIT_REF},
         job_based=True,
     ),

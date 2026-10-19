@@ -10,9 +10,16 @@ import base64
 import logging
 import subprocess
 import threading
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from code_indexer.server.services.analysis_agent_principal import (
+    ANALYSIS_AGENT_USERNAME,
+    ensure_analysis_agent_principal,
+)
 from code_indexer.server.services.audit_events import SystemComponent
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.group_access_manager import GroupAccessManager
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +67,12 @@ class MCPSelfRegistrationService:
             threading.Lock()
         )  # Story #203 Finding 5: Thread safety
         self._cached_auth_header: Optional[str] = None
+        self._group_manager: Optional["GroupAccessManager"] = None
+
+    def set_group_manager(self, group_manager: "GroupAccessManager") -> None:
+        """Wire the group store (built later in startup than this service)."""
+        with self._registration_lock:
+            self._group_manager = group_manager
 
     def ensure_registered(self) -> bool:
         """
@@ -172,24 +185,46 @@ class MCPSelfRegistrationService:
         stored_config = config.mcp_self_registration
         assert stored_config is not None  # Guaranteed by ServerConfig.__post_init__
 
+        group_manager = self._group_manager
+        if group_manager is None:
+            logger.error(
+                "MCP self-registration: group store not wired; cannot provision "
+                "the analysis agent principal"
+            )
+            return None
+        try:
+            ensure_analysis_agent_principal(
+                self._mcp_credential_manager.user_manager, group_manager
+            )
+        except Exception as e:
+            logger.error(
+                "MCP self-registration: the analysis agents' principal could not "
+                "be verified (%s); no credential is used",
+                e,
+            )
+            return None
+
         if stored_config.client_id:
-            # Validate stored credential still exists
             result = self._mcp_credential_manager.get_credential_by_client_id(
                 stored_config.client_id
             )
-            if result:
+            if result and result[0] == ANALYSIS_AGENT_USERNAME:
                 logger.debug("Reusing stored MCP self-registration credentials")
                 return {
                     "client_id": stored_config.client_id,
                     "client_secret": stored_config.client_secret,
                 }
+            if result:
+                if not self._revoke_foreign_credential(
+                    stored_config.client_id, *result
+                ):
+                    return None
             else:
                 logger.info("Stored MCP credential no longer valid, creating new one")
 
-        # Generate new credential
         try:
             cred = self._mcp_credential_manager.generate_credential_audited(
-                "admin",
+                ANALYSIS_AGENT_USERNAME,
                 "cidx-local-auto",
                 actor=SystemComponent.MCP_SELF_REGISTRATION,
             )
@@ -211,8 +246,60 @@ class MCPSelfRegistrationService:
             }
 
         except Exception as e:
-            logger.error(f"Failed to generate MCP credentials: {e}")
+            logger.error("Failed to generate MCP credentials (%s)", type(e).__name__)
             return None
+
+    def migrate_at_startup(self) -> bool:
+        """Bring the agent credential and the user-scope cidx-local entry to
+        the principal at startup (other Claude sessions, such as the Research
+        Assistant, read that entry). False, with an ERROR, on any failure."""
+        creds = self.get_or_create_credentials()
+        if creds is None:
+            logger.error(
+                "MCP self-registration: startup migration could not obtain the "
+                "analysis agents' credential"
+            )
+            return False
+        if self.claude_cli_available() and not self.register_in_claude_code(creds):
+            logger.error(
+                "MCP self-registration: startup migration could not rewrite the "
+                "cidx-local entry of the Claude CLI"
+            )
+            return False
+        return True
+
+    def _revoke_foreign_credential(
+        self, client_id: str, owner: str, credential: Dict[str, Any]
+    ) -> bool:
+        """Revoke a stored agent credential bound to another account (the
+        legacy admin binding) before it is replaced; True when it is gone
+        (also when a peer revoked it first), False when it still exists."""
+        logger.warning(
+            "MCP self-registration: the stored agent credential belongs to %r, "
+            "not %r; revoking and replacing it",
+            owner,
+            ANALYSIS_AGENT_USERNAME,
+        )
+        revoked = self._mcp_credential_manager.revoke_credential_audited(
+            owner,
+            credential["credential_id"],
+            actor=SystemComponent.MCP_SELF_REGISTRATION,
+        )
+        if revoked:
+            return True
+        if self._mcp_credential_manager.get_credential_by_client_id(client_id) is None:
+            logger.info(
+                "MCP self-registration: the credential owned by %r was already "
+                "revoked or replaced",
+                owner,
+            )
+            return True
+        logger.error(
+            "MCP self-registration: could not revoke the credential owned by "
+            "%r; keeping agents off MCP until it can be replaced",
+            owner,
+        )
+        return False
 
     def register_in_claude_code(self, creds: Dict[str, str]) -> bool:
         """
@@ -243,7 +330,7 @@ class MCPSelfRegistrationService:
         _prefix = "Authorization: "
         self._cached_auth_header = auth_header[len(_prefix) :]
 
-        # Build command
+        url = f"http://localhost:{port}/mcp"
         cmd = [
             "claude",
             "mcp",
@@ -255,18 +342,39 @@ class MCPSelfRegistrationService:
             "--scope",
             "user",
             "cidx-local",
-            f"http://localhost:{port}/mcp",
+            url,
         ]
 
+        step = "claude mcp get"
         try:
+            current = subprocess.run(
+                ["claude", "mcp", "get", "cidx-local"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            listed = {line.strip() for line in current.stdout.splitlines()}
+            if current.returncode == 0 and {f"URL: {url}", auth_header} <= listed:
+                return True
+            step = "claude mcp remove"
+            subprocess.run(
+                ["claude", "mcp", "remove", "cidx-local", "--scope", "user"],
+                capture_output=True,
+                timeout=30,
+            )
+            step = "claude mcp add"
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 timeout=30,
             )
             return result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            logger.error(f"Failed to register MCP server: {e}")
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.error(
+                "Failed to register MCP server: %s failed (%s)",
+                step,
+                type(e).__name__,
+            )
             return False
 
     def get_cached_auth_header_value(self) -> Optional[str]:

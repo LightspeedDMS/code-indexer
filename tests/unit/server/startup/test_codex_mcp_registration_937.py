@@ -94,7 +94,12 @@ def _make_cred_manager_stub(client_id: str, client_secret: str) -> MagicMock:
     Stubs only the external credential-storage boundary, not the service under test.
     get_credential_by_client_id returns None to force credential generation.
     """
+    from tests.unit.server.services._principal_account_store import (
+        principal_account_store,
+    )
+
     stub = MagicMock()
+    stub.user_manager = principal_account_store()
     stub.generate_credential_audited.return_value = {
         "client_id": client_id,
         "client_secret": client_secret,
@@ -103,6 +108,22 @@ def _make_cred_manager_stub(client_id: str, client_secret: str) -> MagicMock:
         "created_at": "2026-04-28T00:00:00+00:00",
     }
     stub.get_credential_by_client_id.return_value = None
+    return stub
+
+
+def _principal_owned_cred_manager() -> MagicMock:
+    """A credential store whose stored credential belongs to the analysis
+    agents' principal (the only owner whose credential is reused)."""
+    from tests.unit.server.services._principal_account_store import (
+        principal_account_store,
+    )
+
+    stub = MagicMock()
+    stub.user_manager = principal_account_store()
+    stub.get_credential_by_client_id.return_value = (
+        "cidx-analysis-agent",
+        {"credential_id": "example-credential"},
+    )
     return stub
 
 
@@ -141,8 +162,9 @@ class TestSingletonAssignmentAndCredentialSeeding:
         )
         service = MCPSelfRegistrationService(
             config_manager=config_manager,
-            mcp_credential_manager=MagicMock(),
+            mcp_credential_manager=_principal_owned_cred_manager(),
         )
+        service.set_group_manager(MagicMock())
         MCPSelfRegistrationService.set_instance(service)
 
         try:
@@ -189,6 +211,7 @@ class TestSingletonAssignmentAndCredentialSeeding:
             config_manager=config_manager,
             mcp_credential_manager=cred_manager,
         )
+        service.set_group_manager(MagicMock())
 
         creds = service.get_or_create_credentials()
 
@@ -248,8 +271,9 @@ class TestProviderSucceedsAfterStartupSeeding:
         )
         service = MCPSelfRegistrationService(
             config_manager=config_manager,
-            mcp_credential_manager=MagicMock(),
+            mcp_credential_manager=_principal_owned_cred_manager(),
         )
+        service.set_group_manager(MagicMock())
         MCPSelfRegistrationService.set_instance(service)
 
         try:

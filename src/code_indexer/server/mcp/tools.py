@@ -127,6 +127,10 @@ def filter_tools_by_role(
     Returns:
         List of MCP-compliant tool definitions (name, description, inputSchema only)
     """
+    from code_indexer.server.services.analysis_agent_principal import (
+        analysis_agent_tool_refusal,
+    )
+
     from .tool_access import ToolAccessMemo, resolve_effective_user
 
     if tool_access_memo is None:
@@ -137,6 +141,8 @@ def filter_tools_by_role(
         # The impersonated user's view, except for the tools that manage
         # impersonation itself (authorized for the authenticated principal).
         effective_user = resolve_effective_user(user, session_state, tool_name)
+        if analysis_agent_tool_refusal(effective_user.username, tool_name) is not None:
+            continue
         required_permission = tool_def["required_permission"]
         group_decision = (
             True
