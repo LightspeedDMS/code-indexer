@@ -85,6 +85,7 @@
 - [Keep local server up](feedback_keep_local_server_running.md) - relaunch the local dev server if down
 - [Ruff version](feedback_ruff_black_version_alignment.md) - pre-commit ruff must match system ruff
 - [REST model changes](feedback_rest_model_changes_need_fast_automation.md) - query-model changes need fast-automation too
+- [Deferred promotion](feedback_dont_reask_deferred_promotion.md) - owner deferred a promotion: never re-raise it
 - [No needless questions](feedback_no_unnecessary_questions.md) - stop only when genuinely blocked (also [plan authorized](feedback_dont_ask_when_plan_already_authorized.md))
 - [Agentic to staging](feedback_work_agentically_to_staging_no_questions.md) - no process questions mid-mission
 - [Commands are instructions](feedback_no_confirmation_on_commands.md) - direct commands are not proposals
