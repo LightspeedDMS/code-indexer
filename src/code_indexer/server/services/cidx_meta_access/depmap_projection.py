@@ -58,9 +58,12 @@ from .depmap_model import (
     DepMapModel,
     TableKind,
     cell_names,
+    decoded_form,
     is_separator,
     load_depmap_model,
+    needs_decoding,
     normalize_name,
+    single_repo_name,
     table_cells,
     table_kind,
 )
@@ -189,7 +192,11 @@ def _build_view(
         blocked_domains=frozenset(hidden_domains | (repo_names - visible_domains)),
         visible=visible,
         visible_domains=visible_domains,
-        domain_only=frozenset(hidden_domains - repo_names),
+        domain_only=frozenset(
+            form
+            for name in hidden_domains - repo_names
+            for form in (name, f"{name}-global")
+        ),
         domain_counts={
             d: len(model.participants[d] & visible) for d in visible_domains
         },
@@ -226,28 +233,64 @@ def _view_for(
     return view
 
 
-def _redact(line: str, view: _View) -> str:
+def _redact(line: str, view: _View) -> Optional[str]:
+    """Plain hidden names become placeholders; a hidden name still present
+    in the decoded (rendered) form was encoded, so the line is removed."""
     if view.prose is None:
         return line
 
-    def _placeholder(match: "re.Match[str]") -> str:
-        name = normalize_repo_alias(match.group(0)).lower()
-        return (
-            DOMAIN_PLACEHOLDER if name in view.domain_only else RESTRICTED_PLACEHOLDER
-        )
+    domain_only = view.domain_only
 
-    return view.prose.sub(_placeholder, line)
+    def _placeholder(match: "re.Match[str]") -> str:
+        if match.group(0).lower() in domain_only:
+            return DOMAIN_PLACEHOLDER
+        return RESTRICTED_PLACEHOLDER
+
+    if domain_only:
+        redacted = view.prose.sub(_placeholder, line)
+    else:
+        redacted = view.prose.sub(RESTRICTED_PLACEHOLDER, line)
+    if not needs_decoding(line):
+        return redacted
+    blanked = redacted.replace(RESTRICTED_PLACEHOLDER, " ").replace(
+        DOMAIN_PLACEHOLDER, " "
+    )
+    if view.prose.search(decoded_form(blanked)):
+        return None
+    return redacted
 
 
 def _blocked(cell: str, names: FrozenSet[str]) -> bool:
     return any(name in names for name in cell_names(cell))
 
 
+def _mentions_hidden(text: str, view: _View) -> bool:
+    if view.prose is None:
+        return False
+    if view.prose.search(text):
+        return True
+    return needs_decoding(text) and view.prose.search(decoded_form(text)) is not None
+
+
+def _repo_cell_allowed(cell: str, view: _View) -> bool:
+    """Exactly one repository value that is not hidden; anything else (a
+    list, punctuation around the name, a hidden name inside a note) fails."""
+    name = single_repo_name(cell)
+    if name is None or name in view.blocked_repos:
+        return False
+    return name.rstrip(".") not in view.blocked_repos and not _mentions_hidden(
+        cell, view
+    )
+
+
 def _row_kept(kind: TableKind, cells: List[str], view: _View) -> bool:
-    """Only repo, domain and list columns decide. Catalog and graph rows are
-    kept only for visible domains: the set the summary and the counts are
-    computed from, so every count equals the rows kept."""
-    if any(_blocked(cells[c], view.blocked_repos) for c in kind.repo_columns):
+    """Only repo, domain and list columns decide; a structured cell never
+    keeps a hidden name (no placeholder is ever written into one). Catalog
+    and graph rows are kept only for visible domains: the set the summary
+    and the counts are computed from, so every count equals the rows kept."""
+    if not all(_repo_cell_allowed(cells[c], view) for c in kind.repo_columns):
+        return False
+    if any(_mentions_hidden(cells[c], view) for c in kind.domain_columns):
         return False
     domains = [normalize_name(cells[c]) for c in kind.domain_columns]
     if kind in (CATALOG, GRAPH):
@@ -360,8 +403,10 @@ def _compute(
             following = (
                 table_cells(lines[index + 1]) if index + 1 < len(lines) else None
             )
-            kind = None if is_separator(cells) else table_kind(cells)
-            if following is not None and is_separator(following) and kind:
+            kind = None
+            if following is not None and is_separator(following):
+                kind = None if is_separator(cells) else table_kind(cells)
+            if kind is not None:
                 table = (kind, len(cells))
                 out.append(_redact(line, view))
                 continue

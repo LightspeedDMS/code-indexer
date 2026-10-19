@@ -14,9 +14,12 @@ yields a fresh model.
 from __future__ import annotations
 
 import hashlib
+import html
 import os
 import re
 import threading
+import unicodedata
+import urllib.parse
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,14 +50,46 @@ _ALIAS_SHAPE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _LINK = re.compile(r"^\[([^\]]*)\]\([^)]*\)$")
 _WRAPPERS = "*_`\"'"
 PLACEHOLDER_WORDS = frozenset({"none", "external", "n/a", "-", "empty"})
+DECODE_PASSES = 3
+
+_NEEDS_DECODE = re.compile(r"[&%<\\]")
+_INVISIBLE = re.compile(
+    "[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f"
+    "\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0]"
+)
+_INLINE_TAG = re.compile(r"<[^<>]*>")
+_MD_ESCAPE = re.compile(r"\\([!-/:-@\[-`{-~])")
 
 Edge = Tuple[str, str, FrozenSet[str]]
 
 
+def needs_decoding(text: str) -> bool:
+    """False when *text* is plain ASCII with nothing to decode."""
+    return not text.isascii() or _NEEDS_DECODE.search(text) is not None
+
+
+def decoded_form(text: str) -> str:
+    """*text* as a Markdown renderer displays it: HTML entities and percent
+    escapes decoded (a bounded number of passes, for nested encodings),
+    NFKC-normalised, without invisible characters, inline tags or Markdown
+    backslash escapes. Used for detection only, never for output."""
+    if not needs_decoding(text):
+        return text
+    value = text
+    for _attempt in range(DECODE_PASSES):
+        decoded = urllib.parse.unquote(html.unescape(value))
+        if decoded == value:
+            break
+        value = decoded
+    value = _INVISIBLE.sub("", unicodedata.normalize("NFKC", value))
+    return _MD_ESCAPE.sub(r"\1", _INLINE_TAG.sub("", value))
+
+
 def normalize_name(text: str) -> str:
-    """Comparison form of a name found in a document: link text, without
-    emphasis, quote or backtick wrappers and ``-global``, lowercased."""
-    value = text.strip()
+    """Comparison form of a name found in a document: its decoded form, link
+    text, without emphasis, quote or backtick wrappers and ``-global``,
+    lowercased."""
+    value = decoded_form(text).strip()
     link = _LINK.match(value)
     if link:
         value = link.group(1).strip()
@@ -171,6 +206,19 @@ def cell_names(cell: str) -> List[str]:
             name = normalize_name(_TRAILING_NOTE.sub("", entry.strip()))
         names.append(name)
     return names
+
+
+def single_repo_name(cell: str) -> Optional[str]:
+    """The one repository name a structured cell holds (link, backticks and
+    a trailing ``(note)`` normalised), or a placeholder word; None for a
+    list, a slash pair, punctuation around the name or a non-ASCII value."""
+    names = cell_names(cell)
+    if len(names) != 1:
+        return None
+    name = names[0]
+    if name in PLACEHOLDER_WORDS or _ALIAS_SHAPE.match(name):
+        return name
+    return None
 
 
 def iter_recognised_rows(

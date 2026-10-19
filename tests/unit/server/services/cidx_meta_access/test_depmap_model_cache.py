@@ -290,3 +290,51 @@ def test_registry_failure_raises_and_never_yields_an_empty_universe(
 def test_alias_universe_rejects_a_non_positive_ttl(fx: CidxMetaFixture) -> None:
     with pytest.raises(ValueError):
         AliasUniverse(fx.registry, ttl_seconds=0)
+
+
+def test_follower_raises_instead_of_stale_after_a_failed_refresh(
+    fx: CidxMetaFixture,
+) -> None:
+    now: List[float] = [1000.0]
+    registry = _GatedRegistry(fx.registry, free=1)
+    universe = AliasUniverse(registry, ttl_seconds=60, clock=lambda: now[0])
+    universe.snapshot()
+    now[0] += 61
+    registry.failure = ConnectionError("registry unavailable")
+    registry.gate.set()
+    with pytest.raises(ConnectionError):
+        universe.snapshot()
+
+    registry.gate.clear()
+    registry.entered.clear()
+    try:
+        leader, _leader_box = _in_thread(universe.snapshot)
+        assert registry.entered.wait(5)
+        follower, follower_box = _in_thread(universe.snapshot)
+        follower.join(2)
+        assert not follower.is_alive()
+        assert isinstance(follower_box[0], RuntimeError), follower_box
+    finally:
+        registry.gate.set()
+    leader.join(5)
+
+
+def test_follower_raises_once_the_snapshot_is_past_the_staleness_bound(
+    fx: CidxMetaFixture,
+) -> None:
+    now: List[float] = [1000.0]
+    registry = _GatedRegistry(fx.registry, free=1)
+    universe = AliasUniverse(registry, ttl_seconds=60, clock=lambda: now[0])
+    universe.snapshot()
+    now[0] += 10_000
+    try:
+        leader, leader_box = _in_thread(universe.snapshot)
+        assert registry.entered.wait(5)
+        follower, follower_box = _in_thread(universe.snapshot)
+        follower.join(2)
+        assert not follower.is_alive()
+        assert isinstance(follower_box[0], RuntimeError), follower_box
+    finally:
+        registry.gate.set()
+    leader.join(5)
+    assert CANARY in leader_box[0].names

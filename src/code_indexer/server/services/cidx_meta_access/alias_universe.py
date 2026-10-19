@@ -3,7 +3,9 @@
 The universe only widens redaction (names that must not appear in prose
 for callers who cannot see them); it is never consulted for an allow
 decision. It comes from the cluster-aware registry (PostgreSQL in cluster
-mode), cached per process for a short TTL.
+mode), cached per process for a short TTL. A stale copy is served only
+while a refresh is in flight, never after a failed refresh and never once
+it is older than ``ALIAS_UNIVERSE_MAX_STALENESS_SECONDS``.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from typing import Any, Callable, FrozenSet, Mapping, Optional, Protocol
 from ..repo_access_guard import normalize_repo_alias
 
 ALIAS_UNIVERSE_TTL_SECONDS = 60.0
+ALIAS_UNIVERSE_MAX_STALENESS_SECONDS = 300.0
 
 
 class GlobalReposRegistry(Protocol):
@@ -67,13 +70,16 @@ class AliasUniverse:
         self._snapshot: Optional[UniverseSnapshot] = None
         self._loaded_at = 0.0
         self._inflight: Optional[threading.Event] = None
+        self._refresh_failed = False
 
     def snapshot(self) -> UniverseSnapshot:
         """The current names; re-read from the registry once the TTL expired.
 
-        One caller reads the registry, outside the lock. Meanwhile callers
-        that hold an expired snapshot get it; callers with none wait for
-        that read and raise if it failed (never an empty universe).
+        One caller reads the registry, outside the lock. Meanwhile a caller
+        holding an expired snapshot gets it only while no refresh has failed
+        and it is at most ``ALIAS_UNIVERSE_MAX_STALENESS_SECONDS`` old, else
+        it raises; callers with none wait for that read and raise if it
+        failed (never an empty universe).
         """
         with self._lock:
             now = self._clock()
@@ -84,6 +90,12 @@ class AliasUniverse:
             if pending is None:
                 self._inflight = threading.Event()
             elif current is not None:
+                age = now - self._loaded_at
+                if self._refresh_failed or age > ALIAS_UNIVERSE_MAX_STALENESS_SECONDS:
+                    raise RuntimeError(
+                        "alias universe unavailable: refresh in flight and the "
+                        "last snapshot is no longer servable"
+                    )
                 return current
         if pending is None:
             return self._refresh(now)
@@ -109,6 +121,7 @@ class AliasUniverse:
         """Store *names* (None: the read failed) and wake the waiters."""
         with self._lock:
             event, self._inflight = self._inflight, None
+            self._refresh_failed = names is None
             previous = self._snapshot
             if names is not None:
                 if previous is not None and previous.names == names:

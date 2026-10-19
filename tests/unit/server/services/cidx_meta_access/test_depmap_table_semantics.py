@@ -351,3 +351,86 @@ def test_absent_dependency_map_yields_the_empty_model(tmp_path: Path) -> None:
     model = load_depmap_model(tmp_path / "no-such-dependency-map")
     assert model.fingerprint == "absent"
     assert not model.domains and not model.structured_names
+
+
+ROLES_TABLE = ["| Repository | Role | Detail |", "| :--- | ---: | :---: |"]
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        f"{HIDDEN_A}.",
+        f"({HIDDEN_A})",
+        f"{VISIBLE_A} / {HIDDEN_A}",
+        f"{VISIBLE_A}, {VISIBLE_B}",
+        f"{VISIBLE_A} (talks to {HIDDEN_A})",
+        HIDDEN_A.replace("e", "е"),
+    ],
+)
+def test_repo_cell_must_be_exactly_one_allowed_value(tmp_path: Path, cell: str) -> None:
+    dep_map = build_real_format_map(tmp_path)
+    lines = ROLES_TABLE + [f"| {cell} | owner | text |"]
+    assert project(dep_map, "payments.md", lines) == ROLES_TABLE + [None]
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [f"{VISIBLE_A} (worker)", f"`{VISIBLE_A}`", f"[{VISIBLE_A}]({VISIBLE_A}.md)"],
+)
+def test_repo_cell_with_note_or_link_is_kept(tmp_path: Path, cell: str) -> None:
+    dep_map = build_real_format_map(tmp_path)
+    lines = ROLES_TABLE + [f"| {cell} | owner | text |"]
+    assert project(dep_map, "payments.md", lines) == lines
+
+
+ENCODED_HIDDEN = [
+    "beta&#45;svc",
+    "beta&amp;#45;svc",
+    "beta%2Dsvc",
+    "beta‍-svc",
+    "beta\\-svc",
+    "be<b></b>ta-svc",
+    "ｂｅｔａ-svc",
+]
+
+
+@pytest.mark.parametrize("encoded", ENCODED_HIDDEN)
+def test_encoded_hidden_alias_in_prose_removes_the_line(
+    tmp_path: Path, encoded: str
+) -> None:
+    dep_map = build_real_format_map(tmp_path)
+    lines = [f"Settlement goes through {encoded} nightly.", f"See {HIDDEN_A} too."]
+    assert project(dep_map, "payments.md", lines) == [None, f"See {REPO} too."]
+
+
+@pytest.mark.parametrize("encoded", ENCODED_HIDDEN)
+def test_encoded_hidden_alias_in_yaml_item_removes_it(
+    tmp_path: Path, encoded: str
+) -> None:
+    dep_map = build_real_format_map(tmp_path)
+    lines = ["participating_repos:", f"  - {VISIBLE_A}", f"  - {encoded}"]
+    assert project(dep_map, "payments.md", lines) == lines[:2] + [None]
+
+
+def test_encoded_hidden_domain_in_matrix_cell_drops_the_row(tmp_path: Path) -> None:
+    dep_map = build_real_format_map(tmp_path)
+    lines = ["| Repository | Domain |", "|---|---|", f"| {VISIBLE_A} | identit&#121; |"]
+    assert project(dep_map, "_index.md", lines) == lines[:2] + [None]
+
+
+@pytest.mark.parametrize("encoded", ENCODED_HIDDEN)
+def test_encoded_repo_cell_drops_the_row(tmp_path: Path, encoded: str) -> None:
+    dep_map = build_real_format_map(tmp_path)
+    lines = ROLES_TABLE + [f"| {encoded} | owner | text |"]
+    assert project(dep_map, "payments.md", lines) == ROLES_TABLE + [None]
+
+
+def test_model_harvests_the_decoded_name(tmp_path: Path) -> None:
+    dep_map = build_real_format_map(tmp_path)
+    payments = dep_map / "payments.md"
+    row = f"| {HIDDEN_A} | Go | ledger |"
+    text = payments.read_text(encoding="utf-8")
+    assert row in text
+    encoded_row = "| epsilon&#45;svc | Go | ledger |"
+    payments.write_text(text.replace(row, row + "\n" + encoded_row), "utf-8")
+    assert "epsilon-svc" in load_depmap_model(dep_map).structured_names
