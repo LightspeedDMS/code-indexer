@@ -301,10 +301,6 @@ def _apply_rerank_and_filter(
     access_filtering_service = _get_access_filtering_service()
     if access_filtering_service:
         results = access_filtering_service.filter_query_results(results, user.username)
-        if repository_alias and "cidx-meta" in repository_alias:
-            results = access_filtering_service.filter_cidx_meta_results(
-                results, user.username
-            )
         results = results[:requested_limit]
 
     return results, rerank_meta

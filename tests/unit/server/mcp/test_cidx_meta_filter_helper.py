@@ -28,36 +28,28 @@ class TestFilterCidxMetaFilesHelper:
         result = access_filtering_service.filter_cidx_meta_files(files, "admin_user")
         assert result == files
 
-    def test_regular_user_only_sees_non_repo_md_files(self, access_filtering_service):
-        """regular_user (cidx-meta only) sees README.md but no repo .md files."""
+    def test_regular_user_sees_no_catalog_files(self, access_filtering_service):
+        """regular_user (cidx-meta only) sees no description and no README.md."""
         files = ["repo-a.md", "repo-b.md", "repo-c.md", "README.md"]
         result = access_filtering_service.filter_cidx_meta_files(files, "regular_user")
-        assert "repo-a.md" not in result
-        assert "repo-b.md" not in result
-        assert "repo-c.md" not in result
-        assert "README.md" in result
+        assert result == []
 
     def test_power_user_sees_accessible_repo_files(self, access_filtering_service):
-        """power_user (repo-a, repo-b) sees repo-a.md, repo-b.md, README.md."""
+        """power_user (repo-a, repo-b) sees exactly repo-a.md and repo-b.md."""
         files = ["repo-a.md", "repo-b.md", "repo-c.md", "README.md"]
         result = access_filtering_service.filter_cidx_meta_files(files, "power_user")
-        assert "repo-a.md" in result
-        assert "repo-b.md" in result
-        assert "README.md" in result
-        assert "repo-c.md" not in result
+        assert result == ["repo-a.md", "repo-b.md"]
 
     def test_empty_file_list_returns_empty(self, access_filtering_service):
         """Empty input always produces empty output."""
         result = access_filtering_service.filter_cidx_meta_files([], "power_user")
         assert result == []
 
-    def test_non_md_files_always_pass_through(self, access_filtering_service):
-        """Files without .md extension (e.g. .gitignore) are always accessible."""
+    def test_unlisted_files_are_denied(self, access_filtering_service):
+        """Paths the catalog policy does not name (e.g. .gitignore) are denied."""
         files = [".gitignore", "repo-c.md", "README.txt"]
         result = access_filtering_service.filter_cidx_meta_files(files, "regular_user")
-        assert ".gitignore" in result
-        assert "README.txt" in result
-        assert "repo-c.md" not in result
+        assert result == []
 
 
 @pytest.mark.slow
@@ -112,4 +104,4 @@ class TestCidxMetaGlobalAliasFiltering:
         assert data["success"] is True
         file_paths = [f["path"] for f in data["files"]]
         assert "repo-c.md" not in file_paths
-        assert "README.md" in file_paths
+        assert "README.md" not in file_paths

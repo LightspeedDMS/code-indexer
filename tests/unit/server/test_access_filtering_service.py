@@ -202,63 +202,6 @@ class TestFilterRepoListing:
 
 
 @pytest.mark.slow
-class TestFilterCidxMetaResults:
-    """Tests for AC3: cidx-meta Summary Filtering."""
-
-    def test_cidx_meta_summaries_filtered_by_accessible_repos(
-        self, group_access_manager, access_filtering_service
-    ):
-        """AC3: Summaries referencing inaccessible repos are filtered."""
-        users = group_access_manager.get_group_by_name("users")
-        group_access_manager.assign_user_to_group("test_user", users.id, "admin")
-
-        results = [
-            MockQueryResult(
-                "sum1.md",
-                1,
-                "Summary of cidx-meta",
-                0.95,
-                "cidx-meta",
-                metadata={"referenced_repo": "cidx-meta"},
-            ),
-            MockQueryResult(
-                "sum2.md",
-                1,
-                "Summary of repo-a",
-                0.90,
-                "cidx-meta",
-                metadata={"referenced_repo": "repo-a"},
-            ),
-        ]
-
-        filtered = access_filtering_service.filter_cidx_meta_results(
-            results, "test_user"
-        )
-
-        assert len(filtered) == 1
-        assert filtered[0].metadata["referenced_repo"] == "cidx-meta"
-
-    def test_cidx_meta_results_without_metadata_pass_through(
-        self, group_access_manager, access_filtering_service
-    ):
-        """Results without referenced_repo metadata should pass through."""
-        users = group_access_manager.get_group_by_name("users")
-        group_access_manager.assign_user_to_group("test_user", users.id, "admin")
-
-        results = [
-            MockQueryResult(
-                "general.md", 1, "General content", 0.95, "cidx-meta", metadata=None
-            ),
-        ]
-
-        filtered = access_filtering_service.filter_cidx_meta_results(
-            results, "test_user"
-        )
-
-        assert len(filtered) == 1
-
-
-@pytest.mark.slow
 class TestInvisibleRepoPattern:
     """Tests for AC5: Invisible Repo Pattern Enforced."""
 

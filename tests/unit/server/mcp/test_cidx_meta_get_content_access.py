@@ -73,12 +73,12 @@ class TestGetFileContentCidxMetaAccessFiltering:
         data = extract_mcp_data(result)
         assert data["success"] is False
 
-    def test_regular_user_allowed_for_non_repo_file(
+    def test_regular_user_denied_for_readme(
         self, regular_user, access_filtering_service
     ):
         """
-        AC2: regular_user may access README.md (not a repo-specific file).
-        Must succeed.
+        regular_user may not read README.md: catalog paths that are not a
+        granted repository's description are denied by default.
         """
         mock_file_service = _mock_file_service_with_content("# cidx-meta README")
         with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
@@ -94,7 +94,7 @@ class TestGetFileContentCidxMetaAccessFiltering:
                 )
 
         data = extract_mcp_data(result)
-        assert data["success"] is True
+        assert data["success"] is False
 
     def test_power_user_allowed_for_accessible_repo_file(
         self, power_user, access_filtering_service
@@ -118,8 +118,8 @@ class TestGetFileContentCidxMetaAccessFiltering:
         data = extract_mcp_data(result)
         assert data["success"] is True
 
-    def test_no_access_filtering_service_allows_all(self, regular_user):
-        """If access_filtering_service is not configured, content is returned."""
+    def test_no_access_filtering_service_denies(self, regular_user):
+        """If access_filtering_service is not configured, nothing is read."""
         mock_file_service = _mock_file_service_with_content("# repo-a description")
         with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
@@ -134,4 +134,5 @@ class TestGetFileContentCidxMetaAccessFiltering:
                 )
 
         data = extract_mcp_data(result)
-        assert data["success"] is True
+        assert data["success"] is False
+        assert not mock_file_service.get_file_content.called

@@ -22,7 +22,7 @@ class TestBrowseDirectoryCidxMetaAccessFiltering:
     ):
         """
         AC3: regular_user (cidx-meta only) browses cidx-meta root.
-        Only README.md should appear — no repo-specific .md files.
+        No catalog file appears: no repo description and no README.md.
         """
         mock_file_service = make_file_service_with_cidx_meta()
         with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
@@ -41,7 +41,7 @@ class TestBrowseDirectoryCidxMetaAccessFiltering:
         assert "repo-a.md" not in file_paths
         assert "repo-b.md" not in file_paths
         assert "repo-c.md" not in file_paths
-        assert "README.md" in file_paths
+        assert "README.md" not in file_paths
 
     def test_power_user_sees_only_accessible_repo_files_in_browse(
         self, power_user, access_filtering_service
@@ -64,11 +64,11 @@ class TestBrowseDirectoryCidxMetaAccessFiltering:
         file_paths = [f["path"] for f in data["structure"]["files"]]
         assert "repo-a.md" in file_paths
         assert "repo-b.md" in file_paths
-        assert "README.md" in file_paths
+        assert "README.md" not in file_paths
         assert "repo-c.md" not in file_paths
 
-    def test_no_access_filtering_service_returns_all_entries(self, regular_user):
-        """If access_filtering_service is not configured, all entries are returned."""
+    def test_no_access_filtering_service_returns_no_entries(self, regular_user):
+        """If access_filtering_service is not configured, nothing is listed."""
         mock_file_service = make_file_service_with_cidx_meta()
         with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
@@ -82,4 +82,4 @@ class TestBrowseDirectoryCidxMetaAccessFiltering:
 
         data = extract_mcp_data(result)
         assert data["success"] is True
-        assert len(data["structure"]["files"]) == 4  # all 4 files when no service
+        assert data["structure"]["files"] == []

@@ -140,38 +140,35 @@ MEMORY_ID_MISSING = "dddddddd" * 4
 
 
 # ---------------------------------------------------------------------------
-# Test 1: Non-memory files pass through unchanged (all listed files verified)
+# Test 1: Files that are neither a visible description nor a memory are denied
 # ---------------------------------------------------------------------------
 
 
-def test_non_memory_md_files_all_pass_through_for_poweruser(
+def test_non_memory_md_files_are_denied_for_poweruser(
     service: AccessFilteringService, poweruser: str
 ) -> None:
-    """Non-UUID .md stems that are not known repo aliases always pass through.
-
-    All listed files must appear in the result unchanged.
-    """
-    files = ["README.md", "notes.md"]
+    """Root .md files that are not a granted repo's description are denied."""
+    files = ["README.md", "notes.md", "my-repo.md"]
     result = service.filter_cidx_meta_files(files, poweruser)
-    assert set(result) == {"README.md", "notes.md"}
+    assert result == ["my-repo.md"]
 
 
-def test_non_memory_md_files_all_pass_through_for_regular_user(
+def test_non_memory_md_files_are_denied_for_regular_user(
     service: AccessFilteringService, regular_user: str
 ) -> None:
-    """Non-UUID .md files pass through for unprivileged users too."""
+    """Unprivileged users see none of them either."""
     files = ["README.md", "CHANGELOG.md"]
     result = service.filter_cidx_meta_files(files, regular_user)
-    assert set(result) == {"README.md", "CHANGELOG.md"}
+    assert result == []
 
 
-def test_non_md_files_all_pass_through(
+def test_non_md_files_are_denied(
     service: AccessFilteringService, regular_user: str
 ) -> None:
-    """Non-.md files (e.g. .gitignore) always pass through."""
+    """Non-.md files (e.g. .gitignore) are denied by default."""
     files = [".gitignore", "config.yaml"]
     result = service.filter_cidx_meta_files(files, regular_user)
-    assert set(result) == {".gitignore", "config.yaml"}
+    assert result == []
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +183,7 @@ def test_global_memory_file_visible_to_regular_user(
 ) -> None:
     """scope=global memory files are visible to all users regardless of repo access."""
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
-    filename = f"{MEMORY_ID_GLOBAL}.md"
+    filename = f"memories/{MEMORY_ID_GLOBAL}.md"
 
     result = service.filter_cidx_meta_files([filename], regular_user)
     assert filename in result
@@ -198,7 +195,7 @@ def test_global_memory_file_visible_to_poweruser(
     poweruser: str,
 ) -> None:
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
-    filename = f"{MEMORY_ID_GLOBAL}.md"
+    filename = f"memories/{MEMORY_ID_GLOBAL}.md"
 
     result = service.filter_cidx_meta_files([filename], poweruser)
     assert filename in result
@@ -218,7 +215,7 @@ def test_repo_scoped_memory_visible_when_repo_accessible(
     _write_memory_file(
         memories_dir, MEMORY_ID_REPO, scope="repo", referenced_repo="my-repo"
     )
-    filename = f"{MEMORY_ID_REPO}.md"
+    filename = f"memories/{MEMORY_ID_REPO}.md"
 
     result = service.filter_cidx_meta_files([filename], poweruser)
     assert filename in result
@@ -238,7 +235,7 @@ def test_repo_scoped_memory_hidden_when_repo_inaccessible(
     _write_memory_file(
         memories_dir, MEMORY_ID_REPO, scope="repo", referenced_repo="my-repo"
     )
-    filename = f"{MEMORY_ID_REPO}.md"
+    filename = f"memories/{MEMORY_ID_REPO}.md"
 
     result = service.filter_cidx_meta_files([filename], regular_user)
     assert filename not in result
@@ -262,7 +259,7 @@ def test_file_scoped_memory_visible_when_referenced_repo_accessible(
         referenced_repo="my-repo",
         referenced_file="src/foo.py",
     )
-    filename = f"{MEMORY_ID_FILE}.md"
+    filename = f"memories/{MEMORY_ID_FILE}.md"
 
     result = service.filter_cidx_meta_files([filename], poweruser)
     assert filename in result
@@ -280,7 +277,7 @@ def test_file_scoped_memory_hidden_when_referenced_repo_inaccessible(
         referenced_repo="my-repo",
         referenced_file="src/foo.py",
     )
-    filename = f"{MEMORY_ID_FILE}.md"
+    filename = f"memories/{MEMORY_ID_FILE}.md"
 
     result = service.filter_cidx_meta_files([filename], regular_user)
     assert filename not in result
@@ -296,7 +293,7 @@ def test_missing_memory_file_filtered_out(
     poweruser: str,
 ) -> None:
     """A memory file that does not exist on disk is excluded (fail-closed)."""
-    filename = f"{MEMORY_ID_MISSING}.md"
+    filename = f"memories/{MEMORY_ID_MISSING}.md"
     # File is intentionally NOT written to disk
 
     result = service.filter_cidx_meta_files([filename], poweruser)
@@ -319,7 +316,7 @@ def test_corrupt_yaml_memory_file_filtered_out(
     # Valid delimiters, invalid YAML content (unbalanced brace triggers parse error)
     path.write_text("---\nkey: {unclosed brace\n---\nbody\n")
 
-    filename = f"{corrupt_id}.md"
+    filename = f"memories/{corrupt_id}.md"
     result = service.filter_cidx_meta_files([filename], poweruser)
     assert filename not in result
 
@@ -339,14 +336,14 @@ def test_cache_miss_reads_from_filesystem_then_caches(
     svc = AccessFilteringService(group_manager, memory_metadata_cache=cache)
 
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
-    filename = f"{MEMORY_ID_GLOBAL}.md"
+    filename = f"memories/{MEMORY_ID_GLOBAL}.md"
 
     # First call: cache miss → reads from disk
     result1 = svc.filter_cidx_meta_files([filename], poweruser)
     assert filename in result1
 
     # Remove file from disk; second call should use cached result
-    (memories_dir / filename).unlink()
+    (memories_dir / f"{MEMORY_ID_GLOBAL}.md").unlink()
     result2 = svc.filter_cidx_meta_files([filename], poweruser)
     assert filename in result2, (
         "Second call should return cached result after file deletion"
@@ -374,11 +371,11 @@ def test_admin_sees_memory_files_for_repos_not_granted_to_admins(
     )
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
 
-    files = [f"{MEMORY_ID_REPO}.md", f"{MEMORY_ID_GLOBAL}.md"]
+    files = [f"memories/{MEMORY_ID_REPO}.md", f"memories/{MEMORY_ID_GLOBAL}.md"]
     result = service.filter_cidx_meta_files(files, admin_user)
 
-    assert f"{MEMORY_ID_REPO}.md" in result
-    assert f"{MEMORY_ID_GLOBAL}.md" in result
+    assert f"memories/{MEMORY_ID_REPO}.md" in result
+    assert f"memories/{MEMORY_ID_GLOBAL}.md" in result
 
 
 # ---------------------------------------------------------------------------

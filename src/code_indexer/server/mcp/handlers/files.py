@@ -14,6 +14,10 @@ from pathlib import Path
 
 from code_indexer.server.auth.user_manager import User
 from . import _utils
+from code_indexer.server.services.cidx_meta_access import (
+    is_internal_meta_identity,
+    request_alias_identities,
+)
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.file_listing_paths import (
     normalize_listing_path,
@@ -406,31 +410,45 @@ def _serialize_file_results(result: Any) -> list:
     ]
 
 
+def _is_catalog_alias(repository_alias: Any, user: User) -> bool:
+    """True when the alias serves the internal catalog repository, judged by
+    the golden identity behind it (never by its spelling); an alias whose
+    identity cannot be resolved counts as the catalog."""
+    if not isinstance(repository_alias, str) or not repository_alias:
+        return False
+    return is_internal_meta_identity(
+        request_alias_identities(
+            repository_alias,
+            user.username,
+            _utils._lazy_module_attr_or_none("activated_repo_manager"),
+        )
+    )
+
+
 def _filter_cidx_meta_files(
     serialized_files: list, repository_alias: Any, user: User
 ) -> list:
-    """Bug #336: Filter cidx-meta files to only show repos user can access.
+    """Restrict a catalog listing to the paths the user may see.
 
-    NOTE: When access_filtering_service is unavailable (e.g. during startup or
-    in test environments), this preserves the existing _legacy.py fail-open
-    behavior and returns files unfiltered with a warning log. Changing to
-    fail-closed would be a behavioral change requiring a separate story.
+    Paths are judged by their full repository-relative path. Without the
+    access service nothing is listed (fail closed).
     """
-    if not repository_alias or "cidx-meta" not in str(repository_alias):
+    if not _is_catalog_alias(repository_alias, user):
         return serialized_files
     access_filtering_service = _get_access_filtering_service()
     if not access_filtering_service:
         logger.warning(
-            "Access filtering service unavailable for cidx-meta filtering; "
-            "returning unfiltered results",
+            "Access filtering service unavailable for catalog listing; "
+            "returning no entries",
             extra={"correlation_id": get_correlation_id()},
         )
-        return serialized_files
-    filenames = [Path(f["path"]).name for f in serialized_files]
+        return []
     allowed = set(
-        access_filtering_service.filter_cidx_meta_files(filenames, user.username)
+        access_filtering_service.filter_cidx_meta_files(
+            [f["path"] for f in serialized_files], user.username
+        )
     )
-    return [f for f in serialized_files if Path(f["path"]).name in allowed]
+    return [f for f in serialized_files if f["path"] in allowed]
 
 
 def _build_browse_path_pattern(
@@ -668,17 +686,27 @@ def _tree_node_to_dict(node: Any) -> dict:
 
 
 def _filter_cidx_meta_tree(result: Any, user: User) -> Any:
-    """Bug #336: Filter cidx-meta tree to only show repos user can access."""
-    _tree_access_svc = _get_access_filtering_service()
-    if not _tree_access_svc or result.root.children is None:
+    """Restrict the catalog tree's top-level files to those the user may see,
+    by full relative path; without the access service no file is shown."""
+    if result.root.children is None:
         return result
-
-    _all_names = [node.name for node in result.root.children if not node.is_directory]
-    _allowed = set(_tree_access_svc.filter_cidx_meta_files(_all_names, user.username))
+    _tree_access_svc = _get_access_filtering_service()
+    _files = [node for node in result.root.children if not node.is_directory]
+    _all_names = [node.name for node in _files]
+    _allowed_paths = (
+        set(
+            _tree_access_svc.filter_cidx_meta_files(
+                [node.path for node in _files], user.username
+            )
+        )
+        if _tree_access_svc
+        else set()
+    )
+    _allowed = {node.name for node in _files if node.path in _allowed_paths}
     result.root.children = [
         node
         for node in result.root.children
-        if node.is_directory or node.name in _allowed
+        if node.is_directory or node.path in _allowed_paths
     ]
     _filtered_lines = []
     for _line in result.tree_string.splitlines():
@@ -937,23 +965,24 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                         params["repository_alias"] = _promoted
                         repository_alias = _promoted
 
-        # Bug #336: Check cidx-meta file-level access before returning content
-        if repository_alias and "cidx-meta" in repository_alias:
+        # Catalog file-level access is decided on the full relative path.
+        if _is_catalog_alias(repository_alias, user):
             access_filtering_svc = _get_access_filtering_service()
-            if access_filtering_svc:
-                basename = Path(file_path).name
-                allowed = access_filtering_svc.filter_cidx_meta_files(
-                    [basename], user.username
+            allowed = (
+                access_filtering_svc.filter_cidx_meta_files([file_path], user.username)
+                if access_filtering_svc
+                else []
+            )
+            if not allowed:
+                basename = Path(str(file_path)).name
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": f"Access denied: you are not authorized to access '{basename}'",
+                        "file_content": [],
+                        "metadata": {},
+                    }
                 )
-                if not allowed:
-                    return _mcp_response(
-                        {
-                            "success": False,
-                            "error": f"Access denied: you are not authorized to access '{basename}'",
-                            "file_content": [],
-                            "metadata": {},
-                        }
-                    )
 
         pagination = _parse_pagination_params(params)
         if isinstance(pagination[0], dict):
@@ -1227,7 +1256,7 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         serialized_files = _serialize_file_results(result)
         serialized_files = _filter_cidx_meta_files(
-            serialized_files, repository_alias, user
+            serialized_files, bp["repository_alias"], user
         )
 
         path_normalized = normalized_browse_path or "/"
@@ -1641,7 +1670,7 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             include_hidden=args.get("include_hidden", False),
         )
 
-        if repository_alias and "cidx-meta" in repository_alias:
+        if _is_catalog_alias(repository_alias, user):
             result = _filter_cidx_meta_tree(result, user)
 
         return _mcp_response(

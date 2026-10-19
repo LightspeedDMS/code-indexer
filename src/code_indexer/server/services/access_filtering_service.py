@@ -6,7 +6,7 @@ Story #707: Query-Time Access Enforcement and Repo Visibility Filtering
 Provides centralized access filtering for:
 - Query results filtering by user group membership
 - Repository listing filtering
-- cidx-meta summary filtering
+- cidx-meta listing filtering (through the cidx_meta_access path policy)
 
 Key principles:
 - Invisible repo pattern: No 403 errors, repos simply don't appear
@@ -17,13 +17,13 @@ Key principles:
 
 import logging
 import re
-import time
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
     Dict,
+    FrozenSet,
     List,
     NamedTuple,
     Optional,
@@ -33,6 +33,7 @@ from typing import (
     runtime_checkable,
 )
 
+from .cidx_meta_access import DecisionKind, classify, resolve_meta_visibility
 from .constants import CIDX_META_REPO, DEFAULT_GROUP_ADMINS, is_internal_meta_repo
 from .group_access_manager import GroupAccessManager
 from .memory_io import (
@@ -51,6 +52,16 @@ if TYPE_CHECKING:
 _MEMORY_FILE_RE = re.compile(r"^[0-9a-f]{32}\.md$")
 
 logger = logging.getLogger(__name__)
+
+_LISTABLE_DECISIONS = frozenset(
+    {DecisionKind.ALLOW, DecisionKind.DESCRIPTION, DecisionKind.MEMORY}
+)
+
+
+def _membership_not_read(_domain: str) -> Optional[FrozenSet[str]]:
+    """Listing never shows dependency-map documents (TRANSFORM or DENY alike),
+    so their membership is not read."""
+    return None
 
 
 class _ActivationSource(NamedTuple):
@@ -82,9 +93,6 @@ class AccessFilteringService:
 
     # Special group name that has full access to all repos
     ADMIN_GROUP_NAME = DEFAULT_GROUP_ADMINS
-
-    # Bug #338: TTL for _get_all_repo_aliases() cache (seconds)
-    REPO_ALIASES_CACHE_TTL = 60
 
     def __init__(
         self,
@@ -122,11 +130,6 @@ class AccessFilteringService:
             activated_repo_manager
         )
         self._unwired_warning_logged: bool = False
-        # Bug #338: TTL cache for _get_all_repo_aliases()
-        self._repo_aliases_cache: Optional[Set[str]] = None
-        self._repo_aliases_cache_time: float = 0.0
-        # Bug #338: Register automatic cache invalidation on any repo access change
-        group_access_manager.register_on_repo_change(self.invalidate_repo_aliases_cache)
 
     def get_accessible_repos(self, user_id: str) -> Set[str]:
         """
@@ -412,141 +415,44 @@ class AccessFilteringService:
         accessible = self.get_accessible_repos(user_id)
         return [r for r in repos if r in accessible]
 
-    def filter_cidx_meta_results(self, results: List[Any], user_id: str) -> List[Any]:
-        """
-        Filter cidx-meta summaries that reference inaccessible repos.
-
-        Implements AC3: When querying cidx-meta, summaries referencing
-        inaccessible repos are filtered out.
-
-        Args:
-            results: List of QueryResult objects from cidx-meta
-            user_id: The user's unique identifier
-
-        Returns:
-            Filtered list with inaccessible repo references removed
-        """
-        if not results:
-            return []
-
-        # Admin users see everything
-        if self.is_admin_user(user_id):
-            return results
-
-        accessible = self.get_accessible_repos(user_id)
-        filtered = []
-
-        for result in results:
-            # Check if result has metadata with referenced_repo
-            metadata = getattr(result, "metadata", None)
-            if metadata is None:
-                # No metadata - pass through
-                filtered.append(result)
-                continue
-
-            referenced_repo = metadata.get("referenced_repo")
-            if referenced_repo is None:
-                # No referenced_repo in metadata - pass through
-                filtered.append(result)
-                continue
-
-            # Only include if referenced repo is accessible
-            if referenced_repo in accessible:
-                filtered.append(result)
-
-        return filtered
-
-    def _get_all_repo_aliases(self) -> Set[str]:
-        """
-        Return the universe of all repo aliases known to the system.
-
-        Collects repo aliases granted to every group. Used to distinguish
-        repo-description .md files from general .md files (e.g. README.md).
-
-        Bug #338: Result is cached with REPO_ALIASES_CACHE_TTL (default 60s)
-        to avoid N+1 DB queries on every filter_cidx_meta_files() call.
-        Use invalidate_repo_aliases_cache() to force a fresh query when
-        group-repo assignments change.
-
-        Returns:
-            Set of all repo alias strings across all groups.
-        """
-        now = time.monotonic()
-        if (
-            self._repo_aliases_cache is not None
-            and (now - self._repo_aliases_cache_time) < self.REPO_ALIASES_CACHE_TTL
-        ):
-            return self._repo_aliases_cache
-
-        all_aliases: Set[str] = set()
-        for grp in self.group_manager.get_all_groups():
-            all_aliases.update(self.group_manager.get_group_repos(grp.id))
-
-        self._repo_aliases_cache = all_aliases
-        self._repo_aliases_cache_time = now
-        return all_aliases
-
-    def invalidate_repo_aliases_cache(self) -> None:
-        """
-        Invalidate the _get_all_repo_aliases() TTL cache.
-
-        Bug #338: Call this method after any group-repo assignment change
-        (grant or revoke) so the next call to filter_cidx_meta_files()
-        reflects the updated state immediately rather than waiting for TTL.
-        """
-        self._repo_aliases_cache = None
-        self._repo_aliases_cache_time = 0.0
-
     def filter_cidx_meta_files(self, files: List[str], user_id: str) -> List[str]:
         """
-        Filter a list of cidx-meta filenames to only those the user may access.
+        Keep the cidx-meta paths the user may list, in input order.
 
-        Bug #336: File-level access control for cidx-meta.
-
-        Each repo-description file in cidx-meta is named ``{repo-alias}.md``.
-        General files (e.g. ``README.md``, ``.gitignore``) are always visible.
-
-        A ``.md`` file is treated as a repo-description file only when its stem
-        (name without the ``.md`` extension) matches a known repo alias.
-        Unknown stems pass through unconditionally.
-
-        Admin users receive the full list unchanged.
+        A thin wrapper over the catalog path policy
+        (``cidx_meta_access.classify``): *files* are FULL catalog-relative
+        paths, never basenames, and every path the policy does not allow is
+        dropped (deny by default). Dependency-map documents that need a
+        per-user projection (TRANSFORM) are excluded until a door serves the
+        projected content. Admins (``admins`` group) get the list unchanged;
+        an acting-user scope narrows it.
 
         Args:
-            files: List of filenames (basenames) from cidx-meta.
+            files: Catalog-relative paths (e.g. ``dependency-map/x.md``).
             user_id: The user's unique identifier.
 
         Returns:
-            Filtered list of filenames the user is allowed to see.
+            The paths the user may see.
         """
         if not files:
             return []
-
-        # Admin users see everything
-        if self.is_admin_user(user_id):
+        vis = resolve_meta_visibility(user_id, self)
+        if vis.unrestricted:
             return files
+        accessible = set(vis.visible)
 
-        accessible = self.get_accessible_repos(user_id)
-        all_repo_aliases = self._get_all_repo_aliases()
+        def _memory_visible(memory_id: str) -> bool:
+            filename = f"{memory_id}.md"
+            return bool(
+                _MEMORY_FILE_RE.match(filename)
+            ) and self._is_memory_file_accessible(filename, accessible)
 
-        result = []
-        for filename in files:
-            if not filename.endswith(".md"):
-                # Non-.md files (e.g. .gitignore, README.txt) always pass through
-                result.append(filename)
-            elif _MEMORY_FILE_RE.match(filename):
-                # Memory file: UUID-stemmed .md — apply memory-aware access rules
-                if self._is_memory_file_accessible(filename, accessible):
-                    result.append(filename)
-            else:
-                stem = filename[: -len(".md")]
-                if stem not in all_repo_aliases:
-                    # Not a repo-description file (e.g. README.md) – always pass
-                    result.append(filename)
-                elif stem in accessible:
-                    # Repo-description file the user is authorised to see
-                    result.append(filename)
-        return result
+        return [
+            path
+            for path in files
+            if classify(path, vis, _membership_not_read, _memory_visible).kind
+            in _LISTABLE_DECISIONS
+        ]
 
     def filter_visible_memory_ids(
         self, memory_ids: List[str], user_id: str
@@ -588,6 +494,25 @@ class AccessFilteringService:
                 lookup=self._read_memory_frontmatter_fresh,
             )
         ]
+
+    def memory_visible_within(self, memory_id: str, accessible: Set[str]) -> bool:
+        """The memory scope rule against an explicit visible set.
+
+        Same rule as filter_visible_memory_ids(), with the frontmatter read
+        fresh, but judged against *accessible* instead of the caller's own
+        grants (the cidx-meta path policy passes the caller's resolved
+        visibility, which may be an acting-user scope). A value that is not
+        a memory identifier is never visible.
+        """
+        if not isinstance(memory_id, str) or not _MEMORY_FILE_RE.match(
+            f"{memory_id}.md"
+        ):
+            return False
+        return self._is_memory_file_accessible(
+            f"{memory_id}.md",
+            accessible,
+            lookup=self._read_memory_frontmatter_fresh,
+        )
 
     def _read_memory_frontmatter_fresh(
         self, memory_id: str

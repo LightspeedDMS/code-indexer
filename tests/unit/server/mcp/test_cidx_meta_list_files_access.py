@@ -22,7 +22,7 @@ class TestListFilesCidxMetaAccessFiltering:
     ):
         """
         AC1: regular_user belongs to 'users' group (cidx-meta only).
-        repo-a.md, repo-b.md, repo-c.md must be hidden; README.md passes through.
+        repo-a.md, repo-b.md, repo-c.md and README.md must all be hidden.
         """
         mock_file_service = make_file_service_with_cidx_meta()
         with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
@@ -39,7 +39,7 @@ class TestListFilesCidxMetaAccessFiltering:
         assert "repo-a.md" not in file_paths
         assert "repo-b.md" not in file_paths
         assert "repo-c.md" not in file_paths
-        assert "README.md" in file_paths
+        assert "README.md" not in file_paths
 
     def test_power_user_sees_only_accessible_repo_files(
         self, power_user, access_filtering_service
@@ -62,7 +62,7 @@ class TestListFilesCidxMetaAccessFiltering:
         file_paths = [f["path"] for f in data["files"]]
         assert "repo-a.md" in file_paths
         assert "repo-b.md" in file_paths
-        assert "README.md" in file_paths
+        assert "README.md" not in file_paths
         assert "repo-c.md" not in file_paths
 
     def test_non_cidx_meta_repo_is_not_filtered(
@@ -90,8 +90,8 @@ class TestListFilesCidxMetaAccessFiltering:
         assert data["success"] is True
         assert len(data["files"]) == 2
 
-    def test_no_access_filtering_service_returns_all_files(self, regular_user):
-        """If access_filtering_service is not configured, all files are returned."""
+    def test_no_access_filtering_service_returns_no_files(self, regular_user):
+        """If access_filtering_service is not configured, nothing is listed."""
         mock_file_service = make_file_service_with_cidx_meta()
         with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
@@ -103,4 +103,4 @@ class TestListFilesCidxMetaAccessFiltering:
 
         data = extract_mcp_data(result)
         assert data["success"] is True
-        assert len(data["files"]) == 4  # all files returned when no service
+        assert data["files"] == []

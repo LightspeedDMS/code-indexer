@@ -139,13 +139,12 @@ def _patch_regex_search_infrastructure(
 class TestRegexSearchCidxMetaAccessFilteringNonAdmin:
     """AC1 + AC3: regex_search on cidx-meta filters unauthorized repo .md files."""
 
-    def test_regular_user_sees_only_non_repo_md_matches(
+    def test_regular_user_sees_no_catalog_matches(
         self, regular_user, access_filtering_service
     ):
         """
         regular_user belongs to 'users' group (cidx-meta only).
-        Matches from repo-a.md, repo-b.md, repo-c.md must be hidden.
-        Matches from README.md pass through.
+        Matches from repo-a.md, repo-b.md, repo-c.md and README.md are hidden.
         """
         all_matches = [
             make_regex_match("repo-a.md"),
@@ -171,7 +170,7 @@ class TestRegexSearchCidxMetaAccessFilteringNonAdmin:
         assert "repo-a.md" not in returned_files
         assert "repo-b.md" not in returned_files
         assert "repo-c.md" not in returned_files
-        assert "README.md" in returned_files
+        assert "README.md" not in returned_files
 
     def test_power_user_sees_only_accessible_repo_matches(
         self, power_user, access_filtering_service
@@ -203,15 +202,15 @@ class TestRegexSearchCidxMetaAccessFilteringNonAdmin:
         returned_files = [m["file_path"] for m in data["matches"]]
         assert "repo-a.md" in returned_files
         assert "repo-b.md" in returned_files
-        assert "README.md" in returned_files
+        assert "README.md" not in returned_files
         assert "repo-c.md" not in returned_files
 
     def test_regular_user_cidx_meta_global_alias_also_filtered(
         self, regular_user, access_filtering_service
     ):
         """
-        The cidx-meta-global alias (contains 'cidx-meta') must also be filtered
-        for non-admin users.
+        The cidx-meta-global alias (the catalog's registry entry) must also be
+        filtered for non-admin users.
         """
         all_matches = [
             make_regex_match("repo-a.md"),
@@ -233,7 +232,7 @@ class TestRegexSearchCidxMetaAccessFilteringNonAdmin:
         assert data["success"] is True
         returned_files = [m["file_path"] for m in data["matches"]]
         assert "repo-a.md" not in returned_files
-        assert "README.md" in returned_files
+        assert "README.md" not in returned_files
 
 
 # ---------------------------------------------------------------------------
@@ -304,9 +303,9 @@ class TestRegexSearchCidxMetaAccessFilteringAdmin:
         assert data["success"] is True
         assert len(data["matches"]) == 2
 
-    def test_no_access_filtering_service_returns_all_matches(self, regular_user):
+    def test_no_access_filtering_service_returns_no_matches(self, regular_user):
         """
-        If access_filtering_service is not configured, all matches are returned.
+        If access_filtering_service is not configured, no match is returned.
         """
         all_matches = [
             make_regex_match("repo-a.md"),
@@ -326,7 +325,7 @@ class TestRegexSearchCidxMetaAccessFilteringAdmin:
 
         data = extract_mcp_data(result)
         assert data["success"] is True
-        assert len(data["matches"]) == 2  # unfiltered
+        assert data["matches"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -339,13 +338,13 @@ class TestRegexSearchTotalMatchesReflectsFilteredCount:
     """Bug #337: total_matches in response must equal len(matches) after filtering."""
 
     def test_total_matches_equals_filtered_count_for_non_admin(
-        self, regular_user, access_filtering_service
+        self, power_user, access_filtering_service
     ):
         """
         When filtering removes matches, total_matches must reflect filtered count.
-        regular_user has no access to repo-a.md, repo-b.md, repo-c.md.
-        Engine returns 4 matches but only README.md passes through.
-        total_matches must be 1, not 4.
+        power_user is granted repo-a and repo-b only. The engine returns 4
+        matches; repo-c.md and README.md are hidden, so total_matches must be
+        2, not 4.
         """
         all_matches = [
             make_regex_match("repo-a.md"),
@@ -353,7 +352,6 @@ class TestRegexSearchTotalMatchesReflectsFilteredCount:
             make_regex_match("repo-c.md"),
             make_regex_match("README.md"),
         ]
-        # Engine reports 4 total but user should only see 1
         search_result = make_search_result(all_matches)
         assert search_result.total_matches == 4
 
@@ -363,15 +361,15 @@ class TestRegexSearchTotalMatchesReflectsFilteredCount:
             result = _run(
                 handle_regex_search(
                     {"repository_alias": "cidx-meta", "pattern": "description"},
-                    regular_user,
+                    power_user,
                 )
             )
 
         data = extract_mcp_data(result)
         assert data["success"] is True
-        assert len(data["matches"]) == 1
-        assert data["total_matches"] == 1, (
-            f"total_matches must equal filtered count (1), not pre-filtered engine count (4). "
+        assert len(data["matches"]) == 2
+        assert data["total_matches"] == 2, (
+            f"total_matches must equal filtered count (2), not pre-filtered engine count (4). "
             f"Got: {data['total_matches']}"
         )
 

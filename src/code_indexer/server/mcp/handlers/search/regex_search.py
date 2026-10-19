@@ -26,6 +26,10 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.mcp import reranking as _mcp_reranking
 from code_indexer.server.services.api_metrics_service import api_metrics_service
+from code_indexer.server.services.cidx_meta_access import (
+    is_internal_meta_identity,
+    request_alias_identities,
+)
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.search_event_recording import (
     SearchOrigin,
@@ -313,13 +317,25 @@ async def _rerank_truncate_and_filter_regex_matches(
     matches = _apply_regex_payload_truncation(matches, owner=user.username)
 
     cidx_meta_access_filtered = False
-    if repository_alias and "cidx-meta" in repository_alias:
+    if repository_alias and is_internal_meta_identity(
+        request_alias_identities(
+            repository_alias,
+            user.username,
+            _utils._lazy_module_attr_or_none("activated_repo_manager"),
+        )
+    ):
         access_svc = _get_access_filtering_service()
-        if access_svc:
-            filenames = [Path(m["file_path"]).name for m in matches]
-            allowed = set(access_svc.filter_cidx_meta_files(filenames, user.username))
-            matches = [m for m in matches if Path(m["file_path"]).name in allowed]
-            cidx_meta_access_filtered = True
+        allowed = (
+            set(
+                access_svc.filter_cidx_meta_files(
+                    [m["file_path"] for m in matches], user.username
+                )
+            )
+            if access_svc
+            else set()
+        )
+        matches = [m for m in matches if m["file_path"] in allowed]
+        cidx_meta_access_filtered = True
     rerank_meta["cidx_meta_access_filtered"] = cidx_meta_access_filtered
 
     return matches, rerank_meta
