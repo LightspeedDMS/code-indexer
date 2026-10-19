@@ -255,7 +255,9 @@ def test_an_invalid_pattern_is_recorded_as_a_failure(server, store) -> None:
 
 
 def test_a_failed_commit_is_never_success(server, store, cidx_meta) -> None:
-    shutil.rmtree(cidx_meta / ".git")
+    hook = cidx_meta / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
     body = _store(POWER, "__any__", _pattern("p8"))
     assert body.get("success") is not True
     assert body["error"] == "commit_failed"
@@ -352,3 +354,35 @@ def test_a_failed_unstage_after_a_failed_commit_is_logged_as_an_error(
         r.levelname == "ERROR" and "xray-patterns/__any__/p14.yaml" in r.getMessage()
         for r in caplog.records
     ), [r.getMessage() for r in caplog.records]
+
+
+def _noisy(caplog: pytest.LogCaptureFixture) -> list:
+    import logging
+
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_store_into_a_non_git_cidx_meta_succeeds_and_is_audited(
+    server, store, cidx_meta, caplog
+) -> None:
+    shutil.rmtree(cidx_meta / ".git")
+    caplog.clear()
+    body = _store(POWER, "__any__", _pattern("p20"))
+    assert body.get("success") is True, body
+    assert (cidx_meta / "xray-patterns" / "__any__" / "p20.yaml").exists()
+    assert (POWER.username, "success") in _outcomes(store)
+    assert not _noisy(caplog), _noisy(caplog)
+
+
+def test_seed_and_delete_in_a_non_git_cidx_meta_log_no_warning(
+    cidx_meta, caplog
+) -> None:
+    shutil.rmtree(cidx_meta / ".git")
+    service = XrayPatternService(cidx_meta)
+    caplog.clear()
+    service.ensure_seed_patterns()
+    seed = cidx_meta / "xray-patterns" / "__any__" / "catch-rethrow.yaml"
+    assert seed.exists()
+    service.delete_pattern("__any__", "catch-rethrow")
+    assert not seed.exists()
+    assert not _noisy(caplog), _noisy(caplog)

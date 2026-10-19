@@ -54,6 +54,9 @@ from code_indexer.server.services.audit_outcome import (
     conforming_details,
     record_outcome,
 )
+from code_indexer.server.services.cidx_meta_backup.paths import (
+    cidx_meta_is_git_repository,
+)
 from code_indexer.server.services.cidx_meta_backup.sync import CidxMetaBackupSync
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.xray_pattern_params import (
@@ -712,10 +715,14 @@ class XrayPatternService:
         successful commit, calls CidxMetaBackupSync.sync() when backup is
         configured and enabled. Any sync failure is surfaced as a WARNING
         (deferred-failure pattern) — the commit itself is not rolled back.
+        A cidx-meta that is not a git repository keeps plain files: nothing
+        is committed and nothing fails.
 
         Raises:
             PatternCommitError: git add or git commit failed.
         """
+        if not cidx_meta_is_git_repository(self._cidx_meta):
+            return
         env = build_non_interactive_git_env()
         env["GIT_AUTHOR_NAME"] = "cidx-meta-backup"
         env["GIT_AUTHOR_EMAIL"] = "cidx-meta-backup@example.invalid"

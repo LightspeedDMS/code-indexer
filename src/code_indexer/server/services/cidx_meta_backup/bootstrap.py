@@ -10,6 +10,7 @@ from code_indexer.server.git.git_subprocess_env import build_non_interactive_git
 from code_indexer.server.utils.cancellable_subprocess import run_with_cancel
 
 from .branch_detect import detect_default_branch
+from .paths import cidx_meta_is_git_repository
 
 
 class CidxMetaBackupBootstrap:
@@ -90,13 +91,12 @@ class CidxMetaBackupBootstrap:
 
     def bootstrap(self, cidx_meta_path: str, remote_url: str) -> str:
         """Initialize or re-point git backup state for cidx-meta."""
-        git_dir = Path(cidx_meta_path) / ".git"
         branch = (
             detect_default_branch(cidx_meta_path, cancel_check=self._cancel_check)
             or "master"
         )
 
-        if not git_dir.exists():
+        if not cidx_meta_is_git_repository(cidx_meta_path):
             self._git(cidx_meta_path, "init")
             self._git(cidx_meta_path, "checkout", "-B", branch)
             self._write_gitignore(cidx_meta_path)
