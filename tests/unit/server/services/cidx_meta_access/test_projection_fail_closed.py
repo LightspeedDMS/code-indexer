@@ -5,6 +5,7 @@ Real fixture files and registry; synthetic lines use neutral names only.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import List, Optional
 
@@ -95,7 +96,7 @@ def test_chunk_never_exposes_more_than_the_document(
     universe = AliasUniverse(fx.registry).snapshot()
     full = project_lines(document, rel, vis, model, universe)
     for start in range(len(document)):
-        for end in range(start + 1, min(len(document), start + 12) + 1):
+        for end in range(start + 1, len(document) + 1):
             chunk = project_chunk(
                 document[start:end], start + 1, document, rel, vis, model, universe
             )
@@ -147,6 +148,23 @@ def test_chunk_position_must_be_positive(fx: CidxMetaFixture) -> None:
             load_depmap_model(fx.dep_map_dir),
             AliasUniverse(fx.registry).snapshot(),
         )
+
+
+def test_malformed_diagnostic_is_logged_once_per_path_and_fingerprint(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    fresh = build_cidx_meta_fixture(tmp_path)
+    vis = resolve_meta_visibility(RESTRICTED_USER, fresh.access_service)
+    model = load_depmap_model(fresh.dep_map_dir)
+    universe = AliasUniverse(fresh.registry).snapshot()
+    chunks = [[f"| {ALPHA} | stray {n} |"] for n in range(3)]
+    with caplog.at_level(logging.WARNING):
+        for chunk in chunks:
+            project_lines(chunk, "dependency-map/ledger.md", vis, model, universe)
+        project_lines(chunks[0], "dependency-map/payments.md", vis, model, universe)
+    messages = [r.getMessage() for r in caplog.records if "malformed" in r.getMessage()]
+    assert sum("ledger.md" in m for m in messages) == 1
+    assert sum("payments.md" in m for m in messages) == 1
 
 
 def test_flow_list_membership_is_recognised(tmp_path: Path) -> None:

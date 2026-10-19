@@ -20,11 +20,21 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Set, Tuple
+from typing import (
+    Dict,
+    FrozenSet,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from ..dep_map_file_utils import load_domains_json
 from ..dep_map_parser_hygiene import strip_backticks
-from ..dep_map_parser_tables import iter_table_rows
 from ..query_path_cache import is_immutable_versioned_snapshot
 from ..repo_access_guard import normalize_repo_alias
 from .membership import frontmatter_of, participants_from
@@ -36,6 +46,7 @@ MODEL_CACHE_MAX_ENTRIES = 16
 _ALIAS_SHAPE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _LINK = re.compile(r"^\[([^\]]*)\]\([^)]*\)$")
 _WRAPPERS = "*_`\"'"
+PLACEHOLDER_WORDS = frozenset({"none", "external", "n/a", "-", "empty"})
 
 Edge = Tuple[str, str, FrozenSet[str]]
 
@@ -54,10 +65,12 @@ def normalize_name(text: str) -> str:
 
 
 def _alias_names(values: Iterable[str]) -> Set[str]:
+    """Alias-shaped names; the placeholder words the generator writes into
+    empty structured cells are never names."""
     names = set()
     for value in values:
         name = normalize_name(value)
-        if _ALIAS_SHAPE.match(name):
+        if _ALIAS_SHAPE.match(name) and name not in PLACEHOLDER_WORDS:
             names.add(name)
     return names
 
@@ -84,17 +97,105 @@ class DepMapModel:
 EMPTY_MODEL = DepMapModel("absent", {}, frozenset(), {}, frozenset(), frozenset(), ())
 
 
-def _table_names(content: str) -> Set[str]:
+@dataclass(frozen=True)
+class TableKind:
+    """A recognised dependency-map table and the meaning of its columns.
+
+    Only ``repo_columns``, ``domain_columns`` and ``list_column`` decide
+    whether a row is kept; every other cell is free text.
+    """
+
+    name: str
+    repo_columns: Tuple[int, ...] = ()
+    domain_columns: Tuple[int, ...] = ()
+    list_column: Optional[int] = None
+    count_column: Optional[int] = None
+
+
+ROLES = TableKind("roles", repo_columns=(0,))
+OUTGOING = TableKind("outgoing", repo_columns=(0, 1), domain_columns=(2,))
+INCOMING = TableKind("incoming", repo_columns=(0, 1), domain_columns=(2,))
+MATRIX = TableKind("matrix", repo_columns=(0,), domain_columns=(1,))
+CATALOG = TableKind("catalog", domain_columns=(0,), count_column=2)
+GRAPH = TableKind("graph", domain_columns=(0, 1), list_column=2)
+
+_SEPARATOR_CELL = re.compile(r"^:?-{3,}:?$")
+_TRAILING_NOTE = re.compile(r"\s*\([^()]*\)$")
+
+
+def table_cells(line: str) -> Optional[List[str]]:
+    """The cells of a ``|``-delimited line, or None when it is not one."""
+    stripped = line.strip()
+    if len(stripped) < 2 or not (stripped.startswith("|") and stripped.endswith("|")):
+        return None
+    return [cell.strip() for cell in stripped[1:-1].split("|")]
+
+
+def is_separator(cells: List[str]) -> bool:
+    return bool(cells) and all(_SEPARATOR_CELL.match(cell) for cell in cells)
+
+
+def table_kind(header: List[str]) -> Optional[TableKind]:
+    """The kind of table whose header row (the row right before a separator)
+    is *header*, compared case-insensitively; None when unrecognised."""
+    names = [" ".join(cell.strip("*").split()).lower() for cell in header]
+    first = names[0] if names else ""
+    if first in ("repository", "repo"):
+        if names[1:] in (["domain"], ["domains"]):
+            return MATRIX
+        return ROLES if len(names) >= 3 else None
+    if names[:3] == ["this repo", "depends on", "target domain"]:
+        return OUTGOING if len(names) >= 4 else None
+    if names[:3] == ["external repo", "depends on", "source domain"]:
+        return INCOMING if len(names) >= 6 else None
+    if names == ["domain", "description", "repo count"]:
+        return CATALOG
+    if names[:3] == ["source domain", "target domain", "via repos"]:
+        return GRAPH if len(names) >= 5 else None
+    return None
+
+
+def cell_names(cell: str) -> List[str]:
+    """Comparison names of a structured cell: each comma entry as a whole
+    value, or the name before a trailing ``(note)``."""
+    names = []
+    for entry in cell.split(","):
+        name = normalize_name(entry)
+        if not _ALIAS_SHAPE.match(name):
+            name = normalize_name(_TRAILING_NOTE.sub("", entry.strip()))
+        names.append(name)
+    return names
+
+
+def iter_recognised_rows(
+    lines: Sequence[str],
+) -> Iterator[Tuple[TableKind, List[str]]]:
+    """Data rows of recognised tables whose cell count matches the header."""
+    kind: Optional[TableKind] = None
+    width = 0
+    for index, line in enumerate(lines):
+        cells = table_cells(line)
+        if cells is None:
+            kind = None
+            continue
+        if kind is None:
+            following = (
+                table_cells(lines[index + 1]) if index + 1 < len(lines) else None
+            )
+            if following and is_separator(following) and not is_separator(cells):
+                kind, width = table_kind(cells), len(cells)
+            continue
+        if len(cells) == width and not is_separator(cells):
+            yield kind, cells
+
+
+def _table_names(lines: Sequence[str]) -> Set[str]:
     cells: List[str] = []
-    for row in iter_table_rows(content, "## Repository Roles", 3, "Repository"):
-        cells.append(row[0])
-    for row in iter_table_rows(content, "### Outgoing Dependencies", 4, "This Repo"):
-        cells.extend(row[:2])
-    for row in iter_table_rows(
-        content, "### Incoming Dependencies", 6, "External Repo"
-    ):
-        cells.extend(row[:2])
-    return _alias_names(cells)
+    for kind, row in iter_recognised_rows(lines):
+        cells.extend(row[column] for column in kind.repo_columns)
+        if kind.list_column is not None:
+            cells.append(row[kind.list_column])
+    return _alias_names(name for cell in cells for name in cell_names(cell))
 
 
 def _index_parts(content: str) -> Tuple[Optional[Set[str]], Set[str], List[Edge]]:
@@ -105,17 +206,13 @@ def _index_parts(content: str) -> Tuple[Optional[Set[str]], Set[str], List[Edge]
         if isinstance(analyzed_raw, list)
         else None
     )
-    matrix = _alias_names(
-        row[0]
-        for row in iter_table_rows(content, "## Repo-to-Domain Matrix", 2, "Repository")
-    )
+    lines = content.splitlines()
     edges: List[Edge] = []
-    for row in iter_table_rows(
-        content, "## Cross-Domain Dependencies", 5, "Source Domain"
-    ):
-        via = frozenset(_alias_names(row[2].split(",")))
-        edges.append((normalize_name(row[0]), normalize_name(row[1]), via))
-    return analyzed, matrix, edges
+    for kind, row in iter_recognised_rows(lines):
+        if kind is GRAPH:
+            via = frozenset(_alias_names(row[2].split(",")))
+            edges.append((normalize_name(row[0]), normalize_name(row[1]), via))
+    return analyzed, _table_names(lines), edges
 
 
 def build_depmap_model(dep_map_dir: Path, fingerprint: str) -> DepMapModel:
@@ -145,7 +242,7 @@ def build_depmap_model(dep_map_dir: Path, fingerprint: str) -> DepMapModel:
             participants[key] = lowered
             structured |= lowered
         if content:
-            structured |= _table_names(content)
+            structured |= _table_names(content.splitlines())
     analyzed: Optional[Set[str]] = None
     edges: List[Edge] = []
     index_file = dep_map_dir / INDEX_FILE
@@ -168,8 +265,12 @@ def build_depmap_model(dep_map_dir: Path, fingerprint: str) -> DepMapModel:
     )
 
 
-def _live_fingerprint(dep_map_dir: Path) -> Optional[str]:
-    """Stat fingerprint of the directory and its documents; None if absent."""
+FINGERPRINT_ATTEMPTS = 5
+
+
+def _scan_fingerprint(dep_map_dir: Path) -> Optional[str]:
+    """One scan-and-stat pass; raises FileNotFoundError when a listed
+    document vanished before its stat (the directory is changing)."""
     try:
         st = dep_map_dir.stat()
     except FileNotFoundError:
@@ -185,6 +286,19 @@ def _live_fingerprint(dep_map_dir: Path) -> Optional[str]:
         est = entry.stat()
         parts.append(f"{name}:{est.st_mtime_ns}:{est.st_size}:{est.st_ino}")
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def _live_fingerprint(dep_map_dir: Path) -> Optional[str]:
+    """Stat fingerprint of the directory and its documents; None if absent."""
+    for _attempt in range(FINGERPRINT_ATTEMPTS):
+        try:
+            return _scan_fingerprint(dep_map_dir)
+        except FileNotFoundError:
+            continue
+    raise RuntimeError(
+        f"Dependency map {dep_map_dir} kept changing during "
+        f"{FINGERPRINT_ATTEMPTS} fingerprint attempts"
+    )
 
 
 _cache: "OrderedDict[Tuple[str, ...], DepMapModel]" = OrderedDict()

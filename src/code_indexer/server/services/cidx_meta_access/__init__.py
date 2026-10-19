@@ -8,7 +8,9 @@ projection that turns a catalog document into the caller's view of it.
 from .alias_universe import ALIAS_UNIVERSE_TTL_SECONDS, AliasUniverse, UniverseSnapshot
 from .depmap_model import DepMapModel, load_depmap_model
 from .depmap_projection import (
+    DOMAIN_PLACEHOLDER,
     RESTRICTED_PLACEHOLDER,
+    MetaProjector,
     ProjectionCacheStats,
     project_chunk,
     project_lines,
@@ -33,12 +35,14 @@ from .visibility import (
 
 __all__ = [
     "ALIAS_UNIVERSE_TTL_SECONDS",
+    "DOMAIN_PLACEHOLDER",
     "RESTRICTED_PLACEHOLDER",
     "UNRESOLVED_IDENTITY",
     "AliasUniverse",
     "Decision",
     "DecisionKind",
     "DepMapModel",
+    "MetaProjector",
     "MetaVisibility",
     "ProjectionCacheStats",
     "UniverseSnapshot",

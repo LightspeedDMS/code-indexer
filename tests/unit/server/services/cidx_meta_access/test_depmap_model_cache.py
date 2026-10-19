@@ -6,9 +6,11 @@ and a real SQLite registry. Neutral names only.
 
 from __future__ import annotations
 
+import os
 import shutil
+import threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -97,6 +99,53 @@ def test_equal_visible_sets_share_projections_and_different_never(
     assert other != first
 
 
+class _ListThenUnlink:
+    """``os.scandir`` that lists the real directory, then removes *victim*
+    from disk before the caller stats the listed entries (once)."""
+
+    def __init__(self, victim: Path) -> None:
+        self._victim = victim
+        self._real = os.scandir
+        self.calls = 0
+
+    def __call__(self, path: Any) -> Any:
+        self.calls += 1
+        listing = list(self._real(path))
+        if self._victim.exists():
+            self._victim.unlink()
+        return _Listing(listing)
+
+
+class _Listing:
+    def __init__(self, entries: List[Any]) -> None:
+        self._entries = entries
+
+    def __enter__(self) -> List[Any]:
+        return self._entries
+
+    def __exit__(self, *_exc: Any) -> None:
+        return None
+
+
+def test_document_vanishing_during_fingerprint_is_recomputed(
+    fx: CidxMetaFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scandir = _ListThenUnlink(fx.dep_map_dir / "ledger.md")
+    monkeypatch.setattr(os, "scandir", scandir)
+    model = load_depmap_model(fx.dep_map_dir)
+    assert scandir.calls >= 2
+    monkeypatch.undo()
+    assert load_depmap_model(fx.dep_map_dir) is model
+
+
+def test_fingerprint_fails_loudly_when_the_directory_never_settles(
+    fx: CidxMetaFixture,
+) -> None:
+    (fx.dep_map_dir / "ghost.md").symlink_to(fx.dep_map_dir / "missing-target.md")
+    with pytest.raises(RuntimeError, match="kept changing"):
+        load_depmap_model(fx.dep_map_dir)
+
+
 class _CountingRegistry:
     """Delegates to the real registry and counts its reads."""
 
@@ -137,6 +186,105 @@ def test_alias_universe_is_read_once_per_ttl(fx: CidxMetaFixture) -> None:
     assert changed.generation == first.generation + 1
     assert "delta-sample" in changed.names
     assert changed.digest != first.digest
+
+
+class _GatedRegistry:
+    """Delegates to the real registry; reads after the first ``free`` ones
+    block until ``gate`` opens (a stalled PostgreSQL), or raise when
+    ``failure`` is set."""
+
+    def __init__(self, registry: Any, free: int) -> None:
+        self._registry = registry
+        self._free = free
+        self.reads = 0
+        self.entered = threading.Event()
+        self.gate = threading.Event()
+        self.failure: Optional[Exception] = None
+
+    def list_repos(self) -> Dict[str, Dict[str, Any]]:
+        self.reads += 1
+        if self.reads > self._free:
+            self.entered.set()
+            assert self.gate.wait(10), "test gate never opened"
+        if self.failure is not None:
+            raise self.failure
+        result: Dict[str, Dict[str, Any]] = self._registry.list_repos()
+        return result
+
+
+def _in_thread(fn: Callable[[], Any]) -> Tuple[threading.Thread, List[Any]]:
+    box: List[Any] = []
+
+    def run() -> None:
+        try:
+            box.append(fn())
+        except Exception as exc:  # noqa: BLE001 - the test inspects it
+            box.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, box
+
+
+def test_stalled_registry_refresh_does_not_block_other_callers(
+    fx: CidxMetaFixture,
+) -> None:
+    now: List[float] = [1000.0]
+    registry = _GatedRegistry(fx.registry, free=1)
+    universe = AliasUniverse(registry, ttl_seconds=60, clock=lambda: now[0])
+    first = universe.snapshot()
+    now[0] += 61
+    try:
+        leader, leader_box = _in_thread(universe.snapshot)
+        assert registry.entered.wait(5)
+        follower, follower_box = _in_thread(universe.snapshot)
+        follower.join(2)
+        assert not follower.is_alive(), "a stalled registry read blocked a caller"
+        assert follower_box == [first]
+        assert registry.reads == 2
+    finally:
+        registry.gate.set()
+    leader.join(5)
+    assert leader_box and leader_box[0].names == first.names
+
+
+def test_first_load_waits_for_the_single_flight_read(fx: CidxMetaFixture) -> None:
+    registry = _GatedRegistry(fx.registry, free=0)
+    universe = AliasUniverse(registry)
+    try:
+        leader, leader_box = _in_thread(universe.snapshot)
+        assert registry.entered.wait(5)
+        follower, follower_box = _in_thread(universe.snapshot)
+        follower.join(0.3)
+        assert follower.is_alive(), "a caller without a snapshot must wait"
+    finally:
+        registry.gate.set()
+    leader.join(5)
+    follower.join(5)
+    assert registry.reads == 1
+    assert follower_box[0] is leader_box[0]
+    assert CANARY in follower_box[0].names
+
+
+def test_registry_failure_raises_and_never_yields_an_empty_universe(
+    fx: CidxMetaFixture,
+) -> None:
+    registry = _GatedRegistry(fx.registry, free=0)
+    registry.failure = ConnectionError("registry unavailable")
+    universe = AliasUniverse(registry)
+    try:
+        leader, leader_box = _in_thread(universe.snapshot)
+        assert registry.entered.wait(5)
+        follower, follower_box = _in_thread(universe.snapshot)
+        follower.join(0.3)
+    finally:
+        registry.gate.set()
+    leader.join(5)
+    follower.join(5)
+    assert isinstance(leader_box[0], ConnectionError)
+    assert isinstance(follower_box[0], RuntimeError)
+    registry.failure = None
+    assert CANARY in universe.snapshot().names
 
 
 def test_alias_universe_rejects_a_non_positive_ttl(fx: CidxMetaFixture) -> None:

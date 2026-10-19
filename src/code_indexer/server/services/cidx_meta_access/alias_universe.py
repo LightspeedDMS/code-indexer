@@ -66,21 +66,60 @@ class AliasUniverse:
         self._lock = threading.Lock()
         self._snapshot: Optional[UniverseSnapshot] = None
         self._loaded_at = 0.0
+        self._inflight: Optional[threading.Event] = None
 
     def snapshot(self) -> UniverseSnapshot:
-        """The current names; re-read from the registry once the TTL expired."""
+        """The current names; re-read from the registry once the TTL expired.
+
+        One caller reads the registry, outside the lock. Meanwhile callers
+        that hold an expired snapshot get it; callers with none wait for
+        that read and raise if it failed (never an empty universe).
+        """
         with self._lock:
             now = self._clock()
-            if self._snapshot is not None and now - self._loaded_at < self._ttl:
-                return self._snapshot
-            names = _names_from(self._registry.list_repos())
-            previous = self._snapshot
-            if previous is not None and previous.names == names:
-                generation = previous.generation
-            else:
-                generation = (previous.generation if previous else 0) + 1
-            self._snapshot = UniverseSnapshot(
-                generation=generation, names=names, digest=_digest(names)
-            )
-            self._loaded_at = now
+            current = self._snapshot
+            if current is not None and now - self._loaded_at < self._ttl:
+                return current
+            pending = self._inflight
+            if pending is None:
+                self._inflight = threading.Event()
+            elif current is not None:
+                return current
+        if pending is None:
+            return self._refresh(now)
+        pending.wait()
+        with self._lock:
+            if self._snapshot is None:
+                raise RuntimeError("alias universe unavailable: registry read failed")
             return self._snapshot
+
+    def _refresh(self, started: float) -> UniverseSnapshot:
+        try:
+            names = _names_from(self._registry.list_repos())
+        except BaseException:
+            self._finish(None, started)
+            raise
+        snapshot = self._finish(names, started)
+        assert snapshot is not None, "a successful read always stores a snapshot"
+        return snapshot
+
+    def _finish(
+        self, names: Optional[FrozenSet[str]], started: float
+    ) -> Optional[UniverseSnapshot]:
+        """Store *names* (None: the read failed) and wake the waiters."""
+        with self._lock:
+            event, self._inflight = self._inflight, None
+            previous = self._snapshot
+            if names is not None:
+                if previous is not None and previous.names == names:
+                    generation = previous.generation
+                else:
+                    generation = (previous.generation if previous else 0) + 1
+                self._snapshot = UniverseSnapshot(
+                    generation=generation, names=names, digest=_digest(names)
+                )
+                self._loaded_at = started
+            snapshot = self._snapshot
+        assert event is not None, "refresh finished without a pending read"
+        event.set()
+        return snapshot

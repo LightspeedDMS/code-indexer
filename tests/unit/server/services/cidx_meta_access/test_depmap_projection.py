@@ -222,6 +222,52 @@ def test_restricted_document_projection_uses_model_and_universe(
     assert UNIVERSE_ONLY_ALIAS not in _text(projected)
 
 
+def test_request_projector_loads_the_model_once(tmp_path: Path) -> None:
+    from code_indexer.server.services.cidx_meta_access import MetaProjector
+
+    fx = build_cidx_meta_fixture(tmp_path)
+    vis = _restricted(fx)
+    rel = "dependency-map/_index.md"
+    projector = MetaProjector(
+        vis, dep_map_dir=fx.dep_map_dir, universe=AliasUniverse(fx.registry)
+    )
+    index = read_lines(fx.dep_map_dir / "_index.md")
+    before = projector.project(index, rel)
+    assert "domains_count: 3" in _text(before)
+
+    ledger = fx.dep_map_dir / "ledger.md"
+    ledger.write_text(
+        ledger.read_text(encoding="utf-8").replace(
+            f"  - {ALPHA}\n", f"  - {CANARY}\n", 1
+        ),
+        encoding="utf-8",
+    )
+    assert projector.project(index, rel) == before
+    assert projector.project_chunk(index[:8], 1, index, rel) == before[:8]
+    fresh = project_meta_document(
+        index, rel, vis, dep_map_dir=fx.dep_map_dir, universe=AliasUniverse(fx.registry)
+    )
+    assert "domains_count: 2" in _text(fresh)
+
+
+def test_unrestricted_request_projector_does_no_io(
+    fx: CidxMetaFixture, tmp_path: Path
+) -> None:
+    from code_indexer.server.services.cidx_meta_access import MetaProjector
+
+    not_a_directory = tmp_path / "file-not-dir"
+    not_a_directory.write_text("x", encoding="utf-8")
+    admin = resolve_meta_visibility(ADMIN_USER, fx.access_service)
+    projector = MetaProjector(
+        admin, dep_map_dir=not_a_directory, universe=AliasUniverse(_RefusingRegistry())
+    )
+    lines = read_lines(fx.dep_map_dir / "payments.md")
+    assert projector.project(lines, "dependency-map/payments.md") == lines
+    assert projector.project_chunk(lines[:3], 1, lines, "x.md") == lines[:3]
+    with pytest.raises(ValueError):
+        projector.project_chunk(lines[:3], 0, lines, "x.md")
+
+
 def test_malformed_structures_are_removed_for_restricted_view(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

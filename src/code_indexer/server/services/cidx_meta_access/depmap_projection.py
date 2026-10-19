@@ -9,12 +9,19 @@ regex chunk goes through ``project_chunk``, which takes each line's verdict
 from the projection of the current whole document (so a chunk never shows
 more than its document) and removes lines that no longer match it.
 
-Structured names are filtered exactly (table rows, comma lists, YAML list
-items, counts); exact hidden aliases in prose become
-``[restricted repository]``. Unrestricted callers get the input unchanged.
+A table is recognised by its header row (the row right before a separator,
+compared case-insensitively; see ``depmap_model.table_kind``). In a
+recognised table only the repo-bearing cells, the domain cells and the Via
+Repos list decide whether a row is dropped, by whole-value or name-shaped
+matching; every free-text cell only goes through prose redaction. YAML list
+items and counts are filtered and recomputed from the caller's view, so
+counts equal the rows kept. Exact hidden names in prose become
+``[restricted repository]``, or ``[restricted domain]`` for a hidden domain
+that is not also a repository. Unrestricted callers get the input unchanged.
 
 Callers are synchronous; async doors run them through
-``anyio.to_thread.run_sync``.
+``anyio.to_thread.run_sync``. A door projecting several hits opens one
+``MetaProjector`` per request (one model and universe load per request).
 """
 
 from __future__ import annotations
@@ -45,20 +52,30 @@ from ..constants import is_internal_meta_repo
 from ..dep_map_parser_tables import parse_frontmatter_strict
 from ..repo_access_guard import normalize_repo_alias
 from .alias_universe import AliasUniverse, UniverseSnapshot
-from .depmap_model import DepMapModel, load_depmap_model, normalize_name
+from .depmap_model import (
+    CATALOG,
+    GRAPH,
+    DepMapModel,
+    TableKind,
+    cell_names,
+    is_separator,
+    load_depmap_model,
+    normalize_name,
+    table_cells,
+    table_kind,
+)
 from .visibility import MetaVisibility
 
 logger = logging.getLogger(__name__)
 
 RESTRICTED_PLACEHOLDER = "[restricted repository]"
+DOMAIN_PLACEHOLDER = "[restricted domain]"
 MIN_PROSE_ALIAS_LENGTH = 4
 VIEW_CACHE_MAX_ENTRIES = 64
 PROJECTION_CACHE_MAX_ENTRIES = 256
 _DIAGNOSTIC_LIMIT = 4096
 
 _ALIAS_CHARS = "A-Za-z0-9_-"
-_LEADING_TOKEN = re.compile(r"[a-z0-9][a-z0-9._-]*")
-_SEPARATOR_CELL = re.compile(r"^:?-{3,}:?$")
 _LIST_ITEM = re.compile(r"^\s*-\s+(?P<value>.+?)\s*$")
 _YAML_SHAPED = re.compile(r"^\s*(?:[A-Za-z_][\w-]*\s*:.*|-\s+.*)?$")
 _INLINE_LIST = re.compile(r"^(?P<prefix>\s*[A-Za-z_][\w-]*:\s*)\[(?P<body>.*)\]\s*$")
@@ -79,8 +96,14 @@ class ProjectionCacheStats:
 
 @dataclass(frozen=True)
 class _View:
-    hidden: FrozenSet[str]
-    known: FrozenSet[str]
+    """``blocked_repos`` decides repo cells and YAML items; ``blocked_domains``
+    decides domain cells; catalog/graph rows need a visible domain."""
+
+    blocked_repos: FrozenSet[str]
+    blocked_domains: FrozenSet[str]
+    visible: FrozenSet[str]
+    visible_domains: FrozenSet[str]
+    domain_only: FrozenSet[str]
     domain_counts: Mapping[str, int]
     counts: Mapping[str, int]
     summary: str
@@ -139,12 +162,13 @@ def _build_view(
     universe_names = frozenset(
         normalize_repo_alias(name).lower() for name in universe.names
     )
-    repo_names = {
+    repo_names = frozenset(
         name
         for name in (universe_names | model.structured_names) - visible
         if not is_internal_meta_repo(name)
-    }
-    hidden = frozenset(repo_names | (model.domains - visible_domains - visible))
+    )
+    hidden_domains = model.domains - visible_domains - visible
+    hidden = frozenset(repo_names | hidden_domains)
     edges = [
         (source, target)
         for source, target, via in model.edges
@@ -161,10 +185,11 @@ def _build_view(
     if standalone:
         summary += f" {len(standalone)} standalone domains: {', '.join(standalone)}."
     return _View(
-        hidden=hidden,
-        known=frozenset(
-            universe_names | model.structured_names | visible | model.domains
-        ),
+        blocked_repos=hidden,
+        blocked_domains=frozenset(hidden_domains | (repo_names - visible_domains)),
+        visible=visible,
+        visible_domains=visible_domains,
+        domain_only=frozenset(hidden_domains - repo_names),
         domain_counts={
             d: len(model.participants[d] & visible) for d in visible_domains
         },
@@ -174,7 +199,11 @@ def _build_view(
         },
         summary=summary,
         prose=_redaction_regex(
-            [name for name in hidden if len(name) >= MIN_PROSE_ALIAS_LENGTH]
+            [
+                name
+                for name in hidden - visible_domains
+                if len(name) >= MIN_PROSE_ALIAS_LENGTH
+            ]
         ),
     )
 
@@ -200,42 +229,50 @@ def _view_for(
 def _redact(line: str, view: _View) -> str:
     if view.prose is None:
         return line
-    return view.prose.sub(RESTRICTED_PLACEHOLDER, line)
+
+    def _placeholder(match: "re.Match[str]") -> str:
+        name = normalize_repo_alias(match.group(0)).lower()
+        return (
+            DOMAIN_PLACEHOLDER if name in view.domain_only else RESTRICTED_PLACEHOLDER
+        )
+
+    return view.prose.sub(_placeholder, line)
 
 
-def _cell_hidden(cell: str, view: _View) -> bool:
-    name = normalize_name(cell)
-    if name in view.hidden:
-        return True
-    token = _LEADING_TOKEN.match(name)
-    if token is None:
+def _blocked(cell: str, names: FrozenSet[str]) -> bool:
+    return any(name in names for name in cell_names(cell))
+
+
+def _row_kept(kind: TableKind, cells: List[str], view: _View) -> bool:
+    """Only repo, domain and list columns decide. Catalog and graph rows are
+    kept only for visible domains: the set the summary and the counts are
+    computed from, so every count equals the rows kept."""
+    if any(_blocked(cells[c], view.blocked_repos) for c in kind.repo_columns):
         return False
-    lead = normalize_repo_alias(token.group(0))
-    return len(lead) >= MIN_PROSE_ALIAS_LENGTH and lead in view.hidden
+    domains = [normalize_name(cells[c]) for c in kind.domain_columns]
+    if kind in (CATALOG, GRAPH):
+        return all(domain in view.visible_domains for domain in domains)
+    return not any(
+        _blocked(cells[c], view.blocked_domains) for c in kind.domain_columns
+    )
 
 
-def _project_row(line: str, cells: List[str], view: _View) -> Optional[str]:
-    changed = False
-    projected: List[str] = []
-    for cell in cells:
-        entries = [entry.strip() for entry in cell.split(",")]
-        if len(entries) >= 2 and all(
-            entry and normalize_name(entry) in view.known for entry in entries
-        ):
-            kept = [e for e in entries if normalize_name(e) not in view.hidden]
-            if not kept:
-                return None
-            if len(kept) != len(entries):
-                cell, changed = ", ".join(kept), True
-        elif _cell_hidden(cell, view):
+def _project_row(
+    line: str, kind: TableKind, cells: List[str], view: _View
+) -> Optional[str]:
+    if not _row_kept(kind, cells, view):
+        return None
+    projected = list(cells)
+    if kind.list_column is not None:
+        entries = [e.strip() for e in cells[kind.list_column].split(",")]
+        kept = [e for e in entries if normalize_name(e) in view.visible]
+        if not kept:
             return None
-        projected.append(cell)
-    domain = normalize_name(projected[0]) if projected else ""
-    if len(projected) == 3 and domain in view.domain_counts and projected[2].isdigit():
-        count = str(view.domain_counts[domain])
-        if count != projected[2]:
-            projected[2], changed = count, True
-    if changed:
+        projected[kind.list_column] = ", ".join(kept)
+    if kind.count_column is not None:
+        domain = normalize_name(cells[kind.domain_columns[0]])
+        projected[kind.count_column] = str(view.domain_counts[domain])
+    if projected != cells:
         line = "| " + " | ".join(projected) + " |"
     return _redact(line, view)
 
@@ -249,41 +286,14 @@ def _project_text(line: str, view: _View) -> Optional[str]:
     inline = _INLINE_LIST.match(line)
     if inline:
         entries = [e.strip() for e in inline.group("body").split(",") if e.strip()]
-        kept = [e for e in entries if normalize_name(e) not in view.hidden]
+        kept = [e for e in entries if normalize_name(e) not in view.blocked_repos]
         if len(kept) != len(entries):
             line = f"{inline.group('prefix')}[{', '.join(kept)}]"
     else:
         item = _LIST_ITEM.match(line)
-        if item and normalize_name(item.group("value")) in view.hidden:
+        if item and normalize_name(item.group("value")) in view.blocked_repos:
             return None
     return _redact(line, view)
-
-
-def _table_cells(line: str) -> Optional[List[str]]:
-    stripped = line.strip()
-    if len(stripped) < 2 or not (stripped.startswith("|") and stripped.endswith("|")):
-        return None
-    return [cell.strip() for cell in stripped[1:-1].split("|")]
-
-
-def _is_separator(cells: List[str]) -> bool:
-    return bool(cells) and all(_SEPARATOR_CELL.match(cell) for cell in cells)
-
-
-def _recognised_header(cells: List[str]) -> bool:
-    """The dependency-map table forms (the Story #887 parser sentinels)."""
-    names = [cell.strip().strip("*").strip().lower() for cell in cells]
-    first = names[0] if names else ""
-    return (
-        (
-            first == "repository"
-            and (len(names) >= 3 or names == ["repository", "domain"])
-        )
-        or (first == "this repo" and len(names) >= 4)
-        or (first == "external repo" and len(names) >= 6)
-        or names == ["domain", "description", "repo count"]
-        or (first == "source domain" and len(names) >= 5)
-    )
 
 
 def _frontmatter_span(lines: Sequence[str]) -> int:
@@ -311,8 +321,8 @@ def _frontmatter_span(lines: Sequence[str]) -> int:
     return 0
 
 
-def _diagnose(relative_path: str, digest: str, line_numbers: List[int]) -> None:
-    key = (relative_path, digest)
+def _diagnose(relative_path: str, fingerprint: str, line_numbers: List[int]) -> None:
+    key = (relative_path, fingerprint)
     with _lock:
         if key in _diagnosed:
             return
@@ -328,47 +338,44 @@ def _diagnose(relative_path: str, digest: str, line_numbers: List[int]) -> None:
     )
 
 
-_UNRECOGNISED_TABLE = -1
+_UNRECOGNISED_TABLE = (None, -1)
 
 
 def _compute(
-    lines: Sequence[str], relative_path: str, digest: str, view: _View
+    lines: Sequence[str], relative_path: str, fingerprint: str, view: _View
 ) -> List[Optional[str]]:
     span = _frontmatter_span(lines)
     out: List[Optional[str]] = [None] * span
     malformed: List[int] = list(range(1, span + 1))
-    # None: outside a table; >0: recognised table width; -1: unrecognised.
-    table: Optional[int] = None
+    # None: outside a table; (kind, width) inside one; kind None: unrecognised.
+    table: Optional[Tuple[Optional[TableKind], int]] = None
     for index in range(span, len(lines)):
         line = lines[index]
-        cells = _table_cells(line)
+        cells = table_cells(line)
         if cells is None:
             table = None
             out.append(_project_text(line, view))
             continue
         if table is None:
             following = (
-                _table_cells(lines[index + 1]) if index + 1 < len(lines) else None
+                table_cells(lines[index + 1]) if index + 1 < len(lines) else None
             )
-            if (
-                following is not None
-                and _is_separator(following)
-                and not _is_separator(cells)
-                and _recognised_header(cells)
-            ):
-                table = len(cells)
+            kind = None if is_separator(cells) else table_kind(cells)
+            if following is not None and is_separator(following) and kind:
+                table = (kind, len(cells))
                 out.append(_redact(line, view))
                 continue
             table = _UNRECOGNISED_TABLE
-        if table == _UNRECOGNISED_TABLE or len(cells) != table:
+        kind, width = table
+        if kind is None or len(cells) != width:
             malformed.append(index + 1)
             out.append(None)
-        elif _is_separator(cells):
+        elif is_separator(cells):
             out.append(line)
         else:
-            out.append(_project_row(line, cells, view))
+            out.append(_project_row(line, kind, cells, view))
     if malformed:
-        _diagnose(relative_path, digest, malformed)
+        _diagnose(relative_path, fingerprint, malformed)
     return out
 
 
@@ -392,7 +399,7 @@ def project_lines(
             _projections.move_to_end(key)
             _stats["projection_hits"] += 1
             return list(cached)
-    projected = _compute(lines, relative_path, digest, view)
+    projected = _compute(lines, relative_path, model.fingerprint, view)
     if len(projected) != len(lines):
         raise RuntimeError("projection lost line alignment")
     with _lock:
@@ -411,13 +418,10 @@ def project_meta_document(
     dep_map_dir: Path,
     universe: AliasUniverse,
 ) -> List[Optional[str]]:
-    """``project_lines`` that loads the model and the universe only for a
-    restricted caller (an unrestricted caller costs no I/O)."""
-    if vis.unrestricted:
-        return list(lines)
-    return project_lines(
-        lines, relative_path, vis, load_depmap_model(dep_map_dir), universe.snapshot()
-    )
+    """One document through a one-shot ``MetaProjector`` (a door projecting
+    several hits opens one ``MetaProjector`` per request instead)."""
+    projector = MetaProjector(vis, dep_map_dir=dep_map_dir, universe=universe)
+    return projector.project(lines, relative_path)
 
 
 def project_chunk(
@@ -445,6 +449,59 @@ def project_chunk(
         current = index < len(document_lines) and document_lines[index] == line
         out.append(full[index] if current else None)
     return out
+
+
+class MetaProjector:
+    """Per-request projection handle: the model and the universe are loaded
+    once, at the first restricted projection, and reused for every hit of
+    the request (an unrestricted caller costs no I/O). Create one per
+    request; synchronous, so async doors call it through a worker thread."""
+
+    def __init__(
+        self, vis: MetaVisibility, *, dep_map_dir: Path, universe: AliasUniverse
+    ) -> None:
+        self._vis = vis
+        self._dep_map_dir = Path(dep_map_dir)
+        self._universe = universe
+        self._lock = threading.Lock()
+        self._loaded: Optional[Tuple[DepMapModel, UniverseSnapshot]] = None
+
+    def _sources(self) -> Tuple[DepMapModel, UniverseSnapshot]:
+        with self._lock:
+            if self._loaded is None:
+                self._loaded = (
+                    load_depmap_model(self._dep_map_dir),
+                    self._universe.snapshot(),
+                )
+            return self._loaded
+
+    def project(self, lines: Sequence[str], relative_path: str) -> List[Optional[str]]:
+        if self._vis.unrestricted:
+            return list(lines)
+        model, universe = self._sources()
+        return project_lines(lines, relative_path, self._vis, model, universe)
+
+    def project_chunk(
+        self,
+        chunk_lines: Sequence[str],
+        first_line: int,
+        document_lines: Sequence[str],
+        relative_path: str,
+    ) -> List[Optional[str]]:
+        if first_line < 1:
+            raise ValueError("first_line is 1-based")
+        if self._vis.unrestricted:
+            return list(chunk_lines)
+        model, universe = self._sources()
+        return project_chunk(
+            chunk_lines,
+            first_line,
+            document_lines,
+            relative_path,
+            self._vis,
+            model,
+            universe,
+        )
 
 
 def render_line_aligned(projected: Sequence[Optional[str]]) -> str:
