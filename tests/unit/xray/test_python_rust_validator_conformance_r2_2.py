@@ -125,7 +125,7 @@ def test_shipped_seed_patterns_compile_via_real_pipeline(
     cidx_meta = tmp_path / "cidx-meta"
     svc = XrayPatternService(cidx_meta)
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(svc, "_git_commit", lambda **kw: None)
+        mp.setattr(svc, "_git_commit", lambda files, message: None)
         svc.ensure_seed_patterns()
         evaluator_code, _params = svc.resolve_and_prepare_pattern(
             repo_alias="some-repo", pattern_name=pattern_name
