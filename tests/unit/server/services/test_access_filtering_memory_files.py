@@ -326,28 +326,27 @@ def test_corrupt_yaml_memory_file_filtered_out(
 # ---------------------------------------------------------------------------
 
 
-def test_cache_miss_reads_from_filesystem_then_caches(
+def test_listing_reads_memory_scope_fresh(
     memories_dir: Path,
     group_manager: GroupAccessManager,
     poweruser: str,
 ) -> None:
-    """On cache miss, service reads from disk; subsequent call uses cache."""
+    """A warm metadata cache never decides a listing: the memory's
+    frontmatter is read fresh, so a deleted memory disappears at once."""
     cache = MemoryMetadataCache(memories_dir, ttl_seconds=60)
-    svc = AccessFilteringService(group_manager, memory_metadata_cache=cache)
+    svc = AccessFilteringService(
+        group_manager, memory_metadata_cache=cache, memories_dir=memories_dir
+    )
 
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
     filename = f"memories/{MEMORY_ID_GLOBAL}.md"
 
-    # First call: cache miss → reads from disk
     result1 = svc.filter_cidx_meta_files([filename], poweruser)
     assert filename in result1
 
-    # Remove file from disk; second call should use cached result
     (memories_dir / f"{MEMORY_ID_GLOBAL}.md").unlink()
     result2 = svc.filter_cidx_meta_files([filename], poweruser)
-    assert filename in result2, (
-        "Second call should return cached result after file deletion"
-    )
+    assert filename not in result2
 
 
 # ---------------------------------------------------------------------------

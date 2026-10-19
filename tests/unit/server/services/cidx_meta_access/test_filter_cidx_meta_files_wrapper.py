@@ -77,6 +77,82 @@ def test_alias_granted_to_no_group_and_readme_are_denied(fx: CidxMetaFixture) ->
     assert kept == []
 
 
+def test_memory_scope_change_is_seen_despite_a_warm_metadata_cache(
+    fx: CidxMetaFixture,
+) -> None:
+    from code_indexer.server.services.access_filtering_service import (
+        AccessFilteringService,
+    )
+    from code_indexer.server.services.memory_io import atomic_write_memory_file
+    from code_indexer.server.services.memory_metadata_cache import (
+        MemoryMetadataCache,
+    )
+
+    memories = fx.root / "memories"
+    service = AccessFilteringService(
+        fx.group_manager,
+        memory_metadata_cache=MemoryMetadataCache(memories, ttl_seconds=600),
+        memories_dir=memories,
+    )
+    path = f"memories/{MEMORY_GLOBAL}.md"
+    assert service.filter_cidx_meta_files([path], RESTRICTED_USER) == [path]
+
+    atomic_write_memory_file(
+        memories / f"{MEMORY_GLOBAL}.md",
+        {
+            "id": MEMORY_GLOBAL,
+            "type": "gotcha",
+            "scope": "repo",
+            "referenced_repo": f"{CANARY}-global",
+            "summary": "fixture memory",
+            "tags": [],
+            "created_by": "tester",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "edited_by": None,
+            "edited_at": None,
+        },
+    )
+    assert service.filter_cidx_meta_files([path], RESTRICTED_USER) == []
+
+
+def test_catalog_scoped_memory_is_judged_alike_by_every_door(
+    fx: CidxMetaFixture,
+) -> None:
+    from code_indexer.server.services.cidx_meta_access import (
+        memory_visibility_fn,
+        resolve_meta_visibility,
+    )
+    from code_indexer.server.services.memory_io import atomic_write_memory_file
+
+    memory_id = "d4" * 16
+    atomic_write_memory_file(
+        fx.root / "memories" / f"{memory_id}.md",
+        {
+            "id": memory_id,
+            "type": "gotcha",
+            "scope": "repo",
+            "referenced_repo": "cidx-meta-global",
+            "summary": "fixture memory",
+            "tags": [],
+            "created_by": "tester",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "edited_by": None,
+            "edited_at": None,
+        },
+    )
+    retrieval = fx.access_service.filter_visible_memory_ids(
+        [memory_id], RESTRICTED_USER
+    )
+    listing = fx.access_service.filter_cidx_meta_files(
+        [f"memories/{memory_id}.md"], RESTRICTED_USER
+    )
+    vis = resolve_meta_visibility(RESTRICTED_USER, fx.access_service)
+    policy = memory_visibility_fn(fx.access_service, vis)(memory_id)
+    assert retrieval == [memory_id]
+    assert listing == [f"memories/{memory_id}.md"]
+    assert policy is True
+
+
 def test_admin_listing_is_unchanged(fx: CidxMetaFixture) -> None:
     assert fx.access_service.filter_cidx_meta_files(LISTING, ADMIN_USER) == LISTING
 

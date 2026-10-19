@@ -860,7 +860,7 @@ def _check_repository_access(
         for param_name, value in present:
             if param_name in ("golden_repo_alias", "golden_repo_aliases"):
                 requested.extend(value if isinstance(value, list) else [value])
-        catalog = catalog_aliases(requested)
+        catalog = catalog_aliases(requested + [arguments.get("user_alias")])
         if catalog and not _is_admin():
             _deny_single(catalog[0])
 

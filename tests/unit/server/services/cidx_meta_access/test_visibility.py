@@ -66,6 +66,21 @@ def test_missing_access_service_is_empty_set() -> None:
     assert vis.visible == frozenset()
 
 
+def test_acting_scope_never_widens_the_callers_own_grants(
+    fx: CidxMetaFixture,
+) -> None:
+    with acting_scope({ALPHA, CANARY}):
+        vis = resolve_meta_visibility(RESTRICTED_USER, fx.access_service)
+    assert vis.visible == frozenset({ALPHA})
+
+
+def test_missing_access_service_fails_closed_even_with_acting_scope() -> None:
+    with acting_scope({ALPHA}):
+        vis = resolve_meta_visibility(ADMIN_USER, None)
+    assert vis.unrestricted is False
+    assert vis.visible == frozenset()
+
+
 def test_grant_change_is_seen_on_the_next_resolution(fx: CidxMetaFixture) -> None:
     team = fx.group_manager.get_group_by_name("fixture-team")
     assert team is not None

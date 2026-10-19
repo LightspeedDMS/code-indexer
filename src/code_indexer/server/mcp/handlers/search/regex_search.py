@@ -18,7 +18,7 @@ import functools
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import anyio.to_thread
 
@@ -26,9 +26,8 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.mcp import reranking as _mcp_reranking
 from code_indexer.server.services.api_metrics_service import api_metrics_service
-from code_indexer.server.services.cidx_meta_access import (
-    is_internal_meta_identity,
-    request_alias_identities,
+from code_indexer.server.services.cidx_meta_access.catalog_requests import (
+    restrict_catalog_paths,
 )
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.search_event_recording import (
@@ -316,29 +315,33 @@ async def _rerank_truncate_and_filter_regex_matches(
 
     matches = _apply_regex_payload_truncation(matches, owner=user.username)
 
-    cidx_meta_access_filtered = False
-    if repository_alias and is_internal_meta_identity(
-        request_alias_identities(
-            repository_alias,
-            user.username,
-            _utils._lazy_module_attr_or_none("activated_repo_manager"),
-        )
-    ):
-        access_svc = _get_access_filtering_service()
-        allowed = (
-            set(
-                access_svc.filter_cidx_meta_files(
-                    [m["file_path"] for m in matches], user.username
-                )
-            )
-            if access_svc
-            else set()
-        )
-        matches = [m for m in matches if m["file_path"] in allowed]
-        cidx_meta_access_filtered = True
-    rerank_meta["cidx_meta_access_filtered"] = cidx_meta_access_filtered
+    restricted = await anyio.to_thread.run_sync(
+        functools.partial(_restrict_catalog_matches, matches, repository_alias, user)
+    )
+    if restricted is not None:
+        matches = restricted
+    rerank_meta["cidx_meta_access_filtered"] = restricted is not None
 
     return matches, rerank_meta
+
+
+def _restrict_catalog_matches(
+    matches: list, repository_alias: str, user: User
+) -> Optional[list]:
+    """The matches the user may see when the repository is the internal
+    catalog, else None. Reads the activation and group stores synchronously:
+    async callers run it on a worker thread."""
+    allowed = restrict_catalog_paths(
+        [m["file_path"] for m in matches],
+        repository_alias,
+        user.username,
+        _get_access_filtering_service(),
+        _utils._lazy_module_attr_or_none("activated_repo_manager"),
+    )
+    if allowed is None:
+        return None
+    kept = set(allowed)
+    return [m for m in matches if m["file_path"] in kept]
 
 
 async def _execute_regex_search_impl(

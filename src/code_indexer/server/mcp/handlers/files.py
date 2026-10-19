@@ -14,9 +14,12 @@ from pathlib import Path
 
 from code_indexer.server.auth.user_manager import User
 from . import _utils
-from code_indexer.server.services.cidx_meta_access import (
-    is_internal_meta_identity,
-    request_alias_identities,
+from code_indexer.server.services.cidx_meta_access.catalog_requests import (
+    catalog_restriction_applies,
+    restrict_catalog_paths,
+)
+from code_indexer.server.services.cidx_meta_access.tree_projection import (
+    restrict_catalog_tree,
 )
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.file_listing_paths import (
@@ -410,45 +413,26 @@ def _serialize_file_results(result: Any) -> list:
     ]
 
 
-def _is_catalog_alias(repository_alias: Any, user: User) -> bool:
-    """True when the alias serves the internal catalog repository, judged by
-    the golden identity behind it (never by its spelling); an alias whose
-    identity cannot be resolved counts as the catalog."""
-    if not isinstance(repository_alias, str) or not repository_alias:
-        return False
-    return is_internal_meta_identity(
-        request_alias_identities(
-            repository_alias,
-            user.username,
-            _utils._lazy_module_attr_or_none("activated_repo_manager"),
-        )
-    )
+def _activations() -> Any:
+    return _utils._lazy_module_attr_or_none("activated_repo_manager")
 
 
 def _filter_cidx_meta_files(
     serialized_files: list, repository_alias: Any, user: User
 ) -> list:
-    """Restrict a catalog listing to the paths the user may see.
-
-    Paths are judged by their full repository-relative path. Without the
-    access service nothing is listed (fail closed).
-    """
-    if not _is_catalog_alias(repository_alias, user):
-        return serialized_files
-    access_filtering_service = _get_access_filtering_service()
-    if not access_filtering_service:
-        logger.warning(
-            "Access filtering service unavailable for catalog listing; "
-            "returning no entries",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return []
-    allowed = set(
-        access_filtering_service.filter_cidx_meta_files(
-            [f["path"] for f in serialized_files], user.username
-        )
+    """Restrict a catalog listing to the paths the user may see (full
+    repository-relative paths; nothing without the access service)."""
+    allowed = restrict_catalog_paths(
+        [f["path"] for f in serialized_files],
+        repository_alias,
+        user.username,
+        _get_access_filtering_service(),
+        _activations(),
     )
-    return [f for f in serialized_files if f["path"] in allowed]
+    if allowed is None:
+        return serialized_files
+    kept = set(allowed)
+    return [f for f in serialized_files if f["path"] in kept]
 
 
 def _build_browse_path_pattern(
@@ -685,43 +669,12 @@ def _tree_node_to_dict(node: Any) -> dict:
     return result_dict
 
 
-def _filter_cidx_meta_tree(result: Any, user: User) -> Any:
-    """Restrict the catalog tree's top-level files to those the user may see,
-    by full relative path; without the access service no file is shown."""
-    if result.root.children is None:
-        return result
-    _tree_access_svc = _get_access_filtering_service()
-    _files = [node for node in result.root.children if not node.is_directory]
-    _all_names = [node.name for node in _files]
-    _allowed_paths = (
-        set(
-            _tree_access_svc.filter_cidx_meta_files(
-                [node.path for node in _files], user.username
-            )
-        )
-        if _tree_access_svc
-        else set()
-    )
-    _allowed = {node.name for node in _files if node.path in _allowed_paths}
-    result.root.children = [
-        node
-        for node in result.root.children
-        if node.is_directory or node.path in _allowed_paths
-    ]
-    _filtered_lines = []
-    for _line in result.tree_string.splitlines():
-        _stripped = _line.strip()
-        _name = _stripped.lstrip("|+- ")
-        if not _name.endswith("/") and _name in _all_names and _name not in _allowed:
-            continue
-        _filtered_lines.append(_line)
-    return result.__class__(
-        root=result.root,
-        tree_string="\n".join(_filtered_lines),
-        total_directories=result.total_directories,
-        total_files=len(result.root.children),
-        max_depth_reached=result.max_depth_reached,
-        root_path=result.root_path,
+def _filter_cidx_meta_tree(
+    result: Any, user: User, base_path: str = "", show_stats: bool = False
+) -> Any:
+    """Reduce a catalog tree to the user's view at every depth."""
+    return restrict_catalog_tree(
+        result, base_path, user.username, _get_access_filtering_service(), show_stats
     )
 
 
@@ -966,13 +919,14 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                         repository_alias = _promoted
 
         # Catalog file-level access is decided on the full relative path.
-        if _is_catalog_alias(repository_alias, user):
-            access_filtering_svc = _get_access_filtering_service()
-            allowed = (
-                access_filtering_svc.filter_cidx_meta_files([file_path], user.username)
-                if access_filtering_svc
-                else []
-            )
+        allowed = restrict_catalog_paths(
+            [file_path],
+            repository_alias,
+            user.username,
+            _get_access_filtering_service(),
+            _activations(),
+        )
+        if allowed is not None:
             if not allowed:
                 basename = Path(str(file_path)).name
                 return _mcp_response(
@@ -1670,8 +1624,15 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             include_hidden=args.get("include_hidden", False),
         )
 
-        if _is_catalog_alias(repository_alias, user):
-            result = _filter_cidx_meta_tree(result, user)
+        if catalog_restriction_applies(
+            repository_alias,
+            user.username,
+            _get_access_filtering_service(),
+            _activations(),
+        ):
+            result = _filter_cidx_meta_tree(
+                result, user, args.get("path") or "", bool(args.get("show_stats"))
+            )
 
         return _mcp_response(
             {

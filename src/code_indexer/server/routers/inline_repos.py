@@ -384,7 +384,15 @@ def register_repo_routes(
         repo_access_http.enforce_activation_allowed(
             _access_service(),
             current_user.username,
-            request.golden_repo_aliases or request.golden_repo_alias,
+            [
+                alias
+                for alias in [
+                    *(request.golden_repo_aliases or []),
+                    request.golden_repo_alias,
+                    request.user_alias,
+                ]
+                if alias
+            ],
         )
 
         try:

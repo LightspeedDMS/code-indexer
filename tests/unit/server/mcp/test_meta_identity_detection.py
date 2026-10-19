@@ -40,9 +40,18 @@ class _Activations:
 
     def __init__(self, records: List[Dict[str, Any]]):
         self._records = records
+        self.list_calls = 0
+        self.get_calls = 0
 
     def list_activated_repositories(self, username: str) -> List[Dict[str, Any]]:
+        self.list_calls += 1
         return list(self._records)
+
+    def get_repository(
+        self, username: str, user_alias: str, *, touch: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        self.get_calls += 1
+        return next((r for r in self._records if r["user_alias"] == user_alias), None)
 
     def user_has_activated_repo(self, username: str, alias: str) -> bool:
         return any(r["user_alias"] == alias for r in self._records)
@@ -87,6 +96,25 @@ def test_activation_of_catalog_under_custom_alias_is_detected() -> None:
     assert is_internal_meta_identity(("cidx-metadata",)) is False
     assert is_internal_meta_identity(("cidx-metadata-global",)) is False
     assert is_internal_meta_identity((ALPHA,)) is False
+
+
+def test_path_shaped_alias_is_its_own_identity() -> None:
+    class _Failing(_Activations):
+        def get_repository(
+            self, username: str, user_alias: str, *, touch: bool = True
+        ) -> Optional[Dict[str, Any]]:
+            self.get_calls += 1
+            raise RuntimeError("store unavailable")
+
+    failing = _Failing([])
+    assert request_alias_identities("/srv/repos/sample", "u", failing) == (
+        "/srv/repos/sample",
+    )
+    assert failing.get_calls == 0
+    assert request_alias_identities("team-catalog", "u", failing) == (
+        UNRESOLVED_IDENTITY,
+    )
+    assert is_internal_meta_identity((UNRESOLVED_IDENTITY,)) is True
 
 
 def test_unresolvable_identity_is_treated_as_the_catalog() -> None:
@@ -297,7 +325,94 @@ def test_directory_tree_filter_uses_full_node_paths(fx: CidxMetaFixture) -> None
     assert [n for n in closed.root.children if not n.is_directory] == []
 
 
-async def _filter_regex(alias: str, access_service: Optional[Any]) -> List[str]:
+def test_directory_tree_filter_prunes_nested_paths(fx: CidxMetaFixture) -> None:
+    from code_indexer.global_repos.directory_explorer import (
+        DirectoryExplorerService,
+        TreeNode,
+    )
+    from code_indexer.server.mcp.handlers import files as files_module
+    from tests.shared.cidx_meta_visibility_fixture import ADMIN_USER, GAMMA
+
+    def _walk(node: TreeNode, files: List[str], dirs: List[str]) -> None:
+        for child in node.children or []:
+            if child.is_directory:
+                dirs.append(child.path)
+                _walk(child, files, dirs)
+            else:
+                files.append(child.path)
+
+    with patch.object(
+        files_module, "_get_access_filtering_service", return_value=fx.access_service
+    ):
+        tree = DirectoryExplorerService(fx.root).generate_tree(max_depth=4)
+        result = files_module._filter_cidx_meta_tree(tree, _restricted_user())
+        admin_tree = DirectoryExplorerService(fx.root).generate_tree(max_depth=4)
+        admin_string = admin_tree.tree_string
+        admin = User(
+            username=ADMIN_USER,
+            password_hash="hash",
+            role=UserRole.ADMIN,
+            created_at=datetime.now(),
+        )
+        admin_result = files_module._filter_cidx_meta_tree(admin_tree, admin)
+
+    files: List[str] = []
+    dirs: List[str] = []
+    _walk(result.root, files, dirs)
+    assert sorted(files) == sorted(
+        [
+            f"{ALPHA}.md",
+            "dependency-map/_analysis_guidelines.md",
+            "dependency-map/_dep_types.md",
+            f"memories/{MEMORY_ALPHA}.md",
+            f"memories/{MEMORY_GLOBAL}.md",
+            "xray-patterns/__any__/p.yaml",
+        ]
+    )
+    assert sorted(dirs) == [
+        "dependency-map",
+        "memories",
+        "xray-patterns",
+        "xray-patterns/__any__",
+    ]
+    assert result.total_files == len(files)
+    assert result.total_directories == len(dirs)
+    for hidden in (CANARY, GAMMA, "payments", "_index.md", MEMORY_CANARY):
+        assert hidden not in result.tree_string
+    assert admin_result.tree_string == admin_string
+
+
+async def test_regex_catalog_detection_runs_off_the_event_loop(
+    fx: CidxMetaFixture,
+) -> None:
+    import threading
+
+    loop_thread = threading.get_ident()
+    seen: List[int] = []
+
+    class _Recording(_Activations):
+        def get_repository(
+            self, username: str, user_alias: str, *, touch: bool = True
+        ) -> Optional[Dict[str, Any]]:
+            seen.append(threading.get_ident())
+            return super().get_repository(username, user_alias, touch=touch)
+
+    kept = await _filter_regex(
+        "team-catalog", fx.access_service, _Recording([CATALOG_ACTIVATION])
+    )
+    assert kept == [
+        f"{ALPHA}.md",
+        f"memories/{MEMORY_GLOBAL}.md",
+        f"memories/{MEMORY_ALPHA}.md",
+    ]
+    assert seen and all(thread != loop_thread for thread in seen)
+
+
+async def _filter_regex(
+    alias: str,
+    access_service: Optional[Any],
+    activations: Optional[_Activations] = None,
+) -> List[str]:
     from code_indexer.server.mcp.handlers.search import regex_search
 
     matches = [{"file_path": p, "line_content": "x"} for p in _LISTED]
@@ -305,7 +420,7 @@ async def _filter_regex(alias: str, access_service: Optional[Any]) -> List[str]:
         patch.object(
             regex_search._utils,
             "app_module",
-            _app_module(_Activations([CATALOG_ACTIVATION])),
+            _app_module(activations or _Activations([CATALOG_ACTIVATION])),
         ),
         patch.object(
             regex_search, "_get_access_filtering_service", return_value=access_service
@@ -354,3 +469,101 @@ def test_no_substring_catalog_checks_remain() -> None:
             if needle in text:
                 offenders.append(f"{source.relative_to(server_root)}: {needle}")
     assert offenders == []
+
+
+def _tree_call(
+    fx: CidxMetaFixture, args: Dict[str, Any], activations: _Activations
+) -> Dict[str, Any]:
+    from types import SimpleNamespace
+
+    from code_indexer.server.mcp.handlers import files as files_module
+
+    legacy = SimpleNamespace(_resolve_repo_path=lambda alias, root: str(fx.root))
+    with (
+        patch.object(files_module._utils, "app_module", _app_module(activations)),
+        patch.object(
+            files_module,
+            "_get_access_filtering_service",
+            return_value=fx.access_service,
+        ),
+        patch.object(files_module, "_get_golden_repos_dir", return_value="/unused"),
+        patch.object(files_module, "_get_legacy", return_value=legacy),
+    ):
+        result = files_module.handle_directory_tree(args, _restricted_user())
+    data = extract_mcp_data(result)
+    assert data["success"] is True, data
+    return data
+
+
+def test_directory_tree_on_alias_spelled_as_catalog_is_restricted(
+    fx: CidxMetaFixture,
+) -> None:
+    # The caller named an activation of another repository like the catalog;
+    # the tree served for that alias is the catalog itself.
+    misleading = {
+        "user_alias": "cidx-meta",
+        "golden_repo_alias": ALPHA,
+        "is_composite": False,
+    }
+    data = _tree_call(
+        fx,
+        {"repository_alias": "cidx-meta", "max_depth": 4},
+        _Activations([misleading]),
+    )
+    assert CANARY not in data["tree_string"]
+    assert f"{ALPHA}.md" in data["tree_string"]
+
+
+def test_directory_tree_subdirectory_is_judged_by_full_path(
+    fx: CidxMetaFixture,
+) -> None:
+    (fx.dep_map_dir / f"{ALPHA}.md").write_text("# stray\n", encoding="utf-8")
+    data = _tree_call(
+        fx,
+        {"repository_alias": "cidx-meta-global", "path": "dependency-map"},
+        _Activations([]),
+    )
+    names = [child["name"] for child in data["root"]["children"]]
+    assert f"{ALPHA}.md" not in names
+    assert "_dep_types.md" in names
+    assert "payments.md" not in names
+
+
+def test_catalog_detection_reads_one_activation_and_none_for_admins(
+    fx: CidxMetaFixture,
+) -> None:
+    from code_indexer.server.mcp.handlers import files as files_module
+    from tests.shared.cidx_meta_visibility_fixture import ADMIN_USER
+
+    restricted_activations = _Activations([CATALOG_ACTIVATION])
+    _list_files("team-catalog", restricted_activations, fx.access_service)
+    assert restricted_activations.get_calls == 1
+    assert restricted_activations.list_calls == 0
+
+    admin_activations = _Activations([CATALOG_ACTIVATION])
+    admin = User(
+        username=ADMIN_USER,
+        password_hash="hash",
+        role=UserRole.ADMIN,
+        created_at=datetime.now(),
+    )
+    file_service = MagicMock()
+    file_service.list_files.return_value = MagicMock(
+        files=[make_file_info(p) for p in _LISTED]
+    )
+    app_module = MagicMock()
+    app_module.file_service = file_service
+    app_module.activated_repo_manager = admin_activations
+    app_module.golden_repo_manager = None
+    with (
+        patch.object(files_module._utils, "app_module", app_module),
+        patch.object(
+            files_module,
+            "_get_access_filtering_service",
+            return_value=fx.access_service,
+        ),
+    ):
+        result = files_module.list_files({"repository_alias": "team-catalog"}, admin)
+    assert [f["path"] for f in extract_mcp_data(result)["files"]] == _LISTED
+    assert admin_activations.get_calls == 0
+    assert admin_activations.list_calls == 0

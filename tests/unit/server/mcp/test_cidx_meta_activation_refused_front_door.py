@@ -352,11 +352,23 @@ class TestUnchanged:
         assert CATALOG_TEXT in _file_text(_payload(body))
 
     def test_shared_catalog_read_for_a_normal_user_is_unchanged(self, client, env):
-        body = _mcp(
+        catalog = Path(env.golden_repo_manager.golden_repos_dir) / CIDX_META_REPO
+        (catalog / f"{GRANTED_REPO}.md").write_text(f"{README_TEXT}\n")
+
+        granted = _mcp(
             client,
             USER,
             "get_file_content",
-            {"repository_alias": META_GLOBAL, "file_path": README},
+            {"repository_alias": META_GLOBAL, "file_path": f"{GRANTED_REPO}.md"},
+        )
+        readme = _payload(
+            _mcp(
+                client,
+                USER,
+                "get_file_content",
+                {"repository_alias": META_GLOBAL, "file_path": README},
+            )
         )
 
-        assert README_TEXT in _file_text(_payload(body))
+        assert README_TEXT in _file_text(_payload(granted))
+        assert readme["success"] is False

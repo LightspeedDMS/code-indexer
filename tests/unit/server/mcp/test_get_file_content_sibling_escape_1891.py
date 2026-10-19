@@ -83,11 +83,17 @@ def _call_handler(params: Dict[str, Any], repo_root):
     arm = MagicMock()
     arm.get_activated_repo_path.return_value = str(repo_root)
 
+    # The caller has no activation named like the alias (catalog detection
+    # reads it); with no golden repo manager the bare-to-global fallback
+    # stays disabled.
+    activations = MagicMock()
+    activations.get_repository.return_value = None
+
     original_arm = getattr(file_service, "_activated_repo_manager_lazy", None)
     file_service._activated_repo_manager_lazy = arm
     try:
         with (
-            patch(_ARM_PATH, new=None),
+            patch(_ARM_PATH, new=activations),
             patch(_GRM_PATH, new=None),
         ):
             return get_file_content(params, user)

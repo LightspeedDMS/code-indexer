@@ -33,7 +33,12 @@ from typing import (
     runtime_checkable,
 )
 
-from .cidx_meta_access import DecisionKind, classify, resolve_meta_visibility
+from .cidx_meta_access import (
+    DecisionKind,
+    classify,
+    memory_visibility_fn,
+    resolve_meta_visibility,
+)
 from .constants import CIDX_META_REPO, DEFAULT_GROUP_ADMINS, is_internal_meta_repo
 from .group_access_manager import GroupAccessManager
 from .memory_io import (
@@ -439,18 +444,11 @@ class AccessFilteringService:
         vis = resolve_meta_visibility(user_id, self)
         if vis.unrestricted:
             return files
-        accessible = set(vis.visible)
-
-        def _memory_visible(memory_id: str) -> bool:
-            filename = f"{memory_id}.md"
-            return bool(
-                _MEMORY_FILE_RE.match(filename)
-            ) and self._is_memory_file_accessible(filename, accessible)
-
+        memory_fn = memory_visibility_fn(self, vis)
         return [
             path
             for path in files
-            if classify(path, vis, _membership_not_read, _memory_visible).kind
+            if classify(path, vis, _membership_not_read, memory_fn).kind
             in _LISTABLE_DECISIONS
         ]
 
@@ -488,11 +486,7 @@ class AccessFilteringService:
         return [
             memory_id
             for memory_id in valid_ids
-            if self._is_memory_file_accessible(
-                f"{memory_id}.md",
-                accessible,
-                lookup=self._read_memory_frontmatter_fresh,
-            )
+            if self.memory_visible_within(memory_id, accessible)
         ]
 
     def memory_visible_within(self, memory_id: str, accessible: Set[str]) -> bool:

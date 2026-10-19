@@ -14,6 +14,7 @@ the scope is never stored on a module, class or session object.
 from __future__ import annotations
 
 import hashlib
+import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -29,8 +30,10 @@ from typing import (
     Tuple,
 )
 
-from ..constants import is_internal_meta_repo
+from ..constants import CIDX_META_REPO, is_internal_meta_repo
 from ..repo_access_guard import normalize_repo_alias
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..access_filtering_service import AccessFilteringService
@@ -87,16 +90,21 @@ def resolve_meta_visibility(
 ) -> MetaVisibility:
     """Resolve the caller's catalog visibility, fresh, failing closed.
 
-    Order: an acting-user scope restricts to that scope; a missing access
-    service yields an empty visible set; an ``admins`` group member is
+    Order: a missing access service yields an empty visible set; an
+    acting-user scope restricts to that scope; an ``admins`` group member is
     unrestricted; anyone else sees their granted repositories.
     """
-    scope = ACTING_SCOPE.get()
-    if scope is not None:
-        return MetaVisibility.restricted(scope)
     if access_service is None:
         return MetaVisibility.restricted(())
-    if access_service.is_admin_user(username):
+    scope = ACTING_SCOPE.get()
+    is_admin = access_service.is_admin_user(username)
+    if scope is not None:
+        scoped = MetaVisibility.restricted(scope)
+        if is_admin:
+            return scoped
+        own = MetaVisibility.restricted(access_service.get_accessible_repos(username))
+        return MetaVisibility.restricted(scoped.visible & own.visible)
+    if is_admin:
         return MetaVisibility.everything()
     return MetaVisibility.restricted(access_service.get_accessible_repos(username))
 
@@ -104,14 +112,16 @@ def resolve_meta_visibility(
 def memory_visibility_fn(
     access_service: Optional["AccessFilteringService"], vis: MetaVisibility
 ) -> Callable[[str], bool]:
-    """The ``memory_fn`` for ``classify``: the existing memory scope rule
-    (AccessFilteringService) judged against the caller's visible set."""
+    """The ``memory_fn`` for ``classify``: the memory scope rule
+    (AccessFilteringService.memory_visible_within, frontmatter read fresh)
+    judged against the caller's visible set plus the catalog itself, which
+    every group is granted -- the same set memory retrieval uses."""
     if vis.unrestricted:
         return lambda _memory_id: True
     if access_service is None:
         return lambda _memory_id: False
     service = access_service
-    accessible = set(vis.visible)
+    accessible = set(vis.visible) | {CIDX_META_REPO}
     return lambda memory_id: service.memory_visible_within(memory_id, accessible)
 
 
@@ -153,12 +163,22 @@ def request_alias_identities(
     """
     if alias.endswith("-global"):
         return (alias,)
+    if alias in (".", "..") or any(ch in alias for ch in "/\\\x00"):
+        return (alias,)
     if activated_repo_manager is None:
         return (UNRESOLVED_IDENTITY,)
-    for record in activated_repo_manager.list_activated_repositories(username):
-        if record.get("user_alias") == alias:
-            return _activation_identities(record)
-    return (alias,)
+    try:
+        record = activated_repo_manager.get_repository(username, alias, touch=False)
+    except Exception as exc:
+        logger.warning(
+            "Activation lookup for catalog detection failed (%s); treating the "
+            "alias as the catalog",
+            type(exc).__name__,
+        )
+        return (UNRESOLVED_IDENTITY,)
+    if not isinstance(record, Mapping):
+        return (alias,)
+    return _activation_identities(record)
 
 
 def is_internal_meta_identity(identities: Iterable[str]) -> bool:

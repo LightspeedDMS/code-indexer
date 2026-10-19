@@ -96,6 +96,121 @@ async def test_acting_scope_applies_and_resets(fx: CidxMetaFixture) -> None:
     assert unscoped.unrestricted is True
 
 
+async def test_acting_scope_resets_when_the_handler_raises(
+    fx: CidxMetaFixture,
+) -> None:
+    from contextvars import copy_context
+
+    from code_indexer.server.services.cidx_meta_access.visibility import (
+        ACTING_SCOPE,
+    )
+
+    admin = _user(ADMIN_USER, UserRole.ADMIN)
+    observed: List[MetaVisibility] = []
+
+    def _failing(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+        observed.append(resolve_meta_visibility(user.username, fx.access_service))
+        raise RuntimeError("handler failure")
+
+    app_state = Mock()
+    app_state.access_filtering_service = fx.access_service
+    app_state.user_manager = _Users(
+        [_user(RESTRICTED_USER, UserRole.NORMAL_USER, RESTRICTED_EMAIL)]
+    )
+    with (
+        patch("code_indexer.server.mcp.handlers.app_module") as app_module,
+        patch(
+            "code_indexer.server.services.langfuse_service.get_langfuse_service",
+            return_value=None,
+        ),
+        patch.dict(HANDLER_REGISTRY, {PROBE_TOOL: _failing}),
+    ):
+        app_module.app.state = app_state
+        with pytest.raises(RuntimeError):
+            await handle_tools_call(
+                {
+                    "name": PROBE_TOOL,
+                    "arguments": {"acting_users": [RESTRICTED_EMAIL]},
+                },
+                admin,
+            )
+    assert observed[0].visible == frozenset({ALPHA})
+    assert copy_context().get(ACTING_SCOPE) is None
+    assert (await _observe(fx, admin, {})).unrestricted is True
+
+
+@pytest.mark.parametrize("catalog_alias", ["cidx-meta", "cidx-meta-global"])
+async def test_activation_named_like_the_catalog_is_refused(
+    fx: CidxMetaFixture, catalog_alias: str
+) -> None:
+    called: List[str] = []
+
+    def _activate(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+        called.append(args["user_alias"])
+        return {"content": [{"type": "text", "text": "{}"}]}
+
+    app_state = Mock()
+    app_state.access_filtering_service = fx.access_service
+    with (
+        patch("code_indexer.server.mcp.handlers.app_module") as app_module,
+        patch(
+            "code_indexer.server.services.langfuse_service.get_langfuse_service",
+            return_value=None,
+        ),
+        patch.dict(HANDLER_REGISTRY, {"activate_repository": _activate}),
+    ):
+        app_module.app.state = app_state
+        with pytest.raises(ValueError, match="Access denied"):
+            await handle_tools_call(
+                {
+                    "name": "activate_repository",
+                    "arguments": {
+                        "golden_repo_alias": ALPHA,
+                        "user_alias": catalog_alias,
+                    },
+                },
+                _user(RESTRICTED_USER, UserRole.NORMAL_USER),
+            )
+    assert called == []
+
+
+def test_web_activation_named_like_the_catalog_is_refused(
+    fx: CidxMetaFixture,
+) -> None:
+    from code_indexer.server.services import activated_repo_audited_ops as ops
+    from code_indexer.server.services.repo_access_guard import RepoAccessDeniedError
+
+    class _Manager:
+        def __init__(self) -> None:
+            self.submitted: List[str] = []
+
+        def activate_repository(self, **kwargs: Any) -> str:
+            self.submitted.append(kwargs["user_alias"])
+            return "job-1"
+
+    manager = _Manager()
+    with patch.object(
+        ops, "module_app_access_filtering_service", return_value=fx.access_service
+    ):
+        with pytest.raises(RepoAccessDeniedError):
+            ops.activate_repository_for_user(
+                manager,
+                RESTRICTED_USER,
+                ALPHA,
+                user_alias="cidx-meta",
+                actor=RESTRICTED_USER,
+            )
+        assert manager.submitted == []
+        ops.activate_repository_for_user(
+            manager,
+            RESTRICTED_USER,
+            ALPHA,
+            user_alias="my-alpha",
+            actor=RESTRICTED_USER,
+        )
+    assert manager.submitted == ["my-alpha"]
+
+
 async def test_admin_role_without_admins_group_is_restricted(
     fx: CidxMetaFixture,
 ) -> None:

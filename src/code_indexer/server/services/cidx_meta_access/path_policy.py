@@ -62,15 +62,18 @@ _ALLOW = Decision(DecisionKind.ALLOW)
 
 def normalize_meta_path(relative_path: str) -> Optional[Tuple[str, ...]]:
     """Path segments of a catalog-relative path, or None when it is not one
-    (empty, absolute, parent traversal, NUL byte, not a string)."""
+    (empty, absolute, parent traversal, NUL byte, backslash, not a string).
+
+    A backslash is a literal file-name character to the POSIX reader, so a
+    path holding one is refused rather than reinterpreted as a separator.
+    """
     if not isinstance(relative_path, str) or not relative_path:
         return None
-    if "\x00" in relative_path:
+    if "\x00" in relative_path or "\\" in relative_path:
         return None
-    posix = relative_path.replace("\\", "/")
-    if posix.startswith("/"):
+    if relative_path.startswith("/"):
         return None
-    parts = tuple(seg for seg in posix.split("/") if seg not in ("", "."))
+    parts = tuple(seg for seg in relative_path.split("/") if seg not in ("", "."))
     if not parts or ".." in parts:
         return None
     return parts
