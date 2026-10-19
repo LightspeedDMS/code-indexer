@@ -380,6 +380,12 @@ class UserManager:
         Returns:
             User object if authentication successful, None otherwise
         """
+        from code_indexer.server.services.analysis_agent_principal import (
+            ANALYSIS_AGENT_USERNAME,
+        )
+
+        if username == ANALYSIS_AGENT_USERNAME:
+            return None
         if self._use_sqlite and self._sqlite_backend is not None:
             # SQLite backend (Story #702)
             user_data = self._sqlite_backend.get_user(username)
@@ -787,11 +793,12 @@ class UserManager:
         component.  A failed creation persisted no account, so its row
         names none.
         """
-        provisioning = (
-            "self_registration"
-            if actor is SystemComponent.SELF_REGISTRATION
-            else "admin"
-        )
+        if actor is SystemComponent.SELF_REGISTRATION:
+            provisioning = "self_registration"
+        elif isinstance(actor, SystemComponent):
+            provisioning = "system"
+        else:
+            provisioning = "admin"
         details = {"role": role.value, "provisioning": provisioning}
         try:
             user = self.create_user(username=username, password=password, role=role)
@@ -1640,6 +1647,17 @@ class UserManager:
         )
         actor = SystemComponent.SSO_PROVISIONING
         try:
+            import logging
+
+            from code_indexer.server.services.analysis_agent_principal import (
+                ANALYSIS_AGENT_USERNAME,
+            )
+
+            if username == ANALYSIS_AGENT_USERNAME:
+                logging.getLogger(__name__).error(
+                    "SSO provisioning refused for a reserved account name"
+                )
+                raise ValueError(f"Username '{username}' is reserved")
             user = self._create_oidc_user(username, role, email, oidc_identity)
         except Exception:
             self._record_user_outcome(actor, "user_created", None, "failure", {})

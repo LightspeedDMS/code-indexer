@@ -1,15 +1,15 @@
 ---
 name: store_xray_pattern
 category: search
-required_permission: query_repos
-tl_dr: Store a reusable Rust xray evaluator pattern in the cidx-meta pattern library. Stored patterns can be referenced by name in xray_search and xray_explore via the pattern_name parameter.
+required_permission: repository:write
+tl_dr: Store a reusable Rust xray evaluator pattern in the cidx-meta pattern library (requires repository:write). Stored patterns can be referenced by name in xray_search and xray_explore via the pattern_name parameter.
 slim_description: "Persist a hard-won xray evaluator to the pattern library so it survives session restarts, is shared with all users, and can be re-run without re-deriving. Use this whenever an evaluator took more than one iteration to get right. Patterns can declare typed parameters (usize, i64, f64, bool, str) with defaults that callers override via pattern_name in xray_search and xray_explore."
 inputSchema:
   type: object
   properties:
     scope:
       type: string
-      description: 'Target scope for the pattern. Use "__any__" to store a cross-repo pattern accessible from any repository alias. Use a specific repository alias (e.g. "myrepo-global") to store a repo-specific pattern that takes priority over __any__ patterns when that repo is searched.'
+      description: 'Target scope for the pattern. Use "__any__" to store a cross-repo pattern accessible from any repository alias. Use a specific repository alias (e.g. "myrepo-global") to store a repo-specific pattern that takes priority over __any__ patterns when that repo is searched; you must have access to that repository (an alias you cannot access is refused exactly like an unknown one).'
     pattern_yaml:
       type: string
       description: |
@@ -26,7 +26,7 @@ inputSchema:
           parameters (list): Typed parameter declarations — see Parameters section.
     overwrite:
       type: boolean
-      description: 'When false (default), returns pattern_already_exists error if a pattern with the same name already exists in the given scope. Set to true to replace an existing pattern.'
+      description: 'When false (default), returns pattern_already_exists error if a pattern with the same name already exists in the given scope. Set to true to replace an existing pattern. Replacing an existing "__any__" pattern requires the admin role. Every store and replacement is recorded in the audit log with the caller.'
       default: false
   required:
     - scope
@@ -153,7 +153,9 @@ Store in `__any__` scope for patterns that apply to any codebase. Store in a rep
 
 | Code | Meaning |
 |------|---------|
-| auth_required | Unauthenticated or missing query_repos permission |
+| auth_required | Unauthenticated or missing repository:write permission |
+| access_denied | scope names a repository you cannot access (or no such repository) |
+| global_pattern_overwrite_forbidden | overwrite=true would replace an existing "__any__" pattern and you are not an admin |
 | scope_required | scope parameter missing or empty |
 | pattern_yaml_required | pattern_yaml parameter missing or empty |
 | invalid_yaml | pattern_yaml cannot be parsed as YAML |
@@ -206,7 +208,7 @@ A non-trivial evaluator typically costs 3-6 tool round-trips to develop: one `xr
 Store any evaluator that meets the trigger heuristics above (see "When to store a pattern") rather than re-deriving it later. Benefits:
 
 - **Reuse across sessions**: Stored patterns persist in cidx-meta (git-versioned) and survive server restarts.
-- **Share across users**: All authenticated users with query_repos permission can reference stored patterns.
+- **Share across users**: All authenticated users with query_repos permission can reference stored patterns; storing one requires repository:write.
 - **Parameterize once, override per-call**: Declare typed parameters with defaults; callers override via pattern_params without editing evaluator code.
 
 ### Discovering Stored Patterns

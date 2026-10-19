@@ -299,12 +299,22 @@ class TestMCPSelfRegistrationDirectHeader:
         mock_config_manager = MagicMock()
         mock_config_manager.load_config.return_value = mock_config
 
+        from tests.unit.server.services._principal_account_store import (
+            principal_account_store,
+        )
+
         mock_cred_manager = MagicMock()
+        mock_cred_manager.user_manager = principal_account_store()
+        mock_cred_manager.get_credential_by_client_id.return_value = (
+            "cidx-analysis-agent",
+            {"credential_id": "example-credential"},
+        )
 
         service = MCPSelfRegistrationService(
             config_manager=mock_config_manager,
             mcp_credential_manager=mock_cred_manager,
         )
+        service.set_group_manager(MagicMock())
 
         result = service.build_header_from_stored_credentials()
 

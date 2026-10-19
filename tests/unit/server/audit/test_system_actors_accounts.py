@@ -143,6 +143,9 @@ def test_mcp_self_registration_credential_is_a_system_actor(
     config_service = ConfigService(server_dir_path=str(tmp_path / "server"))
     config_service.load_config()  # writes the default config.json
     service = MCPSelfRegistrationService(config_service, MCPCredentialManager(users))
+    from code_indexer.server.services.group_access_manager import GroupAccessManager
+
+    service.set_group_manager(GroupAccessManager(tmp_path / "group-access.db"))
     creds = service.get_or_create_credentials()
     assert creds is not None
     (row,) = store.rows("mcp_credential_created")

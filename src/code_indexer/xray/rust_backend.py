@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import select
 import subprocess
 import tempfile
 import threading
@@ -32,6 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Protocol, Tuple
 
 from code_indexer.utils.path_confinement import is_readable_within_root
+from code_indexer.utils.process_group import terminate_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +80,31 @@ def _acquire_compile_slot(timeout_seconds: float) -> bool:
 def _release_compile_slot() -> None:
     """Release a previously-acquired compile slot."""
     _compile_semaphore.release()
+
+
+_COMPILE_EXIT_WAIT_SECONDS = 120.0
+_MILLISECONDS_PER_SECOND = 1000
+_LIVENESS_READ_BYTES = 64
+
+
+def _wait_for_job_processes_gone(alive_read_fd: int, budget_seconds: float) -> bool:
+    """True once every holder of the pipe's write end has exited.
+
+    xray-cli receives the write end and every process it starts inherits it,
+    including rustc, which leads its own process group out of reach of a
+    group kill. EOF on the read end therefore means no process of this
+    invocation is still running. False when ``budget_seconds`` ran out first.
+    """
+    deadline = time.monotonic() + budget_seconds
+    poller = select.poll()
+    poller.register(alive_read_fd, select.POLLIN | select.POLLHUP)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        ready = poller.poll(max(1, int(remaining * _MILLISECONDS_PER_SECOND)))
+        if ready and not os.read(alive_read_fd, _LIVENESS_READ_BYTES):
+            return True
 
 
 def _sanitize_error_message(msg: str) -> str:
@@ -1162,29 +1190,27 @@ class RustNativeBackend:
     ) -> Tuple[str, Optional[str]]:
         """Spawn xray-cli, wait for completion, return (stdout, error_msg).
 
-        R2-3 (Codex re-review): spawned in its OWN process group
-        (`start_new_session=True`) so that on timeout the ENTIRE group --
-        including any grandchild the direct child spawned (e.g. rustc
-        launched by xray-cli) -- is killed via `os.killpg`, never just the
-        direct child via a bare `proc.kill()`. SIGKILL cannot be caught or
-        forwarded by the process it kills, so a bare `proc.kill()` leaves
-        any grandchild reparented to init, running FOREVER as an orphan
-        that keeps consuming CPU/RAM.
+        Spawned in its own session (`start_new_session=True`); on timeout
+        its group is stopped by `terminate_process_group` (SIGTERM, then
+        SIGKILL for survivors). xray-cli starts rustc in a SEPARATE process
+        group, so the group signal alone never reaches rustc: xray-cli's
+        SIGTERM handler kills rustc's group, and rustc carries a
+        parent-death SIGKILL for the case xray-cli is SIGKILLed.
 
-        R2-4 (Codex re-review): `acquire_compile_slot` has NO DEFAULT --
-        every call site must state whether this invocation can trigger a
-        fresh rustc compile (the legacy scan path: True) or only runs an
-        already-compiled dylib (--build-graph/--analyze-graph: False), so
-        a future call site can never silently inherit an unthrottled
-        default. When True, a process-wide compile slot is acquired
-        (deadline-aware, bounded by `timeout_seconds`) BEFORE spawning the
-        subprocess -- a saturated compile queue returns a clear timeout
-        error instead of an unbounded Nth concurrent rustc process, and
-        the slot is released in `finally` regardless of outcome.
+        xray-cli also receives the write end of a liveness pipe, inherited
+        by every process it starts. Before returning (and before releasing
+        the compile slot) this method waits for EOF on the read end, so a
+        returned call means no process of the invocation is still running.
+
+        `acquire_compile_slot` has NO DEFAULT -- every call site must state
+        whether this invocation can trigger a fresh rustc compile (the
+        legacy scan path: True) or only runs an already-compiled dylib
+        (--build-graph/--analyze-graph: False). When True, a process-wide
+        compile slot is acquired (deadline-aware, bounded by
+        `timeout_seconds`) BEFORE spawning the subprocess -- a saturated
+        compile queue returns a clear timeout error -- and released in
+        `finally` once the invocation's processes are gone.
         """
-        import os  # noqa: PLC0415 — stdlib, lazy import to keep startup clean
-        import signal  # noqa: PLC0415 — stdlib, lazy import to keep startup clean
-
         if acquire_compile_slot and not _acquire_compile_slot(
             timeout_seconds=float(timeout_seconds)
         ):
@@ -1195,14 +1221,20 @@ class RustNativeBackend:
             logger.warning("RustNativeBackend: %s", msg)
             return "", _sanitize_error_message(msg)
 
+        alive_read: Optional[int] = None
         try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                start_new_session=True,
-            )
+            alive_read, alive_write = os.pipe()
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                    pass_fds=(alive_write,),
+                )
+            finally:
+                os.close(alive_write)
 
             if on_process_spawned is not None:
                 on_process_spawned(proc)
@@ -1210,22 +1242,12 @@ class RustNativeBackend:
             try:
                 stdout, stderr = proc.communicate(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
-                # `start_new_session=True` makes proc.pid both the process
-                # ID AND the process group ID (new session/group leader),
-                # so `os.killpg(proc.pid, ...)` reaches the direct child
-                # AND every descendant it spawned in one signal.
-                # ProcessLookupError means the whole group already exited
-                # between TimeoutExpired firing and this line (a benign
-                # race, not an error). PermissionError is a second, rarer
-                # benign race: the group leader already exited and its
-                # PGID was reused by an unrelated process this session
-                # cannot signal. Neither must prevent proc.wait() below
-                # from reaping the direct child.
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                proc.wait()
+                if not terminate_process_group(proc):
+                    logger.warning(
+                        "RustNativeBackend: xray-cli process group could not be "
+                        "terminated (pid=%s)",
+                        proc.pid,
+                    )
                 msg = f"xray-cli timed out after {timeout_seconds}s"
                 logger.warning("RustNativeBackend: %s", msg)
                 return "", _sanitize_error_message(msg)
@@ -1245,6 +1267,17 @@ class RustNativeBackend:
                 return "", _sanitize_error_message(raw_msg)
             return stdout or "", None
         finally:
+            if alive_read is not None:
+                if not _wait_for_job_processes_gone(
+                    alive_read, _COMPILE_EXIT_WAIT_SECONDS
+                ):
+                    logger.error(
+                        "RustNativeBackend: processes started by xray-cli were "
+                        "still running %.0fs after it ended; releasing its "
+                        "compile slot anyway",
+                        _COMPILE_EXIT_WAIT_SECONDS,
+                    )
+                os.close(alive_read)
             if acquire_compile_slot:
                 _release_compile_slot()
 

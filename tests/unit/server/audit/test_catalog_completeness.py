@@ -111,6 +111,7 @@ _ENTRY_POINTS: Dict[str, FrozenSet[str]] = {
         "ssh_key_host_assigned": {"assign_key_to_host_audited"},
         "git_credential_configured": {"configure_credential_audited"},
         "git_credential_deleted": {"delete_credential_audited"},
+        "xray_pattern_stored": {"store_xray_pattern_audited"},
         "golden_repo_added": {"add_golden_repo"},
         "golden_repo_removed": {"remove_golden_repo"},
         "golden_repo_refreshed": {"request_golden_repo_refresh"},
@@ -197,6 +198,7 @@ _MCP_MAPPED: Dict[str, Tuple[str, ...]] = {
     "manage_ssh_key": ("ssh_key_created", "ssh_key_deleted", "ssh_key_host_assigned"),
     "configure_git_credential": ("git_credential_configured",),
     "delete_git_credential": ("git_credential_deleted",),
+    "store_xray_pattern": ("xray_pattern_stored",),
     "create_group": ("group_create",),
     "update_group": ("group_update",),
     "delete_group": ("group_delete",),
@@ -223,6 +225,9 @@ _MCP_MAPPED: Dict[str, Tuple[str, ...]] = {
 
 # Tools that authenticate the caller themselves (no permission gate).
 _SELF_AUTHENTICATING_MCP = frozenset({"elevate_session"})
+
+# Non-admin tools whose writes to shared state are audited all the same.
+_AUDITED_NON_ADMIN_MCP = frozenset({"store_xray_pattern"})
 
 _READ_ONLY = READ_ONLY
 _WORKSPACE_GIT = WORKSPACE_GIT
@@ -523,7 +528,8 @@ def mcp_inventory(
         for name, handler in handler_registry.items()
         if getattr(handler, "__mcp_requires_session_key__", False)
     }
-    return by_permission | marked | (_SELF_AUTHENTICATING_MCP & set(handler_registry))
+    extra = (_SELF_AUTHENTICATING_MCP | _AUDITED_NON_ADMIN_MCP) & set(handler_registry)
+    return by_permission | marked | extra
 
 
 def unclassified(inventory: Set[str], *tables: Mapping[str, object]) -> List[str]:

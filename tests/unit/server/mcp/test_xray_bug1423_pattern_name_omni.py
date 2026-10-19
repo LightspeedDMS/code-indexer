@@ -87,7 +87,9 @@ def _store_deep_nesting_pattern(cidx_meta: Path) -> None:
     """Store the deep-nesting pattern in the cross-repo __any__ scope."""
     svc = XrayPatternService(cidx_meta)
     with patch.object(svc, "_git_commit"):
-        svc.store_xray_pattern(
+        svc.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
             scope="__any__",
             pattern_yaml=DEEP_NESTING_PATTERN_YAML,
         )

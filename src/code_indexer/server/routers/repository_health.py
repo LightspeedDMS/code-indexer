@@ -25,6 +25,9 @@ from code_indexer.server.services.repository_health_aggregator import (
 from code_indexer.server.services.repository_health_aggregator import (
     _to_collection_health_result as _to_collection_health_result,  # noqa: F401
 )
+from code_indexer.server.services.access_filtering_service import (
+    AccessFilteringService,
+)
 from code_indexer.server.services.repo_access_guard import (
     AccessFilteringServiceUnavailableError,
     RepoAccessDeniedError,
@@ -349,14 +352,23 @@ def _resolve_repo_access_target(repo_alias: str, username: str) -> Optional[List
     order must stay in exact lockstep with that, so authorisation is never
     computed against a different repository than the one actually served.
     """
+    golden = _resolve_golden_access_target(repo_alias)
+    if golden is not None:
+        return [golden]
+    return _resolve_activated_repo_access_targets(username, repo_alias)
+
+
+def _resolve_golden_access_target(repo_alias: str) -> Optional[str]:
+    """Steps 1-2 of _resolve_repo_access_target(): the golden repository
+    repo_alias names (exactly, or minus -global), else None."""
     golden_repo_manager = _get_golden_repo_manager()
     if golden_repo_manager.get_golden_repo(repo_alias):
-        return [repo_alias]
+        return repo_alias
     if repo_alias.endswith("-global"):
         base_alias = repo_alias[:-7]
         if golden_repo_manager.get_golden_repo(base_alias):
-            return [base_alias]
-    return _resolve_activated_repo_access_targets(username, repo_alias)
+            return base_alias
+    return None
 
 
 def _repo_access_allowed(
@@ -383,15 +395,20 @@ def _repo_access_allowed(
     if access_filtering_service.is_admin_user(username):  # type: ignore[attr-defined]
         return True
 
-    targets = _resolve_repo_access_target(repo_alias, username)
-    if not targets:
+    golden = _resolve_golden_access_target(repo_alias)
+    if golden is not None:
+        try:
+            require_repo_access(access_filtering_service, username, [golden])
+            return True
+        except RepoAccessDeniedError:
+            return False
+    sources = _resolve_activated_repo_access_targets(username, repo_alias)
+    if not sources:
         return False
-
-    try:
-        require_repo_access(access_filtering_service, username, targets)
-        return True
-    except RepoAccessDeniedError:
-        return False
+    return AccessFilteringService.activation_sources_granted(
+        [normalize_repo_alias(s) for s in sources],
+        access_filtering_service.get_accessible_repos(username),  # type: ignore[attr-defined]
+    )
 
 
 def _enforce_repo_access(repo_alias: str, username: str) -> None:

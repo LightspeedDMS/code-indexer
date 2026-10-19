@@ -21,9 +21,23 @@ JSON-RPC / tool-response error.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Protocol, Set, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Protocol,
+    Set,
+    Union,
+)
+
+if TYPE_CHECKING:
+    from .access_filtering_service import AccessFilteringService
 
 from ..logging_utils import format_error_log, get_log_extra
+from .constants import is_internal_meta_repo
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +151,53 @@ def require_repo_access(
     for raw_alias in non_empty:
         if normalize_repo_alias(raw_alias) not in accessible:
             raise RepoAccessDeniedError(raw_alias, username)
+
+
+def module_app_access_filtering_service() -> Optional["AccessFilteringService"]:
+    """The access service wired on the server app (as the MCP dispatcher
+    reads it); None when it is not wired, which every guard fails closed on."""
+    from code_indexer.server import app as app_module
+
+    server_app = getattr(app_module, "app")
+    service: Optional["AccessFilteringService"] = getattr(
+        server_app.state, "access_filtering_service", None
+    )
+    return service
+
+
+def catalog_aliases(aliases: Union[str, Iterable[Any], None]) -> List[str]:
+    """The internal catalog repository aliases among *aliases* (exact match)."""
+    alias_list = [aliases] if isinstance(aliases, str) else list(aliases or [])
+    return [a for a in alias_list if isinstance(a, str) and is_internal_meta_repo(a)]
+
+
+def require_activation_allowed(
+    access_filtering_service: Optional[RepoAccessService],
+    username: str,
+    aliases: Union[str, Iterable[str], None],
+) -> None:
+    """Refuse activating the internal catalog repository outside the admins group.
+
+    *username* is the user the activation is created for (the impersonated
+    user on MCP, the target user on the Web admin door). An activation that
+    names no catalog alias needs no decision here and needs no service.
+
+    Raises:
+        AccessFilteringServiceUnavailableError: a catalog alias was named and
+            the service is None (fails closed).
+        RepoAccessDeniedError: a catalog alias was named for a user outside
+            the admins group; the same refusal as for an ungranted repository.
+    """
+    catalog = catalog_aliases(aliases)
+    if not catalog:
+        return
+    if access_filtering_service is None:
+        raise AccessFilteringServiceUnavailableError(
+            "access_filtering_service unavailable -- repository access "
+            "cannot be verified; failing closed"
+        )
+    if not access_filtering_service.is_admin_user(username):
+        raise RepoAccessDeniedError(catalog[0], username)
 
 
 def narrow_global_repos_to_accessible(

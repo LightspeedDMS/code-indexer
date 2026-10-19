@@ -24,6 +24,10 @@ from code_indexer.server.services.audit_outcome import (
     conforming_details,
     record_outcome,
 )
+from code_indexer.server.services.repo_access_guard import (
+    module_app_access_filtering_service,
+    require_activation_allowed,
+)
 
 _ACTIVATED = "user_repo_activated_by_admin"
 _DEACTIVATED = "user_repo_deactivated_by_admin"
@@ -54,16 +58,15 @@ def activate_repository_for_user(
     user_alias: str,
     actor: str,
 ) -> str:
-    """Submit activation of *golden_repo_alias* for *username* on *actor*'s behalf."""
-    if actor == username:
-        return str(
-            manager.activate_repository(
-                username=username,
-                golden_repo_alias=golden_repo_alias,
-                user_alias=user_alias,
-            )
-        )
+    """Submit activation of *golden_repo_alias* for *username* on *actor*'s behalf.
+
+    The internal catalog repository is refused for a *username* outside the
+    admins group (judged for the target, never the acting admin).
+    """
     try:
+        require_activation_allowed(
+            module_app_access_filtering_service(), username, golden_repo_alias
+        )
         job_id = str(
             manager.activate_repository(
                 username=username,
@@ -72,8 +75,11 @@ def activate_repository_for_user(
             )
         )
     except Exception:
-        _record(actor, _ACTIVATED, None, "failure")
+        if actor != username:
+            _record(actor, _ACTIVATED, None, "failure")
         raise
+    if actor == username:
+        return job_id
     _record(
         actor,
         _ACTIVATED,

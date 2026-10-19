@@ -95,7 +95,9 @@ def test_store_pattern_acquires_coarse_lock_when_unlocked(
     svc = XrayPatternService(cidx_meta_path=cidx_meta, refresh_scheduler=scheduler)
 
     with patch.object(svc, "_git_commit", return_value=None):
-        svc.store_xray_pattern(
+        svc.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
             scope="__any__",
             pattern_yaml=MINIMAL_PATTERN_YAML,
             overwrite=True,
@@ -136,7 +138,9 @@ def test_store_pattern_piggybacks_when_already_locked(
         git_commit_called.append((files, message))
 
     with patch.object(svc, "_git_commit", side_effect=_capture_git_commit):
-        result = svc.store_xray_pattern(
+        result = svc.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
             scope="__any__",
             pattern_yaml=MINIMAL_PATTERN_YAML,
             overwrite=True,
@@ -176,7 +180,9 @@ def test_store_pattern_falls_through_to_piggyback_when_acquire_loses_race(
         git_commit_called.append((files, message))
 
     with patch.object(svc, "_git_commit", side_effect=_capture_git_commit):
-        result = svc.store_xray_pattern(
+        result = svc.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
             scope="__any__",
             pattern_yaml=MINIMAL_PATTERN_YAML,
             overwrite=True,
@@ -208,7 +214,9 @@ def test_store_pattern_releases_lock_when_operation_raises(
 
     with patch.object(svc, "_git_commit", side_effect=_raise):
         with pytest.raises(RuntimeError, match="git boom"):
-            svc.store_xray_pattern(
+            svc.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=MINIMAL_PATTERN_YAML,
                 overwrite=True,
@@ -240,7 +248,9 @@ def test_store_pattern_does_not_release_when_piggybacking(
         side_effect=OSError("disk full"),
     ):
         with pytest.raises(OSError, match="disk full"):
-            svc.store_xray_pattern(
+            svc.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=MINIMAL_PATTERN_YAML,
                 overwrite=True,
@@ -336,7 +346,9 @@ def test_service_falls_back_when_no_scheduler_injected(
         git_commit_called.append((files, message))
 
     with patch.object(svc, "_git_commit", side_effect=_capture_git_commit):
-        result = svc.store_xray_pattern(
+        result = svc.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
             scope="__any__",
             pattern_yaml=MINIMAL_PATTERN_YAML,
             overwrite=True,
@@ -363,7 +375,9 @@ def test_owner_string_format_for_debugging(
     svc = XrayPatternService(cidx_meta_path=cidx_meta, refresh_scheduler=scheduler)
 
     with patch.object(svc, "_git_commit", return_value=None):
-        svc.store_xray_pattern(
+        svc.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
             scope="my-repo",
             pattern_yaml=MINIMAL_PATTERN_YAML,
             overwrite=True,
@@ -396,7 +410,9 @@ def test_lock_alias_is_canonical_cidx_meta(
     svc = XrayPatternService(cidx_meta_path=cidx_meta, refresh_scheduler=scheduler)
 
     with patch.object(svc, "_git_commit", return_value=None):
-        svc.store_xray_pattern(
+        svc.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
             scope="__any__",
             pattern_yaml=MINIMAL_PATTERN_YAML,
             overwrite=True,

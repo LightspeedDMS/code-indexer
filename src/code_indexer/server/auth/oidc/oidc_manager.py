@@ -173,6 +173,17 @@ class OIDCManager:
             await db.commit()
 
     async def link_oidc_identity(self, username, subject, email):
+        import logging
+
+        from code_indexer.server.services.analysis_agent_principal import (
+            ANALYSIS_AGENT_USERNAME,
+        )
+
+        if username == ANALYSIS_AGENT_USERNAME:
+            logging.getLogger(__name__).error(
+                "SSO account linking refused for a reserved account name"
+            )
+            raise ValueError(f"Username '{username}' is reserved")
         if self._oauth_backend:
             # OAuthBackend.link_oidc_identity is synchronous (see protocols.py):
             # run it off the event loop.
@@ -234,6 +245,28 @@ class OIDCManager:
         return None
 
     async def match_or_create_user(self, user_info):
+        """The local account for this SSO identity, or None. Never the
+        analysis agents' reserved account: no SSO session is issued for it."""
+        import logging
+
+        from code_indexer.server.services.analysis_agent_principal import (
+            ANALYSIS_AGENT_USERNAME,
+        )
+
+        try:
+            user = await self._match_or_create_user(user_info)
+        except ValueError:
+            if getattr(user_info, "username", None) != ANALYSIS_AGENT_USERNAME:
+                raise
+            user = None
+        if user is not None and user.username == ANALYSIS_AGENT_USERNAME:
+            logging.getLogger(__name__).error(
+                "SSO sign-in refused for a reserved account name"
+            )
+            return None
+        return user
+
+    async def _match_or_create_user(self, user_info):
         import aiosqlite
         import logging
 

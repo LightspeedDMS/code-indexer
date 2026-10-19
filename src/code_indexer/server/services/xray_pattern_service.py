@@ -50,8 +50,24 @@ from code_indexer.server.git.git_subprocess_env import build_non_interactive_git
 from code_indexer.server.services.cidx_meta_backup.branch_detect import (
     detect_default_branch,
 )
+from code_indexer.server.services.audit_outcome import (
+    conforming_details,
+    record_outcome,
+)
+from code_indexer.server.services.cidx_meta_backup.paths import (
+    cidx_meta_is_git_repository,
+)
 from code_indexer.server.services.cidx_meta_backup.sync import CidxMetaBackupSync
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.xray_pattern_params import (
+    build_const_lines,
+    resolve_params,
+    validate_parameter_declarations,
+)
+from code_indexer.server.services.xray_pattern_seeds import (
+    SEED_CATCH_RETHROW as _SEED_CATCH_RETHROW,
+    SEED_DEEP_NESTING as _SEED_DEEP_NESTING,
+)
 from code_indexer.xray.sandbox import (
     detect_evaluator_entry_points,
     validate_rust_evaluator,
@@ -59,8 +75,34 @@ from code_indexer.xray.sandbox import (
 
 logger = logging.getLogger(__name__)
 
-# Allowed parameter types
-_ALLOWED_PARAM_TYPES = frozenset({"usize", "i64", "f64", "bool", "str"})
+
+class PatternCommitError(RuntimeError):
+    """git add/commit of a pattern change in cidx-meta failed."""
+
+
+def _record_pattern_store(
+    actor: str, name: Optional[str], outcome: str, details: Dict[str, Any]
+) -> None:
+    """Record one ``xray_pattern_stored`` row (never raises)."""
+    record_outcome(
+        actor=actor,
+        action_type="xray_pattern_stored",
+        target_type="xray_pattern",
+        target_id=name,
+        outcome=outcome,
+        details=details,
+    )
+
+
+def record_refused_pattern_store(actor: str, scope: str) -> None:
+    """Record a store refused before the service ran (e.g. an ungranted
+    scope): one failure row, the pattern itself not yet resolved."""
+    is_global = scope == XrayPatternService.ANY_SCOPE
+    details = conforming_details(
+        "xray_pattern_stored", global_scope=is_global, repo=None if is_global else scope
+    )
+    _record_pattern_store(actor, None, "failure", details)
+
 
 # Required top-level fields in a pattern YAML
 _REQUIRED_FIELDS = ("name", "description", "language", "evaluator_code")
@@ -79,159 +121,6 @@ _COARSE_ALIAS = "cidx-meta"
 
 
 # ---------------------------------------------------------------------------
-# Seed pattern content
-# ---------------------------------------------------------------------------
-
-_SEED_CATCH_RETHROW = """\
-name: catch-rethrow
-description: "Detects empty catch blocks that just rethrow the exception"
-language: java
-tags: [error-handling, anti-pattern]
-author: cidx
-created_at: "2026-05-28"
-evaluator_code: |
-  fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
-      let mut findings = Vec::new();
-      find_catch_blocks(node, &mut findings);
-      findings
-  }
-
-  fn find_catch_blocks(node: &OwnedNode, findings: &mut Vec<EvalFinding>) {
-      let is_catch = matches!(
-          node.kind.as_str(),
-          "catch_clause" | "catch_block" | "except_clause"
-      );
-      if is_catch {
-          classify_catch(node, findings);
-      }
-      for child in &node.children {
-          find_catch_blocks(child, findings);
-      }
-  }
-
-  fn classify_catch(node: &OwnedNode, findings: &mut Vec<EvalFinding>) {
-      let body = node.child_by_kind("block")
-          .or_else(|| node.child_by_kind("catch_body"));
-      let body = match body {
-          Some(b) => b,
-          None => {
-              findings.push(EvalFinding {
-                  pattern: "empty-catch".to_string(),
-                  line: node.start_line,
-                  snippet: truncate_snippet(node.text(), SNIPPET_MAX),
-              });
-              return;
-          }
-      };
-      let stmts: Vec<&OwnedNode> = body.named_children()
-          .into_iter()
-          .filter(|c| c.kind != "comment" && c.kind != "line_comment"
-                    && c.kind != "block_comment")
-          .collect();
-      if stmts.is_empty() {
-          findings.push(EvalFinding {
-              pattern: "empty-catch".to_string(),
-              line: node.start_line,
-              snippet: truncate_snippet(node.text(), SNIPPET_MAX),
-          });
-          return;
-      }
-      let has_throw = body.has_descendant_of_kind("throw_statement")
-          || body.has_descendant_of_kind("throw_expression");
-      if has_throw && stmts.len() == 1 {
-          findings.push(EvalFinding {
-              pattern: "catch-rethrow".to_string(),
-              line: node.start_line,
-              snippet: truncate_snippet(node.text(), SNIPPET_MAX),
-          });
-      } else if has_throw && stmts.len() <= 3 {
-          let body_text = body.text();
-          let has_log_call = body_text.contains(".log")
-              || body_text.contains(".warn")
-              || body_text.contains(".error")
-              || body_text.contains("LOG.")
-              || body_text.contains("logger.");
-          if has_log_call {
-              findings.push(EvalFinding {
-                  pattern: "catch-log-rethrow".to_string(),
-                  line: node.start_line,
-                  snippet: truncate_snippet(node.text(), SNIPPET_MAX),
-              });
-          }
-      }
-  }
-parameters:
-  - name: SNIPPET_MAX
-    type: usize
-    default: 80
-    description: "Maximum character length for code snippets in findings"
-"""
-
-_SEED_DEEP_NESTING = """\
-name: deep-nesting
-description: "Finds control flow nested N+ levels deep (if/for/while/switch/when)"
-language: java
-tags: [complexity, code-quality]
-author: cidx
-created_at: "2026-05-28"
-evaluator_code: |
-  fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
-      let mut findings = Vec::new();
-      walk_nesting(node, 0, &mut findings);
-      findings
-  }
-
-  fn is_control_flow(kind: &str) -> bool {
-      matches!(
-          kind,
-          "if_statement"
-              | "if_expression"
-              | "for_statement"
-              | "enhanced_for_statement"
-              | "while_statement"
-              | "do_statement"
-              | "switch_expression"
-              | "switch_statement"
-              | "when_expression"
-              | "for_in_statement"
-              | "for_of_statement"
-      )
-  }
-
-  fn walk_nesting(node: &OwnedNode, depth: usize, findings: &mut Vec<EvalFinding>) {
-      let new_depth = if is_control_flow(&node.kind) {
-          depth + 1
-      } else {
-          depth
-      };
-      if new_depth >= DEPTH_THRESHOLD && is_control_flow(&node.kind) {
-          let first_line = node.text().lines().next().unwrap_or("");
-          findings.push(EvalFinding {
-              pattern: "deep-nesting".to_string(),
-              line: node.start_line,
-              snippet: truncate_snippet(
-                  &format!("[depth {}] {}", new_depth, first_line),
-                  SNIPPET_MAX,
-              ),
-          });
-      }
-      for child in &node.children {
-          walk_nesting(child, new_depth, findings);
-      }
-  }
-parameters:
-  - name: DEPTH_THRESHOLD
-    type: usize
-    default: 4
-    description: "Minimum nesting depth to flag"
-  - name: SNIPPET_MAX
-    type: usize
-    default: 80
-    description: "Maximum character length for code snippets in findings"
-"""
-
-
-# ---------------------------------------------------------------------------
 # XrayPatternService
 # ---------------------------------------------------------------------------
 
@@ -246,10 +135,13 @@ class XrayPatternService:
     Args:
         cidx_meta_path: The mutable cidx-meta base path (from get_cidx_meta_path()).
         refresh_scheduler: Optional RefreshScheduler instance. When provided,
-            store_xray_pattern() and delete_pattern() acquire the cidx-meta
-            coarse write lock (mirroring MemoryStoreService._run_with_coarse_lock)
-            before touching the shared git index. When None (default), git commits
-            fire unconditionally as before (backward-compatible solo behaviour).
+            store_xray_pattern_audited() and delete_pattern() acquire the
+            cidx-meta coarse write lock (mirroring
+            MemoryStoreService._run_with_coarse_lock) before touching the shared
+            git index; when the lock is already held they piggyback (write the
+            file, skip the commit, which the holder's refresh picks up). When
+            None (default) there is no coarse lock: writes and commits run
+            directly.
     """
 
     PATTERNS_DIR = "xray-patterns"
@@ -267,23 +159,66 @@ class XrayPatternService:
     def _patterns_root(self) -> Path:
         return self._cidx_meta / self.PATTERNS_DIR
 
-    def store_xray_pattern(
+    def store_xray_pattern_audited(
         self,
         scope: str,
         pattern_yaml: str,
         overwrite: bool = False,
+        *,
+        actor: str,
+        may_replace_global: bool,
     ) -> Dict[str, Any]:
-        """Store a pattern to cidx-meta/xray-patterns/{scope}/{name}.yaml.
+        """Store a pattern to cidx-meta/xray-patterns/{scope}/{name}.yaml on
+        behalf of *actor*.
 
-        Args:
-            scope: Target scope — "__any__" for cross-repo or a repo alias.
-            pattern_yaml: YAML string conforming to the PatternSpec schema.
-            overwrite: When False (default), returns error if pattern exists.
+        Records exactly one ``xray_pattern_stored`` row per attempt (success,
+        or failure for every refusal, validation error or failed commit) and
+        names *actor* in the cidx-meta commit. Replacing an existing
+        ``__any__`` pattern is refused unless *may_replace_global*.
 
         Returns:
             Dict with {"success": True} on success, or
             {"error": "<code>", "message": "<detail>"} on failure.
         """
+        facts: Dict[str, Any] = {}
+        try:
+            result = self._store_pattern(
+                scope,
+                pattern_yaml,
+                overwrite,
+                actor=actor,
+                may_replace_global=may_replace_global,
+                facts=facts,
+            )
+        except Exception:
+            _record_pattern_store(
+                actor, facts.get("name"), "failure", facts.get("details", {})
+            )
+            raise
+        outcome = "success" if result.get("success") is True else "failure"
+        _record_pattern_store(
+            actor, facts.get("name"), outcome, facts.get("details", {})
+        )
+        return result
+
+    def _store_pattern(
+        self,
+        scope: str,
+        pattern_yaml: str,
+        overwrite: bool,
+        *,
+        actor: str,
+        may_replace_global: bool,
+        facts: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Body of :meth:`store_xray_pattern_audited`; fills *facts* with the
+        pattern name and audit details as soon as they are known."""
+        is_global = scope == self.ANY_SCOPE
+        facts["details"] = conforming_details(
+            "xray_pattern_stored",
+            global_scope=is_global,
+            repo=None if is_global else scope,
+        )
         # 0. Validate scope for path traversal sequences (before any filesystem access)
         if "/" in scope or "\\" in scope or ".." in scope:
             return {
@@ -312,6 +247,7 @@ class XrayPatternService:
                 }
 
         name: str = spec["name"]
+        facts["name"] = name
         evaluator_code: str = spec["evaluator_code"]
 
         # 2a. Validate name for path traversal sequences
@@ -334,7 +270,7 @@ class XrayPatternService:
 
         # 4. Validate parameters if present
         params: List[Dict[str, Any]] = spec.get("parameters") or []
-        param_validation = self._validate_parameter_declarations(params)
+        param_validation = validate_parameter_declarations(params, new_store=True)
         if param_validation is not None:
             return param_validation
 
@@ -391,9 +327,95 @@ class XrayPatternService:
         target_dir = self._patterns_root / scope
         target_path = target_dir / f"{name}.yaml"
 
-        # 6. Capture existence BEFORE writing, then check overwrite protection
-        is_update = target_path.exists()
-        if is_update and not overwrite:
+        # 6. Overwrite protection: an early answer here, decided again inside
+        # the write operation right before writing (which holds the coarse
+        # write lock unless it piggybacks on another holder's lock).
+        result_path = str(target_path.relative_to(self._cidx_meta))
+        unchanged = {"success": True, "path": result_path}
+        if self._holds(target_path, pattern_yaml):
+            return unchanged
+        refusal = self._replace_refusal(
+            target_path, scope, name, overwrite, may_replace_global
+        )
+        if refusal is not None:
+            return refusal
+
+        # 7. Write YAML and git-commit under coarse lock.
+        owner = f"xray-pattern:store:{name}"
+
+        def _write_and_commit(piggyback: bool) -> Optional[Dict[str, Any]]:
+            if self._holds(target_path, pattern_yaml):
+                return unchanged
+            locked_refusal = self._replace_refusal(
+                target_path, scope, name, overwrite, may_replace_global
+            )
+            if locked_refusal is not None:
+                return locked_refusal
+            previous = target_path.read_text("utf-8") if target_path.exists() else None
+            facts["details"]["overwrite"] = previous is not None
+            action = "add" if previous is None else "update"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(pattern_yaml, encoding="utf-8")
+            if piggyback:
+                return None
+            try:
+                self._git_commit(
+                    files=[target_path],
+                    message=f"xray-patterns: {action} {scope}/{name} by {actor}",
+                )
+            except PatternCommitError:
+                if previous is None:
+                    target_path.unlink(missing_ok=True)
+                else:
+                    target_path.write_text(previous, encoding="utf-8")
+                self._unstage(target_path)
+                raise
+            return None
+
+        try:
+            locked_result = self._run_with_coarse_lock(owner, _write_and_commit)
+        except PatternCommitError as exc:
+            return {"success": False, "error": "commit_failed", "message": str(exc)}
+        if locked_result is not None:
+            return dict(locked_result)
+        return {"success": True, "path": result_path}
+
+    @staticmethod
+    def _holds(target_path: Path, pattern_yaml: str) -> bool:
+        """True when the pattern file already has exactly this content."""
+        return target_path.exists() and target_path.read_text("utf-8") == pattern_yaml
+
+    def _unstage(self, target_path: Path) -> None:
+        """Reset the index entry of *target_path* to HEAD after a failed
+        commit, so the abandoned change is never picked up later."""
+        relative = str(target_path.relative_to(self._cidx_meta))
+        result = subprocess.run(
+            ["git", "reset", "-q", "--", relative],
+            cwd=str(self._cidx_meta),
+            env=build_non_interactive_git_env(),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            logger.error(
+                "xray_pattern_service: could not unstage %s after a failed commit; "
+                "the index may still hold the abandoned change: %s",
+                relative,
+                result.stderr.strip(),
+            )
+
+    def _replace_refusal(
+        self,
+        target_path: Path,
+        scope: str,
+        name: str,
+        overwrite: bool,
+        may_replace_global: bool,
+    ) -> Optional[Dict[str, Any]]:
+        """The refusal to replace an existing pattern, or None to proceed."""
+        if not target_path.exists():
+            return None
+        if not overwrite:
             return {
                 "error": "pattern_already_exists",
                 "message": (
@@ -401,24 +423,16 @@ class XrayPatternService:
                     "Use overwrite=true to replace it."
                 ),
             }
-
-        # 7. Write YAML and git-commit under coarse lock.
-        action = "update" if is_update else "add"
-        owner = f"xray-pattern:store:{name}"
-        result_path = str(target_path.relative_to(self._cidx_meta))
-
-        def _write_and_commit(piggyback: bool) -> None:
-            target_dir.mkdir(parents=True, exist_ok=True)
-            target_path.write_text(pattern_yaml, encoding="utf-8")
-            if not piggyback:
-                self._git_commit(
-                    files=[target_path],
-                    message=f"xray-patterns: {action} {scope}/{name}",
-                )
-
-        self._run_with_coarse_lock(owner, _write_and_commit)
-
-        return {"success": True, "path": result_path}
+        if scope == self.ANY_SCOPE and not may_replace_global:
+            return {
+                "success": False,
+                "error": "global_pattern_overwrite_forbidden",
+                "message": (
+                    f"Replacing the shared pattern '{name}' in scope "
+                    f"'{scope}' requires the admin role."
+                ),
+            }
+        return None
 
     def resolve_and_prepare_pattern(
         self,
@@ -504,10 +518,10 @@ class XrayPatternService:
         evaluator_code: str = spec["evaluator_code"]
 
         # Validate + resolve parameter values
-        resolved = self._resolve_params(params_decls, pattern_params)
+        resolved = resolve_params(params_decls, pattern_params)
 
         # Build const lines and prepend before evaluator code
-        const_lines = self._build_const_lines(params_decls, resolved)
+        const_lines = build_const_lines(params_decls, resolved)
         if const_lines:
             prepared_code = const_lines + "\n" + evaluator_code
         else:
@@ -584,7 +598,7 @@ class XrayPatternService:
                 created.append(target)
 
         if created:
-            self._git_commit(
+            self._git_commit_tolerating_failure(
                 files=created,
                 message="xray-patterns: add seed patterns to __any__/",
             )
@@ -627,7 +641,7 @@ class XrayPatternService:
         def _delete_and_commit(piggyback: bool) -> None:
             target_path.unlink()
             if not piggyback:
-                self._git_commit(
+                self._git_commit_tolerating_failure(
                     files=[target_path],
                     message=f"xray-patterns: delete {scope}/{name}",
                 )
@@ -686,6 +700,14 @@ class XrayPatternService:
             if coarse_held:
                 self._release_coarse_lock(owner)
 
+    def _git_commit_tolerating_failure(self, files: List[Path], message: str) -> None:
+        """:meth:`_git_commit`, logging a failed commit as a WARNING
+        (seed and delete paths, where a missing commit is tolerated)."""
+        try:
+            self._git_commit(files, message)
+        except PatternCommitError as exc:
+            logger.warning("xray_pattern_service: git commit failed: %s", exc)
+
     def _git_commit(self, files: List[Path], message: str) -> None:
         """Add files and create a git commit in cidx-meta, then trigger backup sync.
 
@@ -693,11 +715,14 @@ class XrayPatternService:
         successful commit, calls CidxMetaBackupSync.sync() when backup is
         configured and enabled. Any sync failure is surfaced as a WARNING
         (deferred-failure pattern) — the commit itself is not rolled back.
+        A cidx-meta that is not a git repository keeps plain files: nothing
+        is committed and nothing fails.
 
-        Args:
-            files: List of absolute paths to git-add.
-            message: Commit message.
+        Raises:
+            PatternCommitError: git add or git commit failed.
         """
+        if not cidx_meta_is_git_repository(self._cidx_meta):
+            return
         env = build_non_interactive_git_env()
         env["GIT_AUTHOR_NAME"] = "cidx-meta-backup"
         env["GIT_AUTHOR_EMAIL"] = "cidx-meta-backup@example.invalid"
@@ -723,8 +748,7 @@ class XrayPatternService:
                 text=True,
             )
         except subprocess.CalledProcessError as exc:
-            logger.warning("xray_pattern_service: git commit failed: %s", exc)
-            return
+            raise PatternCommitError(f"git commit in cidx-meta failed: {exc}") from exc
 
         # Trigger backup sync when configured and enabled
         config = get_config_service().get_config()
@@ -840,7 +864,7 @@ class XrayPatternService:
                     f"pattern_parse_error: pattern file '{path}' has a "
                     "'parameters' field that is not a list of mappings"
                 )
-            error = self._validate_parameter_declarations(params)
+            error = validate_parameter_declarations(params, new_store=False)
             if error is not None:
                 raise ValueError(
                     f"pattern_parse_error: pattern file '{path}' has an "
@@ -856,136 +880,3 @@ class XrayPatternService:
                 f"'execution_mode' value {execution_mode!r} "
                 "(must be 'legacy' or 'graph')"
             )
-
-    def _validate_parameter_declarations(
-        self, params: List[Dict[str, Any]]
-    ) -> Optional[Dict[str, Any]]:
-        """Validate parameter declarations. Returns error dict or None if valid."""
-        for decl in params:
-            if not decl.get("name"):
-                return {
-                    "error": "invalid_parameter",
-                    "message": "Each parameter must have a 'name' field",
-                }
-            param_type = decl.get("type", "")
-            if param_type not in _ALLOWED_PARAM_TYPES:
-                return {
-                    "error": "invalid_parameter_type",
-                    "message": (
-                        f"Parameter type '{param_type}' is not allowed. "
-                        f"Allowed types: {sorted(_ALLOWED_PARAM_TYPES)}"
-                    ),
-                }
-            if "default" not in decl:
-                return {
-                    "error": "invalid_parameter",
-                    "message": f"Parameter '{decl['name']}' must have a 'default' value",
-                }
-        return None
-
-    def _resolve_params(
-        self,
-        decls: List[Dict[str, Any]],
-        overrides: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Merge declared defaults with caller overrides, validating types.
-
-        Raises:
-            ValueError: "unknown_parameter" for unrecognized override keys.
-            ValueError: "parameter_type_mismatch" for type violations.
-        """
-        declared_names = {d["name"] for d in decls}
-
-        for key in overrides:
-            if key not in declared_names:
-                raise ValueError(
-                    f"unknown_parameter: '{key}' is not a declared parameter. "
-                    f"Declared parameters: {sorted(declared_names)}"
-                )
-
-        resolved: Dict[str, Any] = {}
-        for decl in decls:
-            name = decl["name"]
-            param_type = decl["type"]
-            default = decl["default"]
-            value = overrides.get(name, default)
-            _validate_param_type(name, param_type, value)
-            resolved[name] = value
-
-        return resolved
-
-    def _build_const_lines(
-        self,
-        decls: List[Dict[str, Any]],
-        resolved: Dict[str, Any],
-    ) -> str:
-        """Generate Rust const declarations from resolved parameter values.
-
-        Returns empty string when there are no parameters.
-        """
-        if not decls:
-            return ""
-
-        lines: List[str] = []
-        for decl in decls:
-            name = decl["name"]
-            param_type = decl["type"]
-            value = resolved[name]
-            lines.append(_format_const_line(name, param_type, value))
-
-        return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Module-level helpers
-# ---------------------------------------------------------------------------
-
-
-def _validate_param_type(name: str, param_type: str, value: Any) -> None:
-    """Raise ValueError with 'parameter_type_mismatch' if value doesn't match type.
-
-    Raises:
-        ValueError: With "parameter_type_mismatch" prefix.
-    """
-    if param_type == "bool":
-        if not isinstance(value, bool):
-            raise ValueError(
-                f"parameter_type_mismatch: parameter '{name}' expects bool, "
-                f"got {type(value).__name__} ({value!r})"
-            )
-    elif param_type == "str":
-        if not isinstance(value, str):
-            raise ValueError(
-                f"parameter_type_mismatch: parameter '{name}' expects str, "
-                f"got {type(value).__name__} ({value!r})"
-            )
-    elif param_type in ("usize", "i64"):
-        # bool is a subclass of int — reject it explicitly
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError(
-                f"parameter_type_mismatch: parameter '{name}' expects {param_type} (integer), "
-                f"got {type(value).__name__} ({value!r})"
-            )
-    elif param_type == "f64":
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(
-                f"parameter_type_mismatch: parameter '{name}' expects f64 (number), "
-                f"got {type(value).__name__} ({value!r})"
-            )
-
-
-def _format_const_line(name: str, param_type: str, value: Any) -> str:
-    """Format a single Rust const declaration line.
-
-    Returns e.g. "const DEPTH_THRESHOLD: usize = 4;"
-    """
-    rust_type = "&str" if param_type == "str" else param_type
-
-    if param_type == "str":
-        rust_value = f'"{value}"'
-    elif param_type == "bool":
-        rust_value = "true" if value else "false"
-    else:
-        rust_value = str(value)
-
-    return f"const {name}: {rust_type} = {rust_value};"

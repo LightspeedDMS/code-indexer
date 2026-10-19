@@ -13,6 +13,7 @@ import json
 import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -354,6 +355,11 @@ class _CredentialManager:
 
     def __init__(self, during: Callable[[], None]) -> None:
         self._during = during
+        from tests.unit.server.services._principal_account_store import (
+            principal_account_store,
+        )
+
+        self.user_manager = principal_account_store()
 
     def get_credential_by_client_id(self, client_id: str) -> Any:
         return None
@@ -383,6 +389,7 @@ def test_mcp_self_registration_keeps_a_siem_disable_committed_meanwhile(
     service = MCPSelfRegistrationService(
         config_manager=b, mcp_credential_manager=_CredentialManager(_disable_elsewhere)
     )
+    service.set_group_manager(MagicMock())
     creds = service.get_or_create_credentials()
 
     assert creds == {"client_id": "example-client", "client_secret": "example-secret"}

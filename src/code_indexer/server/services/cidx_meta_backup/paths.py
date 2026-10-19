@@ -8,6 +8,15 @@ this helper so neither can drift from the other.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Union
+
+
+def cidx_meta_is_git_repository(cidx_meta_path: Union[str, Path]) -> bool:
+    """True when cidx-meta is a git repository (``.git`` present, directory
+    or file). It becomes one only when the cidx-meta backup bootstrap runs
+    ``git init``; until then writers keep plain files and make no git calls.
+    """
+    return (Path(cidx_meta_path) / ".git").exists()
 
 
 def get_cidx_meta_path(server_data_dir: Path) -> Path:

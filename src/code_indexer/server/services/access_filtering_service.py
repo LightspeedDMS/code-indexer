@@ -33,7 +33,7 @@ from typing import (
     runtime_checkable,
 )
 
-from .constants import CIDX_META_REPO, DEFAULT_GROUP_ADMINS
+from .constants import CIDX_META_REPO, DEFAULT_GROUP_ADMINS, is_internal_meta_repo
 from .group_access_manager import GroupAccessManager
 from .memory_io import (
     MemoryFileCorruptError,
@@ -336,17 +336,24 @@ class AccessFilteringService:
             activation = activation_sources.get(alias)
             return (
                 activation is not None
-                and self._all_granted(
+                and self.activation_sources_granted(
                     [self._strip_global(g) for g in recorded], accessible
                 )
-                and self._all_granted(activation.golden, accessible)
+                and self.activation_sources_granted(activation.golden, accessible)
             )
 
         return [r for r in results if _is_accessible(r)]
 
     @staticmethod
-    def _all_granted(golden: Any, accessible: Set[str]) -> bool:
-        return bool(golden) and all(g in accessible for g in golden)
+    def activation_sources_granted(golden: Any, accessible: Set[str]) -> bool:
+        """The non-admin rule for an activation's source golden repositories
+        (bare names): every one is granted and none is the internal catalog.
+        Only the admins group, who never reach this decision, may use an
+        activated copy of it (the shared ``-global`` read is judged by name,
+        never here)."""
+        return bool(golden) and all(
+            g in accessible and not is_internal_meta_repo(g) for g in golden
+        )
 
     @classmethod
     def alias_granted(
@@ -375,7 +382,7 @@ class AccessFilteringService:
         activation = activation_sources.get(alias)
         if activation is None:
             return name_granted
-        sources_granted = cls._all_granted(activation.golden, accessible)
+        sources_granted = cls.activation_sources_granted(activation.golden, accessible)
         if activation.collides:
             # Ambiguous label: both readings must be granted.
             return name_granted and sources_granted

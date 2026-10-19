@@ -228,8 +228,9 @@ class TestCodexInvokerJsonlParsing:
 
 class TestCodexInvokerTimeout:
     def test_timeout_calls_killpg_not_just_proc_kill(self) -> None:
-        """On timeout, os.killpg(os.getpgid(pid), SIGKILL) must be called.
-        proc.kill() must NOT be called — only the process-group kill path is used."""
+        """On timeout the group (os.getpgid(pid)) gets SIGTERM, then SIGKILL
+        for survivors (terminate_process_group). proc.kill() must NOT be
+        called — only the process-group path is used."""
         invoker = _make_invoker()
         # First communicate() raises TimeoutExpired; second drains after killpg
         proc = _make_proc(
@@ -253,7 +254,9 @@ class TestCodexInvokerTimeout:
                     )
 
         mock_getpgid.assert_called_once_with(9999)
-        mock_killpg.assert_called_once_with(_FAKE_PGID, signal.SIGKILL)
+        sent = [c.args for c in mock_killpg.call_args_list]
+        assert sent[0] == (_FAKE_PGID, signal.SIGTERM)
+        assert sent[-1] == (_FAKE_PGID, signal.SIGKILL)
         # Critically: proc.kill() must NOT have been called — group kill only
         proc.kill.assert_not_called()
         assert result.success is False

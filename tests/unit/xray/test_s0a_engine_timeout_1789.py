@@ -123,9 +123,11 @@ class TestPhase2TimeoutStatus:
             for err in result["evaluation_errors"]
         ), f"expected a timeout error, got {result['evaluation_errors']}"
 
-    def test_sigkills_and_reaps_the_xray_cli_process(
+    def test_terminates_and_reaps_the_xray_cli_process_group(
         self, s0a_search_engine, tmp_path, s0a_requires_xray_cli
     ):
+        import os
+
         # on_process_spawned receives the backend's real subprocess handle.
         spawned: List[subprocess.Popen] = []
 
@@ -137,17 +139,46 @@ class TestPhase2TimeoutStatus:
         assert len(spawned) == 1, "expected exactly one xray-cli invocation"
         proc = spawned[0]
         # poll() returns None while the child is still running, so a non-None
-        # returncode proves it was both terminated AND reaped -- no orphan and
-        # no zombie left behind.
+        # returncode proves it was both terminated AND reaped -- no zombie.
         assert proc.poll() is not None, "xray-cli was left running (orphan process)"
-        # POSIX reports a signal death as the negated signal number. Asserting
-        # the exact signal distinguishes the backend's deliberate SIGKILL from
-        # a SIGTERM or an ordinary non-zero exit, either of which would also
-        # satisfy a bare "returncode != 0".
-        assert proc.returncode == -signal.SIGKILL, (
-            "the backend must SIGKILL a timed-out xray-cli, "
+        # The backend SIGTERMs the group first so xray-cli's handler can reap
+        # the rustc groups it started; the handler then exits 128 + SIGTERM.
+        # -SIGTERM is a signal landing before the handler is installed. An
+        # ordinary exit or a SIGKILL would mean the timeout path was bypassed.
+        assert proc.returncode in (128 + signal.SIGTERM, -signal.SIGTERM), (
+            "the backend must stop a timed-out xray-cli with SIGTERM, "
             f"got returncode={proc.returncode}"
         )
+        with pytest.raises(ProcessLookupError):
+            os.killpg(proc.pid, 0)
+
+    def test_an_xray_cli_ignoring_sigterm_is_sigkilled_and_reaped(self, tmp_path):
+        import os
+
+        from code_indexer.xray.rust_backend import RustNativeBackend
+
+        script = tmp_path / "ignores_sigterm.sh"
+        script.write_text("#!/bin/bash\ntrap '' TERM\nsleep 60\n")
+        script.chmod(0o755)
+        spawned: List[subprocess.Popen] = []
+
+        _stdout, error = RustNativeBackend()._run_xray_cli_process(
+            [str(script)],
+            timeout_seconds=1,
+            on_process_spawned=spawned.append,
+            acquire_compile_slot=False,
+        )
+
+        assert error is not None and "timed out" in error.lower()
+        assert len(spawned) == 1
+        proc = spawned[0]
+        assert proc.poll() is not None, "xray-cli was left running (orphan process)"
+        assert proc.returncode == -signal.SIGKILL, (
+            "an xray-cli ignoring SIGTERM must be SIGKILLed, "
+            f"got returncode={proc.returncode}"
+        )
+        with pytest.raises(ProcessLookupError):
+            os.killpg(proc.pid, 0)
 
 
 class TestTerminalStatusDistinctness:

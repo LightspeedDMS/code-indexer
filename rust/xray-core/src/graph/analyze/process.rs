@@ -249,6 +249,7 @@ pub fn run_analyze_child_with_memory_limit<T: serde::de::DeserializeOwned>(
     let mut containment_active = activate_memory_ceiling(memory_limit_bytes, ceiling);
 
     command.process_group(0);
+    crate::child_group_reaper::die_with_parent(&mut command);
     command.stdout(Stdio::piped());
 
     // AC15 spawn-race fix: without this, the window between spawn()
@@ -287,6 +288,7 @@ pub fn run_analyze_child_with_memory_limit<T: serde::de::DeserializeOwned>(
         }
     };
     let pid = child.id() as i32;
+    let mut tracked = crate::child_group_reaper::TrackedGroup::track(pid);
     if containment_active {
         containment_active = ceiling.add_pid(pid).is_ok();
     }
@@ -309,6 +311,8 @@ pub fn run_analyze_child_with_memory_limit<T: serde::de::DeserializeOwned>(
             }
         }
     };
+    tracked.mark_finished();
+    drop(tracked);
 
     finalize_with_memory_ceiling(containment_active, ceiling, outcome)
 }

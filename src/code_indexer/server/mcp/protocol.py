@@ -19,7 +19,11 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.access_filtering_service import (
     AccessFilteringService,
 )
+from code_indexer.server.services.analysis_agent_principal import (
+    analysis_agent_tool_refusal,
+)
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.repo_access_guard import catalog_aliases
 from sse_starlette.sse import EventSourceResponse
 import anyio.to_thread
 import asyncio
@@ -850,6 +854,15 @@ def _check_repository_access(
         if value:
             _check_one(value, golden_only)
 
+    if tool_name in _NEW_ALIAS_PARAM_TOOLS:
+        requested: List[str] = []
+        for param_name, value in present:
+            if param_name in ("golden_repo_alias", "golden_repo_aliases"):
+                requested.extend(value if isinstance(value, list) else [value])
+        catalog = catalog_aliases(requested)
+        if catalog and not _is_admin():
+            _deny_single(catalog[0])
+
 
 async def handle_tools_call(
     params: Dict[str, Any],
@@ -949,6 +962,10 @@ def _authorize_tool_call(
     group_decision = tool_access_memo.is_allowed(tool_name, effective_user)
     if group_decision is False:
         raise ValueError(f"Permission denied: tool access denied for {tool_name}")
+
+    agent_refusal = analysis_agent_tool_refusal(effective_user.username, tool_name)
+    if agent_refusal is not None:
+        raise ValueError(agent_refusal)
 
     # Check if user has permission for this tool
     tool_def = TOOL_REGISTRY[tool_name]

@@ -140,6 +140,7 @@ fn spawn_rustc_child(mut command: std::process::Command) -> Result<SpawnedRustcC
     use std::os::unix::process::CommandExt;
 
     command.process_group(0);
+    crate::child_group_reaper::die_with_parent(&mut command);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
@@ -210,14 +211,13 @@ fn poll_rustc_until_done(
 ///
 /// The bare `std::process::Command::output()` this replaces had NO
 /// timeout at all -- a compile-expensive or genuinely hanging evaluator
-/// escaped the pipeline's advertised timeout entirely. Worse, `output()`
-/// never puts the child in its own process group, so a caller (Python)
-/// that kills only the xray-cli PARENT process on ITS OWN timeout leaves
-/// the already-running rustc CHILD (and any linker grandchild) orphaned,
-/// continuing to consume CPU/RAM/disk with nothing left to account for
-/// it. `command.process_group(0)` here makes the spawned pid a genuine
-/// process-group leader, so a timeout-triggered kill reaches the whole
-/// tree, not just rustc itself.
+/// escaped the pipeline's advertised timeout entirely.
+/// `command.process_group(0)` makes rustc a process-group leader, so THIS
+/// function's timeout kill reaches rustc and the linker it starts. That
+/// group is out of reach of a caller killing xray-cli's own group, so
+/// rustc never outliving xray-cli rests on `child_group_reaper`: the
+/// parent-death signal, the termination handler and the `TrackedGroup`
+/// guard held for the lifetime of the poll.
 ///
 /// Returns `(success, stdout_bytes, stderr_bytes)` on a completed process
 /// (regardless of exit code -- callers inspect `success`), or a
@@ -228,8 +228,12 @@ pub(crate) fn run_rustc_with_timeout(
     timeout: std::time::Duration,
 ) -> Result<(bool, Vec<u8>, Vec<u8>), CompileError> {
     let (mut child, pid, stdout_rx, stderr_rx) = spawn_rustc_child(command)?;
+    let mut tracked = crate::child_group_reaper::TrackedGroup::track(pid);
     let start = Instant::now();
-    let success = poll_rustc_until_done(&mut child, pid, start, timeout)?;
+    let polled = poll_rustc_until_done(&mut child, pid, start, timeout);
+    tracked.mark_finished();
+    drop(tracked);
+    let success = polled?;
 
     let stdout = drain_pipe_or_warn(stdout_rx, "stdout");
     let stderr = drain_pipe_or_warn(stderr_rx, "stderr");

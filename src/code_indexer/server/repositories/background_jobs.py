@@ -28,6 +28,7 @@ from dataclasses import dataclass, asdict, fields
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 from code_indexer.server.storage.shared.job_status_filter import statuses_for_filter
 from code_indexer.utils.credential_redaction import with_masked_repo_url
+from code_indexer.utils.process_group import terminate_process_group
 
 # Bug #1256: driver-agnostic classifier shared with the INSERT-path
 # unique-violation detection in job_tracker._atomic_insert_impl (Bug
@@ -1233,14 +1234,31 @@ class BackgroundJobManager:
             except subprocess.TimeoutExpired:
                 pass
 
+    def _record_unterminated_children(self, job_id: str, pids: List[int]) -> None:
+        """Record in the job that these child process groups could not be
+        terminated (the group could not be signalled)."""
+        logging.error(
+            "Job %s: child process group(s) of pid(s) %s could not be terminated",
+            job_id,
+            pids,
+        )
+        note = "; ".join(
+            f"child process group of pid={pid} could not be terminated" for pid in pids
+        )
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return
+            job.error = f"{job.error}; {note}" if job.error else note
+        self._persist_jobs(job_id=job_id)
+
     def _terminate_child_processes(self, job_id: str) -> None:
         """Send SIGTERM then SIGKILL (after grace period) to all child processes.
 
-        Implements the AC6 two-phase termination: SIGTERM first, then
-        escalate to SIGKILL for processes that survive the grace period.
-        Handles both multiprocessing.Process and subprocess.Popen (Bug
-        #1495) registered handles -- terminate()/kill() exist natively on
-        both, only the liveness/wait APIs differ (see _process_is_alive /
+        A subprocess.Popen handle is stopped with its WHOLE process group
+        (terminate_process_group: SIGTERM, then SIGKILL for any member still
+        alive after the grace period). multiprocessing.Process handles get
+        the AC6 two-phase terminate()/kill() (see _process_is_alive /
         _process_join above).
 
         Args:
@@ -1248,6 +1266,17 @@ class BackgroundJobManager:
         """
         with self._child_processes_lock:
             processes = list(self._child_processes.get(job_id, []))
+
+        unterminated = [
+            proc.pid
+            for proc in processes
+            if isinstance(proc, subprocess.Popen)
+            and proc.poll() is None
+            and not terminate_process_group(proc, self._SIGTERM_GRACE_SECONDS)
+        ]
+        if unterminated:
+            self._record_unterminated_children(job_id, unterminated)
+        processes = [p for p in processes if not isinstance(p, subprocess.Popen)]
 
         # Phase 1: SIGTERM all alive processes
         for proc in processes:

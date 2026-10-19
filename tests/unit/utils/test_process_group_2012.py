@@ -103,3 +103,52 @@ def test_never_signals_callers_own_process_group() -> None:
         f"terminate_process_group signalled its caller's own process group "
         f"(rc={harness.returncode}, stderr={harness.stderr[-500:]!r})"
     )
+
+
+def test_a_group_that_cannot_be_signalled_is_reported_not_terminated(
+    caplog,
+) -> None:
+    """EPERM from killpg (the group id now names processes we may not
+    signal) is never reported as success, and the call never hangs."""
+    from unittest.mock import patch
+
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    started = time.monotonic()
+    try:
+        with patch("os.killpg", side_effect=PermissionError("not ours")):
+            terminated = terminate_process_group(proc, grace_seconds=1.0)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert terminated is False
+    assert time.monotonic() - started < 10
+    assert proc.returncode is not None, "the direct child must still be reaped"
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_a_terminated_group_is_reported_terminated() -> None:
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    assert terminate_process_group(proc, grace_seconds=1.0) is True
+    assert proc.returncode is not None
+
+
+def test_eperm_on_the_direct_child_kill_still_returns_false(caplog) -> None:
+    """Neither the group nor the direct child may be signalled: the helper
+    reports False within its bound and never raises."""
+    from unittest.mock import patch
+
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    started = time.monotonic()
+    try:
+        with (
+            patch("os.killpg", side_effect=PermissionError("not ours")),
+            patch.object(proc, "kill", side_effect=PermissionError("not ours")),
+        ):
+            terminated = terminate_process_group(proc, grace_seconds=1.0)
+    finally:
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.wait()
+    assert terminated is False
+    assert time.monotonic() - started < 10
+    assert any(r.levelname == "WARNING" for r in caplog.records)

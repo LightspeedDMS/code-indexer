@@ -83,6 +83,20 @@ def _build_www_authenticate_header() -> str:
         return 'Bearer realm="mcp"'
 
 
+def _refuse_analysis_agent(user: User) -> None:
+    """HTTP 403 for the analysis agents' account, which is accepted only
+    through its MCP credential (get_mcp_user_from_credentials)."""
+    from code_indexer.server.services.analysis_agent_principal import (
+        ANALYSIS_AGENT_USERNAME,
+    )
+
+    if user.username == ANALYSIS_AGENT_USERNAME:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account is usable only through its MCP credential",
+        )
+
+
 def _check_non_sso_api_restriction(user: User) -> None:
     """Check if non-SSO user is restricted from REST/MCP API access.
 
@@ -95,8 +109,10 @@ def _check_non_sso_api_restriction(user: User) -> None:
         user: Authenticated user to check
 
     Raises:
-        HTTPException: 403 if user is non-SSO and restriction is enabled
+        HTTPException: 403 if user is non-SSO and restriction is enabled, and
+            always for the analysis agents' account (_refuse_analysis_agent).
     """
+    _refuse_analysis_agent(user)
     if server_config is None:
         return
     web_sec = server_config.web_security_config
@@ -607,7 +623,12 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
     # An elevation window is valid only for the user who created it -- stash
     # the authenticated username alongside the session key.
     request.state.elevation_username = authenticated_user.username
-    if elevated_session_manager is not None:
+    from code_indexer.server.services.analysis_agent_principal import (
+        ANALYSIS_AGENT_USERNAME,
+    )
+
+    pre_elevate = authenticated_user.username != ANALYSIS_AGENT_USERNAME
+    if pre_elevate and elevated_session_manager is not None:
         try:
             client_ip = request.client.host if request.client else "unknown"
 
@@ -687,10 +708,16 @@ def get_current_user_web_or_api(
             session_data = session_manager.get_session(request)
 
             if session_data:
+                from code_indexer.server.services.analysis_agent_principal import (
+                    ANALYSIS_AGENT_USERNAME,
+                )
+
                 # Valid web session - get User object
                 user = user_manager.get_user(session_data.username)
-                if user and not credential_predates_account(
-                    session_data.issued_at, user
+                if (
+                    user
+                    and user.username != ANALYSIS_AGENT_USERNAME
+                    and not credential_predates_account(session_data.issued_at, user)
                 ):
                     # Elevation windows opened through the Web UI (e.g.
                     # /admin/elevate) are keyed by the raw "session" cookie
@@ -962,6 +989,7 @@ def _hybrid_auth_impl(
                     detail="Session predates account",
                     headers={"WWW-Authenticate": _build_www_authenticate_header()},
                 )
+            _refuse_analysis_agent(user)
 
             # Check admin requirement using DATABASE role, not session role
             if require_admin and not user.has_permission("manage_users"):

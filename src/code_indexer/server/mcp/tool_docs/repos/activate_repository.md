@@ -62,6 +62,7 @@ Optional:
 - user_alias: Defaults to the golden repository alias.
 
 When group-based access control is configured, every requested golden repository must be accessible to the caller.
+The internal catalog repository (`cidx-meta`) can be activated only by members of the admins group; for anyone else the request is refused with the same access-denied error as an inaccessible repository. Read it through `cidx-meta-global` instead.
 
 ERRORS (returned as `{"success": false, "error": "...", "job_id": null}`):
 - `Missing required parameter: golden_repo_alias or golden_repo_aliases`
