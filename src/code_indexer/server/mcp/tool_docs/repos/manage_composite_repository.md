@@ -63,7 +63,7 @@ Composites must have at least 2 component repositories; create and update are re
 
 WARNING (update): the deactivation of the existing composite is submitted BEFORE the new list is checked. An update with fewer than 2 aliases is rejected, but removal of the existing composite has already been queued. Always pass at least 2 aliases to update.
 
-ACCESS: When group-based access control is configured, every component alias (with or without '-global') must be accessible to the caller, otherwise `Access denied: repository '<alias>' is not accessible.`
+ACCESS: When group-based access control is configured, every component alias (with or without '-global') must be accessible to the caller, otherwise `Access denied: repository '<alias>' is not accessible.` A composite that includes the internal catalog repository (`cidx-meta`) is refused with an access-denied error for anyone outside the admins group.
 
 PARAMETERS:
 - user_alias: Your alias for the composite repository

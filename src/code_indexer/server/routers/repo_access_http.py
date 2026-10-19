@@ -31,6 +31,8 @@ from ..services.access_filtering_service import AccessFilteringService
 from ..services.repo_access_guard import (
     AccessFilteringServiceUnavailableError,
     RepoAccessDeniedError,
+    module_app_access_filtering_service as module_app_access_filtering_service,
+    require_activation_allowed,
     require_repo_access,
 )
 
@@ -39,18 +41,6 @@ logger = logging.getLogger(__name__)
 # The only text a client sees when an activated-repo access check cannot be
 # completed; the cause is logged server-side.
 ACCESS_NOT_VERIFIED_DETAIL = "Repository access could not be verified"
-
-
-def module_app_access_filtering_service() -> Optional[AccessFilteringService]:
-    """The access service wired on the server app (as the MCP dispatcher
-    reads it); None when it is not wired, which every guard fails closed on."""
-    from code_indexer.server import app as app_module
-
-    server_app = getattr(app_module, "app")
-    service: Optional[AccessFilteringService] = getattr(
-        server_app.state, "access_filtering_service", None
-    )
-    return service
 
 
 def activated_repo_not_found(user_alias: str) -> HTTPException:
@@ -228,8 +218,10 @@ async def is_access_admin_async(
     access_filtering_service: Optional[AccessFilteringService], username: str
 ) -> bool:
     """is_access_admin() on a worker thread, never on the event loop."""
-    return await anyio.to_thread.run_sync(
-        functools.partial(is_access_admin, access_filtering_service, username)
+    return bool(
+        await anyio.to_thread.run_sync(
+            functools.partial(is_access_admin, access_filtering_service, username)
+        )
     )
 
 
@@ -249,6 +241,26 @@ def enforce_repo_access(
     """
     try:
         require_repo_access(access_filtering_service, username, aliases)
+    except RepoAccessDeniedError as e:
+        raise access_denied_error(e.alias, e.username)
+    except AccessFilteringServiceUnavailableError as e:
+        raise access_control_unavailable_error(e)
+
+
+def enforce_activation_allowed(
+    access_filtering_service: Optional["AccessFilteringService"],
+    username: str,
+    aliases: Union[str, Iterable[str], None],
+) -> None:
+    """Refuse activating the internal catalog for *username* outside the
+    admins group (services/repo_access_guard.require_activation_allowed).
+
+    Raises:
+        HTTPException 403: the same refusal as for an ungranted repository.
+        HTTPException 500: access service unavailable (fails closed).
+    """
+    try:
+        require_activation_allowed(access_filtering_service, username, aliases)
     except RepoAccessDeniedError as e:
         raise access_denied_error(e.alias, e.username)
     except AccessFilteringServiceUnavailableError as e:

@@ -23,6 +23,7 @@ from code_indexer.server.services.config_service import get_config_service
 from sse_starlette.sse import EventSourceResponse
 import anyio.to_thread
 import asyncio
+from code_indexer.server.services.repo_access_guard import catalog_aliases
 import contextvars
 import functools
 import time
@@ -853,6 +854,15 @@ def _check_repository_access(
 
 async def handle_tools_call(
     params: Dict[str, Any],
+    if tool_name in _NEW_ALIAS_PARAM_TOOLS:
+        requested: List[str] = []
+        for param_name, value in present:
+            if param_name in ("golden_repo_alias", "golden_repo_aliases"):
+                requested.extend(value if isinstance(value, list) else [value])
+        catalog = catalog_aliases(requested)
+        if catalog and not _is_admin():
+            _deny_single(catalog[0])
+
     user: User,
     session_id: Optional[str] = None,
     elevation_key: Optional[str] = None,

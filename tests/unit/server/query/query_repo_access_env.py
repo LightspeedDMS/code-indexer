@@ -330,5 +330,43 @@ class QueryAccessEnv:
         reset_config_service()
 
 
+CATALOG_FILE = f"{UNGRANTED_REPO}.md"
+CATALOG_TEXT = "catalog entry"
+
+
+def register_catalog(env: QueryAccessEnv) -> None:
+    """Register the internal catalog golden repository the way the server
+    holds it: a real git clone (README plus CATALOG_FILE), a golden row, its
+    -global registry row and alias file."""
+    from code_indexer.server.services.constants import CIDX_META_REPO
+
+    path = Path(env.golden_repo_manager.golden_repos_dir) / CIDX_META_REPO
+    _init_git_repo(path)
+    (path / CATALOG_FILE).write_text(f"{CATALOG_TEXT}\n")
+    for cmd in (
+        ["git", "add", CATALOG_FILE],
+        ["git", "-c", "user.name=example", "-c", "user.email=example@example.com"]
+        + ["commit", "-q", "-m", "catalog"],
+    ):
+        subprocess.run(cmd, cwd=path, check=True, capture_output=True)
+    env.golden_repo_manager._sqlite_backend.add_repo(
+        alias=CIDX_META_REPO,
+        repo_url="local://cidx-meta",
+        default_branch="main",
+        clone_path=str(path),
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc).isoformat(),
+    )
+    env.global_repos.register_repo(
+        alias_name=global_alias(CIDX_META_REPO),
+        repo_name=CIDX_META_REPO,
+        repo_url="local://cidx-meta",
+        index_path=str(path),
+    )
+    env.alias_manager.create_alias(
+        global_alias(CIDX_META_REPO), str(path), repo_name=CIDX_META_REPO
+    )
+    env.repo_paths[CIDX_META_REPO] = path
+
+
 def result_repos(rows: List[Dict[str, Any]]) -> Set[str]:
     return {str(r["repository_alias"]) for r in rows}

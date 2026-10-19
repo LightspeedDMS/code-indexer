@@ -381,6 +381,11 @@ def register_repo_routes(
             current_user.username,
             request.golden_repo_aliases or request.golden_repo_alias,
         )
+        repo_access_http.enforce_activation_allowed(
+            _access_service(),
+            current_user.username,
+            request.golden_repo_aliases or request.golden_repo_alias,
+        )
 
         try:
             job_id = activated_repo_manager.activate_repository(
