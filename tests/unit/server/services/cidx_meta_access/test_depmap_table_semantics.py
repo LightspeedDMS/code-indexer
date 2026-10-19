@@ -68,6 +68,13 @@ def _payments_body(roles_header: str) -> List[str]:
         f"| {VISIBLE_A} | Python | API{pad} |",
         f"| {HIDDEN_A} | Go | ledger{pad} |",
         "",
+        "## Intra-Domain Dependencies",
+        "",
+        "| Source Repo | Target Repo | Type | Why | Evidence |",
+        "|---|---|---|---|---|",
+        f"| {VISIBLE_A} | {VISIBLE_B} | Code-level | {HIDDEN_B} formats it | i.py |",
+        f"| {VISIBLE_A} | {HIDDEN_A} (worker) | Data contracts | ledger rows | l.sql |",
+        "",
         "## Cross-Domain Connections",
         "",
         "### Outgoing Dependencies",
@@ -306,6 +313,38 @@ def test_inline_yaml_list_drops_hidden_entries(tmp_path: Path) -> None:
     assert project(dep_map, "_index.md", [line]) == [
         f"repos_analyzed: [{VISIBLE_A}, {VISIBLE_B}]"
     ]
+
+
+def test_intra_domain_table_keeps_visible_rows_and_drops_hidden_ones(
+    tmp_path: Path,
+) -> None:
+    dep_map = build_real_format_map(tmp_path)
+    model = load_depmap_model(dep_map)
+    assert not {"source repo", "target repo"} & model.structured_names
+
+    out = kept(project(dep_map, "payments.md"))
+    assert "| Source Repo | Target Repo | Type | Why | Evidence |" in out
+    assert (
+        f"| {VISIBLE_A} | {VISIBLE_B} | Code-level | {REPO} formats it | i.py |"
+    ) in out
+    assert not any("(worker) | Data contracts" in line for line in out)
+
+
+def test_dependency_types_table_is_kept_with_prose_redaction(tmp_path: Path) -> None:
+    from code_indexer.global_repos.dependency_map_analyzer import (
+        DependencyMapAnalyzer,
+    )
+
+    dep_map = build_real_format_map(tmp_path)
+    lines = DependencyMapAnalyzer._build_dep_types_content().splitlines()
+    separator = lines.index("|---|---|---|")
+    assert lines[separator - 1] == "| Type | Description | Example |"
+    extra = f"| Code-level | Shared imports | {VISIBLE_A} imports {HIDDEN_A} |"
+    lines.insert(separator + 1, extra)
+
+    projected = project(dep_map, "_dep_types.md", lines)
+    expected = [line.replace(HIDDEN_A, REPO) for line in lines]
+    assert projected == expected
 
 
 def test_absent_dependency_map_yields_the_empty_model(tmp_path: Path) -> None:

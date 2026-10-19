@@ -118,6 +118,8 @@ INCOMING = TableKind("incoming", repo_columns=(0, 1), domain_columns=(2,))
 MATRIX = TableKind("matrix", repo_columns=(0,), domain_columns=(1,))
 CATALOG = TableKind("catalog", domain_columns=(0,), count_column=2)
 GRAPH = TableKind("graph", domain_columns=(0, 1), list_column=2)
+INTRA = TableKind("intra", repo_columns=(0, 1))
+DEP_TYPES = TableKind("dep_types")
 
 _SEPARATOR_CELL = re.compile(r"^:?-{3,}:?$")
 _TRAILING_NOTE = re.compile(r"\s*\([^()]*\)$")
@@ -144,6 +146,10 @@ def table_kind(header: List[str]) -> Optional[TableKind]:
         if names[1:] in (["domain"], ["domains"]):
             return MATRIX
         return ROLES if len(names) >= 3 else None
+    if names[:2] == ["source repo", "target repo"]:
+        return INTRA if len(names) >= 3 else None
+    if names == ["type", "description", "example"]:
+        return DEP_TYPES
     if names[:3] == ["this repo", "depends on", "target domain"]:
         return OUTGOING if len(names) >= 4 else None
     if names[:3] == ["external repo", "depends on", "source domain"]:
