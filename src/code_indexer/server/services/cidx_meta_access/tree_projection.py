@@ -3,14 +3,16 @@
 Every file node is judged by its full catalog-relative path (the requested
 subdirectory prefixed), at every depth. A directory survives only while it
 still holds a visible descendant, so hidden names vanish from the nodes and
-from the rendered text; counts are recomputed from what is kept.
+from the rendered text. The per-directory file limit is applied to visible
+files only, so truncation markers and counts never include hidden entries;
+the raw tree must therefore be generated without a file limit.
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 from ....global_repos.directory_explorer import (
     DirectoryExplorerService,
@@ -23,6 +25,9 @@ if TYPE_CHECKING:
     from ..access_filtering_service import AccessFilteringService
 
 CATALOG_TOP_DIRS = frozenset({"dependency-map", "memories", "xray-patterns"})
+# Per-directory file limit for generating the raw catalog tree, so the
+# caller's own limit can be applied to visible files only.
+UNSCANNED_LIMIT = 2**31 - 1
 
 
 def _full_path(base_path: str, node_path: str) -> str:
@@ -44,25 +49,47 @@ def catalog_tree_paths(result: DirectoryTreeResult, base_path: str) -> List[str]
     return paths
 
 
-def _prune(
-    node: TreeNode, base_path: str, allowed: Set[str], counts: Dict[str, int]
-) -> Optional[TreeNode]:
-    full = _full_path(base_path, node.path)
-    if not node.is_directory:
-        if full not in allowed:
+class _Pruner:
+    def __init__(
+        self, base_path: str, allowed: Set[str], max_files_per_dir: Optional[int]
+    ) -> None:
+        self.base_path = base_path
+        self.allowed = allowed
+        self.limit = max_files_per_dir
+        self.counts: Dict[str, int] = {"files": 0, "dirs": 0}
+
+    def children(self, node: TreeNode) -> Tuple[List[TreeNode], int]:
+        """Visible children of *node* (directories first) and how many
+        visible files the per-directory limit leaves out."""
+        dirs: List[TreeNode] = []
+        files: List[TreeNode] = []
+        for child in node.children or []:
+            if child.is_directory:
+                pruned = self.directory(child)
+                if pruned is not None:
+                    dirs.append(pruned)
+            elif _full_path(self.base_path, child.path) in self.allowed:
+                files.append(child)
+        left_out = 0
+        if self.limit is not None and len(files) > self.limit:
+            left_out = len(files) - self.limit
+            files = files[: self.limit]
+        self.counts["files"] += len(files)
+        return dirs + files, left_out
+
+    def directory(self, node: TreeNode) -> Optional[TreeNode]:
+        depth_limited = node.truncated and not node.children and not node.hidden_count
+        kept, left_out = self.children(node)
+        full = _full_path(self.base_path, node.path)
+        if not kept and not (depth_limited and full in CATALOG_TOP_DIRS):
             return None
-        counts["files"] += 1
-        return node
-    kept: List[TreeNode] = []
-    for child in node.children or []:
-        pruned = _prune(child, base_path, allowed, counts)
-        if pruned is not None:
-            kept.append(pruned)
-    depth_limited = node.truncated and not node.children
-    if not kept and not (depth_limited and full in CATALOG_TOP_DIRS):
-        return None
-    counts["dirs"] += 1
-    return replace(node, children=kept)
+        self.counts["dirs"] += 1
+        return replace(
+            node,
+            children=kept,
+            truncated=depth_limited or left_out > 0,
+            hidden_count=left_out,
+        )
 
 
 def restrict_catalog_tree(
@@ -71,6 +98,7 @@ def restrict_catalog_tree(
     username: str,
     access_service: Optional["AccessFilteringService"],
     show_stats: bool = False,
+    max_files_per_dir: Optional[int] = None,
 ) -> DirectoryTreeResult:
     """*result* reduced to the caller's view; unchanged for unrestricted
     callers. Without the access service no file is shown."""
@@ -88,21 +116,20 @@ def restrict_catalog_tree(
         if access_service is not None
         else set()
     )
-    counts = {"files": 0, "dirs": 0}
-    kept: List[TreeNode] = []
-    for child in result.root.children or []:
-        pruned = _prune(child, base_path, allowed, counts)
-        if pruned is not None:
-            kept.append(pruned)
-    root = replace(result.root, children=kept)
+    pruner = _Pruner(base_path, allowed, max_files_per_dir)
+    kept, left_out = pruner.children(result.root)
+    root = replace(
+        result.root, children=kept, truncated=left_out > 0, hidden_count=left_out
+    )
+    dirs, files = pruner.counts["dirs"], pruner.counts["files"]
     tree_string = DirectoryExplorerService(Path(result.root_path))._format_tree_string(
-        root, show_stats, counts["dirs"], counts["files"]
+        root, show_stats, dirs, files
     )
     return DirectoryTreeResult(
         root=root,
         tree_string=tree_string,
-        total_directories=counts["dirs"],
-        total_files=counts["files"],
+        total_directories=dirs,
+        total_files=files,
         max_depth_reached=result.max_depth_reached,
         root_path=result.root_path,
     )

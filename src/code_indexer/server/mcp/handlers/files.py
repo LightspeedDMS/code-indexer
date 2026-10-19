@@ -19,6 +19,7 @@ from code_indexer.server.services.cidx_meta_access.catalog_requests import (
     restrict_catalog_paths,
 )
 from code_indexer.server.services.cidx_meta_access.tree_projection import (
+    UNSCANNED_LIMIT,
     restrict_catalog_tree,
 )
 from code_indexer.server.services.config_service import get_config_service
@@ -670,11 +671,20 @@ def _tree_node_to_dict(node: Any) -> dict:
 
 
 def _filter_cidx_meta_tree(
-    result: Any, user: User, base_path: str = "", show_stats: bool = False
+    result: Any,
+    user: User,
+    base_path: str = "",
+    show_stats: bool = False,
+    max_files_per_dir: Optional[int] = None,
 ) -> Any:
     """Reduce a catalog tree to the user's view at every depth."""
     return restrict_catalog_tree(
-        result, base_path, user.username, _get_access_filtering_service(), show_stats
+        result,
+        base_path,
+        user.username,
+        _get_access_filtering_service(),
+        show_stats,
+        max_files_per_dir,
     )
 
 
@@ -1611,27 +1621,33 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 )
             )
 
+        restricted = catalog_restriction_applies(
+            repository_alias,
+            user.username,
+            _get_access_filtering_service(),
+            _activations(),
+        )
+        files_per_dir = _coerce_int(
+            args.get("max_files_per_dir"), _DEFAULT_MAX_FILES_PER_DIR
+        )
         service = DirectoryExplorerService(Path(repo_path))
         result = service.generate_tree(
             path=args.get("path"),
             max_depth=_coerce_int(args.get("max_depth"), _DEFAULT_TREE_DEPTH),
-            max_files_per_dir=_coerce_int(
-                args.get("max_files_per_dir"), _DEFAULT_MAX_FILES_PER_DIR
-            ),
+            max_files_per_dir=UNSCANNED_LIMIT if restricted else files_per_dir,
             include_patterns=args.get("include_patterns"),
             exclude_patterns=args.get("exclude_patterns"),
             show_stats=args.get("show_stats", False),
             include_hidden=args.get("include_hidden", False),
         )
 
-        if catalog_restriction_applies(
-            repository_alias,
-            user.username,
-            _get_access_filtering_service(),
-            _activations(),
-        ):
+        if restricted:
             result = _filter_cidx_meta_tree(
-                result, user, args.get("path") or "", bool(args.get("show_stats"))
+                result,
+                user,
+                args.get("path") or "",
+                bool(args.get("show_stats")),
+                files_per_dir,
             )
 
         return _mcp_response(

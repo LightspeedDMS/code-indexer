@@ -145,9 +145,17 @@ class TestDirectoryTreeCidxMetaAccessFiltering:
         fake_tree = _make_tree_result(["src/auth.py", "src/secret.py"])
         mock_explorer = MagicMock()
         mock_explorer.generate_tree.return_value = fake_tree
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value="/fake/golden-repos",
+        no_activation = MagicMock()
+        no_activation.get_repository.return_value = None
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.files._activations",
+                return_value=no_activation,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/fake/golden-repos",
+            ),
         ):
             with patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path",

@@ -514,6 +514,40 @@ def test_directory_tree_on_alias_spelled_as_catalog_is_restricted(
     assert f"{ALPHA}.md" in data["tree_string"]
 
 
+def test_directory_tree_file_limit_counts_visible_entries_only(
+    fx: CidxMetaFixture,
+) -> None:
+    data = _tree_call(
+        fx,
+        {
+            "repository_alias": "cidx-meta-global",
+            "max_depth": 3,
+            "max_files_per_dir": 1,
+        },
+        _Activations([]),
+    )
+    root = data["root"]
+    root_files = [c["name"] for c in root["children"] if not c["is_directory"]]
+    assert root_files == [f"{ALPHA}.md"]
+    assert root["truncated"] is False
+    assert root["hidden_count"] == 0
+
+    memories = next(c for c in root["children"] if c["name"] == "memories")
+    assert memories["truncated"] is True
+    assert memories["hidden_count"] == 1
+    assert len(memories["children"]) == 1
+
+    dep_map = next(c for c in root["children"] if c["name"] == "dependency-map")
+    assert dep_map["hidden_count"] == 1
+
+    more_markers = [
+        line.rsplit("-- ", 1)[-1]
+        for line in data["tree_string"].splitlines()
+        if "more files]" in line
+    ]
+    assert more_markers == ["[+1 more files]", "[+1 more files]"]
+
+
 def test_directory_tree_subdirectory_is_judged_by_full_path(
     fx: CidxMetaFixture,
 ) -> None:
