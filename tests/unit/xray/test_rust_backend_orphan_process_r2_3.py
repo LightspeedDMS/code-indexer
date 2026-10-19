@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from code_indexer.xray.rust_backend import RustNativeBackend
 
 # Named timing constants (all bounded -- never open-ended waits).
@@ -146,6 +148,7 @@ def test_orphan_descendant_does_not_survive_timeout_kill(tmp_path: Path) -> None
 
 def test_permission_error_from_killpg_does_not_prevent_reaping_or_propagate(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Polish item (Codex re-review, ROUND 3): `os.killpg` can also raise
     `PermissionError` (a rare but real OS-level race -- the process group
@@ -191,6 +194,12 @@ def test_permission_error_from_killpg_does_not_prevent_reaping_or_propagate(
         "timeout error tuple from being returned"
     )
     assert "timed out" in error.lower()
+    assert any(
+        r.name == "code_indexer.xray.rust_backend"
+        and r.levelname == "WARNING"
+        and "could not be terminated" in r.getMessage()
+        for r in caplog.records
+    ), "a group that could not be signalled must be reported, never assumed stopped"
 
     assert "value" in spawned_pid, "on_process_spawned callback was never invoked"
 

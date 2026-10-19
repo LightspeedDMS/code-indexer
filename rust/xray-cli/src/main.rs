@@ -1096,6 +1096,10 @@ fn build_graph_extractor_extensions_output() -> GraphExtractorExtensionsOutput {
 
 fn main() {
     let wall_start = Instant::now();
+    if let Err(e) = xray_core::child_group_reaper::install_termination_handler() {
+        eprintln!("Error: failed to install the termination handler: {}", e);
+        std::process::exit(1);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Story #1811 (S5, AC1/AC2): `--compile-only --dynlib <path.rs>` --

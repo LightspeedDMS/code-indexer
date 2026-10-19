@@ -64,8 +64,19 @@ opaque `GraphHandle` accessors in graph mode (ADR-002).
 
 The compiled library is never loaded into the server process. `RustNativeBackend` starts `xray-cli` with
 `subprocess.Popen(..., start_new_session=True)`; `xray-cli` loads the library (`libloading`,
-`rust/xray-core/src/dynlib.rs`) and calls the entry points. When the request's timeout expires, the backend sends
-`SIGKILL` to the child's process group. A crash or panic inside the evaluator terminates or fails only that child.
+`rust/xray-core/src/dynlib.rs`) and calls the entry points. When the request's timeout expires, or the job is
+cancelled, the child's process group is stopped through `terminate_process_group` (`src/code_indexer/utils/process_group.py`:
+SIGTERM, then SIGKILL for survivors). `rustc` leads its own process group, so it never depends on that group signal:
+it carries a parent-death SIGKILL, and `xray-cli`'s SIGTERM/SIGINT/SIGHUP handler kills and reaps every `rustc` group
+before exiting (`rust/xray-core/src/child_group_reaper.rs`). `xray-cli` also inherits the write end of a liveness pipe
+that every process it starts inherits in turn; the backend releases the compile slot only after that pipe reports
+EOF, so no compile process of a returned request is still running. A crash or panic inside the evaluator terminates or fails only that child.
+
+The killable analyze child (`run_analyze_child`, `graph/analyze/process.rs`) gets the same guarantees: parent-death
+SIGKILL, coverage by the termination handler, and a drop guard. Accepted residual: when `xray-cli` itself is SIGKILLed
+(its handler cannot run, which happens only if it ignored SIGTERM for the whole grace period), `rustc` dies by the
+parent-death signal but a linker `rustc` had already started runs until it finishes on its own. The compile slot stays
+held while that linker holds the liveness pipe, at most 120 s, after which it is released and an ERROR is logged.
 In graph mode the exported `collect_facts`, `analyze_graph` and `refine` wrappers catch panics (`catch_unwind`,
 `compiler/graph_preamble.rs`) and report them as failures. When cgroup v2 delegation is available, the
 `--analyze-graph` child is bounded by a `memory.max` ceiling derived from the admission estimate (`rust/xray-core/src/graph/analyze/memory_ceiling.rs`,

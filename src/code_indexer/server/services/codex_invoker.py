@@ -18,9 +18,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-import signal
 import subprocess
 from typing import Callable, List, Optional, Tuple, Union
+
+from code_indexer.utils.process_group import terminate_process_group
 
 from code_indexer.server.services.agent_cli_isolation import (
     is_isolation_exempt_flow,
@@ -32,6 +33,8 @@ from code_indexer.server.services.intelligence_cli_invoker import (
 )
 
 logger = logging.getLogger(__name__)
+
+_POST_TERMINATION_DRAIN_SECONDS = 5
 
 _CLI_USED = "codex"
 _STDERR_SNIPPET_LEN = 200  # max chars of stderr included in error messages
@@ -74,7 +77,8 @@ class CodexInvoker:
              --dangerously-bypass-approvals-and-sandbox "<prompt>"
 
     Process isolation: Popen with start_new_session=True puts the subprocess
-    into its own process group. On timeout, os.killpg kills the entire group
+    into its own process group. On timeout, terminate_process_group stops the
+    entire group (SIGTERM, then SIGKILL for survivors)
     (Codex spawns Node + Rust subprocesses; proc.kill() alone leaks them).
 
     Resource cleanup: proc.communicate(timeout=...) is used on both the normal
@@ -270,12 +274,23 @@ class CodexInvoker:
                 f"CodexInvoker: timed out after {timeout}s — killing process group"
             )
             logger.warning(error_msg)
+            if not terminate_process_group(proc):
+                logger.warning(
+                    "CodexInvoker: process group of pid=%s could not be terminated",
+                    proc.pid,
+                )
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except Exception as kill_exc:
-                logger.warning("CodexInvoker: killpg failed: %s", kill_exc)
-            try:
-                proc.communicate()
+                proc.communicate(timeout=_POST_TERMINATION_DRAIN_SECONDS)
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "CodexInvoker: output pipes still open %ss after terminating "
+                    "pid=%s (held by a process outside its group); closing them",
+                    _POST_TERMINATION_DRAIN_SECONDS,
+                    proc.pid,
+                )
+                for pipe in (proc.stdout, proc.stderr):
+                    if pipe is not None:
+                        pipe.close()
             except Exception as drain_exc:
                 logger.debug(
                     "CodexInvoker: post-kill drain failed (benign): %s", drain_exc
