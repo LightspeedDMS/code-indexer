@@ -230,6 +230,7 @@ AUDIT_TARGET_ID_TYPE: Dict[str, FieldType] = {
     "provider_index": OPAQUE_ID,
     "ci_token": OPAQUE_ID,
     "tool": OPAQUE_ID,
+    "xray_pattern": OPAQUE_ID,
     "auth": USERNAME,
     # Server-wide operational state: this node, or every node of the cluster.
     "server": _enum("node", "cluster"),
@@ -327,6 +328,11 @@ AUDIT_ACTION_CATALOG: Dict[str, ActionSpec] = {
     # --- Golden repositories (job-based: a row means "submitted") ---
     "golden_repo_added": _spec(
         "repo",
+    # --- Shared X-Ray pattern library (cidx-meta) ---
+    "xray_pattern_stored": _spec(
+        "xray_pattern",
+        {"overwrite": BOOL, "global_scope": BOOL, "repo": REPO_ALIAS},
+    ),
         {"job_id": OPAQUE_ID, "repo_host": HOSTNAME, "branch": GIT_REF},
         job_based=True,
     ),

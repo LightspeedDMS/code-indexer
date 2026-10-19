@@ -567,7 +567,12 @@ def _store_test_finder_pattern(cidx_meta: Path, name: str = "test-finder-1812") 
 
     svc = XrayPatternService(cidx_meta)
     with patch.object(svc, "_git_commit"):
-        svc.store_xray_pattern(scope="__any__", pattern_yaml=pattern_yaml)
+        svc.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
+            scope="__any__",
+            pattern_yaml=pattern_yaml,
+        )
 
 
 def _patch_cidx_meta_1812(cidx_meta: Path):

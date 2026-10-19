@@ -404,8 +404,11 @@ class TestStoreXrayPatternFullPathWithRealBackup1577:
         real_config_service = _real_config_service_with_backup(tmp_path, enabled=True)
         set_config_service(real_config_service)
         try:
-            result = service.store_xray_pattern(
-                scope="__any__", pattern_yaml=MINIMAL_PATTERN_YAML
+            result = service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
+                scope="__any__",
+                pattern_yaml=MINIMAL_PATTERN_YAML,
             )
         finally:
             reset_config_service()
@@ -445,8 +448,11 @@ class TestStoreXrayPatternBackupDisabledRegression1577:
         real_config_service = _real_config_service_with_backup(tmp_path, enabled=False)
         set_config_service(real_config_service)
         try:
-            result = service.store_xray_pattern(
-                scope="__any__", pattern_yaml=MINIMAL_PATTERN_YAML
+            result = service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
+                scope="__any__",
+                pattern_yaml=MINIMAL_PATTERN_YAML,
             )
         finally:
             reset_config_service()
@@ -494,8 +500,11 @@ class TestStoreXrayPatternDisabledNeverConstructsSync1577:
             with patch(
                 "code_indexer.server.services.xray_pattern_service.CidxMetaBackupSync"
             ) as MockSync:
-                result = service.store_xray_pattern(
-                    scope="__any__", pattern_yaml=MINIMAL_PATTERN_YAML
+                result = service.store_xray_pattern_audited(
+                    actor="example-user",
+                    may_replace_global=True,
+                    scope="__any__",
+                    pattern_yaml=MINIMAL_PATTERN_YAML,
                 )
                 MockSync.assert_not_called()
 

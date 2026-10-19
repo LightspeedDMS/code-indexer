@@ -234,7 +234,7 @@ class TestHandleStoreXrayPattern:
         from code_indexer.server.mcp.handlers.xray import handle_store_xray_pattern
         from code_indexer.server.services.xray_pattern_service import XrayPatternService
 
-        user = _make_user()
+        user = _make_user(UserRole.POWER_USER)
         cidx_meta = _make_cidx_meta(tmp_path)
 
         with patch(
@@ -265,7 +265,7 @@ class TestHandleStoreXrayPattern:
         from code_indexer.server.mcp.handlers.xray import handle_store_xray_pattern
         from code_indexer.server.services.xray_pattern_service import XrayPatternService
 
-        user = _make_user()
+        user = _make_user(UserRole.POWER_USER)
         cidx_meta = _make_cidx_meta(tmp_path)
 
         original_init = XrayPatternService.__init__
@@ -288,7 +288,7 @@ class TestHandleStoreXrayPattern:
                 result = handle_store_xray_pattern(
                     {
                         "scope": "__any__",
-                        "pattern_yaml": MINIMAL_PATTERN_YAML,
+                        "pattern_yaml": MINIMAL_PATTERN_YAML + "tags: [changed]\n",
                         "overwrite": False,
                     },
                     user=user,
@@ -355,7 +355,9 @@ class TestXraySearchPatternName:
         # Pre-store a pattern
         svc = XrayPatternService(cidx_meta)
         with patch.object(svc, "_git_commit"):
-            svc.store_xray_pattern(
+            svc.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=MINIMAL_PATTERN_YAML,
             )
@@ -431,7 +433,12 @@ class TestXraySearchPatternName:
         # Pre-store a parametrized pattern
         svc = XrayPatternService(cidx_meta)
         with patch.object(svc, "_git_commit"):
-            svc.store_xray_pattern(scope="__any__", pattern_yaml=PARAM_PATTERN_YAML)
+            svc.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
+                scope="__any__",
+                pattern_yaml=PARAM_PATTERN_YAML,
+            )
 
         with (
             _xray_single_repo_env(repo_path="/some/path") as (
@@ -514,7 +521,12 @@ class TestXrayExplorePatternName:
 
         svc = XrayPatternService(cidx_meta)
         with patch.object(svc, "_git_commit"):
-            svc.store_xray_pattern(scope="__any__", pattern_yaml=MINIMAL_PATTERN_YAML)
+            svc.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
+                scope="__any__",
+                pattern_yaml=MINIMAL_PATTERN_YAML,
+            )
 
         with (
             _xray_single_repo_env(repo_path="/some/path") as (

@@ -106,7 +106,9 @@ class TestPatternStorage:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            result = service.store_xray_pattern(
+            result = service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=MINIMAL_PATTERN_YAML,
                 overwrite=False,
@@ -123,7 +125,9 @@ class TestPatternStorage:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=MINIMAL_PATTERN_YAML,
                 overwrite=False,
@@ -138,7 +142,9 @@ class TestPatternStorage:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=MINIMAL_PATTERN_YAML,
                 overwrite=False,
@@ -158,7 +164,9 @@ class TestPatternStorage:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="my-repo",
                 pattern_yaml=MINIMAL_PATTERN_YAML,
                 overwrite=False,
@@ -175,7 +183,9 @@ class TestPatternStorage:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            result = service.store_xray_pattern(
+            result = service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=MINIMAL_PATTERN_YAML,
                 overwrite=False,
@@ -207,7 +217,9 @@ class TestCrossRepoPatterns:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=MINIMAL_PATTERN_YAML,
                 overwrite=False,
@@ -256,8 +268,18 @@ evaluator_code: |
 """
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(scope="my-repo", pattern_yaml=repo_specific_yaml)
-            service.store_xray_pattern(scope="__any__", pattern_yaml=any_yaml)
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
+                scope="my-repo",
+                pattern_yaml=repo_specific_yaml,
+            )
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
+                scope="__any__",
+                pattern_yaml=any_yaml,
+            )
 
         code, _params = service.resolve_and_prepare_pattern(
             repo_alias="my-repo",
@@ -272,8 +294,11 @@ evaluator_code: |
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
-                scope="__any__", pattern_yaml=MINIMAL_PATTERN_YAML
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
+                scope="__any__",
+                pattern_yaml=MINIMAL_PATTERN_YAML,
             )
 
         code, _params = service.resolve_and_prepare_pattern(
@@ -298,12 +323,17 @@ class TestOverwriteProtection:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
-                scope="__any__", pattern_yaml=MINIMAL_PATTERN_YAML
-            )
-            result = service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=MINIMAL_PATTERN_YAML,
+            )
+            result = service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
+                scope="__any__",
+                pattern_yaml=MINIMAL_PATTERN_YAML + "tags: [changed]\n",
                 overwrite=False,
             )
 
@@ -324,10 +354,15 @@ evaluator_code: |
 """
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
-                scope="__any__", pattern_yaml=MINIMAL_PATTERN_YAML
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
+                scope="__any__",
+                pattern_yaml=MINIMAL_PATTERN_YAML,
             )
-            result = service.store_xray_pattern(
+            result = service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=updated_yaml,
                 overwrite=True,
@@ -381,8 +416,11 @@ class TestMalformedRepoSpecificPatternDoesNotFallThrough:
 
         # A valid __any__ pattern exists under the SAME name.
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
-                scope="__any__", pattern_yaml=MINIMAL_PATTERN_YAML
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
+                scope="__any__",
+                pattern_yaml=MINIMAL_PATTERN_YAML,
             )
 
         # The repo-specific pattern of the SAME name is malformed YAML
@@ -527,7 +565,9 @@ class TestParametrizedPatternDefaults:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=PATTERN_WITH_PARAMS_YAML,
             )
@@ -547,7 +587,9 @@ class TestParametrizedPatternDefaults:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=PATTERN_WITH_PARAMS_YAML,
             )
@@ -576,7 +618,9 @@ class TestParameterOverride:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=PATTERN_WITH_PARAMS_YAML,
             )
@@ -595,7 +639,9 @@ class TestParameterOverride:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=PATTERN_WITH_PARAMS_YAML,
             )
@@ -623,7 +669,9 @@ class TestInvalidParameter:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=PATTERN_WITH_PARAMS_YAML,
             )
@@ -675,7 +723,9 @@ class TestNonDictPatternParamsRejected:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=PATTERN_WITH_PARAMS_YAML,
             )
@@ -699,7 +749,9 @@ class TestTypeValidation:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=PATTERN_WITH_PARAMS_YAML,
             )
@@ -718,7 +770,9 @@ class TestTypeValidation:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=PATTERN_WITH_BOOL_PARAM_YAML,
             )
@@ -748,7 +802,9 @@ class TestCacheKeyIncludesParameters:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=PATTERN_WITH_PARAMS_YAML,
             )
@@ -789,7 +845,12 @@ class TestPatternValidation:
             "evaluator_code: |\n"
             "  fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }\n"
         )
-        result = service.store_xray_pattern(scope="__any__", pattern_yaml=bad_yaml)
+        result = service.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
+            scope="__any__",
+            pattern_yaml=bad_yaml,
+        )
         assert result.get("error") is not None
 
     def test_missing_evaluator_code_rejected(self, tmp_path: Path) -> None:
@@ -799,7 +860,12 @@ class TestPatternValidation:
         service = XrayPatternService(cidx_meta)
 
         bad_yaml = "name: test\ndescription: test\nlanguage: java\n"
-        result = service.store_xray_pattern(scope="__any__", pattern_yaml=bad_yaml)
+        result = service.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
+            scope="__any__",
+            pattern_yaml=bad_yaml,
+        )
         assert result.get("error") is not None
 
     def test_invalid_evaluator_code_rejected(self, tmp_path: Path) -> None:
@@ -815,7 +881,12 @@ class TestPatternValidation:
             "evaluator_code: |\n"
             "  unsafe fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }\n"
         )
-        result = service.store_xray_pattern(scope="__any__", pattern_yaml=bad_yaml)
+        result = service.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
+            scope="__any__",
+            pattern_yaml=bad_yaml,
+        )
         assert result.get("error") is not None
 
     def test_invalid_parameter_type_rejected(self, tmp_path: Path) -> None:
@@ -835,7 +906,12 @@ class TestPatternValidation:
             "    type: invalid_type\n"
             "    default: 42\n"
         )
-        result = service.store_xray_pattern(scope="__any__", pattern_yaml=bad_yaml)
+        result = service.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
+            scope="__any__",
+            pattern_yaml=bad_yaml,
+        )
         assert result.get("error") is not None
 
 
@@ -854,7 +930,9 @@ class TestConstGeneration:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=PATTERN_WITH_STR_PARAM_YAML,
             )
@@ -872,7 +950,9 @@ class TestConstGeneration:
         service = XrayPatternService(cidx_meta)
 
         with patch.object(service, "_git_commit"):
-            service.store_xray_pattern(
+            service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=PATTERN_WITH_BOOL_PARAM_YAML,
             )
@@ -898,7 +978,9 @@ class TestPathTraversal:
         cidx_meta = _make_cidx_meta(tmp_path)
         service = XrayPatternService(cidx_meta)
 
-        result = service.store_xray_pattern(
+        result = service.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
             scope="../../..",
             pattern_yaml=MINIMAL_PATTERN_YAML,
         )
@@ -910,7 +992,9 @@ class TestPathTraversal:
         cidx_meta = _make_cidx_meta(tmp_path)
         service = XrayPatternService(cidx_meta)
 
-        result = service.store_xray_pattern(
+        result = service.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
             scope="valid/scope",
             pattern_yaml=MINIMAL_PATTERN_YAML,
         )
@@ -922,7 +1006,9 @@ class TestPathTraversal:
         cidx_meta = _make_cidx_meta(tmp_path)
         service = XrayPatternService(cidx_meta)
 
-        result = service.store_xray_pattern(
+        result = service.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
             scope="scope\\evil",
             pattern_yaml=MINIMAL_PATTERN_YAML,
         )
@@ -941,7 +1027,9 @@ language: java
 evaluator_code: |
   fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }
 """
-        result = service.store_xray_pattern(
+        result = service.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
             scope="__any__",
             pattern_yaml=traversal_yaml,
         )
@@ -960,7 +1048,9 @@ language: java
 evaluator_code: |
   fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }
 """
-        result = service.store_xray_pattern(
+        result = service.store_xray_pattern_audited(
+            actor="example-user",
+            may_replace_global=True,
             scope="__any__",
             pattern_yaml=traversal_yaml,
         )
@@ -1097,7 +1187,9 @@ class TestStoreTimeExecutionModeCrossCheck:
         )
 
         with patch.object(service, "_git_commit"):
-            result = service.store_xray_pattern(
+            result = service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=pattern_yaml,
                 overwrite=False,
@@ -1125,7 +1217,9 @@ class TestStoreTimeExecutionModeCrossCheck:
         pattern_yaml = _graph_pattern_yaml(name="legacy-mismatch")
 
         with patch.object(service, "_git_commit"):
-            result = service.store_xray_pattern(
+            result = service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=pattern_yaml,
                 overwrite=False,
@@ -1152,7 +1246,9 @@ class TestStoreTimeExecutionModeCrossCheck:
         pattern_yaml = _graph_pattern_yaml(execution_mode="graph")
 
         with patch.object(service, "_git_commit"):
-            result = service.store_xray_pattern(
+            result = service.store_xray_pattern_audited(
+                actor="example-user",
+                may_replace_global=True,
                 scope="__any__",
                 pattern_yaml=pattern_yaml,
                 overwrite=False,
