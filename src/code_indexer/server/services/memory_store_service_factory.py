@@ -35,10 +35,10 @@ class MemoryStoreBundle(NamedTuple):
         bundle = build_memory_store_service(...)
         app.state.memory_store_service = bundle.service
         app.state.memory_metadata_cache = bundle.cache
-        # Use bundle.memories_dir as the authoritative path for both service and cache
+        # bundle.memories_dir is the authoritative path; access decisions
+        # read memory frontmatter from it fresh, never through the cache.
         access_filtering_service = AccessFilteringService(
             group_manager,
-            memory_metadata_cache=bundle.cache,
             memories_dir=bundle.memories_dir,
         )
     """

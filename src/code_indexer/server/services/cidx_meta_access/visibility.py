@@ -109,6 +109,19 @@ def resolve_meta_visibility(
     return MetaVisibility.restricted(access_service.get_accessible_repos(username))
 
 
+def unrestricted_caller(
+    username: str, access_service: Optional["AccessFilteringService"]
+) -> bool:
+    """True exactly when ``resolve_meta_visibility`` would be unrestricted,
+    without reading the caller's grants: an ``admins`` member with no
+    acting-user scope. A missing access service is never unrestricted."""
+    return (
+        access_service is not None
+        and ACTING_SCOPE.get() is None
+        and access_service.is_admin_user(username)
+    )
+
+
 def memory_visibility_fn(
     access_service: Optional["AccessFilteringService"], vis: MetaVisibility
 ) -> Callable[[str], bool]:

@@ -16,7 +16,9 @@ from code_indexer.server.auth.user_manager import User
 from . import _utils
 from code_indexer.server.services.cidx_meta_access.catalog_requests import (
     catalog_restriction_applies,
+    restrict_catalog_items,
     restrict_catalog_paths,
+    served_repo_path,
 )
 from code_indexer.server.services.cidx_meta_access.tree_projection import (
     UNSCANNED_LIMIT,
@@ -423,17 +425,15 @@ def _filter_cidx_meta_files(
 ) -> list:
     """Restrict a catalog listing to the paths the user may see (full
     repository-relative paths; nothing without the access service)."""
-    allowed = restrict_catalog_paths(
-        [f["path"] for f in serialized_files],
+    restricted = restrict_catalog_items(
+        serialized_files,
+        lambda f: f["path"],
         repository_alias,
         user.username,
         _get_access_filtering_service(),
         _activations(),
     )
-    if allowed is None:
-        return serialized_files
-    kept = set(allowed)
-    return [f for f in serialized_files if f["path"] in kept]
+    return serialized_files if restricted is None else restricted
 
 
 def _build_browse_path_pattern(
@@ -668,24 +668,6 @@ def _tree_node_to_dict(node: Any) -> dict:
     else:
         result_dict["children"] = None
     return result_dict
-
-
-def _filter_cidx_meta_tree(
-    result: Any,
-    user: User,
-    base_path: str = "",
-    show_stats: bool = False,
-    max_files_per_dir: Optional[int] = None,
-) -> Any:
-    """Reduce a catalog tree to the user's view at every depth."""
-    return restrict_catalog_tree(
-        result,
-        base_path,
-        user.username,
-        _get_access_filtering_service(),
-        show_stats,
-        max_files_per_dir,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1610,7 +1592,12 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     try:
         golden_repos_dir = _get_golden_repos_dir()
-        repo_path = _get_legacy()._resolve_repo_path(repository_alias, golden_repos_dir)
+        repo_path = served_repo_path(
+            repository_alias,
+            user.username,
+            _activations(),
+            lambda alias: _get_legacy()._resolve_repo_path(alias, golden_repos_dir),
+        )
         if repo_path is None:
             available_repos = _get_available_repos(user)
             return _mcp_response(
@@ -1642,10 +1629,11 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         if restricted:
-            result = _filter_cidx_meta_tree(
+            result = restrict_catalog_tree(
                 result,
-                user,
                 args.get("path") or "",
+                user.username,
+                _get_access_filtering_service(),
                 bool(args.get("show_stats")),
                 files_per_dir,
             )

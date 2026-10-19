@@ -12,6 +12,11 @@ from typing import List, Optional
 from code_indexer.utils.path_confinement import resolve_confined_path
 
 
+def path_not_found_error(path: str) -> ValueError:
+    """The one error a tree request answers for a path it will not show."""
+    return ValueError(f"Path does not exist: {path}")
+
+
 @dataclass
 class TreeNode:
     """A node in the directory tree."""
@@ -107,9 +112,9 @@ class DirectoryExplorerService:
             try:
                 start_path = resolve_confined_path(self.repo_path, path)
             except PermissionError:
-                raise ValueError(f"Path does not exist: {path}")
+                raise path_not_found_error(path)
             if not start_path.exists():
-                raise ValueError(f"Path does not exist: {path}")
+                raise path_not_found_error(path)
         else:
             start_path = self.repo_path
 
@@ -311,9 +316,7 @@ class DirectoryExplorerService:
         root.name = root_name
 
         # Generate tree string
-        tree_string = self._format_tree_string(
-            root, show_stats, total_dirs, total_files
-        )
+        tree_string = self.format_tree_string(root, show_stats, total_dirs, total_files)
 
         return DirectoryTreeResult(
             root=root,
@@ -324,8 +327,8 @@ class DirectoryExplorerService:
             root_path=str(start_path),
         )
 
-    def _format_tree_string(
-        self,
+    @staticmethod
+    def format_tree_string(
         root: TreeNode,
         show_stats: bool,
         total_dirs: int,

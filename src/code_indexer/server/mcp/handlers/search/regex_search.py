@@ -27,7 +27,7 @@ from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.mcp import reranking as _mcp_reranking
 from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.services.cidx_meta_access.catalog_requests import (
-    restrict_catalog_paths,
+    restrict_catalog_items,
 )
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.search_event_recording import (
@@ -331,17 +331,14 @@ def _restrict_catalog_matches(
     """The matches the user may see when the repository is the internal
     catalog, else None. Reads the activation and group stores synchronously:
     async callers run it on a worker thread."""
-    allowed = restrict_catalog_paths(
-        [m["file_path"] for m in matches],
+    return restrict_catalog_items(
+        matches,
+        lambda m: m["file_path"],
         repository_alias,
         user.username,
         _get_access_filtering_service(),
         _utils._lazy_module_attr_or_none("activated_repo_manager"),
     )
-    if allowed is None:
-        return None
-    kept = set(allowed)
-    return [m for m in matches if m["file_path"] in kept]
 
 
 async def _execute_regex_search_impl(

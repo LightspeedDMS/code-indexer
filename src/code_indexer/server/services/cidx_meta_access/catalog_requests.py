@@ -12,19 +12,43 @@ All functions read stores synchronously; async callers run them through
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, TypeVar
 
 from ..constants import is_internal_meta_repo
 from .visibility import (
     is_internal_meta_identity,
     request_alias_identities,
-    resolve_meta_visibility,
+    unrestricted_caller,
 )
 
 if TYPE_CHECKING:
     from ..access_filtering_service import AccessFilteringService
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+def served_repo_path(
+    alias: str,
+    username: str,
+    activated_repo_manager: Optional[Any],
+    resolve_golden: Callable[[str], Optional[str]],
+) -> Optional[str]:
+    """The directory a request for *alias* serves: the caller's activation
+    with that ``user_alias`` first (as the file listing, file content and
+    regex doors serve it, and as the dispatcher authorises it), else
+    *resolve_golden*. None when the activation's directory is missing or
+    nothing resolves."""
+    if (
+        activated_repo_manager is not None
+        and not alias.endswith("-global")
+        and activated_repo_manager.user_has_activated_repo(username, alias)
+    ):
+        path = activated_repo_manager.get_activated_repo_path(username, alias)
+        return str(path) if path and Path(path).is_dir() else None
+    return resolve_golden(alias)
 
 
 def is_catalog_request(
@@ -46,13 +70,11 @@ def catalog_restriction_applies(
 ) -> bool:
     """True when a request for *alias* must be restricted to the caller's
     view of the catalog. Unrestricted callers are answered before any
-    activation lookup."""
+    activation lookup and without reading their grants; a missing access
+    service always restricts."""
     if not isinstance(alias, str) or not alias:
         return False
-    if (
-        access_service is not None
-        and resolve_meta_visibility(username, access_service).unrestricted
-    ):
+    if unrestricted_caller(username, access_service):
         return False
     return is_catalog_request(alias, username, activated_repo_manager)
 
@@ -78,3 +100,26 @@ def restrict_catalog_paths(
         )
         return []
     return access_service.filter_cidx_meta_files(list(paths), username)
+
+
+def restrict_catalog_items(
+    items: Sequence[T],
+    key: Callable[[T], str],
+    alias: Any,
+    username: str,
+    access_service: Optional["AccessFilteringService"],
+    activated_repo_manager: Optional[Any],
+) -> Optional[List[T]]:
+    """The *items* whose catalog-relative path (``key(item)``) the caller
+    may see, in input order, or None when no restriction applies."""
+    allowed = restrict_catalog_paths(
+        [key(item) for item in items],
+        alias,
+        username,
+        access_service,
+        activated_repo_manager,
+    )
+    if allowed is None:
+        return None
+    kept = set(allowed)
+    return [item for item in items if key(item) in kept]

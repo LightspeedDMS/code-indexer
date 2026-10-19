@@ -27,7 +27,7 @@ def _make_tree_result(filenames: list) -> DirectoryTreeResult:
         is_directory=True,
         children=children,
     )
-    # Build a simple tree_string matching the format _format_tree_string produces
+    # Build a simple tree_string matching the format format_tree_string produces
     lines = ["cidx-meta/"]
     for i, name in enumerate(filenames):
         connector = "+--" if i == len(filenames) - 1 else "|--"
@@ -147,6 +147,7 @@ class TestDirectoryTreeCidxMetaAccessFiltering:
         mock_explorer.generate_tree.return_value = fake_tree
         no_activation = MagicMock()
         no_activation.get_repository.return_value = None
+        no_activation.user_has_activated_repo.return_value = False
         with (
             patch(
                 "code_indexer.server.mcp.handlers.files._activations",

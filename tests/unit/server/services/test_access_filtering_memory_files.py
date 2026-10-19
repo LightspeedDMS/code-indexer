@@ -11,12 +11,12 @@ Covers:
 5. Memory file with scope=file follows the same repo-access rule as scope=repo.
 6. Missing memory file → filtered out (fail-closed).
 7. Corrupt YAML frontmatter memory file → filtered out (fail-closed).
-8. Cache-miss path reads from filesystem and caches result.
+8. Memory scope is read fresh from disk on every decision (no cache).
 9. Admin user sees all memory files including those for repos the admins group
    has not been explicitly granted (admin sees everything).
 
-Real filesystem (tmp_path), real GroupAccessManager, real MemoryMetadataCache,
-real memory_io writes. No mocks for the service under test.
+Real filesystem (tmp_path), real GroupAccessManager, real memory_io writes.
+No mocks for the service under test.
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ import pytest
 from code_indexer.server.services.access_filtering_service import AccessFilteringService
 from code_indexer.server.services.group_access_manager import GroupAccessManager
 from code_indexer.server.services.memory_io import atomic_write_memory_file
-from code_indexer.server.services.memory_metadata_cache import MemoryMetadataCache
 
 
 # ---------------------------------------------------------------------------
@@ -93,17 +92,10 @@ def group_manager(temp_db: Path) -> GroupAccessManager:
 
 
 @pytest.fixture
-def cache(memories_dir: Path) -> MemoryMetadataCache:
-    return MemoryMetadataCache(memories_dir, ttl_seconds=60)
-
-
-@pytest.fixture
 def service(
-    group_manager: GroupAccessManager, cache: MemoryMetadataCache, memories_dir: Path
+    group_manager: GroupAccessManager, memories_dir: Path
 ) -> AccessFilteringService:
-    return AccessFilteringService(
-        group_manager, memory_metadata_cache=cache, memories_dir=memories_dir
-    )
+    return AccessFilteringService(group_manager, memories_dir=memories_dir)
 
 
 @pytest.fixture
@@ -322,7 +314,7 @@ def test_corrupt_yaml_memory_file_filtered_out(
 
 
 # ---------------------------------------------------------------------------
-# Test 8: Cache-miss path reads from filesystem and caches result
+# Test 8: Memory scope is read fresh from disk on every decision
 # ---------------------------------------------------------------------------
 
 
@@ -331,12 +323,9 @@ def test_listing_reads_memory_scope_fresh(
     group_manager: GroupAccessManager,
     poweruser: str,
 ) -> None:
-    """A warm metadata cache never decides a listing: the memory's
-    frontmatter is read fresh, so a deleted memory disappears at once."""
-    cache = MemoryMetadataCache(memories_dir, ttl_seconds=60)
-    svc = AccessFilteringService(
-        group_manager, memory_metadata_cache=cache, memories_dir=memories_dir
-    )
+    """The memory's frontmatter is read fresh for every listing, so a
+    deleted memory disappears at once."""
+    svc = AccessFilteringService(group_manager, memories_dir=memories_dir)
 
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
     filename = f"memories/{MEMORY_ID_GLOBAL}.md"
@@ -451,18 +440,11 @@ def test_visible_memory_ids_resolve_grants_once_per_call(
 def test_visible_memory_ids_see_scope_change_written_by_another_instance(
     group_manager: GroupAccessManager, memories_dir: Path, poweruser: str
 ) -> None:
-    """Each node authorizes from the file as it is now, never a cached scope.
-
-    The reader's cache stays warm with the old scope on purpose: on another
-    cluster node nothing invalidates it when the writer node edits the file.
-    """
-    writer_cache = MemoryMetadataCache(memories_dir, ttl_seconds=60)
-    reader_cache = MemoryMetadataCache(memories_dir, ttl_seconds=60)
-    reader = AccessFilteringService(
-        group_manager, memory_metadata_cache=reader_cache, memories_dir=memories_dir
-    )
+    """Each node authorizes from the file as it is now, never a scope it
+    read earlier: on another cluster node nothing tells this instance that
+    the writer node edited the file."""
+    reader = AccessFilteringService(group_manager, memories_dir=memories_dir)
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
-    reader_cache.get(MEMORY_ID_GLOBAL)
     assert reader.filter_visible_memory_ids([MEMORY_ID_GLOBAL], poweruser) == [
         MEMORY_ID_GLOBAL
     ]
@@ -470,7 +452,6 @@ def test_visible_memory_ids_see_scope_change_written_by_another_instance(
     _write_memory_file(
         memories_dir, MEMORY_ID_GLOBAL, scope="repo", referenced_repo="ungranted-repo"
     )
-    writer_cache.invalidate(MEMORY_ID_GLOBAL)
 
     assert reader.filter_visible_memory_ids([MEMORY_ID_GLOBAL], poweruser) == []
 
@@ -498,14 +479,13 @@ def test_visible_memory_ids_hide_non_string_referenced_repo(
 
 def test_visible_memory_ids_hide_everything_without_memories_dir(
     group_manager: GroupAccessManager,
-    cache: MemoryMetadataCache,
     memories_dir: Path,
     poweruser: str,
 ) -> None:
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
-    cache_only = AccessFilteringService(group_manager, memory_metadata_cache=cache)
+    no_dir = AccessFilteringService(group_manager)
 
-    assert cache_only.filter_visible_memory_ids([MEMORY_ID_GLOBAL], poweruser) == []
+    assert no_dir.filter_visible_memory_ids([MEMORY_ID_GLOBAL], poweruser) == []
 
 
 def test_visible_memory_ids_hide_unreadable_memory_path(

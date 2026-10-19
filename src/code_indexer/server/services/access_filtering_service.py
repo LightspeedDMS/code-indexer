@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Dict,
     FrozenSet,
     List,
@@ -44,14 +43,12 @@ from .group_access_manager import GroupAccessManager
 from .memory_io import (
     MemoryFileCorruptError,
     MemoryFileNotFoundError,
-    read_memory_file,
     read_memory_frontmatter,
 )
 from ..models.api_models import MAX_CANDIDATE_LIMIT
 
 if TYPE_CHECKING:
     from ..repositories.activated_repo_manager import ActivatedRepoManager
-    from .memory_metadata_cache import MemoryMetadataCache
 
 # Memory files are named {uuid4().hex}.md — exactly 32 lowercase hex chars stem.
 _MEMORY_FILE_RE = re.compile(r"^[0-9a-f]{32}\.md$")
@@ -103,7 +100,6 @@ class AccessFilteringService:
         self,
         group_access_manager: GroupAccessManager,
         *,
-        memory_metadata_cache: "Optional[MemoryMetadataCache]" = None,
         memories_dir: Optional[Path] = None,
         activated_repo_manager: "Optional[ActivatedRepoManager]" = None,
     ):
@@ -117,19 +113,12 @@ class AccessFilteringService:
                 caller's activations to the golden repositories it was
                 created from and checks THOSE against the caller's grants.
                 When None, every row is checked by golden name only.
-            memory_metadata_cache: Optional cache for memory file frontmatter.
-                When provided, used by filter_cidx_meta_files() to look up
-                scope/referenced_repo for UUID-stemmed memory files.
-                When None, the service falls back to direct disk reads using
-                memories_dir (slower but still correct).
             memories_dir: Directory containing memory files ({uuid}.md).
-                Only used when memory_metadata_cache is None.
-                When both are None, memory files are excluded (fail-closed).
+                Every memory scope decision reads the file's frontmatter
+                from here, fresh. When None, memory files are excluded
+                (fail-closed).
         """
         self.group_manager = group_access_manager
-        self._memory_metadata_cache: "Optional[MemoryMetadataCache]" = (
-            memory_metadata_cache
-        )
         self._memories_dir: Optional[Path] = memories_dir
         self._activated_repo_manager: "Optional[ActivatedRepoManager]" = (
             activated_repo_manager
@@ -502,11 +491,7 @@ class AccessFilteringService:
             f"{memory_id}.md"
         ):
             return False
-        return self._is_memory_file_accessible(
-            f"{memory_id}.md",
-            accessible,
-            lookup=self._read_memory_frontmatter_fresh,
-        )
+        return self._is_memory_file_accessible(f"{memory_id}.md", accessible)
 
     def _read_memory_frontmatter_fresh(
         self, memory_id: str
@@ -547,16 +532,11 @@ class AccessFilteringService:
             return None
         return frontmatter
 
-    def _is_memory_file_accessible(
-        self,
-        filename: str,
-        accessible: Set[str],
-        lookup: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
-    ) -> bool:
+    def _is_memory_file_accessible(self, filename: str, accessible: Set[str]) -> bool:
         """Determine whether a UUID-stemmed memory file is accessible to the user.
 
-        Looks up the file's frontmatter via ``lookup`` (default: the metadata
-        cache, or disk when cache is absent). Applies scope rules:
+        Reads the file's frontmatter fresh from disk (never a cache, so a
+        scope change made on any node is seen at once). Applies scope rules:
           - scope=global: always accessible.
           - scope=repo or scope=file: accessible only if referenced_repo
             (with -global suffix stripped) is in the accessible set.
@@ -568,14 +548,12 @@ class AccessFilteringService:
         Args:
             filename: Basename of the memory file (e.g. ``{uuid}.md``).
             accessible: Set of repo aliases the user can access.
-            lookup: Metadata source by memory id; None means
-                _lookup_memory_metadata.
 
         Returns:
             True if the file should be visible to the user.
         """
         memory_id = filename[: -len(".md")]
-        metadata = (lookup or self._lookup_memory_metadata)(memory_id)
+        metadata = self._read_memory_frontmatter_fresh(memory_id)
         if metadata is None:
             logger.debug(
                 "filter_cidx_meta_files: metadata unavailable for memory %r — excluding",
@@ -611,54 +589,6 @@ class AccessFilteringService:
             referenced_repo = referenced_repo[: -len("-global")]
 
         return referenced_repo in accessible
-
-    def _lookup_memory_metadata(self, memory_id: str) -> Optional[Dict[str, Any]]:
-        """Return frontmatter dict for a memory, using cache when available.
-
-        Falls back to direct disk read when no cache is injected.
-        Returns None if the file is missing, unreadable, or both cache and
-        memories_dir are absent (fail-closed in all error cases).
-
-        Args:
-            memory_id: 32-character hex memory identifier.
-
-        Returns:
-            Frontmatter dict, or None on any failure.
-        """
-        if self._memory_metadata_cache is not None:
-            return self._memory_metadata_cache.get(memory_id)
-
-        # No cache: fall back to direct disk read if memories_dir is known
-        if self._memories_dir is None:
-            logger.debug(
-                "_lookup_memory_metadata: no cache and no memories_dir for %r — excluding",
-                memory_id,
-            )
-            return None
-
-        path = self._memories_dir / f"{memory_id}.md"
-        try:
-            fm, _body, _hash = read_memory_file(path)
-            return fm
-        except MemoryFileNotFoundError:
-            logger.debug(
-                "_lookup_memory_metadata: file not found for %r — excluding", memory_id
-            )
-            return None
-        except MemoryFileCorruptError as exc:
-            logger.debug(
-                "_lookup_memory_metadata: corrupt file for %r — excluding: %s",
-                memory_id,
-                exc,
-            )
-            return None
-        except Exception as exc:
-            logger.warning(
-                "_lookup_memory_metadata: unexpected error reading %r — excluding: %s",
-                memory_id,
-                exc,
-            )
-            return None
 
     def calculate_over_fetch_limit(self, requested_limit: int) -> int:
         """

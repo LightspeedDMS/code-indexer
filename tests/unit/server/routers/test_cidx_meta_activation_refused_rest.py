@@ -122,6 +122,20 @@ class TestActivationRefused:
         assert response.status_code == 403, response.text
         assert _activations(catalog, USER) == []
 
+    def test_activation_named_like_the_catalog_is_refused(self, client, catalog):
+        named = _activate(
+            client,
+            USER,
+            {"golden_repo_alias": GRANTED_REPO, "user_alias": CIDX_META_REPO},
+        )
+        ungranted = _activate(
+            client, USER, {"golden_repo_alias": UNGRANTED_REPO, "user_alias": "c"}
+        )
+
+        assert named.status_code == 403, named.text
+        assert shape(named, CIDX_META_REPO) == shape(ungranted, UNGRANTED_REPO)
+        assert _activations(catalog, USER) == []
+
 
 class TestActivationAllowed:
     def test_admin_activation_of_the_catalog_succeeds(self, client, catalog):

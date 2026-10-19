@@ -2425,22 +2425,20 @@ def make_lifespan(
                     app.state.app_state.memory_store_service = _memory_store_service
 
                 # Story #877 Phase 3-A: reconstruct AccessFilteringService with the
-                # shared memory metadata cache so filter_cidx_meta_files() can look up
-                # memory file scope/referenced_repo without redundant disk reads.
-                # Uses _memories_dir from the bundle — the single authoritative path.
-                _access_filtering_service_with_cache = _AccessFilteringService(
+                # bundle's memories_dir (the single authoritative path), from which
+                # every memory scope decision reads the frontmatter fresh.
+                _access_filtering_service_with_memories = _AccessFilteringService(
                     group_manager,
-                    memory_metadata_cache=_memory_metadata_cache,
                     memories_dir=_memories_dir,
                     activated_repo_manager=getattr(
                         app.state, "activated_repo_manager", None
                     ),
                 )
                 app.state.access_filtering_service = (
-                    _access_filtering_service_with_cache
+                    _access_filtering_service_with_memories
                 )
                 logger.info(
-                    "MemoryStoreService initialized for Story #877 (cache wired to AccessFilteringService)",
+                    "MemoryStoreService initialized for Story #877 (memories_dir wired to AccessFilteringService)",
                     extra={"correlation_id": get_correlation_id()},
                 )
 

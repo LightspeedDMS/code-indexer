@@ -38,10 +38,16 @@ from .conftest import extract_mcp_data, make_file_info
 class _Activations:
     """The caller's activation records, as ActivatedRepoManager lists them."""
 
-    def __init__(self, records: List[Dict[str, Any]]):
+    def __init__(
+        self, records: List[Dict[str, Any]], paths: Optional[Dict[str, Path]] = None
+    ):
         self._records = records
+        self._paths = paths or {}
         self.list_calls = 0
         self.get_calls = 0
+
+    def get_activated_repo_path(self, username: str, user_alias: str) -> str:
+        return str(self._paths[user_alias])
 
     def list_activated_repositories(self, username: str) -> List[Dict[str, Any]]:
         self.list_calls += 1
@@ -309,20 +315,18 @@ def _real_tree(fx: CidxMetaFixture) -> Any:
 
 
 def test_directory_tree_filter_uses_full_node_paths(fx: CidxMetaFixture) -> None:
-    from code_indexer.server.mcp.handlers import files as files_module
+    from code_indexer.server.services.cidx_meta_access import restrict_catalog_tree
 
-    with patch.object(
-        files_module, "_get_access_filtering_service", return_value=fx.access_service
-    ):
-        result = files_module._filter_cidx_meta_tree(_real_tree(fx), _restricted_user())
-    files = [n.path for n in result.root.children if not n.is_directory]
+    result = restrict_catalog_tree(
+        _real_tree(fx), "", RESTRICTED_USER, fx.access_service
+    )
+    files = [n.path for n in result.root.children or [] if not n.is_directory]
     assert files == [f"{ALPHA}.md"]
     assert CANARY not in result.tree_string
     assert "README.md" not in result.tree_string
 
-    with patch.object(files_module, "_get_access_filtering_service", return_value=None):
-        closed = files_module._filter_cidx_meta_tree(_real_tree(fx), _restricted_user())
-    assert [n for n in closed.root.children if not n.is_directory] == []
+    closed = restrict_catalog_tree(_real_tree(fx), "", RESTRICTED_USER, None)
+    assert [n for n in closed.root.children or [] if not n.is_directory] == []
 
 
 def test_directory_tree_filter_prunes_nested_paths(fx: CidxMetaFixture) -> None:
@@ -330,7 +334,7 @@ def test_directory_tree_filter_prunes_nested_paths(fx: CidxMetaFixture) -> None:
         DirectoryExplorerService,
         TreeNode,
     )
-    from code_indexer.server.mcp.handlers import files as files_module
+    from code_indexer.server.services.cidx_meta_access import restrict_catalog_tree
     from tests.shared.cidx_meta_visibility_fixture import ADMIN_USER, GAMMA
 
     def _walk(node: TreeNode, files: List[str], dirs: List[str]) -> None:
@@ -341,20 +345,11 @@ def test_directory_tree_filter_prunes_nested_paths(fx: CidxMetaFixture) -> None:
             else:
                 files.append(child.path)
 
-    with patch.object(
-        files_module, "_get_access_filtering_service", return_value=fx.access_service
-    ):
-        tree = DirectoryExplorerService(fx.root).generate_tree(max_depth=4)
-        result = files_module._filter_cidx_meta_tree(tree, _restricted_user())
-        admin_tree = DirectoryExplorerService(fx.root).generate_tree(max_depth=4)
-        admin_string = admin_tree.tree_string
-        admin = User(
-            username=ADMIN_USER,
-            password_hash="hash",
-            role=UserRole.ADMIN,
-            created_at=datetime.now(),
-        )
-        admin_result = files_module._filter_cidx_meta_tree(admin_tree, admin)
+    tree = DirectoryExplorerService(fx.root).generate_tree(max_depth=4)
+    result = restrict_catalog_tree(tree, "", RESTRICTED_USER, fx.access_service)
+    admin_tree = DirectoryExplorerService(fx.root).generate_tree(max_depth=4)
+    admin_string = admin_tree.tree_string
+    admin_result = restrict_catalog_tree(admin_tree, "", ADMIN_USER, fx.access_service)
 
     files: List[str] = []
     dirs: List[str] = []
@@ -499,7 +494,7 @@ def test_directory_tree_on_alias_spelled_as_catalog_is_restricted(
     fx: CidxMetaFixture,
 ) -> None:
     # The caller named an activation of another repository like the catalog;
-    # the tree served for that alias is the catalog itself.
+    # that activation is served, and judged as the catalog by its spelling.
     misleading = {
         "user_alias": "cidx-meta",
         "golden_repo_alias": ALPHA,
@@ -508,7 +503,7 @@ def test_directory_tree_on_alias_spelled_as_catalog_is_restricted(
     data = _tree_call(
         fx,
         {"repository_alias": "cidx-meta", "max_depth": 4},
-        _Activations([misleading]),
+        _Activations([misleading], {"cidx-meta": fx.root}),
     )
     assert CANARY not in data["tree_string"]
     assert f"{ALPHA}.md" in data["tree_string"]

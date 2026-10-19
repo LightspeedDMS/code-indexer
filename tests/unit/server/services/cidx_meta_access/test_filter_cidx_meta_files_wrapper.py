@@ -77,23 +77,14 @@ def test_alias_granted_to_no_group_and_readme_are_denied(fx: CidxMetaFixture) ->
     assert kept == []
 
 
-def test_memory_scope_change_is_seen_despite_a_warm_metadata_cache(
-    fx: CidxMetaFixture,
-) -> None:
+def test_memory_scope_change_is_seen_at_once(fx: CidxMetaFixture) -> None:
     from code_indexer.server.services.access_filtering_service import (
         AccessFilteringService,
     )
     from code_indexer.server.services.memory_io import atomic_write_memory_file
-    from code_indexer.server.services.memory_metadata_cache import (
-        MemoryMetadataCache,
-    )
 
     memories = fx.root / "memories"
-    service = AccessFilteringService(
-        fx.group_manager,
-        memory_metadata_cache=MemoryMetadataCache(memories, ttl_seconds=600),
-        memories_dir=memories,
-    )
+    service = AccessFilteringService(fx.group_manager, memories_dir=memories)
     path = f"memories/{MEMORY_GLOBAL}.md"
     assert service.filter_cidx_meta_files([path], RESTRICTED_USER) == [path]
 

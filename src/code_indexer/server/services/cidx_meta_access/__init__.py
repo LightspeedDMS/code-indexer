@@ -6,6 +6,11 @@ projection that turns a catalog document into the caller's view of it.
 """
 
 from .alias_universe import ALIAS_UNIVERSE_TTL_SECONDS, AliasUniverse, UniverseSnapshot
+from .catalog_requests import (
+    catalog_restriction_applies,
+    is_catalog_request,
+    restrict_catalog_paths,
+)
 from .depmap_model import DepMapModel, load_depmap_model
 from .depmap_projection import (
     DOMAIN_PLACEHOLDER,
