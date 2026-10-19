@@ -159,14 +159,30 @@ def test_global_suffix_and_links_are_redacted(fx: CidxMetaFixture) -> None:
     assert projected[1] == lines[1]
 
 
-def test_headerless_chunk_projects_like_whole_file(fx: CidxMetaFixture) -> None:
+def test_chunk_projects_like_the_same_lines_of_the_document(
+    fx: CidxMetaFixture,
+) -> None:
+    from code_indexer.server.services.cidx_meta_access import project_chunk
+
+    rel = "dependency-map/payments.md"
     lines = read_lines(fx.dep_map_dir / "payments.md")
     assert PAYMENTS_NOTES_HEADER_LINE < 40
-    whole = _project(fx, "dependency-map/payments.md", _restricted(fx))
-    chunk = _project(fx, "dependency-map/payments.md", _restricted(fx), lines[39:55])
-    assert chunk == whole[39:55]
-    assert any(line is None for line in chunk)
-    assert any(line is not None and ALPHA in line for line in chunk)
+    first_row = lines.index("| Repository | Language | Role |") + 2
+    chunk = lines[first_row : first_row + 3]
+    whole = _project(fx, rel, _restricted(fx))
+    projected = project_chunk(
+        chunk,
+        first_row + 1,
+        lines,
+        rel,
+        _restricted(fx),
+        load_depmap_model(fx.dep_map_dir),
+        AliasUniverse(fx.registry).snapshot(),
+    )
+    assert projected == whole[first_row : first_row + 3]
+    assert projected[0] == f"| {ALPHA} | Python | Payment API |"
+    assert projected[1] is None
+    assert _project(fx, rel, _restricted(fx), chunk)[:2] == [None, None]
 
 
 class _RefusingRegistry:

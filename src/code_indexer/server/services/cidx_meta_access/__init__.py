@@ -10,6 +10,7 @@ from .depmap_model import DepMapModel, load_depmap_model
 from .depmap_projection import (
     RESTRICTED_PLACEHOLDER,
     ProjectionCacheStats,
+    project_chunk,
     project_lines,
     project_meta_document,
     projection_cache_stats,
@@ -52,6 +53,7 @@ __all__ = [
     "memory_visibility_fn",
     "meta_identity",
     "participants_reader",
+    "project_chunk",
     "project_lines",
     "project_meta_document",
     "projection_cache_stats",

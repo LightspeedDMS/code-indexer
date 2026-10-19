@@ -1,12 +1,13 @@
 """Line projection of a catalog document for one caller.
 
 The result is aligned 1:1 with the input lines; ``None`` marks a removed
-line. Every rule looks at one line, so a stored search chunk projects
-exactly like the same lines of the whole file (the only exceptions need
-context a chunk may lack: malformed table rows are recognised once the
-table's header was seen, and unparseable frontmatter once its closing
-``---`` was seen; a chunk without that context still gets every per-line
-rule, so no hidden name passes).
+line. ``project_lines`` takes a whole document and fails closed: only
+recognised dependency-map tables (header plus separator, matching cell
+count) and parseable, closed frontmatter reach a restricted caller; any
+other table, header-less row or malformed block is removed. A search or
+regex chunk goes through ``project_chunk``, which takes each line's verdict
+from the projection of the current whole document (so a chunk never shows
+more than its document) and removes lines that no longer match it.
 
 Structured names are filtered exactly (table rows, comma lists, YAML list
 items, counts); exact hidden aliases in prose become
@@ -59,6 +60,7 @@ _ALIAS_CHARS = "A-Za-z0-9_-"
 _LEADING_TOKEN = re.compile(r"[a-z0-9][a-z0-9._-]*")
 _SEPARATOR_CELL = re.compile(r"^:?-{3,}:?$")
 _LIST_ITEM = re.compile(r"^\s*-\s+(?P<value>.+?)\s*$")
+_YAML_SHAPED = re.compile(r"^\s*(?:[A-Za-z_][\w-]*\s*:.*|-\s+.*)?$")
 _INLINE_LIST = re.compile(r"^(?P<prefix>\s*[A-Za-z_][\w-]*:\s*)\[(?P<body>.*)\]\s*$")
 _COUNT_LINE = re.compile(
     r"^(?P<prefix>\s*(?P<key>repos_analyzed_count|domains_count):\s*)\d+\s*$"
@@ -264,13 +266,49 @@ def _table_cells(line: str) -> Optional[List[str]]:
     return [cell.strip() for cell in stripped[1:-1].split("|")]
 
 
-def _frontmatter_end(lines: Sequence[str]) -> Optional[int]:
-    if not lines or lines[0].strip() != "---":
-        return None
-    for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
-            return index
-    return None
+def _is_separator(cells: List[str]) -> bool:
+    return bool(cells) and all(_SEPARATOR_CELL.match(cell) for cell in cells)
+
+
+def _recognised_header(cells: List[str]) -> bool:
+    """The dependency-map table forms (the Story #887 parser sentinels)."""
+    names = [cell.strip().strip("*").strip().lower() for cell in cells]
+    first = names[0] if names else ""
+    return (
+        (
+            first == "repository"
+            and (len(names) >= 3 or names == ["repository", "domain"])
+        )
+        or (first == "this repo" and len(names) >= 4)
+        or (first == "external repo" and len(names) >= 6)
+        or names == ["domain", "description", "repo count"]
+        or (first == "source domain" and len(names) >= 5)
+    )
+
+
+def _frontmatter_span(lines: Sequence[str]) -> int:
+    """How many leading lines are frontmatter that must be removed: an
+    unparseable or unclosed block, or YAML-shaped lines before a lone
+    delimiter (a frontmatter fragment of unknown validity); 0 otherwise."""
+    if not lines:
+        return 0
+    delimiters = [i for i, line in enumerate(lines) if line.strip() == "---"]
+    if lines[0].strip() == "---":
+        closing = next((i for i in delimiters if i > 0), None)
+        if closing is None:
+            return len(lines)
+        try:
+            parse_frontmatter_strict("\n".join(lines[: closing + 1]) + "\n")
+        except (yaml.YAMLError, ValueError):
+            return closing + 1
+        return 0
+    if delimiters:
+        head = lines[: delimiters[0]]
+        if any(line.strip() for line in head) and all(
+            _YAML_SHAPED.match(line) for line in head
+        ):
+            return delimiters[0] + 1
+    return 0
 
 
 def _diagnose(relative_path: str, digest: str, line_numbers: List[int]) -> None:
@@ -290,33 +328,43 @@ def _diagnose(relative_path: str, digest: str, line_numbers: List[int]) -> None:
     )
 
 
+_UNRECOGNISED_TABLE = -1
+
+
 def _compute(
     lines: Sequence[str], relative_path: str, digest: str, view: _View
 ) -> List[Optional[str]]:
-    out: List[Optional[str]] = []
-    malformed: List[int] = []
-    start = 0
-    closing = _frontmatter_end(lines)
-    if closing is not None:
-        try:
-            parse_frontmatter_strict("\n".join(lines[: closing + 1]) + "\n")
-        except (yaml.YAMLError, ValueError):
-            out = [None] * (closing + 1)
-            malformed.extend(range(1, closing + 2))
-            start = closing + 1
-    expected: Optional[int] = None
-    for index in range(start, len(lines)):
+    span = _frontmatter_span(lines)
+    out: List[Optional[str]] = [None] * span
+    malformed: List[int] = list(range(1, span + 1))
+    # None: outside a table; >0: recognised table width; -1: unrecognised.
+    table: Optional[int] = None
+    for index in range(span, len(lines)):
         line = lines[index]
         cells = _table_cells(line)
         if cells is None:
-            expected = None
+            table = None
             out.append(_project_text(line, view))
-        elif all(_SEPARATOR_CELL.match(cell) for cell in cells):
-            expected = len(cells)
-            out.append(line)
-        elif expected is not None and len(cells) != expected:
+            continue
+        if table is None:
+            following = (
+                _table_cells(lines[index + 1]) if index + 1 < len(lines) else None
+            )
+            if (
+                following is not None
+                and _is_separator(following)
+                and not _is_separator(cells)
+                and _recognised_header(cells)
+            ):
+                table = len(cells)
+                out.append(_redact(line, view))
+                continue
+            table = _UNRECOGNISED_TABLE
+        if table == _UNRECOGNISED_TABLE or len(cells) != table:
             malformed.append(index + 1)
             out.append(None)
+        elif _is_separator(cells):
+            out.append(line)
         else:
             out.append(_project_row(line, cells, view))
     if malformed:
@@ -370,6 +418,33 @@ def project_meta_document(
     return project_lines(
         lines, relative_path, vis, load_depmap_model(dep_map_dir), universe.snapshot()
     )
+
+
+def project_chunk(
+    chunk_lines: Sequence[str],
+    first_line: int,
+    document_lines: Sequence[str],
+    relative_path: str,
+    vis: MetaVisibility,
+    model: DepMapModel,
+    universe: UniverseSnapshot,
+) -> List[Optional[str]]:
+    """The caller's view of a chunk starting at 1-based *first_line* of the
+    current *document_lines*: each line takes its verdict from the whole
+    document's projection, so a chunk never shows more than the document.
+    A chunk line that lies outside the document or differs from it (a stale
+    index) is removed."""
+    if first_line < 1:
+        raise ValueError("first_line is 1-based")
+    if vis.unrestricted:
+        return list(chunk_lines)
+    full = project_lines(document_lines, relative_path, vis, model, universe)
+    out: List[Optional[str]] = []
+    for offset, line in enumerate(chunk_lines):
+        index = first_line - 1 + offset
+        current = index < len(document_lines) and document_lines[index] == line
+        out.append(full[index] if current else None)
+    return out
 
 
 def render_line_aligned(projected: Sequence[Optional[str]]) -> str:

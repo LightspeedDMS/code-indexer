@@ -22,12 +22,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Set, Tuple
 
-from ..dep_map_file_utils import load_domains_json, parse_yaml_frontmatter
+from ..dep_map_file_utils import load_domains_json
 from ..dep_map_parser_hygiene import strip_backticks
 from ..dep_map_parser_tables import iter_table_rows
 from ..query_path_cache import is_immutable_versioned_snapshot
 from ..repo_access_guard import normalize_repo_alias
-from .membership import participants_from
+from .membership import frontmatter_of, participants_from
 
 INDEX_FILE = "_index.md"
 DOMAINS_JSON = "_domains.json"
@@ -98,7 +98,7 @@ def _table_names(content: str) -> Set[str]:
 
 
 def _index_parts(content: str) -> Tuple[Optional[Set[str]], Set[str], List[Edge]]:
-    frontmatter = parse_yaml_frontmatter(content) or {}
+    frontmatter = frontmatter_of(content) or {}
     analyzed_raw = frontmatter.get("repos_analyzed")
     analyzed = (
         _alias_names(str(item) for item in analyzed_raw)
@@ -138,7 +138,7 @@ def build_depmap_model(dep_map_dir: Path, fingerprint: str) -> DepMapModel:
         display[key] = name
         content = files[name].read_text(encoding="utf-8") if name in files else ""
         members = participants_from(
-            parse_yaml_frontmatter(content) if content else None, entries.get(name)
+            frontmatter_of(content) if content else None, entries.get(name)
         )
         if members:
             lowered = frozenset(m.lower() for m in members)
