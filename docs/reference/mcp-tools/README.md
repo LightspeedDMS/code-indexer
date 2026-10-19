@@ -188,7 +188,7 @@ The server exposes 148 MCP tools in 12 categories. This catalog is generated fro
 - [`poll_search_job`](search.md#poll_search_job) - Non-blocking check for an async-hybrid temporal search_code job. Returns immediately with partial or final results.
 - [`regex_search`](search.md#regex_search) - Direct pattern search on files without index - comprehensive but slower.
 - [`search_code`](search.md#search_code) - Search code using pre-built indexes.
-- [`store_xray_pattern`](search.md#store_xray_pattern) - Store a reusable Rust xray evaluator pattern in the cidx-meta pattern library. Stored patterns can be referenced by name in xray_search and xray_explore via the pattern_name parameter.
+- [`store_xray_pattern`](search.md#store_xray_pattern) - Store a reusable Rust xray evaluator pattern in the cidx-meta pattern library (requires repository:write). Stored patterns can be referenced by name in xray_search and xray_explore via the pattern_name parameter.
 - [`wiki_article_analytics`](search.md#wiki_article_analytics) - Query wiki article view analytics with sort, filter, and search capabilities.
 - [`xray_dump_ast`](search.md#xray_dump_ast) - Synchronously dump the complete tree-sitter AST for a single file — no job polling required.
 - [`xray_explore`](search.md#xray_explore) - Debug-mode X-Ray search -- same two-phase driver+evaluator as xray_search but enriches every match with a serialised AST tree so you can understand the node structure tree-sitter produces for your code. Evaluator is Rust native code (fn evaluate_node).

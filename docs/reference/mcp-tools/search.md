@@ -192,9 +192,9 @@ Search code using pre-built indexes.
 
 ## `store_xray_pattern`
 
-Store a reusable Rust xray evaluator pattern in the cidx-meta pattern library. Stored patterns can be referenced by name in xray_search and xray_explore via the pattern_name parameter.
+Store a reusable Rust xray evaluator pattern in the cidx-meta pattern library (requires repository:write). Stored patterns can be referenced by name in xray_search and xray_explore via the pattern_name parameter.
 
-- Permission: `query_repos`
+- Permission: `repository:write`
 - Source: [search/store_xray_pattern.md](../../../src/code_indexer/server/mcp/tool_docs/search/store_xray_pattern.md)
 
 | Parameter | Type | Required | Description |

@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.92.0] - 2026-10-19
+
+### Upgrade notes
+
+- Server: the description-refresh, lifecycle and dependency-map agents, and the Research Assistant, now use a dedicated `cidx-analysis-agent` account instead of an admin credential. On first start the server revokes the old credential, creates the account in the `powerusers` group and rewrites the `cidx-local` Claude CLI entry, in the background after startup; no manual step. The account can call only a fixed set of read and query MCP tools on `/mcp` and cannot sign in or use REST, the Web UI or OAuth. Removing a repository from `powerusers` also hides it from these agents.
+- Server: only administrators can activate the `cidx-meta` catalog repository. A non-administrator's existing activated copy of it stops serving content and can be deactivated.
+- Server: storing an X-Ray pattern (`store_xray_pattern`) requires the `repository:write` permission; replacing a global pattern requires the admin role. New patterns must use upper-case parameter names (`A-Z`, `0-9`, `_`); stored patterns whose parameter names are other valid identifiers keep working.
+- Server: rebuild the `xray-cli` release binary as usual on deployment (the auto-updater does this).
+
+### Security
+
+- Server: X-Ray evaluator compiles and graph-analysis children end with the request that started them, on timeout and on job cancel; process-group termination has one implementation that reports a group it could not signal.
+- Server: storing a shared X-Ray pattern is restricted by permission and repository grant, re-checked under the write lock, audited for every attempt and attributed in the catalog commit; pattern parameters are emitted as validated, escaped literals.
+- Server: activation of the internal catalog repository is restricted to administrators at every activation door, and existing copies are refused at every content door.
+- Server: the analysis agents' MCP credential belongs to a least-privilege service account limited to a read/query tool allowlist, never elevated, and refused at every interactive, OAuth, REST and Web door; the migration from the previous credential is automatic and audited.
+
 ## [12.91.0] - 2026-10-15
 
 ### Upgrade notes
