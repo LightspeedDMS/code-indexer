@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import logging
 import os
 import re
@@ -40,7 +41,6 @@ from typing import (
 
 import yaml
 
-from ..dep_map_file_utils import load_domains_json
 from ..dep_map_parser_hygiene import strip_backticks
 from ..dep_map_parser_tables import parse_frontmatter_strict
 from ..query_path_cache import is_immutable_versioned_snapshot
@@ -412,9 +412,9 @@ def _member_names(value: Any) -> FrozenSet[str]:
         raise MalformedMembership(f"not a list ({type(value).__name__})")
     names = set()
     for item in value:
-        if isinstance(item, bool) or not isinstance(item, (str, int)):
+        if not isinstance(item, str):
             raise MalformedMembership(f"invalid entry ({type(item).__name__})")
-        name = str(item).strip().strip("\"'").strip()
+        name = item.strip().strip("\"'").strip()
         if not name:
             raise MalformedMembership("empty entry")
         names.add(normalize_repo_alias(name))
@@ -453,50 +453,84 @@ _malformed_diagnosed: Set[str] = set()
 _malformed_lock = threading.Lock()
 
 
+def _deny_membership(
+    label: str, content: str, entry: Optional[Mapping[str, Any]], reason: str
+) -> Optional[FrozenSet[str]]:
+    """One WARNING per (domain, document version, reason); membership is
+    unknown, so restricted callers never see the domain."""
+    key = hashlib.sha256(
+        f"{label}\n{reason}\n{content}\n{entry!r}".encode("utf-8")
+    ).hexdigest()
+    with _malformed_lock:
+        fresh = key not in _malformed_diagnosed
+        if len(_malformed_diagnosed) >= _MALFORMED_LIMIT:
+            _malformed_diagnosed.clear()
+        _malformed_diagnosed.add(key)
+    if fresh:
+        logger.warning(
+            "Dependency-map domain %s: %s; hidden from restricted callers",
+            label,
+            reason,
+        )
+    return None
+
+
 def document_participants(
     content: str,
     domains_entry: Optional[Mapping[str, Any]],
     *,
     name: str = "",
+    domains_unparsable: bool = False,
 ) -> Optional[FrozenSet[str]]:
     """Membership of one domain: frontmatter ``participating_repos``, else
-    ``_domains.json``, else the roles table; None when none names one or a
-    present value is malformed (one WARNING per document version)."""
-    frontmatter = frontmatter_of(content) if content else None
+    ``_domains.json``, else the roles table. None (one WARNING per document
+    version) when none names one, a present value is malformed, the
+    frontmatter block does not parse, or ``_domains.json`` does not parse and
+    the frontmatter names no members: never a fallback past a broken source."""
+    label = name or str((domains_entry or {}).get("name") or "")
     try:
-        members = participants_from(frontmatter, domains_entry)
-    except MalformedMembership as exc:
-        label = name or str(
-            (domains_entry or {}).get("name") or (frontmatter or {}).get("domain")
+        frontmatter = parse_frontmatter_strict(content) if content else None
+    except (yaml.YAMLError, ValueError):
+        return _deny_membership(
+            label, content, domains_entry, "frontmatter does not parse"
         )
-        key = hashlib.sha256(
-            f"{label}\n{content}\n{domains_entry!r}".encode("utf-8")
-        ).hexdigest()
-        with _malformed_lock:
-            fresh = key not in _malformed_diagnosed
-            if len(_malformed_diagnosed) >= _MALFORMED_LIMIT:
-                _malformed_diagnosed.clear()
-            _malformed_diagnosed.add(key)
-        if fresh:
-            logger.warning(
-                "Dependency-map domain %s has a malformed participating_repos "
-                "(%s); hidden from restricted callers",
-                label,
-                exc,
-            )
-        return None
+    entry = None if domains_unparsable else domains_entry
+    try:
+        members = participants_from(frontmatter, entry)
+    except MalformedMembership as exc:
+        return _deny_membership(
+            label, content, entry, f"malformed participating_repos ({exc})"
+        )
     if members:
         return members
+    if domains_unparsable:
+        return _deny_membership(label, content, None, "_domains.json does not parse")
     roles = roles_participants(content.splitlines()) if content else frozenset()
     return roles or None
 
 
+def read_domain_entries(
+    dep_map_dir: Path,
+) -> Tuple[Tuple[Mapping[str, Any], ...], bool]:
+    """The ``_domains.json`` entries, and True when the file is present but
+    does not parse (unreadable, invalid JSON, not a list, or an entry that is
+    not an object): then no entry is trusted."""
+    path = Path(dep_map_dir) / DOMAINS_JSON
+    if not path.is_file():
+        return (), False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return (), True
+    if not isinstance(data, list) or not all(isinstance(e, dict) for e in data):
+        return (), True
+    return tuple(data), False
+
+
 def build_depmap_model(dep_map_dir: Path, fingerprint: str) -> DepMapModel:
     """Parse the dependency-map directory (reads every document once)."""
-    raw_entries = tuple(load_domains_json(dep_map_dir))
-    entries = {
-        str(d["name"]): d for d in raw_entries if isinstance(d, dict) and d.get("name")
-    }
+    raw_entries, domains_unparsable = read_domain_entries(dep_map_dir)
+    entries = {str(d["name"]): d for d in raw_entries if d.get("name")}
     files: Dict[str, Path] = {}
     for p in dep_map_dir.glob("*.md"):
         if p.name.startswith("_"):
@@ -512,7 +546,12 @@ def build_depmap_model(dep_map_dir: Path, fingerprint: str) -> DepMapModel:
         key = normalize_name(name)
         display[key] = name
         content = files[name].read_text(encoding="utf-8") if name in files else ""
-        members = document_participants(content, entries.get(name), name=name)
+        members = document_participants(
+            content,
+            entries.get(name),
+            name=name,
+            domains_unparsable=domains_unparsable,
+        )
         if members:
             lowered = frozenset(m.lower() for m in members)
             participants[key] = lowered

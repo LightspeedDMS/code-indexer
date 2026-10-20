@@ -477,17 +477,18 @@ def test_directory_tree_file_limit_counts_visible_entries_only(
     assert memories["hidden_count"] == 1
     assert len(memories["children"]) == 1
 
-    # Six visible dependency-map files: two always allowed, the index and
-    # three domains alpha participates in.
+    # Five visible dependency-map files: two always allowed, the index and
+    # two domains alpha participates in (reports' frontmatter does not
+    # parse, so it is hidden).
     dep_map = next(c for c in root["children"] if c["name"] == "dependency-map")
-    assert dep_map["hidden_count"] == 5
+    assert dep_map["hidden_count"] == 4
 
     more_markers = [
         line.rsplit("-- ", 1)[-1]
         for line in data["tree_string"].splitlines()
         if "more files]" in line
     ]
-    assert sorted(more_markers) == ["[+1 more files]", "[+5 more files]"]
+    assert sorted(more_markers) == ["[+1 more files]", "[+4 more files]"]
 
 
 def test_directory_tree_subdirectory_is_judged_by_full_path(

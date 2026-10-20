@@ -16,8 +16,12 @@ import threading
 from pathlib import Path
 from typing import Callable, Dict, FrozenSet, Optional, Set, Tuple
 
-from ..dep_map_file_utils import load_domains_json
-from .depmap_model import DepMapModel, document_participants, load_depmap_model
+from .depmap_model import (
+    DepMapModel,
+    document_participants,
+    load_depmap_model,
+    read_domain_entries,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +38,11 @@ def domain_participants(dep_map_dir: Path, domain: str) -> Optional[FrozenSet[st
         raise ValueError(f"not a domain name: {domain!r}")
     md_file = Path(dep_map_dir) / f"{domain}.md"
     content = md_file.read_text(encoding="utf-8") if md_file.is_file() else ""
-    entry = next(
-        (d for d in load_domains_json(Path(dep_map_dir)) if d.get("name") == domain),
-        None,
+    entries, unparsable = read_domain_entries(Path(dep_map_dir))
+    entry = next((d for d in entries if d.get("name") == domain), None)
+    return document_participants(
+        content, entry, name=domain, domains_unparsable=unparsable
     )
-    return document_participants(content, entry)
 
 
 def _fingerprint(path: Path) -> Tuple[int, int, int]:

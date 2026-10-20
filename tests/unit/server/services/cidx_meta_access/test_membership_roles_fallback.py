@@ -162,8 +162,19 @@ MALFORMED_YAML = [
     f"participating_repos: [{ALPHA}, [nested]]",
     'participating_repos: ["  "]',
     'participating_repos: ""',
+    "participating_repos: [123]",
 ]
-MALFORMED_JSON: List[object] = [None, CANARY, {"a": "b"}, [ALPHA, ["x"]], ["  "], ""]
+MALFORMED_JSON: List[object] = [
+    None,
+    CANARY,
+    {"a": "b"},
+    [ALPHA, ["x"]],
+    ["  "],
+    "",
+    [123],
+    [1.5],
+    [True],
+]
 
 
 def _probe_domain(fx: CidxMetaFixture, field: str, entry: object) -> None:
@@ -211,6 +222,41 @@ def test_malformed_membership_is_diagnosed(
         "malformed" in r.getMessage() and PROBE in r.getMessage()
         for r in caplog.records
     )
+
+
+UNTERMINATED = f"participating_repos: [{ALPHA}"
+
+
+@pytest.mark.parametrize("entry", [[], [ALPHA]])
+def test_unparsable_frontmatter_never_falls_back(
+    fx: CidxMetaFixture, entry: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    _probe_domain(fx, UNTERMINATED, entry)
+    with caplog.at_level(logging.WARNING):
+        _assert_hidden(fx)
+    assert any(
+        "frontmatter" in r.getMessage() and PROBE in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_unparsable_domains_json_never_falls_back(
+    fx: CidxMetaFixture, caplog: pytest.LogCaptureFixture
+) -> None:
+    _probe_domain(fx, "domain_kind: probe", [])
+    (fx.dep_map_dir / "_domains.json").write_text("[{not json", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        _assert_hidden(fx)
+    assert any("_domains.json" in r.getMessage() for r in caplog.records)
+
+
+def test_frontmatter_membership_still_counts_when_domains_json_is_unparsable(
+    fx: CidxMetaFixture,
+) -> None:
+    _probe_domain(fx, f"participating_repos: [{ALPHA}]", [])
+    (fx.dep_map_dir / "_domains.json").write_text("[{not json", encoding="utf-8")
+    assert domain_participants(fx.dep_map_dir, PROBE) == {ALPHA}
+    assert _kind(fx, PROBE) is DecisionKind.TRANSFORM
 
 
 def test_case_differences_do_not_split_the_path_policy_from_the_model(

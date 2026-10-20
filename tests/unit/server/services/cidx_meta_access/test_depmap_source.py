@@ -62,7 +62,8 @@ def test_domains_json_lists_visible_domains_with_visible_participants(
     source = _restricted(fx)
     entries = source.load_domains_json()
     names = sorted(e["name"] for e in entries)
-    assert names == sorted(["payments", "ledger", "reports", AUDIT_DOMAIN])
+    # reports is hidden: its frontmatter does not parse.
+    assert names == sorted(["payments", "ledger", AUDIT_DOMAIN])
     for entry in entries:
         assert set(entry) == {"name", "participating_repos"}
         assert entry["participating_repos"] == [ALPHA]

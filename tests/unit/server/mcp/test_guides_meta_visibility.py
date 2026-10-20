@@ -99,7 +99,8 @@ def _quick_reference(username: str) -> Dict[str, Any]:
 def test_quick_reference_counts_only_visible_domains(server: Any) -> None:
     restricted = _quick_reference(RESTRICTED_USER)
     admin = _quick_reference(ADMIN_USER)
-    assert "(4 domains)" in restricted["dependency_map"]
+    # reports is hidden: its frontmatter does not parse.
+    assert "(3 domains)" in restricted["dependency_map"]
     assert "(7 domains)" in admin["dependency_map"]
 
 

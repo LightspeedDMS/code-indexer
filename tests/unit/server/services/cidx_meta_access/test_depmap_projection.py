@@ -115,14 +115,14 @@ def test_index_counts_are_recomputed_per_user(fx: CidxMetaFixture) -> None:
     text = _text(projected)
 
     assert "repos_analyzed_count: 1" in text
-    assert "domains_count: 3" in text
+    # reports is hidden: its frontmatter does not parse.
+    assert "domains_count: 2" in text
     assert "| payments | Payments | 1 |" in text
     assert "| ledger | Ledger | 1 |" in text
+    assert "| reports |" not in text
     assert "| payments | ledger | alpha | Code-level | posts ledger entries |" in text
-    assert (
-        "**Summary**: 1 cross-domain edges across 3 domains. "
-        "1 standalone domains: reports."
-    ) in text
+    assert "**Summary**: 1 cross-domain edges across 2 domains.\n" in text + "\n"
+    assert "standalone" not in text
     assert f"| {ALPHA} | payments |" in text
     for hidden in (CANARY, GAMMA, "inventory"):
         assert hidden not in text
@@ -236,7 +236,7 @@ def test_request_projector_loads_the_model_once(tmp_path: Path) -> None:
     )
     index = read_lines(fx.dep_map_dir / "_index.md")
     before = projector.project(index, rel)
-    assert "domains_count: 3" in _text(before)
+    assert "domains_count: 2" in _text(before)
 
     ledger = fx.dep_map_dir / "ledger.md"
     ledger.write_text(
@@ -250,7 +250,7 @@ def test_request_projector_loads_the_model_once(tmp_path: Path) -> None:
     fresh = project_meta_document(
         index, rel, vis, dep_map_dir=fx.dep_map_dir, universe=AliasUniverse(fx.registry)
     )
-    assert "domains_count: 2" in _text(fresh)
+    assert "domains_count: 1" in _text(fresh)
 
 
 def test_unrestricted_request_projector_does_no_io(
@@ -294,7 +294,9 @@ def test_malformed_structures_are_removed_for_restricted_view(
 
     closing = reports.index("---", 1)
     assert projected_reports[: closing + 1] == [None] * (closing + 1)
-    assert f"{ALPHA} renders reports." in _text(projected_reports)
+    # reports is a hidden domain (its frontmatter does not parse).
+    assert f"{ALPHA} renders [restricted domain]." in _text(projected_reports)
+    assert "reports" not in _text(projected_reports)
 
     ledger_warnings = [r for r in caplog.records if "ledger.md" in r.getMessage()]
     reports_warnings = [r for r in caplog.records if "reports.md" in r.getMessage()]

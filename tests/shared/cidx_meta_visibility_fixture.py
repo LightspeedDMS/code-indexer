@@ -10,7 +10,8 @@ Builds a REAL cidx-meta directory on disk and REAL group rows:
   standalone ``beta-team-sample`` domain, a ``gamma`` domain, a ``ledger``
   domain whose frontmatter also lists the short hidden alias ``zed`` (so
   ``_index.md``'s ``repos_analyzed`` carries it too), a visible domain
-  with a malformed table, a visible domain with unparseable frontmatter, a
+  with a malformed table, a ``reports`` domain whose frontmatter does not
+  parse (hidden from restricted callers whatever ``_domains.json`` says), a
   legacy domain without ``participating_repos`` (absent from
   ``_domains.json``), and an ``_index.md`` produced by the real
   ``IndexRegenerator``;

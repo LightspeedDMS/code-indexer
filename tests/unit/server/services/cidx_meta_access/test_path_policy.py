@@ -196,9 +196,10 @@ def test_memory_visibility_fn_applies_scope_rule_and_fails_closed(
 def test_membership_comes_from_frontmatter_then_domains_json(
     fx: CidxMetaFixture,
 ) -> None:
-    # reports.md has unparseable frontmatter membership; _domains.json supplies it.
+    # reports.md's frontmatter does not parse: membership is unknown and
+    # never taken from _domains.json or the roles table.
     assert domain_participants(fx.dep_map_dir, "payments") == {ALPHA, CANARY}
-    assert domain_participants(fx.dep_map_dir, "reports") == {ALPHA}
+    assert domain_participants(fx.dep_map_dir, "reports") is None
     assert domain_participants(fx.dep_map_dir, "legacy") is None
     assert domain_participants(fx.dep_map_dir, "absent") is None
 

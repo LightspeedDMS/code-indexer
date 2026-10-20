@@ -130,6 +130,8 @@ def test_a_backslash_continued_quoted_value_never_reveals_a_hidden_name() -> Non
         "title: !!binary " + base64.b64encode(f"{HIDDEN} owns it".encode()).decode(),
         "category: !!binary " + base64.b64encode(HIDDEN.encode()).decode(),
         "category: !custom value",
+        # Harmless payload: only the explicit-tag rule removes this block.
+        "title: !!str harmless",
     ],
 )
 def test_an_explicitly_tagged_frontmatter_is_removed_whole(tagged: str) -> None:

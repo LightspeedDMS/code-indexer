@@ -143,7 +143,6 @@ VISIBLE = {
     "dependency-map/_index.md",
     "dependency-map/payments.md",
     "dependency-map/ledger.md",
-    "dependency-map/reports.md",
     "dependency-map/_dep_types.md",
     "dependency-map/_analysis_guidelines.md",
     "xray-patterns/__any__/p.yaml",

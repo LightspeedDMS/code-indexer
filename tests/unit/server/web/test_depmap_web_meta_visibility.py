@@ -138,8 +138,9 @@ def test_graph_has_no_hidden_node_and_no_edge_of_hidden_rows(web: Web) -> None:
     assert response.status_code == 200
     data = response.json()
     _assert_hidden_absent(json.dumps(data))
+    # reports is hidden: its frontmatter does not parse.
     assert sorted(n["id"] for n in data["nodes"]) == sorted(
-        ["payments", "ledger", "reports", AUDIT_DOMAIN]
+        ["payments", "ledger", AUDIT_DOMAIN]
     )
     assert [(e["source"], e["target"]) for e in data["edges"]] == [
         ("payments", "ledger")
