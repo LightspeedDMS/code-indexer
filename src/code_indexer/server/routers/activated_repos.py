@@ -957,6 +957,12 @@ async def switch_branch(
         )
 
     await _require_activation_access(user_alias, current_user)
+    await repo_access_http.refuse_catalog_history_async(
+        repo_access_http.module_app_access_filtering_service(),
+        _get_activated_repo_manager(),
+        current_user.username,
+        user_alias,
+    )
     try:
         # Get managers
         activated_manager = _get_activated_repo_manager()
@@ -1054,6 +1060,12 @@ async def list_branches(
         HTTPException 500: Failed to list branches
     """
     await _require_activation_access(user_alias, current_user)
+    await repo_access_http.refuse_catalog_history_async(
+        repo_access_http.module_app_access_filtering_service(),
+        _get_activated_repo_manager(),
+        current_user.username,
+        user_alias,
+    )
     try:
         # Get activated repo manager
         activated_manager = _get_activated_repo_manager()

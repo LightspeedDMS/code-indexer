@@ -1,11 +1,10 @@
 """History of the internal catalog is admin-only on every MCP git tool.
 
-Real git repositories (the catalog's history includes a since-deleted
-description of an ungranted repository), a real alias registry, a real
-global-repos registry, a real ActivatedRepoManager holding an activation
-of the catalog under a custom alias, and the real group store. The lock-in
-test is parameterised over TOOL_REGISTRY, so a git tool added later is
-covered automatically. Neutral names only.
+Real git repositories with a few neutral commits, a real alias registry, a
+real global-repos registry, a real ActivatedRepoManager holding an
+activation of the catalog under a custom alias, and the real group store.
+The lock-in test is parameterised over TOOL_REGISTRY, so a git tool added
+later is covered automatically. Neutral names only.
 """
 
 from __future__ import annotations
@@ -123,7 +122,7 @@ def _build_server(
     catalog = tmp_path / "sources" / "cidx-meta"
     _make_repo(
         catalog,
-        {f"{ALPHA}.md": f"# {ALPHA}\n", f"{CANARY}.md": f"# {CANARY} internals\n"},
+        {f"{ALPHA}.md": f"# {ALPHA}\n", f"{CANARY}.md": f"# {CANARY} notes\n"},
         delete_after=[f"{CANARY}.md"],
     )
     alpha = tmp_path / "sources" / ALPHA

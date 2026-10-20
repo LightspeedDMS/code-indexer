@@ -510,6 +510,12 @@ def register_repos_v2_routes(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid repository ID format",
             )
+        repo_access_http.refuse_catalog_history(
+            getattr(app.state, "access_filtering_service", None),
+            activated_repo_manager,
+            current_user.username,
+            cleaned_repo_id,
+        )
 
         try:
             # Check if repository exists and user has access (following existing pattern)

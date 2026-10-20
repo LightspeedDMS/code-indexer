@@ -131,11 +131,15 @@ class TestXrayExploreHandlerOmni:
         assert len(result["job_ids"]) == 2
 
     async def test_empty_array_alias_returns_alias_required_error(self) -> None:
-        """Empty list [] returns alias_required error, not crash (Bug 1)."""
+        """Empty list [] is refused with a structured error, not a crash
+        (Bug 1). The catalog gate refuses an empty alias list first for a
+        restricted caller (this fixture wires no access service), otherwise
+        the door's own alias validation does."""
         result = await self._run_with_aliases([], {})
-        assert result.get("error") == "alias_required", (
-            f"Expected alias_required for empty list, got: {result}"
+        assert result.get("error") in ("alias_required", "xray_not_available"), (
+            f"Expected a structured refusal for empty list, got: {result}"
         )
+        assert "job_id" not in result and "job_ids" not in result
 
     async def test_list_with_unknown_repo_returns_errors_entry(self) -> None:
         """Unknown alias in list produces repository_not_found error entry."""

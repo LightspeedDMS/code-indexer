@@ -718,6 +718,9 @@ def register_repo_routes(
             HTTPException: If repository not found or branch switch fails
         """
         _enforce_activation_access(current_user.username, user_alias)
+        repo_access_http.refuse_catalog_history(
+            _access_service(), activated_repo_manager, current_user.username, user_alias
+        )
         try:
             # Get repository path and validate it's not a composite repository
             repo_path = activated_repo_manager.get_activated_repo_path(
@@ -1203,6 +1206,9 @@ def register_repo_routes(
             HTTPException: If repository not found or branch listing fails
         """
         _enforce_activation_access(current_user.username, user_alias)
+        repo_access_http.refuse_catalog_history(
+            _access_service(), activated_repo_manager, current_user.username, user_alias
+        )
         try:
             result = activated_repo_manager.list_repository_branches(
                 username=current_user.username,
@@ -1319,6 +1325,9 @@ def register_repo_routes(
         # Reading a golden repository requires group access to it, checked
         # before its existence is looked up.
         _enforce_repo_access(current_user.username, alias)
+        repo_access_http.refuse_golden_catalog_history(
+            _access_service(), current_user.username, alias
+        )
         try:
             # Check if golden repository exists
             if not golden_repo_manager.golden_repo_exists(alias):

@@ -256,6 +256,20 @@ def multi_repository_query(
         http_request.app.state, "access_filtering_service", None
     )
     _enforce_repo_access(access_filtering_service, user.username, request.repositories)
+    if request.search_type == "temporal":
+        from ..services.cidx_meta_access.history_policy import (
+            CatalogSurface,
+            golden_catalog_surface_refusal,
+        )
+
+        refusal = golden_catalog_surface_refusal(
+            CatalogSurface.TEMPORAL,
+            request.repositories,
+            user.username,
+            access_filtering_service,
+        )
+        if refusal is not None:
+            raise HTTPException(status_code=422, detail=refusal)
 
     # The SAME repository-count cap MCP omni search enforces (Bug #894,
     # multi_search_limits_config.omni_max_repos_per_search, read fresh so a

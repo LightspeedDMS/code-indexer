@@ -1,9 +1,9 @@
 """History of the internal catalog is admin-only on every REST git route.
 
-The real git router on a small FastAPI app, a real git repository for the
-catalog (its history includes a since-deleted description of an
-ungranted repository), a real ActivatedRepoManager holding activations of
-the catalog under a custom alias, and the real group store. The lock-in is
+The real git router on a small FastAPI app, a real git repository with a
+few neutral commits for the catalog, a real ActivatedRepoManager holding
+activations of the catalog under a custom alias, and the real group store.
+The lock-in is
 parameterised over the router's routes, so a route added later is covered
 automatically. Neutral names only.
 """
@@ -64,7 +64,7 @@ def _make_catalog(path: Path) -> None:
     path.mkdir(parents=True)
     _git(path, "init", "-q", "-b", "main")
     (path / f"{ALPHA}.md").write_text(f"# {ALPHA}\n")
-    (path / f"{CANARY}.md").write_text(f"# {CANARY} internals\n")
+    (path / f"{CANARY}.md").write_text(f"# {CANARY} notes\n")
     _git(path, "add", "-A")
     _git(path, "commit", "-q", "-m", "describe repositories")
     (path / f"{CANARY}.md").unlink()
@@ -228,7 +228,7 @@ def test_history_refusal_stands_on_its_own(server: SimpleNamespace) -> None:
     "suffix, query, expected",
     [
         ("blame", {"path": f"{ALPHA}.md"}, "Sample Author"),
-        ("cat", {"path": f"{CANARY}.md", "rev": "HEAD~1"}, f"{CANARY} internals"),
+        ("cat", {"path": f"{CANARY}.md", "rev": "HEAD~1"}, f"{CANARY} notes"),
         ("file-history", {"path": f"{CANARY}.md"}, "retire descriptions"),
     ],
 )

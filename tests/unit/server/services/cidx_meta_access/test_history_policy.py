@@ -7,7 +7,7 @@ store is a small in-memory stand-in of ActivatedRepoManager's lookup.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import pytest
 
@@ -148,20 +148,20 @@ def test_golden_door_judges_the_golden_name_only(fx: CidxMetaFixture) -> None:
             )
             is None
         )
-    other_inputs: List[Union[str, None, List[str]]] = [
-        f"{ALPHA}-global",
-        ALPHA,
-        "team-notes",
-        "",
-        None,
-        ["cidx-meta"],
-    ]
-    for other in other_inputs:
+    for other in (f"{ALPHA}-global", ALPHA, "team-notes"):
         assert (
             golden_catalog_surface_refusal(
                 CatalogSurface.XRAY, other, RESTRICTED_USER, fx.access_service
             )
             is None
+        )
+    unjudgeable: List[Any] = ["", None, ["cidx-meta"]]
+    for value in unjudgeable:
+        assert (
+            golden_catalog_surface_refusal(
+                CatalogSurface.XRAY, value, RESTRICTED_USER, fx.access_service
+            )
+            == CatalogSurface.XRAY.refusal
         )
     assert (
         golden_catalog_surface_refusal(
@@ -183,3 +183,114 @@ def test_temporal_refusal_is_a_request_rejection(
     assert str(raised.value) == CatalogSurface.TEMPORAL.refusal
     refuse_catalog_temporal("team-notes", ADMIN_USER, fx.access_service, activations)
     refuse_catalog_temporal("my-alpha", RESTRICTED_USER, fx.access_service, activations)
+
+
+# Shapes the gate cannot judge as one concrete repository: a collection is
+# refused when any element is; a pattern could expand to the catalog; any
+# other non-string or empty value is unjudgeable. All fail closed.
+_REFUSED_SHAPES: Dict[str, Any] = {
+    "list-with-catalog": [f"{ALPHA}-global", "cidx-meta-global"],
+    "tuple-with-catalog": (f"{ALPHA}-global", "cidx-meta"),
+    "nested-list-with-catalog": [[f"{ALPHA}-global", "cidx-meta-global"]],
+    "star": "*",
+    "prefix-glob": "cidx-*",
+    "question-glob": f"{ALPHA}?global",
+    "bracket-glob": "[ab]lpha-global",
+    "none": None,
+    "integer": 7,
+    "mapping": {},
+    "empty-string": "",
+    "empty-list": [],
+}
+_GRANTED_SHAPES: Dict[str, Any] = {
+    "list-of-granted": [f"{ALPHA}-global"],
+    "tuple-of-granted": (f"{ALPHA}-global",),
+}
+
+
+@pytest.mark.parametrize("surface", list(CatalogSurface))
+@pytest.mark.parametrize("shape", sorted(_REFUSED_SHAPES))
+def test_unjudgeable_shapes_fail_closed_for_restricted_caller(
+    fx: CidxMetaFixture, activations: _Activations, surface: CatalogSurface, shape: str
+) -> None:
+    alias = _REFUSED_SHAPES[shape]
+    assert (
+        catalog_surface_refusal(
+            surface, alias, RESTRICTED_USER, fx.access_service, activations
+        )
+        == surface.refusal
+    )
+    assert (
+        golden_catalog_surface_refusal(
+            surface, alias, RESTRICTED_USER, fx.access_service
+        )
+        == surface.refusal
+    )
+
+
+@pytest.mark.parametrize("surface", list(CatalogSurface))
+@pytest.mark.parametrize("shape", sorted(_GRANTED_SHAPES))
+def test_collections_of_granted_repositories_are_not_refused(
+    fx: CidxMetaFixture, activations: _Activations, surface: CatalogSurface, shape: str
+) -> None:
+    alias = _GRANTED_SHAPES[shape]
+    assert (
+        catalog_surface_refusal(
+            surface, alias, RESTRICTED_USER, fx.access_service, activations
+        )
+        is None
+    )
+    assert (
+        golden_catalog_surface_refusal(
+            surface, alias, RESTRICTED_USER, fx.access_service
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("surface", list(CatalogSurface))
+@pytest.mark.parametrize("shape", sorted(_REFUSED_SHAPES))
+def test_admin_is_never_refused_whatever_the_shape(
+    fx: CidxMetaFixture, activations: _Activations, surface: CatalogSurface, shape: str
+) -> None:
+    alias = _REFUSED_SHAPES[shape]
+    assert (
+        catalog_surface_refusal(
+            surface, alias, ADMIN_USER, fx.access_service, activations
+        )
+        is None
+    )
+    assert (
+        golden_catalog_surface_refusal(surface, alias, ADMIN_USER, fx.access_service)
+        is None
+    )
+
+
+@pytest.mark.parametrize("alias", ["*", None])
+def test_temporal_rejects_unjudgeable_shapes(
+    fx: CidxMetaFixture, activations: _Activations, alias: Any
+) -> None:
+    from code_indexer.server.query.semantic_query_manager import SearchRequestError
+
+    with pytest.raises(SearchRequestError):
+        refuse_catalog_temporal(alias, RESTRICTED_USER, fx.access_service, activations)
+
+
+@pytest.mark.parametrize("alias", ["*", None, [f"{ALPHA}-global", "cidx-*"]])
+def test_xray_async_gate_refuses_unjudgeable_shapes(
+    fx: CidxMetaFixture, monkeypatch: pytest.MonkeyPatch, alias: Any
+) -> None:
+    import asyncio
+
+    from code_indexer.server.mcp.handlers.xray import _catalog_guard
+
+    monkeypatch.setattr(
+        _catalog_guard, "xray_access_service", lambda: fx.access_service
+    )
+    refusal = asyncio.run(
+        _catalog_guard.catalog_xray_refusal_async(alias, RESTRICTED_USER)
+    )
+    assert refusal is not None
+    assert refusal["message"] == CatalogSurface.XRAY.refusal
+    admin = asyncio.run(_catalog_guard.catalog_xray_refusal_async(alias, ADMIN_USER))
+    assert admin is None

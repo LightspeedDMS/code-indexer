@@ -1,0 +1,165 @@
+"""Is the directory a request is served from one of the catalog's locations?
+
+Catalog identity is otherwise decided from names and activation metadata,
+while readers serve a resolved path. This module checks the resolved path
+against the catalog's real locations so that a disagreement (an alias
+pointer, or a clone, that is in fact the catalog) is treated as the catalog:
+
+- its mutable base clone (``get_cidx_meta_path``) and the target of the
+  ``cidx-meta-global`` alias pointer;
+- its versioned snapshots (``is_versioned_snapshot`` with the catalog as
+  namespace);
+- a clone whose local git remote points at one of the above.
+
+"Is the catalog" is the closed answer here: the caller is then refused the
+surface. A clone whose git config exists but cannot be read is therefore
+answered as the catalog.
+
+Cost per request: alias-pointer reads, ``realpath`` calls, and at most one
+small ``.git/config`` read per served directory; no fleet scan. Synchronous:
+async callers run it on a worker thread.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+from pathlib import Path, PurePosixPath
+from typing import Any, List, Optional, Tuple
+
+from code_indexer.global_repos.alias_manager import AliasManager
+
+from ...storage.shared.snapshot_paths import is_versioned_snapshot
+from ..cidx_meta_backup.paths import get_cidx_meta_path
+from ..constants import CIDX_META_REPO_GLOBAL, is_internal_meta_repo
+from .visibility import names_activation
+
+logger = logging.getLogger(__name__)
+
+_REMOTE_URL = re.compile(r"^\s*url\s*=\s*(.+?)\s*$")
+_MAX_GIT_CONFIG_BYTES = 65536
+_FILE_SCHEME = "file://"
+
+
+def golden_repos_dir_of(activated_repo_manager: Optional[Any]) -> Optional[str]:
+    """The golden repositories directory beside the manager's activations
+    (``<data_dir>/golden-repos``), or None without a manager."""
+    if activated_repo_manager is None:
+        return None
+    data_dir = getattr(activated_repo_manager, "data_dir", None)
+    return str(Path(data_dir) / "golden-repos") if data_dir else None
+
+
+def _aliases(golden_repos_dir: str) -> AliasManager:
+    return AliasManager(str(Path(golden_repos_dir) / "aliases"))
+
+
+def catalog_locations(golden_repos_dir: str) -> Tuple[str, ...]:
+    """Real paths of the catalog's base clone and current published copy."""
+    golden = Path(golden_repos_dir)
+    found = [os.path.realpath(get_cidx_meta_path(golden.parent.parent))]
+    target = _aliases(golden_repos_dir).read_alias(CIDX_META_REPO_GLOBAL)
+    if target:
+        found.append(os.path.realpath(target))
+    return tuple(found)
+
+
+def _is_catalog_snapshot(real: str) -> bool:
+    candidate = PurePosixPath(real)
+    for path in (candidate, *candidate.parents):
+        if is_versioned_snapshot(str(path)) and is_internal_meta_repo(path.parent.name):
+            return True
+    return False
+
+
+def _is_location(real: str, locations: Tuple[str, ...]) -> bool:
+    for location in locations:
+        if real == location or real.startswith(location + os.sep):
+            return True
+    return _is_catalog_snapshot(real)
+
+
+def _local_remote_paths(directory: str) -> Optional[List[str]]:
+    """Local paths the clone's git remotes point at ([] when it is not a
+    clone); None when its git config exists but cannot be read."""
+    config = Path(directory) / ".git" / "config"
+    try:
+        with open(config, "rb") as handle:
+            raw = handle.read(_MAX_GIT_CONFIG_BYTES)
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    except OSError as exc:
+        logger.warning(
+            "Git config of a served repository unreadable (%s); answering it "
+            "as the catalog",
+            type(exc).__name__,
+        )
+        return None
+    paths = []
+    for line in raw.decode("utf-8", "replace").splitlines():
+        match = _REMOTE_URL.match(line)
+        if not match:
+            continue
+        url = match.group(1)
+        if url.startswith(_FILE_SCHEME):
+            url = url[len(_FILE_SCHEME) :]
+        if url.startswith("/"):
+            paths.append(url)
+    return paths
+
+
+def path_is_catalog_location(path: str, golden_repos_dir: str) -> bool:
+    """True when *path* is the catalog, one of its snapshots, or a clone of
+    either (or a clone whose remotes cannot be read)."""
+    locations = catalog_locations(golden_repos_dir)
+    real = os.path.realpath(path)
+    if _is_location(real, locations):
+        return True
+    remotes = _local_remote_paths(real)
+    if remotes is None:
+        return True
+    return any(_is_location(os.path.realpath(url), locations) for url in remotes)
+
+
+def request_served_paths(
+    alias: str,
+    username: str,
+    activated_repo_manager: Optional[Any],
+    golden_repos_dir: str,
+) -> List[str]:
+    """Every directory a door may serve for *alias*: the caller's activation
+    with that name (when it exists) and the alias pointer targets of the
+    alias and its ``-global`` form. A path-shaped alias names none."""
+    if not names_activation(alias) and not alias.endswith("-global"):
+        return []
+    paths: List[str] = []
+    if activated_repo_manager is not None and names_activation(alias):
+        activated = activated_repo_manager.get_activated_repo_path(username, alias)
+        if activated and os.path.isdir(activated):
+            paths.append(str(activated))
+    names = [alias] if alias.endswith("-global") else [alias, f"{alias}-global"]
+    aliases = _aliases(golden_repos_dir)
+    for name in names:
+        target = aliases.read_alias(name)
+        if target:
+            paths.append(target)
+    return paths
+
+
+def alias_serves_catalog_path(
+    alias: str,
+    username: str,
+    activated_repo_manager: Optional[Any],
+    golden_repos_dir: Optional[str],
+) -> bool:
+    """True when any directory a door may serve for *alias* is a catalog
+    location. Without a golden repositories directory nothing is checked."""
+    if not golden_repos_dir:
+        return False
+    return any(
+        path_is_catalog_location(path, golden_repos_dir)
+        for path in request_served_paths(
+            alias, username, activated_repo_manager, golden_repos_dir
+        )
+    )

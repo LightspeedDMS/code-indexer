@@ -20,7 +20,8 @@ from typing import TYPE_CHECKING, Any, Optional
 from ...cache.handle_binding import bind_handles, handle_binding
 from ...cache.payload_cache import CacheNotFoundError
 from .catalog_requests import is_catalog_request
-from .visibility import resolve_meta_visibility
+from .served_identity import alias_serves_catalog_path, golden_repos_dir_of
+from .visibility import resolve_meta_visibility, unrestricted_caller
 
 if TYPE_CHECKING:
     from ..access_filtering_service import AccessFilteringService
@@ -42,6 +43,23 @@ def _may_serve_catalog(
     return is_catalog_request(aliases, username, activated_repo_manager)
 
 
+def _serves_catalog_path(
+    aliases: Any, username: str, activated_repo_manager: Optional[Any]
+) -> bool:
+    """True when a concrete alias in *aliases* is served from a catalog
+    location (whatever its name or activation record says)."""
+    names = aliases if isinstance(aliases, list) else [aliases]
+    golden_repos_dir = golden_repos_dir_of(activated_repo_manager)
+    return any(
+        isinstance(name, str)
+        and bool(name)
+        and alias_serves_catalog_path(
+            name, username, activated_repo_manager, golden_repos_dir
+        )
+        for name in names
+    )
+
+
 def bind_catalog_handles(
     aliases: Any,
     username: str,
@@ -49,9 +67,13 @@ def bind_catalog_handles(
     activated_repo_manager: Optional[Any],
 ) -> "Token[Optional[str]]":
     """Bind the handles this request mints to the caller's visibility when
-    *aliases* (one alias, a list, or a wildcard) may serve the catalog.
+    *aliases* (one alias, a list, or a wildcard) may serve the catalog; for
+    a restricted caller the directories served are checked too.
     Pass the returned token to ``reset_handle_binding`` when done."""
-    if not _may_serve_catalog(aliases, username, activated_repo_manager):
+    if not _may_serve_catalog(aliases, username, activated_repo_manager) and (
+        unrestricted_caller(username, access_service)
+        or not _serves_catalog_path(aliases, username, activated_repo_manager)
+    ):
         return bind_handles(None)
     return bind_handles(resolve_meta_visibility(username, access_service).vis_hash)
 

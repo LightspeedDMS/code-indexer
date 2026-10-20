@@ -204,22 +204,85 @@ def enforce_activated_history_access(
     restricted caller: 403 with a fixed text naming no content. The second
     check stands on its own, whatever the activation rule allows.
     Synchronous: call it from a sync route."""
+    service = module_app_access_filtering_service()
+    enforce_activated_repo_access(service, username, user_alias)
+    refuse_catalog_history(service, activated_repo_manager, username, user_alias)
+
+
+def _history_refused(refusal: Optional[str]) -> None:
+    if refusal is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
+
+
+def refuse_catalog_history(
+    access_filtering_service: Optional[AccessFilteringService],
+    activated_repo_manager: Optional[Any],
+    username: str,
+    alias: Any,
+) -> None:
+    """Refuse the catalog's history (commit and branch metadata, moving a
+    clone's HEAD) when *alias* -- a golden alias or the caller's activation,
+    judged by golden identity -- serves the catalog and the caller is
+    restricted. Synchronous: call it from a sync route.
+
+    Raises:
+        HTTPException 403: fixed text naming no repository content.
+    """
     from ..services.cidx_meta_access.history_policy import (
         CatalogSurface,
         catalog_surface_refusal,
     )
 
-    service = module_app_access_filtering_service()
-    enforce_activated_repo_access(service, username, user_alias)
-    refusal = catalog_surface_refusal(
-        CatalogSurface.GIT_HISTORY,
-        user_alias,
-        username,
-        service,
-        activated_repo_manager,
+    _history_refused(
+        catalog_surface_refusal(
+            CatalogSurface.GIT_HISTORY,
+            alias,
+            username,
+            access_filtering_service,
+            activated_repo_manager,
+        )
     )
-    if refusal is not None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
+
+
+async def refuse_catalog_history_async(
+    access_filtering_service: Optional[AccessFilteringService],
+    activated_repo_manager: Optional[Any],
+    username: str,
+    alias: Any,
+) -> None:
+    """refuse_catalog_history() on a worker thread, never on the event loop."""
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            refuse_catalog_history,
+            access_filtering_service,
+            activated_repo_manager,
+            username,
+            alias,
+        )
+    )
+
+
+def refuse_golden_catalog_history(
+    access_filtering_service: Optional[AccessFilteringService],
+    username: str,
+    alias: Any,
+) -> None:
+    """refuse_catalog_history() for a door that serves golden repositories
+    only. Synchronous: call it from a sync route.
+
+    Raises:
+        HTTPException 403: fixed text naming no repository content.
+    """
+    from ..services.cidx_meta_access.history_policy import (
+        CatalogSurface,
+        golden_catalog_surface_refusal,
+    )
+
+    _history_refused(
+        golden_catalog_surface_refusal(
+            CatalogSurface.GIT_HISTORY, alias, username, access_filtering_service
+        )
+    )
 
 
 async def enforce_activated_repo_access_async(
