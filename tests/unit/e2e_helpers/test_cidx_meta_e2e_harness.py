@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from tests.e2e.cidx_meta_doors import search_echo
 from tests.e2e.cidx_meta_tool_recipes import (
@@ -17,6 +17,7 @@ from tests.e2e.cidx_meta_tool_recipes import (
     schema_repository_tools,
 )
 from tests.e2e.cidx_meta_world import Reply, leaks, run_cleanup_steps
+from tests.e2e.log_audit_gate import is_allowlisted
 from tests.e2e.log_audit_claims import (
     LogClaim,
     LogWindow,
@@ -227,6 +228,63 @@ class TestRepositoryToolAudit:
             tool for tool, r in RECIPES.items() if r.same_as_admin and not r.expect
         )
         assert not unpinned, f"same_as_admin recipes without expect: {unpinned}"
+
+
+_GIT_CONFIG_STDERR = "stderr='fatal: not in a git directory\\n'"
+# (logger, exact full message, a different message from the same logger)
+EXACT_ALLOWLISTED: List[Tuple[str, str, str]] = [
+    (
+        "code_indexer.server.wiki.wiki_service",
+        "Failed to parse front matter, treating as plain content",
+        "Failed to parse front matter for /x/example.md: bad yaml",
+    ),
+    (
+        "code_indexer.services.temporal.temporal_fusion_dispatch",
+        "No temporal indexes available. Run cidx index --index-commits to "
+        "create temporal indexes.",
+        "Temporal embedder 'example' has no indexed collections.",
+    ),
+    (
+        "code_indexer.server.repositories.activated_repo_manager",
+        "Failed to set git config user.email: command='git config user.email "
+        f"cidx-default@example.com' exit_code=128 stdout='' {_GIT_CONFIG_STDERR}",
+        "Failed to set git config user.email: command='git config user.email "
+        "cidx-default@example.com' exit_code=1 stdout='' stderr='permission denied'",
+    ),
+    (
+        "code_indexer.server.repositories.activated_repo_manager",
+        "Failed to set git config user.name: command='git config user.name "
+        f"CIDX User' exit_code=128 stdout='' {_GIT_CONFIG_STDERR}",
+        "Failed to set git config user.email: command='git config user.name "
+        f"CIDX User' exit_code=128 stdout='' {_GIT_CONFIG_STDERR}",
+    ),
+    (
+        "code_indexer.services.git_aware_watch_handler",
+        "Git not available - proceeding with file-only monitoring",
+        "Git monitoring stopped unexpectedly",
+    ),
+    (
+        "code_indexer.daemon.watch_manager",
+        "Watch thread did not stop within 5 seconds",
+        "Watch thread did not stop within 50 seconds",
+    ),
+]
+
+
+class TestExactLogAllowlist:
+    def test_each_entry_allowlists_its_full_message_from_its_logger(self) -> None:
+        for source, message, _other in EXACT_ALLOWLISTED:
+            assert is_allowlisted({"source": source, "message": message}), message
+
+    def test_each_entry_rejects_other_messages_and_other_loggers(self) -> None:
+        for source, message, other in EXACT_ALLOWLISTED:
+            assert not is_allowlisted({"source": source, "message": other}), other
+            assert not is_allowlisted(
+                {"source": source, "message": f"{message} (extra)"}
+            ), message
+            assert not is_allowlisted(
+                {"source": "example.other_logger", "message": message}
+            ), message
 
 
 class TestCleanupSteps:

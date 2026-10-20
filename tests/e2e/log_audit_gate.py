@@ -29,9 +29,10 @@ flush_log_pipeline        : (client) -> None  -- full two-stage drain barrier
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, List, Sequence, cast
+from typing import Any, Callable, List, Sequence, Tuple, cast
 
 # ---------------------------------------------------------------------------
 # Allowlist: known-benign WARNING/ERROR patterns (minimal, explicitly reviewed)
@@ -480,6 +481,54 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     "Catalog document dependency-map/ledger.md: 2 malformed line(s) removed for restricted callers",
 ]
 
+# Exact entries: (logger, regex the WHOLE message must match).  Used for
+# diagnostics the catalog visibility suite (tests/e2e/cidx_meta_suite.py)
+# provokes off the request thread, which carry no correlation id and name no
+# resource of the test, so a test cannot claim them.
+LOG_AUDIT_EXACT_ALLOWLIST: List[Tuple[str, str]] = [
+    # Wiki doors render the fixture's deliberately unparsable "reports" domain.
+    (
+        "code_indexer.server.wiki.wiki_service",
+        r"Failed to parse front matter, treating as plain content",
+    ),
+    # mcp_search_temporal admin control: temporal query on a catalog with no
+    # temporal index (operator advice, correct).
+    (
+        "code_indexer.services.temporal.temporal_fusion_dispatch",
+        r"No temporal indexes available\. Run cidx index --index-commits to "
+        r"create temporal indexes\.",
+    ),
+    # test_catalog_activation_is_refused admin activation of the non-git
+    # catalog; pending dev bug: b9_activation_git_config_non_git
+    (
+        "code_indexer.server.repositories.activated_repo_manager",
+        r"Failed to set git config user\.(?P<key>email|name): command='git config "
+        r"user\.(?P=key) [^']+' exit_code=128 stdout='' "
+        r"stderr='fatal: not in a git directory\\n'",
+    ),
+    # Auto-watch on the non-git catalog clone (write-mode and activation
+    # scenarios); pending dev bug: b9_watch_git_unavailable_warning
+    (
+        "code_indexer.services.git_aware_watch_handler",
+        r"Git not available - proceeding with file-only monitoring",
+    ),
+    # Stopping that auto-watch (exit_write_mode, deactivation); pending dev
+    # bug: b9_watch_thread_stop_timeout
+    (
+        "code_indexer.daemon.watch_manager",
+        r"Watch thread did not stop within 5 seconds",
+    ),
+]
+
+
+def _exactly_allowlisted(entry: dict[str, Any]) -> bool:
+    source = entry.get("source")
+    message = str(entry.get("message") or "")
+    return any(
+        source == logger and re.fullmatch(pattern, message) is not None
+        for logger, pattern in LOG_AUDIT_EXACT_ALLOWLIST
+    )
+
 
 def is_allowlisted(entry: dict[str, Any], extra_allowlist: Sequence[str] = ()) -> bool:
     """Return True if the log entry's message matches any allowlist pattern.
@@ -495,6 +544,8 @@ def is_allowlisted(entry: dict[str, Any], extra_allowlist: Sequence[str] = ()) -
     Returns:
         True if the entry is known-benign (allowlisted), False otherwise.
     """
+    if _exactly_allowlisted(entry):
+        return True
     message = (entry.get("message") or "").lower()
     patterns = list(LOG_AUDIT_ALLOWLIST) + list(extra_allowlist)
     return any(pattern.lower() in message for pattern in patterns)

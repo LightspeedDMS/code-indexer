@@ -26,7 +26,7 @@ import secrets
 import subprocess
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
     Any,
@@ -67,6 +67,8 @@ INTERNAL_FILE = ".code-indexer/config.json"
 
 JOB_TIMEOUT_SECONDS = 300.0
 JOB_POLL_SECONDS = 1.0
+# The server defers a catalog refresh by 30 s (CidxMetaRefreshDebouncer).
+CATALOG_DEBOUNCE_GRACE_SECONDS = 45.0
 INDEX_READY_TIMEOUT_SECONDS = 240.0
 INDEX_READY_POLL_SECONDS = 2.0
 REPLY_SNIPPET = 600
@@ -569,11 +571,20 @@ def _delete_group(ledger: WorldLedger, group_id: str) -> None:
 
 
 def _restore_and_refresh(ledger: WorldLedger, snapshot: Dict[str, bytes]) -> None:
-    # Removing a repository refreshes the catalog on its own; never submit a
-    # second refresh while that one runs.
-    wait_for_idle_catalog_refreshes(ledger.client, ledger.admin)
+    # Removing a repository refreshes the catalog on its own, deferred by the
+    # server's debounce: a refresh starting after the restore publishes it.
+    # Only when none comes within the debounce window is one submitted, so a
+    # second refresh is never submitted while one runs.
+    client, admin = ledger.client, ledger.admin
+    wait_for_idle_catalog_refreshes(client, admin)
+    restored_at = datetime.now(timezone.utc)
     restore_catalog(ledger.catalog_root, snapshot)
-    refresh_catalog(ledger.client, ledger.admin)
+    if not _catalog_refreshed_after(
+        client, admin, restored_at, CATALOG_DEBOUNCE_GRACE_SECONDS
+    ):
+        wait_for_idle_catalog_refreshes(client, admin)
+        refresh_catalog(client, admin)
+    wait_for_idle_catalog_refreshes(client, admin)
 
 
 def cleanup_steps(ledger: WorldLedger) -> List[CleanupStep]:
@@ -636,18 +647,26 @@ def _catalog_last_refresh(client: httpx.Client, admin: HeaderSource) -> datetime
     return datetime.fromisoformat(raw)
 
 
+def _catalog_refreshed_after(
+    client: httpx.Client, admin: HeaderSource, since: datetime, within: float
+) -> bool:
+    """Whether the catalog's last refresh passes *since* within *within* s."""
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        if _catalog_last_refresh(client, admin) > since:
+            return True
+        time.sleep(JOB_POLL_SECONDS)
+    return False
+
+
 def wait_for_catalog_refresh_after(
     client: httpx.Client, admin: HeaderSource, since: datetime
 ) -> None:
     """Wait until the catalog was refreshed after *since* (the refresh a
     catalog write starts, possibly deferred) and no refresh is running."""
-    deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if _catalog_last_refresh(client, admin) > since:
-            wait_for_idle_catalog_refreshes(client, admin)
-            return
-        time.sleep(JOB_POLL_SECONDS)
-    raise TimeoutError(f"catalog not refreshed after {since.isoformat()}")
+    if not _catalog_refreshed_after(client, admin, since, JOB_TIMEOUT_SECONDS):
+        raise TimeoutError(f"catalog not refreshed after {since.isoformat()}")
+    wait_for_idle_catalog_refreshes(client, admin)
 
 
 def web_session(world: CatalogWorld, username: str, password: str) -> httpx.Client:
