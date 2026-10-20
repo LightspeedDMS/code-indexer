@@ -161,7 +161,7 @@ def _query_for(route: APIRoute) -> Dict[str, Any]:
     return {
         p.name: f"{ALPHA}.md" if p.name == "path" else "HEAD"
         for p in route.dependant.query_params
-        if p.required
+        if p.field_info.is_required()
     }
 
 

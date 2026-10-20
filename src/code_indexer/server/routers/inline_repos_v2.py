@@ -528,6 +528,7 @@ def register_repos_v2_routes(
             # Check if repository exists and user has access (following existing pattern)
             repo_found = False
             repo_path = None
+            selected = cleaned_repo_id
 
             # Look for activated repository
             if activated_repo_manager:
@@ -547,6 +548,7 @@ def register_repos_v2_routes(
                             ),
                         )
                         repo_found = True
+                        selected = repo["user_alias"]
                         # Construct path from activated_repos_dir + username + user_alias
                         repo_path = (
                             Path(activated_repo_manager.activated_repos_dir)
@@ -572,6 +574,13 @@ def register_repos_v2_routes(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Repository '{cleaned_repo_id}' not found or not accessible",
                 )
+            repo_access_http.refuse_served_catalog_history(
+                app.state,
+                activated_repo_manager,
+                current_user.username,
+                selected,
+                repo_path,
+            )
 
             # Validate it's not a composite repository
             CompositeRepoValidator.check_operation(repo_path, "branch_list")

@@ -262,13 +262,33 @@ async def refuse_catalog_history_async(
     )
 
 
-def refuse_golden_catalog_history(
-    access_filtering_service: Optional[AccessFilteringService],
+async def enforce_own_activation_async(
     username: str,
-    alias: Any,
+    user_alias: str,
+    activated_repo_manager: Optional[Any],
+    not_found_detail: str,
 ) -> None:
+    """enforce_activated_repo_access_async() with the module app's access
+    service, answering 404 *not_found_detail*; with *activated_repo_manager*
+    the catalog's history is then refused too (403, fixed text)."""
+    service = module_app_access_filtering_service()
+    await enforce_activated_repo_access_async(
+        service,
+        username,
+        user_alias,
+        refusal=HTTPException(status_code=404, detail=not_found_detail),
+    )
+    if activated_repo_manager is not None:
+        await refuse_catalog_history_async(
+            service, activated_repo_manager, username, user_alias
+        )
+
+
+def refuse_golden_catalog_history(state: Any, username: str, alias: Any) -> None:
     """refuse_catalog_history() for a door that serves golden repositories
-    only. Synchronous: call it from a sync route.
+    only, with the access service and golden directory of the app *state*
+    (alias pointer targets are checked too). Synchronous: call it from a
+    sync route.
 
     Raises:
         HTTPException 403: fixed text naming no repository content.
@@ -277,10 +297,47 @@ def refuse_golden_catalog_history(
         CatalogSurface,
         golden_catalog_surface_refusal,
     )
+    from ..services.cidx_meta_access.served_identity import state_golden_repos_dir
 
     _history_refused(
         golden_catalog_surface_refusal(
-            CatalogSurface.GIT_HISTORY, alias, username, access_filtering_service
+            CatalogSurface.GIT_HISTORY,
+            alias,
+            username,
+            getattr(state, "access_filtering_service", None),
+            state_golden_repos_dir(state),
+        )
+    )
+
+
+def refuse_served_catalog_history(
+    state: Any,
+    activated_repo_manager: Optional[Any],
+    username: str,
+    alias: str,
+    served_path: Any,
+) -> None:
+    """refuse_catalog_history() for the repository a door actually selected
+    (*alias*), then for the directory it serves. Synchronous.
+
+    Raises:
+        HTTPException 403: fixed text naming no repository content.
+    """
+    from ..services.cidx_meta_access.history_policy import (
+        CatalogSurface,
+        served_catalog_surface_refusal,
+    )
+    from ..services.cidx_meta_access.served_identity import state_golden_repos_dir
+
+    service = getattr(state, "access_filtering_service", None)
+    refuse_catalog_history(service, activated_repo_manager, username, alias)
+    _history_refused(
+        served_catalog_surface_refusal(
+            CatalogSurface.GIT_HISTORY,
+            str(served_path),
+            username,
+            service,
+            state_golden_repos_dir(state),
         )
     )
 

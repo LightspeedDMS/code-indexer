@@ -9,7 +9,7 @@ inputSchema:
   properties:
     handle:
       type: string
-      description: UUID4 cache handle returned from search_code results
+      description: Cache handle returned from search results (a UUID4 that may carry a suffix); pass it back exactly as returned
     page:
       type: integer
       description: Page number (0-indexed). Defaults to 0 for first page.

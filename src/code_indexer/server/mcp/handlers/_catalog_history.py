@@ -50,3 +50,12 @@ def guard_catalog_history(
         return handler(args, user, *extra, **kw)
 
     return guarded
+
+
+def guard_branch_tools(registry: Dict[str, Any]) -> None:
+    """Wrap the registered branch tools (switch_branch names the caller's
+    activation in ``user_alias``) with ``guard_catalog_history``."""
+    registry["switch_branch"] = guard_catalog_history(
+        registry["switch_branch"], alias_param="user_alias"
+    )
+    registry["get_branches"] = guard_catalog_history(registry["get_branches"])

@@ -38,7 +38,6 @@ from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
 
 from . import _utils
-from ._catalog_history import guard_catalog_history
 from ._utils import (
     _admin_role_first,
     _admin_role_required_response,
@@ -2355,10 +2354,8 @@ def _register(registry: dict) -> None:
     registry["deactivate_repository"] = deactivate_repository
     registry["repository_status"] = handle_repository_status
     registry["sync_repository"] = sync_repository
-    registry["switch_branch"] = guard_catalog_history(
-        switch_branch, alias_param="user_alias"
-    )
-    registry["get_branches"] = guard_catalog_history(get_branches)
+    registry["switch_branch"] = switch_branch
+    registry["get_branches"] = get_branches
     registry["check_health"] = check_health
     registry["check_hnsw_health"] = check_hnsw_health
     registry["add_golden_repo"] = add_golden_repo

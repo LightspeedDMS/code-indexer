@@ -261,12 +261,16 @@ def multi_repository_query(
             CatalogSurface,
             golden_catalog_surface_refusal,
         )
+        from ..services.cidx_meta_access.served_identity import (
+            state_golden_repos_dir,
+        )
 
         refusal = golden_catalog_surface_refusal(
             CatalogSurface.TEMPORAL,
             request.repositories,
             user.username,
             access_filtering_service,
+            state_golden_repos_dir(http_request.app.state),
         )
         if refusal is not None:
             raise HTTPException(status_code=422, detail=refusal)

@@ -136,7 +136,12 @@ def server(module_tmp: Path, fx: CidxMetaFixture) -> Iterator[SimpleNamespace]:
     app.dependency_overrides[get_current_user] = lambda: current["user"]
     with TestClient(app, raise_server_exceptions=False) as client:
         yield SimpleNamespace(
-            client=client, current=current, arm=arm, golden=golden, data_dir=data_dir
+            client=client,
+            current=current,
+            arm=arm,
+            golden=golden,
+            data_dir=data_dir,
+            golden_catalog=catalog,
         )
 
 
@@ -365,3 +370,70 @@ def test_admin_lists_activated_catalog_clone_branches(
     response = _activated(activated_door, "GET", "branches", ADMIN_USER, None)
     assert response.status_code == 200, response.text
     assert "main" in response.json()["branches"]
+
+
+def test_golden_branches_of_an_alias_pointing_at_the_catalog_are_refused(
+    server: SimpleNamespace, tmp_path: Path
+) -> None:
+    from tests.unit.server.mcp.catalog_file_door_env import point_alias
+
+    golden = tmp_path / "golden-repos"
+    for alias in ("cidx-meta-global", f"{ALPHA}-global"):
+        point_alias(golden, alias, server.golden_catalog)
+    state = server.client.app.state
+    state.golden_repos_dir = str(golden)
+    try:
+        response = _get(server, f"/api/repos/golden/{ALPHA}/branches", RESTRICTED_USER)
+    finally:
+        del state.golden_repos_dir
+
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": GIT_REFUSAL}
+    assert server.golden.calls == []
+
+
+class _ActivationSource:
+    """The caller's activations as production's access service reads them
+    (no golden repository shares the activation aliases)."""
+
+    golden_repo_manager = SimpleNamespace(existing_golden_aliases=lambda names: [])
+
+    def __init__(self, arm: Any) -> None:
+        self._arm = arm
+
+    def list_activated_repositories(self, username: str) -> List[Dict[str, Any]]:
+        return list(self._arm.list_activated_repositories(username))
+
+
+def test_v2_branch_listing_judges_the_activation_it_selects(
+    server: SimpleNamespace, fx: CidxMetaFixture
+) -> None:
+    import shutil
+
+    from code_indexer.server.services.access_filtering_service import (
+        AccessFilteringService,
+    )
+
+    alias = "renamed-notes"
+    user_dir = server.data_dir / "activated-repos" / RESTRICTED_USER
+    _activate(server.data_dir, server.golden_catalog, RESTRICTED_USER, alias)
+    meta = user_dir / f"{alias}_metadata.json"
+    meta.write_text(
+        json.dumps({**json.loads(meta.read_text()), "golden_repo_alias": ALPHA})
+    )
+    state = server.client.app.state
+    original = state.access_filtering_service
+    state.access_filtering_service = AccessFilteringService(
+        fx.group_manager,
+        memories_dir=fx.root / "memories",
+        activated_repo_manager=_ActivationSource(server.arm),  # type: ignore[arg-type]
+    )
+    try:
+        response = _get(server, f"/api/repositories/{ALPHA}/branches", RESTRICTED_USER)
+    finally:
+        state.access_filtering_service = original
+        meta.unlink()
+        shutil.rmtree(user_dir / alias)
+
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": GIT_REFUSAL}

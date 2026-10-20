@@ -1327,7 +1327,7 @@ def register_repo_routes(
         # before its existence is looked up.
         _enforce_repo_access(current_user.username, alias)
         repo_access_http.refuse_golden_catalog_history(
-            _access_service(), current_user.username, alias
+            app.state, current_user.username, alias
         )
         try:
             # Check if golden repository exists

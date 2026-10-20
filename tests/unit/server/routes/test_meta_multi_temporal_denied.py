@@ -122,6 +122,23 @@ def test_temporal_multi_search_naming_the_catalog_is_rejected(
     assert door.writer.enqueued == []
 
 
+def test_temporal_multi_search_of_an_alias_pointing_at_the_catalog_is_rejected(
+    door: SimpleNamespace, tmp_path: Path
+) -> None:
+    from tests.unit.server.mcp.catalog_file_door_env import point_alias
+
+    golden = tmp_path / "golden-repos"
+    for alias in ("cidx-meta-global", f"{ALPHA}-global"):
+        point_alias(golden, alias, tmp_path / "cidx-meta")
+    door.client.app.state.golden_repos_dir = str(golden)
+
+    response = _post(door, RESTRICTED_USER, [f"{ALPHA}-global"])
+
+    assert response.status_code == 422, response.text
+    assert response.json() == {"detail": TEMPORAL_REFUSAL}
+    assert door.service.calls == [] and door.writer.enqueued == []
+
+
 def test_temporal_multi_search_of_granted_repositories_reaches_the_service(
     door: SimpleNamespace,
 ) -> None:

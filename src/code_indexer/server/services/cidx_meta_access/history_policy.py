@@ -34,7 +34,14 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from ..constants import is_internal_meta_repo
 from .catalog_requests import is_catalog_request
-from .served_identity import alias_serves_catalog_path, golden_repos_dir_of
+from .served_identity import (
+    CatalogLocations,
+    alias_serves_catalog_path,
+    golden_repos_dir_of,
+    path_is_catalog_location,
+    path_looks_like_catalog,
+    request_catalog_locations,
+)
 from .visibility import unrestricted_caller
 
 if TYPE_CHECKING:
@@ -57,11 +64,18 @@ class CatalogSurface(Enum):
         return str(self.value)
 
 
+def _request_locations(golden_repos_dir: Optional[str]) -> Optional[CatalogLocations]:
+    return request_catalog_locations(golden_repos_dir) if golden_repos_dir else None
+
+
 def _may_serve_catalog(
     alias: Any, is_catalog: Callable[[str], bool], depth: int = 0
 ) -> bool:
     """True unless *alias* is concrete repository names none of which
-    *is_catalog* judges to be the catalog."""
+    *is_catalog* judges to be the catalog: the one alias-shape rule of the
+    package. A list or tuple counts when it is empty, nested more than
+    ``_MAX_NESTING`` deep, or any element counts; a non-string, an empty
+    string or a wildcard pattern always counts."""
     if isinstance(alias, (list, tuple)):
         if not alias or depth >= _MAX_NESTING:
             return True
@@ -87,12 +101,13 @@ def catalog_surface_refusal(
     if unrestricted_caller(username, access_service):
         return None
     golden_repos_dir = golden_repos_dir_of(activated_repo_manager)
+    locations = _request_locations(golden_repos_dir)
 
     def is_catalog(name: str) -> bool:
         return is_catalog_request(
             name, username, activated_repo_manager
         ) or alias_serves_catalog_path(
-            name, username, activated_repo_manager, golden_repos_dir
+            name, username, activated_repo_manager, golden_repos_dir, locations
         )
 
     if _may_serve_catalog(alias, is_catalog):
@@ -126,13 +141,34 @@ def golden_catalog_surface_refusal(
     *golden_repos_dir* the alias pointer targets are checked as well."""
     if unrestricted_caller(username, access_service):
         return None
+    locations = _request_locations(golden_repos_dir)
 
     def is_catalog(name: str) -> bool:
         return golden_alias_is_catalog(name) or alias_serves_catalog_path(
-            name, username, None, golden_repos_dir
+            name, username, None, golden_repos_dir, locations
         )
 
     if _may_serve_catalog(alias, is_catalog):
+        return surface.refusal
+    return None
+
+
+def served_catalog_surface_refusal(
+    surface: CatalogSurface,
+    served_path: str,
+    username: str,
+    access_service: Optional["AccessFilteringService"],
+    golden_repos_dir: Optional[str],
+) -> Optional[str]:
+    """The refusal when a restricted caller is served *served_path* and it is
+    the catalog by its own shape or, with *golden_repos_dir*, one of the
+    catalog's locations; for a door that resolves the repository itself."""
+    if unrestricted_caller(username, access_service):
+        return None
+    if path_looks_like_catalog(served_path) or (
+        bool(golden_repos_dir)
+        and path_is_catalog_location(served_path, str(golden_repos_dir))
+    ):
         return surface.refusal
     return None
 

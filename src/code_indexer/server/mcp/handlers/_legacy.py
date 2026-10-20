@@ -105,6 +105,10 @@ from .repos import _register as _repos_register  # noqa: F401, E402
 
 _repos_register(HANDLER_REGISTRY)
 
+from ._catalog_history import guard_branch_tools  # noqa: E402
+
+guard_branch_tools(HANDLER_REGISTRY)
+
 from .repos import (  # noqa: F401, E402
     discover_repositories,
     list_repositories,

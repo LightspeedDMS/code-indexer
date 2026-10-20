@@ -26,7 +26,7 @@ import logging
 import os
 import re
 from pathlib import Path, PurePosixPath
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from code_indexer.global_repos.alias_manager import AliasManager
 
@@ -49,6 +49,13 @@ def golden_repos_dir_of(activated_repo_manager: Optional[Any]) -> Optional[str]:
         return None
     data_dir = getattr(activated_repo_manager, "data_dir", None)
     return str(Path(data_dir) / "golden-repos") if data_dir else None
+
+
+def state_golden_repos_dir(state: Any) -> Optional[str]:
+    """The server state's golden repositories directory; anything but a
+    non-empty string counts as missing."""
+    golden = getattr(state, "golden_repos_dir", None)
+    return golden if isinstance(golden, str) and golden else None
 
 
 def _aliases(golden_repos_dir: str) -> AliasManager:
@@ -126,10 +133,29 @@ def path_looks_like_catalog(path: str) -> bool:
     return any(_named_like_catalog(os.path.realpath(url)) for url in remotes)
 
 
+CatalogLocations = Callable[[], Tuple[str, ...]]
+
+
+def request_catalog_locations(golden_repos_dir: str) -> CatalogLocations:
+    """``catalog_locations`` for ONE request: computed on first use, then
+    reused for every alias and served directory the request names."""
+    found: List[Tuple[str, ...]] = []
+
+    def locations() -> Tuple[str, ...]:
+        if not found:
+            found.append(catalog_locations(golden_repos_dir))
+        return found[0]
+
+    return locations
+
+
 def path_is_catalog_location(path: str, golden_repos_dir: str) -> bool:
     """True when *path* is the catalog, one of its snapshots, or a clone of
     either (or a clone whose remotes cannot be read)."""
-    locations = catalog_locations(golden_repos_dir)
+    return _in_locations(path, catalog_locations(golden_repos_dir))
+
+
+def _in_locations(path: str, locations: Tuple[str, ...]) -> bool:
     real = os.path.realpath(path)
     if _is_location(real, locations):
         return True
@@ -169,14 +195,17 @@ def alias_serves_catalog_path(
     username: str,
     activated_repo_manager: Optional[Any],
     golden_repos_dir: Optional[str],
+    locations: Optional[CatalogLocations] = None,
 ) -> bool:
     """True when any directory a door may serve for *alias* is a catalog
-    location. Without a golden repositories directory nothing is checked."""
+    location. Without a golden repositories directory nothing is checked.
+    *locations* is the request's ``request_catalog_locations``."""
     if not golden_repos_dir:
         return False
-    return any(
-        path_is_catalog_location(path, golden_repos_dir)
-        for path in request_served_paths(
-            alias, username, activated_repo_manager, golden_repos_dir
-        )
+    paths = request_served_paths(
+        alias, username, activated_repo_manager, golden_repos_dir
     )
+    if not paths:
+        return False
+    known = (locations or request_catalog_locations(golden_repos_dir))()
+    return any(_in_locations(path, known) for path in paths)
