@@ -3,25 +3,27 @@
 Administrators read the directory as it is (``FilesystemDepMapSource``).
 Everyone else gets ``ProjectedDepMapSource``: only documents the path
 policy lets them see, each projected and rendered for display (removed
-lines dropped, so the table parsers see well-formed tables), and a
-``_domains.json`` reduced to visible domains, visible participants and a
-prose-redacted description. Labels are catalog-relative
-(``dependency-map/<name>.md``), never an absolute server path.
+lines dropped, so the table parsers see well-formed tables), and
+``_domains.json`` entries reduced to visible domains and visible
+participants; a description is projected only when a door asks for it
+(``describe``). Labels are catalog-relative (``dependency-map/<name>.md``),
+never an absolute server path.
 
-Built per request; the parsed model and projected documents come from the
+Built per request. Classification and the ``_domains.json`` entries come
+from the dependency-map model the projection loads (one source of truth,
+cached per directory fingerprint); projected documents come from the
 projection caches. Synchronous file I/O: async callers use a worker thread.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from ..dep_map_file_utils import load_domains_json
 from ..dep_map_source import DepMapSource, FilesystemDepMapSource
 from ..repo_access_guard import normalize_repo_alias
 from .depmap_projection import MetaProjector, render_for_display
-from .membership import participants_reader
+from .membership import model_participants_reader
 from .path_policy import DEP_MAP_DIR, Decision, DecisionKind, classify
 from .universe_provider import process_alias_universe
 from .visibility import MetaVisibility, resolve_meta_visibility
@@ -37,7 +39,10 @@ def _no_memory(_memory_id: str) -> bool:
 
 
 class ProjectedDepMapSource:
-    """What one restricted caller may see of a dependency-map directory."""
+    """What one restricted caller may see of a dependency-map directory.
+
+    One object per request, used by that request's thread only (its memo
+    dicts are never shared)."""
 
     def __init__(
         self, output_dir: Path, vis: MetaVisibility, projector: MetaProjector
@@ -47,8 +52,10 @@ class ProjectedDepMapSource:
         self._files = FilesystemDepMapSource(output_dir)
         self._vis = vis
         self._projector = projector
-        self._participants = participants_reader(Path(output_dir))
+        self._model = projector.model()
+        self._participants = model_participants_reader(Path(output_dir), self._model)
         self._decisions: Dict[str, Decision] = {}
+        self._descriptions: Dict[str, str] = {}
 
     def _decide(self, name: str) -> Decision:
         decision = self._decisions.get(name)
@@ -72,29 +79,39 @@ class ProjectedDepMapSource:
 
     def load_domains_json(self) -> List[Dict[str, Any]]:
         visible: List[Dict[str, Any]] = []
-        for entry in load_domains_json(self._files.output_dir):
-            name = entry.get("name") if isinstance(entry, dict) else None
+        for entry in self._model.domain_entries:
+            name = entry.get("name") if isinstance(entry, Mapping) else None
             if not isinstance(name, str) or not self._visible_domain(name):
                 continue
-            repos = entry.get("participating_repos") or []
             description = entry.get("description", "")
+            self._descriptions[name] = (
+                description if isinstance(description, str) else ""
+            )
             visible.append(
                 {
                     "name": name,
-                    "description": (
-                        self._redact(description, _DOMAINS_JSON)
-                        if isinstance(description, str)
-                        else ""
-                    ),
-                    "participating_repos": [
-                        r
-                        for r in (repos if isinstance(repos, list) else [])
-                        if isinstance(r, str)
-                        and normalize_repo_alias(r) in self._vis.visible
-                    ],
+                    "participating_repos": self._visible_participants(name, entry),
                 }
             )
         return visible
+
+    def describe(self, entry: Mapping[str, Any]) -> str:
+        """The projected description of an entry this source returned; ""
+        for any other."""
+        raw = self._descriptions.get(str(entry.get("name", "")), "")
+        return self._redact(raw, _DOMAINS_JSON) if raw else ""
+
+    def _visible_participants(self, name: str, entry: Mapping[str, Any]) -> List[str]:
+        """The entry's visible repositories; an entry naming none lists the
+        visible repositories of the domain's derived membership."""
+        repos = entry.get("participating_repos")
+        named = (
+            [r for r in repos if isinstance(r, str)] if isinstance(repos, list) else []
+        )
+        if named:
+            return [r for r in named if normalize_repo_alias(r) in self._vis.visible]
+        lowered = {p.lower() for p in self._participants(name) or ()}
+        return sorted(v for v in self._vis.visible if v.lower() in lowered)
 
     def domain_names(self) -> List[str]:
         return [n for n in self._files.domain_names() if self._visible_domain(n)]

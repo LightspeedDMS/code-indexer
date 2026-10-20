@@ -4,13 +4,15 @@
 source reads the directory as it is (administrators); the catalog access
 package provides a projected source holding only what a restricted caller
 may see (``cidx_meta_access.depmap_source``). The parsers' graph, hub,
-stale and hygiene logic runs unchanged on either.
+stale and hygiene logic runs unchanged on either. A domain description is
+obtained with ``describe(entry)`` for the entries a door actually returns,
+so a projected source projects only those.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Mapping, Optional, Protocol
 
 from code_indexer.server.services.dep_map_file_utils import (
     get_domain_md_files,
@@ -30,6 +32,10 @@ class DepMapSource(Protocol):
 
     def load_domains_json(self) -> List[Dict[str, Any]]:
         """The ``_domains.json`` entries ([] when absent or invalid)."""
+
+    def describe(self, entry: Mapping[str, Any]) -> str:
+        """The description of one ``load_domains_json`` entry as the caller
+        may see it ("" when it has none)."""
 
     def domain_names(self) -> List[str]:
         """Stems of the domain documents (no ``_`` prefix), in listing order."""
@@ -69,6 +75,10 @@ class FilesystemDepMapSource:
 
     def load_domains_json(self) -> List[Dict[str, Any]]:
         return load_domains_json(self._dir)
+
+    def describe(self, entry: Mapping[str, Any]) -> str:
+        description = entry.get("description", "")
+        return description if isinstance(description, str) else ""
 
     def domain_names(self) -> List[str]:
         return [f.stem for f in get_domain_md_files(self._dir)]

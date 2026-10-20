@@ -99,7 +99,7 @@ def _dependency_map(
         return _DENY
     domain = name[: -len(".md")]
     participants = participants_fn(domain)
-    if participants and participants & vis.visible:
+    if participants and {p.lower() for p in participants} & vis.visible_lc:
         return Decision(DecisionKind.TRANSFORM, domain)
     return _DENY
 

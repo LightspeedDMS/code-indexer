@@ -275,7 +275,7 @@ class DepMapMCPParser:
             content,
             md_file,
             fallback_name=domain_name,
-            fallback_description=domain_entry.get("description", ""),
+            fallback_description=source.describe(domain_entry),
         )
         if fm_anomaly:
             anomalies.append(fm_anomaly)

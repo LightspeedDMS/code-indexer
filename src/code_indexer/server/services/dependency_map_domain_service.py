@@ -102,7 +102,6 @@ class DependencyMapDomainService:
         domains: List[Dict[str, Any]] = []
         for domain in raw_domains:
             name = domain.get("name", "")
-            description = domain.get("description", "")
             all_repos: List[str] = domain.get("participating_repos", [])
 
             # Apply access filtering
@@ -119,7 +118,7 @@ class DependencyMapDomainService:
             domains.append(
                 {
                     "name": name,
-                    "description": description,
+                    "description": self._depmap_source().describe(domain),
                     "repo_count": len(visible_repos),
                     "participating_repos": visible_repos,
                     "last_analyzed": last_analyzed,
@@ -198,7 +197,7 @@ class DependencyMapDomainService:
 
         return {
             "name": domain_name,
-            "description": domain_data.get("description", ""),
+            "description": self._depmap_source().describe(domain_data),
             "last_analyzed": last_analyzed,
             "repos": visible_repos,
             "outgoing_deps": outgoing_deps,

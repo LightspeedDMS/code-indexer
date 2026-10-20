@@ -83,6 +83,7 @@ _ALIAS_CHARS = "A-Za-z0-9_-"
 _LIST_ITEM = re.compile(r"^\s*-\s+(?P<value>.+?)\s*$")
 _YAML_SHAPED = re.compile(r"^\s*(?:[A-Za-z_][\w-]*\s*:.*|-\s+.*)?$")
 _INLINE_LIST = re.compile(r"^(?P<prefix>\s*[A-Za-z_][\w-]*:\s*)\[(?P<body>.*)\]\s*$")
+_SCALAR_LINE = re.compile(r"^(?P<prefix>\s*[A-Za-z_][\w-]*:[ \t]+)(?P<value>\S.*?)\s*$")
 _COUNT_LINE = re.compile(
     r"^(?P<prefix>\s*(?P<key>repos_analyzed_count|domains_count):\s*)\d+\s*$"
 )
@@ -411,17 +412,100 @@ def _diagnose(relative_path: str, fingerprint: str, line_numbers: List[int]) -> 
     )
 
 
+def _frontmatter_end(lines: Sequence[str], span: int) -> int:
+    """Index of the closing delimiter of a kept frontmatter block; 0 when
+    the document has none (or it was removed whole)."""
+    if span or not lines or lines[0].strip() != "---":
+        return 0
+    return next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), 0)
+
+
+_YAML_ESCAPES = {'"': '\\"', "\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r"}
+_YAML_LINE_BREAKS = (0x2028, 0x2029, 0xFEFF)
+
+
+def _yaml_printable(char: str) -> bool:
+    """True when PyYAML reads *char* literally inside a quoted scalar."""
+    code = ord(char)
+    in_ascii = 0x20 <= code <= 0x7E
+    in_bmp = 0xA0 <= code <= 0xFFFD and not 0xD800 <= code <= 0xDFFF
+    in_supplementary = code >= 0x10000
+    return in_ascii or (in_bmp and code not in _YAML_LINE_BREAKS) or in_supplementary
+
+
+def _yaml_quoted(value: str) -> str:
+    """*value* as a double-quoted YAML scalar that parses back to it."""
+    out = []
+    for char in value:
+        if char in _YAML_ESCAPES:
+            out.append(_YAML_ESCAPES[char])
+        elif _yaml_printable(char):
+            out.append(char)
+        elif ord(char) <= 0xFF:
+            out.append(f"\\x{ord(char):02x}")
+        else:
+            out.append(f"\\u{ord(char):04x}")
+    return '"' + "".join(out) + '"'
+
+
+def _scalar_string(text: str) -> Optional[str]:
+    """The string a YAML value spells; None for any other value."""
+    try:
+        value = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _project_frontmatter_line(line: str, view: _View) -> Optional[str]:
+    """A frontmatter line stays YAML of the same shape: list entries naming
+    a hidden name are removed; a scalar changed by redaction is re-quoted;
+    a scalar continuation line (literal text) keeps its redaction; the
+    caller re-parses the whole block."""
+    if _COUNT_LINE.match(line):
+        return _project_text(line, view)
+    inline = _INLINE_LIST.match(line)
+    if inline:
+        entries = [e.strip() for e in inline.group("body").split(",") if e.strip()]
+        kept = [
+            e
+            for e in entries
+            if normalize_name(e) not in view.blocked_repos
+            and not _mentions_hidden(e, view)
+        ]
+        line = f"{inline.group('prefix')}[{', '.join(kept)}]"
+        return None if _mentions_hidden(line, view) else line
+    redacted = _redact(line, view)
+    if redacted == line:
+        return line
+    if _LIST_ITEM.match(line):
+        return None
+    scalar = _SCALAR_LINE.match(line)
+    if scalar is None:
+        return redacted
+    if _mentions_hidden(scalar.group("prefix"), view):
+        return None
+    value = _scalar_string(scalar.group("value"))
+    projected = None if value is None else _redact(value, view)
+    if projected is None:
+        return None
+    return scalar.group("prefix") + _yaml_quoted(projected)
+
+
 def _compute(
     lines: Sequence[str], relative_path: str, fingerprint: str, view: _View
 ) -> List[Optional[str]]:
     span = _frontmatter_span(lines)
+    end = _frontmatter_end(lines, span)
     out: List[Optional[str]] = [None] * span
     malformed: List[int] = list(range(1, span + 1))
     body = lines[span:]
     for offset, (line, (role, kind, cells)) in enumerate(
         zip(body, classify_lines(body))
     ):
-        if role == LINE_TEXT:
+        if role == LINE_TEXT and 0 < span + offset < end:
+            out.append(_project_frontmatter_line(line, view))
+        elif role == LINE_TEXT:
             out.append(_project_text(line, view))
         elif role == LINE_HEADER:
             out.append(_redact(line, view))
@@ -432,6 +516,13 @@ def _compute(
         else:
             malformed.append(span + offset + 1)
             out.append(None)
+    if end:
+        kept = [line for line in out[: end + 1] if line is not None]
+        try:
+            parse_frontmatter_strict("\n".join(kept) + "\n")
+        except (yaml.YAMLError, ValueError):
+            malformed += [i + 1 for i in range(end + 1) if out[i] is not None]
+            out[: end + 1] = [None] * (end + 1)
     if malformed:
         _diagnose(relative_path, fingerprint, malformed)
     return out
@@ -532,6 +623,10 @@ class MetaProjector:
                     self._universe.snapshot(),
                 )
             return self._loaded
+
+    def model(self) -> DepMapModel:
+        """The dependency-map model this request projects with."""
+        return self._sources()[0]
 
     def project(self, lines: Sequence[str], relative_path: str) -> List[Optional[str]]:
         if self._vis.unrestricted:

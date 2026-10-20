@@ -13,6 +13,7 @@ the scope is never stored on a module, class or session object.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
 from contextlib import contextmanager
@@ -66,6 +67,12 @@ class MetaVisibility:
             raise ValueError("a visible set never contains the catalog repository")
         if any(name.endswith("-global") for name in self.visible):
             raise ValueError("visible names are bare golden names")
+
+    @functools.cached_property
+    def visible_lc(self) -> FrozenSet[str]:
+        """``visible`` lowercased: the form dependency-map membership is
+        compared in."""
+        return frozenset(name.lower() for name in self.visible)
 
     @classmethod
     def everything(cls) -> "MetaVisibility":

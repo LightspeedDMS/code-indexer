@@ -25,6 +25,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
+    Any,
     Dict,
     FrozenSet,
     Iterable,
@@ -37,11 +38,13 @@ from typing import (
     Tuple,
 )
 
+import yaml
+
 from ..dep_map_file_utils import load_domains_json
 from ..dep_map_parser_hygiene import strip_backticks
+from ..dep_map_parser_tables import parse_frontmatter_strict
 from ..query_path_cache import is_immutable_versioned_snapshot
 from ..repo_access_guard import normalize_repo_alias
-from .membership import frontmatter_of, participants_from
 
 INDEX_FILE = "_index.md"
 DOMAINS_JSON = "_domains.json"
@@ -141,12 +144,19 @@ class DepMapModel:
     structured_names: FrozenSet[str]
     analyzed_repos: FrozenSet[str]
     edges: Tuple[Edge, ...]
+    #: The ``_domains.json`` entries as read (never mutated by readers).
+    domain_entries: Tuple[Mapping[str, Any], ...] = ()
 
     def visible_domains(self, visible_lc: FrozenSet[str]) -> FrozenSet[str]:
         """Domains with at least one visible participant."""
         return frozenset(
             domain for domain, repos in self.participants.items() if repos & visible_lc
         )
+
+    def domain_participants(self, domain: str) -> Optional[FrozenSet[str]]:
+        """Lowercased participants of the domain file stem *domain*; None
+        when membership is unknown."""
+        return self.participants.get(normalize_name(domain))
 
 
 EMPTY_MODEL = DepMapModel("absent", {}, frozenset(), {}, frozenset(), frozenset(), ())
@@ -382,12 +392,75 @@ def _index_parts(content: str) -> Tuple[Optional[Set[str]], Set[str], List[Edge]
     return analyzed, _table_names(lines), edges
 
 
+def frontmatter_of(content: str) -> Optional[Dict[str, Any]]:
+    """The document's YAML frontmatter, or None when it has none or it does
+    not parse (membership then comes from ``_domains.json``)."""
+    try:
+        return parse_frontmatter_strict(content)
+    except (yaml.YAMLError, ValueError):
+        return None
+
+
+def _member_names(value: Any) -> FrozenSet[str]:
+    if not isinstance(value, list):
+        return frozenset()
+    names = set()
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            continue
+        name = str(item).strip().strip("\"'").strip()
+        if name:
+            names.add(normalize_repo_alias(name))
+    return frozenset(names)
+
+
+def participants_from(
+    frontmatter: Optional[Mapping[str, Any]],
+    domains_entry: Optional[Mapping[str, Any]],
+) -> Optional[FrozenSet[str]]:
+    """Frontmatter membership, else ``_domains.json`` membership, else None."""
+    if frontmatter:
+        names = _member_names(frontmatter.get("participating_repos"))
+        if names:
+            return names
+    if domains_entry:
+        names = _member_names(domains_entry.get("participating_repos"))
+        if names:
+            return names
+    return None
+
+
+def roles_participants(lines: Sequence[str]) -> FrozenSet[str]:
+    """Repositories named by the recognised roles tables' repository column
+    (one repository value per cell; placeholder words are never names)."""
+    names = set()
+    for kind, cells in iter_recognised_rows(lines):
+        if kind is ROLES:
+            name = single_repo_name(cells[0])
+            if name is not None and name not in PLACEHOLDER_WORDS:
+                names.add(name)
+    return frozenset(names)
+
+
+def document_participants(
+    content: str, domains_entry: Optional[Mapping[str, Any]]
+) -> Optional[FrozenSet[str]]:
+    """Membership of one domain: frontmatter ``participating_repos``, else
+    ``_domains.json``, else the roles table; None when none names one."""
+    members = participants_from(
+        frontmatter_of(content) if content else None, domains_entry
+    )
+    if members:
+        return members
+    roles = roles_participants(content.splitlines()) if content else frozenset()
+    return roles or None
+
+
 def build_depmap_model(dep_map_dir: Path, fingerprint: str) -> DepMapModel:
     """Parse the dependency-map directory (reads every document once)."""
+    raw_entries = tuple(load_domains_json(dep_map_dir))
     entries = {
-        str(d["name"]): d
-        for d in load_domains_json(dep_map_dir)
-        if isinstance(d, dict) and d.get("name")
+        str(d["name"]): d for d in raw_entries if isinstance(d, dict) and d.get("name")
     }
     files: Dict[str, Path] = {}
     for p in dep_map_dir.glob("*.md"):
@@ -404,9 +477,7 @@ def build_depmap_model(dep_map_dir: Path, fingerprint: str) -> DepMapModel:
         key = normalize_name(name)
         display[key] = name
         content = files[name].read_text(encoding="utf-8") if name in files else ""
-        members = participants_from(
-            frontmatter_of(content) if content else None, entries.get(name)
-        )
+        members = document_participants(content, entries.get(name))
         if members:
             lowered = frozenset(m.lower() for m in members)
             participants[key] = lowered
@@ -432,6 +503,7 @@ def build_depmap_model(dep_map_dir: Path, fingerprint: str) -> DepMapModel:
         structured_names=frozenset(structured),
         analyzed_repos=frozenset(analyzed),
         edges=tuple(edges),
+        domain_entries=raw_entries,
     )
 
 

@@ -59,15 +59,18 @@ def test_admin_reads_the_filesystem_source(fx: CidxMetaFixture) -> None:
 def test_domains_json_lists_visible_domains_with_visible_participants(
     fx: CidxMetaFixture,
 ) -> None:
-    entries = _restricted(fx).load_domains_json()
+    source = _restricted(fx)
+    entries = source.load_domains_json()
     names = sorted(e["name"] for e in entries)
     assert names == sorted(["payments", "ledger", "reports", AUDIT_DOMAIN])
     for entry in entries:
-        assert set(entry) == {"name", "description", "participating_repos"}
+        assert set(entry) == {"name", "participating_repos"}
         assert entry["participating_repos"] == [ALPHA]
     audit = next(e for e in entries if e["name"] == AUDIT_DOMAIN)
-    assert CANARY not in audit["description"]
-    assert "[restricted repository]" in audit["description"]
+    description = source.describe(audit)
+    assert CANARY not in description
+    assert "[restricted repository]" in description
+    assert source.describe({"name": CANARY}) == ""
 
 
 def test_domain_names_and_reads_hide_denied_documents(fx: CidxMetaFixture) -> None:
