@@ -1,0 +1,279 @@
+{
+ "consumers_alpha": {
+  "anomalies": [
+   {
+    "error": "while parsing a flow sequence\n  in \"<unicode string>\", line 3, column 22:\n    participating_repos: [alpha, beta-team-sample\n                         ^\nexpected ',' or ']', but got '<stream end>'\n  in \"<unicode string>\", line 4, column 1:\n    \n    ^",
+    "file": "<root>/dependency-map/reports.md"
+   }
+  ],
+  "consumers": [
+   {
+    "consuming_repo": "gamma",
+    "dependency_type": "Service integration",
+    "domain": "payments",
+    "domain_name": "payments",
+    "evidence": "api/reserve.py",
+    "repo": "gamma"
+   },
+   {
+    "consuming_repo": "alpha",
+    "dependency_type": "Code-level",
+    "domain": "audit",
+    "domain_name": "audit",
+    "evidence": "src/read.py",
+    "repo": "alpha"
+   },
+   {
+    "consuming_repo": "beta-team-sample",
+    "dependency_type": "Data contracts",
+    "domain": "audit",
+    "domain_name": "audit",
+    "evidence": "src/stream.py",
+    "repo": "beta-team-sample"
+   }
+  ],
+  "resolution": "ok",
+  "success": true
+ },
+ "graph": {
+  "anomalies": [
+   {
+    "error": "while parsing a flow sequence\n  in \"<unicode string>\", line 3, column 22:\n    participating_repos: [alpha, beta-team-sample\n                         ^\nexpected ',' or ']', but got '<stream end>'\n  in \"<unicode string>\", line 4, column 1:\n    \n    ^",
+    "file": "<root>/dependency-map/reports.md"
+   },
+   {
+    "error": "bidirectional mismatch: payments→beta-team-sample declared outgoing by payments but not confirmed by incoming table",
+    "file": "<root>/dependency-map/beta-team-sample.md"
+   },
+   {
+    "error": "bidirectional mismatch: payments→ledger declared outgoing by payments but not confirmed by incoming table",
+    "file": "<root>/dependency-map/ledger.md"
+   }
+  ],
+  "data_anomalies": [
+   {
+    "error": "bidirectional mismatch: payments→beta-team-sample declared outgoing by payments but not confirmed by incoming table",
+    "file": "<root>/dependency-map/beta-team-sample.md"
+   },
+   {
+    "error": "bidirectional mismatch: payments→ledger declared outgoing by payments but not confirmed by incoming table",
+    "file": "<root>/dependency-map/ledger.md"
+   }
+  ],
+  "edges": [
+   {
+    "dependency_count": 1,
+    "source_domain": "audit",
+    "target_domain": "payments",
+    "types": [
+     "Service integration"
+    ]
+   },
+   {
+    "dependency_count": 1,
+    "source_domain": "payments",
+    "target_domain": "beta-team-sample",
+    "types": [
+     "Service integration"
+    ]
+   },
+   {
+    "dependency_count": 2,
+    "source_domain": "payments",
+    "target_domain": "ledger",
+    "types": [
+     "Code-level",
+     "Data contracts"
+    ]
+   }
+  ],
+  "parser_anomalies": [
+   {
+    "error": "while parsing a flow sequence\n  in \"<unicode string>\", line 3, column 22:\n    participating_repos: [alpha, beta-team-sample\n                         ^\nexpected ',' or ']', but got '<stream end>'\n  in \"<unicode string>\", line 4, column 1:\n    \n    ^",
+    "file": "<root>/dependency-map/reports.md"
+   }
+  ],
+  "resolution": "ok",
+  "success": true
+ },
+ "hubs": {
+  "hubs": [
+   {
+    "domain": "payments",
+    "in_degree": 1,
+    "out_degree": 2,
+    "total": 3
+   },
+   {
+    "domain": "beta-team-sample",
+    "in_degree": 1,
+    "out_degree": 0,
+    "total": 1
+   },
+   {
+    "domain": "ledger",
+    "in_degree": 1,
+    "out_degree": 0,
+    "total": 1
+   },
+   {
+    "domain": "audit",
+    "in_degree": 0,
+    "out_degree": 1,
+    "total": 1
+   }
+  ],
+  "resolution": "ok",
+  "success": true
+ },
+ "repo_domains_alpha": {
+  "anomalies": [
+   {
+    "error": "while parsing a flow sequence\n  in \"<unicode string>\", line 3, column 22:\n    participating_repos: [alpha, beta-team-sample\n                         ^\nexpected ',' or ']', but got '<stream end>'\n  in \"<unicode string>\", line 4, column 1:\n    \n    ^",
+    "file": "<root>/dependency-map/reports.md"
+   }
+  ],
+  "domains": [
+   {
+    "domain": "payments",
+    "domain_name": "payments",
+    "role": "Payment API"
+   },
+   {
+    "domain": "ledger",
+    "domain_name": "ledger",
+    "role": "Ledger"
+   },
+   {
+    "domain": "reports",
+    "domain_name": "reports",
+    "role": ""
+   },
+   {
+    "domain": "audit",
+    "domain_name": "audit",
+    "role": "Audit reader"
+   }
+  ],
+  "resolution": "ok",
+  "success": true
+ },
+ "stale": {
+  "anomalies": [
+   {
+    "error": "while parsing a flow sequence\n  in \"<unicode string>\", line 3, column 22:\n    participating_repos: [alpha, beta-team-sample\n                         ^\nexpected ',' or ']', but got '<stream end>'\n  in \"<unicode string>\", line 4, column 1:\n    \n    ^",
+    "file": "<root>/dependency-map/reports.md"
+   }
+  ],
+  "resolution": "ok",
+  "stale_domains": [
+   {
+    "days_stale": "<n>",
+    "domain_name": "payments",
+    "last_analyzed": "2026-01-01T00:00:00+00:00"
+   },
+   {
+    "days_stale": "<n>",
+    "domain_name": "ledger",
+    "last_analyzed": "2026-01-01T00:00:00+00:00"
+   },
+   {
+    "days_stale": "<n>",
+    "domain_name": "beta-team-sample",
+    "last_analyzed": "2026-01-01T00:00:00+00:00"
+   },
+   {
+    "days_stale": "<n>",
+    "domain_name": "inventory",
+    "last_analyzed": "2026-01-01T00:00:00+00:00"
+   },
+   {
+    "days_stale": "<n>",
+    "domain_name": "audit",
+    "last_analyzed": "2026-01-01T00:00:00+00:00"
+   }
+  ],
+  "success": true
+ },
+ "summary_audit": {
+  "anomalies": [],
+  "resolution": "ok",
+  "success": true,
+  "summary": {
+   "cross_domain_connections": [
+    {
+     "dependency_count": 1,
+     "target_domain": "payments"
+    }
+   ],
+   "description": "Audit trail",
+   "name": "audit",
+   "participating_repos": [
+    {
+     "repo": "alpha",
+     "role": "Audit reader"
+    },
+    {
+     "repo": "beta-team-sample",
+     "role": "Audit writer"
+    }
+   ]
+  }
+ },
+ "summary_canary": {
+  "anomalies": [],
+  "resolution": "ok",
+  "success": true,
+  "summary": {
+   "cross_domain_connections": [],
+   "description": "beta-team-sample domain",
+   "name": "beta-team-sample",
+   "participating_repos": []
+  }
+ },
+ "summary_payments": {
+  "anomalies": [],
+  "resolution": "ok",
+  "success": true,
+  "summary": {
+   "cross_domain_connections": [
+    {
+     "dependency_count": 1,
+     "target_domain": "beta-team-sample"
+    },
+    {
+     "dependency_count": 2,
+     "target_domain": "ledger"
+    }
+   ],
+   "description": "Payment processing across services",
+   "name": "payments",
+   "participating_repos": [
+    {
+     "repo": "alpha",
+     "role": "Payment API"
+    },
+    {
+     "repo": "beta-team-sample",
+     "role": "Settlement worker"
+    }
+   ]
+  }
+ },
+ "summary_reports": {
+  "anomalies": [
+   {
+    "error": "frontmatter: while parsing a flow sequence\n  in \"<unicode string>\", line 3, column 22:\n    participating_repos: [alpha, beta-team-sample\n                         ^\nexpected ',' or ']', but got '<stream end>'\n  in \"<unicode string>\", line 4, column 1:\n    \n    ^",
+    "file": "<root>/dependency-map/reports.md"
+   }
+  ],
+  "resolution": "ok",
+  "success": true,
+  "summary": {
+   "cross_domain_connections": [],
+   "description": "",
+   "name": "",
+   "participating_repos": []
+  }
+ }
+}

@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import yaml
@@ -268,7 +267,7 @@ def parse_last_analyzed(raw: str) -> datetime:
 
 def build_name_description(
     content: str,
-    md_file: Path,
+    md_file: str,
     fallback_name: str,
     fallback_description: str = "",
 ) -> Tuple[str, str, Optional[Dict[str, str]]]:
@@ -301,7 +300,7 @@ def build_name_description(
 
 def build_participating_repos(
     content: str,
-    md_file: Path,
+    md_file: str,
 ) -> Tuple[List[Dict[str, str]], Optional[Dict[str, str]]]:
     """Extract participating_repos from the Repository Roles table.
 
@@ -327,7 +326,7 @@ def build_participating_repos(
 
 def build_cross_domain_connections(
     content: str,
-    md_file: Path,
+    md_file: str,
 ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, str]]]:
     """Extract cross_domain_connections from the Outgoing Dependencies table.
 

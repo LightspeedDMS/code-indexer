@@ -61,7 +61,11 @@ class TestAC4AggregateGraphReuse:
         )
         _write_domain_md(dep_map_dir, "b")
 
-        edge_data, anomalies = _aggregate_graph(dep_map_dir)
+        from code_indexer.server.services.dep_map_source import (
+            FilesystemDepMapSource,
+        )
+
+        edge_data, anomalies = _aggregate_graph(FilesystemDepMapSource(dep_map_dir))
         assert isinstance(edge_data, dict)
         assert isinstance(anomalies, list)
         assert edge_data, "edge_data must not be empty for a graph with one edge"

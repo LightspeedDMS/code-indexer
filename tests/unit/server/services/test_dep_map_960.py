@@ -19,6 +19,7 @@ from code_indexer.server.services.dep_map_parser_graph import (
     parse_domain_file_for_graph,
 )
 from code_indexer.server.services.dep_map_parser_hygiene import AnomalyEntry
+from code_indexer.server.services.dep_map_source import FilesystemDepMapSource
 
 
 @pytest.fixture(autouse=True)
@@ -37,7 +38,7 @@ def _call_parse_for_missing(
     does not exist.  Returns (anomalies, log_records) where log_records is a list
     of (levelname, exc_info_present) tuples captured from the logger.
     """
-    base_dir = output_dir.resolve()
+    source = FilesystemDepMapSource(output_dir)
     edge_data: Dict[Tuple[str, str], Dict[str, Any]] = {}
     incoming_claims: Set[frozenset] = set()
     anomalies: List[AnomalyEntry] = []
@@ -57,8 +58,7 @@ def _call_parse_for_missing(
     try:
         for _ in range(times):
             parse_domain_file_for_graph(
-                output_dir,
-                base_dir,
+                source,
                 domain_name,
                 edge_data,
                 incoming_claims,
@@ -114,7 +114,7 @@ class TestMissingFileWarningOnce:
         output_dir = tmp_path / "dep-map"
         output_dir.mkdir()
 
-        base_dir = output_dir.resolve()
+        source = FilesystemDepMapSource(output_dir)
         captured: List[Tuple[str, str]] = []
 
         class _Handler(logging.Handler):
@@ -137,8 +137,7 @@ class TestMissingFileWarningOnce:
         try:
             for _ in range(3):
                 parse_domain_file_for_graph(
-                    output_dir,
-                    base_dir,
+                    source,
                     "domain-alpha",
                     {},
                     set(),
@@ -146,8 +145,7 @@ class TestMissingFileWarningOnce:
                 )
             for _ in range(3):
                 parse_domain_file_for_graph(
-                    output_dir,
-                    base_dir,
+                    source,
                     "domain-beta",
                     {},
                     set(),
@@ -192,7 +190,7 @@ class TestExistingFileStillParsesNormally:
         )
         (output_dir / "my-domain.md").write_text(content, encoding="utf-8")
 
-        base_dir = output_dir.resolve()
+        source = FilesystemDepMapSource(output_dir)
         edge_data: Dict[Tuple[str, str], Dict[str, Any]] = {}
         incoming_claims: Set[frozenset] = set()
         anomalies: List[AnomalyEntry] = []
@@ -212,8 +210,7 @@ class TestExistingFileStillParsesNormally:
 
         try:
             parse_domain_file_for_graph(
-                output_dir,
-                base_dir,
+                source,
                 "my-domain",
                 edge_data,
                 incoming_claims,

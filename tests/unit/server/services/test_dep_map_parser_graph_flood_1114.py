@@ -52,10 +52,10 @@ def _parse_domain(
     from code_indexer.server.services.dep_map_parser_graph import (
         parse_domain_file_for_graph,
     )
+    from code_indexer.server.services.dep_map_source import FilesystemDepMapSource
 
     parse_domain_file_for_graph(
-        output_dir=output_dir,
-        base_dir=output_dir.resolve(),
+        source=FilesystemDepMapSource(output_dir),
         domain_name=domain_name,
         edge_data=edge_data,
         incoming_claims=incoming_claims,

@@ -335,3 +335,64 @@ def build_cidx_meta_fixture(tmp_path: Path) -> CidxMetaFixture:
 
 def read_lines(path: Path) -> List[str]:
     return path.read_text(encoding="utf-8").splitlines()
+
+
+# Opt-in extension (depmap tools, Web dependency map, quick reference).
+AUDIT_DOMAIN = "audit"
+LANGFUSE_GRANTED = "langfuse_sample_granted"
+LANGFUSE_HIDDEN = "langfuse_sample_hidden"
+
+
+def _audit_lines() -> List[str]:
+    lines = _frontmatter(AUDIT_DOMAIN, [ALPHA, CANARY], "Audit trail")
+    lines += [
+        "",
+        f"# Domain Analysis: {AUDIT_DOMAIN}",
+        "",
+        "## Repository Roles",
+        "",
+        "| Repository | Language | Role |",
+        "|---|---|---|",
+        f"| {ALPHA} | Python | Audit reader |",
+        f"| {CANARY} | Go | Audit writer |",
+        "",
+    ]
+    lines += _cross_domain(
+        [
+            f"| {CANARY} | {CANARY} | payments | Service integration | audits settlements | src/audit.py |",
+        ],
+        [
+            f"| {ALPHA} | {ALPHA} | ledger | Code-level | reads audit rows | src/read.py |",
+            f"| {CANARY} | {ALPHA} | payments | Data contracts | streams audit rows | src/stream.py |",
+        ],
+    )
+    return lines
+
+
+def add_depmap_extension(fx: CidxMetaFixture) -> None:
+    """Add the ``audit`` domain (alpha and the canary; its only edge, to
+    payments, runs through the canary; alpha has one visible and one hidden
+    consumer there) and two Langfuse trace aliases, one granted to the
+    restricted user's group and one granted to nobody."""
+    _write(fx.dep_map_dir / f"{AUDIT_DOMAIN}.md", "\n".join(_audit_lines()) + "\n")
+    domains_file = fx.dep_map_dir / "_domains.json"
+    domains = json.loads(domains_file.read_text(encoding="utf-8"))
+    domains.append(
+        {
+            "name": AUDIT_DOMAIN,
+            "description": f"Audit trail written by {CANARY}",
+            "participating_repos": [ALPHA, CANARY],
+        }
+    )
+    _write(domains_file, json.dumps(domains, indent=2))
+    IndexRegenerator().regenerate(fx.dep_map_dir)
+    for alias in (LANGFUSE_GRANTED, LANGFUSE_HIDDEN):
+        fx.registry.register_repo(
+            alias_name=f"{alias}-global",
+            repo_name=alias,
+            repo_url=None,
+            index_path=f"/golden/{alias}",
+        )
+    team = fx.group_manager.get_group_by_name("fixture-team")
+    assert team is not None
+    fx.group_manager.grant_repo_access(LANGFUSE_GRANTED, team.id, granted_by="test")

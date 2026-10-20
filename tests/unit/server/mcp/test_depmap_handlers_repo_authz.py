@@ -90,6 +90,8 @@ def _indexed_app_state(tmp_path: Path, repo_name: str) -> Mock:
     )
     state = Mock()
     state.dependency_map_service.cidx_meta_read_path = tmp_path
+    # The restricted caller's projection reads the alias registry.
+    state.backend_registry.global_repos.list_repos.return_value = {}
     return state
 
 

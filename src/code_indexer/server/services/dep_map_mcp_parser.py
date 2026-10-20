@@ -1,9 +1,10 @@
 """
 DepMapMCPParser -- shared parser for dependency-map MCP tools (Story #855).
 
-Reads the dependency-map directory from cidx-meta and exposes query methods
-used by the depmap MCP handlers. No I/O at construction; all I/O deferred
-to method calls.
+Reads the dependency map through a ``DepMapSource`` (the filesystem for
+administrators and maintenance callers, the caller's projected view for
+restricted callers) and exposes query methods used by the depmap MCP
+handlers. No I/O at construction; all I/O deferred to method calls.
 
 Story #887: parser hygiene and anomaly channel hardening.
   AC1: strip backticks from all identifier fields
@@ -14,22 +15,17 @@ Story #887: parser hygiene and anomaly channel hardening.
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
 
 # Any is justified: domain summary dicts contain heterogeneous YAML/JSON values
 # (str, int, list, dict) with no fixed schema across all fields.
 
-from code_indexer.server.services.dep_map_file_utils import (
-    get_domain_md_files,
-    load_domains_json,
-)
 from code_indexer.server.services.dep_map_parser_graph import (
-    apply_edge_hygiene,
     build_graph_anomalies,
+    collect_graph,
     finalize_graph_edges,
-    parse_domain_file_for_graph,
 )
 from code_indexer.server.services.dep_map_parser_hygiene import (
     AnomalyAggregate,
@@ -45,12 +41,17 @@ from code_indexer.server.services.dep_map_parser_tables import (
     parse_last_analyzed,
     parse_roles_table,
 )
+from code_indexer.server.services.dep_map_source import (
+    DepMapSource,
+    FilesystemDepMapSource,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _parse_file_for_consumers(
-    md_file: Path,
+    source: DepMapSource,
+    name: str,
     repo_name: str,
     domain_repos: Dict[str, List[str]],
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
@@ -62,9 +63,9 @@ def _parse_file_for_consumers(
         OSError: on file read failure.
         ValueError: on malformed frontmatter.
     """
-    content = md_file.read_text(encoding="utf-8")
+    content = source.read_text(name)
     fm = parse_frontmatter_strict(content)
-    domain_name = fm.get("name", md_file.stem) if fm else md_file.stem
+    domain_name = fm.get("name", name) if fm else name
     domain_name = strip_backticks(domain_name)
 
     incoming = parse_incoming_table(content)
@@ -82,7 +83,7 @@ def _parse_file_for_consumers(
             if repo_name not in json_repos:
                 anomalies.append(
                     {
-                        "file": str(md_file),
+                        "file": source.label(name),
                         "error": (
                             f"Inconsistency: markdown table references '{repo_name}' "
                             f"as dependency in domain '{domain_name}' but "
@@ -114,17 +115,18 @@ def _lookup_domain_entry(
 
 
 def _read_domain_md_content(
-    md_file: Path,
+    source: DepMapSource, name: str
 ) -> Tuple[str, Optional[Dict[str, str]]]:
     """Read a domain .md file. Returns (content, None) on success or ("", anomaly) on error."""
-    if not md_file.exists():
-        logger.warning("get_domain_summary: .md file not found: %s", md_file)
-        return "", {"file": str(md_file), "error": "file not found"}
+    label = source.resolved_label(name)
+    if not source.has_domain(name):
+        logger.warning("get_domain_summary: .md file not found: %s", label)
+        return "", {"file": label, "error": "file not found"}
     try:
-        return md_file.read_text(encoding="utf-8"), None
+        return source.read_text(name), None
     except OSError as exc:
-        logger.warning("get_domain_summary: failed to read %s: %s", md_file, exc)
-        return "", {"file": str(md_file), "error": str(exc)}
+        logger.warning("get_domain_summary: failed to read %s: %s", label, exc)
+        return "", {"file": label, "error": str(exc)}
 
 
 def _current_utc_now() -> datetime:
@@ -136,16 +138,31 @@ class DepMapMCPParser:
     """
     Parser for the dependency-map output directory in cidx-meta.
 
-    Constructor stores the root path (parent of dependency-map/).
-    No I/O is performed at construction time.
+    Constructed from the root path (parent of dependency-map/), read from
+    the filesystem, or from an explicit ``DepMapSource``. No I/O is
+    performed at construction time.
 
     Public methods return (results, anomalies) 2-tuples EXCEPT
     get_cross_domain_graph which returns a 4-tuple
     (edges, anomalies, parser_anomalies, data_anomalies).
     """
 
-    def __init__(self, dep_map_path: Path) -> None:
-        self._dep_map_path = dep_map_path
+    def __init__(
+        self,
+        dep_map_path: Optional[Path] = None,
+        *,
+        source: Optional[DepMapSource] = None,
+    ) -> None:
+        if (dep_map_path is None) == (source is None):
+            raise ValueError("pass exactly one of dep_map_path or source")
+        if source is None:
+            assert dep_map_path is not None
+            source = FilesystemDepMapSource(Path(dep_map_path) / "dependency-map")
+        self._source: DepMapSource = source
+
+    @property
+    def source(self) -> DepMapSource:
+        return self._source
 
     def find_consumers(
         self, repo_name: str
@@ -154,11 +171,11 @@ class DepMapMCPParser:
         if not repo_name:
             return [], []
 
-        output_dir = self._dep_map_path / "dependency-map"
-        if not output_dir.exists():
+        source = self._source
+        if not source.is_present():
             return [], []
 
-        domains = load_domains_json(output_dir)
+        domains = source.load_domains_json()
         domain_repos: Dict[str, List[str]] = {
             d["name"]: list(d.get("participating_repos") or [])
             for d in domains
@@ -168,15 +185,15 @@ class DepMapMCPParser:
         consumers: List[Dict[str, str]] = []
         anomalies: List[Dict[str, str]] = []
 
-        for md_file in get_domain_md_files(output_dir):
+        for name in source.domain_names():
             try:
                 rows, file_anomalies = _parse_file_for_consumers(
-                    md_file, repo_name, domain_repos
+                    source, name, repo_name, domain_repos
                 )
                 consumers.extend(rows)
                 anomalies.extend(file_anomalies)
             except (OSError, ValueError, yaml.YAMLError) as exc:
-                anomalies.append({"file": str(md_file), "error": str(exc)})
+                anomalies.append({"file": source.label(name), "error": str(exc)})
 
         return consumers, anomalies
 
@@ -187,11 +204,11 @@ class DepMapMCPParser:
         if not repo_name:
             return [], []
 
-        output_dir = self._dep_map_path / "dependency-map"
-        if not output_dir.exists():
+        source = self._source
+        if not source.is_present():
             return [], []
 
-        domains = load_domains_json(output_dir)
+        domains = source.load_domains_json()
         memberships: List[Dict[str, str]] = []
         anomalies: List[Dict[str, str]] = []
 
@@ -204,18 +221,18 @@ class DepMapMCPParser:
             if repo_name not in (domain.get("participating_repos") or []):
                 continue
 
-            md_file = output_dir / f"{domain_name}.md"
             role = ""
-            if md_file.exists():
+            if source.has_domain(domain_name):
                 try:
-                    content = md_file.read_text(encoding="utf-8")
+                    content = source.read_text(domain_name)
                     parse_frontmatter_strict(content)
                     role = parse_roles_table(content).get(repo_name, "")
                 except (OSError, ValueError, yaml.YAMLError) as exc:
+                    label = source.label(domain_name)
                     logger.warning(
-                        "get_repo_domains: failed to parse %s: %s", md_file, exc
+                        "get_repo_domains: failed to parse %s: %s", label, exc
                     )
-                    anomalies.append({"file": str(md_file), "error": str(exc)})
+                    anomalies.append({"file": label, "error": str(exc)})
                     memberships.append({"domain_name": domain_name, "role": ""})
                     continue
 
@@ -234,27 +251,23 @@ class DepMapMCPParser:
         if not domain_name:
             return None, []
 
-        output_dir = self._dep_map_path / "dependency-map"
-        if not output_dir.exists():
+        source = self._source
+        if not source.is_present():
             return None, []
 
-        domains = load_domains_json(output_dir)
-        domain_entry = _lookup_domain_entry(domains, domain_name)
+        domain_entry = _lookup_domain_entry(source.load_domains_json(), domain_name)
         if domain_entry is None:
             return None, []
 
         # Path-traversal guard: mirrors get_stale_domains pattern
-        base_dir = output_dir.resolve()
-        md_file = (output_dir / f"{domain_name}.md").resolve()
-        try:
-            md_file.relative_to(base_dir)
-        except ValueError:
+        md_file = source.resolved_label(domain_name)
+        if not source.within(domain_name):
             return None, [
-                {"file": str(md_file), "error": "domain_name path traversal rejected"}
+                {"file": md_file, "error": "domain_name path traversal rejected"}
             ]
 
         anomalies: List[Dict[str, str]] = []
-        content, read_anomaly = _read_domain_md_content(md_file)
+        content, read_anomaly = _read_domain_md_content(source, domain_name)
         if read_anomaly:
             anomalies.append(read_anomaly)
 
@@ -304,12 +317,11 @@ class DepMapMCPParser:
         if days_threshold < 0:
             raise ValueError("days_threshold must be non-negative")
 
-        output_dir = self._dep_map_path / "dependency-map"
-        if not output_dir.exists():
+        source = self._source
+        if not source.is_present():
             return [], []
 
-        base_dir = output_dir.resolve()
-        domains = load_domains_json(output_dir)
+        domains = source.load_domains_json()
         now_utc = _current_utc_now()
         stale_domains: List[Dict[str, Any]] = []
         anomalies: List[Dict[str, str]] = []
@@ -320,19 +332,17 @@ class DepMapMCPParser:
             domain_name = domain.get("name", "")
             if not domain_name:
                 continue
-            md_file = (output_dir / f"{domain_name}.md").resolve()
-            try:
-                md_file.relative_to(base_dir)
-            except ValueError:
+            md_file = source.resolved_label(domain_name)
+            if not source.within(domain_name):
                 anomalies.append(
                     {
-                        "file": str(md_file),
+                        "file": md_file,
                         "error": "domain_name path traversal rejected",
                     }
                 )
                 continue
             try:
-                content = md_file.read_text(encoding="utf-8")
+                content = source.read_text(domain_name)
                 fm = parse_frontmatter_strict(content) or {}
                 if "last_analyzed" not in fm:
                     raise ValueError("last_analyzed field missing from frontmatter")
@@ -347,7 +357,7 @@ class DepMapMCPParser:
                         }
                     )
             except (OSError, ValueError, yaml.YAMLError) as exc:
-                anomalies.append({"file": str(md_file), "error": str(exc)})
+                anomalies.append({"file": md_file, "error": str(exc)})
 
         stale_domains.sort(key=lambda d: d["days_stale"], reverse=True)
         return stale_domains, anomalies
@@ -370,41 +380,16 @@ class DepMapMCPParser:
             parser_anomalies — structural/format-level anomalies (channel='parser').
             data_anomalies — semantic/consistency anomalies (channel='data').
         """
-        output_dir = self._dep_map_path / "dependency-map"
-        if not output_dir.exists():
+        source = self._source
+        edge_data, incoming_claims, raw_anomalies = collect_graph(source)
+        if not edge_data and not raw_anomalies:
             return [], [], [], []
-
-        domains = load_domains_json(output_dir)
-        if not domains:
-            return [], [], [], []
-
-        base_dir = output_dir.resolve()
-        edge_data: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        incoming_claims: Set[frozenset] = set()
-        raw_anomalies: List[AnomalyEntry] = []
-
-        for domain in domains:
-            if not isinstance(domain, dict):
-                continue
-            domain_name = domain.get("name", "")
-            if not domain_name:
-                continue
-            parse_domain_file_for_graph(
-                output_dir,
-                base_dir,
-                domain_name,
-                edge_data,
-                incoming_claims,
-                raw_anomalies,
-            )
-
-        edge_data = apply_edge_hygiene(edge_data, raw_anomalies)
         # finalize_graph_edges runs BEFORE build_graph_anomalies so that any
         # anomalies it emits (e.g. GARBAGE_DOMAIN_REJECTED for empty-types edges)
         # are included in dedup, aggregation, and channel split (Blocker 2 fix).
-        edges = finalize_graph_edges(output_dir, edge_data, raw_anomalies)
+        edges = finalize_graph_edges(source, edge_data, raw_anomalies)
         all_anomalies, parser_anomalies, data_anomalies = build_graph_anomalies(
-            output_dir, edge_data, incoming_claims, raw_anomalies
+            source, edge_data, incoming_claims, raw_anomalies
         )
         return edges, all_anomalies, parser_anomalies, data_anomalies
 

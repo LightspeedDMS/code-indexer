@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import logging
 import threading
-from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple, Union
 
+from code_indexer.server.services.dep_map_source import DepMapSource
 from code_indexer.server.services.dep_map_parser_hygiene import (
     AnomalyAggregate,
     AnomalyEntry,
@@ -57,7 +57,7 @@ _INCOMING_HEADER_SENTINEL = "External Repo"
 def collect_outgoing_edges(
     content: str,
     domain_name: str,
-    md_file: Path,
+    md_file: str,
     edge_data: Dict[Tuple[str, str], Dict[str, Any]],
     anomalies: List[AnomalyEntry],
 ) -> None:
@@ -118,7 +118,7 @@ def collect_outgoing_edges(
 def collect_incoming_claims(
     content: str,
     domain_name: str,
-    md_file: Path,
+    md_file: str,
     incoming_claims: Set[frozenset],
     anomalies: List[AnomalyEntry],
 ) -> None:
@@ -160,7 +160,7 @@ def collect_incoming_claims(
 
 
 def check_bidirectional_consistency(
-    output_dir: Path,
+    source: DepMapSource,
     edge_data: Dict[Tuple[str, str], Dict[str, Any]],
     incoming_claims: Set[frozenset],
     anomalies: List[AnomalyEntry],
@@ -183,7 +183,7 @@ def check_bidirectional_consistency(
             anomalies.append(
                 AnomalyEntry(
                     type=AnomalyType.BIDIRECTIONAL_MISMATCH,
-                    file=str(output_dir / f"{tgt}.md"),
+                    file=source.label(tgt),
                     message=(
                         f"bidirectional mismatch: {src}→{tgt} declared "
                         f"outgoing by {src} but not confirmed by incoming table"
@@ -194,7 +194,7 @@ def check_bidirectional_consistency(
 
 
 def finalize_graph_edges(
-    output_dir: Path,
+    source: DepMapSource,
     edge_data: Dict[Tuple[str, str], Dict[str, Any]],
     anomalies: List[AnomalyEntry],
 ) -> List[Dict[str, Any]]:
@@ -211,7 +211,7 @@ def finalize_graph_edges(
             anomalies.append(
                 AnomalyEntry(
                     type=AnomalyType.GARBAGE_DOMAIN_REJECTED,
-                    file=str(output_dir / f"{src}.md"),
+                    file=source.label(src),
                     message=f"edge {src}→{tgt} has no derivable types",
                     channel="data",
                 )
@@ -234,8 +234,7 @@ def finalize_graph_edges(
 
 
 def parse_domain_file_for_graph(
-    output_dir: Path,
-    base_dir: Path,
+    source: DepMapSource,
     domain_name: str,
     edge_data: Dict[Tuple[str, str], Dict[str, Any]],
     incoming_claims: Set[frozenset],
@@ -247,14 +246,12 @@ def parse_domain_file_for_graph(
     Outgoing and incoming sections are each wrapped in their own try/except
     so that one section's failure does not abort the other.
     """
-    md_file = (output_dir / f"{domain_name}.md").resolve()
-    try:
-        md_file.relative_to(base_dir)
-    except ValueError:
+    md_file = source.resolved_label(domain_name)
+    if not source.within(domain_name):
         anomalies.append(
             AnomalyEntry(
                 type=AnomalyType.PATH_TRAVERSAL_REJECTED,
-                file=str(md_file),
+                file=md_file,
                 message="domain_name path traversal rejected",
                 channel="parser",
             )
@@ -262,10 +259,10 @@ def parse_domain_file_for_graph(
         return
 
     try:
-        content = md_file.read_text(encoding="utf-8")
+        content = source.read_text(domain_name)
         parse_frontmatter_strict(content)
     except FileNotFoundError as exc:
-        domain_path_str = str(md_file)
+        domain_path_str = md_file
         with _warned_missing_domains_lock:
             already_warned = domain_path_str in _warned_missing_domains
             if not already_warned:
@@ -362,7 +359,7 @@ def apply_edge_hygiene(
 
 def emit_self_loop_anomalies(
     edge_data: Dict[Tuple[str, str], Dict[str, Any]],
-    output_dir: Path,
+    source: DepMapSource,
     anomalies: List[AnomalyEntry],
 ) -> None:
     """Emit AC4 SELF_LOOP data-channel anomaly for each self-loop edge.
@@ -375,63 +372,47 @@ def emit_self_loop_anomalies(
             anomalies.append(
                 AnomalyEntry(
                     type=AnomalyType.SELF_LOOP,
-                    file=str(output_dir / f"{src}.md"),
+                    file=source.label(src),
                     message=f"self-loop edge: {src}→{tgt}",
                     channel="data",
                 )
             )
 
 
-def _aggregate_graph(
-    output_dir: Path,
-) -> Tuple[Dict[Tuple[str, str], Dict[str, Any]], List[AnomalyEntry]]:
-    """Parse all domain files in output_dir and return (edge_data, raw_anomalies).
-
-    Shared helper consumed by both DepMapMCPParser.get_cross_domain_graph_with_channels
-    and depmap_get_hub_domains_handler. Single source of truth for the parsing loop
-    (AC4, Story #889).
-
-    Returns:
-        edge_data    — dict keyed by (src, tgt) tuples, values have 'count' and 'types'.
-        raw_anomalies — list of AnomalyEntry from parsing; not yet deduped or aggregated.
-
-    If output_dir does not exist or _domains.json is empty, returns ({}, []).
-    """
-    from code_indexer.server.services.dep_map_file_utils import load_domains_json
-
-    if not output_dir.exists():
-        return {}, []
-
-    domains = load_domains_json(output_dir)
-    if not domains:
-        return {}, []
-
-    base_dir = output_dir.resolve()
+def collect_graph(
+    source: DepMapSource,
+) -> Tuple[Dict[Tuple[str, str], Dict[str, Any]], Set[frozenset], List[AnomalyEntry]]:
+    """Parse every domain of *source*: (edge_data after hygiene,
+    incoming_claims, raw_anomalies). Empty when the directory is absent or
+    ``_domains.json`` lists nothing."""
     edge_data: Dict[Tuple[str, str], Dict[str, Any]] = {}
     incoming_claims: Set[frozenset] = set()
     raw_anomalies: List[AnomalyEntry] = []
-
-    for domain in domains:
+    if not source.is_present():
+        return edge_data, incoming_claims, raw_anomalies
+    for domain in source.load_domains_json():
         if not isinstance(domain, dict):
             continue
         domain_name = domain.get("name", "")
         if not domain_name:
             continue
         parse_domain_file_for_graph(
-            output_dir,
-            base_dir,
-            domain_name,
-            edge_data,
-            incoming_claims,
-            raw_anomalies,
+            source, domain_name, edge_data, incoming_claims, raw_anomalies
         )
+    return apply_edge_hygiene(edge_data, raw_anomalies), incoming_claims, raw_anomalies
 
-    edge_data = apply_edge_hygiene(edge_data, raw_anomalies)
+
+def _aggregate_graph(
+    source: DepMapSource,
+) -> Tuple[Dict[Tuple[str, str], Dict[str, Any]], List[AnomalyEntry]]:
+    """(edge_data, raw_anomalies) of *source* -- the hub tool's view of
+    ``collect_graph`` (AC4, Story #889: one parsing loop)."""
+    edge_data, _claims, raw_anomalies = collect_graph(source)
     return edge_data, raw_anomalies
 
 
 def build_graph_anomalies(
-    output_dir: Path,
+    source: DepMapSource,
     edge_data: Dict[Tuple[str, str], Dict[str, Any]],
     incoming_claims: Set[frozenset],
     raw_anomalies: List[AnomalyEntry],
@@ -449,10 +430,8 @@ def build_graph_anomalies(
     via item.type.channel. AnomalyAggregate carries .type which has the bound .channel
     attribute, so aggregates are correctly routed without being silently dropped.
     """
-    emit_self_loop_anomalies(edge_data, output_dir, raw_anomalies)
-    check_bidirectional_consistency(
-        output_dir, edge_data, incoming_claims, raw_anomalies
-    )
+    emit_self_loop_anomalies(edge_data, source, raw_anomalies)
+    check_bidirectional_consistency(source, edge_data, incoming_claims, raw_anomalies)
     deduped = deduplicate_anomalies(raw_anomalies)
     aggregated = aggregate_anomalies(deduped)
     # Approach B: route each item (AnomalyEntry or AnomalyAggregate) to its channel

@@ -560,7 +560,9 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
             [],
             [],
         )
-        with patch.object(depmap, "_resolve_parser", return_value=(mock_parser, None)):
+        with patch.object(
+            depmap, "_resolve_parser", return_value=(mock_parser, False, None)
+        ):
 
             async def _denied():
                 await _invoke(
@@ -584,15 +586,16 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
 
     @pytest.mark.asyncio
     async def test_depmap_depmap_get_hub_domains_handler(self, tmp_path):
+        from code_indexer.server.services.dep_map_source import (
+            FilesystemDepMapSource,
+        )
+
         mock_compute_hub_domains = MagicMock(return_value=[])
-        mock_dep_map_service = MagicMock()
-        mock_dep_map_service.cidx_meta_read_path = tmp_path
         with (
             patch.object(
-                _handlers_utils.app_module.app.state,
-                "dependency_map_service",
-                mock_dep_map_service,
-                create=True,
+                depmap,
+                "_resolve_source",
+                new=MagicMock(return_value=(FilesystemDepMapSource(tmp_path), False)),
             ),
             patch.object(depmap, "_compute_hub_domains", mock_compute_hub_domains),
         ):
