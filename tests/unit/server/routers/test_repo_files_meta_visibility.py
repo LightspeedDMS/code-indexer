@@ -189,6 +189,102 @@ def test_admin_activated_listing_is_unchanged(client: Dict[str, Any]) -> None:
     assert f"{CANARY}.md" in {f["path"] for f in response.json()["files"]}
 
 
+COMPOSITE = "combined"
+CATALOG_VISIBLE = {
+    f"{ALPHA}.md",
+    "dependency-map/_index.md",
+    "dependency-map/payments.md",
+    "dependency-map/ledger.md",
+    "dependency-map/reports.md",
+    "dependency-map/_dep_types.md",
+    "dependency-map/_analysis_guidelines.md",
+    "xray-patterns/__any__/p.yaml",
+}
+
+
+@pytest.fixture
+def composite(env: CatalogFileDoorEnv, tmp_path: Path) -> Path:
+    """A pre-existing composite activation whose record names only a granted
+    repository while one component directory is a catalog copy (real proxy
+    configuration on disk): the directory served decides."""
+    import shutil
+
+    root = tmp_path / "activated" / COMPOSITE
+    shutil.copytree(env.fx.root, root / "cidx-meta", symlinks=True)
+    shutil.copytree(env.alpha_dir, root / ALPHA)
+    components = ["cidx-meta", ALPHA]
+    (root / ".code-indexer").mkdir()
+    (root / ".code-indexer" / "config.json").write_text(
+        json.dumps({"proxy_mode": True, "discovered_repos": components})
+    )
+    env.activations.add(COMPOSITE, ALPHA, root)
+    env.activations.records[COMPOSITE].update(
+        is_composite=True,
+        username=RESTRICTED_USER,
+        path=str(root),
+        golden_repo_aliases=[ALPHA],
+        discovered_repos=components,
+    )
+    return root
+
+
+def _composite_paths(
+    client: Dict[str, Any], query: str, who: str = RESTRICTED_USER
+) -> Any:
+    response = _get(client, f"/api/repositories/{COMPOSITE}/files?{query}", who)
+    assert response.status_code == 200, response.text
+    return {f["full_path"] for f in response.json()["files"]}, response.text
+
+
+def test_composite_listing_judges_each_component_on_its_own_paths(
+    client: Dict[str, Any], composite: Path
+) -> None:
+    paths, text = _composite_paths(client, "recursive=true")
+
+    memories = {p for p in paths if p.startswith("cidx-meta/memories/")}
+    catalog = {p for p in paths if p.startswith("cidx-meta/")} - memories
+    assert catalog == {f"cidx-meta/{p}" for p in CATALOG_VISIBLE}
+    assert len(memories) == 2
+    assert f"{ALPHA}/src/main.py" in paths
+    _no_hidden(text)
+
+
+def test_composite_subdirectory_listing_uses_catalog_relative_paths(
+    client: Dict[str, Any], composite: Path
+) -> None:
+    paths, text = _composite_paths(client, "recursive=true&path=dependency-map")
+
+    shown = {p.split("/", 1)[1] for p in paths}
+    expected = {
+        p.split("/", 1)[1] for p in CATALOG_VISIBLE if p.startswith("dependency-map/")
+    }
+    assert shown == expected
+    _no_hidden(text)
+
+
+def test_composite_single_level_listing_hides_internals_and_hidden_names(
+    client: Dict[str, Any], composite: Path
+) -> None:
+    paths, text = _composite_paths(client, "recursive=false")
+
+    assert paths == {
+        f"cidx-meta/{ALPHA}.md",
+        "cidx-meta/dependency-map",
+        "cidx-meta/memories",
+        "cidx-meta/xray-patterns",
+        f"{ALPHA}/src",
+    }
+    _no_hidden(text)
+
+
+def test_admin_composite_listing_is_unchanged(
+    client: Dict[str, Any], composite: Path
+) -> None:
+    paths, _ = _composite_paths(client, "recursive=true", ADMIN_USER)
+
+    assert f"cidx-meta/{CANARY}.md" in paths
+
+
 def test_description_is_redacted_for_a_restricted_caller(
     client: Dict[str, Any], env: CatalogFileDoorEnv
 ) -> None:

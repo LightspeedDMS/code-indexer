@@ -624,11 +624,17 @@ class TestFileCRUDServiceWriteModeEnforcement:
             "code_indexer.server.services.api_metrics_service.api_metrics_service"
         ) as mock_metrics:
             mock_metrics.increment_other_api_call.return_value = None
+            from code_indexer.server.services.cidx_meta_access.file_doors import (
+                CatalogFileAccess,
+            )
+
+            # An admin door's judgement: unrestricted for the directory written.
             result = service.create_file(
                 repo_alias="cidx-meta-global",
                 file_path="new_test_file.md",
                 content="hello world",
                 username="testuser",
+                access_for=lambda served: CatalogFileAccess(None, served),
             )
 
         assert result["success"] is True

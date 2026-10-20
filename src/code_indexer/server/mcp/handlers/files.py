@@ -28,7 +28,7 @@ from code_indexer.server.services.cidx_meta_access.universe_provider import (
 )
 from code_indexer.server.services.cidx_meta_access.tree_projection import (
     UNSCANNED_LIMIT,
-    refuse_hidden_base,
+    catalog_tree_root,
     restrict_catalog_tree,
 )
 from code_indexer.server.services.config_service import get_config_service
@@ -1287,6 +1287,7 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             file_path=file_path,
             content=params["content"],
             username=user.username,
+            access_for=lambda served: _judge(repository_alias, served, user),
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
@@ -1330,6 +1331,7 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             content_hash=params["content_hash"],
             replace_all=params.get("replace_all", False),
             username=user.username,
+            access_for=lambda served: _judge(repository_alias, served, user),
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
@@ -1357,6 +1359,7 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             file_path=file_path,
             content_hash=params.get("content_hash"),
             username=user.username,
+            access_for=lambda served: _judge(repository_alias, served, user),
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
@@ -1575,10 +1578,11 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             registry_of(_utils.app_module.app.state),
         )
         visibility = view.vis if view is not None else None
-        if visibility is not None:
-            refuse_hidden_base(args.get("path") or "", visibility, access_service)
+        base = args.get("path") or ""
+        if view is not None:
+            base = catalog_tree_root(view, base)
         result = DirectoryExplorerService(Path(served.path)).generate_tree(
-            path=args.get("path"),
+            path=base or None,
             max_depth=_coerce_int(args.get("max_depth"), _DEFAULT_TREE_DEPTH),
             max_files_per_dir=UNSCANNED_LIMIT if visibility else files_per_dir,
             include_patterns=args.get("include_patterns"),
@@ -1589,7 +1593,7 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         if visibility is not None:
             result = restrict_catalog_tree(
                 result,
-                args.get("path") or "",
+                base,
                 visibility,
                 access_service,
                 bool(args.get("show_stats")),

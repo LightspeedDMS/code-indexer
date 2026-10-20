@@ -10,7 +10,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import List
+from typing import Any, List, Optional
 
 from ..models.activated_repository import ActivatedRepository
 from ..models.composite_file_models import FileInfo
@@ -105,6 +105,21 @@ def _walk_directory(
             )
 
     return files
+
+
+def composite_activation(
+    activated_repo_manager: Any, username: str, alias: str
+) -> Optional[ActivatedRepository]:
+    """The caller's composite activation *alias*, or None when it is not a
+    composite or its record cannot be read (the door then serves it as a
+    regular activation)."""
+    try:
+        record = activated_repo_manager.get_repository(username, alias)
+        if record and record.get("is_composite", False):
+            return ActivatedRepository.from_dict(record)
+    except Exception as e:
+        logger.debug(f"Could not check composite status for {alias}: {e}")
+    return None
 
 
 def _list_composite_files(

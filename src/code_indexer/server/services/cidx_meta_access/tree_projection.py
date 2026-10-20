@@ -9,8 +9,10 @@ file limit is applied to visible files only, so truncation markers and
 counts never include hidden entries; the raw tree must therefore be
 generated without a file limit.
 
-A requested path under which the caller could never see anything is
-answered exactly like a path that does not exist, before anything is read.
+The requested path is resolved first (dot segments and in-repository
+symlinks) and the tree is walked from that canonical root: a root the caller
+may not see is answered exactly like a path that does not exist, before
+anything is read; a visible document is a valid root.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from .visibility import MetaVisibility, memory_visibility_fn
 
 if TYPE_CHECKING:
     from ..access_filtering_service import AccessFilteringService
+    from .file_doors import CatalogFileView
 
 # Per-directory file limit for generating the raw catalog tree, so the
 # caller's own limit can be applied to visible files only.
@@ -106,22 +109,18 @@ class _Pruner:
         )
 
 
-def refuse_hidden_base(
-    base_path: str,
-    visibility: MetaVisibility,
-    access_service: Optional["AccessFilteringService"],
-) -> None:
-    """Raise the tree door's not-found error, before anything is read, for a
-    requested *base_path* under which the caller could never see anything.
+def catalog_tree_root(view: "CatalogFileView", requested: str) -> str:
+    """The canonical catalog-relative root a restricted tree request walks
+    (``""`` for the catalog itself), decided before anything is read.
 
     Raises:
-        ValueError: the not-found error a missing path gets.
+        ValueError: the not-found error a missing path gets, for a root the
+            caller may not see.
     """
-    if visibility.unrestricted or not base_path:
-        return
-    memory_fn = memory_visibility_fn(access_service, visibility)
-    if not may_list_under(base_path.lstrip("/"), visibility, memory_fn):
-        raise path_not_found_error(base_path)
+    root = view.tree_root(requested)
+    if root is None:
+        raise path_not_found_error(requested)
+    return root
 
 
 def restrict_catalog_tree(

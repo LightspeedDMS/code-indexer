@@ -114,6 +114,27 @@ def test_missing_golden_repos_dir_restricts(
     assert _judge(fx, f"{ALPHA}-global", ordinary, None).view is not None
 
 
+def test_composite_entry_outside_its_component_fails_closed() -> None:
+    from datetime import datetime
+
+    from code_indexer.server.models.composite_file_models import FileInfo
+    from code_indexer.server.services.cidx_meta_access.file_doors import (
+        visible_composite_entries,
+    )
+
+    stray = FileInfo(
+        full_path="other/notes.md",
+        name="notes.md",
+        size=1,
+        modified=datetime.now(),
+        is_directory=False,
+        component_repo="cidx-meta",
+    )
+
+    with pytest.raises(ValueError):
+        visible_composite_entries([stray], "", lambda name: UNRESTRICTED)
+
+
 def test_bound_handles_carry_the_callers_visibility(
     fx: CidxMetaFixture, golden: Path
 ) -> None:

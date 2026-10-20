@@ -13,7 +13,7 @@ and focus on MCP handler logic, parameter validation, and error handling.
 import json
 from datetime import datetime
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -89,6 +89,7 @@ class TestHandleCreateFile:
             file_path="src/new_module.py",
             content="def hello():\n    return 'world'",
             username="testuser",
+            access_for=ANY,
         )
 
     def test_create_file_missing_params(self, mock_user, mock_file_crud_service):
@@ -236,6 +237,7 @@ class TestHandleEditFile:
             content_hash="old_hash_abc123",
             replace_all=False,
             username="testuser",
+            access_for=ANY,
         )
 
     def test_edit_file_replace_all(self, mock_user, mock_file_crud_service):
@@ -393,6 +395,7 @@ class TestHandleDeleteFile:
             file_path="src/old_module.py",
             content_hash=None,
             username="testuser",
+            access_for=ANY,
         )
 
     def test_delete_file_success_with_hash(self, mock_user, mock_file_crud_service):
@@ -423,6 +426,7 @@ class TestHandleDeleteFile:
             file_path="src/old_module.py",
             content_hash="hash_xyz789",
             username="testuser",
+            access_for=ANY,
         )
 
     def test_delete_file_missing_params(self, mock_user, mock_file_crud_service):

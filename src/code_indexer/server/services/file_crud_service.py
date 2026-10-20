@@ -19,7 +19,7 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Optional, TYPE_CHECKING
+from typing import Callable, Dict, Any, Optional, TYPE_CHECKING
 
 from code_indexer.utils.file_locking import nfs_safe_fsync
 from code_indexer.utils.path_confinement import (
@@ -31,6 +31,12 @@ if TYPE_CHECKING:
     from code_indexer.server.repositories.activated_repo_manager import (
         ActivatedRepoManager,
     )
+    from code_indexer.server.services.cidx_meta_access.file_doors import (
+        CatalogFileAccess,
+    )
+
+# A door's catalog judgement of the directory a write lands in.
+AccessFor = Callable[[str], "CatalogFileAccess"]
 
 
 def _get_activated_repo_manager() -> "ActivatedRepoManager":
@@ -292,8 +298,28 @@ class FileCRUDService:
 
         return repo_path
 
+    @staticmethod
+    def _refuse_hidden_catalog_path(
+        repo_path: Path, file_path: str, access_for: Optional[AccessFor]
+    ) -> None:
+        """The catalog write gate, before any existence check or read:
+        *access_for* judges the directory written (a door passing none is
+        refused on a catalog directory)."""
+        from code_indexer.server.services.cidx_meta_access.file_doors import (
+            refuse_hidden_catalog_writes,
+        )
+
+        served = str(repo_path)
+        access = access_for(served) if access_for is not None else None
+        refuse_hidden_catalog_writes(served, [file_path], access)
+
     def create_file(
-        self, repo_alias: str, file_path: str, content: str, username: str
+        self,
+        repo_alias: str,
+        file_path: str,
+        content: str,
+        username: str,
+        access_for: Optional[AccessFor] = None,
     ) -> Dict[str, Any]:
         """
         Create a new file in the activated repository.
@@ -325,6 +351,7 @@ class FileCRUDService:
 
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
+        self._refuse_hidden_catalog_path(repo_path, file_path, access_for)
 
         # Bug #1891: resolve + confine BEFORE any exists()/open() call.
         # _validate_crud_path() above only rejects literal ".." components
@@ -374,6 +401,7 @@ class FileCRUDService:
         content_hash: str,
         replace_all: bool,
         username: str,
+        access_for: Optional[AccessFor] = None,
     ) -> Dict[str, Any]:
         """
         Edit a file by replacing string occurrences.
@@ -413,6 +441,7 @@ class FileCRUDService:
 
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
+        self._refuse_hidden_catalog_path(repo_path, file_path, access_for)
 
         # Bug #1891: resolve + confine BEFORE any exists()/open() call.
         # _validate_crud_path() above only rejects literal ".." components
@@ -479,6 +508,7 @@ class FileCRUDService:
         file_path: str,
         content_hash: Optional[str],
         username: str,
+        access_for: Optional[AccessFor] = None,
     ) -> Dict[str, Any]:
         """
         Delete a file from the activated repository.
@@ -511,6 +541,7 @@ class FileCRUDService:
 
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
+        self._refuse_hidden_catalog_path(repo_path, file_path, access_for)
 
         # Bug #1891: resolve + confine BEFORE any exists()/open() call.
         # _validate_crud_path() above only rejects literal ".." components

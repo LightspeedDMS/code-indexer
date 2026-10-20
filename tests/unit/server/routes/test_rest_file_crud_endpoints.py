@@ -11,7 +11,7 @@ import pytest
 from datetime import datetime, timezone
 from fastapi import status
 from fastapi.testclient import TestClient
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from code_indexer.server.app import create_app
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -95,6 +95,7 @@ class TestCreateFileEndpoint:
                     file_path="src/test.py",
                     content="print('hello')",
                     username="testuser",
+                    access_for=ANY,
                 )
         finally:
             # Clean up dependency override

@@ -14,10 +14,10 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Callable, FrozenSet, Optional, Set, Tuple
+from typing import Callable, Dict, FrozenSet, Optional, Set, Tuple
 
 from ..dep_map_file_utils import load_domains_json
-from .depmap_model import DepMapModel, document_participants
+from .depmap_model import DepMapModel, document_participants, load_depmap_model
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,24 @@ def participants_reader(dep_map_dir: Path) -> ParticipantsReader:
     return _diagnosed(
         dep_map_dir, lambda domain: domain_participants(dep_map_dir, domain)
     )
+
+
+def request_participants_reader(
+    dep_map_dir: Path, model: Optional[Callable[[], DepMapModel]] = None
+) -> ParticipantsReader:
+    """Membership for ONE request, answered from ONE dependency-map model:
+    ``model()`` (the request's own) when given, else the model of
+    *dep_map_dir* loaded on first use. No domain file is read per domain,
+    and every decision of the request agrees on membership."""
+    source = model or (lambda: load_depmap_model(dep_map_dir))
+    loaded: Dict[str, DepMapModel] = {}
+
+    def _lookup(domain: str) -> Optional[FrozenSet[str]]:
+        if "model" not in loaded:
+            loaded["model"] = source()
+        return loaded["model"].domain_participants(domain)
+
+    return _diagnosed(dep_map_dir, _lookup)
 
 
 def model_participants_reader(

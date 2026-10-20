@@ -17,6 +17,10 @@ Listings keep what the policy allows, visible dependency-map documents
 included. The file service refuses a catalog directory when a request
 carries no judgement at all (``refuse_unjudged_catalog``).
 
+Writes (``refuse_hidden_catalog_writes``) judge the canonical path before
+any existence check or read: a path the caller may not see gets one fixed
+refusal whether or not it exists.
+
 Synchronous (stores and files): async callers use a worker thread.
 """
 
@@ -25,7 +29,7 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from contextvars import Token
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -42,7 +46,7 @@ from ...cache.handle_binding import bind_handles, reset_handle_binding
 from .catalog_requests import is_catalog_request
 from .depmap_projection import MetaProjector, render_line_aligned
 from .history_policy import _may_serve_catalog
-from .membership import participants_reader
+from .membership import ParticipantsReader, request_participants_reader
 from .path_policy import (
     DEP_MAP_DIR,
     Decision,
@@ -79,14 +83,25 @@ class CatalogFileView:
     root: Path
     access_service: Optional[Any]
     registry: Any
-    _participants: Dict[str, Optional[FrozenSet[str]]] = field(default_factory=dict)
+    _participants: Optional[ParticipantsReader] = None
     _projector: Optional[MetaProjector] = None
 
+    def _meta_projector(self) -> MetaProjector:
+        """The request's projector; its model also answers membership."""
+        if self._projector is None:
+            self._projector = MetaProjector(
+                self.vis,
+                dep_map_dir=self.root / DEP_MAP_DIR,
+                universe=process_alias_universe(self.registry),
+            )
+        return self._projector
+
     def _members(self, domain: str) -> Optional[FrozenSet[str]]:
-        if domain not in self._participants:
-            read = participants_reader(self.root / DEP_MAP_DIR)
-            self._participants[domain] = read(domain)
-        return self._participants[domain]
+        if self._participants is None:
+            self._participants = request_participants_reader(
+                self.root / DEP_MAP_DIR, lambda: self._meta_projector().model()
+            )
+        return self._participants(domain)
 
     def decide(self, relative_path: str) -> Decision:
         """The policy decision; everything is denied without the access
@@ -96,17 +111,41 @@ class CatalogFileView:
         memory_fn = memory_visibility_fn(self.access_service, self.vis)
         return classify(relative_path, self.vis, self._members, memory_fn)
 
-    def _canonical(self, relative_path: str) -> Optional[str]:
-        """The catalog-relative path of the file actually served for
-        *relative_path* (symlinks and dot segments resolved), or None when
-        it lies outside the catalog or is the catalog itself."""
+    def _relative_real(self, relative_path: str) -> Optional[str]:
+        """The catalog-relative path actually served for *relative_path*
+        (symlinks and dot segments resolved; ``""`` for the catalog itself),
+        or None when it lies outside the catalog."""
         if not isinstance(relative_path, str) or "\x00" in relative_path:
             return None
         root = os.path.realpath(self.root)
         real = os.path.realpath(os.path.join(root, relative_path))
+        if real == root:
+            return ""
         if not real.startswith(root + os.sep):
             return None
         return Path(os.path.relpath(real, root)).as_posix()
+
+    def _canonical(self, relative_path: str) -> Optional[str]:
+        """``_relative_real``, None for the catalog itself."""
+        return self._relative_real(relative_path) or None
+
+    def tree_root(self, relative_path: str) -> Optional[str]:
+        """The canonical root a tree of *relative_path* walks (``""`` for
+        the catalog itself), or None when the caller may see nothing there:
+        a directory by what could be listed under it, a document by the file
+        decision, a missing path by either (the walk then answers the same
+        not-found)."""
+        canonical = self._relative_real(relative_path)
+        if not canonical:
+            return canonical
+        target = self.root / canonical
+        as_dir = not target.exists() or target.is_dir()
+        as_file = not target.is_dir()
+        if (as_dir and self.may_list_under(canonical)) or (
+            as_file and self.listable(canonical)
+        ):
+            return canonical
+        return None
 
     def _served_decision(self, relative_path: str) -> Decision:
         canonical = self._canonical(relative_path)
@@ -136,14 +175,8 @@ class CatalogFileView:
         return lambda lines: self._project(lines, canonical)
 
     def _project(self, lines: List[str], canonical: str) -> List[str]:
-        if self._projector is None:
-            self._projector = MetaProjector(
-                self.vis,
-                dep_map_dir=self.root / DEP_MAP_DIR,
-                universe=process_alias_universe(self.registry),
-            )
         bare = [line[:-1] if line.endswith("\n") else line for line in lines]
-        shown = render_line_aligned(self._projector.project(bare, canonical))
+        shown = render_line_aligned(self._meta_projector().project(bare, canonical))
         rendered = shown.split("\n")
         return [
             text + ("\n" if line.endswith("\n") else "")
@@ -281,6 +314,37 @@ def served_tree_view(
     return CatalogFileView(visibility, Path(served_path), access_service, registry)
 
 
+def visible_composite_entries(
+    entries: List[Any],
+    path: str,
+    judge_component: Callable[[str], CatalogFileAccess],
+) -> List[Any]:
+    """The composite listing *entries* (``full_path``, ``component_repo``,
+    ``is_directory``) the caller may see. Each component is judged once on
+    its own served directory (``judge_component(name)``) and each entry is
+    decided on its path inside that component (*path*, the requested
+    subdirectory, prefixed).
+
+    Raises:
+        ValueError: an entry does not lie under its component (fail closed).
+    """
+    base = path.strip("/")
+    accesses: Dict[str, CatalogFileAccess] = {}
+    kept: List[Any] = []
+    for entry in entries:
+        component = entry.component_repo
+        prefix = f"{component}/"
+        if not entry.full_path.startswith(prefix):
+            raise ValueError("composite entry outside its component")
+        if component not in accesses:
+            accesses[component] = judge_component(component)
+        inner = entry.full_path[len(prefix) :]
+        relative = f"{base}/{inner}" if base else inner
+        if accesses[component].lists(relative, entry.is_directory):
+            kept.append(entry)
+    return kept
+
+
 def view_for(
     repo_path: str, access: Optional[CatalogFileAccess], missing: Exception
 ) -> Optional[CatalogFileView]:
@@ -300,6 +364,28 @@ def view_for(
     ) != os.path.realpath(repo_path):
         raise missing
     return access.view
+
+
+CATALOG_WRITE_REFUSAL = "This path is not available for writing in this repository."
+
+
+def refuse_hidden_catalog_writes(
+    repo_path: str, paths: List[str], access: Optional[CatalogFileAccess]
+) -> None:
+    """Refuse a write into *repo_path* unless the caller may see every one of
+    *paths*, decided on the canonical path before any existence check or
+    read. Visible paths and unrestricted requests pass unchanged.
+
+    Raises:
+        PermissionError: ``CATALOG_WRITE_REFUSAL``, identical whether or not
+            the file exists; also for a catalog directory written without a
+            judgement or under a judgement made for another directory.
+    """
+    view = view_for(repo_path, access, PermissionError(CATALOG_WRITE_REFUSAL))
+    if view is None:
+        return
+    if not all(view.listable(path) for path in paths):
+        raise PermissionError(CATALOG_WRITE_REFUSAL)
 
 
 @contextmanager

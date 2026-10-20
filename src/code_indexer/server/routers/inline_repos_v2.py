@@ -51,10 +51,16 @@ from ..models.activated_repository import ActivatedRepository
 
 from ..auth import dependencies
 from . import repo_access_http
-from ..managers.composite_file_listing import _list_composite_files
+from ..managers.composite_file_listing import (
+    _list_composite_files,
+    composite_activation,
+)
 from ..services.stats_service import stats_service
 from ..services.file_service import file_service
-from ..services.cidx_meta_access.file_doors import judge_app_request
+from ..services.cidx_meta_access.file_doors import (
+    judge_app_request,
+    visible_composite_entries,
+)
 from ..services.file_listing_paths import build_non_composite_path_pattern
 from code_indexer.utils.path_confinement import resolve_confined_path
 from ..services.search_service import search_service
@@ -962,27 +968,24 @@ def register_repos_v2_routes(
         access = judge_app_request(
             app.state, repo_id, served, current_user.username, activated_repo_manager
         )
-        # Check if this is a composite repository
-        try:
-            repo_dict = activated_repo_manager.get_repository(
-                current_user.username, repo_id
+        composite = composite_activation(
+            activated_repo_manager, current_user.username, repo_id
+        )
+        if composite is not None:
+            # Bug #1886 (R3 revision): `recursive` is composite-only.
+            components = composite.path
+            files = visible_composite_entries(
+                _list_composite_files(composite, path=path or "", recursive=recursive),
+                path or "",
+                lambda name: judge_app_request(
+                    app.state,
+                    name,
+                    str(components / name),
+                    current_user.username,
+                    activated_repo_manager,
+                ),
             )
-            if repo_dict and repo_dict.get("is_composite", False):
-                # Composite repository - use simple file listing.
-                # Bug #1886 (R3 revision): byte-identical to HEAD --
-                # `recursive` is a plain bool again (composite-only,
-                # unaffected by the non-composite path-pattern change
-                # below).
-                repo = ActivatedRepository.from_dict(repo_dict)
-                files = _list_composite_files(
-                    repo, path=path or "", recursive=recursive
-                )
-                if access.view is not None:
-                    files = [f for f in files if access.view.listable(f.path)]
-                return {"files": [f.model_dump() for f in files]}
-        except Exception as e:
-            logging.debug(f"Could not check composite status for {repo_id}: {e}")
-            # Fall through to regular file listing
+            return {"files": [f.model_dump() for f in files]}
 
         # Validate query parameters
         if page < 1:
