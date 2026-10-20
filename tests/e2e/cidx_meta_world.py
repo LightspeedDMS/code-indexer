@@ -60,6 +60,10 @@ RESTRICTED_USER = "e2e-catalog-viewer"
 RESTRICTED_GROUP = "e2e-catalog-alpha"
 VISIBLE_ASSET = f"{ALPHA}.svg"
 HIDDEN_ASSET = f"{CANARY}.svg"
+GIT_HEAD = ".git/HEAD"
+# A real internal metadata file of the indexed catalog (same exclusion rule
+# as .git in the file doors).
+INTERNAL_FILE = ".code-indexer/config.json"
 
 JOB_TIMEOUT_SECONDS = 300.0
 JOB_POLL_SECONDS = 1.0
@@ -420,7 +424,10 @@ def refresh_catalog(client: httpx.Client, admin: HeaderSource) -> None:
 
 def refresh_catalog_until_served(client: httpx.Client, admin: HeaderSource) -> None:
     """Refresh the catalog, then wait until an admin full-text search serves
-    the seeded content (the refresh publishes a new snapshot)."""
+    the seeded content (the refresh publishes a new snapshot).  Registering
+    repositories starts catalog refreshes of its own: never submit a second
+    refresh while one runs."""
+    wait_for_idle_catalog_refreshes(client, admin)
     refresh_catalog(client, admin)
     deadline = time.monotonic() + INDEX_READY_TIMEOUT_SECONDS
     last: Optional[Reply] = None
@@ -618,6 +625,29 @@ def wait_for_idle_catalog_refreshes(client: httpx.Client, admin: HeaderSource) -
             return
         time.sleep(JOB_POLL_SECONDS)
     raise TimeoutError("catalog refresh jobs still running")
+
+
+def _catalog_last_refresh(client: httpx.Client, admin: HeaderSource) -> datetime:
+    reply = mcp(
+        client, admin.get_headers(), "repository_status", {"alias": CATALOG_GLOBAL}
+    )
+    assert reply.ok, f"repository_status: {reply.snippet()}"
+    raw = str(reply.body["status"]["last_refresh"]).replace("Z", "+00:00")
+    return datetime.fromisoformat(raw)
+
+
+def wait_for_catalog_refresh_after(
+    client: httpx.Client, admin: HeaderSource, since: datetime
+) -> None:
+    """Wait until the catalog was refreshed after *since* (the refresh a
+    catalog write starts, possibly deferred) and no refresh is running."""
+    deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if _catalog_last_refresh(client, admin) > since:
+            wait_for_idle_catalog_refreshes(client, admin)
+            return
+        time.sleep(JOB_POLL_SECONDS)
+    raise TimeoutError(f"catalog not refreshed after {since.isoformat()}")
 
 
 def web_session(world: CatalogWorld, username: str, password: str) -> httpx.Client:

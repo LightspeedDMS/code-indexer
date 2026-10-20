@@ -8,6 +8,7 @@ after ``open_catalog_doors`` (enables the catalog wiki).
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, Tuple
 
@@ -15,7 +16,6 @@ import pytest
 
 from tests.e2e.cidx_meta_doors import (
     CONTENT_DOORS,
-    GIT_UNAVAILABLE_WATCH_LOG,
     REFUSAL_DOORS,
     WIKI_FRONT_MATTER_LOG,
     Caller,
@@ -33,45 +33,27 @@ from tests.e2e.cidx_meta_tool_recipes import RECIPES, repository_tools
 from tests.e2e.cidx_meta_world import (
     CATALOG,
     CATALOG_GLOBAL,
+    GIT_HEAD,
+    INTERNAL_FILE,
     Reply,
     leaks,
     mentions,
+    wait_for_catalog_refresh_after,
 )
 from tests.e2e.helpers import wait_for_job
-from tests.e2e.log_audit_claims import exact, pattern
+from tests.e2e.log_audit_claims import exact, utc_now
 from tests.shared.cidx_meta_visibility_fixture import ALPHA, CANARY
 
 Callers = Tuple[Caller, Caller]
 JOB_TIMEOUT_SECONDS = 180.0
 WRITE_REFUSAL = "This path is not available for writing in this repository."
-GIT_HEAD = ".git/HEAD"
 ABSENT_FILE = "absent-sample.md"
 _DOMAIN_COUNT = re.compile(r"\((\d+) domains\)")
-_ACTIVATED_REPO_LOGGER = "code_indexer.server.repositories.activated_repo_manager"
 _FILES_LOGGER = "code_indexer.server.mcp.handlers.files"
-# The catalog is not a git repository: an activation job (off the request
-# thread) logs both identity settings it could not apply.
-ACTIVATION_LOGS = tuple(
-    pattern(
-        _ACTIVATED_REPO_LOGGER,
-        rf"Failed to set git config user\.{key}: command='git config user\.{key} "
-        r"[^']+' exit_code=128 stdout='' stderr='fatal: not in a git directory\\n'",
-        same_request=False,
-    )
-    for key in ("email", "name")
-)
-WATCH_STOP_LOG = exact(
-    "code_indexer.daemon.watch_manager",
-    "Watch thread did not stop within 5 seconds",
-    same_request=False,
-)
-ACTIVATION_WINDOW_LOGS = (
-    GIT_UNAVAILABLE_WATCH_LOG,
-    WATCH_STOP_LOG,
-    exact(_ACTIVATED_REPO_LOGGER, "Repository deactivation initiated", False),
-)
-# Longer than the watch manager's 5-second stop wait.
-ACTIVATION_SETTLE_SECONDS = 8.0
+# Not claimed: the activation job's git-config warnings, "Repository
+# deactivation initiated" and the auto-watch start/stop warnings are logged
+# off the request thread and their messages name no resource of this test,
+# so they cannot be bound to it and are left to the log audit.
 _SUITE_NAMES = frozenset(
     {d.name for d in CONTENT_DOORS}
     | {d.name for d in REFUSAL_DOORS}
@@ -79,6 +61,8 @@ _SUITE_NAMES = frozenset(
         "test_catalog_activation_is_refused",
         "test_hidden_catalog_writes_share_one_refusal",
         "test_quick_reference_counts_only_visible_domains",
+        "test_restricted_memory_lifecycle_names_nothing_hidden",
+        "test_restricted_xray_pattern_store_names_nothing_hidden",
     }
 )
 
@@ -164,6 +148,10 @@ def _assert_recipe_control(tool: str, reply: Reply, admin: Caller) -> None:
     control = admin.mcp(tool, _recipe_args(tool))
     assert control.ok, f"{tool} admin control: {control.snippet()}"
     if recipe.same_as_admin:
+        for answer in (reply, control):
+            body = answer.body if isinstance(answer.body, dict) else {}
+            got = {key: body.get(key) for key in recipe.expect}
+            assert got == recipe.expect, f"{tool}: {answer.snippet()}"
         assert reply.items == control.items, (reply.snippet(), control.snippet())
         return
     assert recipe.shows and mentions(reply, recipe.shows), (
@@ -190,6 +178,35 @@ def _assert_missing_file_answer(reply: Reply, path: str, caller: Caller) -> None
 
 def _assert_reads_like_missing_file(caller: Caller, path: str) -> None:
     _assert_missing_file_answer(_read_catalog_file(caller, path), path, caller)
+
+
+MEMORY_SUMMARY = "Sample catalog visibility memory: alpha entry returns one."
+UNKNOWN_REPO = "absent-sample-repo"
+PATTERN_YAML = (
+    "name: e2e-catalog-sample-pattern\n"
+    "description: Sample pattern stored by the catalog visibility suite.\n"
+    "language: python\n"
+    "evaluator_code: |\n"
+    "  fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { Vec::new() }\n"
+)
+
+
+def _memory_args(summary: str) -> Dict[str, Any]:
+    return {
+        "type": "gotcha",
+        "scope": "repo",
+        "scope_target": ALPHA,
+        "referenced_repo": ALPHA,
+        "summary": summary,
+        "evidence": [{"file": f"{ALPHA}_core.py", "lines": "1-4"}],
+    }
+
+
+def _store_pattern(caller: Caller, scope: str) -> Reply:
+    return caller.mcp(
+        "store_xray_pattern",
+        {"scope": scope, "pattern_yaml": PATTERN_YAML, "overwrite": True},
+    )
 
 
 def _recipe_args(tool: str) -> Dict[str, Any]:
@@ -261,18 +278,23 @@ class CatalogDoorSuite:
         control = _read_catalog_file(admin, f"{CANARY}.md")
         assert control.ok and mentions(control, "alphabet of flags"), control.snippet()
 
-    def test_git_metadata_answers_like_a_missing_file(
+    def test_internal_metadata_answers_like_a_missing_file(
         self, catalog_callers: Callers
     ) -> None:
+        # INTERNAL_FILE really exists in the indexed catalog and the admin
+        # control reads it; the restricted caller gets exactly the
+        # missing-file answer.  The catalog holds no .git (a .git with only
+        # HEAD makes the server treat it as a git repository and breaks
+        # activation), so .git/HEAD is checked for the restricted caller
+        # only.
         user, admin = catalog_callers
+        on_disk = user.world.catalog_root / INTERNAL_FILE
+        assert on_disk.is_file(), INTERNAL_FILE
+        key = sorted(json.loads(on_disk.read_text(encoding="utf-8")))[0]
+        control = _read_catalog_file(admin, INTERNAL_FILE)
+        assert control.ok and mentions(control, key), control.snippet()
+        _assert_reads_like_missing_file(user, INTERNAL_FILE)
         _assert_reads_like_missing_file(user, GIT_HEAD)
-        control = _read_catalog_file(admin, GIT_HEAD)
-        if (user.world.catalog_root / GIT_HEAD).is_file():
-            assert control.ok and mentions(control, "ref:"), control.snippet()
-        else:
-            # The catalog holds no git metadata: the admin gets the
-            # missing-file answer as well.
-            _assert_missing_file_answer(control, GIT_HEAD, admin)
 
     def test_canary_term_finds_nothing_for_restricted_caller(
         self, catalog_callers: Callers
@@ -354,23 +376,15 @@ class CatalogDoorSuite:
         ):
             assert not reply.ok and mentions(reply, "not accessible"), reply.snippet()
             assert not leaks(reply), reply.snippet()
-        mark = admin.log_mark()
         accepted = admin.mcp("activate_repository", {"golden_repo_alias": CATALOG})
         assert accepted.ok, f"admin activation: {accepted.snippet()}"
         _wait(admin, accepted)
-        # The catalog is not a git repository: activating it logs these.
-        admin.claim_logs(mark, ACTIVATION_LOGS)
         try:
             _activated_paths(user, admin)
         finally:
             removed = admin.mcp("deactivate_repository", {"user_alias": CATALOG})
             assert removed.ok, f"admin deactivation: {removed.snippet()}"
             _wait(admin, removed)
-            # Watch start and stop are logged asynchronously; claimed only
-            # inside this activation's own window.
-            admin.claim_optional(
-                mark, ACTIVATION_WINDOW_LOGS, settle_seconds=ACTIVATION_SETTLE_SECONDS
-            )
 
     def test_hidden_catalog_writes_share_one_refusal(
         self, catalog_callers: Callers
@@ -411,13 +425,8 @@ class CatalogDoorSuite:
             )
             user.claim_logs(mark, (create, create, delete))
         finally:
-            mark = user.log_mark()
             exited = user.mcp("exit_write_mode", {"repo_alias": CATALOG_GLOBAL})
             assert exited.ok, f"exit_write_mode: {exited.snippet()}"
-            # Leaving write mode stops the catalog clone's auto-watch.
-            user.claim_optional(
-                mark, (WATCH_STOP_LOG,), settle_seconds=ACTIVATION_SETTLE_SECONDS
-            )
 
     def test_cached_handle_is_refused_after_grant_revocation(
         self, catalog_callers: Callers
@@ -459,6 +468,52 @@ class CatalogDoorSuite:
         restricted = user.mcp("search_code", args)
         assert restricted.ok and not leaks(restricted), restricted.snippet()
         assert f"{ALPHA}.md" in result_paths(restricted), restricted.snippet()
+
+    # The two write scenarios run last: a catalog write starts a catalog
+    # refresh, during which activating the catalog is refused.
+    def test_restricted_memory_lifecycle_names_nothing_hidden(
+        self, catalog_callers: Callers
+    ) -> None:
+        user = catalog_callers[0]
+        started = utc_now()
+        created = user.mcp("create_memory", _memory_args(MEMORY_SUMMARY))
+        assert created.ok and not leaks(created), created.snippet()
+        memory_id = str(created.body["id"])
+        content_hash = str(created.body["content_hash"])
+        try:
+            edited = user.mcp(
+                "edit_memory",
+                {
+                    "memory_id": memory_id,
+                    "expected_content_hash": content_hash,
+                    **_memory_args(f"{MEMORY_SUMMARY} (edited)"),
+                },
+            )
+            if edited.ok:
+                content_hash = str(edited.body["content_hash"])
+            assert edited.ok and not leaks(edited), edited.snippet()
+        finally:
+            deleted = user.mcp(
+                "delete_memory",
+                {"memory_id": memory_id, "expected_content_hash": content_hash},
+            )
+            wait_for_catalog_refresh_after(user.world.client, user.world.admin, started)
+            assert deleted.ok and not leaks(deleted), deleted.snippet()
+
+    def test_restricted_xray_pattern_store_names_nothing_hidden(
+        self, catalog_callers: Callers
+    ) -> None:
+        # No delete door exists for patterns: the stored file lives in the
+        # catalog and the world teardown's catalog restore removes it.
+        user = catalog_callers[0]
+        started = utc_now()
+        stored = _store_pattern(user, f"{ALPHA}-global")
+        hidden = _store_pattern(user, f"{CANARY}-global")
+        unknown = _store_pattern(user, f"{UNKNOWN_REPO}-global")
+        wait_for_catalog_refresh_after(user.world.client, user.world.admin, started)
+        assert stored.ok and not leaks(stored), stored.snippet()
+        assert not hidden.ok and not unknown.ok, (hidden.snippet(), unknown.snippet())
+        assert hidden.text.replace(CANARY, UNKNOWN_REPO) == unknown.text
 
 
 def restricted_catalog_handle(user: Caller) -> str:

@@ -69,20 +69,12 @@ def search_echo(*submitted: str) -> Echo:
 
 
 CORRELATION_HEADER = "X-Correlation-ID"
-# The wiki renders the fixture's deliberately unparsable "reports" domain
-# (its own logging names no file, and rendering may run off the request
-# thread); claimed only inside the wiki doors' own call windows.
+# The wiki renders the fixture's deliberately unparsable "reports" domain;
+# claimed when a wiki door's own request logged it (a copy logged off the
+# request thread names no resource and is left to the log audit).
 WIKI_FRONT_MATTER_LOG = exact(
     "code_indexer.server.wiki.wiki_service",
     "Failed to parse front matter, treating as plain content",
-    same_request=False,
-)
-# An auto-watch started on the (non-git) catalog clone logs this off the
-# request thread.
-GIT_UNAVAILABLE_WATCH_LOG = exact(
-    "code_indexer.services.git_aware_watch_handler",
-    "Git not available - proceeding with file-only monitoring",
-    same_request=False,
 )
 
 
@@ -484,13 +476,6 @@ _TEMPORAL_REFUSAL_LOG = exact(
     "code_indexer.server.mcp.handlers.search",
     "Error in search_code: Temporal search is not available for this repository.",
 )
-# Logged by the temporal dispatcher off the request thread.
-_NO_TEMPORAL_INDEX_LOG = exact(
-    "code_indexer.services.temporal.temporal_fusion_dispatch",
-    "No temporal indexes available. Run cidx index --index-commits "
-    "to create temporal indexes.",
-    same_request=False,
-)
 
 
 def _git_door(tool: str, args: Dict[str, Any]) -> RefusalDoor:
@@ -530,7 +515,9 @@ REFUSAL_DOORS: Tuple[RefusalDoor, ...] = (
         refused=_refused_with("Temporal search is not available"),
         admin_passes=lambda r: r.ok,
         restricted_logs=(_TEMPORAL_REFUSAL_LOG,),
-        admin_logs=(_NO_TEMPORAL_INDEX_LOG,),
+        # The admin control's "No temporal indexes available" warning is
+        # logged off the request thread and names no resource: unbindable,
+        # so it is left to the log audit.
     ),
     RefusalDoor(
         "rest_query_temporal",

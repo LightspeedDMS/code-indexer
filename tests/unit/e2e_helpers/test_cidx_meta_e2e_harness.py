@@ -74,6 +74,7 @@ class TestLeakScanRequestEcho:
 SOURCE = "example.catalog_service"
 MESSAGE = "Failed to parse front matter, treating as plain content"
 CALL_ID = "call-correlation-1"
+IDENTITY = "example-sample-activation"
 STARTED = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 WINDOW = LogWindow(
     after_id=10,
@@ -117,14 +118,23 @@ class TestLogClaimMatching:
         assert _claimed(unrelated, exact(SOURCE, MESSAGE)) == []
 
     def test_entry_of_another_request_is_not_claimed(self) -> None:
-        foreign = [_entry(correlation_id="other-request")]
-        assert _claimed(foreign, exact(SOURCE, MESSAGE)) == []
-        assert _claimed(foreign, exact(SOURCE, MESSAGE, same_request=False)) == []
+        bound = f"Watch stopped for {IDENTITY}"
+        assert _claimed([_entry(correlation_id="other")], exact(SOURCE, MESSAGE)) == []
+        foreign = [_entry(message=bound, correlation_id="other-request")]
+        assert _claimed(foreign, exact(SOURCE, bound, bound_to=IDENTITY)) == []
 
-    def test_request_claim_requires_the_calls_own_correlation_id(self) -> None:
+    def test_uncorrelated_entry_without_a_binding_is_never_claimed(self) -> None:
         background = [_entry(correlation_id=None)]
         assert _claimed(background, exact(SOURCE, MESSAGE)) == []
-        assert _claimed(background, exact(SOURCE, MESSAGE, same_request=False)) == [11]
+
+    def test_uncorrelated_entry_is_claimed_only_for_its_bound_identity(self) -> None:
+        claim = pattern(SOURCE, r"Watch stopped for \S+", bound_to=IDENTITY)
+        ours = _entry(23, message=f"Watch stopped for {IDENTITY}", correlation_id=None)
+        other = _entry(
+            24, message="Watch stopped for other-sample", correlation_id=None
+        )
+        assert _claimed([other], claim) == []
+        assert _claimed([other, ours], claim) == [23]
 
     def test_entries_outside_the_calls_window_are_not_claimed(self) -> None:
         outside = [
@@ -132,7 +142,7 @@ class TestLogClaimMatching:
             _entry(15, timestamp=(STARTED - timedelta(seconds=1)).isoformat()),
             _entry(16, timestamp=(STARTED + timedelta(seconds=6)).isoformat()),
         ]
-        assert _claimed(outside, exact(SOURCE, MESSAGE, same_request=False)) == []
+        assert _claimed(outside, exact(SOURCE, MESSAGE)) == []
 
     def test_naive_and_zulu_timestamps_are_read_as_utc(self) -> None:
         inside = (STARTED + timedelta(seconds=2)).replace(tzinfo=None).isoformat()
@@ -211,6 +221,12 @@ class TestRepositoryToolAudit:
             if recipe.may_succeed and not (recipe.shows or recipe.same_as_admin)
         )
         assert not vacuous, f"may_succeed recipes without a control: {vacuous}"
+
+    def test_every_same_as_admin_recipe_names_its_expected_answer(self) -> None:
+        unpinned = sorted(
+            tool for tool, r in RECIPES.items() if r.same_as_admin and not r.expect
+        )
+        assert not unpinned, f"same_as_admin recipes without expect: {unpinned}"
 
 
 class TestCleanupSteps:

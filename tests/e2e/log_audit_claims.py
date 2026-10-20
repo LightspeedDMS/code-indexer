@@ -6,8 +6,9 @@ its own correlation id, and afterwards claims the COMPLETE entries it
 expects: each ``LogClaim`` names the logger and a full-message pattern.  An
 entry is claimed only inside the call's own window: id above the mark,
 created between the mark and the claim, and carrying one of the window's
-correlation ids (``same_request``) or, for diagnostics written off the
-request thread, either none of them or no correlation id at all.  The phase
+correlation ids.  A diagnostic written off the request thread (no
+correlation id) is claimed only when its message names a resource unique to
+the test (``LogClaim.bound_to``); otherwise the log audit sees it.  The phase
 gate (``log_audit_gate.run_log_audit_gate``) skips claimed ids only, so the
 same text logged by any other request is still audited.  The registry is
 per process: every phase runs its server tests in one pytest process.
@@ -45,13 +46,15 @@ _GATE_RESULTS = pytest.StashKey[List[Any]]()
 class LogClaim:
     """One expected entry: logger ``source`` and a full-message regex.
 
-    ``same_request``: the entry must carry a correlation id of the window's
-    own requests; otherwise an entry with no correlation id (logged off the
-    request thread) is accepted too."""
+    The entry must carry a correlation id of the window's own requests.  An
+    entry with no correlation id (logged off the request thread) is claimed
+    only when ``bound_to`` names a resource unique to the test (a fixture
+    alias, a job id, an activation name) and the message names it; an
+    unbound one is left to the log audit (see ``_in_window``)."""
 
     source: str
     message: str
-    same_request: bool = True
+    bound_to: str = ""
 
     def matches(self, entry: Dict[str, Any]) -> bool:
         return entry.get("source") == self.source and bool(
@@ -59,12 +62,12 @@ class LogClaim:
         )
 
 
-def exact(source: str, message: str, same_request: bool = True) -> LogClaim:
-    return LogClaim(source, re.escape(message), same_request)
+def exact(source: str, message: str, bound_to: str = "") -> LogClaim:
+    return LogClaim(source, re.escape(message), bound_to)
 
 
-def pattern(source: str, regex: str, same_request: bool = True) -> LogClaim:
-    return LogClaim(source, regex, same_request)
+def pattern(source: str, regex: str, bound_to: str = "") -> LogClaim:
+    return LogClaim(source, regex, bound_to)
 
 
 @dataclass(frozen=True)
@@ -105,7 +108,11 @@ def _in_window(entry: Dict[str, Any], claim: LogClaim, window: LogWindow) -> boo
     correlation = entry.get("correlation_id")
     if correlation in window.correlation_ids:
         return True
-    return not claim.same_request and not correlation
+    return (
+        not correlation
+        and bool(claim.bound_to)
+        and claim.bound_to in str(entry.get("message"))
+    )
 
 
 def match_claims(

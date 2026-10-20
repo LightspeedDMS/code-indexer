@@ -24,7 +24,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, List, Mapping, Tuple
 
-from tests.e2e.cidx_meta_doors import GIT_UNAVAILABLE_WATCH_LOG
 from tests.e2e.cidx_meta_world import CATALOG, CATALOG_GLOBAL
 from tests.e2e.log_audit_claims import LogClaim, exact, pattern
 from tests.shared.cidx_meta_visibility_fixture import ALPHA, CANARY
@@ -47,6 +46,7 @@ class ToolRecipe:
     shows: str = ""
     admin_shows: str = ""
     same_as_admin: bool = False
+    expect: Dict[str, Any] = field(default_factory=dict)
     logs: Tuple[LogClaim, ...] = ()
     optional_logs: Tuple[LogClaim, ...] = ()
 
@@ -78,10 +78,16 @@ def shows(visible: str, admin_shows: str = "", **args: Any) -> ToolRecipe:
     )
 
 
-def same_as_admin(note: str, **args: Any) -> ToolRecipe:
-    """A call that succeeds with exactly the admin control's answer."""
+def same_as_admin(note: str, expect: Dict[str, Any], **args: Any) -> ToolRecipe:
+    """A call that succeeds with exactly the admin control's answer, which
+    both callers must give with the *expect* fields."""
     return ToolRecipe(
-        "call", note=note, args=args, may_succeed=True, same_as_admin=True
+        "call",
+        note=note,
+        args=args,
+        may_succeed=True,
+        same_as_admin=True,
+        expect=expect,
     )
 
 
@@ -141,11 +147,7 @@ def repository_tools() -> FrozenSet[str]:
 _G: Dict[str, Any] = {"repository_alias": CATALOG_GLOBAL}
 _HIDDEN_PATH = f"{CANARY}.md"
 _NO_SCIP_INDEX = "the catalog has no SCIP index: the admin gets the same empty answer"
-_WRITES_OWN_CONTENT = (
-    "writes caller-authored content instead of reading the catalog; a write "
-    "naming a hidden repository is covered by "
-    "test_hidden_catalog_writes_share_one_refusal"
-)
+_NO_SCIP_RESULTS: Dict[str, Any] = {"total_results": 0, "results": []}
 
 RECIPES: Dict[str, ToolRecipe] = {
     # Doors and scenarios of the suite.
@@ -176,9 +178,11 @@ RECIPES: Dict[str, ToolRecipe] = {
     "trigger_reindex": exempt(
         "starts an index job on its target instead of reading it; no catalog content"
     ),
-    "create_memory": exempt(_WRITES_OWN_CONTENT),
-    "edit_memory": exempt(_WRITES_OWN_CONTENT),
-    "store_xray_pattern": exempt(_WRITES_OWN_CONTENT),
+    "create_memory": door("test_restricted_memory_lifecycle_names_nothing_hidden"),
+    "edit_memory": door("test_restricted_memory_lifecycle_names_nothing_hidden"),
+    "store_xray_pattern": door(
+        "test_restricted_xray_pattern_store_names_nothing_hidden"
+    ),
     # Admin-only tools: the restricted caller is refused.
     "add_golden_repo": call(url="file:///nonexistent-e2e-source", alias=CATALOG),
     "add_golden_repo_index": call(alias=CATALOG, index_type="fts"),
@@ -226,9 +230,6 @@ RECIPES: Dict[str, ToolRecipe] = {
                 "operations.",
             ),
         ),
-        # The refused edit still starts an auto-watch on the catalog clone
-        # (stopped by exit_write_mode in the hidden-writes scenario).
-        optional_logs=(GIT_UNAVAILABLE_WATCH_LOG,),
         **_G,
     ),
     # X-Ray family.
@@ -250,7 +251,6 @@ RECIPES: Dict[str, ToolRecipe] = {
                 r"e2e-catalog-viewer/cidx-meta-global",
             ),
         ),
-        optional_logs=(GIT_UNAVAILABLE_WATCH_LOG,),
         **_G,
     ),
     "get_branches": call(**_G),
@@ -259,18 +259,22 @@ RECIPES: Dict[str, ToolRecipe] = {
     "list_repositories": shows(ALPHA, admin_shows=CANARY),
     # SCIP on the catalog.
     **{
-        tool: same_as_admin(_NO_SCIP_INDEX, symbol="alpha_entry", **_G)
-        for tool in (
-            "scip_context",
-            "scip_definition",
-            "scip_dependencies",
-            "scip_dependents",
-            "scip_impact",
-            "scip_references",
+        tool: same_as_admin(_NO_SCIP_INDEX, expect, symbol="alpha_entry", **_G)
+        for tool, expect in (
+            ("scip_context", {"total_files": 0, "files": []}),
+            ("scip_definition", _NO_SCIP_RESULTS),
+            ("scip_dependencies", _NO_SCIP_RESULTS),
+            ("scip_dependents", _NO_SCIP_RESULTS),
+            ("scip_impact", {"total_affected": 0, "affected_files": []}),
+            ("scip_references", _NO_SCIP_RESULTS),
         )
     },
     "scip_callchain": same_as_admin(
-        _NO_SCIP_INDEX, from_symbol="alpha_entry", to_symbol=ALPHA, **_G
+        _NO_SCIP_INDEX,
+        {"total_chains_found": 0, "scip_files_searched": 0},
+        from_symbol="alpha_entry",
+        to_symbol=ALPHA,
+        **_G,
     ),
     # CI and pull requests: the catalog has no forge remote.
     "ci_cancel_run": call(run_id="1", **_G),
