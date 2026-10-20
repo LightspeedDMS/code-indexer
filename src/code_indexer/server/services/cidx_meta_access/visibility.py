@@ -138,7 +138,18 @@ def memory_visibility_fn(
     return lambda memory_id: service.memory_visible_within(memory_id, accessible)
 
 
-def _activation_identities(record: Mapping[str, Any]) -> Tuple[str, ...]:
+def names_activation(alias: str) -> bool:
+    """True when *alias* can name one of the caller's activations: a bare
+    alias, not ``-global`` and not shaped like a path."""
+    if alias.endswith("-global") or alias in (".", ".."):
+        return False
+    return not any(ch in alias for ch in "/\\\x00")
+
+
+def activation_identities(record: Mapping[str, Any]) -> Tuple[str, ...]:
+    """Golden repositories an activation record was created from (every
+    component for a composite); ``UNRESOLVED_IDENTITY`` when none is
+    recorded."""
     if record.get("is_composite"):
         golden = [str(g) for g in (record.get("golden_repo_aliases") or []) if g]
     else:
@@ -161,7 +172,7 @@ def meta_identity(repo_info: Mapping[str, Any]) -> Tuple[str, ...]:
     if repo_info.get("repo_path"):
         actual = repo_info.get("actual_repo_id") or repo_info.get("user_alias")
         return (str(actual),) if actual else (UNRESOLVED_IDENTITY,)
-    return _activation_identities(repo_info)
+    return activation_identities(repo_info)
 
 
 def request_alias_identities(
@@ -169,14 +180,12 @@ def request_alias_identities(
 ) -> Tuple[str, ...]:
     """Golden identity behind a request alias, for doors that have only it.
 
-    A ``-global`` alias names a registry entry. A bare alias is the caller's
-    activation when one has that ``user_alias`` (its golden source), else a
-    golden name. Without the activation manager the alias cannot be
-    resolved: ``UNRESOLVED_IDENTITY``.
+    A ``-global`` or path-shaped alias is its own identity. A bare alias is
+    the caller's activation when one has that ``user_alias`` (its golden
+    source), else a golden name. Without the activation manager the alias
+    cannot be resolved: ``UNRESOLVED_IDENTITY``.
     """
-    if alias.endswith("-global"):
-        return (alias,)
-    if alias in (".", "..") or any(ch in alias for ch in "/\\\x00"):
+    if not names_activation(alias):
         return (alias,)
     if activated_repo_manager is None:
         return (UNRESOLVED_IDENTITY,)
@@ -191,7 +200,7 @@ def request_alias_identities(
         return (UNRESOLVED_IDENTITY,)
     if not isinstance(record, Mapping):
         return (alias,)
-    return _activation_identities(record)
+    return activation_identities(record)
 
 
 def is_internal_meta_identity(identities: Iterable[str]) -> bool:

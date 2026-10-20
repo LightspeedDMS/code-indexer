@@ -2416,11 +2416,9 @@ def make_lifespan(
                     refresh_debouncer=cidx_meta_debouncer,
                 )
                 _memory_store_service = _memory_bundle.service
-                _memory_metadata_cache = _memory_bundle.cache
                 _memories_dir = _memory_bundle.memories_dir
 
                 app.state.memory_store_service = _memory_store_service
-                app.state.memory_metadata_cache = _memory_metadata_cache
                 if hasattr(app.state, "app_state") and app.state.app_state is not None:
                     app.state.app_state.memory_store_service = _memory_store_service
 

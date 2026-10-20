@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from code_indexer.server.services.memory_file_lock_manager import MemoryFileLockManager
-from code_indexer.server.services.memory_metadata_cache import MemoryMetadataCache
 from code_indexer.server.services.memory_rate_limiter import (
     MemoryRateLimiter,
     RateLimitConfig,
@@ -29,14 +28,12 @@ from code_indexer.server.services.memory_store_service import (
 class MemoryStoreBundle(NamedTuple):
     """Result of build_memory_store_service.
 
-    Callers that need both the service and the cache (e.g. lifespan wiring)
-    can access them via named fields:
+    Typical lifespan wiring:
 
         bundle = build_memory_store_service(...)
         app.state.memory_store_service = bundle.service
-        app.state.memory_metadata_cache = bundle.cache
         # bundle.memories_dir is the authoritative path; access decisions
-        # read memory frontmatter from it fresh, never through the cache.
+        # read memory frontmatter from it fresh.
         access_filtering_service = AccessFilteringService(
             group_manager,
             memories_dir=bundle.memories_dir,
@@ -44,7 +41,6 @@ class MemoryStoreBundle(NamedTuple):
     """
 
     service: MemoryStoreService
-    cache: MemoryMetadataCache
     memories_dir: Path
 
 
@@ -59,10 +55,8 @@ def build_memory_store_service(
     rate_limit_refill_per_second: float = 0.5,
     per_memory_lock_ttl_seconds: int = 30,
     coarse_lock_ttl_seconds: int = 60,
-    cache_ttl_seconds: int = 60,
-    cache_max_entries: int = 2048,
 ) -> MemoryStoreBundle:
-    """Assemble MemoryStoreService and MemoryMetadataCache from runtime dependencies.
+    """Assemble MemoryStoreService from runtime dependencies.
 
     Args:
         golden_repos_dir: Base clone directory (NOT a .versioned snapshot).
@@ -75,12 +69,9 @@ def build_memory_store_service(
         rate_limit_refill_per_second: Token refill rate per user.
         per_memory_lock_ttl_seconds: TTL for per-memory write locks.
         coarse_lock_ttl_seconds: TTL for the coarse cidx-meta write lock.
-        cache_ttl_seconds: TTL for MemoryMetadataCache entries (seconds).
-        cache_max_entries: Maximum entries in MemoryMetadataCache before LRU eviction.
 
     Returns:
-        MemoryStoreBundle(service, cache) — both wired together so the cache
-        is automatically invalidated on every successful write.
+        MemoryStoreBundle(service, memories_dir).
     """
     memories_dir = Path(golden_repos_dir) / "cidx-meta" / "memories"
     memories_dir.mkdir(parents=True, exist_ok=True)
@@ -104,19 +95,12 @@ def build_memory_store_service(
         coarse_lock_ttl_seconds=coarse_lock_ttl_seconds,
     )
 
-    cache = MemoryMetadataCache(
-        memories_dir,
-        ttl_seconds=cache_ttl_seconds,
-        max_entries=cache_max_entries,
-    )
-
     service = MemoryStoreService(
         config=config,
         lock_manager=lock_manager,
         refresh_scheduler=refresh_scheduler,
         refresh_debouncer=refresh_debouncer,
         rate_limiter=rate_limiter,
-        metadata_cache_invalidator=cache.invalidate,
     )
 
-    return MemoryStoreBundle(service=service, cache=cache, memories_dir=memories_dir)
+    return MemoryStoreBundle(service=service, memories_dir=memories_dir)

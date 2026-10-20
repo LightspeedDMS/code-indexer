@@ -148,7 +148,6 @@ class MemoryStoreService:
         hostname: Optional[str] = None,
         clock: Optional[Callable[[], datetime]] = None,
         id_factory: Optional[Callable[[], str]] = None,
-        metadata_cache_invalidator: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._config = config
         self._lock_manager = lock_manager
@@ -160,11 +159,6 @@ class MemoryStoreService:
             lambda: datetime.now(timezone.utc)
         )
         self._id_factory: Callable[[], str] = id_factory or (lambda: uuid.uuid4().hex)
-        # Story #877 Phase 3-A: optional callback to invalidate metadata cache
-        # after successful write. Called with memory_id; never on exception paths.
-        self._cache_invalidator: Optional[Callable[[str], None]] = (
-            metadata_cache_invalidator
-        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -194,7 +188,6 @@ class MemoryStoreService:
             content_hash = self._run_with_coarse_lock(
                 owner, lambda: atomic_write_memory_file(path, full_payload)
             )
-            self._invalidate_cache(memory_id)
             return {"id": memory_id, "content_hash": content_hash, "path": str(path)}
 
         return self._run_with_per_memory_lock(memory_id, owner, _body)
@@ -231,7 +224,6 @@ class MemoryStoreService:
             content_hash = self._run_with_coarse_lock(
                 owner, lambda: atomic_write_memory_file(path, merged)
             )
-            self._invalidate_cache(memory_id)
             return {"id": memory_id, "content_hash": content_hash, "path": str(path)}
 
         return self._run_with_per_memory_lock(memory_id, owner, _body)
@@ -260,34 +252,12 @@ class MemoryStoreService:
                 raise RateLimitError(f"Rate limit exceeded for user {username!r}")
 
             self._run_with_coarse_lock(owner, lambda: atomic_delete_memory_file(path))
-            self._invalidate_cache(memory_id)
 
         self._run_with_per_memory_lock(memory_id, owner, _body)
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
-
-    def _invalidate_cache(self, memory_id: str) -> None:
-        """Call the metadata cache invalidator if one was injected.
-
-        Invoked after a successful write (create/edit/delete). Never called
-        on exception paths so callers can rely on: invalidator called ↔ write succeeded.
-
-        Exceptions from the invalidator are logged as warnings and suppressed
-        so they never mask the successful write result.
-        """
-        if self._cache_invalidator is None:
-            return
-        try:
-            self._cache_invalidator(memory_id)
-        except Exception:
-            logger.warning(
-                "metadata_cache_invalidator raised an exception for memory_id=%r — "
-                "cache entry may be stale until TTL; write was successful.",
-                memory_id,
-                exc_info=True,
-            )
 
     def _owner_name(self, username: str) -> str:
         return f"memory_store@{self._hostname}/{username}"

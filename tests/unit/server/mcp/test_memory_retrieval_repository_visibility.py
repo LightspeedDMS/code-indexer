@@ -59,7 +59,6 @@ _SHARED_VECTOR_PATCH = (
 )
 _QUERY_VECTOR = [0.1, 0.2, 0.3, 0.4]
 _ACCESS_MODULE = "code_indexer.server.services.access_filtering_service"
-_CACHE_MODULE = "code_indexer.server.services.memory_metadata_cache"
 _PIPELINE_MODULE = "code_indexer.server.mcp.memory_retrieval_pipeline"
 
 
@@ -267,7 +266,6 @@ class TestRunMemoryRetrievalVisibility:
 
         hnsw_returns["candidates"] = _candidates([GLOBAL_ID, REPO_B_ID], golden_dir)
         with (
-            patch(f"{_CACHE_MODULE}.read_memory_file", _recording_read),
             patch(f"{_PIPELINE_MODULE}.read_memory_file", _recording_read),
         ):
             result = _run("user-a", golden_dir, access_service)

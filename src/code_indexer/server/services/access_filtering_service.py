@@ -22,7 +22,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Dict,
-    FrozenSet,
     List,
     NamedTuple,
     Optional,
@@ -32,12 +31,8 @@ from typing import (
     runtime_checkable,
 )
 
-from .cidx_meta_access import (
-    DecisionKind,
-    classify,
-    memory_visibility_fn,
-    resolve_meta_visibility,
-)
+from .cidx_meta_access import memory_visibility_fn, resolve_meta_visibility
+from .cidx_meta_access.path_policy import listable_paths
 from .constants import CIDX_META_REPO, DEFAULT_GROUP_ADMINS, is_internal_meta_repo
 from .group_access_manager import GroupAccessManager
 from .memory_io import (
@@ -54,16 +49,6 @@ if TYPE_CHECKING:
 _MEMORY_FILE_RE = re.compile(r"^[0-9a-f]{32}\.md$")
 
 logger = logging.getLogger(__name__)
-
-_LISTABLE_DECISIONS = frozenset(
-    {DecisionKind.ALLOW, DecisionKind.DESCRIPTION, DecisionKind.MEMORY}
-)
-
-
-def _membership_not_read(_domain: str) -> Optional[FrozenSet[str]]:
-    """Listing never shows dependency-map documents (TRANSFORM or DENY alike),
-    so their membership is not read."""
-    return None
 
 
 class _ActivationSource(NamedTuple):
@@ -433,13 +418,7 @@ class AccessFilteringService:
         vis = resolve_meta_visibility(user_id, self)
         if vis.unrestricted:
             return files
-        memory_fn = memory_visibility_fn(self, vis)
-        return [
-            path
-            for path in files
-            if classify(path, vis, _membership_not_read, memory_fn).kind
-            in _LISTABLE_DECISIONS
-        ]
+        return listable_paths(files, vis, memory_visibility_fn(self, vis))
 
     def filter_visible_memory_ids(
         self, memory_ids: List[str], user_id: str

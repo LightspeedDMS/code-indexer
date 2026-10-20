@@ -319,8 +319,13 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
         fake_legacy = MagicMock()
         fake_legacy._resolve_repo_path.return_value = _FAKE_REPO_PATH
         mock_tree_service_cls = MagicMock()
+        admin_access = MagicMock()
+        admin_access.is_admin_user.return_value = True
         with (
             patch.object(files, "_get_legacy", return_value=fake_legacy),
+            patch.object(
+                files, "_get_access_filtering_service", return_value=admin_access
+            ),
             patch(
                 "code_indexer.global_repos.directory_explorer.DirectoryExplorerService",
                 mock_tree_service_cls,

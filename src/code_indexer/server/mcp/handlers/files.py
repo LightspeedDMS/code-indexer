@@ -15,13 +15,13 @@ from pathlib import Path
 from code_indexer.server.auth.user_manager import User
 from . import _utils
 from code_indexer.server.services.cidx_meta_access.catalog_requests import (
-    catalog_restriction_applies,
+    resolve_served_repository,
     restrict_catalog_items,
     restrict_catalog_paths,
-    served_repo_path,
 )
 from code_indexer.server.services.cidx_meta_access.tree_projection import (
     UNSCANNED_LIMIT,
+    refuse_hidden_base,
     restrict_catalog_tree,
 )
 from code_indexer.server.services.config_service import get_config_service
@@ -1567,73 +1567,52 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
 
-    # Story #1039: bare-to-global alias fallback (read-only handler).
-    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
-        # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
-        # of a bare getattr(_utils.app_module, name, None), which would
-        # otherwise permanently construct the process-wide app singleton
-        # as a side effect of merely reading it.
-        _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
-        _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
-        if _arm is not None and _grm is not None:
-            if not _arm.user_has_activated_repo(user.username, repository_alias):
-                from ._global_fallback import try_global_fallback
-
-                _promoted = try_global_fallback(repository_alias, _grm)
-                if _promoted is not None:
-                    logger.info(
-                        "bare-alias fallback: %r -> %r for user %r",
-                        repository_alias,
-                        _promoted,
-                        user.username,
-                    )
-                    args["repository_alias"] = _promoted
-                    repository_alias = _promoted
-
+    access_service = _get_access_filtering_service()
+    grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     try:
+        from ._global_fallback import try_global_fallback
+
         golden_repos_dir = _get_golden_repos_dir()
-        repo_path = served_repo_path(
+        # Story #1039: bare-to-global promotion only without an activation.
+        served = resolve_served_repository(
             repository_alias,
             user.username,
+            access_service,
             _activations(),
             lambda alias: _get_legacy()._resolve_repo_path(alias, golden_repos_dir),
+            lambda alias: try_global_fallback(alias, grm) if grm else None,
         )
-        if repo_path is None:
-            available_repos = _get_available_repos(user)
+        if served.path is None:
             return _mcp_response(
                 _error_with_suggestions(
                     error_msg=f"Repository '{repository_alias}' not found",
                     attempted_value=repository_alias,
-                    available_values=available_repos,
+                    available_values=_get_available_repos(user),
                 )
             )
-
-        restricted = catalog_restriction_applies(
-            repository_alias,
-            user.username,
-            _get_access_filtering_service(),
-            _activations(),
-        )
+        args["repository_alias"] = served.alias
         files_per_dir = _coerce_int(
             args.get("max_files_per_dir"), _DEFAULT_MAX_FILES_PER_DIR
         )
-        service = DirectoryExplorerService(Path(repo_path))
-        result = service.generate_tree(
+        if served.visibility is not None:
+            refuse_hidden_base(
+                args.get("path") or "", served.visibility, access_service
+            )
+        result = DirectoryExplorerService(Path(served.path)).generate_tree(
             path=args.get("path"),
             max_depth=_coerce_int(args.get("max_depth"), _DEFAULT_TREE_DEPTH),
-            max_files_per_dir=UNSCANNED_LIMIT if restricted else files_per_dir,
+            max_files_per_dir=UNSCANNED_LIMIT if served.visibility else files_per_dir,
             include_patterns=args.get("include_patterns"),
             exclude_patterns=args.get("exclude_patterns"),
             show_stats=args.get("show_stats", False),
             include_hidden=args.get("include_hidden", False),
         )
-
-        if restricted:
+        if served.visibility is not None:
             result = restrict_catalog_tree(
                 result,
                 args.get("path") or "",
-                user.username,
-                _get_access_filtering_service(),
+                served.visibility,
+                access_service,
                 bool(args.get("show_stats")),
                 files_per_dir,
             )

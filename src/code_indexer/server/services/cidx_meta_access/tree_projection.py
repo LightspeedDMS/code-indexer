@@ -1,17 +1,22 @@
 """A catalog directory tree reduced to what the caller may see.
 
 Every file node is judged by its full catalog-relative path (the requested
-subdirectory prefixed), at every depth. A directory survives only while it
-still holds a visible descendant, so hidden names vanish from the nodes and
-from the rendered text. The per-directory file limit is applied to visible
-files only, so truncation markers and counts never include hidden entries;
-the raw tree must therefore be generated without a file limit.
+subdirectory prefixed), at every depth. A directory survives while it still
+holds a visible descendant or the path policy could show the caller
+something under it (a top-level area, a visible X-Ray scope), so hidden
+names vanish from the nodes and from the rendered text. The per-directory
+file limit is applied to visible files only, so truncation markers and
+counts never include hidden entries; the raw tree must therefore be
+generated without a file limit.
+
+A requested path under which the caller could never see anything is
+answered exactly like a path that does not exist, before anything is read.
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set, Tuple
 
 from ....global_repos.directory_explorer import (
     DirectoryExplorerService,
@@ -19,13 +24,12 @@ from ....global_repos.directory_explorer import (
     TreeNode,
     path_not_found_error,
 )
-from .path_policy import XRAY_ANY_SCOPE, XRAY_PATTERNS_DIR, normalize_meta_path
-from .visibility import unrestricted_caller
+from .path_policy import listable_paths, may_list_under
+from .visibility import MetaVisibility, memory_visibility_fn
 
 if TYPE_CHECKING:
     from ..access_filtering_service import AccessFilteringService
 
-CATALOG_TOP_DIRS = frozenset({"dependency-map", "memories", "xray-patterns"})
 # Per-directory file limit for generating the raw catalog tree, so the
 # caller's own limit can be applied to visible files only.
 UNSCANNED_LIMIT = 2**31 - 1
@@ -34,17 +38,6 @@ UNSCANNED_LIMIT = 2**31 - 1
 def _full_path(base_path: str, node_path: str) -> str:
     base = base_path.strip("/")
     return f"{base}/{node_path}" if base and node_path else base or node_path
-
-
-def _listable_directory(full_path: str) -> bool:
-    """A catalog directory every caller may know about, whatever it holds
-    for them: a top-level area or the shared X-Ray pattern scope."""
-    parts = normalize_meta_path(full_path.strip("/"))
-    if not parts or any(seg.startswith(".") for seg in parts):
-        return False
-    if len(parts) == 1:
-        return parts[0] in CATALOG_TOP_DIRS
-    return parts[0] == XRAY_PATTERNS_DIR and parts[1] == XRAY_ANY_SCOPE
 
 
 def catalog_tree_paths(result: DirectoryTreeResult, base_path: str) -> List[str]:
@@ -66,10 +59,15 @@ def catalog_tree_paths(result: DirectoryTreeResult, base_path: str) -> List[str]
 
 class _Pruner:
     def __init__(
-        self, base_path: str, allowed: Set[str], max_files_per_dir: Optional[int]
+        self,
+        base_path: str,
+        allowed: Set[str],
+        may_list: Callable[[str], bool],
+        max_files_per_dir: Optional[int],
     ) -> None:
         self.base_path = base_path
         self.allowed = allowed
+        self.may_list = may_list
         self.limit = max_files_per_dir
         self.counts: Dict[str, int] = {"files": 0, "dirs": 0}
         self.depth_limited_kept = False
@@ -96,8 +94,7 @@ class _Pruner:
     def directory(self, node: TreeNode) -> Optional[TreeNode]:
         depth_limited = node.truncated and not node.children and not node.hidden_count
         kept, left_out = self.children(node)
-        full = _full_path(self.base_path, node.path)
-        if not kept and not (depth_limited and _listable_directory(full)):
+        if not kept and not self.may_list(_full_path(self.base_path, node.path)):
             return None
         self.counts["dirs"] += 1
         self.depth_limited_kept = self.depth_limited_kept or depth_limited
@@ -109,39 +106,58 @@ class _Pruner:
         )
 
 
+def refuse_hidden_base(
+    base_path: str,
+    visibility: MetaVisibility,
+    access_service: Optional["AccessFilteringService"],
+) -> None:
+    """Raise the tree door's not-found error, before anything is read, for a
+    requested *base_path* under which the caller could never see anything.
+
+    Raises:
+        ValueError: the not-found error a missing path gets.
+    """
+    if visibility.unrestricted or not base_path:
+        return
+    memory_fn = memory_visibility_fn(access_service, visibility)
+    if not may_list_under(base_path.lstrip("/"), visibility, memory_fn):
+        raise path_not_found_error(base_path)
+
+
 def restrict_catalog_tree(
     result: DirectoryTreeResult,
     base_path: str,
-    username: str,
+    visibility: MetaVisibility,
     access_service: Optional["AccessFilteringService"],
     show_stats: bool = False,
     max_files_per_dir: Optional[int] = None,
 ) -> DirectoryTreeResult:
-    """*result* reduced to the caller's view; unchanged for unrestricted
-    callers. Without the access service no file is shown.
+    """*result* reduced to the caller's *visibility* (resolved once for the
+    request); unchanged when it is unrestricted. Without the access service
+    no memory is shown.
 
     Raises:
         ValueError: the tree door's not-found error, for a requested
             *base_path* the caller may not see.
     """
-    if unrestricted_caller(username, access_service):
+    if visibility.unrestricted:
         return result
-    allowed = (
-        set(
-            access_service.filter_cidx_meta_files(
-                catalog_tree_paths(result, base_path), username
-            )
-        )
-        if access_service is not None
-        else set()
+    memory_fn = memory_visibility_fn(access_service, visibility)
+    allowed = set(
+        listable_paths(catalog_tree_paths(result, base_path), visibility, memory_fn)
     )
     if not result.root.is_directory:
         if _full_path(base_path, "") not in allowed:
             raise path_not_found_error(base_path)
         return result
-    pruner = _Pruner(base_path, allowed, max_files_per_dir)
+
+    def may_list(full_path: str) -> bool:
+        return may_list_under(full_path, visibility, memory_fn)
+
+    pruner = _Pruner(base_path, allowed, may_list, max_files_per_dir)
     kept, left_out = pruner.children(result.root)
-    if base_path.strip("/") and not kept and not _listable_directory(base_path):
+    base = base_path.strip("/")
+    if base and not kept and not may_list(base):
         raise path_not_found_error(base_path)
     root = replace(
         result.root, children=kept, truncated=left_out > 0, hidden_count=left_out

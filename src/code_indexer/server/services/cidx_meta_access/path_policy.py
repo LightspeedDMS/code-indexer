@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
-from typing import Callable, FrozenSet, Optional, Tuple
+from typing import Callable, FrozenSet, Iterable, List, Optional, Tuple
 
 from ....utils.path_confinement import has_git_segment
 from ..repo_access_guard import normalize_repo_alias
@@ -144,3 +144,47 @@ def classify(
     if head == XRAY_PATTERNS_DIR and len(parts) >= 3:
         return _xray(parts[1], vis)
     return _DENY
+
+
+LISTABLE_KINDS = frozenset(
+    {DecisionKind.ALLOW, DecisionKind.DESCRIPTION, DecisionKind.MEMORY}
+)
+
+
+def _membership_not_read(_domain: str) -> Optional[FrozenSet[str]]:
+    """Listings never show dependency-map documents (TRANSFORM or DENY
+    alike), so their membership is not read."""
+    return None
+
+
+def is_listable(relative_path: str, vis: MetaVisibility, memory_fn: MemoryFn) -> bool:
+    """True when a listing may show this catalog file to the caller."""
+    return classify(relative_path, vis, _membership_not_read, memory_fn).kind in (
+        LISTABLE_KINDS
+    )
+
+
+def listable_paths(
+    paths: Iterable[str], vis: MetaVisibility, memory_fn: MemoryFn
+) -> List[str]:
+    """The catalog files a listing may show the caller, in input order."""
+    return [path for path in paths if is_listable(path, vis, memory_fn)]
+
+
+def may_list_under(
+    relative_path: str, vis: MetaVisibility, memory_fn: MemoryFn
+) -> bool:
+    """True when a listing could show the caller this catalog path or
+    something under it, decided from the path alone (no directory read)."""
+    if vis.unrestricted:
+        return True
+    parts = normalize_meta_path(relative_path)
+    if not parts or has_git_segment(parts):
+        return False
+    if any(seg.startswith(".") for seg in parts):
+        return False
+    if len(parts) == 1 and parts[0] in (DEP_MAP_DIR, MEMORIES_DIR, XRAY_PATTERNS_DIR):
+        return True
+    if parts[0] == XRAY_PATTERNS_DIR:
+        return _xray(parts[1], vis).kind is DecisionKind.ALLOW
+    return is_listable(relative_path, vis, memory_fn)

@@ -11,12 +11,15 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.repositories.activated_repo_manager import (
+    ActivatedRepoManager,
+)
 from code_indexer.server.mcp.handlers import files as files_module
 from tests.shared.cidx_meta_visibility_fixture import (
     ALPHA,
@@ -48,6 +51,8 @@ class _Activations:
     def get_activated_repo_path(self, username: str, user_alias: str) -> str:
         return str(self._paths[user_alias])
 
+
+ActivationSource = Union[_Activations, ActivatedRepoManager]
 
 _NO_ACTIVATIONS = _Activations({}, {})
 
@@ -85,7 +90,7 @@ def _tree_text(
     fx: CidxMetaFixture,
     golden_root: Path,
     args: Dict[str, Any],
-    activations: _Activations = _NO_ACTIVATIONS,
+    activations: ActivationSource = _NO_ACTIVATIONS,
     access_service: Any = None,
 ) -> str:
     """The raw MCP text block handle_directory_tree returns."""
@@ -113,7 +118,7 @@ def _tree(
     fx: CidxMetaFixture,
     golden_root: Path,
     args: Dict[str, Any],
-    activations: _Activations = _NO_ACTIVATIONS,
+    activations: ActivationSource = _NO_ACTIVATIONS,
 ) -> Dict[str, Any]:
     data: Dict[str, Any] = json.loads(_tree_text(fx, golden_root, args, activations))
     return data
@@ -190,6 +195,49 @@ def test_hidden_catalog_path_is_answered_as_not_found(
 
 
 @pytest.mark.parametrize(
+    "hidden, missing",
+    [
+        (f"xray-patterns/{CANARY}", "xray-patterns/missing"),
+        (f"{CANARY}.md", "missing.md"),
+        (f"./{CANARY}.md", "./missing.md"),
+        (f"a/../{CANARY}.md", "a/../missing.md"),
+        (f"//{CANARY}.md", "//missing.md"),
+        (f"../{CANARY}.md", "../missing.md"),
+        (f"{CANARY}.md/", "missing.md/"),
+        (f"{CANARY.upper()}.md", "MISSING.md"),
+        (f"%2e%2e/{CANARY}.md", "%2e%2e/missing.md"),
+        (f"{CANARY}.md\\x", "missing.md\\x"),
+        (f"{CANARY}.md\x00", "missing.md\x00"),
+        ("dependency-map/_journal.json", "dependency-map/_missing.json"),
+        (".code-indexer", ".missing"),
+    ],
+)
+def test_hidden_base_path_is_refused_before_any_walk(
+    fx: CidxMetaFixture, golden_root: Path, hidden: str, missing: str
+) -> None:
+    from code_indexer.global_repos.directory_explorer import DirectoryExplorerService
+
+    walked: List[Optional[str]] = []
+    real = DirectoryExplorerService.generate_tree
+
+    def recording(self: DirectoryExplorerService, *a: Any, **kw: Any) -> Any:
+        walked.append(kw.get("path"))
+        return real(self, *a, **kw)
+
+    with patch.object(DirectoryExplorerService, "generate_tree", recording):
+        hidden_text = _tree_text(fx, golden_root, _catalog_path(hidden))
+        missing_text = _tree_text(fx, golden_root, _catalog_path(missing))
+
+    assert hidden not in walked
+    assert json.loads(hidden_text)["success"] is False
+    hidden_echo = json.dumps(hidden)[1:-1]
+    missing_echo = json.dumps(missing)[1:-1]
+    assert hidden_text.replace(hidden_echo, "<path>") == missing_text.replace(
+        missing_echo, "<path>"
+    )
+
+
+@pytest.mark.parametrize(
     "visible, listed",
     [
         ("xray-patterns/__any__", "p.yaml"),
@@ -236,6 +284,36 @@ def test_max_depth_reached_counts_visible_directories_only(
     assert "archive" not in json.dumps(hidden)
     assert hidden["max_depth_reached"] is False
     assert visible["max_depth_reached"] is True
+
+
+def test_visible_scope_at_the_depth_limit_is_kept(
+    fx: CidxMetaFixture, golden_root: Path
+) -> None:
+    visible_scope = fx.root / "xray-patterns" / ALPHA
+    visible_scope.mkdir()
+    (visible_scope / "p.yaml").write_text("name: p\n", encoding="utf-8")
+
+    data = _tree(fx, golden_root, {**_catalog_path("xray-patterns"), "max_depth": 1})
+
+    assert data["success"] is True, data
+    scopes = [child["name"] for child in data["root"]["children"]]
+    assert scopes == ["__any__", ALPHA]
+    assert data["max_depth_reached"] is True
+    assert CANARY not in json.dumps(data)
+
+
+def test_root_tree_lists_an_emptied_area_like_its_subpath(
+    fx: CidxMetaFixture, golden_root: Path
+) -> None:
+    for memory_id in (MEMORY_GLOBAL, MEMORY_ALPHA):
+        (fx.root / "memories" / f"{memory_id}.md").unlink()
+
+    root = _tree(fx, golden_root, {**_catalog_path(""), "max_depth": 3})
+    subpath = _tree(fx, golden_root, _catalog_path("memories"))
+
+    assert subpath["success"] is True, subpath
+    areas = [child["name"] for child in root["root"]["children"]]
+    assert "memories" in areas
 
 
 def test_directory_tree_reads_grants_once(
