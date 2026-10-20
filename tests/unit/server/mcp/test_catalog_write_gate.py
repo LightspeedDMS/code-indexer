@@ -15,6 +15,9 @@ FileCRUDService, registry and group store. Neutral names only.
 from __future__ import annotations
 
 import hashlib
+import os
+import sys
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, Tuple
 from unittest.mock import patch
@@ -220,6 +223,84 @@ def test_projected_write_replies_do_not_depend_on_hidden_text(
 
     assert with_hidden == other_hidden
     assert all(reply == {"success": False, "error": REFUSAL} for reply in with_hidden)
+
+
+_RECORDING = threading.local()
+
+
+def _record_opens(event: str, args: Tuple[Any, ...]) -> None:
+    # ^ why audit hooks cannot be removed=>no-op unless this thread records
+    opened = getattr(_RECORDING, "opened", None)
+    if event != "open" or opened is None:
+        return
+    target = args[0]
+    if isinstance(target, (str, bytes, os.PathLike)):
+        opened.append(os.fsdecode(os.fspath(target)))
+
+
+sys.addaudithook(_record_opens)
+
+
+@pytest.mark.parametrize("tool", sorted(TOOLS))
+@pytest.mark.parametrize("path", PROJECTED)
+def test_projected_write_is_refused_without_reading_the_catalog(
+    env: CatalogFileDoorEnv, tool: str, path: str
+) -> None:
+    _RECORDING.opened = []
+    try:
+        data = _write(env, tool, CATALOG_ALIAS, path)
+    finally:
+        opened = _RECORDING.opened
+        del _RECORDING.opened
+
+    catalog = str(env.fx.root) + os.sep
+    assert data == {"success": False, "error": REFUSAL}
+    assert [p for p in opened if p.startswith(catalog)] == []
+
+
+INVALID = [
+    ".git/config",
+    "../outside.md",
+    "/srv/example/abs.md",
+    f"xray-patterns/__any__/../{CANARY}.md",
+]
+
+
+@pytest.mark.parametrize("tool", sorted(TOOLS))
+@pytest.mark.parametrize("path", INVALID)
+def test_invalid_spellings_get_the_catalog_refusal_first(
+    env: CatalogFileDoorEnv, tool: str, path: str
+) -> None:
+    before = _snapshot(env.fx.root)
+
+    data = _write(env, tool, CATALOG_ALIAS, path)
+
+    assert data == {"success": False, "error": REFUSAL}, (path, data)
+    assert _snapshot(env.fx.root) == before
+
+
+@pytest.mark.parametrize("path", INVALID)
+def test_admin_invalid_spellings_keep_todays_messages(
+    env: CatalogFileDoorEnv, path: str
+) -> None:
+    data = _write(env, "delete_file", CATALOG_ALIAS, path, ADMIN_USER)
+
+    assert data["success"] is False
+    assert data["error"].startswith("delete_file blocked: "), data
+
+
+@pytest.mark.parametrize("path", INVALID)
+def test_ordinary_activation_invalid_spellings_keep_todays_messages(
+    env: CatalogFileDoorEnv, tmp_path: Path, path: str
+) -> None:
+    repo = tmp_path / "activated" / "plain"
+    repo.mkdir(parents=True)
+    env.activations.add("plain", ALPHA, repo)
+
+    data = _write(env, "delete_file", "plain", path)
+
+    assert data["success"] is False
+    assert data["error"].startswith("delete_file blocked: "), data
 
 
 def test_admin_writes_keep_todays_behaviour(env: CatalogFileDoorEnv) -> None:

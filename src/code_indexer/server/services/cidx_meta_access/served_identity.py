@@ -27,10 +27,15 @@ import json
 import logging
 import os
 import re
+import threading
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, List, Mapping, Optional, Set, Tuple
 
-from code_indexer.global_repos.alias_manager import read_alias_from_disk
+from code_indexer.global_repos.alias_manager import (
+    AliasPointerUnusable,
+    read_alias_from_disk,
+    read_alias_pointer_strict,
+)
 
 from ...storage.shared.snapshot_paths import is_versioned_snapshot
 from ..cidx_meta_backup.paths import get_cidx_meta_path
@@ -43,6 +48,12 @@ _REMOTE_URL = re.compile(r"^\s*url\s*=\s*(.+?)\s*$")
 _MAX_GIT_CONFIG_BYTES = 65536
 _MAX_PROXY_CONFIG_BYTES = 1048576
 _FILE_SCHEME = "file://"
+# A location no real path can equal (NUL): the catalog pointer exists but
+# cannot be used, so every path counts as a catalog location.
+CATALOG_IDENTITY_UNKNOWN = "\x00catalog-identity-unknown"
+_UNUSABLE_WARNED_LIMIT = 64
+_unusable_warned: Set[str] = set()
+_unusable_warned_lock = threading.Lock()
 
 
 def golden_repos_dir_of(activated_repo_manager: Optional[Any]) -> Optional[str]:
@@ -65,11 +76,32 @@ def _alias_target(golden_repos_dir: str, alias: str) -> Optional[str]:
     return read_alias_from_disk(Path(golden_repos_dir) / "aliases", alias)
 
 
+def _warn_unusable_pointer(exc: AliasPointerUnusable) -> None:
+    key = str(exc)
+    with _unusable_warned_lock:
+        if key in _unusable_warned:
+            return
+        if len(_unusable_warned) >= _UNUSABLE_WARNED_LIMIT:
+            _unusable_warned.clear()
+        _unusable_warned.add(key)
+    logger.warning(
+        "Catalog alias pointer present but unusable (%s); restricted requests "
+        "treat every served directory as the catalog",
+        type(exc.__cause__ or exc).__name__,
+    )
+
+
 def catalog_locations(golden_repos_dir: str) -> Tuple[str, ...]:
-    """Real paths of the catalog's base clone and current published copy."""
+    """Real paths of the catalog's base clone and current published copy;
+    ``CATALOG_IDENTITY_UNKNOWN`` too when the catalog pointer exists but
+    cannot be used."""
     golden = Path(golden_repos_dir)
     found = [os.path.realpath(get_cidx_meta_path(golden.parent.parent))]
-    target = _alias_target(golden_repos_dir, CIDX_META_REPO_GLOBAL)
+    try:
+        target = read_alias_pointer_strict(golden / "aliases", CIDX_META_REPO_GLOBAL)
+    except AliasPointerUnusable as exc:
+        _warn_unusable_pointer(exc)
+        return (*found, CATALOG_IDENTITY_UNKNOWN)
     if target:
         found.append(os.path.realpath(target))
     return tuple(found)
@@ -84,6 +116,8 @@ def _is_catalog_snapshot(real: str) -> bool:
 
 
 def _is_location(real: str, locations: Tuple[str, ...]) -> bool:
+    if CATALOG_IDENTITY_UNKNOWN in locations:
+        return True
     for location in locations:
         if real == location or real.startswith(location + os.sep):
             return True

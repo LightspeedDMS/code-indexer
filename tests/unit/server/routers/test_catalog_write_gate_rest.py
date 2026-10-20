@@ -125,6 +125,28 @@ def test_projected_catalog_paths_get_the_fixed_refusal(
     assert _snapshot(env.fx.root) == before
 
 
+@pytest.mark.parametrize(
+    "verb,path",
+    [
+        ("create", ".git/config"),
+        ("edit", ".git/config"),
+        ("delete", ".git/config"),
+        ("create", "../outside.md"),
+        ("create", "/srv/example/abs.md"),
+    ],
+)
+def test_invalid_spellings_get_the_catalog_refusal_first(
+    client: TestClient, env: CatalogFileDoorEnv, verb: str, path: str
+) -> None:
+    before = _snapshot(env.fx.root)
+
+    response = _send(client, verb, path)
+
+    assert response.status_code == 403, (path, response.text)
+    assert response.json() == {"detail": REFUSAL}
+    assert _snapshot(env.fx.root) == before
+
+
 def test_visible_catalog_path_is_still_writable(
     client: TestClient, env: CatalogFileDoorEnv
 ) -> None:

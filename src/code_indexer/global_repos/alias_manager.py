@@ -105,24 +105,64 @@ def _local_write_mode_source(
     return None
 
 
-def _alias_file_target(aliases_dir: Path, alias_name: str) -> Optional[str]:
-    """The ``target_path`` of the alias pointer file, or None."""
-    alias_file = aliases_dir / f"{alias_name}.json"
+class AliasPointerUnusable(Exception):
+    """An alias pointer file exists but cannot be read, is not a JSON
+    object, or names no target path."""
 
-    if not alias_file.exists():
-        return None
 
+def _load_alias_object(alias_file: Path) -> Optional[Dict[str, Any]]:
+    """The pointer file's JSON object; None only when there is no file.
+
+    Raises:
+        AliasPointerUnusable: the file exists but cannot be read or decoded,
+            or is not a JSON object.
+    """
     try:
         with open(alias_file, "r") as f:
             alias_data = json.load(f)
-    except (json.JSONDecodeError, IOError) as e:
+    except FileNotFoundError:
+        return None
+    except (ValueError, OSError) as e:
+        raise AliasPointerUnusable(f"{type(e).__name__}: {e}") from e
+    if not isinstance(alias_data, dict):
+        raise AliasPointerUnusable("not an object")
+    return alias_data
+
+
+def _alias_file_target(aliases_dir: Path, alias_name: str) -> Optional[str]:
+    """The ``target_path`` of the alias pointer file, or None (also, with a
+    warning, for a pointer that cannot be used)."""
+    try:
+        alias_data = _load_alias_object(aliases_dir / f"{alias_name}.json")
+    except AliasPointerUnusable as e:
         logger.warning(f"Failed to read alias {alias_name}: {e}")
         return None
-    if not isinstance(alias_data, dict):
-        logger.warning(f"Failed to read alias {alias_name}: not an object")
+    if alias_data is None:
         return None
     target_path: Optional[str] = alias_data.get("target_path")
     return target_path
+
+
+def read_alias_pointer_strict(aliases_dir: Path, alias_name: str) -> Optional[str]:
+    """Like ``read_alias_from_disk``, but None only when there is no pointer
+    file: a pointer that exists and cannot be used raises.
+
+    Raises:
+        AliasPointerUnusable: the pointer exists but cannot be read, is not
+            a JSON object, or has no non-empty string ``target_path``.
+    """
+    aliases = Path(aliases_dir)
+    if alias_name.endswith("-global"):
+        source = _local_write_mode_source(aliases.parent, alias_name[: -len("-global")])
+        if source:
+            return source
+    alias_data = _load_alias_object(aliases / f"{alias_name}.json")
+    if alias_data is None:
+        return None
+    target = alias_data.get("target_path")
+    if not isinstance(target, str) or not target:
+        raise AliasPointerUnusable("no target path")
+    return target
 
 
 def read_alias_from_disk(aliases_dir: Path, alias_name: str) -> Optional[str]:

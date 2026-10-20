@@ -314,6 +314,33 @@ class FileCRUDService:
         access = access_for(served) if access_for is not None else None
         refuse_hidden_catalog_writes(served, [file_path], access)
 
+    def _validate_path_or_refuse(
+        self,
+        repo_alias: str,
+        file_path: str,
+        username: str,
+        operation: str,
+        access_for: Optional[AccessFor],
+    ) -> None:
+        """``_validate_crud_path``; a path it rejects gets the catalog write
+        refusal instead when a restricted catalog view applies, so every
+        spelling answers alike there. Elsewhere the error is unchanged."""
+        from code_indexer.server.services.cidx_meta_access.file_doors import (
+            refuse_restricted_catalog_write,
+        )
+
+        try:
+            self._validate_crud_path(file_path, operation)
+        except PermissionError as invalid:
+            try:
+                repo_path = self._resolve_repo_path(repo_alias, username)
+            except (ValueError, OSError):
+                raise invalid from None
+            served = str(repo_path)
+            access = access_for(served) if access_for is not None else None
+            refuse_restricted_catalog_write(served, access)
+            raise
+
     def create_file(
         self,
         repo_alias: str,
@@ -348,7 +375,9 @@ class FileCRUDService:
         self._check_write_mode_active(repo_alias)
 
         # Validate path security
-        self._validate_crud_path(file_path, "create_file")
+        self._validate_path_or_refuse(
+            repo_alias, file_path, username, "create_file", access_for
+        )
 
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
@@ -439,7 +468,9 @@ class FileCRUDService:
         self._check_write_mode_active(repo_alias)
 
         # Validate path security
-        self._validate_crud_path(file_path, "edit_file")
+        self._validate_path_or_refuse(
+            repo_alias, file_path, username, "edit_file", access_for
+        )
 
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
@@ -540,7 +571,9 @@ class FileCRUDService:
         self._check_write_mode_active(repo_alias)
 
         # Validate path security
-        self._validate_crud_path(file_path, "delete_file")
+        self._validate_path_or_refuse(
+            repo_alias, file_path, username, "delete_file", access_for
+        )
 
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)

@@ -54,6 +54,7 @@ from .path_policy import (
     Decision,
     DecisionKind,
     classify,
+    may_be_served_unchanged,
     may_list_under,
 )
 from .served_identity import (
@@ -450,7 +451,8 @@ def refuse_hidden_catalog_writes(
     """Refuse a write into *repo_path* unless the caller sees every one of
     *paths* unchanged (ALLOW or MEMORY), decided on the canonical path
     before any existence check, hash comparison or read: hidden paths,
-    descriptions and dependency-map documents are refused alike.
+    descriptions and dependency-map documents are refused alike, from the
+    path shape alone (no membership model or catalog file is read).
     Unrestricted requests pass unchanged.
 
     Raises:
@@ -461,8 +463,33 @@ def refuse_hidden_catalog_writes(
     view = view_for(repo_path, access, PermissionError(CATALOG_WRITE_REFUSAL))
     if view is None:
         return
-    if not all(view._served_decision(path).kind in _WRITABLE for path in paths):
+    if not all(_writable(view, path) for path in paths):
         raise PermissionError(CATALOG_WRITE_REFUSAL)
+
+
+def refuse_restricted_catalog_write(
+    repo_path: str, access: Optional[CatalogFileAccess]
+) -> None:
+    """Refuse any write into *repo_path* when a catalog view applies to it,
+    whatever the path: for spellings the file service would otherwise
+    reject with an operation-specific message. Admins and ordinary
+    directories pass.
+
+    Raises:
+        PermissionError: ``CATALOG_WRITE_REFUSAL``.
+    """
+    refusal = PermissionError(CATALOG_WRITE_REFUSAL)
+    if view_for(repo_path, access, refusal) is not None:
+        raise refusal
+
+
+def _writable(view: CatalogFileView, path: str) -> bool:
+    canonical = view._canonical(path)
+    return (
+        canonical is not None
+        and may_be_served_unchanged(canonical)
+        and view.decide(canonical).kind in _WRITABLE
+    )
 
 
 @contextmanager

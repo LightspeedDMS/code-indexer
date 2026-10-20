@@ -146,6 +146,21 @@ def classify(
     return _DENY
 
 
+def may_be_served_unchanged(relative_path: str) -> bool:
+    """True when the path's shape alone allows an ALLOW or MEMORY decision
+    (a memory, an allowed dependency-map file, an X-Ray pattern); never for
+    a description or a dependency-map document. No callback, no I/O."""
+    parts = normalize_meta_path(relative_path)
+    if parts is None or len(parts) < 2:
+        return False
+    head = parts[0]
+    if head == MEMORIES_DIR:
+        return len(parts) == 2
+    if head == DEP_MAP_DIR:
+        return len(parts) == 2 and parts[1] in _DEP_MAP_ALLOWED
+    return head == XRAY_PATTERNS_DIR and len(parts) >= 3
+
+
 LISTABLE_KINDS = frozenset(
     {DecisionKind.ALLOW, DecisionKind.DESCRIPTION, DecisionKind.MEMORY}
 )

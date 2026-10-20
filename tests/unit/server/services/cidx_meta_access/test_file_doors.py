@@ -226,6 +226,48 @@ def test_text_file_is_served_with_its_content(tmp_path: Path) -> None:
     }
 
 
+def _opaque_with_pointer(tmp_path: Path, pointer: Optional[str]) -> tuple:
+    """An opaque directory (not named like the catalog, no git remote) and
+    a golden directory whose catalog pointer is *pointer*: ``None`` = no
+    pointer file, ``"<valid>"`` = a pointer at the opaque directory,
+    ``"<dir>"`` = a directory where the pointer file should be."""
+    opaque = tmp_path / "opaque-dir"
+    opaque.mkdir()
+    golden = tmp_path / "srv" / "data" / "golden-repos"
+    aliases = golden / "aliases"
+    aliases.mkdir(parents=True)
+    target = aliases / "cidx-meta-global.json"
+    if pointer == "<valid>":
+        target.write_text(json.dumps({"target_path": str(opaque)}))
+    elif pointer == "<dir>":
+        target.mkdir()
+    elif pointer is not None:
+        target.write_text(pointer)
+    return opaque, golden
+
+
+@pytest.mark.parametrize(
+    "pointer",
+    ["<valid>", "[]", "{}", "{not json", '{"target_path": 7}', "<dir>"],
+)
+def test_unusable_catalog_pointer_judges_the_served_directory_as_the_catalog(
+    fx: CidxMetaFixture, tmp_path: Path, pointer: str
+) -> None:
+    opaque, golden = _opaque_with_pointer(tmp_path, pointer)
+
+    access = _judge(fx, "ordinary-global", opaque, golden)
+
+    assert access.view is not None, pointer
+
+
+def test_absent_catalog_pointer_leaves_an_ordinary_directory_unrestricted(
+    fx: CidxMetaFixture, tmp_path: Path
+) -> None:
+    opaque, golden = _opaque_with_pointer(tmp_path, None)
+
+    assert _judge(fx, "ordinary-global", opaque, golden).view is None
+
+
 def test_projected_payload_reports_the_projected_size(
     fx: CidxMetaFixture, golden: Path
 ) -> None:
