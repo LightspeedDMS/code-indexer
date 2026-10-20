@@ -16,6 +16,7 @@ from tenacity import (
     retry_if_exception,
     before_sleep_log,
 )
+from code_indexer.utils.bounded_regex import BoundedPattern
 from code_indexer.server.clients.ci_identifiers import (
     ci_id_segment,
     encode_gitlab_project_id,
@@ -356,7 +357,7 @@ class GitLabCIClient:
             matches = []
             # Compile regex with case-sensitivity based on parameter
             regex_flags = 0 if case_sensitive else re.IGNORECASE
-            pattern_re = re.compile(pattern, regex_flags)
+            pattern_re = BoundedPattern(pattern, regex_flags, purpose="CI log search")
 
             for job in jobs_data:
                 job_id = job["id"]

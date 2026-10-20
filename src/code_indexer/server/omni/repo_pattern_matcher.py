@@ -4,9 +4,10 @@ Repository pattern matching for omni-search.
 Filters repository aliases by wildcard patterns and regex.
 """
 
-import re
 import pathspec
 from typing import List
+
+from code_indexer.utils.bounded_regex import BoundedPattern
 
 
 class RepoPatternMatcher:
@@ -58,7 +59,8 @@ class RepoPatternMatcher:
                 if is_regex:
                     # Use regex for advanced patterns
                     try:
-                        regex = re.compile(pattern)
+                        # Bounded: exhausting the budget stops this pattern.
+                        regex = BoundedPattern(pattern, purpose="repository alias")
                         for repo in repos:
                             if regex.search(repo):
                                 matched.add(repo)

@@ -3,20 +3,14 @@ enforcement at all.
 
 The pure-Python ``re.DOTALL`` fallback used when ``multiline=True`` on the
 grep engine (or when ripgrep is unavailable) performs its own synchronous
-``os.walk`` + per-file ``open()``/``read()`` + ``compiled.finditer()`` loop
-with no time budget whatsoever. A slow multiline regex (catastrophic
-backtracking) or a large repo scanned via this fallback can run unbounded,
-regardless of the caller's requested ``timeout_seconds``. This was
-explicitly scoped OUT of bug #1598's Phase 1 timeout remediation.
+``os.walk`` + per-file ``open()``/``read()`` + ``compiled.finditer()`` loop.
+The walk must honour the caller's requested ``timeout_seconds`` whatever
+the pattern or repository size.
 
-This test proves the fix with REAL, un-mocked work: real files on disk and
-a genuinely expensive (polynomial, not exponential -- deterministic and
-bounded) regex scan. ``.*LITERAL`` against a large non-matching haystack is
-a well-known O(n^2) case for Python's backtracking ``re`` engine (no
-literal anchor to short-circuit the scan, and no memoization across start
-positions) -- verified empirically: a single 40,000-character file with
-this pattern takes ~0.4s of REAL CPU time to scan. No ``time.sleep`` or
-mocked delay is used anywhere in this reproduction.
+This test proves it with REAL, un-mocked work: real files on disk and a
+deterministic regex scan measured at ~0.4s of REAL CPU time per
+6,500-character file. No ``time.sleep`` or mocked delay is used anywhere in
+this reproduction.
 """
 
 from __future__ import annotations
@@ -27,17 +21,13 @@ import pytest
 
 from code_indexer.global_repos.regex_search import RegexSearchService
 
-# A deliberately expensive (but polynomial, hence bounded and deterministic)
-# pattern: DOTALL ".*LITERAL" against a haystack that never contains LITERAL
-# forces Python's backtracking `re` engine to rescan from every start
-# position -- O(n^2) -- without any risk of exponential (unbounded) blowup.
-_SLOW_PATTERN = r".*ZZZ_NOT_PRESENT_MARKER_ZZZ"
+_SLOW_PATTERN = r"A.*[XY]"
 
-# Empirically measured (see module docstring): ~0.4s of real CPU time per
-# file at this size. 20 such files therefore take ~8s to scan unbounded --
-# comfortably longer than the timeout used below, proving a genuine
-# mid-walk cutoff rather than a coincidental near-instant completion.
-_SLOW_FILE_CONTENT = "A" * 40_000
+# Empirically measured: ~0.4s of real CPU time per file at this size. 20
+# such files therefore take ~8s to scan unbounded -- comfortably longer
+# than the timeout used below, proving a genuine mid-walk cutoff rather
+# than a coincidental near-instant completion.
+_SLOW_FILE_CONTENT = "A" * 6_500
 _SLOW_FILE_COUNT = 20
 
 # Real wall-clock budget handed to the fallback. Must be well under the
