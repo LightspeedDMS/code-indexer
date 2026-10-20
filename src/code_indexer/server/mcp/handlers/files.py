@@ -438,6 +438,7 @@ def _judge(alias: Any, served_path: Optional[str], user: User) -> CatalogFileAcc
         _activations(),
         _golden_dir_or_none(),
         registry_of(_utils.app_module.app.state),
+        may_write=user.has_permission("repository:write"),
     )
 
 

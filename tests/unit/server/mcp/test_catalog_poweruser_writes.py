@@ -1,25 +1,28 @@
 """Power users who see every repository may modify the catalog.
 
-A ``powerusers`` member with no acting-user scope whose grants cover every
-repository the registry names writes the catalog like an admin, through the
-MCP and REST file write doors. When any repository is withheld from the
-group they keep only the writes every restricted caller has (memories, X-Ray
-patterns, the allowed dependency-map files), and full write returns once the
-repository is granted back. An unreadable alias universe, normal users and
-the analysis-agent principal keep the restricted write set. Real catalog on
-disk, real FileCRUDService, registry and group store. Neutral names only.
+A ``powerusers`` member holding ``repository:write`` with no acting-user
+scope, whose grants cover every repository the registry names (read fresh
+for each decision), writes the catalog like an admin through the MCP and
+REST file write doors. When any repository is withheld from the group, the
+registry or the group cannot be read, or the caller lacks the write
+permission, the caller keeps only the writes every restricted caller has
+(memories, X-Ray patterns, the allowed dependency-map files) and every other
+path gets the fixed refusal. Normal users and the analysis-agent principal
+keep the restricted write set. Real catalog on disk, real FileCRUDService,
+registry and group store. Neutral names only.
 """
 
 from __future__ import annotations
 
 import hashlib
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, Optional
 
 import pytest
 from fastapi.testclient import TestClient
 
 from code_indexer.server.auth.dependencies import get_current_user
+from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.mcp.handlers import files as files_module
 from code_indexer.server.services.analysis_agent_principal import (
     ANALYSIS_AGENT_USERNAME,
@@ -40,6 +43,13 @@ POWER_USER = "fixture-power"
 DESCRIPTION = f"{ALPHA}.md"
 DOMAIN = "dependency-map/payments.md"
 GRANTED = [name for name in REGISTERED_ALIASES if name != "cidx-meta"]
+
+
+def _caller(who: str = POWER_USER, role: Optional[UserRole] = None) -> User:
+    """The power user holds repository:write (power_user role)."""
+    if role is None and who == POWER_USER:
+        role = UserRole.POWER_USER
+    return user(who, role=role)
 
 
 def _powerusers(door: CatalogFileDoorEnv) -> Any:
@@ -63,7 +73,9 @@ def _hash(door: CatalogFileDoorEnv, path: str) -> str:
     return hashlib.sha256((door.fx.root / path).read_bytes()).hexdigest()
 
 
-def _edit(door: CatalogFileDoorEnv, path: str, who: str = POWER_USER) -> Dict[str, Any]:
+def _edit(
+    door: CatalogFileDoorEnv, path: str, caller: Optional[User] = None
+) -> Dict[str, Any]:
     params = {
         "repository_alias": CATALOG_ALIAS,
         "file_path": path,
@@ -73,7 +85,13 @@ def _edit(door: CatalogFileDoorEnv, path: str, who: str = POWER_USER) -> Dict[st
         "replace_all": True,
     }
     with door.serving():
-        return mcp_data(files_module.handle_edit_file(params, user(who)))
+        return mcp_data(files_module.handle_edit_file(params, caller or _caller()))
+
+
+def _delete(door: CatalogFileDoorEnv, path: str) -> Dict[str, Any]:
+    params = {"repository_alias": CATALOG_ALIAS, "file_path": path}
+    with door.serving():
+        return mcp_data(files_module.handle_delete_file(params, _caller()))
 
 
 def _create_pattern(door: CatalogFileDoorEnv, name: str) -> Dict[str, Any]:
@@ -83,7 +101,10 @@ def _create_pattern(door: CatalogFileDoorEnv, name: str) -> Dict[str, Any]:
         "content": "name: n\n",
     }
     with door.serving():
-        return mcp_data(files_module.handle_create_file(params, user(POWER_USER)))
+        return mcp_data(files_module.handle_create_file(params, _caller()))
+
+
+REFUSED = {"success": False, "error": REFUSAL}
 
 
 @pytest.mark.parametrize("path", [DESCRIPTION, DOMAIN])
@@ -102,9 +123,7 @@ def test_full_visibility_power_user_edits_via_rest(
     client: TestClient,  # noqa: F811
     path: str,
 ) -> None:
-    from code_indexer.server.auth.user_manager import UserRole
-
-    caller = user(POWER_USER, role=UserRole.POWER_USER)
+    caller = _caller()
     client.app.dependency_overrides[get_current_user] = lambda: caller  # type: ignore[attr-defined]
     body = {
         "old_string": ALPHA,
@@ -126,7 +145,7 @@ def test_withheld_repository_restores_the_restricted_write_set(
     gam.revoke_repo_access(GRANTED[-1], group.id)
 
     for path in (DESCRIPTION, DOMAIN):
-        assert _edit(power, path) == {"success": False, "error": REFUSAL}, path
+        assert _edit(power, path) == REFUSED, path
     memory = f"memories/{MEMORY_GLOBAL}.md"
     params = {
         "repository_alias": CATALOG_ALIAS,
@@ -136,7 +155,7 @@ def test_withheld_repository_restores_the_restricted_write_set(
         "content_hash": _hash(power, memory),
     }
     with power.serving():
-        edited = mcp_data(files_module.handle_edit_file(params, user(POWER_USER)))
+        edited = mcp_data(files_module.handle_edit_file(params, _caller()))
     assert edited["success"] is True, edited
     assert _create_pattern(power, "kept.yaml")["success"] is True
 
@@ -144,11 +163,63 @@ def test_withheld_repository_restores_the_restricted_write_set(
     assert _edit(power, DESCRIPTION)["success"] is True
 
 
+def test_repository_registered_after_a_decision_is_never_writable_unseen(
+    power: CatalogFileDoorEnv,
+) -> None:
+    assert _edit(power, DESCRIPTION)["success"] is True
+    power.fx.registry.register_repo(
+        alias_name="new-hidden-global",
+        repo_name="new-hidden",
+        repo_url=None,
+        index_path="/golden/new-hidden",
+    )
+
+    assert _delete(power, DOMAIN) == REFUSED
+    assert (power.fx.root / DOMAIN).exists()
+
+
+def test_registry_failure_after_a_decision_refuses(
+    power: CatalogFileDoorEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _edit(power, DESCRIPTION)["success"] is True
+
+    def unavailable() -> Any:
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(power.fx.registry, "list_repos", unavailable)
+
+    assert _edit(power, DESCRIPTION) == REFUSED
+
+
+def test_powerusers_member_without_the_write_permission_is_refused(
+    power: CatalogFileDoorEnv,
+) -> None:
+    lower = _caller(POWER_USER, role=UserRole.NORMAL_USER)
+
+    assert _edit(power, DESCRIPTION, lower) == REFUSED
+
+
+def test_group_read_failure_gets_the_fixed_refusal(
+    power: CatalogFileDoorEnv,
+    client: TestClient,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(_username: str) -> Any:
+        raise RuntimeError("group unavailable")
+
+    monkeypatch.setattr(power.fx.group_manager, "get_user_group", unavailable)
+    caller = _caller()
+    client.app.dependency_overrides[get_current_user] = lambda: caller  # type: ignore[attr-defined]
+
+    response = client.delete(f"/api/v1/repos/{CATALOG_ALIAS}/files/{DESCRIPTION}")
+
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": REFUSAL}
+    assert _edit(power, DESCRIPTION) == REFUSED
+
+
 def test_normal_user_is_still_refused(power: CatalogFileDoorEnv) -> None:
-    assert _edit(power, DESCRIPTION, RESTRICTED_USER) == {
-        "success": False,
-        "error": REFUSAL,
-    }
+    assert _edit(power, DESCRIPTION, _caller(RESTRICTED_USER)) == REFUSED
 
 
 def test_unreadable_alias_universe_refuses(power: CatalogFileDoorEnv) -> None:
@@ -159,15 +230,14 @@ def test_unreadable_alias_universe_refuses(power: CatalogFileDoorEnv) -> None:
         global_repos=SimpleNamespace(list_repos=failing_listing)
     )
 
-    assert _edit(power, DESCRIPTION) == {"success": False, "error": REFUSAL}
+    assert _edit(power, DESCRIPTION) == REFUSED
 
 
 def test_analysis_agent_principal_cannot_write(power: CatalogFileDoorEnv) -> None:
     before = (power.fx.root / DESCRIPTION).read_bytes()
+    agent = _caller(ANALYSIS_AGENT_USERNAME, role=UserRole.POWER_USER)
 
-    data = _edit(power, DESCRIPTION, ANALYSIS_AGENT_USERNAME)
-
-    assert data == {"success": False, "error": REFUSAL}
+    assert _edit(power, DESCRIPTION, agent) == REFUSED
     assert (power.fx.root / DESCRIPTION).read_bytes() == before
 
 
@@ -185,19 +255,11 @@ def test_power_user_paths_are_identical_on_disk_after_refusal(
 
 
 def test_power_user_reaches_catalog_write_mode(power: CatalogFileDoorEnv) -> None:
-    from datetime import datetime
-
-    from code_indexer.server.auth.user_manager import User, UserRole
     from code_indexer.server.mcp.protocol import _check_repository_access
     from code_indexer.server.mcp.tools import TOOL_REGISTRY
     from code_indexer.server.services.file_crud_service import file_crud_service
 
-    caller = User(
-        username=POWER_USER,
-        password_hash="hash",
-        role=UserRole.POWER_USER,
-        created_at=datetime.now(),
-    )
+    caller = _caller()
     tools = ["enter_write_mode", "exit_write_mode", "create_file", "edit_file"]
     for tool in tools + ["delete_file"]:
         assert caller.has_permission(TOOL_REGISTRY[tool]["required_permission"]), tool

@@ -53,6 +53,7 @@ def _catalog_judge(
         served,
         user.username,
         getattr(state, "activated_repo_manager", None),
+        may_write=user.has_permission("repository:write"),
     )
 
 

@@ -67,6 +67,7 @@ from .served_identity import (
 )
 from ..analysis_agent_principal import ANALYSIS_AGENT_USERNAME
 from ..constants import DEFAULT_GROUP_POWERUSERS, is_internal_meta_repo
+from .alias_universe import read_registry_names
 from .universe_provider import process_alias_universe, registry_of
 from .visibility import (
     ACTING_SCOPE,
@@ -99,6 +100,7 @@ class CatalogFileView:
     access_service: Optional[Any]
     registry: Any
     username: str = ""
+    may_write: bool = False
     _participants: Optional[ParticipantsReader] = None
     _projector: Optional[MetaProjector] = None
 
@@ -285,6 +287,8 @@ def judge_app_request(
     served_path: Optional[str],
     username: str,
     activated_repo_manager: Optional[Any],
+    *,
+    may_write: bool = False,
 ) -> CatalogFileAccess:
     """``judge_file_door`` with the stores read from the server *state*; a
     golden directory that is not a non-empty string counts as missing."""
@@ -297,6 +301,7 @@ def judge_app_request(
         activated_repo_manager,
         golden if isinstance(golden, str) and golden else None,
         registry_of(state),
+        may_write=may_write,
     )
 
 
@@ -326,6 +331,8 @@ def judge_file_door(
     activated_repo_manager: Optional[Any],
     golden_repos_dir: Optional[str],
     registry: Any,
+    *,
+    may_write: bool = False,
 ) -> CatalogFileAccess:
     """Judge a request serving *served_path* under *alias*.
 
@@ -333,13 +340,15 @@ def judge_file_door(
     served directory is confirmed not to be a catalog location, is
     unrestricted. An alias the gate cannot judge (not a non-empty string, a
     glob, an empty collection) and a missing golden repositories directory
-    count as the catalog; a missing access service restricts.
+    count as the catalog; a missing access service restricts, and so does a
+    group or grants read that fails. *may_write*: the caller holds the
+    repository write permission (a write door's judgement).
 
     Raises:
         FileNotFoundError: a restricted request whose served directory is
             unknown.
     """
-    if unrestricted_caller(username, access_service):
+    if _caller_unrestricted(username, access_service):
         return UNRESTRICTED
     if not served_path:
         raise FileNotFoundError("Repository not found")
@@ -352,13 +361,44 @@ def judge_file_door(
     )
     if not catalog:
         return CatalogFileAccess(None, served_path)
-    vis = resolve_meta_visibility(username, access_service)
+    vis = _caller_visibility(username, access_service)
     return CatalogFileAccess(
         CatalogFileView(
-            vis, Path(served_path), access_service, registry, username=username
+            vis,
+            Path(served_path),
+            access_service,
+            registry,
+            username=username,
+            may_write=may_write,
         ),
         served_path,
     )
+
+
+def _undecided(exc: Exception) -> None:
+    logger.warning(
+        "Caller's catalog access undecided (%s); the restricted judgement applies",
+        type(exc).__name__,
+    )
+
+
+def _caller_unrestricted(username: str, access_service: Optional[Any]) -> bool:
+    """``unrestricted_caller``; a failing group read is not unrestricted."""
+    try:
+        return unrestricted_caller(username, access_service)
+    except Exception as exc:
+        _undecided(exc)
+        return False
+
+
+def _caller_visibility(username: str, access_service: Optional[Any]) -> MetaVisibility:
+    """``resolve_meta_visibility``; a failing group or grants read sees
+    nothing."""
+    try:
+        return resolve_meta_visibility(username, access_service)
+    except Exception as exc:
+        _undecided(exc)
+        return MetaVisibility.restricted(())
 
 
 def served_tree_view(
@@ -478,11 +518,15 @@ def refuse_hidden_catalog_writes(
 
 def full_catalog_writer(view: CatalogFileView) -> bool:
     """True when the caller writes the catalog like an admin: a
-    ``powerusers`` member (never the analysis-agent principal) with no
-    acting-user scope whose visible set covers every repository the registry
-    names, so nothing is hidden from them. Decided from the caller's group,
-    grants and the registry names alone; any read failure answers False."""
-    if not view.username or view.username == ANALYSIS_AGENT_USERNAME:
+    ``powerusers`` member holding the repository write permission (never the
+    analysis-agent principal) with no acting-user scope whose visible set
+    covers every repository the registry names, read fresh for this
+    decision, so nothing is hidden from them. Decided from the caller's
+    permission, group, grants and the registry names alone; any read
+    failure answers False."""
+    if not view.may_write or not view.username:
+        return False
+    if view.username == ANALYSIS_AGENT_USERNAME:
         return False
     if ACTING_SCOPE.get() is not None or view.access_service is None:
         return False
@@ -490,7 +534,7 @@ def full_catalog_writer(view: CatalogFileView) -> bool:
         group = view.access_service.group_manager.get_user_group(view.username)
         if group is None or group.name != DEFAULT_GROUP_POWERUSERS:
             return False
-        names = process_alias_universe(view.registry).snapshot().names
+        names = read_registry_names(view.registry)
     except Exception as exc:
         logger.warning(
             "Catalog write eligibility undecided (%s); the restricted write "

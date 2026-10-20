@@ -1,10 +1,11 @@
 """Every golden repository alias known to the registry, for prose redaction.
 
 The universe widens redaction (names that must not appear in prose for
-callers who cannot see them). Its one allow decision is catalog write
-eligibility: a power user writes the catalog like an admin only while their
-grants cover every name here, and a failed read answers "not every". It
-never widens what a caller may read. It comes from the cluster-aware
+callers who cannot see them). Catalog write eligibility (a power user writes
+the catalog like an admin only while their grants cover every registered
+name) never uses this cache: it reads the names fresh for every decision
+(``read_registry_names``), and a failed read answers "not every". Nothing
+here widens what a caller may read. It comes from the cluster-aware
 registry (PostgreSQL in cluster mode), cached per process for a short TTL. A stale copy is served only
 while a refresh is in flight, never after a failed refresh and never once
 it is older than ``ALIAS_UNIVERSE_MAX_STALENESS_SECONDS``.
@@ -52,6 +53,18 @@ def _names_from(repos: Mapping[str, Mapping[str, Any]]) -> FrozenSet[str]:
         if isinstance(repo_name, str) and repo_name:
             names.add(normalize_repo_alias(repo_name))
     return frozenset(names)
+
+
+def read_registry_names(registry: Optional[GlobalReposRegistry]) -> FrozenSet[str]:
+    """The registry's repository names read now (never cached): for an
+    allow decision that must see a repository the moment it is registered.
+
+    Raises:
+        RuntimeError: no registry; any read failure propagates.
+    """
+    if registry is None:
+        raise RuntimeError("alias registry unavailable")
+    return _names_from(registry.list_repos())
 
 
 class AliasUniverse:
