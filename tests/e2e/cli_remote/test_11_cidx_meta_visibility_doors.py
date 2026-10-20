@@ -13,8 +13,13 @@ import httpx
 import pytest
 
 from tests.e2e.cidx_meta_doors import Caller
-from tests.e2e.cidx_meta_suite import CatalogDoorSuite, Callers, open_catalog_doors
-from tests.e2e.cidx_meta_world import provision_catalog_world
+from tests.e2e.cidx_meta_suite import (
+    CatalogDoorSuite,
+    Callers,
+    close_catalog_doors,
+    open_catalog_doors,
+)
+from tests.e2e.cidx_meta_world import provision_catalog_world, teardown_catalog_world
 from tests.e2e.conftest import E2EConfig
 from tests.e2e.helpers import require_voyage_key
 from tests.e2e.server.conftest import AdminTokenProvider
@@ -52,8 +57,14 @@ def catalog_callers(
                 world=world, restricted=False, admin_user=user, admin_password=password
             ),
         )
-        open_catalog_doors(callers)
-        yield callers
+        try:
+            open_catalog_doors(callers)
+            yield callers
+        finally:
+            try:
+                close_catalog_doors(callers)
+            finally:
+                teardown_catalog_world(world)
 
 
 class TestCatalogDoorsLiveServer(CatalogDoorSuite):

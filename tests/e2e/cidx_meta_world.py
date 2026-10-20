@@ -19,14 +19,26 @@ World:
 from __future__ import annotations
 
 import copy
+import functools
 import json
 import re
 import secrets
 import subprocess
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+)
 
 import httpx
 
@@ -145,24 +157,35 @@ def rest(
     return Reply(resp.status_code, body, resp.text, body, (body,))
 
 
-def _drop_path(value: Any, path: EchoPath) -> None:
-    """Remove the key at exactly *path* (nested dict keys), if present."""
+@dataclass(frozen=True)
+class Echo:
+    """Where a reply may echo the request, and the request texts it may echo.
+
+    A value at one of ``paths`` is ignored by the leak scan only when it is
+    exactly one of ``submitted``; any other value there is scanned."""
+
+    paths: Tuple[EchoPath, ...]
+    submitted: Tuple[str, ...]
+
+
+def _drop_echo(value: Any, path: EchoPath, submitted: Tuple[str, ...]) -> None:
+    """Remove the key at exactly *path* when its value is a submitted text."""
     node = value
     for key in path[:-1]:
         if not isinstance(node, dict) or key not in node:
             return
         node = node[key]
-    if isinstance(node, dict):
-        node.pop(path[-1], None)
+    if isinstance(node, dict) and node.get(path[-1]) in submitted:
+        del node[path[-1]]
 
 
-def _full_payload(reply: Reply, echo_paths: Sequence[EchoPath]) -> Any:
+def _full_payload(reply: Reply, echo: Echo) -> Any:
     """The complete reply with every MCP content item decoded in place and
-    only the exact *echo_paths* removed from each item."""
+    only the exact request echoes removed from each item."""
     items = [copy.deepcopy(item) for item in reply.items]
     for item in items:
-        for path in echo_paths:
-            _drop_path(item, path)
+        for path in echo.paths:
+            _drop_echo(item, path, echo.submitted)
     envelope = copy.deepcopy(reply.envelope)
     result = envelope.get("result") if isinstance(envelope, dict) else None
     if isinstance(result, dict) and isinstance(result.get("content"), list):
@@ -185,23 +208,23 @@ def _structured_short_alias(value: Any, where: str, out: List[str]) -> None:
             out.append(f"short alias as a structured value at {where}")
 
 
-def leaks(reply: Reply, echo_paths: Sequence[EchoPath] = ()) -> List[str]:
+def leaks(reply: Reply, echo: Optional[Echo] = None) -> List[str]:
     """Every way *reply* names a repository the restricted user cannot see.
 
     The canary and ``gamma`` are searched in the COMPLETE reply: the raw
-    HTTP body, or, when exact request-echo paths are given (a request that
-    itself names the canary), the complete payload with only those paths
-    removed.  The short alias counts as a whole structured value or path
-    segment in any decoded item (3-character aliases in prose are an
-    accepted residual).
+    HTTP body, or, when *echo* is given (a request that itself names the
+    canary), the complete payload with only the exact echoes of the
+    submitted request removed.  The short alias counts as a whole
+    structured value or path segment in any decoded item (3-character
+    aliases in prose are an accepted residual).
     """
     found: List[str] = []
     if reply.envelope is None:
         text = reply.text
     else:
-        payload = _full_payload(reply, echo_paths)
+        payload = _full_payload(reply, echo or Echo((), ()))
         _structured_short_alias(payload, "$", found)
-        text = json.dumps(payload) if echo_paths else reply.text
+        text = json.dumps(payload) if echo else reply.text
     if CANARY in text.lower():
         found.append(f"canary {CANARY!r} present")
     if _GAMMA_WORD.search(text):
@@ -213,6 +236,35 @@ def mentions(reply: Reply, needle: str) -> bool:
     return needle.lower() in reply.text.lower()
 
 
+CleanupStep = Tuple[str, Callable[[], None]]
+
+
+def run_cleanup_steps(steps: Sequence[CleanupStep]) -> List[str]:
+    """Run every step in order, whatever fails; one report per failure."""
+    failures: List[str] = []
+    for name, step in steps:
+        try:
+            step()
+        except Exception as exc:
+            failures.append(f"{name}: {type(exc).__name__}: {exc}")
+    return failures
+
+
+@dataclass
+class WorldLedger:
+    """What provisioning created, recorded as it goes, so a failed setup and
+    the teardown remove exactly that."""
+
+    client: httpx.Client
+    admin: HeaderSource
+    catalog_root: Path
+    snapshot: Optional[Dict[str, bytes]] = None
+    repos: List[str] = field(default_factory=list)
+    user_created: bool = False
+    group_id: Optional[str] = None
+    catalog_seeded: bool = False
+
+
 @dataclass
 class CatalogWorld:
     client: httpx.Client
@@ -222,7 +274,12 @@ class CatalogWorld:
     group_id: str
     web_client_factory: Callable[[], httpx.Client]
     catalog_root: Path
-    snapshot: Dict[str, bytes] = field(default_factory=dict)
+    ledger: WorldLedger
+    # (sent at, X-Correlation-ID) of every door call, for log claims.
+    issued_calls: List[Tuple[datetime, str]] = field(default_factory=list)
+
+    def calls_since(self, started: datetime) -> FrozenSet[str]:
+        return frozenset(cid for sent, cid in self.issued_calls if sent >= started)
 
     def admin_mcp(self, tool: str, args: Dict[str, Any]) -> Reply:
         return mcp(self.client, self.admin.get_headers(), tool, args)
@@ -275,7 +332,8 @@ def _wait_completed(client: httpx.Client, admin: HeaderSource, job_id: str) -> N
     assert job.get("status") == "completed", f"job {job_id}: {job}"
 
 
-def _register_repos(client: httpx.Client, admin: HeaderSource, work_dir: Path) -> None:
+def _register_repos(ledger: WorldLedger, work_dir: Path) -> None:
+    client, admin = ledger.client, ledger.admin
     for name in WORLD_REPOS:
         repo = work_dir / name
         if not repo.exists():
@@ -288,6 +346,7 @@ def _register_repos(client: httpx.Client, admin: HeaderSource, work_dir: Path) -
             json={"repo_url": str(repo), "alias": name},
         )
         assert reply.status in (200, 202), f"register {name}: {reply.snippet()}"
+        ledger.repos.append(name)
         _wait_completed(client, admin, reply.body["job_id"])
 
 
@@ -385,11 +444,10 @@ def refresh_catalog_until_served(client: httpx.Client, admin: HeaderSource) -> N
     )
 
 
-def _create_restricted_user(
-    client: httpx.Client, admin: HeaderSource
-) -> tuple[str, str]:
+def _create_restricted_user(ledger: WorldLedger) -> tuple[str, str]:
+    client = ledger.client
     password = f"Vw{secrets.token_urlsafe(18)}9!"
-    headers = admin.get_headers()
+    headers = ledger.admin.get_headers()
     user = mcp(
         client,
         headers,
@@ -397,9 +455,11 @@ def _create_restricted_user(
         {"username": RESTRICTED_USER, "password": password, "role": "power_user"},
     )
     assert user.ok, f"create_user: {user.snippet()}"
+    ledger.user_created = True
     group = mcp(client, headers, "create_group", {"name": RESTRICTED_GROUP})
     assert group.ok, f"create_group: {group.snippet()}"
     group_id = str(group.body["group_id"])
+    ledger.group_id = group_id
     member = mcp(
         client,
         headers,
@@ -435,50 +495,104 @@ def provision_catalog_world(
     web_client_factory: Callable[[], httpx.Client],
 ) -> CatalogWorld:
     """Build the world through the front door on a server that does not
-    hold it yet; ``teardown_catalog_world`` removes it again."""
-    snapshot = snapshot_catalog(catalog_root)
-    _register_repos(client, admin, work_dir)
-    seed_catalog(catalog_root)
-    refresh_catalog_until_served(client, admin)
-    password, group_id = _create_restricted_user(client, admin)
-    world = CatalogWorld(
-        client=client,
-        admin=admin,
-        restricted=_login_provider(client, RESTRICTED_USER, password),
-        restricted_password=password,
-        group_id=group_id,
-        web_client_factory=web_client_factory,
-        catalog_root=catalog_root,
-        snapshot=snapshot,
-    )
-    world.set_alpha_grant(True)
-    return world
+    hold it yet; ``teardown_catalog_world`` removes it again.  A failing
+    step rolls back everything created before it."""
+    ledger = WorldLedger(client, admin, catalog_root)
+    try:
+        ledger.snapshot = snapshot_catalog(catalog_root)
+        _register_repos(ledger, work_dir)
+        ledger.catalog_seeded = True
+        seed_catalog(catalog_root)
+        refresh_catalog_until_served(client, admin)
+        password, group_id = _create_restricted_user(ledger)
+        world = CatalogWorld(
+            client=client,
+            admin=admin,
+            restricted=_login_provider(client, RESTRICTED_USER, password),
+            restricted_password=password,
+            group_id=group_id,
+            web_client_factory=web_client_factory,
+            catalog_root=catalog_root,
+            ledger=ledger,
+        )
+        world.set_alpha_grant(True)
+        return world
+    except Exception as exc:
+        failures = run_cleanup_steps(cleanup_steps(ledger))
+        if failures:
+            raise AssertionError(
+                f"catalog world setup failed ({exc!r}); rollback failures: {failures}"
+            ) from exc
+        raise
 
 
 def teardown_catalog_world(world: CatalogWorld) -> None:
-    """Remove the world through the front doors: the restricted user, its
-    group and the four repositories; then put the catalog clone back to its
-    pre-seed state and refresh the catalog."""
-    client, admin = world.client, world.admin
-    deleted = rest(
-        client, "DELETE", f"/api/admin/users/{RESTRICTED_USER}", admin.get_headers()
+    """Remove the world through the front doors, attempting every step and
+    reporting every failure (see ``cleanup_steps``)."""
+    failures = run_cleanup_steps(cleanup_steps(world.ledger))
+    assert not failures, f"catalog world teardown failures: {failures}"
+
+
+def _admin_delete(ledger: WorldLedger, path: str) -> Reply:
+    reply = rest(ledger.client, "DELETE", path, ledger.admin.get_headers())
+    # A resource already gone (a rolled-back registration) needs no removal.
+    assert reply.status in (200, 202, 204, 404), f"DELETE {path}: {reply.snippet()}"
+    return reply
+
+
+def _delete_user(ledger: WorldLedger) -> None:
+    _admin_delete(ledger, f"/api/admin/users/{RESTRICTED_USER}")
+
+
+def _remove_repo(ledger: WorldLedger, name: str) -> None:
+    removed = _admin_delete(ledger, f"/api/admin/golden-repos/{name}")
+    job_id = removed.body.get("job_id") if isinstance(removed.body, dict) else None
+    if job_id:
+        _wait_completed(ledger.client, ledger.admin, job_id)
+
+
+def _delete_group(ledger: WorldLedger, group_id: str) -> None:
+    reply = mcp(
+        ledger.client,
+        ledger.admin.get_headers(),
+        "delete_group",
+        {"group_id": group_id},
     )
-    assert deleted.status == 200, f"delete user: {deleted.snippet()}"
-    group = world.admin_mcp("delete_group", {"group_id": world.group_id})
-    assert group.ok, f"delete_group: {group.snippet()}"
-    for name in WORLD_REPOS:
-        removed = rest(
-            client, "DELETE", f"/api/admin/golden-repos/{name}", admin.get_headers()
-        )
-        assert removed.status in (200, 202, 204), f"remove {name}: {removed.snippet()}"
-        job_id = removed.body.get("job_id") if isinstance(removed.body, dict) else None
-        if job_id:
-            _wait_completed(client, admin, job_id)
+    assert reply.ok, f"delete_group: {reply.snippet()}"
+
+
+def _restore_and_refresh(ledger: WorldLedger, snapshot: Dict[str, bytes]) -> None:
     # Removing a repository refreshes the catalog on its own; never submit a
     # second refresh while that one runs.
-    wait_for_idle_catalog_refreshes(client, admin)
-    restore_catalog(world.catalog_root, world.snapshot)
-    refresh_catalog(client, admin)
+    wait_for_idle_catalog_refreshes(ledger.client, ledger.admin)
+    restore_catalog(ledger.catalog_root, snapshot)
+    refresh_catalog(ledger.client, ledger.admin)
+
+
+def cleanup_steps(ledger: WorldLedger) -> List[CleanupStep]:
+    """The removal of everything *ledger* recorded: the restricted user,
+    its group, each registered repository, then the catalog clone put back
+    to its pre-seed state and refreshed."""
+    steps: List[CleanupStep] = []
+    if ledger.user_created:
+        steps.append(("delete user", functools.partial(_delete_user, ledger)))
+    if ledger.group_id is not None:
+        steps.append(
+            (
+                "delete group",
+                functools.partial(_delete_group, ledger, ledger.group_id),
+            )
+        )
+    for name in reversed(ledger.repos):
+        steps.append((f"remove {name}", functools.partial(_remove_repo, ledger, name)))
+    if ledger.snapshot is not None and (ledger.catalog_seeded or ledger.repos):
+        steps.append(
+            (
+                "restore catalog",
+                functools.partial(_restore_and_refresh, ledger, ledger.snapshot),
+            )
+        )
+    return steps
 
 
 def wait_for_idle_catalog_refreshes(client: httpx.Client, admin: HeaderSource) -> None:

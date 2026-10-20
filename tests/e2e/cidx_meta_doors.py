@@ -11,6 +11,8 @@ expected to log are claimed by exact entry (``tests/e2e/log_audit_claims``).
 from __future__ import annotations
 
 import re
+import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -23,6 +25,7 @@ from tests.e2e.cidx_meta_world import (
     RESTRICTED_USER,
     VISIBLE_ASSET,
     CatalogWorld,
+    Echo,
     EchoPath,
     Reply,
     leaks,
@@ -33,9 +36,15 @@ from tests.e2e.cidx_meta_world import (
 )
 from tests.e2e.helpers import wait_for_job
 from tests.e2e.log_audit_claims import (
+    CLAIM_SETTLE_SECONDS,
+    LogClaim,
+    LogMark,
+    LogWindow,
     claim_expected_entries,
     claim_present_entries,
-    current_log_id,
+    exact,
+    open_log_mark,
+    utc_now,
 )
 from tests.shared.cidx_meta_visibility_fixture import ALPHA, CANARY
 
@@ -45,16 +54,36 @@ _CSRF = re.compile(r'name="csrf_token" value="([^"]+)"')
 
 # Exact paths at which a search reply echoes the caller's own query text
 # (used only for requests that themselves name the canary).
-SEARCH_ECHO: Tuple[EchoPath, ...] = (
+SEARCH_ECHO_PATHS: Tuple[EchoPath, ...] = (
     ("results", "query_metadata", "query_text"),
     ("query_metadata", "query_text"),
     ("metadata", "query_text"),
     ("query",),
 )
+
+
+def search_echo(*submitted: str) -> Echo:
+    """The search echo paths, ignored only where they hold exactly one of
+    the *submitted* query or pattern texts."""
+    return Echo(SEARCH_ECHO_PATHS, tuple(submitted))
+
+
+CORRELATION_HEADER = "X-Correlation-ID"
 # The wiki renders the fixture's deliberately unparsable "reports" domain
-# (its own logging names no file); claimed only inside the wiki doors' own
-# call windows.
-WIKI_FRONT_MATTER_LOG = "Failed to parse front matter, treating as plain content"
+# (its own logging names no file, and rendering may run off the request
+# thread); claimed only inside the wiki doors' own call windows.
+WIKI_FRONT_MATTER_LOG = exact(
+    "code_indexer.server.wiki.wiki_service",
+    "Failed to parse front matter, treating as plain content",
+    same_request=False,
+)
+# An auto-watch started on the (non-git) catalog clone logs this off the
+# request thread.
+GIT_UNAVAILABLE_WATCH_LOG = exact(
+    "code_indexer.services.git_aware_watch_handler",
+    "Git not available - proceeding with file-only monitoring",
+    same_request=False,
+)
 
 
 @dataclass
@@ -71,14 +100,22 @@ class Caller:
         source = self.world.restricted if self.restricted else self.world.admin
         return source.get_headers()
 
+    def _call_id(self) -> Dict[str, str]:
+        """A fresh correlation id for one call, recorded for log claims."""
+        call_id = f"e2e-catalog-{uuid.uuid4()}"
+        self.world.issued_calls.append((utc_now(), call_id))
+        return {CORRELATION_HEADER: call_id}
+
     def token(self) -> str:
         return str(self.headers()["Authorization"]).split(" ", 1)[1]
 
     def mcp(self, tool: str, args: Dict[str, Any]) -> Reply:
-        return mcp(self.world.client, self.headers(), tool, args)
+        headers = {**self.headers(), **self._call_id()}
+        return mcp(self.world.client, headers, tool, args)
 
     def rest(self, method: str, path: str, **kwargs: Any) -> Reply:
-        return rest(self.world.client, method, path, self.headers(), **kwargs)
+        headers = {**self.headers(), **kwargs.pop("headers", {}), **self._call_id()}
+        return rest(self.world.client, method, path, headers, **kwargs)
 
     def web(self, method: str, path: str, **kwargs: Any) -> Reply:
         session = self._web.get(self.restricted)
@@ -91,7 +128,10 @@ class Caller:
             )
             session = web_session(self.world, user, password)
             self._web[self.restricted] = session
-        resp = session.request(method, path, follow_redirects=False, **kwargs)
+        headers = {**kwargs.pop("headers", {}), **self._call_id()}
+        resp = session.request(
+            method, path, follow_redirects=False, headers=headers, **kwargs
+        )
         try:
             body: Any = resp.json()
         except ValueError:
@@ -107,25 +147,38 @@ class Caller:
             return shown
         return self.web("POST", path, data={**form, "csrf_token": match.group(1)})
 
-    def log_mark(self) -> int:
-        return current_log_id(self.world.client, self.world.admin_token())
+    def log_mark(self) -> LogMark:
+        return open_log_mark(self.world.client, self.world.admin_token())
 
-    def claim_logs(self, mark: int, expected: Sequence[str]) -> None:
-        claim_expected_entries(
-            self.world.client, self.world.admin_token(), mark, expected
+    def _window(self, mark: LogMark) -> LogWindow:
+        """The window from *mark* to now, with the ids of its calls."""
+        return LogWindow(
+            mark.after_id, mark.started, utc_now(), self.world.calls_since(mark.started)
         )
 
+    def claim_logs(self, mark: LogMark, expected: Sequence[LogClaim]) -> None:
+        if expected:
+            claim_expected_entries(
+                self.world.client,
+                self.world.admin_token(),
+                self._window(mark),
+                expected,
+            )
+
     def claim_optional(
-        self, mark: int, texts: Sequence[str], settle_seconds: Optional[float] = None
+        self,
+        mark: LogMark,
+        claims: Sequence[LogClaim],
+        settle_seconds: float = CLAIM_SETTLE_SECONDS,
     ) -> None:
-        if settle_seconds is None:
-            claim_present_entries(
-                self.world.client, self.world.admin_token(), mark, texts
-            )
-        else:
-            claim_present_entries(
-                self.world.client, self.world.admin_token(), mark, texts, settle_seconds
-            )
+        """Claim *claims* the window's calls logged, waiting *settle_seconds*
+        for late writes before the window closes."""
+        if not claims:
+            return
+        time.sleep(settle_seconds)
+        claim_present_entries(
+            self.world.client, self.world.admin_token(), self._window(mark), claims
+        )
 
 
 DoorCall = Callable[[Caller], Reply]
@@ -137,7 +190,7 @@ class ContentDoor:
     call: DoorCall
     visible: str = ALPHA
     admin_sees: str = CANARY
-    optional_logs: Tuple[str, ...] = ()
+    optional_logs: Tuple[LogClaim, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -151,9 +204,9 @@ class RefusalDoor:
     call: DoorCall
     refused: Callable[[Reply], bool]
     admin_passes: Optional[Callable[[Reply], bool]]
-    restricted_logs: Tuple[str, ...] = ()
-    admin_logs: Tuple[str, ...] = ()
-    optional_logs: Tuple[str, ...] = ()
+    restricted_logs: Tuple[LogClaim, ...] = ()
+    admin_logs: Tuple[LogClaim, ...] = ()
+    optional_logs: Tuple[LogClaim, ...] = ()
 
 
 def _search(
@@ -427,12 +480,16 @@ def _shows_canary(r: Reply) -> bool:
 
 _HISTORY_REFUSAL = "Git history is not available for this repository"
 _XRAY_EVALUATOR = "fn evaluate_node(n: &Node) -> bool { true }"
-_TEMPORAL_REFUSAL_LOG = (
-    "Error in search_code: Temporal search is not available for this repository."
+_TEMPORAL_REFUSAL_LOG = exact(
+    "code_indexer.server.mcp.handlers.search",
+    "Error in search_code: Temporal search is not available for this repository.",
 )
-_NO_TEMPORAL_INDEX_LOG = (
+# Logged by the temporal dispatcher off the request thread.
+_NO_TEMPORAL_INDEX_LOG = exact(
+    "code_indexer.services.temporal.temporal_fusion_dispatch",
     "No temporal indexes available. Run cidx index --index-commits "
-    "to create temporal indexes."
+    "to create temporal indexes.",
+    same_request=False,
 )
 
 

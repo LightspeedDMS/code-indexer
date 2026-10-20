@@ -15,8 +15,8 @@ import pytest
 
 from tests.e2e.cidx_meta_doors import (
     CONTENT_DOORS,
+    GIT_UNAVAILABLE_WATCH_LOG,
     REFUSAL_DOORS,
-    SEARCH_ECHO,
     WIKI_FRONT_MATTER_LOG,
     Caller,
     ContentDoor,
@@ -27,6 +27,7 @@ from tests.e2e.cidx_meta_doors import (
     error_text,
     regex_paths,
     result_paths,
+    search_echo,
 )
 from tests.e2e.cidx_meta_tool_recipes import RECIPES, repository_tools
 from tests.e2e.cidx_meta_world import (
@@ -37,20 +38,37 @@ from tests.e2e.cidx_meta_world import (
     mentions,
 )
 from tests.e2e.helpers import wait_for_job
+from tests.e2e.log_audit_claims import exact, pattern
 from tests.shared.cidx_meta_visibility_fixture import ALPHA, CANARY
 
 Callers = Tuple[Caller, Caller]
 JOB_TIMEOUT_SECONDS = 180.0
 WRITE_REFUSAL = "This path is not available for writing in this repository."
+GIT_HEAD = ".git/HEAD"
+ABSENT_FILE = "absent-sample.md"
 _DOMAIN_COUNT = re.compile(r"\((\d+) domains\)")
-ACTIVATION_LOGS = (
-    "Failed to set git config user.email",
-    "Failed to set git config user.name",
+_ACTIVATED_REPO_LOGGER = "code_indexer.server.repositories.activated_repo_manager"
+_FILES_LOGGER = "code_indexer.server.mcp.handlers.files"
+# The catalog is not a git repository: an activation job (off the request
+# thread) logs both identity settings it could not apply.
+ACTIVATION_LOGS = tuple(
+    pattern(
+        _ACTIVATED_REPO_LOGGER,
+        rf"Failed to set git config user\.{key}: command='git config user\.{key} "
+        r"[^']+' exit_code=128 stdout='' stderr='fatal: not in a git directory\\n'",
+        same_request=False,
+    )
+    for key in ("email", "name")
+)
+WATCH_STOP_LOG = exact(
+    "code_indexer.daemon.watch_manager",
+    "Watch thread did not stop within 5 seconds",
+    same_request=False,
 )
 ACTIVATION_WINDOW_LOGS = (
-    "Git not available - proceeding with file-only monitoring",
-    "Watch thread did not stop within 5 seconds",
-    "Repository deactivation initiated",
+    GIT_UNAVAILABLE_WATCH_LOG,
+    WATCH_STOP_LOG,
+    exact(_ACTIVATED_REPO_LOGGER, "Repository deactivation initiated", False),
 )
 # Longer than the watch manager's 5-second stop wait.
 ACTIVATION_SETTLE_SECONDS = 8.0
@@ -60,6 +78,7 @@ _SUITE_NAMES = frozenset(
     | {
         "test_catalog_activation_is_refused",
         "test_hidden_catalog_writes_share_one_refusal",
+        "test_quick_reference_counts_only_visible_domains",
     }
 )
 
@@ -125,13 +144,52 @@ def _activated_paths(user: Caller, admin: Caller) -> None:
     assert regex_paths(admin.mcp("regex_search", regex))
     # The restricted caller has no activation of that name: the bare alias
     # is served as the global catalog, projected to its view.
-    for reply in (user.mcp("search_code", search), user.mcp("regex_search", regex)):
+    for reply, submitted in (
+        (user.mcp("search_code", search), search["query_text"]),
+        (user.mcp("regex_search", regex), regex["pattern"]),
+    ):
         assert reply.status == 200, reply.snippet()
-        assert not leaks(reply, SEARCH_ECHO), reply.snippet()
+        assert not leaks(reply, search_echo(submitted)), reply.snippet()
 
 
 def _shows(reply: Reply) -> bool:
     return reply.status == 200 and mentions(reply, CANARY)
+
+
+def _assert_recipe_control(tool: str, reply: Reply, admin: Caller) -> None:
+    """A ``may_succeed`` recipe: visible content plus an admin control, or
+    the admin control's exact answer where the catalog has nothing to show."""
+    recipe = RECIPES[tool]
+    assert reply.ok, f"{tool} failed: {reply.snippet()}"
+    control = admin.mcp(tool, _recipe_args(tool))
+    assert control.ok, f"{tool} admin control: {control.snippet()}"
+    if recipe.same_as_admin:
+        assert reply.items == control.items, (reply.snippet(), control.snippet())
+        return
+    assert recipe.shows and mentions(reply, recipe.shows), (
+        f"{tool} lacks visible {recipe.shows!r}: {reply.snippet()}"
+    )
+    assert mentions(control, recipe.admin_shows), (
+        f"{tool} admin control lacks {recipe.admin_shows!r}: {control.snippet()}"
+    )
+
+
+def _read_catalog_file(caller: Caller, path: str) -> Reply:
+    return caller.mcp(
+        "get_file_content", {"repository_alias": CATALOG_GLOBAL, "file_path": path}
+    )
+
+
+def _assert_missing_file_answer(reply: Reply, path: str, caller: Caller) -> None:
+    """*reply* for *path* is exactly what *caller* gets for an absent file."""
+    absent = _read_catalog_file(caller, ABSENT_FILE)
+    assert not reply.ok and not absent.ok, (reply.snippet(), absent.snippet())
+    assert error_text(reply) == error_text(absent).replace(ABSENT_FILE, path)
+    assert reply.body.get("file_content") == absent.body.get("file_content") == []
+
+
+def _assert_reads_like_missing_file(caller: Caller, path: str) -> None:
+    _assert_missing_file_answer(_read_catalog_file(caller, path), path, caller)
 
 
 def _recipe_args(tool: str) -> Dict[str, Any]:
@@ -169,12 +227,18 @@ class CatalogDoorSuite:
         )
         assert not unknown, f"recipes naming no door or scenario: {unknown}"
         assert all(r.note for r in RECIPES.values() if r.kind == "exempt")
+        vacuous = sorted(
+            tool
+            for tool, r in RECIPES.items()
+            if r.may_succeed and not (r.shows or r.same_as_admin)
+        )
+        assert not vacuous, f"may_succeed recipes without a control: {vacuous}"
 
     @pytest.mark.parametrize("tool", CALL_RECIPES)
     def test_repository_tool_names_nothing_hidden_on_the_catalog(
         self, tool: str, catalog_callers: Callers
     ) -> None:
-        user = catalog_callers[0]
+        user, admin = catalog_callers
         recipe = RECIPES[tool]
         mark = user.log_mark()
         try:
@@ -183,6 +247,8 @@ class CatalogDoorSuite:
             assert not leaks(reply), f"{tool}: {leaks(reply)}"
             if not recipe.may_succeed:
                 assert not reply.ok, f"{tool} was not refused: {reply.snippet()}"
+            else:
+                _assert_recipe_control(tool, reply, admin)
             user.claim_logs(mark, recipe.logs)
         finally:
             user.claim_optional(mark, recipe.optional_logs)
@@ -191,21 +257,22 @@ class CatalogDoorSuite:
         self, catalog_callers: Callers
     ) -> None:
         user, admin = catalog_callers
-
-        def read(caller: Caller, path: str) -> Reply:
-            return caller.mcp(
-                "get_file_content",
-                {"repository_alias": CATALOG_GLOBAL, "file_path": path},
-            )
-
-        hidden, absent = read(user, f"{CANARY}.md"), read(user, "absent-sample.md")
-        assert not hidden.ok and not absent.ok, (hidden.snippet(), absent.snippet())
-        assert error_text(hidden) == error_text(absent).replace(
-            "absent-sample.md", f"{CANARY}.md"
-        )
-        assert hidden.body.get("file_content") == absent.body.get("file_content") == []
-        control = read(admin, f"{CANARY}.md")
+        _assert_reads_like_missing_file(user, f"{CANARY}.md")
+        control = _read_catalog_file(admin, f"{CANARY}.md")
         assert control.ok and mentions(control, "alphabet of flags"), control.snippet()
+
+    def test_git_metadata_answers_like_a_missing_file(
+        self, catalog_callers: Callers
+    ) -> None:
+        user, admin = catalog_callers
+        _assert_reads_like_missing_file(user, GIT_HEAD)
+        control = _read_catalog_file(admin, GIT_HEAD)
+        if (user.world.catalog_root / GIT_HEAD).is_file():
+            assert control.ok and mentions(control, "ref:"), control.snippet()
+        else:
+            # The catalog holds no git metadata: the admin gets the
+            # missing-file answer as well.
+            _assert_missing_file_answer(control, GIT_HEAD, admin)
 
     def test_canary_term_finds_nothing_for_restricted_caller(
         self, catalog_callers: Callers
@@ -226,7 +293,7 @@ class CatalogDoorSuite:
         ):
             assert reply.status == 200, reply.snippet()
             assert not result_paths(reply) and not regex_paths(reply), reply.snippet()
-            assert not leaks(reply, SEARCH_ECHO), reply.snippet()
+            assert not leaks(reply, search_echo(CANARY)), reply.snippet()
         assert result_paths(admin.mcp("search_code", fts))
         assert result_paths(admin.rest("POST", "/api/query", json=fts))
         assert regex_paths(admin.mcp("regex_search", regex))
@@ -244,7 +311,7 @@ class CatalogDoorSuite:
         top = result_paths(admin.mcp("search_code", args))
         assert any(CANARY in p for p in top), f"admin top hits not hidden ones: {top}"
         reply = user.mcp("search_code", args)
-        assert not leaks(reply, SEARCH_ECHO), reply.snippet()
+        assert not leaks(reply, search_echo(str(args["query_text"]))), reply.snippet()
         assert len(result_paths(reply)) == 3, reply.snippet()
 
     def test_graph_dependency_count_drops_for_restricted_caller(
@@ -267,8 +334,10 @@ class CatalogDoorSuite:
     def test_poll_search_job_reveals_no_unknown_job(
         self, catalog_callers: Callers
     ) -> None:
-        # Search jobs exist only for temporal queries, which the catalog
-        # refuses to restricted callers (mcp_search_temporal).
+        # No search job can carry catalog results: search jobs exist only
+        # for temporal queries, and the catalog refuses temporal search
+        # (mcp_search_temporal).  What remains to pin is that an unknown job
+        # id answers not_found and names nothing.
         reply = catalog_callers[0].mcp(
             "poll_search_job", {"job_id": "00000000-0000-4000-8000-000000000000"}
         )
@@ -330,23 +399,24 @@ class CatalogDoorSuite:
             )
             for reply in replies:
                 assert error_text(reply) == WRITE_REFUSAL, reply.snippet()
-            user.claim_logs(
-                mark,
-                (
-                    f"File create failed - permission denied: {WRITE_REFUSAL}",
-                    f"File create failed - permission denied: {WRITE_REFUSAL}",
-                    f"File delete failed - permission denied: {WRITE_REFUSAL}",
-                ),
+            create = exact(
+                _FILES_LOGGER,
+                f"[MCP-GENERAL-043] File create failed - permission denied: "
+                f"{WRITE_REFUSAL}",
             )
+            delete = exact(
+                _FILES_LOGGER,
+                f"[MCP-GENERAL-055] File delete failed - permission denied: "
+                f"{WRITE_REFUSAL}",
+            )
+            user.claim_logs(mark, (create, create, delete))
         finally:
             mark = user.log_mark()
             exited = user.mcp("exit_write_mode", {"repo_alias": CATALOG_GLOBAL})
             assert exited.ok, f"exit_write_mode: {exited.snippet()}"
             # Leaving write mode stops the catalog clone's auto-watch.
             user.claim_optional(
-                mark,
-                ("Watch thread did not stop within 5 seconds",),
-                settle_seconds=ACTIVATION_SETTLE_SECONDS,
+                mark, (WATCH_STOP_LOG,), settle_seconds=ACTIVATION_SETTLE_SECONDS
             )
 
     def test_cached_handle_is_refused_after_grant_revocation(
@@ -366,7 +436,12 @@ class CatalogDoorSuite:
             assert after_rest.status == 404, after_rest.snippet()
             user.claim_logs(
                 mark,
-                (f"[MCP-GENERAL-117] Cache handle not found or expired: {handle}",),
+                (
+                    exact(
+                        "code_indexer.server.mcp.handlers.search",
+                        f"[MCP-GENERAL-117] Cache handle not found or expired: {handle}",
+                    ),
+                ),
             )
         finally:
             user.world.set_alpha_grant(True)
