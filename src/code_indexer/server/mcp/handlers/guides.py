@@ -94,17 +94,20 @@ def _build_langfuse_section(
             if normalize_repo_alias(alias) in vis.visible
         ]
 
-    # Get project count
-    pull_projects = getattr(langfuse, "pull_projects", [])
-    project_count = len(pull_projects) if pull_projects else 0
-
     # Build compact 4-field section (Story #222 TODO 10)
-    return {
+    section: Dict[str, Any] = {
         "description": "Langfuse AI traces indexed for semantic search.",
         "search_pattern": "search_code('query', repository_alias='langfuse_<project>_<userId>')",
         "available_repositories": langfuse_repos,
-        "configured_projects_count": project_count,
     }
+    # The configured project list is global: only an unrestricted caller
+    # is shown its size.
+    if vis.unrestricted:
+        pull_projects = getattr(langfuse, "pull_projects", [])
+        section["configured_projects_count"] = (
+            len(pull_projects) if pull_projects else 0
+        )
+    return section
 
 
 def _build_dependency_map_section(

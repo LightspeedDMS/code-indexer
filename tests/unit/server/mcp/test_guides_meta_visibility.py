@@ -78,7 +78,7 @@ def server(fx: CidxMetaFixture, tmp_path: Path) -> Iterator[SimpleNamespace]:
     config = MagicMock()
     config.service_display_name = "Neo"
     config.langfuse_config.pull_enabled = True
-    config.langfuse_config.pull_projects = ["sample"]
+    config.langfuse_config.pull_projects = ["sample", "other-sample"]
     try:
         with pytest.MonkeyPatch.context() as monkeypatch:
             state = build_depmap_server(monkeypatch, fx, golden_repo_manager=golden)
@@ -113,6 +113,16 @@ def test_quick_reference_lists_only_visible_trace_repositories(server: Any) -> N
         LANGFUSE_GRANTED,
         LANGFUSE_HIDDEN,
     ]
+
+
+def test_quick_reference_shows_restricted_callers_no_global_project_count(
+    server: Any,
+) -> None:
+    restricted = _quick_reference(RESTRICTED_USER)["langfuse_trace_search"]
+    assert restricted["available_repositories"] == [LANGFUSE_GRANTED]
+    assert "configured_projects_count" not in restricted
+    admin = _quick_reference(ADMIN_USER)["langfuse_trace_search"]
+    assert admin["configured_projects_count"] == 2
 
 
 def _analytics(username: str) -> Dict[str, Any]:

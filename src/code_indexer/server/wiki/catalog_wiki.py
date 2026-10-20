@@ -7,15 +7,17 @@ The policy judges the file that is served: a request is resolved first
 (confined to the repository, never into ``.git``) and only its canonical
 spelling is served, so ``./``, ``//``, ``..``, backslashes and in-repo
 symlink aliases answer not found. Description and dependency-map documents
-are rendered from their projection. Nothing caller-specific is ever written
-to the shared wiki cache: pages are rendered per request, and the shared
-sidebar is filtered after it is read. Wiki routes are sync ``def``.
+are rendered from their projection. Sidebar titles and category names come
+from raw article content, so they are projected like prose too. Nothing
+caller-specific is ever written to the shared wiki cache: pages are
+rendered per request, and the shared sidebar is filtered after it is read.
+Wiki routes are sync ``def``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, Request
@@ -39,7 +41,10 @@ from ..services.cidx_meta_access.universe_provider import (
     registry_of,
 )
 
+from .wiki_service import WikiService
+
 _PROJECTED = frozenset({DecisionKind.DESCRIPTION, DecisionKind.TRANSFORM})
+UNCATEGORIZED_LABEL = WikiService.UNCATEGORIZED_LABEL
 
 
 def _not_found() -> HTTPException:
@@ -158,17 +163,47 @@ def filter_articles(
     return [a for a in articles if _article_visible(view, str(a["path"]))]
 
 
+def _projected_label(
+    view: CatalogWikiView, text: str, relative_path: str, fallback: str
+) -> str:
+    """*text* (a title or category taken from an article's raw content)
+    through the caller's projection; *fallback* when it is removed."""
+    projected = view.projector.project([text], relative_path)[0]
+    return projected if projected else fallback
+
+
+def _projected_entries(
+    entries: List[Dict[str, Any]], view: CatalogWikiView
+) -> List[Dict[str, Any]]:
+    kept = []
+    for entry in filter_articles(entries, view):
+        path = str(entry["path"])
+        derived = PurePosixPath(path).name.replace("-", " ").replace("_", " ").title()
+        title = _projected_label(
+            view, str(entry.get("title", "")), article_relative_path(path), derived
+        )
+        kept.append({**entry, "title": title})
+    return kept
+
+
 def filter_sidebar(sidebar: List[Dict[str, Any]], view: CatalogWikiView) -> List[Any]:
-    """A filtered copy of the shared sidebar; empty categories and groups
-    are dropped. The shared copy is never modified."""
+    """A filtered copy of the shared sidebar: entries the caller may see,
+    their titles and category names projected like prose (categories that
+    project to one name are merged); empty categories and groups are
+    dropped. The shared copy is never modified."""
     groups: List[Any] = []
     for group in sidebar:
-        categories = {}
+        categories: Dict[str, List[Dict[str, Any]]] = {}
         for name, entries in (group.get("categories") or {}).items():
-            kept = filter_articles(list(entries), view)
-            if kept:
-                categories[name] = kept
-        articles = filter_articles(list(group.get("articles") or []), view)
+            kept = _projected_entries(list(entries), view)
+            if not kept:
+                continue
+            first = article_relative_path(str(kept[0]["path"]))
+            label = _projected_label(view, str(name), first, UNCATEGORIZED_LABEL)
+            categories.setdefault(label, []).extend(kept)
+        for merged in categories.values():
+            merged.sort(key=lambda a: str(a["title"]).lower())
+        articles = _projected_entries(list(group.get("articles") or []), view)
         if categories or articles:
             groups.append({**group, "categories": categories, "articles": articles})
     return groups
