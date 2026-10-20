@@ -14,6 +14,7 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.utils.path_confinement import has_git_segment
 from code_indexer.xray.search_engine import XRaySearchEngine
 
+from ._catalog_guard import catalog_xray_refusal, xray_access_service
 from ._infra import (
     _DUMP_AST_MAX_NODES_DEFAULT,
     _DUMP_AST_MAX_NODES_MIN,
@@ -59,6 +60,11 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     # 2. Parameter extraction
     repo_alias: str = params.get("repository_alias", "")
     file_path_raw: str = params.get("file_path", "")
+    catalog_refusal = catalog_xray_refusal(
+        repo_alias, user.username, xray_access_service()
+    )
+    if catalog_refusal is not None:
+        return _mcp_response(catalog_refusal)
 
     # max_nodes: optional int, default 500, range [1, 2000] (Finding 3.2, v10.4.4)
     max_nodes_raw = params.get("max_nodes", _DUMP_AST_MAX_NODES_DEFAULT)

@@ -278,18 +278,12 @@ def _execute_temporal_via_live_dispatch_rest(
     app: FastAPI,
     activated_repo_manager,
 ) -> JSONResponse:
-    """Story #1400: the REST live async-hybrid temporal dispatch entry
-    point -- mirrors mcp/handlers/search.py's
-    _execute_temporal_via_live_dispatch exactly, adapted for REST's
-    SemanticQueryRequest shape and JSONResponse wire format.
-
-    Scenario 12: both doors call the SAME execute_live_temporal_search
-    function, so an identical logical query landing on the same node joins
-    the same in-flight job. fusion_fetch_limit is computed via the shared
-    compute_temporal_fusion_fetch_limit() (temporal_fusion_limit.py) below,
-    so an identical logical query from either door now genuinely produces
-    the identical dedup signature.
-    """
+    """Story #1400: REST twin of MCP _execute_temporal_via_live_dispatch; both
+    doors call the SAME execute_live_temporal_search (shared fusion_fetch_limit),
+    so an identical query from either door joins the same in-flight job."""
+    from code_indexer.server.services.cidx_meta_access.history_policy import (
+        refuse_catalog_temporal,
+    )
     from code_indexer.services.temporal.temporal_worker_input_adapters import (
         TemporalAliasRejectedError,
         build_temporal_worker_input_from_rest_request,
@@ -329,6 +323,12 @@ def _execute_temporal_via_live_dispatch_rest(
             },
         )
 
+    refuse_catalog_temporal(
+        worker_input.repository_alias,
+        current_user.username,
+        access_filtering_service,
+        activated_repo_manager,
+    )
     repo_path, err = _resolve_temporal_repo_path_rest(
         worker_input.repository_alias, current_user, app, activated_repo_manager
     )

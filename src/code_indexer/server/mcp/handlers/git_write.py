@@ -38,6 +38,7 @@ from code_indexer.server.storage.shared.snapshot_manager import (
 )
 
 from ..auth.elevation_decorator import require_mcp_elevation
+from ._catalog_history import guard_catalog_history
 from ._utils import _admin_role_first, _mcp_response, app_module
 
 logger = logging.getLogger(__name__)
@@ -1278,12 +1279,11 @@ def git_unstage(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 
 def _register(registry: dict) -> None:
-    """Register all git write handlers into the provided HANDLER_REGISTRY."""
     registry["git_stage"] = git_stage
     registry["git_unstage"] = git_unstage
     registry["git_commit"] = git_commit
     registry["git_push"] = git_push
-    registry["git_pull"] = git_pull
+    registry["git_pull"] = guard_catalog_history(git_pull)
     registry["git_reset"] = git_reset
     registry["git_clean"] = git_clean
     registry["git_merge"] = git_merge

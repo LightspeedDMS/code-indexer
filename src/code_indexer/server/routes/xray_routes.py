@@ -237,6 +237,21 @@ def xray_search(
         http_request.app.state, "access_filtering_service", None
     )
     _enforce_repo_access(access_filtering_service, user.username, body.repository_alias)
+    from code_indexer.server.mcp.handlers.xray._catalog_guard import (
+        catalog_xray_refusal,
+    )
+
+    catalog_refusal = catalog_xray_refusal(
+        body.repository_alias, user.username, access_filtering_service
+    )
+    if catalog_refusal is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": catalog_refusal["error"],
+                "detail": catalog_refusal["message"],
+            },
+        )
 
     # ------------------------------------------------------------------
     # 2. Field validation

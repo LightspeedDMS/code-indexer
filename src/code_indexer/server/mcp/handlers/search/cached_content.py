@@ -18,6 +18,9 @@ from typing import Any, Dict, Optional
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.cidx_meta_access.cached_handles import (
+    require_catalog_handle_visible,
+)
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.temporal_poll_job_status import (
     poll_temporal_job_status,
@@ -89,6 +92,9 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
         )
 
     try:
+        require_catalog_handle_visible(
+            handle, user.username, _get_access_filtering_service()
+        )
         result = payload_cache.retrieve_owned(handle, user.username, page=page)
         return _mcp_response(
             {

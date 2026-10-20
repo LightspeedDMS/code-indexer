@@ -195,6 +195,33 @@ def enforce_activated_repo_access(
         raise refusal if refusal is not None else activated_repo_not_found(user_alias)
 
 
+def enforce_activated_history_access(
+    activated_repo_manager: Optional[Any], username: str, user_alias: str
+) -> None:
+    """enforce_activated_repo_access() for a git route (a copy of the
+    internal catalog is refused there like an unknown alias), then refuse
+    the catalog's history (by the golden identity of *user_alias*) to every
+    restricted caller: 403 with a fixed text naming no content. The second
+    check stands on its own, whatever the activation rule allows.
+    Synchronous: call it from a sync route."""
+    from ..services.cidx_meta_access.history_policy import (
+        CatalogSurface,
+        catalog_surface_refusal,
+    )
+
+    service = module_app_access_filtering_service()
+    enforce_activated_repo_access(service, username, user_alias)
+    refusal = catalog_surface_refusal(
+        CatalogSurface.GIT_HISTORY,
+        user_alias,
+        username,
+        service,
+        activated_repo_manager,
+    )
+    if refusal is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
+
+
 async def enforce_activated_repo_access_async(
     access_filtering_service: Optional[AccessFilteringService],
     username: str,

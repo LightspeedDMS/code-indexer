@@ -6,6 +6,7 @@ projection that turns a catalog document into the caller's view of it.
 """
 
 from .alias_universe import ALIAS_UNIVERSE_TTL_SECONDS, AliasUniverse, UniverseSnapshot
+from .cached_handles import bind_catalog_handles, require_catalog_handle_visible
 from .catalog_requests import (
     catalog_restriction_applies,
     is_catalog_request,
@@ -23,6 +24,12 @@ from .depmap_projection import (
     projection_cache_stats,
     render_for_display,
     render_line_aligned,
+)
+from .history_policy import (
+    CatalogSurface,
+    catalog_surface_refusal,
+    golden_catalog_surface_refusal,
+    refuse_catalog_temporal,
 )
 from .membership import domain_participants, participants_reader
 from .path_policy import Decision, DecisionKind, classify
@@ -51,8 +58,14 @@ __all__ = [
     "MetaVisibility",
     "ProjectionCacheStats",
     "UniverseSnapshot",
+    "CatalogSurface",
     "acting_scope",
+    "bind_catalog_handles",
     "catalog_restriction_applies",
+    "catalog_surface_refusal",
+    "golden_catalog_surface_refusal",
+    "refuse_catalog_temporal",
+    "require_catalog_handle_visible",
     "catalog_tree_paths",
     "classify",
     "domain_participants",

@@ -19,6 +19,10 @@ import time
 from typing import Any, Dict, Optional
 
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.cache.handle_binding import reset_handle_binding
+from code_indexer.server.services.cidx_meta_access.cached_handles import (
+    bind_catalog_handles,
+)
 from code_indexer.server.services.search_event_outcomes import failure_error_class
 from code_indexer.server.services.search_event_recording import (
     SearchOrigin,
@@ -145,6 +149,7 @@ def search_code(
         search_type=_search_mode,
     )
     _ctx_token = _search_event_ctx.set(_event_ctx)
+    _handle_binding = None
     # Set once routing starts: from then on an exception is a failed search.
     _routed = False
 
@@ -212,6 +217,15 @@ def search_code(
                         repository_alias = _promoted
                         # Bug #2111: the row carries the resolved alias.
                         _event_ctx.repo_alias = _single_alias(_promoted)
+
+        # Handles cached while serving the catalog carry the caller's view;
+        # the read doors refuse them once that view changes.
+        _handle_binding = bind_catalog_handles(
+            repository_alias,
+            user.username,
+            _utils._get_access_filtering_service(),
+            _utils._get_activated_repo_manager(),
+        )
 
         # Story #1400: async-hybrid temporal query execution. Intercept
         # AFTER the Story #1039 alias promotion above (so a bare alias that
@@ -328,3 +342,4 @@ def search_code(
     finally:
         # Issue #1159: always reset ContextVar so it never leaks into the next request.
         _search_event_ctx.reset(_ctx_token)
+        reset_handle_binding(_handle_binding)

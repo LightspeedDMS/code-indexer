@@ -33,6 +33,7 @@ from code_indexer.global_repos.alias_manager import AliasManager
 
 # Shared utilities extracted to _utils.py (Story #496 refactoring)
 from . import _utils  # noqa: F401 — tests patch _legacy._utils
+from ._catalog_history import catalog_history_refusal
 from ._utils import (
     _get_scip_audit_repository,  # noqa: F401 — re-exported via handlers namespace
     _get_golden_repos_dir,
@@ -288,6 +289,9 @@ def _resolve_git_repo_path(
             None,
             "repository_alias must be a string, not a list. Use a single repository alias.",
         )
+    refusal = catalog_history_refusal(repository_alias, username)
+    if refusal is not None:
+        return None, refusal
     if repository_alias.endswith("-global"):
         golden_repos_dir = _get_golden_repos_dir()
 

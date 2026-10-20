@@ -63,6 +63,11 @@ class _ActivatedRepos:
     def user_has_activated_repo(self, username: str, alias: str) -> bool:
         return True
 
+    def get_repository(
+        self, username: str, user_alias: str, *, touch: bool = True
+    ) -> Dict[str, Any]:
+        return {"user_alias": user_alias, "golden_repo_alias": user_alias}
+
     def get_activated_repo_path(self, username: str, alias: str) -> str:
         if alias == "missing-repo":
             raise ValueError(f"Repository '{alias}' not found")
@@ -86,6 +91,7 @@ def env(request, tmp_path) -> Iterator[TemporalEnv]:
             payload_cache=SimpleNamespace(),
             background_job_manager=SimpleNamespace(),
             access_filtering_service=None,
+            activated_repo_manager=repos,
         )
         app_module = SimpleNamespace(
             app=SimpleNamespace(state=state),

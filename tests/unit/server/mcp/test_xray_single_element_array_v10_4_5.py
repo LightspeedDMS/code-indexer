@@ -1,6 +1,6 @@
 """v10.4.5 Defect 5 tests: single-element list alias returns single-repo response shape.
 
-Verifies that repository_alias=["cidx-meta-global"] (1-element list — native or
+Verifies that repository_alias=["example-repo-global"] (1-element list — native or
 JSON-encoded) returns {"job_id":"..."} (single-repo shape), NOT {"job_ids":[...],
 "errors":[]} (multi-repo shape).
 
@@ -157,8 +157,8 @@ async def _invoke_handler(handler_name: str, repo_alias: Any) -> Dict[str, Any]:
 async def test_single_element_string_array_returns_single_repo_shape(
     handler_name: str,
 ) -> None:
-    """repository_alias=["cidx-meta-global"] -> {job_id: ...}, not {job_ids: [...]}."""
-    data = await _invoke_handler(handler_name, ["cidx-meta-global"])
+    """repository_alias=["example-repo-global"] -> {job_id: ...}, not {job_ids: [...]}."""
+    data = await _invoke_handler(handler_name, ["example-repo-global"])
     assert "job_id" in data, (
         f"[{handler_name}] Expected 'job_id' key, got: {list(data.keys())}"
     )
@@ -172,8 +172,8 @@ async def test_single_element_string_array_returns_single_repo_shape(
 async def test_single_element_json_encoded_array_returns_single_repo_shape(
     handler_name: str,
 ) -> None:
-    """repository_alias='["cidx-meta-global"]' (JSON-encoded string) -> {job_id: ...}."""
-    data = await _invoke_handler(handler_name, '["cidx-meta-global"]')
+    """repository_alias='["example-repo-global"]' (JSON-encoded string) -> {job_id: ...}."""
+    data = await _invoke_handler(handler_name, '["example-repo-global"]')
     assert "job_id" in data, (
         f"[{handler_name}] Expected 'job_id' key, got: {list(data.keys())}"
     )
@@ -213,7 +213,7 @@ async def test_two_element_array_returns_multi_repo_shape(handler_name: str) -> 
 @pytest.mark.parametrize("handler_name", _HANDLER_NAMES)
 async def test_string_alias_returns_single_repo_shape(handler_name: str) -> None:
     """Plain string alias (regression guard) -> {job_id: ...} unchanged."""
-    data = await _invoke_handler(handler_name, "cidx-meta-global")
+    data = await _invoke_handler(handler_name, "example-repo-global")
     assert "job_id" in data, (
         f"[{handler_name}] Expected 'job_id' key, got: {list(data.keys())}"
     )

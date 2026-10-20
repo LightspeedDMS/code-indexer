@@ -102,12 +102,12 @@ def _get_activated_repo_manager() -> ActivatedRepoManager:
 
 
 def _require_activation_access(alias: str, user: User) -> None:
-    """Every route here serves the caller's own activation *alias*: require
-    the caller's grants on that activation's source golden repositories
-    (the MCP rule), refusing exactly like an alias never activated.
-    Called first in each (sync) route body, outside its broad except."""
-    repo_access_http.enforce_activated_repo_access(
-        repo_access_http.module_app_access_filtering_service(), user.username, alias
+    """Every route here serves the caller's own activation *alias*: the
+    catalog's history is admin-only (403); otherwise require the caller's
+    grants on the activation's sources (the MCP rule), refused like an alias
+    never activated. Called first in each (sync) route, outside its except."""
+    repo_access_http.enforce_activated_history_access(
+        _get_activated_repo_manager(), user.username, alias
     )
 
 

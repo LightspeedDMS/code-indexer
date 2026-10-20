@@ -68,6 +68,11 @@ class _ActivatedRepos:
     def user_has_activated_repo(self, username: str, alias: str) -> bool:
         return True
 
+    def get_repository(
+        self, username: str, user_alias: str, *, touch: bool = True
+    ) -> Dict[str, Any]:
+        return {"user_alias": user_alias, "golden_repo_alias": user_alias}
+
     def get_activated_repo_path(self, username: str, alias: str) -> str:
         path = Path(self.activated_repos_dir) / username / alias
         path.mkdir(parents=True, exist_ok=True)
@@ -124,6 +129,7 @@ def env(request, tmp_path) -> Iterator[Env]:
             payload_cache=cache,
             background_job_manager=jobs,
             access_filtering_service=_AllowAll(),
+            activated_repo_manager=repos,
         )
         app_module = SimpleNamespace(
             app=SimpleNamespace(state=state),

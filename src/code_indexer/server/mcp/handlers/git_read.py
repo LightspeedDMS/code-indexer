@@ -44,6 +44,7 @@ from code_indexer.server.services.git_operations_service import (
 from code_indexer.global_repos.git_operations import GitOperationsService
 from code_indexer.server.mcp import reranking as _mcp_reranking
 
+from ._catalog_history import guard_catalog_history
 from ._utils import (
     CapBreach,
     _coerce_int,
@@ -1741,8 +1742,7 @@ def _register(registry: dict) -> None:
     """Register all git read handlers into the provided HANDLER_REGISTRY.
 
     Registration order mirrors _legacy.py to preserve overwrite semantics:
-    - git_log / git_diff registered first with older handle_* variants
-    - Then overwritten with the newer git_log / git_diff variants
+    git_log / git_diff go in first as older handle_* variants, then newer ones.
     """
     # Older variants (registered first, same order as _legacy.py)
     registry["git_log"] = handle_git_log
@@ -1753,7 +1753,7 @@ def _register(registry: dict) -> None:
     registry["git_search_commits"] = handle_git_search_commits
     registry["git_search_diffs"] = handle_git_search_diffs
     registry["git_status"] = git_status
-    registry["git_fetch"] = git_fetch
+    registry["git_fetch"] = guard_catalog_history(git_fetch)
     registry["git_branch_list"] = git_branch_list
     registry["git_conflict_status"] = git_conflict_status
     # Newer variants overwrite the registry entries (same as _legacy.py)

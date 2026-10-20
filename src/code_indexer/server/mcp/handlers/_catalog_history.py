@@ -1,0 +1,48 @@
+"""Git history of the internal catalog is admin-only on every MCP git tool.
+
+``_legacy._resolve_git_repo_path`` asks ``catalog_history_refusal`` first;
+git tools that resolve their repository elsewhere (through
+``git_operations_service`` by alias) are registered through
+``guard_catalog_history`` so they ask the same question before running.
+"""
+
+from __future__ import annotations
+
+from functools import wraps
+from typing import Any, Callable, Dict, Optional
+
+from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.cidx_meta_access.history_policy import (
+    CatalogSurface,
+    catalog_surface_refusal,
+)
+
+from . import _utils
+
+
+def catalog_history_refusal(repository_alias: Any, username: str) -> Optional[str]:
+    """The git-history refusal when *repository_alias* (a golden alias or
+    the caller's activation, judged by golden identity) serves the catalog
+    and the caller is restricted; None otherwise."""
+    return catalog_surface_refusal(
+        CatalogSurface.GIT_HISTORY,
+        repository_alias,
+        username,
+        _utils._get_access_filtering_service(),
+        _utils._get_activated_repo_manager(),
+    )
+
+
+def guard_catalog_history(
+    handler: Callable[..., Dict[str, Any]],
+) -> Callable[..., Dict[str, Any]]:
+    """Refuse the catalog's history before *handler* runs."""
+
+    @wraps(handler)
+    def guarded(args: Dict[str, Any], user: User, *extra: Any, **kw: Any) -> Any:
+        refusal = catalog_history_refusal(args.get("repository_alias"), user.username)
+        if refusal is not None:
+            return _utils._mcp_response({"success": False, "error": refusal})
+        return handler(args, user, *extra, **kw)
+
+    return guarded
