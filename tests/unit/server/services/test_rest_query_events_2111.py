@@ -529,7 +529,7 @@ class TestOnlySearchedRepositoriesGetRows:
         repos = _Repos(
             tmp_path,
             [
-                {"user_alias": "repo-a"},
+                {"user_alias": "repo-a", "golden_repo_alias": "repo-a"},
                 {"user_alias": "repo-b-global", "is_global": True},
             ],
         )
@@ -545,9 +545,8 @@ class TestOnlySearchedRepositoriesGetRows:
         repos = _Repos(
             tmp_path,
             [
-                {"user_alias": "repo-a"},
-                {"user_alias": "repo-b"},
-                {"user_alias": "repo-c"},
+                {"user_alias": alias, "golden_repo_alias": alias}
+                for alias in ("repo-a", "repo-b", "repo-c")
             ],
         )
         searched: List[str] = []

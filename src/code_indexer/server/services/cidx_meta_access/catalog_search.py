@@ -99,9 +99,11 @@ def _labels_catalog(row: Any) -> bool:
 
 
 def _marked_catalog(row: Any) -> Any:
-    """*row* carrying the catalog's identity in ``source_repo`` (kept when
-    the row already names a source)."""
-    if _field(row, "source_repo"):
+    """*row* carrying the catalog's identity in ``source_repo``, replacing
+    any other label: rereads judge the row by it, never by re-resolving an
+    alias that may since point elsewhere."""
+    label = _field(row, "source_repo")
+    if isinstance(label, str) and is_internal_meta_repo(label):
         return row
     if isinstance(row, dict):
         return dict(row, source_repo=CIDX_META_REPO_GLOBAL)
@@ -224,7 +226,8 @@ def project_catalog_rows(
                 logger.warning("Catalog copy unresolvable; catalog rows dropped")
         scope = scopes[root]
         if scope is not None:
-            out.extend(project_meta_hits([row], scope, rematch))
+            projected = project_meta_hits([row], scope, rematch)
+            out.extend(_marked_catalog(hit) for hit in projected)
     return out
 
 
@@ -319,14 +322,22 @@ def catalog_query_vector(
     return list(vector)
 
 
-def _searches_catalog(
+def _catalog_judgement(
     repo_info: Mapping[str, Any], repo_path: Any, golden_repos_dir: Optional[str]
-) -> bool:
-    if is_internal_meta_identity(meta_identity(repo_info)):
+) -> Optional[bool]:
+    """True when the entry is proven to be the catalog (its golden identity,
+    or the directory searched is a catalog location); None when only an
+    unresolved identity makes it count as the catalog; False otherwise."""
+    identities = meta_identity(repo_info)
+    if any(is_internal_meta_repo(identity) for identity in identities):
         return True
-    if not repo_path or not golden_repos_dir:
-        return False
-    return path_is_catalog_location(str(repo_path), str(golden_repos_dir))
+    if (
+        repo_path
+        and golden_repos_dir
+        and path_is_catalog_location(str(repo_path), str(golden_repos_dir))
+    ):
+        return True
+    return None if is_internal_meta_identity(identities) else False
 
 
 def search_for_caller(
@@ -359,7 +370,8 @@ def search_for_caller(
     if unrestricted_caller(username, access_service):
         return run(limit, search_mode, query_vector)
     golden_repos_dir = golden_repos_dir_of(activated_repo_manager)
-    if not _searches_catalog(repo_info, repo_path, golden_repos_dir):
+    proven = _catalog_judgement(repo_info, repo_path, golden_repos_dir)
+    if proven is False:
         return run(limit, search_mode, query_vector)
     scope = _LazyScope(
         lambda: open_catalog_scope(
@@ -367,13 +379,15 @@ def search_for_caller(
         )
     )
     vector = query_vector
-    if vector is None and search_mode in ("semantic", "hybrid"):
-        vector = catalog_query_vector(
-            repo_path, rematch.query, no_embedding_cache_shortcut
-        )
+    embeds = search_mode in ("semantic", "hybrid")
     requested = max(1, limit)
     page: List[Any] = []
     for round_index in range(META_DEEPEN_MAX_ROUNDS):
+        # An unresolved identity embeds only to deepen, never up front.
+        if vector is None and embeds and (proven or round_index > 0):
+            vector = catalog_query_vector(
+                repo_path, rematch.query, no_embedding_cache_shortcut
+            )
         k = min(requested * 2 ** (round_index + 1), META_DEEPEN_MAX_K)
         logger.debug("catalog round %d k=%d", round_index, k)
         page, exhausted = _round(run, k, search_mode, scope, rematch, merge, vector)

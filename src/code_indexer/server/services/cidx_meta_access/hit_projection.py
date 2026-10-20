@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence
 
 from ....utils.path_confinement import resolve_confined_path
 from .depmap_projection import MetaProjector, render_line_aligned
-from .membership import participants_reader
+from .membership import request_participants_reader
 from .path_policy import DEP_MAP_DIR, Decision, DecisionKind, classify
 from .universe_provider import process_alias_universe
 from .visibility import MetaVisibility, memory_visibility_fn, resolve_meta_visibility
@@ -184,14 +184,7 @@ def open_catalog_scope(
     projector = MetaProjector(
         vis, dep_map_dir=root / DEP_MAP_DIR, universe=process_alias_universe(registry)
     )
-    read_participants = participants_reader(root / DEP_MAP_DIR)
-    memo: Dict[str, Optional[FrozenSet[str]]] = {}
-
-    def participants(domain: str) -> Optional[FrozenSet[str]]:
-        if domain not in memo:
-            memo[domain] = read_participants(domain)
-        return memo[domain]
-
+    participants = request_participants_reader(root / DEP_MAP_DIR, projector.model)
     memory_fn = memory_visibility_fn(access_service, vis)
     return CatalogScope(
         vis=vis,

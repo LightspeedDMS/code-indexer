@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 # Story #2117: the tool and door every REST regex search event carries.
 REST_REGEX_ORIGIN = SearchOrigin(tool="POST /api/regex/search", door="rest")
+_REST_MAX_RESULTS = 1000
 
 router = APIRouter(prefix="/api/regex", tags=["regex"])
 
@@ -67,7 +68,7 @@ class RegexSearchRequest(BaseModel):
     exclude_patterns: Optional[List[str]] = None
     case_sensitive: bool = True
     context_lines: int = Field(default=0, ge=0, le=10)
-    max_results: int = Field(default=100, ge=1, le=1000)
+    max_results: int = Field(default=100, ge=1, le=_REST_MAX_RESULTS)
     multiline: bool = False
     pcre2: bool = False
 
@@ -170,6 +171,40 @@ async def _resolve_repo_paths_batch_offloaded(
 # ---------------------------------------------------------------------------
 
 
+def _catalog_regex_applies(
+    alias: Union[str, List[str]],
+    repo_path: Optional[str],
+    user: User,
+    app_state: Optional[State],
+) -> bool:
+    """True when the caller's request may be the catalog and is restricted;
+    services from *app_state*. Synchronous reads: called on a worker thread."""
+    from pathlib import Path
+
+    from ..services.cidx_meta_access.catalog_regex import catalog_regex_applies
+
+    state = app_state if app_state is not None else State()
+    return catalog_regex_applies(
+        alias,
+        None if repo_path is None else Path(repo_path),
+        user.username,
+        getattr(state, "access_filtering_service", None),
+        getattr(state, "activated_repo_manager", None),
+    )
+
+
+def _advanced_regex_refused() -> HTTPException:
+    from ..services.cidx_meta_access.catalog_regex import ADVANCED_REGEX_REFUSAL
+
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail={
+            "error_code": "advanced_regex_unavailable",
+            "detail": ADVANCED_REGEX_REFUSAL,
+        },
+    )
+
+
 def _restrict_catalog_matches(
     matches: List[Dict[str, Any]],
     alias: str,
@@ -217,6 +252,15 @@ async def _execute_single_search(
     from pathlib import Path
 
     started = time.monotonic()
+    catalog = False
+    if user is not None and alias is not None:
+        catalog = await anyio.to_thread.run_sync(
+            functools.partial(
+                _catalog_regex_applies, alias, repo_path_str, user, app_state
+            )
+        )
+    if catalog and body.pcre2:
+        raise _advanced_regex_refused()
     if user is not None:
         api_metrics_service.increment_regex_search(username=user.username)
 
@@ -250,7 +294,7 @@ async def _execute_single_search(
             exclude_patterns=body.exclude_patterns,
             case_sensitive=body.case_sensitive,
             context_lines=body.context_lines,
-            max_results=body.max_results,
+            max_results=_REST_MAX_RESULTS if catalog else body.max_results,
             multiline=body.multiline,
             pcre2=body.pcre2,
             timeout_seconds=timeout_seconds,
@@ -267,19 +311,24 @@ async def _execute_single_search(
         }
         for m in result.matches
     ]
-    from ..services.cidx_meta_access.catalog_regex import caller_visible_flag
+    from ..services.cidx_meta_access.catalog_regex import (
+        caller_visible_flag,
+        catalog_page,
+    )
 
     total_matches = result.total_matches
     projected: Optional[List[Dict[str, Any]]] = None
     if user is not None and alias is not None:
-        # Catalog matches are projected before counting and recording.
+        # Catalog matches are projected before paging, counting and recording.
         projected = await anyio.to_thread.run_sync(
             functools.partial(
                 _restrict_catalog_matches, matches, alias, repo_path, user, app_state
             )
         )
         if projected is not None:
-            matches, total_matches = projected, len(projected)
+            # The page size: never a count shaped by matches the caller cannot see.
+            matches = catalog_page(projected, body.max_results)
+            total_matches = len(matches)
     visible = None if projected is None else len(projected)
 
     response = {
@@ -339,6 +388,16 @@ async def _execute_omni_search(
     # un-offloaded call could hang the event loop forever on a wedged NFS
     # mount.
     resolved_paths = await _resolve_repo_paths_batch_offloaded(aliases)
+
+    def _set_includes_catalog() -> bool:
+        return any(
+            _catalog_regex_applies(name, path, user, app_state)
+            for name, path in resolved_paths.items()
+            if path is not None
+        )
+
+    if body.pcre2 and await anyio.to_thread.run_sync(_set_includes_catalog):
+        raise _advanced_regex_refused()
 
     for alias in aliases:
         repo_path_str = resolved_paths[alias]

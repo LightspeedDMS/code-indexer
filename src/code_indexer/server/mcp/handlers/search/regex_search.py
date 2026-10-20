@@ -29,7 +29,10 @@ from code_indexer.server.mcp import reranking as _mcp_reranking
 from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.services.cidx_meta_access import bind_catalog_handles
 from code_indexer.server.services.cidx_meta_access.catalog_regex import (
+    ADVANCED_REGEX_REFUSAL,
     caller_visible_flag,
+    catalog_page,
+    catalog_regex_applies,
     restrict_regex_matches,
 )
 from code_indexer.server.services.cidx_meta_access.catalog_search import (
@@ -118,6 +121,10 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
                 "errors": {},
             }
         )
+    if args.get("pcre2") and await anyio.to_thread.run_sync(
+        functools.partial(_catalog_regex_applies, repo_aliases, None, user)
+    ):
+        return _mcp_response({"success": False, "error": ADVANCED_REGEX_REFUSAL})
 
     start_time = time.time()
     all_matches: list = []
@@ -315,7 +322,7 @@ async def _rerank_truncate_and_filter_regex_matches(
         )
     )
     if restricted is not None:
-        matches = restricted
+        matches = catalog_page(restricted, _effective_max_results(args))
 
     regex_limit = _coerce_int(args.get("max_results"), len(matches))
     rerank_kwargs = dict(
@@ -341,6 +348,15 @@ async def _rerank_truncate_and_filter_regex_matches(
     )
 
     return matches, rerank_meta
+
+
+def _catalog_regex_applies(alias: Any, repo_path: Optional[Path], user: User) -> bool:
+    """True when the caller's request may be the catalog and is restricted
+    (``catalog_regex_applies``). Reads stores synchronously: async callers
+    run it on a worker thread."""
+    access_service = _get_access_filtering_service()
+    arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+    return catalog_regex_applies(alias, repo_path, user.username, access_service, arm)
 
 
 def _truncate_with_catalog_binding(
@@ -401,8 +417,12 @@ async def _execute_regex_search_impl(
     repo_path: Path,
     repository_alias: str,
     user: User,
+    *,
+    catalog: bool = False,
 ) -> tuple:
     """Execute regex search, enrich, rerank, truncate, and filter results.
+    A restricted catalog request (*catalog*) runs the engine at the maximum
+    result count; its page is cut after projection.
 
     Returns:
         (matches, rerank_meta, search_result) where search_result is the
@@ -413,7 +433,7 @@ async def _execute_regex_search_impl(
     config = get_config_service().get_config()
     search_limits = config.search_limits_config
     subprocess_max_workers = config.background_jobs_config.subprocess_max_workers
-    max_results = _effective_max_results(args)
+    max_results = _MAX_REGEX_MAX_RESULTS if catalog else _effective_max_results(args)
     context_lines = max(
         0,
         min(
@@ -494,6 +514,8 @@ async def _execute_regex_search(
     repo_path: Path,
     repository_alias: str,
     user: User,
+    *,
+    catalog: bool = False,
 ) -> tuple:
     """Execute regex search and record its cidx.fts.* OTEL metric (AC1).
 
@@ -509,7 +531,9 @@ async def _execute_regex_search(
             matches,
             rerank_meta,
             search_result,
-        ) = await _execute_regex_search_impl(args, repo_path, repository_alias, user)
+        ) = await _execute_regex_search_impl(
+            args, repo_path, repository_alias, user, catalog=catalog
+        )
         matches_count = len(matches)
         fts_status = "success"
         return matches, rerank_meta, search_result
@@ -620,6 +644,14 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
                 }
             )
 
+        catalog = await anyio.to_thread.run_sync(
+            functools.partial(
+                _catalog_regex_applies, repository_alias, Path(resolved), user
+            )
+        )
+        if catalog and args.get("pcre2"):
+            return _mcp_response({"success": False, "error": ADVANCED_REGEX_REFUSAL})
+
         # Story #2117: the repository resolved; a search that raises from
         # here is one failure row.
         with recording_failure(
@@ -633,7 +665,7 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             correlation_id=get_correlation_id(),
         ):
             matches, rerank_meta, sr = await _execute_regex_search(
-                args, Path(resolved), repository_alias, user
+                args, Path(resolved), repository_alias, user, catalog=catalog
             )
         # Bug #337 regression fix: when cidx-meta access filtering actually
         # ran (rerank_meta["cidx_meta_access_filtered"], set in

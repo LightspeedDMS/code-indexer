@@ -196,6 +196,43 @@ def test_stored_rows_of_an_alias_serving_the_catalog_are_rechecked(
     assert CANARY in line and CANARY not in dump(rechecked)
 
 
+def test_projected_rows_keep_catalog_identity_through_alias_retarget(
+    env: CatalogEnv,
+) -> None:
+    from code_indexer.global_repos.alias_manager import AliasManager
+    from code_indexer.server.services.cidx_meta_access.catalog_search import (
+        project_catalog_rows,
+        project_grouped_results,
+        reproject_job_result,
+    )
+
+    aliases = AliasManager(str(Path(env.app.state.golden_repos_dir) / "aliases"))
+    alias, access, gam = "retarget-global", env.fx.access_service, env.fx.group_manager
+    aliases.create_alias(alias, str(env.root), "retarget")
+    row = {
+        "file_path": f"{ALPHA}.md",
+        "line_number": 6,
+        "code_snippet": "alphabet ordering applies.",
+        "repository_alias": alias,
+    }
+    flat = project_catalog_rows([row], RESTRICTED_USER, access)
+    grouped = project_grouped_results({alias: [row]}, RESTRICTED_USER, access)[alias]
+    assert [r["source_repo"] for r in flat + grouped] == [CATALOG_ALIAS] * 2
+
+    aliases.create_alias(alias, str(env.root.parent / "alpha-repo"), "retarget")
+    team = gam.get_group_by_name("fixture-team")
+    assert team is not None
+    gam.revoke_repo_access(ALPHA, team.id)
+    try:
+        for stored_rows in (flat, grouped):
+            stored = {"results": stored_rows, "total_results": 1}
+            again = reproject_job_result(stored, RESTRICTED_USER, access)
+            assert again == {"results": [], "total_results": 0}
+    finally:
+        gam.grant_repo_access(ALPHA, team.id, granted_by="test")
+        aliases.delete_alias(alias)
+
+
 def test_missing_access_service_serves_projected_hits_to_everyone(
     env: CatalogEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -210,6 +247,66 @@ def test_missing_registry_raises_instead_of_serving_unprojected(
     monkeypatch.setattr(env.app.state, "backend_registry", None)
     with pytest.raises(RuntimeError):
         _search_canary(env, RESTRICTED_USER)
+
+
+def _search_unresolved(
+    env: CatalogEnv,
+    repo_path: Path,
+    seen: List[Optional[List[float]]],
+    raw: Any,
+) -> List[Any]:
+    """search_for_caller over an activation whose golden identity is not
+    recorded; *seen* collects the vector each raw round was given."""
+    from code_indexer.server.services.cidx_meta_access.catalog_search import (
+        TextRematch,
+        search_for_caller,
+    )
+
+    sqm = env.app.state.semantic_query_manager
+
+    def run(k: int, mode: str, vector: Optional[List[float]]) -> List[Any]:
+        seen.append(vector)
+        return list(raw(k))
+
+    return search_for_caller(
+        run,
+        username=RESTRICTED_USER,
+        repo_info={"user_alias": "my-activation"},
+        repo_path=repo_path,
+        activated_repo_manager=sqm.activated_repo_manager,
+        limit=3,
+        search_mode="semantic",
+        rematch=TextRematch(QUERY),
+        merge=sqm._merge_hybrid_results,
+        budget_spent=lambda: False,
+    )
+
+
+def test_unresolved_identity_embeds_nothing_before_the_first_round(
+    env: CatalogEnv, tmp_path: Path
+) -> None:
+    plain = tmp_path / "plain-activation"  # no index config to embed with
+    plain.mkdir()
+    seen: List[Optional[List[float]]] = []
+    assert _search_unresolved(env, plain, seen, lambda k: []) == []
+    assert seen == [None]
+
+
+def test_unresolved_identity_embeds_once_only_when_deepening(env: CatalogEnv) -> None:
+    hidden = {
+        "file_path": f"xray-patterns/{CANARY}/w01.yaml",
+        "line_number": 1,
+        "code_snippet": "name: widget",
+        "similarity_score": 0.9,
+    }
+    seen: List[Optional[List[float]]] = []
+    with ranked_store_search():
+        rows = _search_unresolved(
+            env, env.root.parent / "alpha-repo", seen, lambda k: [hidden] * k
+        )
+    assert rows == []
+    assert len(seen) == 4 and seen[0] is None
+    assert seen[1] is not None and all(v == seen[1] for v in seen[2:])
 
 
 def test_hybrid_rows_are_projected(env: CatalogEnv) -> None:

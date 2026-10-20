@@ -14,6 +14,8 @@ Only the embedding provider (an external service) is replaced, through
 from __future__ import annotations
 
 import json
+import math
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -99,6 +101,21 @@ def catalog_files(root: Path) -> List[str]:
     )
 
 
+_UNRANKED_STEP = 0.001
+_RANK_TOKEN = re.compile(r"rank\d+")
+
+
+def _chunk_vector(provider: RankedEmbeddingProvider, chunk: str, n: int) -> List[float]:
+    """The provider's vector for a ranked chunk; an unranked chunk gets its
+    own angle just below 0 (same order against every query), because
+    identical vectors leave the HNSW graph degenerate and its recall
+    nondeterministic."""
+    if _RANK_TOKEN.search(chunk):
+        return provider.get_embedding(chunk)
+    angle = -_UNRANKED_STEP * (n + 1)
+    return [math.cos(angle), math.sin(angle)] + [0.0] * (VECTOR_DIM - 2)
+
+
 def _points(root: Path, fts: TantivyIndexManager) -> List[dict]:
     provider = RankedEmbeddingProvider()
     points: List[dict] = []
@@ -111,7 +128,7 @@ def _points(root: Path, fts: TantivyIndexManager) -> List[dict]:
             points.append(
                 {
                     "id": f"chunk-{len(points)}",
-                    "vector": provider.get_embedding(chunk),
+                    "vector": _chunk_vector(provider, chunk, len(points)),
                     "payload": {
                         "path": rel,
                         "line_start": start + 1,

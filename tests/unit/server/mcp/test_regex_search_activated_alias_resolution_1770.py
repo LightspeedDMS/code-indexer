@@ -98,7 +98,7 @@ class TestRegexSearchActivatedRepoAliasResolution:
 
         captured_path = {}
 
-        async def _fake_execute_regex_search(args, path, alias, user):
+        async def _fake_execute_regex_search(args, path, alias, user, *, catalog=False):
             captured_path["path"] = path
             return (
                 [],
