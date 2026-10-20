@@ -257,3 +257,63 @@ def test_restricted_judgement_resolves_the_served_path_once(
     monkeypatch.undo()
 
     assert calls.count(str(served)) == 1, calls
+
+
+def _set_pointer(env: CatalogFileDoorEnv, opaque: Path, state: str) -> None:
+    pointer = env.golden_root / "aliases" / "cidx-meta-global.json"
+    if pointer.is_symlink() or pointer.is_file():
+        pointer.unlink()
+    if state == "valid":
+        pointer.write_text(json.dumps({"target_path": str(opaque)}))
+    elif state == "non-object":
+        pointer.write_text("[]")
+    elif state == "dangling":
+        pointer.symlink_to(pointer.parent / "missing.json")
+    elif state == "dirlink":
+        pointer.symlink_to(opaque, target_is_directory=True)
+
+
+def test_search_for_caller_restricts_an_opaque_directory_while_the_pointer_is_unusable(
+    env: CatalogFileDoorEnv, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from code_indexer.server import app as app_module
+    from code_indexer.server.services.cidx_meta_access.catalog_search import (
+        TextRematch,
+        search_for_caller,
+    )
+
+    opaque = tmp_path / "opaque-served"
+    opaque.mkdir()
+    monkeypatch.setattr(
+        app_module, "app", SimpleNamespace(state=env.state), raising=False
+    )
+
+    def rounds(state: str) -> List[int]:
+        _set_pointer(env, opaque, state)
+        sizes: List[int] = []
+
+        def run(k: int, mode: str, vector: Any, text: str) -> List[Any]:
+            sizes.append(k)
+            return []
+
+        search_for_caller(
+            run,
+            username=RESTRICTED_USER,
+            repo_info={"is_global": True, "user_alias": "ordinary-global"},
+            repo_path=str(opaque),
+            activated_repo_manager=env.activations,
+            limit=1,
+            search_mode="fts",
+            rematch=TextRematch("needle", regex=True),
+            merge=lambda a, b, k: a + b,
+            budget_spent=lambda: False,
+        )
+        return sizes
+
+    catalog_route = rounds("valid")
+    assert rounds("missing") == [1]
+    assert catalog_route != [1]
+    for state in ("non-object", "dangling", "dirlink"):
+        assert rounds(state) == catalog_route, state

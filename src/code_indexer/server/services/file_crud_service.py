@@ -15,6 +15,7 @@ Concurrency control:
 """
 
 import hashlib
+import logging
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -35,6 +36,8 @@ if TYPE_CHECKING:
     from code_indexer.server.services.cidx_meta_access.file_doors import (
         CatalogFileAccess,
     )
+
+logger = logging.getLogger(__name__)
 
 # A door's catalog judgement of the directory a write lands in.
 AccessFor = Callable[[str], "CatalogFileAccess"]
@@ -323,22 +326,31 @@ class FileCRUDService:
         access_for: Optional[AccessFor],
     ) -> None:
         """``_validate_crud_path``; a path it rejects gets the catalog write
-        refusal instead when a restricted catalog view applies, so every
-        spelling answers alike there. Elsewhere the error is unchanged."""
+        refusal instead only when a restricted catalog view is established
+        for the repository, so every spelling answers alike there. In every
+        other case, a failing resolution or judgement included, the original
+        error is raised unchanged."""
         from code_indexer.server.services.cidx_meta_access.file_doors import (
-            refuse_restricted_catalog_write,
+            CATALOG_WRITE_REFUSAL,
+            restricted_catalog_view_applies,
         )
 
         try:
             self._validate_crud_path(file_path, operation)
         except PermissionError as invalid:
             try:
-                repo_path = self._resolve_repo_path(repo_alias, username)
-            except (ValueError, OSError):
+                served = str(self._resolve_repo_path(repo_alias, username))
+                access = access_for(served) if access_for is not None else None
+                restricted = restricted_catalog_view_applies(served, access)
+            except Exception as judging:
+                # ^ inv original validation error survives any judging failure
+                logger.debug(
+                    "Catalog judgement of a rejected path failed (%s)",
+                    type(judging).__name__,
+                )
                 raise invalid from None
-            served = str(repo_path)
-            access = access_for(served) if access_for is not None else None
-            refuse_restricted_catalog_write(served, access)
+            if restricted:
+                raise PermissionError(CATALOG_WRITE_REFUSAL) from None
             raise
 
     def create_file(

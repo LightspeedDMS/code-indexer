@@ -26,6 +26,7 @@ import pytest
 
 from code_indexer.server.mcp.handlers import files as files_module
 from code_indexer.server.services import file_crud_service as crud_module
+from code_indexer.server.services.cidx_meta_access.file_doors import UNRESTRICTED
 from code_indexer.server.services.cidx_meta_access.history_policy import (
     CatalogSurface,
 )
@@ -301,6 +302,41 @@ def test_ordinary_activation_invalid_spellings_keep_todays_messages(
 
     assert data["success"] is False
     assert data["error"].startswith("delete_file blocked: "), data
+
+
+def _access_fails(served: str) -> Any:
+    raise RuntimeError("access service unavailable")
+
+
+def _crud_call(operation: str, access_for: Any) -> None:
+    common = {"username": ADMIN_USER, "access_for": access_for}
+    path = ".git/config"
+    if operation == "create_file":
+        file_crud_service.create_file(CATALOG_ALIAS, path, "x\n", **common)
+    elif operation == "edit_file":
+        file_crud_service.edit_file(
+            CATALOG_ALIAS, path, "a", "b", "0" * 64, False, **common
+        )
+    else:
+        file_crud_service.delete_file(CATALOG_ALIAS, path, None, **common)
+
+
+@pytest.mark.parametrize("operation", ["create_file", "edit_file", "delete_file"])
+@pytest.mark.parametrize(
+    "access_for",
+    [_access_fails, lambda served: None, lambda served: UNRESTRICTED],
+    ids=["raises", "none", "unrestricted"],
+)
+def test_invalid_spelling_keeps_the_original_error_unless_a_restricted_view_is_established(
+    env: CatalogFileDoorEnv, operation: str, access_for: Any
+) -> None:
+    with pytest.raises(PermissionError) as raised:
+        _crud_call(operation, access_for)
+
+    assert type(raised.value) is PermissionError
+    assert str(raised.value) == (
+        f"{operation} blocked: Access to .git/ directory is forbidden"
+    )
 
 
 def test_admin_writes_keep_todays_behaviour(env: CatalogFileDoorEnv) -> None:

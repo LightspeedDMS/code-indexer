@@ -581,6 +581,21 @@ class HealthCheckService:
         reasons = stored_credential_health_reasons(registry)
         return bool(reasons), False, reasons
 
+    def _collect_catalog_pointer_failures(self) -> Tuple[bool, bool, List[str]]:
+        """The catalog alias pointer exists but cannot be used, so restricted
+        callers are served the restricted view everywhere. DEGRADED only;
+        one small read per health check. A process without a golden
+        repositories directory reports nothing."""
+        from ..app import app as app_module
+        from .cidx_meta_access.served_identity import (
+            catalog_pointer_health_reasons,
+            state_golden_repos_dir,
+        )
+
+        golden = state_golden_repos_dir(app_module.state)
+        reasons = catalog_pointer_health_reasons(golden)
+        return bool(reasons), False, reasons
+
     def _read_fleet_migration_unrecoverable_aliases(self) -> List[str]:
         """
         Read every golden_alias currently recorded with the PERMANENT
@@ -1536,6 +1551,11 @@ class HealthCheckService:
         scr_warn, _scr_err, scr_reasons = self._collect_stored_credential_failures()
         has_warning = has_warning or scr_warn
         failure_reasons.extend(scr_reasons)
+
+        # Unusable catalog alias pointer -- DEGRADED only.
+        cap_warn, _cap_err, cap_reasons = self._collect_catalog_pointer_failures()
+        has_warning = has_warning or cap_warn
+        failure_reasons.extend(cap_reasons)
 
         # Bug #2114: search events dropped recently on this node -- DEGRADED
         # only (a full recording queue never drains a node).

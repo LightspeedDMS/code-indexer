@@ -230,7 +230,9 @@ def _opaque_with_pointer(tmp_path: Path, pointer: Optional[str]) -> tuple:
     """An opaque directory (not named like the catalog, no git remote) and
     a golden directory whose catalog pointer is *pointer*: ``None`` = no
     pointer file, ``"<valid>"`` = a pointer at the opaque directory,
-    ``"<dir>"`` = a directory where the pointer file should be."""
+    ``"<dir>"`` = a directory where the pointer file should be,
+    ``"<dangling>"`` = a link to a missing file, ``"<dirlink>"`` = a link to
+    a directory."""
     opaque = tmp_path / "opaque-dir"
     opaque.mkdir()
     golden = tmp_path / "srv" / "data" / "golden-repos"
@@ -241,6 +243,10 @@ def _opaque_with_pointer(tmp_path: Path, pointer: Optional[str]) -> tuple:
         target.write_text(json.dumps({"target_path": str(opaque)}))
     elif pointer == "<dir>":
         target.mkdir()
+    elif pointer == "<dangling>":
+        target.symlink_to(aliases / "missing.json")
+    elif pointer == "<dirlink>":
+        target.symlink_to(opaque, target_is_directory=True)
     elif pointer is not None:
         target.write_text(pointer)
     return opaque, golden
@@ -248,7 +254,16 @@ def _opaque_with_pointer(tmp_path: Path, pointer: Optional[str]) -> tuple:
 
 @pytest.mark.parametrize(
     "pointer",
-    ["<valid>", "[]", "{}", "{not json", '{"target_path": 7}', "<dir>"],
+    [
+        "<valid>",
+        "[]",
+        "{}",
+        "{not json",
+        '{"target_path": 7}',
+        "<dir>",
+        "<dangling>",
+        "<dirlink>",
+    ],
 )
 def test_unusable_catalog_pointer_judges_the_served_directory_as_the_catalog(
     fx: CidxMetaFixture, tmp_path: Path, pointer: str

@@ -22,7 +22,7 @@ from code_indexer.global_repos.alias_manager import (
 )
 
 ALIAS = "example-repo-global"
-UNREADABLE = ["[]", "{}", "{not json", "<dir>"]
+UNREADABLE = ["[]", "{}", "{not json", "<dir>", "<dangling>"]
 NON_STRING_TARGET = '{"target_path": ["x"]}'
 
 
@@ -32,6 +32,8 @@ def _aliases(tmp_path: Path, pointer: str) -> Path:
     target = aliases / f"{ALIAS}.json"
     if pointer == "<dir>":
         target.mkdir()
+    elif pointer == "<dangling>":
+        target.symlink_to(aliases / "missing.json")
     else:
         target.write_text(pointer)
     return aliases

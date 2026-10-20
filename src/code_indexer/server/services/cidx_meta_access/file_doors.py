@@ -467,20 +467,18 @@ def refuse_hidden_catalog_writes(
         raise PermissionError(CATALOG_WRITE_REFUSAL)
 
 
-def refuse_restricted_catalog_write(
+def restricted_catalog_view_applies(
     repo_path: str, access: Optional[CatalogFileAccess]
-) -> None:
-    """Refuse any write into *repo_path* when a catalog view applies to it,
-    whatever the path: for spellings the file service would otherwise
-    reject with an operation-specific message. Admins and ordinary
-    directories pass.
-
-    Raises:
-        PermissionError: ``CATALOG_WRITE_REFUSAL``.
-    """
-    refusal = PermissionError(CATALOG_WRITE_REFUSAL)
-    if view_for(repo_path, access, refusal) is not None:
-        raise refusal
+) -> bool:
+    """True only when *access* is a judgement with a catalog view, made for
+    *repo_path*; False for no judgement, an unrestricted one, or one made
+    for another directory. Never raises."""
+    if access is None or access.view is None:
+        return False
+    served = access.served
+    return served is not None and (
+        served == repo_path or os.path.realpath(served) == os.path.realpath(repo_path)
+    )
 
 
 def _writable(view: CatalogFileView, path: str) -> bool:

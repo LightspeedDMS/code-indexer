@@ -111,17 +111,20 @@ class AliasPointerUnusable(Exception):
 
 
 def _load_alias_object(alias_file: Path) -> Optional[Dict[str, Any]]:
-    """The pointer file's JSON object; None only when there is no file.
+    """The pointer file's JSON object; None only when no directory entry
+    exists at its path.
 
     Raises:
-        AliasPointerUnusable: the file exists but cannot be read or decoded,
-            or is not a JSON object.
+        AliasPointerUnusable: an entry exists but cannot be read or decoded
+            (a dangling link included), or is not a JSON object.
     """
     try:
         with open(alias_file, "r") as f:
             alias_data = json.load(f)
-    except FileNotFoundError:
-        return None
+    except FileNotFoundError as e:
+        if not os.path.lexists(alias_file):
+            return None
+        raise AliasPointerUnusable(f"{type(e).__name__}: {e}") from e
     except (ValueError, OSError) as e:
         raise AliasPointerUnusable(f"{type(e).__name__}: {e}") from e
     if not isinstance(alias_data, dict):
