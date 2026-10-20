@@ -15,6 +15,11 @@ from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.cidx_meta_access.file_doors import judge_file_door
+from code_indexer.server.services.cidx_meta_access.universe_provider import (
+    registry_of,
+)
+from code_indexer.server.services.constants import CIDX_META_REPO_GLOBAL
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.services.repository_health_aggregator import (
     CollectionHealthResult,
@@ -185,40 +190,63 @@ async def get_repository_description(
     )
 
     golden_repos_dir = getattr(request.app.state, "golden_repos_dir", None)
+    not_found = HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"No cidx-meta description found for repository '{repo_alias}'",
+    )
     if not golden_repos_dir:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No cidx-meta description found for repository '{repo_alias}'",
+        raise not_found
+    try:
+        description = await anyio.to_thread.run_sync(
+            functools.partial(
+                _read_description,
+                request.app.state,
+                Path(golden_repos_dir),
+                repo_alias,
+                current_user.username,
+            )
         )
+    except FileNotFoundError:
+        raise not_found
+    return DescriptionResponse(repo_alias=repo_alias, description=description)
 
-    # INVARIANT: cidx-meta filenames use SHORT alias ({repo_alias}.md), NOT -global.md
-    cidx_meta_path = Path(golden_repos_dir) / "cidx-meta" / f"{repo_alias}.md"
-    # Prevent path traversal: reject any alias that escapes the cidx-meta dir (Story #218)
-    expected_parent = (Path(golden_repos_dir) / "cidx-meta").resolve()
-    if not cidx_meta_path.resolve().is_relative_to(expected_parent):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No cidx-meta description found for repository '{repo_alias}'",
-        )
-    if not cidx_meta_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No cidx-meta description found for repository '{repo_alias}'",
-        )
 
+def _read_description(
+    state: Any, golden_repos_dir: Path, repo_alias: str, username: str
+) -> str:
+    """The description body of *repo_alias* as the caller may see it.
+    Synchronous (file and store I/O): run on a worker thread.
+
+    Raises:
+        FileNotFoundError: no such description, an alias escaping the
+            catalog, a read failure, or a description the caller may not see.
+    """
+    catalog = golden_repos_dir / "cidx-meta"
+    # INVARIANT: catalog filenames use the SHORT alias ({repo_alias}.md).
+    cidx_meta_path = catalog / f"{repo_alias}.md"
+    # Story #218: reject any alias that escapes the catalog directory.
+    if not cidx_meta_path.resolve().is_relative_to(catalog.resolve()):
+        raise FileNotFoundError(repo_alias)
+    access = judge_file_door(
+        CIDX_META_REPO_GLOBAL,
+        str(catalog),
+        username,
+        _get_access_filtering_service(),
+        None,
+        str(golden_repos_dir),
+        registry_of(state),
+    )
+    if access.view is not None:
+        access.view.lines_view(f"{repo_alias}.md")
     try:
         content = cidx_meta_path.read_text(encoding="utf-8")
     except OSError as e:
-        logger.error(
-            f"Failed to read cidx-meta file for {repo_alias}: {e}", exc_info=True
-        )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No cidx-meta description found for repository '{repo_alias}'",
-        )
-
-    description = _strip_yaml_frontmatter(content)
-    return DescriptionResponse(repo_alias=repo_alias, description=description)
+        if cidx_meta_path.exists():
+            logger.error(
+                f"Failed to read cidx-meta file for {repo_alias}: {e}", exc_info=True
+            )
+        raise FileNotFoundError(repo_alias)
+    return access.served_text(f"{repo_alias}.md", _strip_yaml_frontmatter(content))
 
 
 def _get_golden_repo_manager():

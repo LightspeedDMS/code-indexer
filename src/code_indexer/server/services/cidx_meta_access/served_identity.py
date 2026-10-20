@@ -109,6 +109,23 @@ def _local_remote_paths(directory: str) -> Optional[List[str]]:
     return paths
 
 
+def _named_like_catalog(real: str) -> bool:
+    return is_internal_meta_repo(PurePosixPath(real).name) or _is_catalog_snapshot(real)
+
+
+def path_looks_like_catalog(path: str) -> bool:
+    """True when *path* alone shows it is the catalog: named like it, one of
+    its snapshots, or a clone of such a directory (or a clone whose remotes
+    cannot be read). No registry is read."""
+    real = os.path.realpath(path)
+    if _named_like_catalog(real):
+        return True
+    remotes = _local_remote_paths(real)
+    if remotes is None:
+        return True
+    return any(_named_like_catalog(os.path.realpath(url)) for url in remotes)
+
+
 def path_is_catalog_location(path: str, golden_repos_dir: str) -> bool:
     """True when *path* is the catalog, one of its snapshots, or a clone of
     either (or a clone whose remotes cannot be read)."""

@@ -15,7 +15,7 @@ Also tests:
 import json
 from datetime import datetime
 from typing import cast
-from unittest.mock import patch, MagicMock
+from unittest.mock import ANY, patch, MagicMock
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -98,6 +98,7 @@ class TestGetFileContentPaginationParameters:
             offset=100,
             limit=2,
             skip_truncation=True,
+            access=ANY,
         )
 
         # Verify response includes metadata

@@ -54,6 +54,7 @@ from . import repo_access_http
 from ..managers.composite_file_listing import _list_composite_files
 from ..services.stats_service import stats_service
 from ..services.file_service import file_service
+from ..services.cidx_meta_access.file_doors import judge_app_request
 from ..services.file_listing_paths import build_non_composite_path_pattern
 from code_indexer.utils.path_confinement import resolve_confined_path
 from ..services.search_service import search_service
@@ -905,65 +906,62 @@ def register_repos_v2_routes(
             )
 
             repo = ActivatedRepository.from_dict(repo_dict)
-
-            # Bug #1891: confine the resolved target to repo.path BEFORE any
-            # exists()/is_file()/open() touches the filesystem. A caller-
-            # supplied `path` containing parent-directory segments, an
-            # absolute path, or a symlink pointing outside the repository
-            # must never reach the filesystem calls below. The 404 here is
-            # byte-identical to the ordinary not-found response so an
-            # escape attempt cannot be distinguished from a legitimately
-            # missing file.
+            access = judge_app_request(
+                app.state,
+                repo_id,
+                str(repo.path),
+                current_user.username,
+                activated_repo_manager,
+            )
+            missing = HTTPException(status_code=404, detail=f"File '{path}' not found")
+            # Bug #1891: confine to repo.path BEFORE any exists()/is_file()/
+            # open(); an escape answers byte-identically to a missing file.
+            # A path the caller may not see is answered the same way.
             try:
                 file_path = resolve_confined_path(Path(repo.path), path)
-            except PermissionError:
-                raise HTTPException(status_code=404, detail=f"File '{path}' not found")
+                if access.view is not None:
+                    access.view.lines_view(path)
+            except (PermissionError, FileNotFoundError):
+                raise missing
 
             if not file_path.exists():
-                raise HTTPException(status_code=404, detail=f"File '{path}' not found")
+                raise missing
 
             if not file_path.is_file():
                 raise HTTPException(
                     status_code=400, detail=f"Path '{path}' is not a file"
                 )
 
-            # Detect if binary
+            # Detect if binary (a NUL byte, or not UTF-8, in the first 8 KiB)
             try:
                 with open(file_path, "rb") as f:
                     chunk = f.read(8192)
-                    is_binary = b"\x00" in chunk
-                    if not is_binary:
-                        try:
-                            chunk.decode("utf-8")
-                        except UnicodeDecodeError:
-                            is_binary = True
+                is_binary = b"\x00" in chunk
+                if not is_binary:
+                    chunk.decode("utf-8")
             except Exception:
                 is_binary = True
 
+            binary = {"path": path, "is_binary": True, "content": None}
             if is_binary:
-                return {
-                    "path": path,
-                    "is_binary": True,
-                    "size": file_path.stat().st_size,
-                    "content": None,
-                }
-            else:
-                try:
-                    content_text = file_path.read_text(encoding="utf-8")
-                    return {
-                        "path": path,
-                        "is_binary": False,
-                        "size": file_path.stat().st_size,
-                        "content": content_text,
-                    }
-                except UnicodeDecodeError:
-                    return {
-                        "path": path,
-                        "is_binary": True,
-                        "size": file_path.stat().st_size,
-                        "content": None,
-                    }
+                return {**binary, "size": file_path.stat().st_size}
+            try:
+                text = access.served_text(path, file_path.read_text(encoding="utf-8"))
+            except UnicodeDecodeError:
+                return {**binary, "size": file_path.stat().st_size}
+            return {
+                "path": path,
+                "is_binary": False,
+                "size": file_path.stat().st_size,
+                "content": text,
+            }
 
+        served = activated_repo_manager.get_activated_repo_path(
+            current_user.username, repo_id
+        )
+        access = judge_app_request(
+            app.state, repo_id, served, current_user.username, activated_repo_manager
+        )
         # Check if this is a composite repository
         try:
             repo_dict = activated_repo_manager.get_repository(
@@ -979,6 +977,8 @@ def register_repos_v2_routes(
                 files = _list_composite_files(
                     repo, path=path or "", recursive=recursive
                 )
+                if access.view is not None:
+                    files = [f for f in files if access.view.listable(f.path)]
                 return {"files": [f.model_dump() for f in files]}
         except Exception as e:
             logging.debug(f"Could not check composite status for {repo_id}: {e}")
@@ -1025,7 +1025,7 @@ def register_repos_v2_routes(
             )
 
             file_list = file_service.list_files(
-                repo_id, current_user.username, query_params
+                repo_id, current_user.username, query_params, access
             )
             return file_list
 

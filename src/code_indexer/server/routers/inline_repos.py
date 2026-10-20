@@ -84,6 +84,7 @@ from ..models.repository_discovery import RepositoryDiscoveryResponse
 
 from ..auth import dependencies
 from ..auth.user_manager import UserRole
+from ..services.cidx_meta_access.file_doors import judge_app_request
 from ..app_helpers import (
     _execute_repository_sync,
     build_sync_progress_webhook_callback,
@@ -2008,9 +2009,14 @@ def register_repo_routes(
                 detail="Invalid path: must be a relative path within the repository",
             )
 
-        # A path inside the repository's .git is answered as a missing path.
+        access = judge_app_request(
+            app.state, user_alias, str(repo_path), current_user.username, arm
+        )
+        base = scan_root.relative_to(repo_resolved)
+        # A path inside .git, or one the caller may not see, is a missing path.
         if (
-            has_git_segment(scan_root.relative_to(repo_resolved).parts)
+            has_git_segment(base.parts)
+            or not access.lists(base.as_posix(), True)
             or not scan_root.exists()
         ):
             raise HTTPException(
@@ -2027,9 +2033,11 @@ def register_repo_routes(
         def _listable(candidate: Path) -> bool:
             # A symlink is listed only when it resolves inside the repository
             # and outside its .git -- the same rule every file read applies.
-            return not candidate.is_symlink() or is_readable_within_root(
-                candidate, repo_resolved
-            )
+            rel = candidate.relative_to(repo_resolved).as_posix()
+            return (
+                not candidate.is_symlink()
+                or is_readable_within_root(candidate, repo_resolved)
+            ) and access.lists(rel, candidate.is_dir())
 
         try:
             if not recursive:

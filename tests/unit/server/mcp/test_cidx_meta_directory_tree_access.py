@@ -139,7 +139,7 @@ class TestDirectoryTreeCidxMetaAccessFiltering:
             assert name not in tree_str
 
     def test_non_cidx_meta_repo_is_not_filtered(
-        self, power_user, access_filtering_service
+        self, power_user, access_filtering_service, tmp_path
     ):
         """Non-cidx-meta repos must not have filtering applied."""
         fake_tree = _make_tree_result(["src/auth.py", "src/secret.py"])
@@ -156,6 +156,10 @@ class TestDirectoryTreeCidxMetaAccessFiltering:
             patch(
                 "code_indexer.server.mcp.handlers._get_golden_repos_dir",
                 return_value="/fake/golden-repos",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.files._get_golden_repos_dir",
+                return_value=str(tmp_path),
             ),
         ):
             with patch(

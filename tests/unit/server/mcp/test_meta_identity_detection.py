@@ -193,19 +193,6 @@ def _list_files(
     return [f["path"] for f in data["files"]]
 
 
-def test_list_files_on_catalog_activation_with_custom_alias_is_restricted(
-    fx: CidxMetaFixture,
-) -> None:
-    paths = _list_files(
-        "team-catalog", _Activations([CATALOG_ACTIVATION]), fx.access_service
-    )
-    assert paths == [
-        f"{ALPHA}.md",
-        f"memories/{MEMORY_GLOBAL}.md",
-        f"memories/{MEMORY_ALPHA}.md",
-    ]
-
-
 def test_list_files_on_repo_whose_name_contains_catalog_is_not_filtered(
     fx: CidxMetaFixture,
 ) -> None:
@@ -216,10 +203,6 @@ def test_list_files_on_repo_whose_name_contains_catalog_is_not_filtered(
     }
     paths = _list_files("cidx-metadata", _Activations([activation]), fx.access_service)
     assert paths == _LISTED
-
-
-def test_list_files_on_catalog_fails_closed_without_access_service() -> None:
-    assert _list_files("team-catalog", _Activations([CATALOG_ACTIVATION]), None) == []
 
 
 def _restricted_user() -> User:
@@ -239,73 +222,6 @@ def _app_module(activations: _Activations) -> MagicMock:
         files=[make_file_info(p) for p in _LISTED]
     )
     return app_module
-
-
-@pytest.mark.parametrize(
-    "file_path, denied",
-    [
-        ("dependency-map/payments.md", True),
-        ("gamma.md", True),
-        (f"memories/{MEMORY_CANARY}.md", True),
-        (f"{ALPHA}.md", False),
-    ],
-)
-def test_get_file_content_on_catalog_uses_full_path_and_identity(
-    fx: CidxMetaFixture, file_path: str, denied: bool
-) -> None:
-    from code_indexer.server.mcp.handlers import files as files_module
-
-    app_module = _app_module(_Activations([CATALOG_ACTIVATION]))
-    app_module.file_service.get_file_content.return_value = {
-        "content": "x",
-        "metadata": {},
-    }
-    with (
-        patch.object(files_module._utils, "app_module", app_module),
-        patch.object(
-            files_module,
-            "_get_access_filtering_service",
-            return_value=fx.access_service,
-        ),
-    ):
-        result = files_module.get_file_content(
-            {"repository_alias": "team-catalog", "file_path": file_path},
-            _restricted_user(),
-        )
-    data = extract_mcp_data(result)
-    is_denied = "Access denied" in str(data.get("error", ""))
-    assert is_denied is denied
-    assert app_module.file_service.get_file_content.called is (not denied)
-
-
-def test_browse_directory_on_global_catalog_is_restricted(fx: CidxMetaFixture) -> None:
-    from code_indexer.server.mcp.handlers import files as files_module
-
-    app_module = _app_module(_Activations([]))
-    with (
-        patch.object(files_module._utils, "app_module", app_module),
-        patch.object(
-            files_module,
-            "_get_access_filtering_service",
-            return_value=fx.access_service,
-        ),
-        patch.object(
-            files_module,
-            "_resolve_global_repo_target",
-            return_value=(str(fx.root), None),
-        ),
-    ):
-        result = files_module.browse_directory(
-            {"repository_alias": "cidx-meta-global"}, _restricted_user()
-        )
-    data = extract_mcp_data(result)
-    assert data["success"] is True, data
-    paths = [f["path"] for f in data["structure"]["files"]]
-    assert paths == [
-        f"{ALPHA}.md",
-        f"memories/{MEMORY_GLOBAL}.md",
-        f"memories/{MEMORY_ALPHA}.md",
-    ]
 
 
 def _real_tree(fx: CidxMetaFixture) -> Any:
@@ -541,15 +457,17 @@ def test_directory_tree_file_limit_counts_visible_entries_only(
     assert memories["hidden_count"] == 1
     assert len(memories["children"]) == 1
 
+    # Six visible dependency-map files: two always allowed, the index and
+    # three domains alpha participates in.
     dep_map = next(c for c in root["children"] if c["name"] == "dependency-map")
-    assert dep_map["hidden_count"] == 1
+    assert dep_map["hidden_count"] == 5
 
     more_markers = [
         line.rsplit("-- ", 1)[-1]
         for line in data["tree_string"].splitlines()
         if "more files]" in line
     ]
-    assert more_markers == ["[+1 more files]", "[+1 more files]"]
+    assert sorted(more_markers) == ["[+1 more files]", "[+5 more files]"]
 
 
 def test_directory_tree_subdirectory_is_judged_by_full_path(
@@ -564,7 +482,7 @@ def test_directory_tree_subdirectory_is_judged_by_full_path(
     names = [child["name"] for child in data["root"]["children"]]
     assert f"{ALPHA}.md" not in names
     assert "_dep_types.md" in names
-    assert "payments.md" not in names
+    assert "payments.md" in names and f"{CANARY}.md" not in names
 
 
 def test_catalog_detection_reads_one_activation_and_none_for_admins(

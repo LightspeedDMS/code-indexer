@@ -131,10 +131,12 @@ def restrict_catalog_tree(
     access_service: Optional["AccessFilteringService"],
     show_stats: bool = False,
     max_files_per_dir: Optional[int] = None,
+    listable: Optional[Callable[[str], bool]] = None,
 ) -> DirectoryTreeResult:
     """*result* reduced to the caller's *visibility* (resolved once for the
     request); unchanged when it is unrestricted. Without the access service
-    no memory is shown.
+    no memory is shown. *listable* (a file door's view) decides file nodes
+    when given, dependency-map documents included.
 
     Raises:
         ValueError: the tree door's not-found error, for a requested
@@ -143,9 +145,11 @@ def restrict_catalog_tree(
     if visibility.unrestricted:
         return result
     memory_fn = memory_visibility_fn(access_service, visibility)
-    allowed = set(
-        listable_paths(catalog_tree_paths(result, base_path), visibility, memory_fn)
-    )
+    paths = catalog_tree_paths(result, base_path)
+    if listable is not None:
+        allowed = {path for path in paths if listable(path)}
+    else:
+        allowed = set(listable_paths(paths, visibility, memory_fn))
     if not result.root.is_directory:
         if _full_path(base_path, "") not in allowed:
             raise path_not_found_error(base_path)
