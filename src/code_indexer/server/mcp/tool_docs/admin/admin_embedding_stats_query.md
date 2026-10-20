@@ -58,7 +58,8 @@ outputSchema:
           token_count:
             type: integer
             description: Tokens the vendor reported billing for this call. 0 for
-              failed calls, for Cohere rerank (billed in search units) unless the
+              failed calls, for successful replies whose vendor usage is missing
+              or unreadable, for Cohere rerank (billed in search units) unless the
               vendor reports input tokens, and for rows recorded before 12.93.0.
           batch_size:
             type: integer

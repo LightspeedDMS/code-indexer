@@ -464,6 +464,31 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     "/golden-repos/cidx-meta/.code-indexer/index/voyage-code-3, "
     "model=voyage-code-3 -- Run 'cidx index' to build the index. "
     "Returning empty results.",
+    # Catalog visibility door tests (tests/e2e/cidx_meta_doors.py) seed the
+    # catalog with the neutral unit fixture, which deliberately carries a
+    # domain whose frontmatter does not parse ("reports"), a legacy domain
+    # without participating repositories ("legacy") and tables the catalog
+    # projection does not support (payments notes, ledger rows).  These are
+    # the operator diagnostics those fixture files exist to provoke; each is
+    # anchored on the fixture's own file or domain name.
+    "Dependency-map domain reports: frontmatter does not parse; hidden from restricted callers",
+    "dependency-map/reports.md names no participating repositories",
+    "dependency-map/legacy.md names no participating repositories",
+    "dependency-map/reports.md (suppressing future repeats)",
+    "dependency-map/reports.md: while parsing a flow sequence",
+    "Catalog document dependency-map/payments.md: 42 malformed line(s) removed for restricted callers",
+    "Catalog document dependency-map/ledger.md: 2 malformed line(s) removed for restricted callers",
+    # The catalog has no temporal index by design: the restricted caller's
+    # temporal query is refused (logged by the MCP handler) and the admin
+    # control's temporal query reports the missing temporal index.
+    "Error in search_code: Temporal search is not available for this repository.",
+    "No temporal indexes available. Run cidx index --index-commits to create temporal indexes.",
+    # The fixed refusal for writes on hidden catalog paths (asserted signal).
+    "File create failed - permission denied: This path is not available for writing in this repository.",
+    "File delete failed - permission denied: This path is not available for writing in this repository.",
+    # A catalog cache handle fetched after a grant revocation is refused as
+    # not found (asserted signal of the revocation test).
+    "[MCP-GENERAL-117] Cache handle not found or expired",
 ]
 
 

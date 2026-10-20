@@ -264,6 +264,14 @@ def _write_memory(
 
 
 def _write_tree(root: Path) -> None:
+    write_catalog_content(root)
+    _write(root / ".git" / "config", f"[remote] {CANARY}\n")
+    _write(root / ".code-indexer" / "index" / "meta.json", json.dumps([CANARY]))
+
+
+def write_catalog_content(root: Path) -> None:
+    """Every fixture file except the repository internals (``.git``,
+    ``.code-indexer``), so a live server's catalog clone can be seeded."""
     _write(
         root / f"{ALPHA}.md",
         f"# {ALPHA}\n\n{ALPHA} talks to {CANARY} and {GAMMA} over HTTP.\n"
@@ -279,8 +287,6 @@ def _write_tree(root: Path) -> None:
     _write(root / "README.md", f"# Catalog\n\nLists {CANARY} and {ALPHA}.\n")
     _write(root / ".gitignore", "*.tmp\n")
     _write(root / ".self-check-probe", "probe\n")
-    _write(root / ".git" / "config", f"[remote] {CANARY}\n")
-    _write(root / ".code-indexer" / "index" / "meta.json", json.dumps([CANARY]))
     _write(root / "xray-patterns" / "__any__" / "p.yaml", "name: p\n")
     _write(root / "xray-patterns" / CANARY / "p.yaml", f"name: {CANARY}\n")
     memories = root / "memories"
@@ -372,13 +378,11 @@ def _audit_lines() -> List[str]:
     return lines
 
 
-def add_depmap_extension(fx: CidxMetaFixture) -> None:
-    """Add the ``audit`` domain (alpha and the canary; its only edge, to
-    payments, runs through the canary; alpha has one visible and one hidden
-    consumer there) and two Langfuse trace aliases, one granted to the
-    restricted user's group and one granted to nobody."""
-    _write(fx.dep_map_dir / f"{AUDIT_DOMAIN}.md", "\n".join(_audit_lines()) + "\n")
-    domains_file = fx.dep_map_dir / "_domains.json"
+def write_audit_domain(dep_map_dir: Path) -> None:
+    """Add the ``audit`` domain file, its ``_domains.json`` entry and the
+    regenerated ``_index.md``."""
+    _write(dep_map_dir / f"{AUDIT_DOMAIN}.md", "\n".join(_audit_lines()) + "\n")
+    domains_file = dep_map_dir / "_domains.json"
     domains = json.loads(domains_file.read_text(encoding="utf-8"))
     domains.append(
         {
@@ -388,7 +392,15 @@ def add_depmap_extension(fx: CidxMetaFixture) -> None:
         }
     )
     _write(domains_file, json.dumps(domains, indent=2))
-    IndexRegenerator().regenerate(fx.dep_map_dir)
+    IndexRegenerator().regenerate(dep_map_dir)
+
+
+def add_depmap_extension(fx: CidxMetaFixture) -> None:
+    """Add the ``audit`` domain (alpha and the canary; its only edge, to
+    payments, runs through the canary; alpha has one visible and one hidden
+    consumer there) and two Langfuse trace aliases, one granted to the
+    restricted user's group and one granted to nobody."""
+    write_audit_domain(fx.dep_map_dir)
     for alias in (LANGFUSE_GRANTED, LANGFUSE_HIDDEN):
         fx.registry.register_repo(
             alias_name=f"{alias}-global",
