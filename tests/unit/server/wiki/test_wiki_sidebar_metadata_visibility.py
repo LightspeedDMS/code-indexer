@@ -7,6 +7,7 @@ WikiService sidebar and renderer, real projector; no mocks.
 
 from __future__ import annotations
 
+import base64
 import copy
 import json
 from pathlib import Path
@@ -52,6 +53,29 @@ def fx(tmp_path: Path) -> CidxMetaFixture:
         encoding="utf-8",
     )
     return fixture
+
+
+def test_tagged_frontmatter_title_and_category_never_render_a_hidden_name(
+    fx: CidxMetaFixture,
+) -> None:
+    def tagged(text: str) -> str:
+        return "!!binary " + base64.b64encode(text.encode()).decode()
+
+    article = fx.root / f"{ALPHA}.md"
+    article.write_text(
+        f"---\ntitle: {tagged(CANARY + ' architecture')}\n"
+        f"category: {tagged(CANARY)}\n---\n\n# {ALPHA}\n\n{ALPHA} body.\n",
+        encoding="utf-8",
+    )
+    view = _view(fx)
+    page = render_projected_page(
+        view, WikiService(), article, f"{ALPHA}.md", "cidx-meta", "", None
+    )
+    rendered = json.dumps([page["title"], page["metadata"], page["html"]], default=str)
+    assert CANARY not in rendered
+    assert "b'" not in page["title"]
+    shared = WikiService().build_sidebar_tree(fx.root, "cidx-meta")
+    assert CANARY not in json.dumps(filter_sidebar(shared, view))
 
 
 def _view(fx: CidxMetaFixture) -> CatalogWikiView:

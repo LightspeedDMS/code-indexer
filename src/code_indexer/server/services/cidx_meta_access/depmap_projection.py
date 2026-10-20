@@ -26,6 +26,7 @@ Callers are synchronous; async doors run them through
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import logging
 import re
@@ -348,14 +349,17 @@ def _project_text(line: str, view: _View) -> Optional[str]:
 
 
 def _yaml_unfilterable(text: str) -> bool:
-    """Anchors, aliases or a flow collection spanning lines: YAML forms the
-    line rules cannot filter."""
-    if not any(char in text for char in "&*[{"):
+    """Anchors, aliases, explicit tags or a flow collection spanning lines:
+    YAML forms the line rules cannot filter."""
+    if not any(char in text for char in "&*[{!"):
         return False
     open_collections: List[int] = []
     try:
         for event in yaml.parse(text, Loader=yaml.SafeLoader):
             if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None):
+                return True
+            # ^ inv parser events carry a tag only when it is explicit
+            if getattr(event, "tag", None) is not None:
                 return True
             if isinstance(event, (yaml.SequenceStartEvent, yaml.MappingStartEvent)):
                 flow = bool(event.flow_style)
@@ -517,9 +521,15 @@ def _project_frontmatter_line(line: str, view: _View) -> Optional[str]:
     return scalar.group("prefix") + _yaml_quoted(projected)
 
 
+#: Parsed values that render as digits and separators only (datetime is a
+#: date), so they can never spell a name.
+_PLAIN_SCALARS = (int, float, bool, type(None), datetime.date)
+
+
 def _parsed_names_hidden(value: Any, view: _View) -> bool:
     """Any decoded string key or value of a parsed frontmatter names a
-    hidden repository."""
+    hidden repository, or a value is of a type the rules cannot judge
+    (bytes, sets, objects): fail closed."""
     if isinstance(value, str):
         return _names_hidden(value, view)
     if isinstance(value, dict):
@@ -529,7 +539,7 @@ def _parsed_names_hidden(value: Any, view: _View) -> bool:
         )
     if isinstance(value, list):
         return any(_parsed_names_hidden(item, view) for item in value)
-    return False
+    return not isinstance(value, _PLAIN_SCALARS)
 
 
 def _frontmatter_unsafe(out: Sequence[Optional[str]], end: int, view: _View) -> bool:

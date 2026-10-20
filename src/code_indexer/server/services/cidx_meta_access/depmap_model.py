@@ -401,16 +401,23 @@ def frontmatter_of(content: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+class MalformedMembership(ValueError):
+    """A ``participating_repos`` value is present but not a list of names."""
+
+
 def _member_names(value: Any) -> FrozenSet[str]:
+    """Names of a present ``participating_repos`` (``[]`` is a valid empty
+    membership); raises MalformedMembership for anything else."""
     if not isinstance(value, list):
-        return frozenset()
+        raise MalformedMembership(f"not a list ({type(value).__name__})")
     names = set()
     for item in value:
         if isinstance(item, bool) or not isinstance(item, (str, int)):
-            continue
+            raise MalformedMembership(f"invalid entry ({type(item).__name__})")
         name = str(item).strip().strip("\"'").strip()
-        if name:
-            names.add(normalize_repo_alias(name))
+        if not name:
+            raise MalformedMembership("empty entry")
+        names.add(normalize_repo_alias(name))
     return frozenset(names)
 
 
@@ -418,15 +425,14 @@ def participants_from(
     frontmatter: Optional[Mapping[str, Any]],
     domains_entry: Optional[Mapping[str, Any]],
 ) -> Optional[FrozenSet[str]]:
-    """Frontmatter membership, else ``_domains.json`` membership, else None."""
-    if frontmatter:
-        names = _member_names(frontmatter.get("participating_repos"))
-        if names:
-            return names
-    if domains_entry:
-        names = _member_names(domains_entry.get("participating_repos"))
-        if names:
-            return names
+    """Frontmatter membership, else ``_domains.json`` membership, else None
+    (both absent or empty). Raises MalformedMembership when the value read
+    is present but malformed: it never falls through to another source."""
+    for source in (frontmatter, domains_entry):
+        if source and "participating_repos" in source:
+            names = _member_names(source["participating_repos"])
+            if names:
+                return names
     return None
 
 
@@ -442,14 +448,43 @@ def roles_participants(lines: Sequence[str]) -> FrozenSet[str]:
     return frozenset(names)
 
 
+_MALFORMED_LIMIT = 4096
+_malformed_diagnosed: Set[str] = set()
+_malformed_lock = threading.Lock()
+
+
 def document_participants(
-    content: str, domains_entry: Optional[Mapping[str, Any]]
+    content: str,
+    domains_entry: Optional[Mapping[str, Any]],
+    *,
+    name: str = "",
 ) -> Optional[FrozenSet[str]]:
     """Membership of one domain: frontmatter ``participating_repos``, else
-    ``_domains.json``, else the roles table; None when none names one."""
-    members = participants_from(
-        frontmatter_of(content) if content else None, domains_entry
-    )
+    ``_domains.json``, else the roles table; None when none names one or a
+    present value is malformed (one WARNING per document version)."""
+    frontmatter = frontmatter_of(content) if content else None
+    try:
+        members = participants_from(frontmatter, domains_entry)
+    except MalformedMembership as exc:
+        label = name or str(
+            (domains_entry or {}).get("name") or (frontmatter or {}).get("domain")
+        )
+        key = hashlib.sha256(
+            f"{label}\n{content}\n{domains_entry!r}".encode("utf-8")
+        ).hexdigest()
+        with _malformed_lock:
+            fresh = key not in _malformed_diagnosed
+            if len(_malformed_diagnosed) >= _MALFORMED_LIMIT:
+                _malformed_diagnosed.clear()
+            _malformed_diagnosed.add(key)
+        if fresh:
+            logger.warning(
+                "Dependency-map domain %s has a malformed participating_repos "
+                "(%s); hidden from restricted callers",
+                label,
+                exc,
+            )
+        return None
     if members:
         return members
     roles = roles_participants(content.splitlines()) if content else frozenset()
@@ -477,7 +512,7 @@ def build_depmap_model(dep_map_dir: Path, fingerprint: str) -> DepMapModel:
         key = normalize_name(name)
         display[key] = name
         content = files[name].read_text(encoding="utf-8") if name in files else ""
-        members = document_participants(content, entries.get(name))
+        members = document_participants(content, entries.get(name), name=name)
         if members:
             lowered = frozenset(m.lower() for m in members)
             participants[key] = lowered

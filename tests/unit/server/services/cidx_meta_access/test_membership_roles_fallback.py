@@ -154,6 +154,65 @@ def test_every_door_agrees_on_derived_membership(fx: CidxMetaFixture) -> None:
     assert HIDDEN_ONLY not in by_name and NO_ROLES not in by_name
 
 
+PROBE = "probe"
+MALFORMED_YAML = [
+    "participating_repos:",
+    f"participating_repos: {CANARY}",
+    "participating_repos: {a: b}",
+    f"participating_repos: [{ALPHA}, [nested]]",
+    'participating_repos: ["  "]',
+    'participating_repos: ""',
+]
+MALFORMED_JSON: List[object] = [None, CANARY, {"a": "b"}, [ALPHA, ["x"]], ["  "], ""]
+
+
+def _probe_domain(fx: CidxMetaFixture, field: str, entry: object) -> None:
+    """A domain whose roles table names the visible repository."""
+    text = _roles_domain(PROBE, [ALPHA]).replace("participating_repos: []", field)
+    (fx.dep_map_dir / f"{PROBE}.md").write_text(text, encoding="utf-8")
+    domains_file = fx.dep_map_dir / "_domains.json"
+    domains = json.loads(domains_file.read_text(encoding="utf-8"))
+    domains.append({"name": PROBE, "participating_repos": entry})
+    domains_file.write_text(json.dumps(domains), encoding="utf-8")
+
+
+def _assert_hidden(fx: CidxMetaFixture) -> None:
+    assert domain_participants(fx.dep_map_dir, PROBE) is None
+    assert _kind(fx, PROBE) is DecisionKind.DENY
+    assert PROBE not in load_depmap_model(fx.dep_map_dir).participants
+    vis = MetaVisibility.restricted([ALPHA])
+    source = source_for_visibility(vis, fx.dep_map_dir, fx.registry)
+    assert PROBE not in source.domain_names()
+
+
+@pytest.mark.parametrize("field", MALFORMED_YAML)
+def test_malformed_frontmatter_membership_never_falls_back(
+    fx: CidxMetaFixture, field: str
+) -> None:
+    _probe_domain(fx, field, [])
+    _assert_hidden(fx)
+
+
+@pytest.mark.parametrize("entry", MALFORMED_JSON)
+def test_malformed_domains_json_membership_never_falls_back(
+    fx: CidxMetaFixture, entry: object
+) -> None:
+    _probe_domain(fx, "domain_kind: probe", entry)
+    _assert_hidden(fx)
+
+
+def test_malformed_membership_is_diagnosed(
+    fx: CidxMetaFixture, caplog: pytest.LogCaptureFixture
+) -> None:
+    _probe_domain(fx, "participating_repos: diagnosed-scalar", [])
+    with caplog.at_level(logging.WARNING):
+        load_depmap_model(fx.dep_map_dir)
+    assert any(
+        "malformed" in r.getMessage() and PROBE in r.getMessage()
+        for r in caplog.records
+    )
+
+
 def test_case_differences_do_not_split_the_path_policy_from_the_model(
     fx: CidxMetaFixture,
 ) -> None:
