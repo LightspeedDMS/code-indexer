@@ -173,6 +173,59 @@ def test_unjudgeable_composite_configuration_is_restricted(
     assert _judge(fx, f"{ALPHA}-global", served, golden).view is not None
 
 
+def test_unreadable_file_raises_instead_of_reading_as_binary(tmp_path: Path) -> None:
+    import os
+
+    from code_indexer.server.services.cidx_meta_access.file_doors import (
+        served_file_payload,
+    )
+
+    unreadable = tmp_path / "locked.txt"
+    unreadable.write_text("visible content\n")
+    unreadable.chmod(0)
+    if os.access(unreadable, os.R_OK):
+        pytest.skip("running with privileges that bypass file modes")
+    try:
+        with pytest.raises(PermissionError):
+            served_file_payload("locked.txt", unreadable, UNRESTRICTED)
+    finally:
+        unreadable.chmod(0o644)
+
+
+@pytest.mark.parametrize("raw", [b"a\x00b", b"caf\xe9 latin-1\n"])
+def test_undecodable_file_is_served_as_binary(tmp_path: Path, raw: bytes) -> None:
+    from code_indexer.server.services.cidx_meta_access.file_doors import (
+        served_file_payload,
+    )
+
+    blob = tmp_path / "blob.bin"
+    blob.write_bytes(raw)
+
+    assert served_file_payload("blob.bin", blob, UNRESTRICTED) == {
+        "path": "blob.bin",
+        "is_binary": True,
+        "size": len(raw),
+        "content": None,
+    }
+
+
+def test_text_file_is_served_with_its_content(tmp_path: Path) -> None:
+    from code_indexer.server.services.cidx_meta_access.file_doors import (
+        served_file_payload,
+    )
+
+    text = tmp_path / "notes.txt"
+    text.write_text("hello\n")
+
+    payload = served_file_payload("notes.txt", text, UNRESTRICTED)
+    assert payload == {
+        "path": "notes.txt",
+        "is_binary": False,
+        "size": 6,
+        "content": "hello\n",
+    }
+
+
 def test_composite_entry_outside_its_component_fails_closed() -> None:
     from datetime import datetime
 

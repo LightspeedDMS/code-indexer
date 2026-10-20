@@ -12,9 +12,10 @@ proxy configuration on disk. Neutral names only.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, Iterator, List, Set
 
 import pytest
 
@@ -286,3 +287,95 @@ def test_composite_root_doors_never_leave_the_composite(
         assert json.loads(read)["success"] is False, (path, read)
         for text in (content.text, listing.text, read):
             assert OUTSIDE_MARKER not in text and "Unlike alpha" not in text, path
+
+
+# The activation record says composite: a missing or unjudgeable
+# configuration on disk never makes the composite look ordinary.
+CONFIG_DAMAGE = ["deleted", "not-json", "not-proxy"]
+
+
+def _damage_config(root: Path, how: str) -> None:
+    config = root / ".code-indexer" / "config.json"
+    if how == "deleted":
+        config.unlink()
+    elif how == "not-json":
+        config.write_text("{broken")
+    else:
+        config.write_text(json.dumps({"proxy_mode": False}))
+
+
+@pytest.mark.parametrize("how", CONFIG_DAMAGE)
+def test_composite_record_keeps_the_restriction_without_its_configuration(
+    client: Dict[str, Any], env: CatalogFileDoorEnv, composite: Path, how: str
+) -> None:
+    _damage_config(composite, how)
+
+    content = _content(client, COMPOSITE, CATALOG_FILE, RESTRICTED_USER)
+    assert content.status_code == 404, content.text
+    listing = _get(client, f"/api/repos/{COMPOSITE}/files?path=cidx-meta")
+    assert listing.status_code == 404, listing.text
+    read = _mcp(
+        env,
+        "get_file_content",
+        {"repository_alias": COMPOSITE, "file_path": CATALOG_FILE},
+        RESTRICTED_USER,
+    )
+    assert json.loads(read)["success"] is False and "Unlike alpha" not in read
+    for tool in ("list_files", "handle_directory_tree"):
+        params = {"repository_alias": COMPOSITE, "max_depth": 6}
+        assert CANARY not in _mcp(env, tool, params, RESTRICTED_USER), tool
+
+    admin = _content(client, COMPOSITE, CATALOG_FILE, ADMIN_USER)
+    assert admin.status_code == 200 and CANARY in admin.json()["content"]
+
+
+INDEX_PATHS = [
+    ".code-indexer/config.json",
+    "./.code-indexer/config.json",
+    f"{ALPHA}/../.code-indexer/config.json",
+    f"{ALPHA}/index-link/config.json",
+]
+
+
+@pytest.fixture
+def crud(env: CatalogFileDoorEnv, plain: Path) -> Iterator[Any]:
+    from unittest.mock import patch
+
+    from code_indexer.server.services import file_crud_service as crud_module
+
+    (plain / ALPHA / "index-link").symlink_to(
+        plain / ".code-indexer", target_is_directory=True
+    )
+    with patch.object(
+        crud_module, "_get_activated_repo_manager", lambda: env.activations
+    ):
+        yield crud_module.file_crud_service
+
+
+@pytest.mark.parametrize("path", INDEX_PATHS)
+def test_write_tools_never_touch_the_activation_index_directory(
+    crud: Any, plain: Path, path: str
+) -> None:
+    config = plain / ".code-indexer" / "config.json"
+    before = config.read_bytes()
+    digest = hashlib.sha256(before).hexdigest()
+    new = path.replace("config.json", "other.json")
+
+    calls = [
+        lambda: crud.create_file(PLAIN, new, "x", RESTRICTED_USER),
+        lambda: crud.edit_file(
+            PLAIN, path, "proxy_mode", "x", digest, False, RESTRICTED_USER
+        ),
+        lambda: crud.delete_file(PLAIN, path, None, RESTRICTED_USER),
+    ]
+    for call in calls:
+        with pytest.raises(PermissionError):
+            call()
+    assert config.read_bytes() == before
+    assert not (plain / ".code-indexer" / "other.json").exists()
+
+
+def test_write_tools_still_write_inside_a_component(crud: Any, plain: Path) -> None:
+    crud.create_file(PLAIN, f"{ALPHA}/src/new.py", "x\n", RESTRICTED_USER)
+
+    assert (plain / ALPHA / "src" / "new.py").read_text() == "x\n"

@@ -24,6 +24,7 @@ from typing import Callable, Dict, Any, Optional, TYPE_CHECKING
 from code_indexer.utils.file_locking import nfs_safe_fsync
 from code_indexer.utils.path_confinement import (
     reject_if_within_git_directory,
+    reject_if_within_index_directory,
     resolve_confined_path,
 )
 
@@ -367,6 +368,7 @@ class FileCRUDService:
         # repo_path/.git/hooks/pre-commit), letting a write-mode user
         # plant a hook that executes on the server's next `git commit`.
         reject_if_within_git_directory(repo_path, full_path, "create_file")
+        reject_if_within_index_directory(repo_path, full_path, "create_file")
 
         # Check if file already exists
         if full_path.exists():
@@ -454,6 +456,7 @@ class FileCRUDService:
         # comment -- a tracked in-repo symlink (e.g. "gitlink" -> ".git")
         # is confined to repo_path yet still resolves into ".git".
         reject_if_within_git_directory(repo_path, full_path, "edit_file")
+        reject_if_within_index_directory(repo_path, full_path, "edit_file")
 
         if not full_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -598,6 +601,8 @@ class FileCRUDService:
         # symlink node; either landing inside/at ".git" is forbidden).
         reject_if_within_git_directory(repo_path, full_path, "delete_file")
         reject_if_within_git_directory(repo_path, lexical_path, "delete_file")
+        reject_if_within_index_directory(repo_path, full_path, "delete_file")
+        reject_if_within_index_directory(repo_path, lexical_path, "delete_file")
 
         if not full_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")

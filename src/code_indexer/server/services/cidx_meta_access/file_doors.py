@@ -56,6 +56,7 @@ from .path_policy import (
     may_list_under,
 )
 from .served_identity import (
+    activation_is_composite,
     composite_component_paths,
     path_is_catalog_location,
     path_looks_like_catalog,
@@ -240,11 +241,12 @@ def served_file_payload(
 ) -> Dict[str, Any]:
     """The content payload of the confined, judged file *file_path* (requested
     as *path*): binary (a NUL byte, or not UTF-8, in the first
-    ``BINARY_SNIFF_BYTES``, or unreadable) has no content; text is served as
-    *access* allows.
+    ``BINARY_SNIFF_BYTES``, or not UTF-8 at all) has no content; text is
+    served as *access* allows.
 
     Raises:
         FileNotFoundError: the judgement denies *path*.
+        OSError: the file cannot be read.
     """
     size = file_path.stat().st_size
     binary: Dict[str, Any] = {
@@ -253,15 +255,15 @@ def served_file_payload(
         "size": size,
         "content": None,
     }
+    with open(file_path, "rb") as f:
+        chunk = f.read(BINARY_SNIFF_BYTES)
+    if b"\x00" in chunk:
+        return binary
     try:
-        with open(file_path, "rb") as f:
-            chunk = f.read(BINARY_SNIFF_BYTES)
-        if b"\x00" in chunk:
-            return binary
         chunk.decode("utf-8")
         raw = file_path.read_text(encoding="utf-8")
-    except (OSError, ValueError) as exc:
-        logger.debug("Serving a file as binary (%s)", type(exc).__name__)
+    except UnicodeDecodeError:
+        logger.debug("Serving a file that is not UTF-8 as binary")
         return binary
     text = access.served_text(path, raw)
     return {"path": path, "is_binary": False, "size": size, "content": text}
@@ -288,11 +290,14 @@ def judge_app_request(
     )
 
 
-def _served_from_catalog(served_path: str, golden_repos_dir: Optional[str]) -> bool:
+def _served_from_catalog(
+    served_path: str, golden_repos_dir: Optional[str], composite_activation: bool
+) -> bool:
     """True when *served_path*, or any component of a composite served there,
-    is the catalog or cannot be judged."""
+    is the catalog or cannot be judged. A *composite_activation* (its record
+    says so) whose configuration names no component cannot be judged."""
     components = composite_component_paths(served_path)
-    if components is None:
+    if components is None or (composite_activation and not components):
         return True
     served = [served_path, *components]
     if any(path_looks_like_catalog(path) for path in served):
@@ -332,7 +337,11 @@ def judge_file_door(
         raise FileNotFoundError("Repository not found")
     catalog = _may_serve_catalog(
         alias, lambda name: is_catalog_request(name, username, activated_repo_manager)
-    ) or _served_from_catalog(served_path, golden_repos_dir)
+    ) or _served_from_catalog(
+        served_path,
+        golden_repos_dir,
+        activation_is_composite(alias, username, activated_repo_manager),
+    )
     if not catalog:
         return CatalogFileAccess(None, served_path)
     vis = resolve_meta_visibility(username, access_service)
@@ -349,15 +358,20 @@ def served_tree_view(
     access_service: Optional["AccessFilteringService"],
     golden_repos_dir: Optional[str],
     registry: Any,
+    *,
+    composite_activation: bool,
 ) -> Optional[CatalogFileView]:
     """The view for a door that already resolved *visibility* for the
     request (None = not judged the catalog by name or activation): reused
     as is, else a restricted caller served from a catalog location gets one.
-    No activation or grant is read twice."""
+    *composite_activation*: the served activation's record says it is a
+    composite. No grant is read twice."""
     if visibility is None:
         if unrestricted_caller(username, access_service):
             return None
-        if not _served_from_catalog(served_path, golden_repos_dir):
+        if not _served_from_catalog(
+            served_path, golden_repos_dir, composite_activation
+        ):
             return None
         visibility = resolve_meta_visibility(username, access_service)
     if visibility.unrestricted:

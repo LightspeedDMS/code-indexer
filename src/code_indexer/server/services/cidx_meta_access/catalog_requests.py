@@ -50,12 +50,14 @@ T = TypeVar("T")
 class ServedRepository:
     """One request's resolution, read once and used for both serving and
     filtering: the directory served (None = not found), the alias it is
-    served under, and the caller's visibility when the catalog restriction
-    applies (None = unrestricted)."""
+    served under, the caller's visibility when the catalog restriction
+    applies (None = unrestricted), and whether the activation record says
+    it is a composite."""
 
     path: Optional[str]
     alias: str
     visibility: Optional[MetaVisibility]
+    composite: bool = False
 
 
 def _spelled_like_catalog(alias: str) -> bool:
@@ -104,7 +106,9 @@ def resolve_served_repository(
             if unrestricted or not catalog
             else resolve_meta_visibility(username, access_service)
         )
-        return ServedRepository(served, alias, visibility)
+        return ServedRepository(
+            served, alias, visibility, bool(record.get("is_composite"))
+        )
 
     served_alias = (promote(alias) if names_activation(alias) else None) or alias
     if served_alias != alias:

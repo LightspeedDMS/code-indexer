@@ -27,7 +27,7 @@ import logging
 import os
 import re
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Mapping, Optional, Tuple
 
 from code_indexer.global_repos.alias_manager import AliasManager
 
@@ -188,6 +188,27 @@ def composite_component_paths(path: str) -> Optional[List[str]]:
     if not isinstance(names, list) or not all(_plain_name(n) for n in names):
         return None
     return [os.path.join(path, name) for name in names]
+
+
+def activation_is_composite(
+    alias: Any, username: str, activated_repo_manager: Optional[Any]
+) -> bool:
+    """True when *alias* names the caller's activation and its record says it
+    is a composite; a record that cannot be read counts as one."""
+    if activated_repo_manager is None or not isinstance(alias, str):
+        return False
+    if not names_activation(alias):
+        return False
+    try:
+        record = activated_repo_manager.get_repository(username, alias, touch=False)
+    except Exception as exc:
+        logger.warning(
+            "Activation lookup for composite detection failed (%s); treating "
+            "it as a composite",
+            type(exc).__name__,
+        )
+        return True
+    return isinstance(record, Mapping) and bool(record.get("is_composite"))
 
 
 def _plain_name(name: Any) -> bool:

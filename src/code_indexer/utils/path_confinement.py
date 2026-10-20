@@ -241,6 +241,32 @@ def is_indexable_location(candidate: Path, resolved_root: Path, confined: bool) 
     return not resolves_into_git_directory(candidate, resolved_root)
 
 
+INDEX_DIRECTORY_NAME = ".code-indexer"
+
+
+def reject_if_within_index_directory(
+    repo_root: Path, resolved_path: Path, operation: str
+) -> None:
+    """Reject a CONFINED path that is, or lies inside, the repository root's
+    own index directory (``.code-indexer``: the server-managed index and, for
+    a composite, the configuration naming its components). Compared
+    case-insensitively on the resolved location; nested ``.code-indexer``
+    directories deeper in the tree are not affected.
+
+    Raises:
+        PermissionError: *resolved_path* is in the root's index directory.
+    """
+    try:
+        rel = resolved_path.relative_to(Path(repo_root).resolve())
+    except ValueError:
+        return
+    if rel.parts and rel.parts[0].casefold() == INDEX_DIRECTORY_NAME:
+        raise PermissionError(
+            f"{operation} blocked: Access to {INDEX_DIRECTORY_NAME}/ directory "
+            "is forbidden"
+        )
+
+
 def reject_if_within_git_directory(
     repo_root: Path, resolved_path: Path, operation: str
 ) -> None:

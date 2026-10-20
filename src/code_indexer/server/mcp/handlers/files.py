@@ -1576,6 +1576,7 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             access_service,
             _golden_dir_or_none(),
             registry_of(_utils.app_module.app.state),
+            composite_activation=served.composite,
         )
         visibility = view.vis if view is not None else None
         base = args.get("path") or ""
