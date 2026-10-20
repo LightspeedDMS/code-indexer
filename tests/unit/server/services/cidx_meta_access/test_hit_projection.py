@@ -109,12 +109,17 @@ def test_fts_hit_requires_match_in_projected_text(fx: CidxMetaFixture) -> None:
     )
 
 
-def test_regex_rematch_denies_uncompilable_patterns(fx: CidxMetaFixture) -> None:
-    hit = _hit(fx, f"{ALPHA}.md", 3, 1)
+def test_regex_rematch_needs_the_engine_match_on_a_verbatim_line(
+    fx: CidxMetaFixture,
+) -> None:
     scope = _scope(fx)
-    assert project_meta_hits([hit], scope, TextRematch("beta-.*", regex=True)) == []
-    assert project_meta_hits([hit], scope, TextRematch("(?<=x", regex=True)) == []
-    assert project_meta_hits([hit], scope, TextRematch("talks?", regex=True))
+    rematch = TextRematch("(?<=x", regex=True)  # never evaluated
+    changed = _hit(fx, f"{ALPHA}.md", 3, 1)
+    verbatim = _hit(fx, f"{ALPHA}.md", 6, 1)
+    assert project_meta_hits([changed], scope, rematch) == []
+    assert project_meta_hits([dict(changed, match_text="talks")], scope, rematch) == []
+    kept = project_meta_hits([dict(verbatim, match_text="ordering")], scope, rematch)
+    assert [row["match_text"] for row in kept] == ["ordering"]
 
 
 def test_partial_edge_lines_survive_only_inside_their_projected_line(

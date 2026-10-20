@@ -16,11 +16,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from .catalog_requests import is_catalog_request
-from .catalog_search import CatalogProjectionUnavailable, server_app_state
+from .catalog_search import CatalogProjectionUnavailable
 from .hit_projection import open_catalog_scope, project_regex_matches
 from .history_policy import _may_serve_catalog
 from .served_identity import golden_repos_dir_of, path_is_catalog_location
-from .universe_provider import registry_of
 from .visibility import unrestricted_caller
 
 
@@ -45,31 +44,34 @@ def restrict_regex_matches(
     username: str,
     access_service: Optional[Any],
     activated_repo_manager: Optional[Any],
-    pattern: str,
-    case_sensitive: bool,
-    multiline: bool,
+    registry: Optional[Any],
 ) -> Optional[List[Dict[str, Any]]]:
     """The caller's projected matches, or None when no restriction applies.
+    The services and *registry* come from the app serving the request.
 
     Raises:
         CatalogProjectionUnavailable: a restricted caller's catalog search
-            cannot be projected (no server state, registry or scope).
+            cannot be projected (no registry or scope).
     """
     if unrestricted_caller(username, access_service):
         return None
     if not _serves_catalog(alias, Path(repo_path), username, activated_repo_manager):
         return None
-    state = server_app_state()
-    registry = None if state is None else registry_of(state)
     if registry is None:
         raise CatalogProjectionUnavailable("catalog regex needs the alias registry")
     scope = open_catalog_scope(username, access_service, Path(repo_path), registry)
     if scope is None:
         raise CatalogProjectionUnavailable("catalog regex scope unavailable")
-    return project_regex_matches(
-        matches,
-        scope,
-        pattern=pattern,
-        case_sensitive=case_sensitive,
-        multiline=multiline,
-    )
+    return project_regex_matches(matches, scope)
+
+
+def caller_visible_flag(
+    raw: bool, projected_count: Optional[int], max_results: int
+) -> bool:
+    """The engine's ``truncated`` / ``read_capped`` flag as the caller may
+    see it: unchanged when no projection ran (*projected_count* None);
+    after projection, kept only while the projected page is full, so the
+    flag never signals matches the caller cannot see."""
+    if projected_count is None:
+        return bool(raw)
+    return bool(raw) and projected_count >= max_results

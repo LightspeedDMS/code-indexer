@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Union, cast
 import anyio.to_thread
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from starlette.datastructures import State
 
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
@@ -171,32 +172,25 @@ async def _resolve_repo_paths_batch_offloaded(
 
 def _restrict_catalog_matches(
     matches: List[Dict[str, Any]],
-    body: RegexSearchRequest,
     alias: str,
     repo_path: Any,
     user: User,
+    app_state: Optional[State],
 ) -> Optional[List[Dict[str, Any]]]:
     """The caller's projected matches when the served repository is the
-    catalog, else None. Synchronous reads: called on a worker thread."""
+    catalog, else None; services from *app_state*, the serving app's state.
+    Synchronous reads: called on a worker thread."""
     from ..services.cidx_meta_access.catalog_regex import restrict_regex_matches
-    from ..services.cidx_meta_access.catalog_search import server_app_state
+    from ..services.cidx_meta_access.universe_provider import registry_of
 
-    state = server_app_state()
-    access_service = None
-    activated_repo_manager = None
-    if state is not None:
-        access_service = getattr(state, "access_filtering_service", None)
-        activated_repo_manager = getattr(state, "activated_repo_manager", None)
     return restrict_regex_matches(
         matches,
         alias=alias,
         repo_path=repo_path,
         username=user.username,
-        access_service=access_service,
-        activated_repo_manager=activated_repo_manager,
-        pattern=body.pattern,
-        case_sensitive=body.case_sensitive,
-        multiline=body.multiline,
+        access_service=getattr(app_state, "access_filtering_service", None),
+        activated_repo_manager=getattr(app_state, "activated_repo_manager", None),
+        registry=registry_of(app_state),
     )
 
 
@@ -208,6 +202,7 @@ async def _execute_single_search(
     *,
     alias: Optional[str] = None,
     event_writer: Any = None,
+    app_state: Optional[State] = None,
 ) -> Dict[str, Any]:
     """Execute a single-repo regex search.
 
@@ -272,22 +267,28 @@ async def _execute_single_search(
         }
         for m in result.matches
     ]
+    from ..services.cidx_meta_access.catalog_regex import caller_visible_flag
+
     total_matches = result.total_matches
+    projected: Optional[List[Dict[str, Any]]] = None
     if user is not None and alias is not None:
         # Catalog matches are projected before counting and recording.
         projected = await anyio.to_thread.run_sync(
             functools.partial(
-                _restrict_catalog_matches, matches, body, alias, repo_path, user
+                _restrict_catalog_matches, matches, alias, repo_path, user, app_state
             )
         )
         if projected is not None:
             matches, total_matches = projected, len(projected)
+    visible = None if projected is None else len(projected)
 
     response = {
         "matches": matches,
         "total_matches": total_matches,
-        "truncated": result.truncated,
-        "read_capped": result.read_capped,
+        "truncated": caller_visible_flag(result.truncated, visible, body.max_results),
+        "read_capped": caller_visible_flag(
+            result.read_capped, visible, body.max_results
+        ),
         "search_engine": result.search_engine,
         "search_time_ms": result.search_time_ms,
     }
@@ -316,6 +317,7 @@ async def _execute_omni_search(
     user: User,
     timeout_seconds: Optional[int] = None,
     event_writer: Optional[SearchEventLogWriter] = None,
+    app_state: Optional[State] = None,
 ) -> Dict[str, Any]:
     """Fan out search across multiple repos, collecting results and errors.
 
@@ -352,6 +354,7 @@ async def _execute_omni_search(
                 user=user,
                 alias=alias,
                 event_writer=event_writer,
+                app_state=app_state,
             )
             repos_searched += 1
             search_engine = result.get("search_engine", search_engine)
@@ -496,6 +499,7 @@ async def regex_search(
             user,
             timeout_seconds=effective_timeout,
             event_writer=writer_from_app(request.app),
+            app_state=request.app.state,
         )
         return result
 
@@ -520,6 +524,7 @@ async def regex_search(
             user=user,
             alias=body.repository_alias,
             event_writer=writer_from_app(request.app),
+            app_state=request.app.state,
         )
         return result
     except ValueError as e:

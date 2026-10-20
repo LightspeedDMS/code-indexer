@@ -44,6 +44,7 @@ class TestAliasLessFanOutQueryTracking:
         activated_repos_dir = str(tmp_path / "activated-repos")
 
         activated_repo_manager = MagicMock()
+        activated_repo_manager.data_dir = str(tmp_path)
         activated_repo_manager.activated_repos_dir = activated_repos_dir
         activated_repo_manager.get_activated_repo_path.side_effect = (
             lambda username, alias: str(Path(activated_repos_dir) / username / alias)
@@ -58,8 +59,16 @@ class TestAliasLessFanOutQueryTracking:
         manager.set_query_tracker(real_query_tracker)
 
         user_repos = [
-            {"user_alias": "repo-one", "username": "alice"},
-            {"user_alias": "repo-two", "username": "alice"},
+            {
+                "user_alias": "repo-one",
+                "username": "alice",
+                "golden_repo_alias": "repo-one",
+            },
+            {
+                "user_alias": "repo-two",
+                "username": "alice",
+                "golden_repo_alias": "repo-two",
+            },
         ]
 
         observed: Dict[str, Any] = {}

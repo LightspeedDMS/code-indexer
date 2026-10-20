@@ -287,13 +287,19 @@ class TestMcpActivatedRepoOverfetch:
 class TestRestQueryRerankOverfetch:
     @pytest.mark.parametrize("limit, fetch", [(21, 105), (60, _MAX_CANDIDATES)])
     def test_rest_query_rerank_limit_above_20_returns_results(
-        self, manager, repo_dir, limit, fetch
+        self, manager, repo_dir, limit, fetch, tmp_path
     ):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
         from code_indexer.server.auth import dependencies as auth_deps
         from code_indexer.server.routers.inline_query import register_query_routes
+        from code_indexer.server.services.access_filtering_service import (
+            AccessFilteringService,
+        )
+        from code_indexer.server.services.group_access_manager import (
+            GroupAccessManager,
+        )
 
         arm = manager.activated_repo_manager
         arm.list_activated_repositories.return_value = [
@@ -303,9 +309,13 @@ class TestRestQueryRerankOverfetch:
                 "repo_path": str(repo_dir),
             }
         ]
+        groups = GroupAccessManager(tmp_path / "groups.db")
+        admins = groups.get_group_by_name("admins")
+        assert admins is not None
+        groups.assign_user_to_group("example-user", admins.id, assigned_by="test")
         app = FastAPI()
         app.state.payload_cache = None
-        app.state.access_filtering_service = None
+        app.state.access_filtering_service = AccessFilteringService(groups)
         app.state.search_event_log_writer = None
         register_query_routes(
             app, semantic_query_manager=manager, activated_repo_manager=arm

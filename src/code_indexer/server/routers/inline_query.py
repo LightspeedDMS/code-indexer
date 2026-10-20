@@ -46,8 +46,7 @@ from code_indexer.server.mcp.reranking import (
 from code_indexer.server.cache.handle_binding import reset_handle_binding
 from code_indexer.server.services.cidx_meta_access import bind_catalog_handles
 from code_indexer.server.services.cidx_meta_access.catalog_search import (
-    TextRematch,
-    project_catalog_rows,
+    rest_rows_for_caller,
 )
 from code_indexer.server.services.deactivation_query_drain import (
     track_activated_repo_query,
@@ -561,8 +560,6 @@ def register_query_routes(
         _delivered: Optional[list] = None
         _failure_class: Optional[str] = None
         _record_on_exit = True
-        # Handles minted while serving the catalog carry the caller's view
-        # (no alias fans out over every repository, catalog included).
         _handle_binding = bind_catalog_handles(
             request.repository_alias or "*",
             current_user.username,
@@ -1081,32 +1078,17 @@ def register_query_routes(
                 # Calculate execution time
                 execution_time_ms = int((time.time() - start_time) * 1000)
 
-                # Apply access filtering based on user's group membership (Story #707)
-                if (
-                    hasattr(app.state, "access_filtering_service")
-                    and app.state.access_filtering_service
-                ):
-                    # Catalog FTS rows must still match on their projected text.
-                    fts_dicts = project_catalog_rows(
-                        [r.model_dump() for r in fts_results],
-                        current_user.username,
-                        app.state.access_filtering_service,
-                        TextRematch(
-                            request.query_text, request.case_sensitive, request.regex
-                        ),
-                    )
-                    fts_dicts = app.state.access_filtering_service.filter_query_results(
-                        fts_dicts, current_user.username
-                    )
-                    semantic_dicts = [r.model_dump() for r in semantic_results_list]
-                    semantic_dicts = (
-                        app.state.access_filtering_service.filter_query_results(
-                            semantic_dicts, current_user.username
-                        )
-                    )
-                else:
-                    fts_dicts = [r.model_dump() for r in fts_results]
-                    semantic_dicts = [r.model_dump() for r in semantic_results_list]
+                fts_dicts = rest_rows_for_caller(
+                    getattr(app.state, "access_filtering_service", None),
+                    current_user.username,
+                    [r.model_dump() for r in fts_results],
+                    fts_query=request,
+                )
+                semantic_dicts = rest_rows_for_caller(
+                    getattr(app.state, "access_filtering_service", None),
+                    current_user.username,
+                    [r.model_dump() for r in semantic_results_list],
+                )
 
                 # Apply payload truncation for consistency with MCP handlers
                 _payload_cache = getattr(app.state, "payload_cache", None)
@@ -1233,17 +1215,12 @@ def register_query_routes(
                     status=_search_status,
                 )
 
-            # Apply access filtering based on user's group membership (Story #707)
-            if (
-                hasattr(app.state, "access_filtering_service")
-                and app.state.access_filtering_service
-            ):
-                results["results"] = (
-                    app.state.access_filtering_service.filter_query_results(
-                        results["results"], current_user.username
-                    )
-                )
-                results["total_results"] = len(results["results"])
+            results["results"] = rest_rows_for_caller(
+                getattr(app.state, "access_filtering_service", None),
+                current_user.username,
+                results["results"],
+            )
+            results["total_results"] = len(results["results"])
 
             # Bug #1209: apply reranking AFTER fusion and BEFORE truncation,
             # mirroring the MCP _apply_rerank_and_filter pipeline order exactly.

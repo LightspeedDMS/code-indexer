@@ -1416,6 +1416,40 @@ class SemanticQueryManager:
             extension_deadline = extension_overfetch_deadline(file_extensions)
 
         from .filtered_search import extension_budget_spent
+        from code_indexer.server.services.cidx_meta_access.catalog_search import (
+            TextRematch,
+            search_for_caller,
+        )
+
+        # The arguments every repository of this request is searched with.
+        _request_kwargs: Dict[str, Any] = dict(
+            min_score=min_score,
+            file_extensions=file_extensions,
+            language=language,
+            exclude_language=exclude_language,
+            path_filter=path_filter,
+            exclude_path=exclude_path,
+            accuracy=accuracy,
+            time_range=time_range,
+            time_range_all=time_range_all,
+            at_commit=at_commit,
+            case_sensitive=case_sensitive,
+            fuzzy=fuzzy,
+            edit_distance=edit_distance,
+            snippet_lines=snippet_lines,
+            regex=regex,
+            diff_type=diff_type,
+            author=author,
+            chunk_type=chunk_type,
+            query_strategy=query_strategy,
+            score_fusion=score_fusion,
+            preferred_provider=preferred_provider,
+            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+            temporal_embedder=temporal_embedder,
+            _temporal_warning_out=_temporal_warning_out,
+            _provider_completeness_out=_provider_completeness_out,
+            extension_deadline=extension_deadline,
+        )
 
         # Search each repository
         for repo_index, repo_info in enumerate(user_repos):
@@ -1498,19 +1532,8 @@ class SemanticQueryManager:
                     activation_id = self.activated_repo_manager.get_activation_id(
                         username, repo_alias
                     )
-                    # Codex round-6 HIGH finding #9: migration 039's
-                    # activation_id column is correctly additive/nullable,
-                    # but a NULL VALUE FROM A GENUINE ACTIVATED-REPO
-                    # LOOKUP (e.g. an activation created by an OLD node
-                    # during a rolling upgrade, before activation_id
-                    # generation existed) must never be forwarded bare --
-                    # FilesystemVectorStore._activation_scoped_cache_key()
-                    # treats None as "no activation_id component", so TWO
-                    # DIFFERENT such activations at the SAME path would
-                    # derive the IDENTICAL cache key. A fresh, unique
-                    # per-call sentinel forces a structural cache miss
-                    # (genuine bypass) that can never collide with
-                    # another NULL-activation_id activation.
+                    # ^ haz forward activation_id None=>two NULL-id activations at one path share FilesystemVectorStore._activation_scoped_cache_key
+                    # ^ why unique per-call sentinel=>structural cache miss that never collides
                     if activation_id is None:
                         activation_id = f"__missing_activation_id__{uuid.uuid4().hex}"
                     # Codex HIGH finding (round 4): this is the ONLY branch
@@ -1535,10 +1558,6 @@ class SemanticQueryManager:
                 from code_indexer.server.services.search_event_context import (
                     searching_resolved_repository,
                 )
-                from code_indexer.server.services.cidx_meta_access.catalog_search import (
-                    TextRematch,
-                    search_for_caller,
-                )
 
                 _tracking = track_activated_repo_query(
                     getattr(self, "query_tracker", None),
@@ -1547,73 +1566,32 @@ class SemanticQueryManager:
                     _tracking_alias,
                 )
 
-                def _run_search(k: int, mode: str) -> List[QueryResult]:
-                    return self._search_single_repository(
-                        repo_path,
-                        repo_alias,
-                        query_text,
-                        k,
-                        min_score,
-                        file_extensions,
-                        language,
-                        exclude_language,
-                        path_filter,
-                        exclude_path,
-                        accuracy,
-                        # Search mode (Story #503 - FTS Bug Fix)
-                        search_mode=mode,
-                        # Temporal parameters (Story #446)
-                        time_range=time_range,
-                        time_range_all=time_range_all,
-                        at_commit=at_commit,
-                        # FTS-specific parameters (Story #503 Phase 2)
-                        case_sensitive=case_sensitive,
-                        fuzzy=fuzzy,
-                        edit_distance=edit_distance,
-                        snippet_lines=snippet_lines,
-                        regex=regex,
-                        # Temporal filtering parameters (Story #503 Phase 3)
-                        diff_type=diff_type,
-                        author=author,
-                        chunk_type=chunk_type,
-                        # Query strategy parameters (Story #488 Phase 4)
-                        query_strategy=query_strategy,
-                        score_fusion=score_fusion,
-                        # Multi-provider routing (Story #593)
-                        preferred_provider=preferred_provider,
-                        # Story #883 Phase C: reuse pre-computed vector (no duplicate Voyage call)
-                        precomputed_query_vector=precomputed_query_vector,
-                        # Story #1108 (S4): per-request cache bypass
-                        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-                        # Story #1291 AC7/AC8: forward explicit embedder override
-                        temporal_embedder=temporal_embedder,
-                        # AC7 (Bug #1202): collect resolved routing decision
-                        _effective_strategy_out=_strat_out,
-                        # Bug #1298: relay the embedder-specific warning out-param
-                        _temporal_warning_out=_temporal_warning_out,
-                        # Story #1457 AC1/AC2: forward the golden repo alias.
-                        golden_repo_alias=golden_repo_alias_for_temporal,
-                        # Story #1458 AC11: forward the per-clone generation token.
-                        activation_id=activation_id,
-                        # Bug #1804: relay the completeness out-param
-                        _provider_completeness_out=_provider_completeness_out,
-                        # #2047: the request-wide over-fetch time budget
-                        extension_deadline=extension_deadline,
-                    )
-
-                # A restricted caller's catalog hits are projected here, before
-                # the sort and limit below (see cidx_meta_access.catalog_search).
+                # Catalog hits are projected for the caller here, before sort and limit.
                 with searching_resolved_repository(str(repo_alias)), _tracking:
                     results = search_for_caller(
-                        _run_search,
+                        lambda k, mode, vector: self._search_single_repository(
+                            repo_path,
+                            repo_alias,
+                            query_text,
+                            k,
+                            search_mode=mode,
+                            precomputed_query_vector=vector,
+                            golden_repo_alias=golden_repo_alias_for_temporal,
+                            activation_id=activation_id,
+                            _effective_strategy_out=_strat_out,
+                            **_request_kwargs,
+                        ),
                         username=username,
                         repo_info=repo_info,
                         repo_path=repo_path,
+                        activated_repo_manager=self.activated_repo_manager,
                         limit=limit,
                         search_mode=search_mode,
                         rematch=TextRematch(query_text, case_sensitive, regex),
                         merge=self._merge_hybrid_results,
                         budget_spent=lambda: extension_budget_spent(extension_deadline),
+                        query_vector=precomputed_query_vector,
+                        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                     )
                 # AC7: capture routing decision from the first resolved repo
                 if _strat_out and _effective_strategy == (

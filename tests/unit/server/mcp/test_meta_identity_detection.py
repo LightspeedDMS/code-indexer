@@ -317,11 +317,13 @@ async def test_regex_catalog_detection_runs_off_the_event_loop(
             seen.append(threading.get_ident())
             return super().get_repository(username, user_alias, touch=touch)
 
-    kept = await _filter_regex(
-        "team-catalog", fx.access_service, _Recording([CATALOG_ACTIVATION])
-    )
+    recording = _Recording([CATALOG_ACTIVATION])
+    # A known golden-repos directory: detection then reads the activation.
+    setattr(recording, "data_dir", str(fx.root.parent / "server-data"))
+    kept = await _filter_regex(fx, "team-catalog", fx.access_service, recording)
     assert kept == [
         f"{ALPHA}.md",
+        "dependency-map/payments.md",
         f"memories/{MEMORY_GLOBAL}.md",
         f"memories/{MEMORY_ALPHA}.md",
     ]
@@ -329,19 +331,34 @@ async def test_regex_catalog_detection_runs_off_the_event_loop(
 
 
 async def _filter_regex(
+    fx: CidxMetaFixture,
     alias: str,
     access_service: Optional[Any],
     activations: Optional[_Activations] = None,
 ) -> List[str]:
+    """Matches on every listed catalog path, filtered by the MCP regex door
+    for the restricted user; the served directory is the fixture catalog
+    and the server state holds its real alias registry."""
+    from types import SimpleNamespace
+
     from code_indexer.server.mcp.handlers.search import regex_search
 
-    matches = [{"file_path": p, "line_content": "x"} for p in _LISTED]
+    state = SimpleNamespace(backend_registry=SimpleNamespace(global_repos=fx.registry))
+    matches = [
+        {
+            "file_path": p,
+            "line_number": 1,
+            "line_content": (fx.root / p).read_text().splitlines()[0],
+        }
+        for p in _LISTED
+    ]
     with (
         patch.object(
             regex_search._utils,
             "app_module",
             _app_module(activations or _Activations([CATALOG_ACTIVATION])),
         ),
+        patch.object(regex_search, "server_app_state", return_value=state),
         patch.object(
             regex_search, "_get_access_filtering_service", return_value=access_service
         ),
@@ -357,21 +374,24 @@ async def _filter_regex(
         ),
     ):
         kept, meta = await regex_search._rerank_truncate_and_filter_regex_matches(
-            matches, {}, alias, _restricted_user()
+            matches, {}, alias, _restricted_user(), fx.root
         )
     assert meta["cidx_meta_access_filtered"] is True
+    served = repr([{k: v for k, v in m.items() if k != "file_path"} for m in kept])
+    assert CANARY not in served and "gamma" not in served
     return [m["file_path"] for m in kept]
 
 
 async def test_regex_matches_on_catalog_activation_are_restricted_by_full_path(
     fx: CidxMetaFixture,
 ) -> None:
-    assert await _filter_regex("team-catalog", fx.access_service) == [
+    assert await _filter_regex(fx, "team-catalog", fx.access_service) == [
         f"{ALPHA}.md",
+        "dependency-map/payments.md",
         f"memories/{MEMORY_GLOBAL}.md",
         f"memories/{MEMORY_ALPHA}.md",
     ]
-    assert await _filter_regex("team-catalog", None) == []
+    assert await _filter_regex(fx, "team-catalog", None) == []
 
 
 def test_no_substring_catalog_checks_remain() -> None:

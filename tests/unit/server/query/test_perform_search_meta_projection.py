@@ -10,7 +10,8 @@ per-round DEBUG log.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterator, List
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional
 
 import pytest
 
@@ -88,6 +89,38 @@ def test_hidden_top_hits_still_fill_the_page(
     assert CANARY in dump(admin_rows)
 
 
+@pytest.mark.parametrize("bypass_cache", [False, True], ids=["cache", "no-cache"])
+def test_deepening_embeds_the_query_once(
+    env: CatalogEnv, caplog: pytest.LogCaptureFixture, bypass_cache: bool
+) -> None:
+    # The 25 hidden widgets sit closer to rank13 than any visible file.
+    deep_query = "rank13"
+    caplog.set_level(logging.DEBUG, logger=ROUND_LOGGER)
+    sqm = env.app.state.semantic_query_manager
+    with ranked_store_search() as provider:
+        real = provider._vector_for
+        embedded: List[str] = []
+
+        def counting(text: str) -> List[float]:
+            if text == deep_query:
+                embedded.append(text)
+            return real(text)
+
+        setattr(provider, "_vector_for", counting)
+        response = sqm.query_user_repositories(
+            username=RESTRICTED_USER,
+            query_text=deep_query,
+            repository_alias=CATALOG_ALIAS,
+            limit=3,
+            search_mode="semantic",
+            no_embedding_cache_shortcut=bypass_cache,
+        )
+    rows = _rows(response)
+    assert len(rows) == 3 and CANARY not in dump(rows)
+    assert _rounds(caplog) > 1
+    assert len(embedded) == 1
+
+
 def test_semantic_rows_are_projected(env: CatalogEnv) -> None:
     response = _query(env, RESTRICTED_USER, "payments", "semantic", 40)
     dumped = dump(response)
@@ -98,28 +131,69 @@ def test_semantic_rows_are_projected(env: CatalogEnv) -> None:
     assert CANARY in dump(_query(env, ADMIN_USER, "payments", "semantic", 40))
 
 
-def _search_canary(env: CatalogEnv, user: str) -> List[Any]:
+def _search_canary(
+    env: CatalogEnv,
+    user: str,
+    repo_info: Optional[Dict[str, Any]] = None,
+    query: str = CANARY,
+) -> List[Any]:
     from code_indexer.server.services.cidx_meta_access.catalog_search import (
         TextRematch,
         search_for_caller,
     )
 
     sqm = env.app.state.semantic_query_manager
+    info = repo_info or {"user_alias": CATALOG_ALIAS, "is_global": True}
 
-    def run(k: int, mode: str) -> List[Any]:
-        return list(sqm._execute_fts_search(env.root, CATALOG_ALIAS, CANARY, k))
+    def run(k: int, mode: str, vector: Optional[List[float]]) -> List[Any]:
+        return list(sqm._execute_fts_search(env.root, info["user_alias"], query, k))
 
     return search_for_caller(
         run,
         username=user,
-        repo_info={"user_alias": CATALOG_ALIAS, "is_global": True},
+        repo_info=info,
         repo_path=env.root,
+        activated_repo_manager=sqm.activated_repo_manager,
         limit=10,
         search_mode="fts",
-        rematch=TextRematch(CANARY),
+        rematch=TextRematch(query),
         merge=sqm._merge_hybrid_results,
         budget_spent=lambda: False,
     )
+
+
+def test_ordinary_alias_serving_the_catalog_is_projected(env: CatalogEnv) -> None:
+    ordinary = {"user_alias": f"{ALPHA}-global", "is_global": True}
+    assert _search_canary(env, ADMIN_USER, ordinary)  # control: raw for admins
+    assert _search_canary(env, RESTRICTED_USER, ordinary) == []
+    visible = _search_canary(env, RESTRICTED_USER, ordinary, query=QUERY)
+    assert visible and CANARY not in dump([r.to_dict() for r in visible])
+    assert {r.source_repo for r in visible} == {CATALOG_ALIAS}
+
+
+def test_stored_rows_of_an_alias_serving_the_catalog_are_rechecked(
+    env: CatalogEnv,
+) -> None:
+    from code_indexer.global_repos.alias_manager import AliasManager
+    from code_indexer.server.services.cidx_meta_access.catalog_search import (
+        reproject_job_result,
+    )
+
+    golden = Path(env.app.state.golden_repos_dir)
+    AliasManager(str(golden / "aliases")).create_alias(
+        "decoy-global", str(env.root), "decoy"
+    )
+    line = (env.root / f"{ALPHA}.md").read_text().splitlines()[2]
+    row = {
+        "file_path": f"{ALPHA}.md",
+        "line_number": 3,
+        "code_snippet": line,
+        "similarity_score": 1.0,
+        "repository_alias": "decoy-global",
+    }
+    stored = {"results": [row], "total_results": 1}
+    rechecked = reproject_job_result(stored, RESTRICTED_USER, env.fx.access_service)
+    assert CANARY in line and CANARY not in dump(rechecked)
 
 
 def test_missing_access_service_serves_projected_hits_to_everyone(

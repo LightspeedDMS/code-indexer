@@ -51,7 +51,10 @@ class _ActivatedRepos:
         self.activated_repos_dir = str(directory)
 
     def list_activated_repositories(self, username: str) -> List[Dict[str, Any]]:
-        return [{"user_alias": a, "username": username} for a in _ALIASES]
+        return [
+            {"user_alias": a, "username": username, "golden_repo_alias": a}
+            for a in _ALIASES
+        ]
 
     def get_activated_repo_path(self, username: str, alias: str) -> str:
         return self.activated_repos_dir

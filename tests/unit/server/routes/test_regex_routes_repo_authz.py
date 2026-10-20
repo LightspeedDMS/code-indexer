@@ -35,7 +35,6 @@ Scenarios:
 
 from __future__ import annotations
 
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
@@ -64,12 +63,9 @@ def _make_user(username: str, role: UserRole = UserRole.NORMAL_USER) -> User:
 
 
 @pytest.fixture
-def group_db_path() -> Iterator[Path]:
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = Path(f.name)
-    yield db_path
-    if db_path.exists():
-        db_path.unlink()
+def group_db_path(tmp_path: Path) -> Iterator[Path]:
+    """The groups database inside the test's server data directory."""
+    yield tmp_path / "groups.db"
 
 
 def _build_access_service(
@@ -99,10 +95,19 @@ def _build_access_service(
 
 
 def _build_app(user: User, access_service: AccessFilteringService) -> FastAPI:
+    """The router on an app holding the services a server wires: the access
+    service and an activated repo manager over the groups database's data
+    directory (so served repositories can be judged against the catalog)."""
+    from code_indexer.server.repositories.activated_repo_manager import (
+        ActivatedRepoManager,
+    )
+
     app = FastAPI()
     app.include_router(regex_routes.router)
     app.dependency_overrides[get_current_user] = lambda: user
     app.state.access_filtering_service = access_service
+    data_dir = Path(access_service.group_manager.db_path).parent
+    app.state.activated_repo_manager = ActivatedRepoManager(data_dir=str(data_dir))
     return app
 
 

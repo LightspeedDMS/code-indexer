@@ -76,3 +76,24 @@ def test_restricted_catalog_rows_are_projected(env: CatalogEnv) -> None:
 def test_admin_rows_are_unchanged(env: CatalogEnv) -> None:
     rows = _rows(env)
     assert _filter(env, rows, ADMIN_USER) == rows
+
+
+def test_rest_rows_refuse_without_the_access_service(env: CatalogEnv) -> None:
+    from types import SimpleNamespace
+
+    from code_indexer.server.services.cidx_meta_access.catalog_search import (
+        rest_rows_for_caller,
+    )
+    from code_indexer.server.services.repo_access_guard import (
+        AccessFilteringServiceUnavailableError,
+    )
+
+    with pytest.raises(AccessFilteringServiceUnavailableError):
+        rest_rows_for_caller(None, RESTRICTED_USER, _rows(env))
+    ordinary = [{"file_path": "README.md", "repository_alias": f"{ALPHA}-global"}]
+    assert rest_rows_for_caller(None, RESTRICTED_USER, ordinary) == ordinary
+    service = env.fx.access_service
+    fts = SimpleNamespace(query_text=CANARY, case_sensitive=False, regex=False)
+    assert rest_rows_for_caller(service, RESTRICTED_USER, _rows(env), fts) == []
+    plain = rest_rows_for_caller(service, RESTRICTED_USER, _rows(env))
+    assert plain == _filter(env, _rows(env), RESTRICTED_USER)

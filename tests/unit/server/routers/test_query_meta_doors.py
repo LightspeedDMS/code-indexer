@@ -190,3 +190,25 @@ def test_async_job_results_are_rechecked_on_read(
         assert f"{ALPHA}.md" not in dump(polled_after)
     finally:
         gam.grant_repo_access(ALPHA, team.id, granted_by="test")
+
+
+@pytest.mark.parametrize("mode", ["fts", "semantic", "hybrid"])
+def test_query_is_refused_without_the_access_service(
+    env: CatalogEnv,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    monkeypatch.setattr(env.app.state, "access_filtering_service", None)
+    response = client.post(
+        "/api/query",
+        json={
+            "query_text": CANARY,
+            "repository_alias": CATALOG_ALIAS,
+            "search_mode": mode,
+            "limit": 10,
+        },
+    )
+    assert response.status_code == 500, response.text
+    assert "access_control_unavailable" in response.text
+    assert CANARY not in response.text.replace(f'"{CANARY}"', "").lower()

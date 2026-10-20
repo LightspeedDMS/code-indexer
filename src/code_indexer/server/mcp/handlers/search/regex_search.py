@@ -23,11 +23,20 @@ from typing import Any, Dict, Optional
 import anyio.to_thread
 
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.cache.handle_binding import reset_handle_binding
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.mcp import reranking as _mcp_reranking
 from code_indexer.server.services.api_metrics_service import api_metrics_service
+from code_indexer.server.services.cidx_meta_access import bind_catalog_handles
 from code_indexer.server.services.cidx_meta_access.catalog_regex import (
+    caller_visible_flag,
     restrict_regex_matches,
+)
+from code_indexer.server.services.cidx_meta_access.catalog_search import (
+    server_app_state,
+)
+from code_indexer.server.services.cidx_meta_access.universe_provider import (
+    registry_of,
 )
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.search_event_recording import (
@@ -302,7 +311,7 @@ async def _rerank_truncate_and_filter_regex_matches(
     """
     restricted = await anyio.to_thread.run_sync(
         functools.partial(
-            _restrict_catalog_matches, matches, args, repository_alias, user, repo_path
+            _restrict_catalog_matches, matches, repository_alias, user, repo_path
         )
     )
     if restricted is not None:
@@ -321,15 +330,39 @@ async def _rerank_truncate_and_filter_regex_matches(
         None, lambda: _mcp_reranking._apply_reranking_sync(**rerank_kwargs)
     )
 
-    matches = _apply_regex_payload_truncation(matches, owner=user.username)
+    matches = await anyio.to_thread.run_sync(
+        functools.partial(
+            _truncate_with_catalog_binding, matches, repository_alias, user
+        )
+    )
     rerank_meta["cidx_meta_access_filtered"] = restricted is not None
+    rerank_meta["catalog_visible_count"] = (
+        None if restricted is None else len(restricted)
+    )
 
     return matches, rerank_meta
 
 
+def _truncate_with_catalog_binding(
+    matches: list, repository_alias: str, user: User
+) -> list:
+    """Payload truncation with the handles it mints bound to the caller's
+    catalog view when the repository may serve the catalog. Reads stores
+    synchronously: async callers run it on a worker thread."""
+    token = bind_catalog_handles(
+        repository_alias,
+        user.username,
+        _get_access_filtering_service(),
+        _utils._lazy_module_attr_or_none("activated_repo_manager"),
+    )
+    try:
+        return _apply_regex_payload_truncation(matches, owner=user.username)
+    finally:
+        reset_handle_binding(token)
+
+
 def _restrict_catalog_matches(
     matches: list,
-    args: Dict[str, Any],
     repository_alias: str,
     user: User,
     repo_path: Path,
@@ -337,6 +370,7 @@ def _restrict_catalog_matches(
     """The caller's projected matches when the served repository is the
     internal catalog, else None. Reads files and stores synchronously:
     async callers run it on a worker thread."""
+    state = server_app_state()
     return restrict_regex_matches(
         matches,
         alias=repository_alias,
@@ -346,9 +380,19 @@ def _restrict_catalog_matches(
         activated_repo_manager=_utils._lazy_module_attr_or_none(
             "activated_repo_manager"
         ),
-        pattern=str(args["pattern"]),
-        case_sensitive=bool(args.get("case_sensitive", True)),
-        multiline=bool(args.get("multiline", False)),
+        registry=None if state is None else registry_of(state),
+    )
+
+
+def _effective_max_results(args: Dict[str, Any]) -> int:
+    """The engine's max_results for *args*: the requested value clamped to
+    1.._MAX_REGEX_MAX_RESULTS (default _DEFAULT_REGEX_MAX_RESULTS)."""
+    return max(
+        1,
+        min(
+            _MAX_REGEX_MAX_RESULTS,
+            _coerce_int(args.get("max_results"), _DEFAULT_REGEX_MAX_RESULTS),
+        ),
     )
 
 
@@ -369,13 +413,7 @@ async def _execute_regex_search_impl(
     config = get_config_service().get_config()
     search_limits = config.search_limits_config
     subprocess_max_workers = config.background_jobs_config.subprocess_max_workers
-    max_results = max(
-        1,
-        min(
-            _MAX_REGEX_MAX_RESULTS,
-            _coerce_int(args.get("max_results"), _DEFAULT_REGEX_MAX_RESULTS),
-        ),
-    )
+    max_results = _effective_max_results(args)
     context_lines = max(
         0,
         min(
@@ -625,13 +663,17 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             started_monotonic=regex_started,
             correlation_id=get_correlation_id(),
         )
+        visible = rerank_meta.get("catalog_visible_count")
+        max_results = _effective_max_results(args)
         return _mcp_response(
             {
                 "success": True,
                 "matches": matches,
                 "total_matches": total_matches,
-                "truncated": sr.truncated,
-                "read_capped": sr.read_capped,
+                "truncated": caller_visible_flag(sr.truncated, visible, max_results),
+                "read_capped": caller_visible_flag(
+                    sr.read_capped, visible, max_results
+                ),
                 "search_engine": sr.search_engine,
                 "search_time_ms": sr.search_time_ms,
                 "query_metadata": {

@@ -7,11 +7,16 @@ AC1: Non-admin users calling regex_search on cidx-meta only see matches from
 AC2: Admin users retain full regex_search access to all cidx-meta files.
 AC3: Unit tests verify regex_search cidx-meta filtering.
 
-TDD: Tests written FIRST before implementation (red phase).
+The served catalog is a real directory holding every matched file and the
+alias universe is a real SQLite global-repos registry; only ripgrep and the
+server configuration are replaced.
 """
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,6 +25,8 @@ import pytest
 from code_indexer.server.mcp.handlers import handle_regex_search
 
 from .conftest import extract_mcp_data
+
+REGISTERED = ("repo-a", "repo-b", "repo-c", "cidx-meta")
 
 
 # ---------------------------------------------------------------------------
@@ -76,18 +83,45 @@ def _run(coro):
             loop.close()
 
 
+def _registry(db_path: Path) -> Any:
+    """A real SQLite global-repos registry naming every test repository."""
+    from code_indexer.server.storage.database_manager import DatabaseSchema
+    from code_indexer.server.storage.sqlite_backends import GlobalReposSqliteBackend
+
+    DatabaseSchema(str(db_path)).initialize_database()
+    registry = GlobalReposSqliteBackend(str(db_path))
+    for alias in REGISTERED:
+        registry.register_repo(
+            alias_name=f"{alias}-global",
+            repo_name=alias,
+            repo_url=None,
+            index_path=f"/golden/{alias}",
+        )
+    return registry
+
+
+def _served_directory(root: Path, search_result) -> Path:
+    """The served repository: every matched file, its match on line 1."""
+    for match in search_result.matches:
+        target = root / match.file_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"{match.line_content}\n", encoding="utf-8")
+    return root
+
+
 @contextmanager
 def _patch_regex_search_infrastructure(
-    repo_alias: str, search_result, access_filtering_service=None
+    tmp_path: Path, repo_alias: str, search_result, access_filtering_service=None
 ):
     """
-    Context manager that patches all required infrastructure for handle_regex_search
-    unit tests, isolating from the real server state.
+    Context manager that patches the infrastructure handle_regex_search needs,
+    isolating from the real server state.
 
     Patches:
-    - _get_golden_repos_dir: returns a fake path
-    - _resolve_repo_path: returns a fake resolved path
+    - _get_golden_repos_dir: returns a path that does not exist
+    - _resolve_repo_path: returns a real directory holding the matched files
     - _get_access_filtering_service: returns provided service or None
+    - server_app_state: a state whose registry is a real SQLite registry
     - RegexSearchService: returns an AsyncMock with the given result
     - _get_wiki_enabled_repos: returns empty set
     - _apply_regex_payload_truncation: identity function
@@ -95,39 +129,55 @@ def _patch_regex_search_infrastructure(
     """
     mock_service = AsyncMock()
     mock_service.search.return_value = search_result
-
-    repo_path = f"/fake/path/{repo_alias}"
-
-    with patch(
-        "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-        return_value="/fake/golden-repos",
-    ):
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=repo_path,
+    repo_path = _served_directory(tmp_path / repo_alias, search_result)
+    state = SimpleNamespace(
+        backend_registry=SimpleNamespace(
+            global_repos=_registry(tmp_path / "registry.db")
+        )
+    )
+    handlers = "code_indexer.server.mcp.handlers"
+    with ExitStack() as stack:
+        for target, kwargs in (
+            (f"{handlers}._get_golden_repos_dir", {"return_value": "/fake/golden"}),
+            (f"{handlers}._resolve_repo_path", {"return_value": str(repo_path)}),
+            (
+                f"{handlers}._get_access_filtering_service",
+                {"return_value": access_filtering_service},
+            ),
+            (
+                f"{handlers}.search.regex_search.server_app_state",
+                {"return_value": state},
+            ),
+            (
+                "code_indexer.global_repos.regex_search.RegexSearchService",
+                {"return_value": mock_service},
+            ),
+            (f"{handlers}._get_wiki_enabled_repos", {"return_value": set()}),
+            (
+                f"{handlers}._apply_regex_payload_truncation",
+                {"side_effect": lambda x, **kw: x},
+            ),
         ):
-            with patch(
-                "code_indexer.server.mcp.handlers._get_access_filtering_service",
-                return_value=access_filtering_service,
-            ):
-                with patch(
-                    "code_indexer.global_repos.regex_search.RegexSearchService",
-                    return_value=mock_service,
-                ):
-                    with patch(
-                        "code_indexer.server.mcp.handlers._get_wiki_enabled_repos",
-                        return_value=set(),
-                    ):
-                        with patch(
-                            "code_indexer.server.mcp.handlers._apply_regex_payload_truncation",
-                            side_effect=lambda x, **kw: x,
-                        ):
-                            with patch(
-                                "code_indexer.server.services.config_service.get_config_service"
-                            ) as mock_cfg:
-                                mock_cfg.return_value.get_config.return_value.search_limits_config.timeout_seconds = 30
-                                mock_cfg.return_value.get_config.return_value.background_jobs_config.subprocess_max_workers = 2
-                                yield
+            stack.enter_context(patch(target, **kwargs))
+        mock_cfg = stack.enter_context(
+            patch("code_indexer.server.services.config_service.get_config_service")
+        )
+        config = mock_cfg.return_value.get_config.return_value
+        config.search_limits_config.timeout_seconds = 30
+        config.background_jobs_config.subprocess_max_workers = 2
+        yield
+
+
+def _search(tmp_path: Path, alias: str, matches, service, user, pattern: str):
+    search_result = make_search_result(matches)
+    with _patch_regex_search_infrastructure(tmp_path, alias, search_result, service):
+        result = _run(
+            handle_regex_search({"repository_alias": alias, "pattern": pattern}, user)
+        )
+    return extract_mcp_data(result)
+
+
+ALL_FOUR = ("repo-a.md", "repo-b.md", "repo-c.md", "README.md")
 
 
 # ---------------------------------------------------------------------------
@@ -140,31 +190,21 @@ class TestRegexSearchCidxMetaAccessFilteringNonAdmin:
     """AC1 + AC3: regex_search on cidx-meta filters unauthorized repo .md files."""
 
     def test_regular_user_sees_no_catalog_matches(
-        self, regular_user, access_filtering_service
+        self, tmp_path, regular_user, access_filtering_service
     ):
         """
         regular_user belongs to 'users' group (cidx-meta only).
         Matches from repo-a.md, repo-b.md, repo-c.md and README.md are hidden.
         """
-        all_matches = [
-            make_regex_match("repo-a.md"),
-            make_regex_match("repo-b.md"),
-            make_regex_match("repo-c.md"),
-            make_regex_match("README.md"),
-        ]
-        search_result = make_search_result(all_matches)
-
-        with _patch_regex_search_infrastructure(
-            "cidx-meta", search_result, access_filtering_service
-        ):
-            result = _run(
-                handle_regex_search(
-                    {"repository_alias": "cidx-meta", "pattern": "description"},
-                    regular_user,
-                )
-            )
-
-        data = extract_mcp_data(result)
+        matches = [make_regex_match(p) for p in ALL_FOUR]
+        data = _search(
+            tmp_path,
+            "cidx-meta",
+            matches,
+            access_filtering_service,
+            regular_user,
+            "description",
+        )
         assert data["success"] is True
         returned_files = [m["file_path"] for m in data["matches"]]
         assert "repo-a.md" not in returned_files
@@ -173,31 +213,21 @@ class TestRegexSearchCidxMetaAccessFilteringNonAdmin:
         assert "README.md" not in returned_files
 
     def test_power_user_sees_only_accessible_repo_matches(
-        self, power_user, access_filtering_service
+        self, tmp_path, power_user, access_filtering_service
     ):
         """
         power_user belongs to 'powerusers' group (repo-a, repo-b, cidx-meta).
         Matches from repo-a.md and repo-b.md visible; repo-c.md hidden.
         """
-        all_matches = [
-            make_regex_match("repo-a.md"),
-            make_regex_match("repo-b.md"),
-            make_regex_match("repo-c.md"),
-            make_regex_match("README.md"),
-        ]
-        search_result = make_search_result(all_matches)
-
-        with _patch_regex_search_infrastructure(
-            "cidx-meta", search_result, access_filtering_service
-        ):
-            result = _run(
-                handle_regex_search(
-                    {"repository_alias": "cidx-meta", "pattern": "description"},
-                    power_user,
-                )
-            )
-
-        data = extract_mcp_data(result)
+        matches = [make_regex_match(p) for p in ALL_FOUR]
+        data = _search(
+            tmp_path,
+            "cidx-meta",
+            matches,
+            access_filtering_service,
+            power_user,
+            "description",
+        )
         assert data["success"] is True
         returned_files = [m["file_path"] for m in data["matches"]]
         assert "repo-a.md" in returned_files
@@ -206,29 +236,21 @@ class TestRegexSearchCidxMetaAccessFilteringNonAdmin:
         assert "repo-c.md" not in returned_files
 
     def test_regular_user_cidx_meta_global_alias_also_filtered(
-        self, regular_user, access_filtering_service
+        self, tmp_path, regular_user, access_filtering_service
     ):
         """
         The cidx-meta-global alias (the catalog's registry entry) must also be
         filtered for non-admin users.
         """
-        all_matches = [
-            make_regex_match("repo-a.md"),
-            make_regex_match("README.md"),
-        ]
-        search_result = make_search_result(all_matches)
-
-        with _patch_regex_search_infrastructure(
-            "cidx-meta-global", search_result, access_filtering_service
-        ):
-            result = _run(
-                handle_regex_search(
-                    {"repository_alias": "cidx-meta-global", "pattern": "description"},
-                    regular_user,
-                )
-            )
-
-        data = extract_mcp_data(result)
+        matches = [make_regex_match("repo-a.md"), make_regex_match("README.md")]
+        data = _search(
+            tmp_path,
+            "cidx-meta-global",
+            matches,
+            access_filtering_service,
+            regular_user,
+            "description",
+        )
         assert data["success"] is True
         returned_files = [m["file_path"] for m in data["matches"]]
         assert "repo-a.md" not in returned_files
@@ -244,30 +266,22 @@ class TestRegexSearchCidxMetaAccessFilteringNonAdmin:
 class TestRegexSearchCidxMetaAccessFilteringAdmin:
     """AC2: Admin users retain full regex_search access to all cidx-meta files."""
 
-    def test_admin_user_sees_all_matches(self, admin_user, access_filtering_service):
+    def test_admin_user_sees_all_matches(
+        self, tmp_path, admin_user, access_filtering_service
+    ):
         """
         admin_user belongs to 'admins' group.
         All matches are returned without filtering.
         """
-        all_matches = [
-            make_regex_match("repo-a.md"),
-            make_regex_match("repo-b.md"),
-            make_regex_match("repo-c.md"),
-            make_regex_match("README.md"),
-        ]
-        search_result = make_search_result(all_matches)
-
-        with _patch_regex_search_infrastructure(
-            "cidx-meta", search_result, access_filtering_service
-        ):
-            result = _run(
-                handle_regex_search(
-                    {"repository_alias": "cidx-meta", "pattern": "description"},
-                    admin_user,
-                )
-            )
-
-        data = extract_mcp_data(result)
+        matches = [make_regex_match(p) for p in ALL_FOUR]
+        data = _search(
+            tmp_path,
+            "cidx-meta",
+            matches,
+            access_filtering_service,
+            admin_user,
+            "description",
+        )
         assert data["success"] is True
         returned_files = [m["file_path"] for m in data["matches"]]
         assert "repo-a.md" in returned_files
@@ -277,53 +291,32 @@ class TestRegexSearchCidxMetaAccessFilteringAdmin:
         assert len(data["matches"]) == 4
 
     def test_non_cidx_meta_repo_not_filtered(
-        self, regular_user, access_filtering_service
+        self, tmp_path, regular_user, access_filtering_service
     ):
         """
         Non-cidx-meta repos must not be affected by this filtering logic.
         All matches pass through for any repo that is not cidx-meta.
         """
-        all_matches = [
-            make_regex_match("src/auth.py"),
-            make_regex_match("src/secret.py"),
-        ]
-        search_result = make_search_result(all_matches)
-
-        with _patch_regex_search_infrastructure(
-            "some-repo", search_result, access_filtering_service
-        ):
-            result = _run(
-                handle_regex_search(
-                    {"repository_alias": "some-repo", "pattern": "auth"},
-                    regular_user,
-                )
-            )
-
-        data = extract_mcp_data(result)
+        matches = [make_regex_match("src/auth.py"), make_regex_match("src/secret.py")]
+        data = _search(
+            tmp_path,
+            "some-repo",
+            matches,
+            access_filtering_service,
+            regular_user,
+            "auth",
+        )
         assert data["success"] is True
         assert len(data["matches"]) == 2
 
-    def test_no_access_filtering_service_returns_no_matches(self, regular_user):
+    def test_no_access_filtering_service_returns_no_matches(
+        self, tmp_path, regular_user
+    ):
         """
         If access_filtering_service is not configured, no match is returned.
         """
-        all_matches = [
-            make_regex_match("repo-a.md"),
-            make_regex_match("repo-b.md"),
-        ]
-        search_result = make_search_result(all_matches)
-
-        with _patch_regex_search_infrastructure(
-            "cidx-meta", search_result, access_filtering_service=None
-        ):
-            result = _run(
-                handle_regex_search(
-                    {"repository_alias": "cidx-meta", "pattern": "description"},
-                    regular_user,
-                )
-            )
-
-        data = extract_mcp_data(result)
+        matches = [make_regex_match("repo-a.md"), make_regex_match("repo-b.md")]
+        data = _search(tmp_path, "cidx-meta", matches, None, regular_user, "desc")
         assert data["success"] is True
         assert data["matches"] == []
 
@@ -338,7 +331,7 @@ class TestRegexSearchTotalMatchesReflectsFilteredCount:
     """Bug #337: total_matches in response must equal len(matches) after filtering."""
 
     def test_total_matches_equals_filtered_count_for_non_admin(
-        self, power_user, access_filtering_service
+        self, tmp_path, power_user, access_filtering_service
     ):
         """
         When filtering removes matches, total_matches must reflect filtered count.
@@ -346,26 +339,16 @@ class TestRegexSearchTotalMatchesReflectsFilteredCount:
         matches; repo-c.md and README.md are hidden, so total_matches must be
         2, not 4.
         """
-        all_matches = [
-            make_regex_match("repo-a.md"),
-            make_regex_match("repo-b.md"),
-            make_regex_match("repo-c.md"),
-            make_regex_match("README.md"),
-        ]
-        search_result = make_search_result(all_matches)
-        assert search_result.total_matches == 4
-
-        with _patch_regex_search_infrastructure(
-            "cidx-meta", search_result, access_filtering_service
-        ):
-            result = _run(
-                handle_regex_search(
-                    {"repository_alias": "cidx-meta", "pattern": "description"},
-                    power_user,
-                )
-            )
-
-        data = extract_mcp_data(result)
+        matches = [make_regex_match(p) for p in ALL_FOUR]
+        assert make_search_result(matches).total_matches == 4
+        data = _search(
+            tmp_path,
+            "cidx-meta",
+            matches,
+            access_filtering_service,
+            power_user,
+            "description",
+        )
         assert data["success"] is True
         assert len(data["matches"]) == 2
         assert data["total_matches"] == 2, (
@@ -374,27 +357,19 @@ class TestRegexSearchTotalMatchesReflectsFilteredCount:
         )
 
     def test_total_matches_equals_match_count_when_no_filtering_applied(
-        self, admin_user, access_filtering_service
+        self, tmp_path, admin_user, access_filtering_service
     ):
         """
         For admin users (no filtering), total_matches must still equal len(matches).
         """
-        all_matches = [
-            make_regex_match("repo-a.md"),
-            make_regex_match("repo-b.md"),
-        ]
-        search_result = make_search_result(all_matches)
-
-        with _patch_regex_search_infrastructure(
-            "cidx-meta", search_result, access_filtering_service
-        ):
-            result = _run(
-                handle_regex_search(
-                    {"repository_alias": "cidx-meta", "pattern": "description"},
-                    admin_user,
-                )
-            )
-
-        data = extract_mcp_data(result)
+        matches = [make_regex_match("repo-a.md"), make_regex_match("repo-b.md")]
+        data = _search(
+            tmp_path,
+            "cidx-meta",
+            matches,
+            access_filtering_service,
+            admin_user,
+            "description",
+        )
         assert data["success"] is True
         assert data["total_matches"] == len(data["matches"]) == 2

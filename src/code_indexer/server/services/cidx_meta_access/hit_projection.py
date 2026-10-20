@@ -6,8 +6,11 @@ projected lines of the hit's own range (``MetaProjector.project_chunk``, so
 a hit never shows more than its current document); a line the projection
 removed becomes an empty line, so line numbers stay valid. A catalog hit
 carries only ``CATALOG_HIT_FIELDS``: a field added to a hit shape later is
-dropped, never passed through. A full-text hit is re-matched on the
-projected text (``TextRematch``), so the existence of a hit never proves a
+dropped, never passed through. A full-text hit must still match on what
+the caller sees (``TextRematch``): literal terms by substring on the
+projected text; a regex match (full-text or ripgrep) keeps the engine's own
+match only when the lines it covers are shown verbatim. The caller's
+pattern is never evaluated here. So the existence of a hit never proves a
 hidden term is in the document. A hit with no text left is dropped.
 
 Projection is idempotent: a line that already equals its projected form is
@@ -20,7 +23,6 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence
@@ -67,6 +69,44 @@ _NEAR_WINDOW = 64
 
 
 @dataclass(frozen=True)
+class LineView:
+    """Text as the caller sees it, line-aligned with the raw text, and for
+    each line whether it is in the current document and shown verbatim."""
+
+    lines: List[str]
+    unchanged: List[bool]
+
+    @classmethod
+    def verbatim(cls, text: str) -> "LineView":
+        lines = text.split("\n")
+        return cls(lines=lines, unchanged=[True] * len(lines))
+
+    @property
+    def text(self) -> Optional[str]:
+        """The shown text, or None when no line has anything left."""
+        if not any(line.strip() for line in self.lines):
+            return None
+        return "\n".join(self.lines)
+
+
+def engine_match_on_unchanged_lines(
+    raw: str, unchanged: Sequence[bool], needle: Optional[str]
+) -> Optional[str]:
+    """*needle* (the text the search engine matched) when one of its
+    occurrences in *raw* lies only on lines shown verbatim, else None."""
+    if not needle:
+        return None
+    start = raw.find(needle)
+    while start >= 0:
+        first = raw.count("\n", 0, start)
+        last = first + needle.count("\n")
+        if last < len(unchanged) and all(unchanged[first : last + 1]):
+            return needle
+        start = raw.find(needle, start + 1)
+    return None
+
+
+@dataclass(frozen=True)
 class TextRematch:
     """The full-text query a hit must still match on its projected text."""
 
@@ -74,19 +114,16 @@ class TextRematch:
     case_sensitive: bool = False
     regex: bool = False
 
-    def _flags(self) -> int:
-        return 0 if self.case_sensitive else re.IGNORECASE
-
-    def match(self, text: str, match_text: Optional[str]) -> Optional[str]:
-        """The match in *text* (the new ``match_text``), or None when the
-        projected text no longer matches. A pattern Python cannot compile
-        never matches (deny by default)."""
+    def match(
+        self, raw: str, view: LineView, match_text: Optional[str]
+    ) -> Optional[str]:
+        """The new ``match_text`` for a hit whose raw text *raw* is shown as
+        *view*, or None when the hit no longer matches. A regex query keeps
+        the engine's own *match_text* only on lines shown verbatim; it is
+        never evaluated here."""
         if self.regex:
-            try:
-                found = re.search(self.query, text, self._flags() | re.MULTILINE)
-            except re.error:
-                return None
-            return found.group(0) if found and found.group(0) else None
+            return engine_match_on_unchanged_lines(raw, view.unchanged, match_text)
+        text = "\n".join(view.lines)
         needles = [match_text] if match_text else self.query.split()
         haystack = text if self.case_sensitive else text.lower()
         for needle in needles:
@@ -212,12 +249,13 @@ def _locate(
 
 def _project_lines_at(
     scope: CatalogScope, relative_path: str, lines: List[str], first: int
-) -> Optional[List[str]]:
+) -> Optional[LineView]:
     """*lines* taken to sit at 1-based *first* of the current document, as
     the caller sees them (aligned; removed lines empty). A whole line takes
     its projected form, a partial line is kept only inside its projected
-    line, and a line that is not in the document there is emptied. None
-    when the document cannot be read or *first* is not a line."""
+    line, and a line that is not in the document there is emptied. A line
+    is unchanged when its document line projects to itself. None when the
+    document cannot be read or *first* is not a line."""
     doc = scope.document(relative_path)
     if doc is None or first < 1:
         return None
@@ -230,14 +268,35 @@ def _project_lines_at(
     raw_lines = [doc[i] if ok else line for line, i, ok in zip(lines, indexes, current)]
     verdicts = scope.projector.project_chunk(raw_lines, first, doc, relative_path)
     out: List[str] = []
+    unchanged: List[bool] = []
     for line, raw, i, ok, verdict in zip(lines, raw_lines, indexes, current, verdicts):
+        unchanged.append(ok and verdict == raw)
         if not ok or verdict is None:
             out.append("")
         elif line == raw or line == shown[i]:
             out.append(verdict)
         else:
             out.append(line if line in verdict else "")
-    return out
+    return LineView(lines=out, unchanged=unchanged)
+
+
+def project_chunk_view(
+    scope: CatalogScope, relative_path: str, text: str, hint: Optional[int]
+) -> Optional[LineView]:
+    """*text* (lines of the document starting near *hint*) as the caller
+    sees it; None when it is not in the current document or no line of it
+    has anything left (``LineView.text`` is None)."""
+    doc = scope.document(relative_path)
+    if doc is None:
+        return None
+    chunk = text.split("\n")
+    first = _locate(chunk, doc, scope.rendered(relative_path, doc), hint)
+    view = (
+        None if first is None else _project_lines_at(scope, relative_path, chunk, first)
+    )
+    if view is None or view.text is None:
+        return None
+    return view
 
 
 def project_text(
@@ -245,17 +304,8 @@ def project_text(
 ) -> Optional[str]:
     """*text* (lines of the document starting near *hint*) as the caller
     sees it, line-aligned; None when nothing of it remains."""
-    doc = scope.document(relative_path)
-    if doc is None:
-        return None
-    chunk = text.split("\n")
-    first = _locate(chunk, doc, scope.rendered(relative_path, doc), hint)
-    out = (
-        None if first is None else _project_lines_at(scope, relative_path, chunk, first)
-    )
-    if out is None or not any(line.strip() for line in out):
-        return None
-    return "\n".join(out)
+    view = project_chunk_view(scope, relative_path, text, hint)
+    return None if view is None else view.text
 
 
 def _rebuild(hit: Any, updates: Dict[str, Optional[str]]) -> Any:
@@ -298,25 +348,30 @@ def _project_one(
     texts = {key: value for key in _TEXT_KEYS if (value := _get(hit, (key,)))}
     projected_kind = decision.kind in _PROJECTED_KINDS
     updates: Dict[str, Optional[str]] = {}
-    if projected_kind:
-        hint = _get(hit, _LINE_KEYS)
-        for key, value in texts.items():
-            updates[key] = (
-                project_text(scope, path, value, hint)
-                if isinstance(value, str)
-                else None
+    views: Dict[str, LineView] = {}
+    hint = _get(hit, _LINE_KEYS)
+    for key, value in texts.items():
+        view: Optional[LineView] = None
+        if isinstance(value, str):
+            view = (
+                project_chunk_view(scope, path, value, hint)
+                if projected_kind
+                else LineView.verbatim(value)
             )
-        if texts and not any(updates.values()):
-            return None
-    shown = [
-        text
-        for text in (updates.get(k, v) for k, v in texts.items())
-        if isinstance(text, str) and text
-    ]
+        if view is not None:
+            views[key] = view
+        if projected_kind:
+            updates[key] = None if view is None else view.text
+    if projected_kind and texts and not views:
+        return None
+    shown = [text for view in views.values() if (text := view.text)]
     match_text = _get(hit, ("match_text",))
     if rematch is not None:
         prior = match_text if isinstance(match_text, str) else None
-        found = next((m for m in (rematch.match(t, prior) for t in shown) if m), None)
+        found = next(
+            (m for k, v in views.items() if (m := rematch.match(texts[k], v, prior))),
+            None,
+        )
         if found is None:
             return None
         if _first_key(hit, ("match_text",)) is not None:
@@ -353,18 +408,8 @@ REGEX_MATCH_FIELDS: FrozenSet[str] = frozenset(
 )
 
 
-def _compile(pattern: str, case_sensitive: bool, multiline: bool) -> Optional[Any]:
-    flags = 0 if case_sensitive else re.IGNORECASE
-    if multiline:
-        flags |= re.MULTILINE | re.DOTALL
-    try:
-        return re.compile(pattern, flags)
-    except re.error:
-        return None
-
-
 def _project_match(
-    match: Dict[str, Any], scope: CatalogScope, compiled: Optional[Any]
+    match: Dict[str, Any], scope: CatalogScope
 ) -> Optional[Dict[str, Any]]:
     path = match.get("file_path")
     if not isinstance(path, str):
@@ -379,41 +424,31 @@ def _project_match(
     content = str(match.get("line_content") or "").split("\n")
     after = [str(x) for x in match.get("context_after") or []]
     line_number = match.get("line_number")
-    if compiled is None or not isinstance(line_number, int):
+    if not isinstance(line_number, int):
         return None
-    lines = _project_lines_at(
+    view = _project_lines_at(
         scope, path, before + content + after, line_number - len(before)
     )
-    if lines is None:
+    match_lines = slice(len(before), len(before) + len(content))
+    if view is None or not all(view.unchanged[match_lines]):
         return None
-    projected_content = "\n".join(lines[len(before) : len(before) + len(content)])
-    found = compiled.search(projected_content)
-    if found is None:
-        return None
-    line_start = projected_content.rfind("\n", 0, found.start()) + 1
     kept.update(
-        context_before=lines[: len(before)],
-        line_content=projected_content,
-        context_after=lines[len(before) + len(content) :],
-        column=found.start() - line_start + 1,
+        context_before=view.lines[: len(before)],
+        line_content="\n".join(view.lines[match_lines]),
+        context_after=view.lines[match_lines.stop :],
     )
     return kept
 
 
 def project_regex_matches(
-    matches: Sequence[Dict[str, Any]],
-    scope: CatalogScope,
-    *,
-    pattern: str,
-    case_sensitive: bool,
-    multiline: bool,
+    matches: Sequence[Dict[str, Any]], scope: CatalogScope
 ) -> List[Dict[str, Any]]:
-    """The catalog regex *matches* the caller may see, projected and
-    re-matched on the projected text, in input order."""
-    compiled = _compile(pattern, case_sensitive, multiline)
+    """The catalog regex *matches* the caller may see, in input order: a
+    match is kept (with the engine's line and column) only when every line
+    it covers is shown verbatim; its context lines are projected."""
     out: List[Dict[str, Any]] = []
     for match in matches:
-        projected = _project_match(match, scope, compiled)
+        projected = _project_match(match, scope)
         if projected is not None:
             out.append(projected)
     return out

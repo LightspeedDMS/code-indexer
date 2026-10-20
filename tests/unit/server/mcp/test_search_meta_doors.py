@@ -259,3 +259,28 @@ def test_handles_are_refused_after_a_revocation(env: CatalogEnv) -> None:
         assert after.get("success") is not True
     finally:
         gam.grant_repo_access(ALPHA, team.id, granted_by="test")
+
+
+def test_reranker_receives_only_projected_candidates(
+    env: CatalogEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from code_indexer.server.mcp import reranking
+
+    real = reranking._apply_reranking_sync
+    seen: List[Any] = []
+
+    def observing(**kwargs: Any) -> Any:
+        seen.append(list(kwargs["results"]))
+        return real(**kwargs)
+
+    monkeypatch.setattr(reranking, "_apply_reranking_sync", observing)
+    _search(
+        RESTRICTED,
+        query_text="payments",
+        repository_alias=CATALOG_ALIAS,
+        rerank_query="payments ledger",
+        limit=10,
+    )
+    assert seen and seen[0]
+    candidates = dump([getattr(r, "__dict__", r) for batch in seen for r in batch])
+    assert CANARY not in candidates and GAMMA not in candidates
