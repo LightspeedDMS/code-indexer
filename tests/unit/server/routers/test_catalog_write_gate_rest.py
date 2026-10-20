@@ -58,7 +58,10 @@ def client(env: CatalogFileDoorEnv) -> Iterator[TestClient]:
     for name, value in vars(env.state).items():
         setattr(app.state, name, value)
     app.include_router(router)
-    app.dependency_overrides[get_current_user] = lambda: user()
+    from code_indexer.server.auth.user_manager import UserRole
+
+    # The routes require repository:write: the caller holds it, the gate decides.
+    app.dependency_overrides[get_current_user] = lambda: user(role=UserRole.POWER_USER)
     saved = dict(file_crud_service._global_write_exceptions)
     saved_golden = file_crud_service._golden_repos_dir
     file_crud_service.register_write_exception(CATALOG_ALIAS, env.fx.root)

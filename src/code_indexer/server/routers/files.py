@@ -10,7 +10,7 @@ from typing import Callable, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
-from code_indexer.server.auth.dependencies import get_current_user
+from code_indexer.server.auth.dependencies import require_permission
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.cidx_meta_access.file_doors import (
     CatalogFileAccess,
@@ -133,7 +133,7 @@ def create_file(
     alias: str,
     request: CreateFileRequest,
     http_request: Request,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("repository:write")),
 ) -> CreateFileResponse:
     """
     Create a new file in the repository.
@@ -227,7 +227,7 @@ def edit_file(
     file_path: str,
     request: EditFileRequest,
     http_request: Request,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("repository:write")),
 ) -> EditFileResponse:
     """
     Edit an existing file in the repository.
@@ -325,7 +325,7 @@ def delete_file(
     content_hash: Optional[str] = Query(
         None, description="Expected content hash for verification"
     ),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("repository:write")),
 ) -> DeleteFileResponse:
     """
     Delete a file from the repository.

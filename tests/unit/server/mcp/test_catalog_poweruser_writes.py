@@ -102,7 +102,10 @@ def test_full_visibility_power_user_edits_via_rest(
     client: TestClient,  # noqa: F811
     path: str,
 ) -> None:
-    client.app.dependency_overrides[get_current_user] = lambda: user(POWER_USER)  # type: ignore[attr-defined]
+    from code_indexer.server.auth.user_manager import UserRole
+
+    caller = user(POWER_USER, role=UserRole.POWER_USER)
+    client.app.dependency_overrides[get_current_user] = lambda: caller  # type: ignore[attr-defined]
     body = {
         "old_string": ALPHA,
         "new_string": "renamed-sample",

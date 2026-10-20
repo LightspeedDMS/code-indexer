@@ -85,11 +85,13 @@ class GoldenActivity:
         return [alias for alias in aliases if alias in self.active]
 
 
-def user(name: str = RESTRICTED_USER) -> User:
+def user(name: str = RESTRICTED_USER, role: Optional[UserRole] = None) -> User:
+    if role is None:
+        role = UserRole.ADMIN if name == ADMIN_USER else UserRole.NORMAL_USER
     return User(
         username=name,
         password_hash="hash",
-        role=UserRole.ADMIN if name == ADMIN_USER else UserRole.NORMAL_USER,
+        role=role,
         created_at=datetime.now(),
     )
 
