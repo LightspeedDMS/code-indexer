@@ -126,7 +126,10 @@ def test_index_counts_are_recomputed_per_user(fx: CidxMetaFixture) -> None:
     assert f"| {ALPHA} | payments |" in text
     for hidden in (CANARY, GAMMA, "inventory"):
         assert hidden not in text
-    assert "repos_analyzed_count: 3" in lines[3]  # source untouched
+    # A hidden alias shorter than the prose minimum is still filtered.
+    assert f"  - {SHORT_ALIAS}" not in text
+    assert f"| {SHORT_ALIAS} |" not in text
+    assert "repos_analyzed_count: 4" in lines[3]  # source untouched
 
 
 def test_admin_index_view_keeps_full_counts(fx: CidxMetaFixture) -> None:

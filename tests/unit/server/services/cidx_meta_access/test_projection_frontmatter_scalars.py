@@ -46,7 +46,7 @@ def _refunds_document() -> str:
             f"owner: {CANARY}",
             f'summary: "Settled by {CANARY} nightly"',
             f"motto: '{CANARY}: always on'",
-            f"tricky: {json.dumps(TRICKY + ' ' + CANARY)}",
+            f"tricky: '{TRICKY} {CANARY}'",
             "notes: |",
             f"  {CANARY} keeps the ledger",
             "last_analyzed: 2026-01-01T00:00:00+00:00",
@@ -125,7 +125,7 @@ def test_frontmatter_that_cannot_stay_valid_is_removed_with_a_diagnostic(
 ) -> None:
     (fx.dep_map_dir / "spaced.md").write_text(
         "---\ndomain: spaced\nparticipating_repos:\n"
-        f"  - {ALPHA}\nrelease owner: {CANARY} team\n---\n\n"
+        f'  - {ALPHA}\ntitle: "the {CANARY[:5]}\\\n  {CANARY[5:]} owns it"\n---\n\n'
         f"# Domain Analysis: spaced\n\n{ALPHA} body text.\n",
         encoding="utf-8",
     )

@@ -27,6 +27,7 @@ from tests.shared.cidx_meta_visibility_fixture import (
     ALPHA,
     CANARY,
     RESTRICTED_USER,
+    SHORT_ALIAS,
     CidxMetaFixture,
     build_cidx_meta_fixture,
     read_lines,
@@ -57,8 +58,8 @@ def test_live_directory_edit_yields_a_fresh_model(fx: CidxMetaFixture) -> None:
     _retarget_ledger(fx.dep_map_dir)
     after = load_depmap_model(fx.dep_map_dir)
     assert after is not before
-    assert before.participants["ledger"] == frozenset({ALPHA})
-    assert after.participants["ledger"] == frozenset({CANARY})
+    assert before.participants["ledger"] == frozenset({ALPHA, SHORT_ALIAS})
+    assert after.participants["ledger"] == frozenset({CANARY, SHORT_ALIAS})
 
 
 def test_immutable_snapshot_is_parsed_once_per_process(
@@ -73,7 +74,7 @@ def test_immutable_snapshot_is_parsed_once_per_process(
     second = load_depmap_model(snapshot_dep_map)
 
     assert second is first
-    assert second.participants["ledger"] == frozenset({ALPHA})
+    assert second.participants["ledger"] == frozenset({ALPHA, SHORT_ALIAS})
 
 
 def test_equal_visible_sets_share_projections_and_different_never(

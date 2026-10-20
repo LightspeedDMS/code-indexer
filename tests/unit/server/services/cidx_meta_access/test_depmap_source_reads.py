@@ -8,10 +8,11 @@ opens are traced with an audit hook; real fixture, no mocks.
 
 from __future__ import annotations
 
+import os
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Iterator, List, Optional, Tuple
 
 import pytest
 
@@ -34,10 +35,21 @@ from tests.shared.cidx_meta_visibility_fixture import (
 _tracing: List[Optional[List[str]]] = [None]
 
 
-def _audit(event: str, args: Tuple[Any, ...]) -> None:
-    opened = _tracing[0]
-    if opened is not None and event == "open" and isinstance(args[0], (str, Path)):
-        opened.append(str(args[0]))
+def _audit(
+    event: str,
+    args: Tuple[Any, ...],
+    _state: List[Optional[List[str]]] = _tracing,
+    _isinstance: Callable[[object, Any], bool] = isinstance,
+    _path_types: Tuple[type, ...] = (str, os.PathLike),
+    _fspath: Callable[[Any], Any] = os.fspath,
+) -> None:
+    # Installed for the whole process: everything is bound here (no global
+    # lookup), so it is a no-op outside a trace and safe at shutdown.
+    opened = _state[0]
+    if opened is None or event != "open":
+        return
+    if args and _isinstance(args[0], _path_types):
+        opened.append(str(_fspath(args[0])))
 
 
 sys.addaudithook(_audit)

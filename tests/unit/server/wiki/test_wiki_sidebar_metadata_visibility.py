@@ -15,6 +15,7 @@ import pytest
 
 from code_indexer.server.services.cidx_meta_access import (
     MetaProjector,
+    projection_cache_stats,
     resolve_meta_visibility,
 )
 from code_indexer.server.services.cidx_meta_access.catalog_articles import (
@@ -36,6 +37,7 @@ from tests.shared.cidx_meta_visibility_fixture import (
     ALPHA,
     CANARY,
     RESTRICTED_USER,
+    SHORT_ALIAS,
     CidxMetaFixture,
     build_cidx_meta_fixture,
 )
@@ -78,6 +80,30 @@ def test_sidebar_title_and_category_of_an_allowed_article_are_redacted(
     # The shared (cached) sidebar is never modified.
     assert shared == before
     assert CANARY in json.dumps(shared)
+
+
+def test_sidebar_projection_never_touches_the_shared_projection_cache(
+    fx: CidxMetaFixture,
+) -> None:
+    ledger = fx.dep_map_dir / "ledger.md"
+    ledger.write_text(
+        ledger.read_text(encoding="utf-8").replace(
+            "domain: ledger\n", f"domain: ledger\ntitle: {SHORT_ALIAS}\n", 1
+        ),
+        encoding="utf-8",
+    )
+    shared = WikiService().build_sidebar_tree(fx.root, "cidx-meta")
+    view = _view(fx)
+    before = projection_cache_stats()
+    filtered = filter_sidebar(shared, view)
+    after = projection_cache_stats()
+    assert after.projections_computed == before.projections_computed
+    assert after.projection_hits == before.projection_hits
+    group = next(g for g in filtered if g["name"] == "dependency-map")
+    entries = [e for cat in group["categories"].values() for e in cat]
+    assert next(e for e in entries if e["path"] == "dependency-map/ledger")[
+        "title"
+    ] == ("Ledger")
 
 
 def test_page_title_of_an_allowed_article_is_redacted(fx: CidxMetaFixture) -> None:

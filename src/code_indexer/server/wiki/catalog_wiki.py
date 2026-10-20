@@ -151,8 +151,12 @@ def render_projected_page(
 
 
 def _article_visible(view: CatalogWikiView, article_path: str) -> bool:
-    found = _canonical(view, article_relative_path(article_path))
-    return found is not None and view.decide(found[1]).kind is not DecisionKind.DENY
+    # _canonical only succeeds when the served path equals the requested
+    # one, so judging the request first is the same decision without I/O.
+    requested = article_relative_path(article_path)
+    if view.decide(requested).kind is DecisionKind.DENY:
+        return False
+    return _canonical(view, requested) is not None
 
 
 def filter_articles(
@@ -163,12 +167,11 @@ def filter_articles(
     return [a for a in articles if _article_visible(view, str(a["path"]))]
 
 
-def _projected_label(
-    view: CatalogWikiView, text: str, relative_path: str, fallback: str
-) -> str:
+def _projected_label(view: CatalogWikiView, text: str, fallback: str) -> str:
     """*text* (a title or category taken from an article's raw content)
-    through the caller's projection; *fallback* when it is removed."""
-    projected = view.projector.project([text], relative_path)[0]
+    through the caller's view (never the shared projection cache);
+    *fallback* when it is removed."""
+    projected = view.projector.redact_label(text)
     return projected if projected else fallback
 
 
@@ -179,9 +182,7 @@ def _projected_entries(
     for entry in filter_articles(entries, view):
         path = str(entry["path"])
         derived = PurePosixPath(path).name.replace("-", " ").replace("_", " ").title()
-        title = _projected_label(
-            view, str(entry.get("title", "")), article_relative_path(path), derived
-        )
+        title = _projected_label(view, str(entry.get("title", "")), derived)
         kept.append({**entry, "title": title})
     return kept
 
@@ -198,8 +199,7 @@ def filter_sidebar(sidebar: List[Dict[str, Any]], view: CatalogWikiView) -> List
             kept = _projected_entries(list(entries), view)
             if not kept:
                 continue
-            first = article_relative_path(str(kept[0]["path"]))
-            label = _projected_label(view, str(name), first, UNCATEGORIZED_LABEL)
+            label = _projected_label(view, str(name), UNCATEGORIZED_LABEL)
             categories.setdefault(label, []).extend(kept)
         for merged in categories.values():
             merged.sort(key=lambda a: str(a["title"]).lower())

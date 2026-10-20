@@ -83,7 +83,9 @@ _ALIAS_CHARS = "A-Za-z0-9_-"
 _LIST_ITEM = re.compile(r"^\s*-\s+(?P<value>.+?)\s*$")
 _YAML_SHAPED = re.compile(r"^\s*(?:[A-Za-z_][\w-]*\s*:.*|-\s+.*)?$")
 _INLINE_LIST = re.compile(r"^(?P<prefix>\s*[A-Za-z_][\w-]*:\s*)\[(?P<body>.*)\]\s*$")
-_SCALAR_LINE = re.compile(r"^(?P<prefix>\s*[A-Za-z_][\w-]*:[ \t]+)(?P<value>\S.*?)\s*$")
+_SCALAR_LINE = re.compile(
+    r"^(?P<prefix>\s*[^\s\-?:#\[\]{},&*!|>'\"%@`][^:#]*?:[ \t]+)(?P<value>\S.*?)\s*$"
+)
 _COUNT_LINE = re.compile(
     r"^(?P<prefix>\s*(?P<key>repos_analyzed_count|domains_count):\s*)\d+\s*$"
 )
@@ -457,6 +459,20 @@ def _scalar_string(text: str) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
+def _names_hidden(text: str, view: _View) -> bool:
+    """*text* mentions a hidden name, or is one whatever its length."""
+    return normalize_name(text) in view.blocked_repos or _mentions_hidden(text, view)
+
+
+def _decoded_hidden(text: str, view: _View) -> bool:
+    """A double-quoted YAML value written with backslash escapes whose
+    decoded string names a hidden repository."""
+    if "\\" not in text or not text.startswith('"'):
+        return False
+    value = _scalar_string(text)
+    return value is not None and _names_hidden(value, view)
+
+
 def _project_frontmatter_line(line: str, view: _View) -> Optional[str]:
     """A frontmatter line stays YAML of the same shape: list entries naming
     a hidden name are removed; a scalar changed by redaction is re-quoted;
@@ -464,6 +480,15 @@ def _project_frontmatter_line(line: str, view: _View) -> Optional[str]:
     caller re-parses the whole block."""
     if _COUNT_LINE.match(line):
         return _project_text(line, view)
+    item = _LIST_ITEM.match(line)
+    if item is not None and (
+        normalize_name(item.group("value")) in view.blocked_repos
+        or _decoded_hidden(item.group("value"), view)
+    ):
+        return None
+    escaped = _SCALAR_LINE.match(line) if "\\" in line else None
+    if escaped is not None and _decoded_hidden(escaped.group("value"), view):
+        return None
     inline = _INLINE_LIST.match(line)
     if inline:
         entries = [e.strip() for e in inline.group("body").split(",") if e.strip()]
@@ -492,6 +517,32 @@ def _project_frontmatter_line(line: str, view: _View) -> Optional[str]:
     return scalar.group("prefix") + _yaml_quoted(projected)
 
 
+def _parsed_names_hidden(value: Any, view: _View) -> bool:
+    """Any decoded string key or value of a parsed frontmatter names a
+    hidden repository."""
+    if isinstance(value, str):
+        return _names_hidden(value, view)
+    if isinstance(value, dict):
+        return any(
+            _parsed_names_hidden(k, view) or _parsed_names_hidden(v, view)
+            for k, v in value.items()
+        )
+    if isinstance(value, list):
+        return any(_parsed_names_hidden(item, view) for item in value)
+    return False
+
+
+def _frontmatter_unsafe(out: Sequence[Optional[str]], end: int, view: _View) -> bool:
+    """The projected frontmatter block does not parse, or once decoded it
+    still names a hidden repository (escapes, continuations)."""
+    kept = [line for line in out[: end + 1] if line is not None]
+    try:
+        parsed = parse_frontmatter_strict("\n".join(kept) + "\n")
+    except (yaml.YAMLError, ValueError):
+        return True
+    return _parsed_names_hidden(parsed, view)
+
+
 def _compute(
     lines: Sequence[str], relative_path: str, fingerprint: str, view: _View
 ) -> List[Optional[str]]:
@@ -516,13 +567,9 @@ def _compute(
         else:
             malformed.append(span + offset + 1)
             out.append(None)
-    if end:
-        kept = [line for line in out[: end + 1] if line is not None]
-        try:
-            parse_frontmatter_strict("\n".join(kept) + "\n")
-        except (yaml.YAMLError, ValueError):
-            malformed += [i + 1 for i in range(end + 1) if out[i] is not None]
-            out[: end + 1] = [None] * (end + 1)
+    if end and _frontmatter_unsafe(out, end, view):
+        malformed += [i + 1 for i in range(end + 1) if out[i] is not None]
+        out[: end + 1] = [None] * (end + 1)
     if malformed:
         _diagnose(relative_path, fingerprint, malformed)
     return out
@@ -627,6 +674,20 @@ class MetaProjector:
     def model(self) -> DepMapModel:
         """The dependency-map model this request projects with."""
         return self._sources()[0]
+
+    def redact_label(self, text: str) -> Optional[str]:
+        """A one-line label (a title, a category name) through the caller's
+        view, never stored in the shared projection cache; None when it is
+        still a hidden name after redaction (a short alias prose keeps), or
+        still spells one once rendered."""
+        if self._vis.unrestricted:
+            return text
+        model, universe = self._sources()
+        view = _view_for(model, universe, self._vis)
+        redacted = _redact(text, view)
+        if redacted is None or normalize_name(redacted) in view.blocked_repos:
+            return None
+        return redacted
 
     def project(self, lines: Sequence[str], relative_path: str) -> List[Optional[str]]:
         if self._vis.unrestricted:

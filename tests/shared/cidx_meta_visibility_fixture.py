@@ -7,7 +7,9 @@ Builds a REAL cidx-meta directory on disk and REAL group rows:
 - ``gamma`` is granted to no group;
 - ``dependency-map/`` holds a ``payments`` domain (alpha and
   beta-team-sample, with an alpha -> beta-team-sample outgoing row), a
-  standalone ``beta-team-sample`` domain, a ``gamma`` domain, a visible domain
+  standalone ``beta-team-sample`` domain, a ``gamma`` domain, a ``ledger``
+  domain whose frontmatter also lists the short hidden alias ``zed`` (so
+  ``_index.md``'s ``repos_analyzed`` carries it too), a visible domain
   with a malformed table, a visible domain with unparseable frontmatter, a
   legacy domain without ``participating_repos`` (absent from
   ``_domains.json``), and an ``_index.md`` produced by the real
@@ -172,7 +174,7 @@ def _write_dependency_map(dep_map_dir: Path) -> None:
         dep_map_dir / "ledger.md",
         _domain_file(
             "ledger",
-            [ALPHA],
+            [ALPHA, SHORT_ALIAS],
             [
                 "# Domain Analysis: ledger",
                 "",
