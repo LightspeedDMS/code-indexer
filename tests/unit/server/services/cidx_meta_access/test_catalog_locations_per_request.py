@@ -12,6 +12,11 @@ location count is observed through a pass-through spy. Neutral names only.
 
 from __future__ import annotations
 
+import json
+import os
+import sys
+import threading
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, List, Tuple
 
@@ -25,6 +30,10 @@ from code_indexer.server.cache.handle_binding import (
 from code_indexer.server.services.cidx_meta_access import served_identity
 from code_indexer.server.services.cidx_meta_access.cached_handles import (
     bind_catalog_handles,
+)
+from code_indexer.server.services.cidx_meta_access.file_doors import (
+    judge_app_request,
+    view_for,
 )
 from code_indexer.server.services.cidx_meta_access.history_policy import (
     CatalogSurface,
@@ -163,3 +172,88 @@ def test_cached_handles_leave_an_ordinary_alias_unbound(
     assert _bound(env, f"{ALPHA}-global") is None
     assert _bound(env, (f"{ALPHA}-global",)) is None
     assert _bound(env, "cidx-meta-global") is not None
+
+
+def test_catalog_locations_never_create_the_aliases_directory(
+    tmp_path: Path,
+) -> None:
+    golden = tmp_path / "data" / "golden-repos"
+    golden.mkdir(parents=True)
+
+    _ = served_identity.catalog_locations(str(golden))
+    _ = served_identity.request_served_paths(f"{ALPHA}-global", "u", None, str(golden))
+
+    assert not (golden / "aliases").exists()
+
+
+_OPENED: List[str] = []
+_RECORDING_THREADS: List[int] = []
+
+
+def _record_opens(event: str, args: Tuple[Any, ...]) -> None:
+    # ^ why audit hooks cannot be removed=>no-op outside a recording thread
+    if event != "open" or threading.get_ident() not in _RECORDING_THREADS:
+        return
+    target = args[0]
+    if isinstance(target, (str, bytes, os.PathLike)):
+        _OPENED.append(os.fsdecode(os.fspath(target)))
+
+
+sys.addaudithook(_record_opens)
+
+
+def _ordinary_clone(env: CatalogFileDoorEnv) -> Path:
+    git = env.alpha_dir / ".git"
+    git.mkdir()
+    (git / "config").write_text(
+        '[remote "origin"]\n\turl = https://example.com/alpha.git\n'
+    )
+    config = env.alpha_dir / ".code-indexer" / "config.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"embedding_provider": "voyage-ai"}))
+    return env.alpha_dir
+
+
+def _judge_and_serve(env: CatalogFileDoorEnv, served: Path) -> None:
+    access = judge_app_request(
+        env.state, f"{ALPHA}-global", str(served), RESTRICTED_USER, env.activations
+    )
+    assert access.view is None
+    assert view_for(str(served), access, FileNotFoundError("x")) is None
+
+
+def test_restricted_judgement_opens_each_identity_file_once(
+    env: CatalogFileDoorEnv,
+) -> None:
+    served = _ordinary_clone(env)
+    _OPENED.clear()
+    _RECORDING_THREADS.append(threading.get_ident())
+    try:
+        _judge_and_serve(env, served)
+    finally:
+        _RECORDING_THREADS.clear()
+
+    counts = Counter(_OPENED)
+    assert counts[str(served / ".git" / "config")] == 1, counts
+    assert counts[str(served / ".code-indexer" / "config.json")] == 1, counts
+    aliases = [p for p in counts if "/aliases/" in p]
+    assert aliases, counts
+    assert all(counts[p] == 1 for p in aliases), counts
+
+
+def test_restricted_judgement_resolves_the_served_path_once(
+    env: CatalogFileDoorEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    served = _ordinary_clone(env)
+    calls: List[str] = []
+    real = os.path.realpath
+
+    def counted(path: Any, *args: Any, **kwargs: Any) -> str:
+        calls.append(os.fsdecode(os.fspath(path)))
+        return os.fsdecode(real(path, *args, **kwargs))
+
+    monkeypatch.setattr(os.path, "realpath", counted)
+    _judge_and_serve(env, served)
+    monkeypatch.undo()
+
+    assert calls.count(str(served)) == 1, calls

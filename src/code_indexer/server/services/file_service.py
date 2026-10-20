@@ -1040,8 +1040,11 @@ class FileListingService:
 
         # Build metadata with pagination info
         stat_info = full_file_path.stat()
+        size = stat_info.st_size
+        if lines_view is not None:
+            size = len("".join(all_lines).encode("utf-8"))
         metadata = {
-            "size": stat_info.st_size,
+            "size": size,
             "modified_at": datetime.fromtimestamp(
                 stat_info.st_mtime, tz=timezone.utc
             ).isoformat(),

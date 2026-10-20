@@ -38,9 +38,8 @@ from .served_identity import (
     CatalogLocations,
     alias_serves_catalog_path,
     golden_repos_dir_of,
-    path_is_catalog_location,
-    path_looks_like_catalog,
     request_catalog_locations,
+    served_path_is_catalog,
 )
 from .visibility import unrestricted_caller
 
@@ -169,11 +168,7 @@ def served_catalog_surface_refusal(
     ``request_catalog_locations``."""
     if unrestricted_caller(username, access_service):
         return None
-    if (
-        path_looks_like_catalog(served_path)
-        or not golden_repos_dir
-        or path_is_catalog_location(served_path, golden_repos_dir, locations)
-    ):
+    if served_path_is_catalog(served_path, golden_repos_dir, locations):
         return surface.refusal
     return None
 

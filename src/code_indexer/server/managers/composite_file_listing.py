@@ -155,25 +155,6 @@ def _confined_target(component_root: Path, path: str) -> Optional[Path]:
         return None
 
 
-def _list_composite_files(
-    repo: ActivatedRepository, path: str = "", recursive: bool = False
-) -> List[FileInfo]:
-    """
-    List files across all component repositories.
-
-    Args:
-        repo: Activated composite repository
-        path: Optional path filter (subdirectory within components)
-        recursive: Whether to walk recursively
-
-    Returns:
-        List of FileInfo objects sorted by full_path
-    """
-    listings = list_composite_components(repo, path, recursive)
-    files = [entry for listing in listings for entry in listing.entries]
-    return sorted(files, key=lambda f: f.full_path)
-
-
 def visible_composite_files(
     state: Any,
     composite: ActivatedRepository,

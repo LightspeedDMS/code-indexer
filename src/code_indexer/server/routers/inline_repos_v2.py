@@ -877,7 +877,7 @@ def register_repos_v2_routes(
         List files in repository with pagination and filtering.
 
         Supports both single and composite repository file listing.
-        `recursive` is COMPOSITE-ONLY: it controls _list_composite_files'
+        `recursive` is COMPOSITE-ONLY: it controls visible_composite_files'
         walk depth for composite repos and is otherwise ignored entirely
         (Bug #1886, R3 revision -- a prior round applied it as a
         non-composite depth restriction too, which regressed two absolute

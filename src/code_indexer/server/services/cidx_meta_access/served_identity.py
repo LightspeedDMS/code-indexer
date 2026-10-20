@@ -15,9 +15,10 @@ pointer, or a clone, that is in fact the catalog) is treated as the catalog:
 surface. A clone whose git config exists but cannot be read is therefore
 answered as the catalog.
 
-Cost per request: alias-pointer reads, ``realpath`` calls, and at most one
-small ``.git/config`` read per served directory; no fleet scan. Synchronous:
-async callers run it on a worker thread.
+Cost per request: alias-pointer reads (never creating a directory), one
+``realpath`` and at most one small ``.git/config`` read per served
+directory (``served_path_is_catalog``); no fleet scan. Synchronous: async
+callers run it on a worker thread.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, List, Mapping, Optional, Tuple
 
-from code_indexer.global_repos.alias_manager import AliasManager
+from code_indexer.global_repos.alias_manager import read_alias_from_disk
 
 from ...storage.shared.snapshot_paths import is_versioned_snapshot
 from ..cidx_meta_backup.paths import get_cidx_meta_path
@@ -60,15 +61,15 @@ def state_golden_repos_dir(state: Any) -> Optional[str]:
     return golden if isinstance(golden, str) and golden else None
 
 
-def _aliases(golden_repos_dir: str) -> AliasManager:
-    return AliasManager(str(Path(golden_repos_dir) / "aliases"))
+def _alias_target(golden_repos_dir: str, alias: str) -> Optional[str]:
+    return read_alias_from_disk(Path(golden_repos_dir) / "aliases", alias)
 
 
 def catalog_locations(golden_repos_dir: str) -> Tuple[str, ...]:
     """Real paths of the catalog's base clone and current published copy."""
     golden = Path(golden_repos_dir)
     found = [os.path.realpath(get_cidx_meta_path(golden.parent.parent))]
-    target = _aliases(golden_repos_dir).read_alias(CIDX_META_REPO_GLOBAL)
+    target = _alias_target(golden_repos_dir, CIDX_META_REPO_GLOBAL)
     if target:
         found.append(os.path.realpath(target))
     return tuple(found)
@@ -161,6 +162,30 @@ def path_is_catalog_location(
     return _in_locations(path, known)
 
 
+def served_path_is_catalog(
+    path: str,
+    golden_repos_dir: Optional[str],
+    locations: Optional[CatalogLocations] = None,
+) -> bool:
+    """``path_looks_like_catalog`` or ``path_is_catalog_location`` for one
+    served directory, from ONE ``realpath`` and at most one ``.git/config``
+    read. True without *golden_repos_dir* (it cannot be judged)."""
+    real = os.path.realpath(path)
+    if _named_like_catalog(real) or not golden_repos_dir:
+        return True
+    known = (locations or request_catalog_locations(golden_repos_dir))()
+    if _is_location(real, known):
+        return True
+    remotes = _local_remote_paths(real)
+    if remotes is None:
+        return True
+    for url in remotes:
+        remote = os.path.realpath(url)
+        if _named_like_catalog(remote) or _is_location(remote, known):
+            return True
+    return False
+
+
 def composite_component_paths(path: str) -> Optional[List[str]]:
     """The component directories when *path* is a composite activation (its
     proxy configuration on disk), ``[]`` when it is not one, None when that
@@ -246,9 +271,8 @@ def request_served_paths(
         if activated and os.path.isdir(activated):
             paths.append(str(activated))
     names = [alias] if alias.endswith("-global") else [alias, f"{alias}-global"]
-    aliases = _aliases(golden_repos_dir)
     for name in names:
-        target = aliases.read_alias(name)
+        target = _alias_target(golden_repos_dir, name)
         if target:
             paths.append(target)
     return paths

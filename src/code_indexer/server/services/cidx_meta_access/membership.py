@@ -6,12 +6,14 @@ Membership comes from the domain file's frontmatter ``participating_repos``
 roles table (``depmap_model.document_participants``, the one derivation the
 model uses too). When none names a repository, membership is unknown (None)
 and the domain stays hidden from restricted callers, with one operator
-diagnostic per (path, file fingerprint).
+diagnostic per (path, file fingerprint) of an existing domain file; a name
+with no domain file logs nothing.
 """
 
 from __future__ import annotations
 
 import logging
+import stat
 import threading
 from pathlib import Path
 from typing import Callable, Dict, FrozenSet, Optional, Set, Tuple
@@ -45,16 +47,23 @@ def domain_participants(dep_map_dir: Path, domain: str) -> Optional[FrozenSet[st
     )
 
 
-def _fingerprint(path: Path) -> Tuple[int, int, int]:
+def _fingerprint(path: Path) -> Optional[Tuple[int, int, int]]:
+    """The regular file's identity, or None when there is no such file."""
     try:
         st = path.stat()
-    except FileNotFoundError:
-        return (0, 0, 0)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
     return (st.st_mtime_ns, st.st_size, st.st_ino)
 
 
 def _warn_unknown_membership(md_file: Path) -> None:
-    key = (str(md_file), _fingerprint(md_file))
+    fingerprint = _fingerprint(md_file)
+    if fingerprint is None:
+        # ^ why no file=>caller-chosen name, never logged
+        return
+    key = (str(md_file), fingerprint)
     with _warned_lock:
         if key in _warned:
             return

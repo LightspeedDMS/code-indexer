@@ -94,8 +94,20 @@ def test_every_page_and_count_covers_visible_files_only(fx: CidxMetaFixture) -> 
     assert sorted(seen) == sorted(VISIBLE)
 
 
+def test_projected_read_reports_the_projected_size(fx: CidxMetaFixture) -> None:
+    service, access = FileListingService(), _restricted(fx)
+
+    result = service.get_file_content_by_path(
+        str(fx.root), f"{ALPHA}.md", skip_truncation=True, access=access
+    )
+
+    shown = result["content"].encode("utf-8")
+    assert len(shown) != (fx.root / f"{ALPHA}.md").stat().st_size
+    assert result["metadata"]["size"] == len(shown)
+
+
 MISSING = "xray-patterns/__any__/missing.yaml"
-LINK = "xray-patterns/__any__/leak.yaml"
+LINK = "xray-patterns/__any__/link.yaml"
 
 
 @pytest.mark.parametrize(

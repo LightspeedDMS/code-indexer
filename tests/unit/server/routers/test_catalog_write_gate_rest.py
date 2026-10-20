@@ -2,10 +2,12 @@
 
 A restricted caller writing to the catalog gets one fixed refusal for every
 path they may not see, identical whether or not the file exists, before any
-existence check; nothing on disk changes, and visible paths keep today's
-behaviour. A lock-in discovers every mutating route that takes a path, so a
-new one cannot skip a gate. Real routes on a small FastAPI app, real catalog
-on disk, real FileCRUDService and group store. Neutral names only.
+existence check; nothing on disk changes. Restricted callers may write only
+catalog files they see unchanged: descriptions and dependency-map documents
+get the same refusal, other visible paths keep today's behaviour. A lock-in
+discovers every mutating route that takes a path, so a new one cannot skip a
+gate. Real routes on a small FastAPI app, real catalog on disk, real
+FileCRUDService and group store. Neutral names only.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from fastapi.testclient import TestClient
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.services import file_crud_service as crud_module
 from code_indexer.server.services.file_crud_service import file_crud_service
-from tests.shared.cidx_meta_visibility_fixture import CANARY, MEMORY_CANARY
+from tests.shared.cidx_meta_visibility_fixture import ALPHA, CANARY, MEMORY_CANARY
 from tests.unit.server.mcp.catalog_file_door_env import (
     CATALOG_ALIAS,
     CatalogFileDoorEnv,
@@ -106,6 +108,20 @@ def test_hidden_catalog_path_gets_one_refusal_whether_or_not_it_exists(
         response = _send(client, verb, path)
         assert response.status_code == 403, (path, response.text)
         assert response.json() == {"detail": REFUSAL}
+    assert _snapshot(env.fx.root) == before
+
+
+@pytest.mark.parametrize("verb", ["create", "edit", "delete"])
+@pytest.mark.parametrize("path", [f"{ALPHA}.md", "dependency-map/payments.md"])
+def test_projected_catalog_paths_get_the_fixed_refusal(
+    client: TestClient, env: CatalogFileDoorEnv, verb: str, path: str
+) -> None:
+    before = _snapshot(env.fx.root)
+
+    response = _send(client, verb, path)
+
+    assert response.status_code == 403, (path, response.text)
+    assert response.json() == {"detail": REFUSAL}
     assert _snapshot(env.fx.root) == before
 
 

@@ -68,6 +68,74 @@ def resolve_alias_or_index_path(
     return None
 
 
+def _local_write_mode_source(
+    golden_repos_dir: Path, alias_without_global: str
+) -> Optional[str]:
+    """The live source path of an active local write-mode marker, else None."""
+    write_mode_marker = (
+        golden_repos_dir / ".write_mode" / f"{alias_without_global}.json"
+    )
+    if not write_mode_marker.exists():
+        return None
+    try:
+        marker_data = json.loads(write_mode_marker.read_text())
+    except (json.JSONDecodeError, IOError, OSError) as e:
+        logger.warning(
+            "Corrupt write-mode marker for %s: %s; "
+            "falling back to normal alias resolution",
+            alias_without_global,
+            e,
+        )
+        return None
+    if not isinstance(marker_data, dict):
+        logger.warning(
+            "Corrupt write-mode marker for %s: not an object; "
+            "falling back to normal alias resolution",
+            alias_without_global,
+        )
+        return None
+    fs_source_path: Optional[str] = marker_data.get("source_path")
+    if fs_source_path:
+        return fs_source_path
+    logger.warning(
+        "Write-mode marker for %s has no source_path; "
+        "falling back to normal alias resolution",
+        alias_without_global,
+    )
+    return None
+
+
+def _alias_file_target(aliases_dir: Path, alias_name: str) -> Optional[str]:
+    """The ``target_path`` of the alias pointer file, or None."""
+    alias_file = aliases_dir / f"{alias_name}.json"
+
+    if not alias_file.exists():
+        return None
+
+    try:
+        with open(alias_file, "r") as f:
+            alias_data = json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        logger.warning(f"Failed to read alias {alias_name}: {e}")
+        return None
+    if not isinstance(alias_data, dict):
+        logger.warning(f"Failed to read alias {alias_name}: not an object")
+        return None
+    target_path: Optional[str] = alias_data.get("target_path")
+    return target_path
+
+
+def read_alias_from_disk(aliases_dir: Path, alias_name: str) -> Optional[str]:
+    """``AliasManager.read_alias`` with no write-mode backend (the local
+    marker, then the pointer file), without creating *aliases_dir*."""
+    aliases = Path(aliases_dir)
+    if alias_name.endswith("-global"):
+        source = _local_write_mode_source(aliases.parent, alias_name[: -len("-global")])
+        if source:
+            return source
+    return _alias_file_target(aliases, alias_name)
+
+
 class AliasManager:
     """
     Manages alias pointer files for global repos.
@@ -159,31 +227,9 @@ class AliasManager:
                 return None
         else:
             # Standalone mode: read the local filesystem marker.
-            golden_repos_dir = self.aliases_dir.parent
-            write_mode_marker = (
-                golden_repos_dir / ".write_mode" / f"{alias_without_global}.json"
+            return _local_write_mode_source(
+                self.aliases_dir.parent, alias_without_global
             )
-            if not write_mode_marker.exists():
-                return None
-            try:
-                marker_data = json.loads(write_mode_marker.read_text())
-                fs_source_path: Optional[str] = marker_data.get("source_path")
-                if fs_source_path:
-                    return fs_source_path
-                logger.warning(
-                    "Write-mode marker for %s has no source_path; "
-                    "falling back to normal alias resolution",
-                    alias_without_global,
-                )
-                return None
-            except (json.JSONDecodeError, IOError, OSError) as e:
-                logger.warning(
-                    "Corrupt write-mode marker for %s: %s; "
-                    "falling back to normal alias resolution",
-                    alias_without_global,
-                    e,
-                )
-                return None
 
     def create_alias(
         self, alias_name: str, target_path: str, repo_name: Optional[str] = None
@@ -274,19 +320,7 @@ class AliasManager:
             # source_path is None — no active write session; fall through to
             # normal alias file resolution below.
 
-        alias_file = self.aliases_dir / f"{alias_name}.json"
-
-        if not alias_file.exists():
-            return None
-
-        try:
-            with open(alias_file, "r") as f:
-                alias_data = json.load(f)
-                target_path: Optional[str] = alias_data.get("target_path")
-                return target_path
-        except (json.JSONDecodeError, IOError, KeyError) as e:
-            logger.warning(f"Failed to read alias {alias_name}: {e}")
-            return None
+        return _alias_file_target(self.aliases_dir, alias_name)
 
     def delete_alias(self, alias_name: str) -> None:
         """

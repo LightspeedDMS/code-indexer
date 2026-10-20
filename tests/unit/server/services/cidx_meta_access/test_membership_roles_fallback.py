@@ -130,6 +130,16 @@ def test_no_roles_table_and_no_membership_stays_hidden_with_a_diagnostic(
     assert NO_ROLES not in load_depmap_model(fx.dep_map_dir).participants
 
 
+def test_domain_names_without_a_file_stay_hidden_without_a_diagnostic(
+    fx: CidxMetaFixture, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        kinds = {_kind(fx, f"no-such-domain-{i}") for i in range(50)}
+
+    assert kinds == {DecisionKind.DENY}
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
 def test_every_door_agrees_on_derived_membership(fx: CidxMetaFixture) -> None:
     vis = MetaVisibility.restricted([ALPHA])
     source = source_for_visibility(vis, fx.dep_map_dir, fx.registry)

@@ -226,6 +226,23 @@ def test_text_file_is_served_with_its_content(tmp_path: Path) -> None:
     }
 
 
+def test_projected_payload_reports_the_projected_size(
+    fx: CidxMetaFixture, golden: Path
+) -> None:
+    from code_indexer.server.services.cidx_meta_access.file_doors import (
+        served_file_payload,
+    )
+
+    access = _judge(fx, "cidx-meta-global", fx.root, golden)
+    raw = fx.root / f"{ALPHA}.md"
+
+    payload = served_file_payload(f"{ALPHA}.md", raw, access)
+
+    shown = payload["content"].encode("utf-8")
+    assert len(shown) != raw.stat().st_size
+    assert payload["size"] == len(shown)
+
+
 def test_composite_entry_outside_its_component_fails_closed() -> None:
     from datetime import datetime
 

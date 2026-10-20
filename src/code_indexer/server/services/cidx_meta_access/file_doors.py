@@ -18,8 +18,9 @@ included. The file service refuses a catalog directory when a request
 carries no judgement at all (``refuse_unjudged_catalog``).
 
 Writes (``refuse_hidden_catalog_writes``) judge the canonical path before
-any existence check or read: a path the caller may not see gets one fixed
-refusal whether or not it exists.
+any existence check or read: a restricted caller may write only paths served
+unchanged (allowed files, memories); every other path gets one fixed refusal
+whether or not it exists.
 
 Synchronous (stores and files): async callers use a worker thread.
 """
@@ -58,9 +59,9 @@ from .path_policy import (
 from .served_identity import (
     activation_is_composite,
     composite_component_paths,
-    path_is_catalog_location,
     path_looks_like_catalog,
     request_catalog_locations,
+    served_path_is_catalog,
 )
 from .universe_provider import process_alias_universe, registry_of
 from .visibility import (
@@ -242,7 +243,8 @@ def served_file_payload(
     """The content payload of the confined, judged file *file_path* (requested
     as *path*): binary (a NUL byte, or not UTF-8, in the first
     ``BINARY_SNIFF_BYTES``, or not UTF-8 at all) has no content; text is
-    served as *access* allows.
+    served as *access* allows, and under a catalog view its ``size`` is that
+    of the served text.
 
     Raises:
         FileNotFoundError: the judgement denies *path*.
@@ -266,6 +268,8 @@ def served_file_payload(
         logger.debug("Serving a file that is not UTF-8 as binary")
         return binary
     text = access.served_text(path, raw)
+    if access.view is not None:
+        size = len(text.encode("utf-8"))
     return {"path": path, "is_binary": False, "size": size, "content": text}
 
 
@@ -299,14 +303,12 @@ def _served_from_catalog(
     components = composite_component_paths(served_path)
     if components is None or (composite_activation and not components):
         return True
-    served = [served_path, *components]
-    if any(path_looks_like_catalog(path) for path in served):
-        return True
     if not golden_repos_dir:
         return True
     locations = request_catalog_locations(golden_repos_dir)
     return any(
-        path_is_catalog_location(path, golden_repos_dir, locations) for path in served
+        served_path_is_catalog(path, golden_repos_dir, locations)
+        for path in [served_path, *components]
     )
 
 
@@ -426,22 +428,30 @@ def view_for(
         if path_looks_like_catalog(repo_path):
             raise missing
         return None
-    if access.served is not None and os.path.realpath(
-        access.served
-    ) != os.path.realpath(repo_path):
+    served = access.served
+    if (
+        served is not None
+        and served != repo_path
+        and os.path.realpath(served) != os.path.realpath(repo_path)
+    ):
         raise missing
     return access.view
 
 
 CATALOG_WRITE_REFUSAL = "This path is not available for writing in this repository."
+# Decisions whose content is served unchanged: the only catalog paths a
+# restricted caller may write.
+_WRITABLE = frozenset({DecisionKind.ALLOW, DecisionKind.MEMORY})
 
 
 def refuse_hidden_catalog_writes(
     repo_path: str, paths: List[str], access: Optional[CatalogFileAccess]
 ) -> None:
-    """Refuse a write into *repo_path* unless the caller may see every one of
-    *paths*, decided on the canonical path before any existence check or
-    read. Visible paths and unrestricted requests pass unchanged.
+    """Refuse a write into *repo_path* unless the caller sees every one of
+    *paths* unchanged (ALLOW or MEMORY), decided on the canonical path
+    before any existence check, hash comparison or read: hidden paths,
+    descriptions and dependency-map documents are refused alike.
+    Unrestricted requests pass unchanged.
 
     Raises:
         PermissionError: ``CATALOG_WRITE_REFUSAL``, identical whether or not
@@ -451,7 +461,7 @@ def refuse_hidden_catalog_writes(
     view = view_for(repo_path, access, PermissionError(CATALOG_WRITE_REFUSAL))
     if view is None:
         return
-    if not all(view.listable(path) for path in paths):
+    if not all(view._served_decision(path).kind in _WRITABLE for path in paths):
         raise PermissionError(CATALOG_WRITE_REFUSAL)
 
 
