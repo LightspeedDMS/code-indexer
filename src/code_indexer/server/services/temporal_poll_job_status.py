@@ -179,7 +179,14 @@ def poll_temporal_job_status(
         job_result = job_status.get("result")
         is_temporal_job = job_status.get("operation_type") == _TEMPORAL_OPERATION_TYPE
         if isinstance(job_result, dict) and not is_temporal_job:
-            response = dict(job_result)
+            from code_indexer.server.services.cidx_meta_access.catalog_search import (
+                reproject_job_result,
+            )
+
+            # Catalog rows of a stored result are re-checked on every read.
+            response = dict(
+                reproject_job_result(job_result, username, access_filtering_service)  # type: ignore[call-overload]
+            )
             response["status"] = "completed"
             response["continue_polling"] = False
             return response

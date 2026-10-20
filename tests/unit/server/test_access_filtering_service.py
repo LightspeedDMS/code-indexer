@@ -117,9 +117,11 @@ class TestFilterQueryResultsAC1AC2:
     def test_users_group_filters_out_inaccessible_repos(
         self, group_access_manager, access_filtering_service
     ):
-        """AC1: User in users group only sees results from cidx-meta."""
+        """AC1: User in users group only sees results from granted repos; a
+        catalog row is never returned raw (f1.py is no catalog path)."""
         users = group_access_manager.get_group_by_name("users")
         group_access_manager.assign_user_to_group("test_user", users.id, "admin")
+        group_access_manager.grant_repo_access("repo-a", users.id, "admin")
 
         results = [
             MockQueryResult("f1.py", 10, "code1", 0.95, "cidx-meta"),
@@ -129,8 +131,7 @@ class TestFilterQueryResultsAC1AC2:
 
         filtered = access_filtering_service.filter_query_results(results, "test_user")
 
-        assert len(filtered) == 1
-        assert filtered[0].repository_alias == "cidx-meta"
+        assert [r.repository_alias for r in filtered] == ["repo-a"]
 
     def test_admins_see_all_results(
         self, group_access_manager, access_filtering_service
@@ -152,9 +153,11 @@ class TestFilterQueryResultsAC1AC2:
     def test_filter_works_with_dict_results(
         self, group_access_manager, access_filtering_service
     ):
-        """Test that filtering works with dictionary results (API format)."""
+        """Test that filtering works with dictionary results (API format); a
+        catalog row is never returned raw (f1.py is no catalog path)."""
         users = group_access_manager.get_group_by_name("users")
         group_access_manager.assign_user_to_group("test_user", users.id, "admin")
+        group_access_manager.grant_repo_access("repo-a", users.id, "admin")
 
         # API returns dict format, not dataclass
         results = [
@@ -165,8 +168,7 @@ class TestFilterQueryResultsAC1AC2:
 
         filtered = access_filtering_service.filter_query_results(results, "test_user")
 
-        assert len(filtered) == 1
-        assert filtered[0]["repository_alias"] == "cidx-meta"
+        assert [r["repository_alias"] for r in filtered] == ["repo-a"]
 
 
 @pytest.mark.slow

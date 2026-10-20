@@ -314,6 +314,12 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         response, category_map, _get_wiki_enabled_repos()
     )
     errors = _filter_errors_for_user(response.errors or {}, user)
+    # Access filter (catalog rows projected) before the limit and the cache.
+    access_filtering_service = _get_access_filtering_service()
+    if access_filtering_service:
+        all_results = access_filtering_service.filter_query_results(
+            all_results, user.username
+        )
     final_results = _aggregate_results(all_results, aggregation_mode, requested_limit)
 
     response_format = params.get(
@@ -324,13 +330,6 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         final_results, fts_truncation_meta = _apply_search_truncation(
             final_results, search_mode, params, owner=user.username
         )
-
-    access_filtering_service = _get_access_filtering_service()
-    if access_filtering_service:
-        final_results = access_filtering_service.filter_query_results(
-            final_results, user.username
-        )
-        final_results = final_results[:requested_limit]
 
     formatted = _format_omni_response(
         all_results=final_results,

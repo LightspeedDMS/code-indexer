@@ -1535,6 +1535,10 @@ class SemanticQueryManager:
                 from code_indexer.server.services.search_event_context import (
                     searching_resolved_repository,
                 )
+                from code_indexer.server.services.cidx_meta_access.catalog_search import (
+                    TextRematch,
+                    search_for_caller,
+                )
 
                 _tracking = track_activated_repo_query(
                     getattr(self, "query_tracker", None),
@@ -1542,12 +1546,13 @@ class SemanticQueryManager:
                     username,
                     _tracking_alias,
                 )
-                with searching_resolved_repository(str(repo_alias)), _tracking:
-                    results = self._search_single_repository(
+
+                def _run_search(k: int, mode: str) -> List[QueryResult]:
+                    return self._search_single_repository(
                         repo_path,
                         repo_alias,
                         query_text,
-                        limit,
+                        k,
                         min_score,
                         file_extensions,
                         language,
@@ -1556,7 +1561,7 @@ class SemanticQueryManager:
                         exclude_path,
                         accuracy,
                         # Search mode (Story #503 - FTS Bug Fix)
-                        search_mode=search_mode,
+                        search_mode=mode,
                         # Temporal parameters (Story #446)
                         time_range=time_range,
                         time_range_all=time_range_all,
@@ -1594,6 +1599,21 @@ class SemanticQueryManager:
                         _provider_completeness_out=_provider_completeness_out,
                         # #2047: the request-wide over-fetch time budget
                         extension_deadline=extension_deadline,
+                    )
+
+                # A restricted caller's catalog hits are projected here, before
+                # the sort and limit below (see cidx_meta_access.catalog_search).
+                with searching_resolved_repository(str(repo_alias)), _tracking:
+                    results = search_for_caller(
+                        _run_search,
+                        username=username,
+                        repo_info=repo_info,
+                        repo_path=repo_path,
+                        limit=limit,
+                        search_mode=search_mode,
+                        rematch=TextRematch(query_text, case_sensitive, regex),
+                        merge=self._merge_hybrid_results,
+                        budget_spent=lambda: extension_budget_spent(extension_deadline),
                     )
                 # AC7: capture routing decision from the first resolved repo
                 if _strat_out and _effective_strategy == (

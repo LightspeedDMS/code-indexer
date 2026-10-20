@@ -299,6 +299,12 @@ class AccessFilteringService:
         if not results:
             return []
 
+        from .cidx_meta_access.catalog_search import project_catalog_rows
+
+        # Catalog rows carry only the caller's projected view (idempotent
+        # with the search choke point; acting-user scopes included).
+        results = project_catalog_rows(results, user_id, self)
+
         # Admin users see everything
         if self.is_admin_user(user_id):
             return results

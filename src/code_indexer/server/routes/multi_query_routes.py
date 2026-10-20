@@ -334,6 +334,20 @@ def multi_repository_query(
                 correlation_id=get_correlation_id(),
             ):
                 response = service.search(request)
+                from ..services.cidx_meta_access.catalog_search import (
+                    TextRematch,
+                    project_grouped_results,
+                )
+
+                # Catalog rows are projected before recording and caching.
+                response.results = project_grouped_results(
+                    response.results,
+                    user.username,
+                    access_filtering_service,
+                    TextRematch(request.query, regex=request.search_type == "regex")
+                    if request.search_type in ("fts", "regex")
+                    else None,
+                )
                 search_event_recording.record_multi_repository_search(
                     writer,
                     response.results,

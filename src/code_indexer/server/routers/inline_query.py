@@ -43,6 +43,12 @@ from code_indexer.server.mcp.reranking import (
     calculate_overfetch_limit as _rest_calculate_overfetch_limit,
     extract_rerank_document as _rest_extract_rerank_document,
 )
+from code_indexer.server.cache.handle_binding import reset_handle_binding
+from code_indexer.server.services.cidx_meta_access import bind_catalog_handles
+from code_indexer.server.services.cidx_meta_access.catalog_search import (
+    TextRematch,
+    project_catalog_rows,
+)
 from code_indexer.server.services.deactivation_query_drain import (
     track_activated_repo_query,
 )
@@ -555,6 +561,14 @@ def register_query_routes(
         _delivered: Optional[list] = None
         _failure_class: Optional[str] = None
         _record_on_exit = True
+        # Handles minted while serving the catalog carry the caller's view
+        # (no alias fans out over every repository, catalog included).
+        _handle_binding = bind_catalog_handles(
+            request.repository_alias or "*",
+            current_user.username,
+            getattr(app.state, "access_filtering_service", None),
+            activated_repo_manager,
+        )
 
         try:
             # Handle background job submission (semantic mode only)
@@ -1072,7 +1086,15 @@ def register_query_routes(
                     hasattr(app.state, "access_filtering_service")
                     and app.state.access_filtering_service
                 ):
-                    fts_dicts = [r.model_dump() for r in fts_results]
+                    # Catalog FTS rows must still match on their projected text.
+                    fts_dicts = project_catalog_rows(
+                        [r.model_dump() for r in fts_results],
+                        current_user.username,
+                        app.state.access_filtering_service,
+                        TextRematch(
+                            request.query_text, request.case_sensitive, request.regex
+                        ),
+                    )
                     fts_dicts = app.state.access_filtering_service.filter_query_results(
                         fts_dicts, current_user.username
                     )
@@ -1345,6 +1367,7 @@ def register_query_routes(
             # #2111); a failed one records a failure; a job or a deferred
             # handoff records later (_record_on_exit False).
             _search_event_ctx.reset(_ctx_token)
+            reset_handle_binding(_handle_binding)
             if _record_on_exit:
                 _record_rest_query_event(
                     app,

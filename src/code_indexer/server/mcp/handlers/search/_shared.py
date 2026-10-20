@@ -273,12 +273,18 @@ def _apply_rerank_and_filter(
     repository_alias: Optional[str],
     user: User,
 ) -> tuple:
-    """Apply reranking, truncation, and access filtering to search results.
+    """Apply access filtering (catalog rows projected), reranking,
+    truncation and the limit, in that order: the reranker and the payload
+    cache only see rows the caller may see.
 
     Returns (filtered_results, rerank_meta) where rerank_meta is the dict from
     _apply_reranking_sync, optionally enriched with AC4 fts truncation keys
     (preview_size_chars, rows_capped) when search_mode is fts or hybrid.
     """
+    access_filtering_service = _get_access_filtering_service()
+    if access_filtering_service:
+        results = access_filtering_service.filter_query_results(results, user.username)
+
     rerank_query = params.get("rerank_query")
     rerank_instruction = params.get("rerank_instruction")
     results, rerank_meta = _mcp_reranking._apply_reranking_sync(
@@ -298,9 +304,4 @@ def _apply_rerank_and_filter(
     if fts_truncation_meta:
         rerank_meta.update(fts_truncation_meta)
 
-    access_filtering_service = _get_access_filtering_service()
-    if access_filtering_service:
-        results = access_filtering_service.filter_query_results(results, user.username)
-        results = results[:requested_limit]
-
-    return results, rerank_meta
+    return results[:requested_limit], rerank_meta

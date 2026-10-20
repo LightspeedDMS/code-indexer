@@ -28,6 +28,7 @@ from ..models.jobs import (
 
 from ..auth import dependencies
 from ..auth.user_manager import UserRole
+from ..services.cidx_meta_access.catalog_search import reproject_job_result
 
 # Module-level logger
 logger = logging.getLogger(__name__)
@@ -94,7 +95,12 @@ def register_job_routes(
             started_at=job_status["started_at"],
             completed_at=job_status["completed_at"],
             progress=job_status["progress"],
-            result=job_status["result"],
+            # Catalog rows of a stored result are re-checked on every read.
+            result=reproject_job_result(
+                job_status["result"],
+                current_user.username,
+                getattr(http_request.app.state, "access_filtering_service", None),
+            ),
             error=job_status["error"],
             username=job_status["username"],
             # Story #480: Real-time phase progress fields (AC7)
