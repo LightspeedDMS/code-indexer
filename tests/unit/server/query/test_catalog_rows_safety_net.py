@@ -93,7 +93,13 @@ def test_rest_rows_refuse_without_the_access_service(env: CatalogEnv) -> None:
     ordinary = [{"file_path": "README.md", "repository_alias": f"{ALPHA}-global"}]
     assert rest_rows_for_caller(None, RESTRICTED_USER, ordinary) == ordinary
     service = env.fx.access_service
-    fts = SimpleNamespace(query_text=CANARY, case_sensitive=False, regex=False)
+    fts = SimpleNamespace(
+        query_text=CANARY,
+        case_sensitive=False,
+        regex=False,
+        fuzzy=False,
+        edit_distance=0,
+    )
     assert rest_rows_for_caller(service, RESTRICTED_USER, _rows(env), fts) == []
     plain = rest_rows_for_caller(service, RESTRICTED_USER, _rows(env))
     assert plain == _filter(env, _rows(env), RESTRICTED_USER)

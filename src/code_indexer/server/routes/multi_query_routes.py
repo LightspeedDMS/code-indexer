@@ -302,6 +302,23 @@ def multi_repository_query(
             f"Multi-repo search request from user {user.username}: "
             f"{len(request.repositories)} repos, type={request.search_type}"
         )
+        activated_repo_manager = getattr(
+            http_request.app.state, "activated_repo_manager", None
+        )
+        if request.search_type == "fts":
+            from ..services.cidx_meta_access.catalog_fulltext import (
+                refuse_unevaluable_catalog_fulltext,
+            )
+
+            refuse_unevaluable_catalog_fulltext(
+                request.query,
+                0,
+                request.repositories,
+                None,
+                user.username,
+                access_filtering_service,
+                activated_repo_manager,
+            )
 
         import time
 
@@ -340,12 +357,13 @@ def multi_repository_query(
                 response = service.search(request)
                 from ..services.cidx_meta_access.catalog_search import (
                     TextRematch,
-                    project_grouped_results,
+                    project_multi_response,
                 )
 
-                # Catalog rows are projected before recording and caching.
-                response.results = project_grouped_results(
-                    response.results,
+                # Catalog rows and the count are projected before recording
+                # and caching.
+                project_multi_response(
+                    response,
                     user.username,
                     access_filtering_service,
                     TextRematch(request.query, regex=request.search_type == "regex")
@@ -361,11 +379,23 @@ def multi_repository_query(
                     correlation_id=get_correlation_id(),
                 )
 
-        # Story #683: Apply payload truncation to results
-        # Story #50: Now sync call (underlying handlers are sync)
-        response.results = _apply_multi_truncation(
-            response.results, request.search_type, owner=user.username
+        from ..cache.handle_binding import reset_handle_binding
+        from ..services.cidx_meta_access.cached_handles import bind_catalog_handles
+
+        # Story #683: Apply payload truncation to results; handles minted for
+        # catalog rows are bound to the caller's view.
+        binding = bind_catalog_handles(
+            request.repositories,
+            user.username,
+            access_filtering_service,
+            activated_repo_manager,
         )
+        try:
+            response.results = _apply_multi_truncation(
+                response.results, request.search_type, owner=user.username
+            )
+        finally:
+            reset_handle_binding(binding)
 
         # Log response summary
         logger.info(

@@ -45,8 +45,14 @@ from code_indexer.server.mcp.reranking import (
 )
 from code_indexer.server.cache.handle_binding import reset_handle_binding
 from code_indexer.server.services.cidx_meta_access import bind_catalog_handles
+from code_indexer.server.services.cidx_meta_access.catalog_fulltext import (
+    refuse_unevaluable_rest_fulltext,
+)
 from code_indexer.server.services.cidx_meta_access.catalog_search import (
     rest_rows_for_caller,
+)
+from code_indexer.server.services.cidx_meta_access.request_activations import (
+    request_activations,
 )
 from code_indexer.server.services.deactivation_query_drain import (
     track_activated_repo_query,
@@ -560,11 +566,12 @@ def register_query_routes(
         _delivered: Optional[list] = None
         _failure_class: Optional[str] = None
         _record_on_exit = True
+        _activations = request_activations(activated_repo_manager)
         _handle_binding = bind_catalog_handles(
             request.repository_alias or "*",
             current_user.username,
             getattr(app.state, "access_filtering_service", None),
-            activated_repo_manager,
+            _activations,
         )
 
         try:
@@ -792,13 +799,11 @@ def register_query_routes(
                             continue
                         repo_path = PathLib(resolved_path)
                     else:
-                        # User repos: activated-repos/username/alias.
-                        # Route through the same realpath-containment
-                        # helper every other (username, user_alias) join in
-                        # ActivatedRepoManager uses, instead of a hand-built
-                        # join that bypasses it.
+                        # User repos: the manager's realpath-contained join,
+                        # resolved once per request (_activations).
+                        assert _activations is not None
                         repo_path = PathLib(
-                            activated_repo_manager.get_activated_repo_path(
+                            _activations.get_activated_repo_path(
                                 current_user.username, repo["user_alias"]
                             )
                         )
@@ -837,7 +842,14 @@ def register_query_routes(
                 semantic_results_list = []
 
                 if search_mode_actual in ["fts", "hybrid"] and fts_available:
-                    # Execute FTS search
+                    refuse_unevaluable_rest_fulltext(
+                        request,
+                        fts_repo_alias,
+                        repo_path,
+                        current_user.username,
+                        getattr(app.state, "access_filtering_service", None),
+                        _activations,
+                    )
                     from code_indexer.services.tantivy_index_manager import (
                         TantivyIndexManager,
                     )
@@ -857,19 +869,9 @@ def register_query_routes(
                     ):
                         _event_ctx.repo_alias = fts_repo_alias
 
-                    # Codex HIGH finding (round 2): this branch reads the
-                    # Tantivy FTS index directly (never calls
-                    # query_user_repositories()), so it was completely
-                    # invisible to the track_activated_repo_query()
-                    # wrapping already applied to the semantic/hybrid
-                    # branch below -- wire the SAME tracking here too.
-                    #
-                    # Codex HIGH finding (round 5): use fts_repo_alias
-                    # (the REAL repo whose index is about to be read),
-                    # not request.repository_alias -- an alias-less/omni
-                    # request has the latter as None, which would make
-                    # tracking a silent no-op even though a concrete
-                    # activated repo's chunks are being read.
+                    # This branch reads Tantivy directly, so it tracks the
+                    # repository whose index is read (fts_repo_alias), never
+                    # the request alias (None for an alias-less request).
                     with track_activated_repo_query(
                         getattr(app.state, "query_tracker", None),
                         activated_repo_manager,
@@ -933,12 +935,8 @@ def register_query_routes(
                                         line_end=result.get("line_end", 0),
                                         snippet=result.get("snippet", ""),
                                         language=result.get("language", "unknown"),
-                                        # Codex round-6 LOW finding: use
-                                        # fts_repo_alias (the repo whose
-                                        # index was ACTUALLY read), not
-                                        # activated_repos[0] (the first
-                                        # repo in the list, which may
-                                        # lack an FTS index entirely).
+                                        # The repository whose index was
+                                        # read, not the first listed one.
                                         repository_alias=request.repository_alias
                                         or fts_repo_alias
                                         or "",

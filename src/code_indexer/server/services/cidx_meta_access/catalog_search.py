@@ -34,9 +34,12 @@ from .hit_projection import (
     project_meta_hits,
 )
 from ..constants import CIDX_META_REPO_GLOBAL, is_internal_meta_repo
+from .fulltext_terms import effective_edit_distance, raise_fulltext_refusal
 from .served_identity import (
+    CatalogLocations,
     golden_repos_dir_of,
     path_is_catalog_location,
+    request_catalog_locations,
     request_served_paths,
 )
 from .universe_provider import registry_of
@@ -168,6 +171,22 @@ def project_grouped_results(
     return out
 
 
+def project_multi_response(
+    response: Any,
+    username: str,
+    access_service: Optional[Any],
+    rematch: Optional[TextRematch] = None,
+) -> None:
+    """A multi-repository response (``results`` grouped by alias, with
+    ``metadata.total_results``) as the caller may see it, in place: rows
+    projected (``project_grouped_results``) and the count taken from the
+    projected rows."""
+    response.results = project_grouped_results(
+        response.results, username, access_service, rematch
+    )
+    response.metadata.total_results = sum(len(r) for r in response.results.values())
+
+
 def reproject_job_result(
     result: object, username: str, access_service: Optional[Any]
 ) -> object:
@@ -244,6 +263,8 @@ class FullTextQuery(Protocol):
     query_text: str
     case_sensitive: bool
     regex: bool
+    fuzzy: bool
+    edit_distance: int
 
 
 def rest_rows_for_caller(
@@ -273,7 +294,10 @@ def rest_rows_for_caller(
         None
         if fts_query is None
         else TextRematch(
-            fts_query.query_text, fts_query.case_sensitive, fts_query.regex
+            fts_query.query_text,
+            fts_query.case_sensitive,
+            fts_query.regex,
+            effective_edit_distance(fts_query.fuzzy, fts_query.edit_distance),
         )
     )
     projected = project_catalog_rows(rows, username, access_service, rematch)
@@ -322,8 +346,34 @@ def catalog_query_vector(
     return list(vector)
 
 
+def catalog_rematch(
+    query_text: str,
+    request_kwargs: Mapping[str, Any],
+    activated_repo_manager: Optional[Any],
+) -> Tuple[TextRematch, Optional[CatalogLocations]]:
+    """One search request's full-text query (as every repository of it
+    runs it) and its catalog locations, looked up at most once."""
+    distance = effective_edit_distance(
+        bool(request_kwargs.get("fuzzy")), int(request_kwargs.get("edit_distance") or 0)
+    )
+    rematch = TextRematch(
+        query_text,
+        bool(request_kwargs.get("case_sensitive")),
+        bool(request_kwargs.get("regex")),
+        distance,
+    )
+    golden_repos_dir = golden_repos_dir_of(activated_repo_manager)
+    locations = (
+        request_catalog_locations(golden_repos_dir) if golden_repos_dir else None
+    )
+    return rematch, locations
+
+
 def _catalog_judgement(
-    repo_info: Mapping[str, Any], repo_path: Any, golden_repos_dir: Optional[str]
+    repo_info: Mapping[str, Any],
+    repo_path: Any,
+    golden_repos_dir: Optional[str],
+    locations: Optional[CatalogLocations] = None,
 ) -> Optional[bool]:
     """True when the entry is proven to be the catalog (its golden identity,
     or the directory searched is a catalog location); None when only an
@@ -334,7 +384,7 @@ def _catalog_judgement(
     if (
         repo_path
         and golden_repos_dir
-        and path_is_catalog_location(str(repo_path), str(golden_repos_dir))
+        and path_is_catalog_location(str(repo_path), str(golden_repos_dir), locations)
     ):
         return True
     return None if is_internal_meta_identity(identities) else False
@@ -354,6 +404,7 @@ def search_for_caller(
     budget_spent: Callable[[], bool],
     query_vector: Optional[List[float]] = None,
     no_embedding_cache_shortcut: bool = False,
+    locations: Optional[CatalogLocations] = None,
 ) -> List[Any]:
     """One repository's hits for the caller (see the module docstring).
     *run(k, mode, vector)* is the raw single-repository search over
@@ -370,9 +421,12 @@ def search_for_caller(
     if unrestricted_caller(username, access_service):
         return run(limit, search_mode, query_vector)
     golden_repos_dir = golden_repos_dir_of(activated_repo_manager)
-    proven = _catalog_judgement(repo_info, repo_path, golden_repos_dir)
+    proven = _catalog_judgement(repo_info, repo_path, golden_repos_dir, locations)
     if proven is False:
         return run(limit, search_mode, query_vector)
+    fulltext = search_mode in ("fts", "hybrid") and not rematch.regex
+    if fulltext and rematch.terms is None:
+        raise_fulltext_refusal()
     scope = _LazyScope(
         lambda: open_catalog_scope(
             username, access_service, Path(repo_path), registry_of(state)

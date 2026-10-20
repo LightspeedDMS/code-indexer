@@ -33,6 +33,7 @@ from .._utils import (
     _expand_wildcard_patterns,
     _format_omni_response,
     _get_access_filtering_service,
+    _get_activated_repo_manager,
     _get_temporal_status,
     _get_wiki_enabled_repos,
     _is_temporal_query,
@@ -244,6 +245,24 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     )
 
     search_type = _resolve_search_type(params, user)
+    if search_type == "fts":
+        from ....query.semantic_query_manager import SearchParameterError
+        from ....services.cidx_meta_access.catalog_fulltext import (
+            refuse_unevaluable_catalog_fulltext,
+        )
+
+        try:
+            refuse_unevaluable_catalog_fulltext(
+                str(params.get("query_text", "") or ""),
+                0,
+                repo_aliases,
+                None,
+                user.username,
+                _get_access_filtering_service(),
+                _get_activated_repo_manager(),
+            )
+        except SearchParameterError as refusal:
+            return _mcp_response({"success": False, "error": str(refusal)})
     effective_limit = _compute_effective_limit(requested_limit, user)
     request = _build_multi_search_request(
         repo_aliases, params, search_type, effective_limit
@@ -309,6 +328,19 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             errors={"service_error": classify_search_error(e).message}
         )
 
+    if search_type == "fts":
+        from ....services.cidx_meta_access.catalog_search import (
+            TextRematch,
+            project_multi_response,
+        )
+
+        # Catalog rows must match on the text the caller may see.
+        project_multi_response(
+            response,
+            user.username,
+            _get_access_filtering_service(),
+            TextRematch(str(params.get("query_text", "") or "")),
+        )
     category_map = _load_category_map("_omni_search_code")
     all_results = _flatten_multi_results(
         response, category_map, _get_wiki_enabled_repos()

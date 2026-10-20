@@ -1404,10 +1404,7 @@ class SemanticQueryManager:
         # (which repo(s), not just the raw error text) to the caller
         # instead of the failure being silently dropped.
         failed_repo_aliases: List[str] = []
-        # AC7 (Bug #1202): track the effective routing decision from the first
-        # successfully-searched repo (all repos in one request share the same
-        # search_mode and query_strategy parameters so the resolved value is
-        # constant across the loop).
+        # AC7 (Bug #1202): the first searched repo's routing decision (shared).
         _effective_strategy: str = query_strategy or "primary_only"
 
         # #2047: ONE extension over-fetch time budget for this whole request,
@@ -1417,7 +1414,7 @@ class SemanticQueryManager:
 
         from .filtered_search import extension_budget_spent
         from code_indexer.server.services.cidx_meta_access.catalog_search import (
-            TextRematch,
+            catalog_rematch,
             search_for_caller,
         )
 
@@ -1451,7 +1448,9 @@ class SemanticQueryManager:
             extension_deadline=extension_deadline,
         )
 
-        # Search each repository
+        _rematch, _locations = catalog_rematch(
+            query_text, _request_kwargs, self.activated_repo_manager
+        )
         for repo_index, repo_info in enumerate(user_repos):
             # #2047: no repository search STARTS after the request's budget
             # (a running one finishes); the short answer is logged.
@@ -1587,11 +1586,12 @@ class SemanticQueryManager:
                         activated_repo_manager=self.activated_repo_manager,
                         limit=limit,
                         search_mode=search_mode,
-                        rematch=TextRematch(query_text, case_sensitive, regex),
+                        rematch=_rematch,
                         merge=self._merge_hybrid_results,
                         budget_spent=lambda: extension_budget_spent(extension_deadline),
                         query_vector=precomputed_query_vector,
                         no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                        locations=_locations,
                     )
                 # AC7: capture routing decision from the first resolved repo
                 if _strat_out and _effective_strategy == (

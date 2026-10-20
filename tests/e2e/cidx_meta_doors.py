@@ -649,13 +649,6 @@ class CatalogDoorSuite:
     this (``class TestCatalogDoors(CatalogDoorSuite)``) and provides a
     module-scoped ``catalog_callers`` fixture returning (restricted, admin)."""
 
-    # First on purpose: a session-scoped log-audit gate fails in the LAST
-    # test's teardown, and pytest reports that as xfailed when the last test
-    # is an xfail -- the gate failure would be swallowed.
-    @pytest.mark.xfail(
-        strict=True,
-        reason="a visible catalog hit whose snippet ends at the end of the file is dropped",
-    )
     def test_fts_keeps_visible_hit_on_last_line_of_description(
         self, catalog_callers: Callers
     ) -> None:

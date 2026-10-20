@@ -24,11 +24,13 @@ from __future__ import annotations
 import dataclasses
 import logging
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence
 
 from ....utils.path_confinement import resolve_confined_path
 from .depmap_projection import MetaProjector, render_line_aligned
+from .fulltext_terms import FullTextTerms, first_visible_match, parse_fulltext_terms
 from .membership import request_participants_reader
 from .path_policy import DEP_MAP_DIR, Decision, DecisionKind, classify
 from .universe_provider import process_alias_universe
@@ -113,6 +115,12 @@ class TextRematch:
     query: str
     case_sensitive: bool = False
     regex: bool = False
+    edit_distance: int = 0
+
+    @cached_property
+    def terms(self) -> Optional[FullTextTerms]:
+        """The query's required words; None for a refused literal form."""
+        return parse_fulltext_terms(self.query, self.edit_distance)
 
     def match(
         self, raw: str, view: LineView, match_text: Optional[str]
@@ -273,6 +281,20 @@ def _project_lines_at(
     return LineView(lines=out, unchanged=unchanged)
 
 
+def _text_lines(text: str) -> List[str]:
+    """*text* split into lines, a CRLF ending read like LF (as
+    ``CatalogScope.document`` reads the file)."""
+    return [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
+
+
+def _chunk_candidates(lines: List[str]) -> List[List[str]]:
+    """*lines*, then, when the text ended in a line break, *lines* without
+    the empty element that break left (it may be a real empty line)."""
+    if len(lines) > 1 and lines[-1] == "":
+        return [lines, lines[:-1]]
+    return [lines]
+
+
 def project_chunk_view(
     scope: CatalogScope, relative_path: str, text: str, hint: Optional[int]
 ) -> Optional[LineView]:
@@ -282,8 +304,12 @@ def project_chunk_view(
     doc = scope.document(relative_path)
     if doc is None:
         return None
-    chunk = text.split("\n")
-    first = _locate(chunk, doc, scope.rendered(relative_path, doc), hint)
+    shown = scope.rendered(relative_path, doc)
+    chunk, first = [""], None
+    for chunk in _chunk_candidates(_text_lines(text)):
+        first = _locate(chunk, doc, shown, hint)
+        if first is not None:
+            break
     view = (
         None if first is None else _project_lines_at(scope, relative_path, chunk, first)
     )
@@ -329,6 +355,55 @@ def _rebuild(hit: Any, updates: Dict[str, Optional[str]]) -> Any:
     raise TypeError(f"unsupported catalog hit type: {type(hit).__name__}")
 
 
+def _shown_window(
+    shown: List[str], doc: List[str], original: str, line: int, matched: str
+) -> str:
+    """The shown text replacing *original*: the matched text when
+    *original* was part of one line, else as many lines around *line*."""
+    lines = _chunk_candidates(_text_lines(original))[-1]
+    count = len(lines)
+    if count == 1 and lines[0] not in doc:
+        return matched
+    context = (count - 1) // 2
+    first = max(1, line - context)
+    return "\n".join(shown[first - 1 : min(len(shown), line + context)])
+
+
+def _project_fulltext(
+    hit: Any, scope: CatalogScope, path: str, rematch: TextRematch
+) -> Optional[Any]:
+    """A full-text hit on a projected document, kept only when the shown
+    document holds every required word, anchored on its first shown
+    occurrence; dropped for a form that cannot be judged on shown text."""
+    terms = rematch.terms
+    doc = scope.document(path)
+    if terms is None or doc is None:
+        return None
+    shown = scope.rendered(path, doc)
+    found = first_visible_match(doc, shown, terms)
+    if found is None:
+        return None
+    updates: Dict[str, Optional[str]] = {}
+    for key in _TEXT_KEYS:
+        value = _get(hit, (key,))
+        if isinstance(value, str) and value:
+            updates[key] = _shown_window(shown, doc, value, found.line, found.text)
+    if _first_key(hit, ("match_text",)) is not None:
+        updates["match_text"] = found.text
+    rebuilt = _rebuild(hit, updates)
+    for key in ("line_number", "line_start", "line_end"):
+        value = _get(hit, (key,))
+        if isinstance(value, int) and value > 0:
+            rebuilt = _with_line(rebuilt, key, found.line)
+    return rebuilt
+
+
+def _with_line(hit: Any, key: str, line: int) -> Any:
+    if isinstance(hit, dict):
+        return dict(hit, **{key: line})
+    return dataclasses.replace(hit, **{key: line})
+
+
 def _project_one(
     hit: Any, scope: CatalogScope, rematch: Optional[TextRematch]
 ) -> Optional[Any]:
@@ -338,6 +413,9 @@ def _project_one(
     decision = scope.decide(path)
     if decision.kind is DecisionKind.DENY:
         return None
+    if rematch is not None and not rematch.regex:
+        if decision.kind in _PROJECTED_KINDS:
+            return _project_fulltext(hit, scope, path, rematch)
     texts = {key: value for key in _TEXT_KEYS if (value := _get(hit, (key,)))}
     projected_kind = decision.kind in _PROJECTED_KINDS
     updates: Dict[str, Optional[str]] = {}
