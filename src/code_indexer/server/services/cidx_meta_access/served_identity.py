@@ -22,6 +22,7 @@ async callers run it on a worker thread.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 _REMOTE_URL = re.compile(r"^\s*url\s*=\s*(.+?)\s*$")
 _MAX_GIT_CONFIG_BYTES = 65536
+_MAX_PROXY_CONFIG_BYTES = 1048576
 _FILE_SCHEME = "file://"
 
 
@@ -149,10 +151,51 @@ def request_catalog_locations(golden_repos_dir: str) -> CatalogLocations:
     return locations
 
 
-def path_is_catalog_location(path: str, golden_repos_dir: str) -> bool:
+def path_is_catalog_location(
+    path: str, golden_repos_dir: str, locations: Optional[CatalogLocations] = None
+) -> bool:
     """True when *path* is the catalog, one of its snapshots, or a clone of
-    either (or a clone whose remotes cannot be read)."""
-    return _in_locations(path, catalog_locations(golden_repos_dir))
+    either (or a clone whose remotes cannot be read). *locations* is the
+    request's ``request_catalog_locations``."""
+    known = (locations or request_catalog_locations(golden_repos_dir))()
+    return _in_locations(path, known)
+
+
+def composite_component_paths(path: str) -> Optional[List[str]]:
+    """The component directories when *path* is a composite activation (its
+    proxy configuration on disk), ``[]`` when it is not one, None when that
+    configuration cannot be read or names a component that is not a plain
+    directory name (then answered as the catalog)."""
+    config = Path(path) / ".code-indexer" / "config.json"
+    try:
+        with open(config, "rb") as handle:
+            raw = handle.read(_MAX_PROXY_CONFIG_BYTES + 1)
+        data = json.loads(raw) if len(raw) <= _MAX_PROXY_CONFIG_BYTES else None
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "Configuration of a served repository unreadable (%s); answering "
+            "it as the catalog",
+            type(exc).__name__,
+        )
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("proxy_mode") is not True:
+        return []
+    names = data.get("discovered_repos")
+    if not isinstance(names, list) or not all(_plain_name(n) for n in names):
+        return None
+    return [os.path.join(path, name) for name in names]
+
+
+def _plain_name(name: Any) -> bool:
+    return (
+        isinstance(name, str)
+        and name not in ("", ".", "..")
+        and not any(ch in name for ch in "/\\\x00")
+    )
 
 
 def _in_locations(path: str, locations: Tuple[str, ...]) -> bool:

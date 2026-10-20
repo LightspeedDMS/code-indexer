@@ -93,15 +93,16 @@ def catalog_surface_refusal(
     username: str,
     access_service: Optional["AccessFilteringService"],
     activated_repo_manager: Optional[Any],
+    locations: Optional[CatalogLocations] = None,
 ) -> Optional[str]:
     """The refusal when *alias* (a golden alias, the caller's activation, or
     a collection of them) may serve the catalog and the caller is
     restricted, else None. Without the access service the caller is
-    restricted."""
+    restricted. *locations* is the request's ``request_catalog_locations``."""
     if unrestricted_caller(username, access_service):
         return None
     golden_repos_dir = golden_repos_dir_of(activated_repo_manager)
-    locations = _request_locations(golden_repos_dir)
+    locations = locations or _request_locations(golden_repos_dir)
 
     def is_catalog(name: str) -> bool:
         return is_catalog_request(
@@ -159,15 +160,19 @@ def served_catalog_surface_refusal(
     username: str,
     access_service: Optional["AccessFilteringService"],
     golden_repos_dir: Optional[str],
+    locations: Optional[CatalogLocations] = None,
 ) -> Optional[str]:
     """The refusal when a restricted caller is served *served_path* and it is
-    the catalog by its own shape or, with *golden_repos_dir*, one of the
-    catalog's locations; for a door that resolves the repository itself."""
+    the catalog by its own shape or one of the catalog's locations, or
+    cannot be judged (no *golden_repos_dir*); for a door that resolves the
+    repository itself. *locations* is the request's
+    ``request_catalog_locations``."""
     if unrestricted_caller(username, access_service):
         return None
-    if path_looks_like_catalog(served_path) or (
-        bool(golden_repos_dir)
-        and path_is_catalog_location(served_path, str(golden_repos_dir))
+    if (
+        path_looks_like_catalog(served_path)
+        or not golden_repos_dir
+        or path_is_catalog_location(served_path, golden_repos_dir, locations)
     ):
         return surface.refusal
     return None

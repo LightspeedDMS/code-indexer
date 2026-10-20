@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Set, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import anyio.to_thread
 from fastapi import HTTPException, status
@@ -219,11 +219,13 @@ def refuse_catalog_history(
     activated_repo_manager: Optional[Any],
     username: str,
     alias: Any,
+    locations: Optional[Callable[[], Tuple[str, ...]]] = None,
 ) -> None:
     """Refuse the catalog's history (commit and branch metadata, moving a
     clone's HEAD) when *alias* -- a golden alias or the caller's activation,
     judged by golden identity -- serves the catalog and the caller is
-    restricted. Synchronous: call it from a sync route.
+    restricted. *locations* is the request's ``request_catalog_locations``.
+    Synchronous: call it from a sync route.
 
     Raises:
         HTTPException 403: fixed text naming no repository content.
@@ -240,6 +242,7 @@ def refuse_catalog_history(
             username,
             access_filtering_service,
             activated_repo_manager,
+            locations,
         )
     )
 
@@ -327,17 +330,23 @@ def refuse_served_catalog_history(
         CatalogSurface,
         served_catalog_surface_refusal,
     )
-    from ..services.cidx_meta_access.served_identity import state_golden_repos_dir
+    from ..services.cidx_meta_access.served_identity import (
+        request_catalog_locations,
+        state_golden_repos_dir,
+    )
 
     service = getattr(state, "access_filtering_service", None)
-    refuse_catalog_history(service, activated_repo_manager, username, alias)
+    golden = state_golden_repos_dir(state)
+    locations = request_catalog_locations(golden) if golden else None
+    refuse_catalog_history(service, activated_repo_manager, username, alias, locations)
     _history_refused(
         served_catalog_surface_refusal(
             CatalogSurface.GIT_HISTORY,
             str(served_path),
             username,
             service,
-            state_golden_repos_dir(state),
+            golden,
+            locations,
         )
     )
 

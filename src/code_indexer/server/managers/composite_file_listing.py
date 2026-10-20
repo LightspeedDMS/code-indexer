@@ -8,6 +8,7 @@ supporting Story 3.3 of the Server Composite Repository Activation epic.
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 from typing import Any, List, Optional
@@ -15,13 +16,28 @@ from typing import Any, List, Optional
 from ..models.activated_repository import ActivatedRepository
 from ..models.composite_file_models import FileInfo
 from ...proxy.config_manager import ProxyConfigManager
+from ...utils.path_confinement import is_readable_within_root, resolve_confined_path
+from ..services.cidx_meta_access.file_doors import (
+    judge_app_request,
+    visible_composite_entries,
+)
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class ComponentListing:
+    """One component's entries; ``base`` is the directory walked, relative
+    to the component (``""`` for its root, symlinks resolved)."""
+
+    component: str
+    base: str
+    entries: List[FileInfo]
+
+
 def _walk_directory(
-    directory: Path, repo_prefix: str, recursive: bool
+    directory: Path, repo_prefix: str, recursive: bool, root: Optional[Path] = None
 ) -> List[FileInfo]:
     """
     Walk directory and collect file information.
@@ -30,17 +46,25 @@ def _walk_directory(
         directory: Directory path to walk
         repo_prefix: Component repository prefix for paths
         recursive: Whether to walk recursively
+        root: The component root; a symlink resolving outside it (or into
+            its ``.git``) is not listed. Defaults to *directory*.
 
     Returns:
         List of FileInfo objects for files in directory
     """
     files = []
+    resolved_root = (root or directory).resolve()
+
+    def _escapes(item: Path) -> bool:
+        return item.is_symlink() and not is_readable_within_root(item, resolved_root)
 
     if recursive:
         # Recursive walk
         for item in directory.rglob("*"):
             # Skip .git and .code-indexer directories
             if ".git" in item.parts or ".code-indexer" in item.parts:
+                continue
+            if _escapes(item):
                 continue
 
             if item.is_file():
@@ -71,7 +95,7 @@ def _walk_directory(
         try:
             for item in directory.iterdir():
                 # Skip .git and .code-indexer directories
-                if item.name in [".git", ".code-indexer"]:
+                if item.name in [".git", ".code-indexer"] or _escapes(item):
                     continue
 
                 try:
@@ -122,6 +146,15 @@ def composite_activation(
     return None
 
 
+def _confined_target(component_root: Path, path: str) -> Optional[Path]:
+    """The directory a listing of *path* walks inside *component_root*,
+    resolved; None when it leaves the component (or enters its ``.git``)."""
+    try:
+        return resolve_confined_path(component_root, path)
+    except PermissionError:
+        return None
+
+
 def _list_composite_files(
     repo: ActivatedRepository, path: str = "", recursive: bool = False
 ) -> List[FileInfo]:
@@ -136,9 +169,36 @@ def _list_composite_files(
     Returns:
         List of FileInfo objects sorted by full_path
     """
-    files = []
+    listings = list_composite_components(repo, path, recursive)
+    files = [entry for listing in listings for entry in listing.entries]
+    return sorted(files, key=lambda f: f.full_path)
 
-    # Get component repos using ProxyConfigManager
+
+def visible_composite_files(
+    state: Any,
+    composite: ActivatedRepository,
+    path: str,
+    recursive: bool,
+    username: str,
+    activated_repo_manager: Any,
+) -> List[FileInfo]:
+    """The composite listing of *path* the caller may see: each component is
+    walked confined to itself and judged on its own directory."""
+    components = Path(composite.path)
+    return visible_composite_entries(
+        list_composite_components(composite, path, recursive),
+        lambda name: judge_app_request(
+            state, name, str(components / name), username, activated_repo_manager
+        ),
+    )
+
+
+def list_composite_components(
+    repo: ActivatedRepository, path: str = "", recursive: bool = False
+) -> List[ComponentListing]:
+    """The listing of *path* inside every component, confined to it: a path
+    that leaves a component lists nothing from it, like a missing path."""
+    listings: List[ComponentListing] = []
     try:
         proxy_config = ProxyConfigManager(repo.path)
         discovered_repos = proxy_config.get_repositories()
@@ -151,21 +211,20 @@ def _list_composite_files(
         )
         return []
 
-    # Walk each component repository
     for repo_name in discovered_repos:
-        subrepo_path = repo.path / repo_name
-        target_path = subrepo_path / path if path else subrepo_path
+        subrepo_path = Path(repo.path) / repo_name
+        target_path = _confined_target(subrepo_path, path)
 
-        if not target_path.exists():
+        if target_path is None or not target_path.is_dir():
             logger.debug(
-                f"Path does not exist: {target_path}",
+                f"Path does not exist in component {repo_name}",
                 extra={"correlation_id": get_correlation_id()},
             )
             continue
 
-        # Walk the component repository
-        repo_files = _walk_directory(target_path, repo_name, recursive)
-        files.extend(repo_files)
-
-    # Sort by path for consistent output
-    return sorted(files, key=lambda f: f.full_path)
+        base = target_path.relative_to(subrepo_path.resolve()).as_posix()
+        entries = _walk_directory(target_path, repo_name, recursive, subrepo_path)
+        listings.append(
+            ComponentListing(repo_name, "" if base == "." else base, entries)
+        )
+    return listings

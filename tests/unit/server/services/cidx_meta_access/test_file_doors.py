@@ -114,9 +114,69 @@ def test_missing_golden_repos_dir_restricts(
     assert _judge(fx, f"{ALPHA}-global", ordinary, None).view is not None
 
 
+def _configured(repo: Path, config: Any) -> Path:
+    (repo / ".code-indexer").mkdir(exist_ok=True)
+    text = config if isinstance(config, str) else json.dumps(config)
+    (repo / ".code-indexer" / "config.json").write_text(text)
+    return repo
+
+
+def _components(repo: Path, names: Any) -> dict:
+    for name in names:
+        (repo / name).mkdir()
+    return {"proxy_mode": True, "discovered_repos": names}
+
+
+@pytest.mark.parametrize(
+    "config", [{"proxy_mode": False}, {"embedding_provider": "voyage-ai"}]
+)
+def test_non_composite_configuration_leaves_an_ordinary_directory_unrestricted(
+    fx: CidxMetaFixture, golden: Path, ordinary: Path, config: Any
+) -> None:
+    served = _configured(ordinary, config)
+    assert _judge(fx, f"{ALPHA}-global", served, golden).view is None
+
+
+def test_composite_of_ordinary_components_is_unrestricted(
+    fx: CidxMetaFixture, golden: Path, ordinary: Path
+) -> None:
+    served = _configured(ordinary, _components(ordinary, [ALPHA, "bravo"]))
+    assert _judge(fx, f"{ALPHA}-global", served, golden).view is None
+
+
+def test_composite_with_a_catalog_component_is_restricted(
+    fx: CidxMetaFixture, golden: Path, ordinary: Path
+) -> None:
+    (ordinary / "notes").symlink_to(fx.root)
+    served = _configured(ordinary, {"proxy_mode": True, "discovered_repos": ["notes"]})
+
+    assert _judge(fx, f"{ALPHA}-global", served, golden).view is not None
+    assert _judge(fx, f"{ALPHA}-global", served, golden, ADMIN_USER) is UNRESTRICTED
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        "{not json",
+        "[1, 2]",
+        {"proxy_mode": True, "discovered_repos": "alpha"},
+        {"proxy_mode": True, "discovered_repos": ["../elsewhere"]},
+        {"proxy_mode": True, "discovered_repos": [".."]},
+        {"proxy_mode": True, "discovered_repos": [7]},
+        " " * (1048576 + 1),
+    ],
+)
+def test_unjudgeable_composite_configuration_is_restricted(
+    fx: CidxMetaFixture, golden: Path, ordinary: Path, config: Any
+) -> None:
+    served = _configured(ordinary, config)
+    assert _judge(fx, f"{ALPHA}-global", served, golden).view is not None
+
+
 def test_composite_entry_outside_its_component_fails_closed() -> None:
     from datetime import datetime
 
+    from code_indexer.server.managers.composite_file_listing import ComponentListing
     from code_indexer.server.models.composite_file_models import FileInfo
     from code_indexer.server.services.cidx_meta_access.file_doors import (
         visible_composite_entries,
@@ -132,7 +192,9 @@ def test_composite_entry_outside_its_component_fails_closed() -> None:
     )
 
     with pytest.raises(ValueError):
-        visible_composite_entries([stray], "", lambda name: UNRESTRICTED)
+        visible_composite_entries(
+            [ComponentListing("cidx-meta", "", [stray])], lambda name: UNRESTRICTED
+        )
 
 
 def test_bound_handles_carry_the_callers_visibility(

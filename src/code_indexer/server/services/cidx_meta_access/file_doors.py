@@ -26,6 +26,7 @@ Synchronous (stores and files): async callers use a worker thread.
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import contextmanager
 from contextvars import Token
@@ -54,7 +55,12 @@ from .path_policy import (
     classify,
     may_list_under,
 )
-from .served_identity import path_is_catalog_location, path_looks_like_catalog
+from .served_identity import (
+    composite_component_paths,
+    path_is_catalog_location,
+    path_looks_like_catalog,
+    request_catalog_locations,
+)
 from .universe_provider import process_alias_universe, registry_of
 from .visibility import (
     MetaVisibility,
@@ -65,6 +71,8 @@ from .visibility import (
 
 if TYPE_CHECKING:
     from ..access_filtering_service import AccessFilteringService
+
+logger = logging.getLogger(__name__)
 
 LinesView = Callable[[List[str]], List[str]]
 _PROJECTED = frozenset({DecisionKind.DESCRIPTION, DecisionKind.TRANSFORM})
@@ -224,6 +232,40 @@ class CatalogFileAccess:
 
 UNRESTRICTED = CatalogFileAccess(None)
 
+BINARY_SNIFF_BYTES = 8192
+
+
+def served_file_payload(
+    path: str, file_path: Path, access: CatalogFileAccess
+) -> Dict[str, Any]:
+    """The content payload of the confined, judged file *file_path* (requested
+    as *path*): binary (a NUL byte, or not UTF-8, in the first
+    ``BINARY_SNIFF_BYTES``, or unreadable) has no content; text is served as
+    *access* allows.
+
+    Raises:
+        FileNotFoundError: the judgement denies *path*.
+    """
+    size = file_path.stat().st_size
+    binary: Dict[str, Any] = {
+        "path": path,
+        "is_binary": True,
+        "size": size,
+        "content": None,
+    }
+    try:
+        with open(file_path, "rb") as f:
+            chunk = f.read(BINARY_SNIFF_BYTES)
+        if b"\x00" in chunk:
+            return binary
+        chunk.decode("utf-8")
+        raw = file_path.read_text(encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        logger.debug("Serving a file as binary (%s)", type(exc).__name__)
+        return binary
+    text = access.served_text(path, raw)
+    return {"path": path, "is_binary": False, "size": size, "content": text}
+
 
 def judge_app_request(
     state: Any,
@@ -247,11 +289,20 @@ def judge_app_request(
 
 
 def _served_from_catalog(served_path: str, golden_repos_dir: Optional[str]) -> bool:
-    if path_looks_like_catalog(served_path):
+    """True when *served_path*, or any component of a composite served there,
+    is the catalog or cannot be judged."""
+    components = composite_component_paths(served_path)
+    if components is None:
+        return True
+    served = [served_path, *components]
+    if any(path_looks_like_catalog(path) for path in served):
         return True
     if not golden_repos_dir:
         return True
-    return path_is_catalog_location(served_path, golden_repos_dir)
+    locations = request_catalog_locations(golden_repos_dir)
+    return any(
+        path_is_catalog_location(path, golden_repos_dir, locations) for path in served
+    )
 
 
 def judge_file_door(
@@ -315,34 +366,36 @@ def served_tree_view(
 
 
 def visible_composite_entries(
-    entries: List[Any],
-    path: str,
+    listings: List[Any],
     judge_component: Callable[[str], CatalogFileAccess],
 ) -> List[Any]:
-    """The composite listing *entries* (``full_path``, ``component_repo``,
-    ``is_directory``) the caller may see. Each component is judged once on
-    its own served directory (``judge_component(name)``) and each entry is
-    decided on its path inside that component (*path*, the requested
-    subdirectory, prefixed).
+    """The composite entries the caller may see, sorted by ``full_path``.
+
+    Each listing (``component``; ``base``, the directory walked inside it;
+    ``entries`` with ``full_path``, ``component_repo``, ``is_directory``) is
+    judged once on its own served directory (``judge_component(name)``) and
+    each entry on its path inside the component: ``base`` + its path under
+    the walked directory.
 
     Raises:
         ValueError: an entry does not lie under its component (fail closed).
     """
-    base = path.strip("/")
-    accesses: Dict[str, CatalogFileAccess] = {}
     kept: List[Any] = []
-    for entry in entries:
-        component = entry.component_repo
-        prefix = f"{component}/"
-        if not entry.full_path.startswith(prefix):
-            raise ValueError("composite entry outside its component")
-        if component not in accesses:
-            accesses[component] = judge_component(component)
-        inner = entry.full_path[len(prefix) :]
-        relative = f"{base}/{inner}" if base else inner
-        if accesses[component].lists(relative, entry.is_directory):
-            kept.append(entry)
-    return kept
+    for listing in listings:
+        if not listing.entries:
+            continue
+        access = judge_component(listing.component)
+        prefix = f"{listing.component}/"
+        for entry in listing.entries:
+            if entry.component_repo != listing.component or not (
+                entry.full_path.startswith(prefix)
+            ):
+                raise ValueError("composite entry outside its component")
+            inner = entry.full_path[len(prefix) :]
+            relative = f"{listing.base}/{inner}" if listing.base else inner
+            if access.lists(relative, entry.is_directory):
+                kept.append(entry)
+    return sorted(kept, key=lambda entry: entry.full_path)
 
 
 def view_for(

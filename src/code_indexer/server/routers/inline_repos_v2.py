@@ -52,14 +52,14 @@ from ..models.activated_repository import ActivatedRepository
 from ..auth import dependencies
 from . import repo_access_http
 from ..managers.composite_file_listing import (
-    _list_composite_files,
     composite_activation,
+    visible_composite_files,
 )
 from ..services.stats_service import stats_service
 from ..services.file_service import file_service
 from ..services.cidx_meta_access.file_doors import (
     judge_app_request,
-    visible_composite_entries,
+    served_file_payload,
 )
 from ..services.file_listing_paths import build_non_composite_path_pattern
 from code_indexer.utils.path_confinement import resolve_confined_path
@@ -947,29 +947,7 @@ def register_repos_v2_routes(
                     status_code=400, detail=f"Path '{path}' is not a file"
                 )
 
-            # Detect if binary (a NUL byte, or not UTF-8, in the first 8 KiB)
-            try:
-                with open(file_path, "rb") as f:
-                    chunk = f.read(8192)
-                is_binary = b"\x00" in chunk
-                if not is_binary:
-                    chunk.decode("utf-8")
-            except Exception:
-                is_binary = True
-
-            binary = {"path": path, "is_binary": True, "content": None}
-            if is_binary:
-                return {**binary, "size": file_path.stat().st_size}
-            try:
-                text = access.served_text(path, file_path.read_text(encoding="utf-8"))
-            except UnicodeDecodeError:
-                return {**binary, "size": file_path.stat().st_size}
-            return {
-                "path": path,
-                "is_binary": False,
-                "size": file_path.stat().st_size,
-                "content": text,
-            }
+            return served_file_payload(path, file_path, access)
 
         served = activated_repo_manager.get_activated_repo_path(
             current_user.username, repo_id
@@ -982,17 +960,13 @@ def register_repos_v2_routes(
         )
         if composite is not None:
             # Bug #1886 (R3 revision): `recursive` is composite-only.
-            components = composite.path
-            files = visible_composite_entries(
-                _list_composite_files(composite, path=path or "", recursive=recursive),
+            files = visible_composite_files(
+                app.state,
+                composite,
                 path or "",
-                lambda name: judge_app_request(
-                    app.state,
-                    name,
-                    str(components / name),
-                    current_user.username,
-                    activated_repo_manager,
-                ),
+                recursive,
+                current_user.username,
+                activated_repo_manager,
             )
             return {"files": [f.model_dump() for f in files]}
 

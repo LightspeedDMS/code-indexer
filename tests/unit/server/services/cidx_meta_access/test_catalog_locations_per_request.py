@@ -89,6 +89,47 @@ def test_golden_gate_computes_locations_once(
     assert len(location_calls) == 1
 
 
+def _served_history(env: CatalogFileDoorEnv, state: Any, who: str) -> None:
+    from code_indexer.server.routers.repo_access_http import (
+        refuse_served_catalog_history,
+    )
+
+    refuse_served_catalog_history(
+        state, env.activations, who, f"{ALPHA}-global", env.alpha_dir
+    )
+
+
+def test_served_history_computes_locations_once(
+    env: CatalogFileDoorEnv, location_calls: List[str]
+) -> None:
+    _served_history(env, env.state, RESTRICTED_USER)
+
+    assert len(location_calls) == 1
+
+
+def test_served_history_without_golden_dir_refuses_restricted(
+    env: CatalogFileDoorEnv,
+) -> None:
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from tests.shared.cidx_meta_visibility_fixture import ADMIN_USER
+
+    state = SimpleNamespace(**{**vars(env.state), "golden_repos_dir": None})
+
+    with pytest.raises(HTTPException) as refused:
+        _served_history(env, state, RESTRICTED_USER)
+    assert refused.value.status_code == 403
+    _served_history(env, state, ADMIN_USER)
+
+
+def test_served_history_of_an_ordinary_repository_passes(
+    env: CatalogFileDoorEnv,
+) -> None:
+    _served_history(env, env.state, RESTRICTED_USER)
+
+
 def _bound(env: CatalogFileDoorEnv, aliases: Any) -> Any:
     token = bind_catalog_handles(
         aliases, RESTRICTED_USER, env.fx.access_service, env.activations
