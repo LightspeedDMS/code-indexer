@@ -55,7 +55,10 @@ if TYPE_CHECKING:
 # belongs to the `cidx index` child process, not to a server service.
 from code_indexer.services.run_spend_meter import get_run_spend_meter
 from code_indexer.server.services.embedding_stats_attribution import StatsAttribution
-from code_indexer.server.services.embedding_stats_writer import EmbeddingStatsWriter
+from code_indexer.server.services.embedding_stats_writer import (
+    EmbeddingStatsWriter,
+    NoOpWriter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -271,8 +274,11 @@ def _tokens_for_success(
     """The vendor token count of a successful call; fail-open to 0.
 
     A None from the extractor means the response carried no readable usage
-    figure; that, like an extractor error, records 0 and warns."""
+    figure; that, like an extractor error, records 0 and warns. With the NoOp
+    writer active nothing is recorded, so the extractor is not run."""
     try:
+        if isinstance(EmbeddingStatsWriter.get_active(), NoOpWriter):
+            return 0
         tokens = tokens_from_result(result)
     except Exception as exc:  # fail-open: never raise into indexing/query
         _warn_usage_unavailable(
@@ -341,17 +347,19 @@ def instrument_call(
     # raises RunSpendDefect and no stats record is written (no attempt).
     get_run_spend_meter().charge(purpose=purpose, inputs=inputs)
     start = time.time()
+    ended: Optional[float] = None
     success = False
     token_count = 0
     try:
         result = fn()
+        ended = time.time()
         success = True
         token_count = _tokens_for_success(
             result, tokens_from_result, provider, call_type, model
         )
         return result
     finally:
-        latency_ms = int((time.time() - start) * 1000)
+        latency_ms = int(((ended or time.time()) - start) * 1000)
         _record_call(
             provider=provider,
             call_type=call_type,
@@ -388,17 +396,19 @@ async def instrument_call_async(
     """
     get_run_spend_meter().charge(purpose=purpose, inputs=inputs)
     start = time.time()
+    ended: Optional[float] = None
     success = False
     token_count = 0
     try:
         result = await fn()
+        ended = time.time()
         success = True
         token_count = _tokens_for_success(
             result, tokens_from_result, provider, call_type, model
         )
         return result
     finally:
-        latency_ms = int((time.time() - start) * 1000)
+        latency_ms = int(((ended or time.time()) - start) * 1000)
         _record_call(
             provider=provider,
             call_type=call_type,

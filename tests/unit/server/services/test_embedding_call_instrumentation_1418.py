@@ -698,6 +698,67 @@ class TestMissingUsage:
         assert len(_warnings(caplog)) == 1
 
 
+def _slow_extractor(_result):
+    time.sleep(0.3)
+    return 5
+
+
+class TestLatencyExcludesExtraction:
+    """latency_ms measures the vendor call only; the post-call usage parse
+    runs after the clock stops."""
+
+    def test_latency_stops_when_fn_returns(self):
+        writer = _RecordingWriter()
+        _install(writer)
+
+        _sync_call(lambda: "resp", _slow_extractor)
+
+        [rec] = writer.records
+        assert rec.token_count == 5
+        assert rec.latency_ms < 150
+
+    @pytest.mark.asyncio
+    async def test_async_latency_stops_when_fn_returns(self):
+        writer = _RecordingWriter()
+        _install(writer)
+
+        await _async_call(lambda: "resp", _slow_extractor)
+
+        [rec] = writer.records
+        assert rec.token_count == 5
+        assert rec.latency_ms < 150
+
+
+class TestNoOpWriterSkipsExtraction:
+    """When nothing is recorded (stats disabled or a plain CLI process, i.e.
+    the NoOp writer is active) the post-call usage parse is skipped."""
+
+    def test_default_noop_writer_never_calls_extractor(self):
+        seen: list = []
+
+        assert _sync_call(lambda: "resp", _recording_extractor(seen)) == "resp"
+
+        assert seen == []
+
+    def test_installed_noop_writer_never_calls_extractor(self):
+        from code_indexer.server.services.embedding_stats_writer import NoOpWriter
+
+        _install(NoOpWriter())
+        seen: list = []
+
+        assert _sync_call(lambda: "resp", _recording_extractor(seen)) == "resp"
+
+        assert seen == []
+
+    @pytest.mark.asyncio
+    async def test_async_noop_writer_never_calls_extractor(self):
+        seen: list = []
+
+        assert await _async_call(lambda: "resp", _recording_extractor(seen)) == "resp"
+
+        assert seen == []
+
+
 class TestInstrumentCallLatencyMeasurement:
     def test_latency_ms_reflects_actual_call_duration(self):
         from code_indexer.server.services.embedding_call_instrumentation import (
