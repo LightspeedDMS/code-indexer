@@ -26,8 +26,8 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.mcp import reranking as _mcp_reranking
 from code_indexer.server.services.api_metrics_service import api_metrics_service
-from code_indexer.server.services.cidx_meta_access.catalog_requests import (
-    restrict_catalog_items,
+from code_indexer.server.services.cidx_meta_access.catalog_regex import (
+    restrict_regex_matches,
 )
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.search_event_recording import (
@@ -283,8 +283,10 @@ async def _rerank_truncate_and_filter_regex_matches(
     args: Dict[str, Any],
     repository_alias: str,
     user: User,
+    repo_path: Path,
 ) -> tuple:
-    """Rerank, truncate, and (for cidx-meta repos) access-filter matches.
+    """Project catalog matches for a restricted caller, then rerank, then
+    truncate: the reranker and the payload cache see only projected text.
 
     Extracted from the former body of _execute_regex_search (Story #1586
     AC1 split).
@@ -292,14 +294,20 @@ async def _rerank_truncate_and_filter_regex_matches(
     Returns:
         (matches, rerank_meta). rerank_meta carries an additional
         "cidx_meta_access_filtered" bool (Bug #337 regression fix) set True
-        only when the cidx-meta access-filtering branch below actually ran
-        with a real access_svc -- the caller (handle_regex_search) uses this
-        to decide whether the raw engine's sr.total_matches (Issue #1601
-        Priority 7's lower-bound sentinel) is still safe to report, or
-        whether it must fall back to the post-filter len(matches) instead
-        because the raw count would otherwise leak the existence of files
-        the requesting user is not authorized to see.
+        only when the catalog projection ran -- the caller
+        (handle_regex_search) then reports the post-projection len(matches)
+        instead of the raw engine's sr.total_matches (Issue #1601 Priority
+        7's lower-bound sentinel), so the reported count covers only
+        matches the caller can see.
     """
+    restricted = await anyio.to_thread.run_sync(
+        functools.partial(
+            _restrict_catalog_matches, matches, args, repository_alias, user, repo_path
+        )
+    )
+    if restricted is not None:
+        matches = restricted
+
     regex_limit = _coerce_int(args.get("max_results"), len(matches))
     rerank_kwargs = dict(
         results=matches,
@@ -314,30 +322,33 @@ async def _rerank_truncate_and_filter_regex_matches(
     )
 
     matches = _apply_regex_payload_truncation(matches, owner=user.username)
-
-    restricted = await anyio.to_thread.run_sync(
-        functools.partial(_restrict_catalog_matches, matches, repository_alias, user)
-    )
-    if restricted is not None:
-        matches = restricted
     rerank_meta["cidx_meta_access_filtered"] = restricted is not None
 
     return matches, rerank_meta
 
 
 def _restrict_catalog_matches(
-    matches: list, repository_alias: str, user: User
+    matches: list,
+    args: Dict[str, Any],
+    repository_alias: str,
+    user: User,
+    repo_path: Path,
 ) -> Optional[list]:
-    """The matches the user may see when the repository is the internal
-    catalog, else None. Reads the activation and group stores synchronously:
+    """The caller's projected matches when the served repository is the
+    internal catalog, else None. Reads files and stores synchronously:
     async callers run it on a worker thread."""
-    return restrict_catalog_items(
+    return restrict_regex_matches(
         matches,
-        lambda m: m["file_path"],
-        repository_alias,
-        user.username,
-        _get_access_filtering_service(),
-        _utils._lazy_module_attr_or_none("activated_repo_manager"),
+        alias=repository_alias,
+        repo_path=repo_path,
+        username=user.username,
+        access_service=_get_access_filtering_service(),
+        activated_repo_manager=_utils._lazy_module_attr_or_none(
+            "activated_repo_manager"
+        ),
+        pattern=str(args["pattern"]),
+        case_sensitive=bool(args.get("case_sensitive", True)),
+        multiline=bool(args.get("multiline", False)),
     )
 
 
@@ -407,7 +418,7 @@ async def _execute_regex_search_impl(
 
     matches = _build_and_enrich_matches(search_result, repository_alias)
     matches, rerank_meta = await _rerank_truncate_and_filter_regex_matches(
-        matches, args, repository_alias, user
+        matches, args, repository_alias, user, repo_path
     )
 
     return matches, rerank_meta, search_result

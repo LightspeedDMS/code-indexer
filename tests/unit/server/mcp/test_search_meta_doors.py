@@ -171,6 +171,55 @@ def test_omni_never_returns_ungranted_repository_hits(env: CatalogEnv) -> None:
     assert f"{CANARY}-global" in {row.get("source_repo") for row in _results(admin)}
 
 
+def _search_tools() -> List[str]:
+    from code_indexer.server.mcp.tools import TOOL_REGISTRY
+
+    names = []
+    for name, tool in TOOL_REGISTRY.items():
+        props = (tool.get("inputSchema") or {}).get("properties", {})
+        if "repository_alias" in props and (
+            "query_text" in props or "pattern" in props
+        ):
+            names.append(name)
+    return sorted(names)
+
+
+SEARCH_TOOLS = _search_tools()
+assert {"search_code", "regex_search"} <= set(SEARCH_TOOLS), SEARCH_TOOLS
+_ECHO_KEYS = {"query_text", "pattern", "query"}
+
+
+def _strip_echoes(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _strip_echoes(v) for k, v in value.items() if k not in _ECHO_KEYS}
+    if isinstance(value, list):
+        return [_strip_echoes(v) for v in value]
+    return value
+
+
+@pytest.mark.parametrize("tool", SEARCH_TOOLS)
+def test_every_search_tool_serves_no_hidden_catalog_content(
+    env: CatalogEnv, tool: str
+) -> None:
+    import asyncio
+    import inspect
+
+    from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
+
+    args = {"repository_alias": CATALOG_ALIAS, "query_text": CANARY, "pattern": CANARY}
+    with ranked_store_search():
+        response = HANDLER_REGISTRY[tool](args, RESTRICTED)
+        if inspect.iscoroutine(response):
+            response = asyncio.run(response)
+    text = response["content"][0]["text"] if "content" in response else response
+    try:
+        served = _strip_echoes(json.loads(text) if isinstance(text, str) else text)
+    except json.JSONDecodeError:
+        served = text
+    dumped = dump(served)
+    assert CANARY not in dumped and GAMMA not in dumped, (tool, dumped[:400])
+
+
 def test_cached_handles_hold_only_projected_text(env: CatalogEnv) -> None:
     payload = _search(
         RESTRICTED,

@@ -169,6 +169,37 @@ async def _resolve_repo_paths_batch_offloaded(
 # ---------------------------------------------------------------------------
 
 
+def _restrict_catalog_matches(
+    matches: List[Dict[str, Any]],
+    body: RegexSearchRequest,
+    alias: str,
+    repo_path: Any,
+    user: User,
+) -> Optional[List[Dict[str, Any]]]:
+    """The caller's projected matches when the served repository is the
+    catalog, else None. Synchronous reads: called on a worker thread."""
+    from ..services.cidx_meta_access.catalog_regex import restrict_regex_matches
+    from ..services.cidx_meta_access.catalog_search import server_app_state
+
+    state = server_app_state()
+    access_service = None
+    activated_repo_manager = None
+    if state is not None:
+        access_service = getattr(state, "access_filtering_service", None)
+        activated_repo_manager = getattr(state, "activated_repo_manager", None)
+    return restrict_regex_matches(
+        matches,
+        alias=alias,
+        repo_path=repo_path,
+        username=user.username,
+        access_service=access_service,
+        activated_repo_manager=activated_repo_manager,
+        pattern=body.pattern,
+        case_sensitive=body.case_sensitive,
+        multiline=body.multiline,
+    )
+
+
 async def _execute_single_search(
     body: RegexSearchRequest,
     repo_path_str: str,
@@ -241,10 +272,20 @@ async def _execute_single_search(
         }
         for m in result.matches
     ]
+    total_matches = result.total_matches
+    if user is not None and alias is not None:
+        # Catalog matches are projected before counting and recording.
+        projected = await anyio.to_thread.run_sync(
+            functools.partial(
+                _restrict_catalog_matches, matches, body, alias, repo_path, user
+            )
+        )
+        if projected is not None:
+            matches, total_matches = projected, len(projected)
 
     response = {
         "matches": matches,
-        "total_matches": result.total_matches,
+        "total_matches": total_matches,
         "truncated": result.truncated,
         "read_capped": result.read_capped,
         "search_engine": result.search_engine,

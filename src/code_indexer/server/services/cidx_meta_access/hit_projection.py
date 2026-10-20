@@ -337,3 +337,83 @@ def project_meta_hits(
         if projected is not None:
             out.append(projected)
     return out
+
+
+REGEX_MATCH_FIELDS: FrozenSet[str] = frozenset(
+    {
+        "file_path",
+        "line_number",
+        "column",
+        "line_content",
+        "context_before",
+        "context_after",
+        "source_repo",
+        "wiki_url",
+    }
+)
+
+
+def _compile(pattern: str, case_sensitive: bool, multiline: bool) -> Optional[Any]:
+    flags = 0 if case_sensitive else re.IGNORECASE
+    if multiline:
+        flags |= re.MULTILINE | re.DOTALL
+    try:
+        return re.compile(pattern, flags)
+    except re.error:
+        return None
+
+
+def _project_match(
+    match: Dict[str, Any], scope: CatalogScope, compiled: Optional[Any]
+) -> Optional[Dict[str, Any]]:
+    path = match.get("file_path")
+    if not isinstance(path, str):
+        return None
+    decision = scope.decide(path)
+    if decision.kind is DecisionKind.DENY:
+        return None
+    kept = {k: v for k, v in match.items() if k in REGEX_MATCH_FIELDS}
+    if decision.kind not in _PROJECTED_KINDS:
+        return kept
+    before = [str(x) for x in match.get("context_before") or []]
+    content = str(match.get("line_content") or "").split("\n")
+    after = [str(x) for x in match.get("context_after") or []]
+    line_number = match.get("line_number")
+    if compiled is None or not isinstance(line_number, int):
+        return None
+    lines = _project_lines_at(
+        scope, path, before + content + after, line_number - len(before)
+    )
+    if lines is None:
+        return None
+    projected_content = "\n".join(lines[len(before) : len(before) + len(content)])
+    found = compiled.search(projected_content)
+    if found is None:
+        return None
+    line_start = projected_content.rfind("\n", 0, found.start()) + 1
+    kept.update(
+        context_before=lines[: len(before)],
+        line_content=projected_content,
+        context_after=lines[len(before) + len(content) :],
+        column=found.start() - line_start + 1,
+    )
+    return kept
+
+
+def project_regex_matches(
+    matches: Sequence[Dict[str, Any]],
+    scope: CatalogScope,
+    *,
+    pattern: str,
+    case_sensitive: bool,
+    multiline: bool,
+) -> List[Dict[str, Any]]:
+    """The catalog regex *matches* the caller may see, projected and
+    re-matched on the projected text, in input order."""
+    compiled = _compile(pattern, case_sensitive, multiline)
+    out: List[Dict[str, Any]] = []
+    for match in matches:
+        projected = _project_match(match, scope, compiled)
+        if projected is not None:
+            out.append(projected)
+    return out
