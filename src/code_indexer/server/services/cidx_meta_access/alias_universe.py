@@ -20,6 +20,7 @@ from ..repo_access_guard import normalize_repo_alias
 
 ALIAS_UNIVERSE_TTL_SECONDS = 60.0
 ALIAS_UNIVERSE_MAX_STALENESS_SECONDS = 300.0
+ALIAS_UNIVERSE_WAIT_SECONDS = 30.0
 
 
 class GlobalReposRegistry(Protocol):
@@ -59,12 +60,14 @@ class AliasUniverse:
         registry: GlobalReposRegistry,
         *,
         ttl_seconds: float = ALIAS_UNIVERSE_TTL_SECONDS,
+        wait_seconds: float = ALIAS_UNIVERSE_WAIT_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if ttl_seconds <= 0:
-            raise ValueError("ttl_seconds must be positive")
+        if ttl_seconds <= 0 or wait_seconds <= 0:
+            raise ValueError("ttl_seconds and wait_seconds must be positive")
         self._registry = registry
         self._ttl = ttl_seconds
+        self._wait = wait_seconds
         self._clock = clock
         self._lock = threading.Lock()
         self._snapshot: Optional[UniverseSnapshot] = None
@@ -76,10 +79,10 @@ class AliasUniverse:
         """The current names; re-read from the registry once the TTL expired.
 
         One caller reads the registry, outside the lock. Meanwhile a caller
-        holding an expired snapshot gets it only while no refresh has failed
-        and it is at most ``ALIAS_UNIVERSE_MAX_STALENESS_SECONDS`` old, else
-        it raises; callers with none wait for that read and raise if it
-        failed (never an empty universe).
+        holding an expired snapshot gets it while no refresh has failed and
+        it is at most ``ALIAS_UNIVERSE_MAX_STALENESS_SECONDS`` old; any other
+        caller waits for that read, at most ``wait_seconds``, and gets its
+        result or a RuntimeError (never an empty universe).
         """
         with self._lock:
             now = self._clock()
@@ -89,19 +92,18 @@ class AliasUniverse:
             pending = self._inflight
             if pending is None:
                 self._inflight = threading.Event()
-            elif current is not None:
-                age = now - self._loaded_at
-                if self._refresh_failed or age > ALIAS_UNIVERSE_MAX_STALENESS_SECONDS:
-                    raise RuntimeError(
-                        "alias universe unavailable: refresh in flight and the "
-                        "last snapshot is no longer servable"
-                    )
-                return current
+            elif current is not None and not self._refresh_failed:
+                if now - self._loaded_at <= ALIAS_UNIVERSE_MAX_STALENESS_SECONDS:
+                    return current
         if pending is None:
             return self._refresh(now)
-        pending.wait()
+        if not pending.wait(self._wait):
+            raise RuntimeError(
+                f"alias universe unavailable: registry read still running "
+                f"after {self._wait} s"
+            )
         with self._lock:
-            if self._snapshot is None:
+            if self._snapshot is None or self._refresh_failed:
                 raise RuntimeError("alias universe unavailable: registry read failed")
             return self._snapshot
 

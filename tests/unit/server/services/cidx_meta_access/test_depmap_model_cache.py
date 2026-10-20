@@ -6,6 +6,7 @@ and a real SQLite registry. Neutral names only.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import threading
@@ -138,12 +139,49 @@ def test_document_vanishing_during_fingerprint_is_recomputed(
     assert load_depmap_model(fx.dep_map_dir) is model
 
 
+class _AlwaysVanishing:
+    """``os.scandir`` under which *victim* exists while the directory is
+    listed and is gone before any listed entry is stat'ed, on every call."""
+
+    def __init__(self, victim: Path) -> None:
+        self._victim = victim
+        self._real = os.scandir
+
+    def __call__(self, path: Any) -> Any:
+        self._victim.write_text("# transient\n", encoding="utf-8")
+        listing = list(self._real(path))
+        self._victim.unlink()
+        return _Listing(listing)
+
+
 def test_fingerprint_fails_loudly_when_the_directory_never_settles(
-    fx: CidxMetaFixture,
+    fx: CidxMetaFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (fx.dep_map_dir / "ghost.md").symlink_to(fx.dep_map_dir / "missing-target.md")
+    monkeypatch.setattr(os, "scandir", _AlwaysVanishing(fx.dep_map_dir / "flux.md"))
     with pytest.raises(RuntimeError, match="kept changing"):
         load_depmap_model(fx.dep_map_dir)
+
+
+def test_symlinked_documents_are_skipped(
+    fx: CidxMetaFixture, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    outside = tmp_path / "outside-domain.md"
+    outside.write_text(
+        f"---\ndomain: elsewhere\nparticipating_repos:\n  - {CANARY}\n---\n",
+        encoding="utf-8",
+    )
+    (fx.dep_map_dir / "ghost.md").symlink_to(fx.dep_map_dir / "missing-target.md")
+    (fx.dep_map_dir / "elsewhere.md").symlink_to(outside)
+    with caplog.at_level(logging.WARNING):
+        model = load_depmap_model(fx.dep_map_dir)
+    assert "ghost" not in model.domains and "elsewhere" not in model.domains
+    assert "payments" in model.domains
+    skipped = [r for r in caplog.records if "symlink" in r.getMessage()]
+    assert len(skipped) == 2
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert load_depmap_model(fx.dep_map_dir) is model
+    assert not [r for r in caplog.records if "symlink" in r.getMessage()]
 
 
 class _CountingRegistry:
@@ -292,7 +330,7 @@ def test_alias_universe_rejects_a_non_positive_ttl(fx: CidxMetaFixture) -> None:
         AliasUniverse(fx.registry, ttl_seconds=0)
 
 
-def test_follower_raises_instead_of_stale_after_a_failed_refresh(
+def test_follower_waits_for_the_retry_after_a_failed_refresh(
     fx: CidxMetaFixture,
 ) -> None:
     now: List[float] = [1000.0]
@@ -307,16 +345,18 @@ def test_follower_raises_instead_of_stale_after_a_failed_refresh(
 
     registry.gate.clear()
     registry.entered.clear()
+    registry.failure = None
     try:
-        leader, _leader_box = _in_thread(universe.snapshot)
+        leader, leader_box = _in_thread(universe.snapshot)
         assert registry.entered.wait(5)
         follower, follower_box = _in_thread(universe.snapshot)
-        follower.join(2)
-        assert not follower.is_alive()
-        assert isinstance(follower_box[0], RuntimeError), follower_box
+        follower.join(0.3)
+        assert follower.is_alive(), "the follower must wait for the retry"
     finally:
         registry.gate.set()
     leader.join(5)
+    follower.join(5)
+    assert follower_box and follower_box[0] is leader_box[0]
 
 
 def test_follower_raises_once_the_snapshot_is_past_the_staleness_bound(
@@ -324,17 +364,34 @@ def test_follower_raises_once_the_snapshot_is_past_the_staleness_bound(
 ) -> None:
     now: List[float] = [1000.0]
     registry = _GatedRegistry(fx.registry, free=1)
-    universe = AliasUniverse(registry, ttl_seconds=60, clock=lambda: now[0])
+    universe = AliasUniverse(
+        registry, ttl_seconds=60, wait_seconds=0.2, clock=lambda: now[0]
+    )
     universe.snapshot()
     now[0] += 10_000
     try:
         leader, leader_box = _in_thread(universe.snapshot)
         assert registry.entered.wait(5)
         follower, follower_box = _in_thread(universe.snapshot)
-        follower.join(2)
+        follower.join(3)
         assert not follower.is_alive()
         assert isinstance(follower_box[0], RuntimeError), follower_box
     finally:
         registry.gate.set()
     leader.join(5)
     assert CANARY in leader_box[0].names
+
+
+def test_first_load_wait_is_bounded(fx: CidxMetaFixture) -> None:
+    registry = _GatedRegistry(fx.registry, free=0)
+    universe = AliasUniverse(registry, wait_seconds=0.2)
+    try:
+        leader, _leader_box = _in_thread(universe.snapshot)
+        assert registry.entered.wait(5)
+        follower, follower_box = _in_thread(universe.snapshot)
+        follower.join(3)
+        assert not follower.is_alive(), "a hanging first load must not hang callers"
+        assert isinstance(follower_box[0], RuntimeError), follower_box
+    finally:
+        registry.gate.set()
+    leader.join(5)

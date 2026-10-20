@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import logging
 import os
 import re
 import threading
@@ -156,7 +157,7 @@ GRAPH = TableKind("graph", domain_columns=(0, 1), list_column=2)
 INTRA = TableKind("intra", repo_columns=(0, 1))
 DEP_TYPES = TableKind("dep_types")
 
-_SEPARATOR_CELL = re.compile(r"^:?-{3,}:?$")
+_SEPARATOR_CELL = re.compile(r"^:?-+:?$")
 _TRAILING_NOTE = re.compile(r"\s*\([^()]*\)$")
 
 
@@ -211,7 +212,10 @@ def cell_names(cell: str) -> List[str]:
 def single_repo_name(cell: str) -> Optional[str]:
     """The one repository name a structured cell holds (link, backticks and
     a trailing ``(note)`` normalised), or a placeholder word; None for a
-    list, a slash pair, punctuation around the name or a non-ASCII value."""
+    list, a slash pair, punctuation around the name, a non-ASCII value, an
+    unbalanced backtick or a pipe."""
+    if cell.count("`") % 2 or "|" in cell:
+        return None
     names = cell_names(cell)
     if len(names) != 1:
         return None
@@ -221,25 +225,107 @@ def single_repo_name(cell: str) -> Optional[str]:
     return None
 
 
+def gfm_cells(line: str) -> Optional[List[str]]:
+    """Cells of a GFM table line whose outer pipes are optional; None when
+    the line has no pipe."""
+    stripped = line.strip()
+    if "|" not in stripped:
+        return None
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def is_gfm_separator(line: str) -> bool:
+    """A GFM delimiter row: a pipe, and every cell ``:?-+:?``."""
+    if "-" not in line:
+        return False
+    cells = gfm_cells(line)
+    if not cells:
+        return False
+    return all(_SEPARATOR_CELL.match(cell) for cell in cells)
+
+
+_HTML_TABLE = re.compile(
+    r"<\s*/?\s*(?:table|thead|tbody|tfoot|tr|td|th)(?![A-Za-z0-9])", re.IGNORECASE
+)
+_CODE_FENCE = re.compile(r"^ {0,3}(?:```|~~~)")
+
+LINE_TEXT = "text"
+LINE_HEADER = "header"
+LINE_SEPARATOR = "separator"
+LINE_ROW = "row"
+LINE_DROP = "drop"
+
+#: (role, table kind, the row's cells for a ROW line else None)
+LineRole = Tuple[str, Optional[TableKind], Optional[List[str]]]
+
+
+def _is_piped(line: str) -> bool:
+    stripped = line.strip()
+    return len(stripped) >= 2 and stripped[0] == "|" and stripped[-1] == "|"
+
+
+def _table_body_role(line: str, kind: Optional[TableKind], width: int) -> LineRole:
+    cells = table_cells(line)
+    if kind is None or cells is None or len(cells) != width:
+        return LINE_DROP, kind, None
+    if is_separator(cells):
+        return LINE_SEPARATOR, kind, None
+    if any(cell.count("`") % 2 for cell in cells):
+        return LINE_DROP, kind, None
+    return LINE_ROW, kind, cells
+
+
+def _in_table_body(line: str) -> bool:
+    """A table body runs to a blank line or a code fence."""
+    return bool(line.strip()) and not _CODE_FENCE.match(line)
+
+
+def classify_lines(lines: Sequence[str]) -> List[LineRole]:
+    """The role of every line under GFM table structure: a line followed by
+    a delimiter row is a header; the table runs to the next blank line (or
+    code fence), and a body line is a ROW only as an outer-piped row of the
+    header's width. An unrecognised header drops its whole table, and so does
+    a header whose width differs from the delimiter row's. Outside tables, an
+    outer-piped row and HTML table markup are dropped."""
+    roles: List[LineRole] = []
+    total = len(lines)
+    index = 0
+    while index < total:
+        line = lines[index]
+        following = lines[index + 1] if index + 1 < total else ""
+        if line.strip() and is_gfm_separator(following) and not is_gfm_separator(line):
+            header = gfm_cells(line) or [line.strip()]
+            width = len(header)
+            kind = (
+                table_kind(header) if width == len(gfm_cells(following) or []) else None
+            )
+            if kind is None:
+                roles += [(LINE_DROP, None, None), (LINE_DROP, None, None)]
+            else:
+                roles += [(LINE_HEADER, kind, None), (LINE_SEPARATOR, kind, None)]
+            index += 2
+            while index < total and _in_table_body(lines[index]):
+                roles.append(_table_body_role(lines[index], kind, width))
+                index += 1
+            continue
+        dropped = _is_piped(line) or (
+            "<" in line and _HTML_TABLE.search(line) is not None
+        )
+        roles.append((LINE_DROP if dropped else LINE_TEXT, None, None))
+        index += 1
+    return roles
+
+
 def iter_recognised_rows(
     lines: Sequence[str],
 ) -> Iterator[Tuple[TableKind, List[str]]]:
-    """Data rows of recognised tables whose cell count matches the header."""
-    kind: Optional[TableKind] = None
-    width = 0
-    for index, line in enumerate(lines):
-        cells = table_cells(line)
-        if cells is None:
-            kind = None
-            continue
-        if kind is None:
-            following = (
-                table_cells(lines[index + 1]) if index + 1 < len(lines) else None
-            )
-            if following and is_separator(following) and not is_separator(cells):
-                kind, width = table_kind(cells), len(cells)
-            continue
-        if len(cells) == width and not is_separator(cells):
+    """Data rows of recognised tables, as the projection keeps them."""
+    for role, kind, cells in classify_lines(lines):
+        if role == LINE_ROW and kind is not None and cells is not None:
             yield kind, cells
 
 
@@ -276,11 +362,14 @@ def build_depmap_model(dep_map_dir: Path, fingerprint: str) -> DepMapModel:
         for d in load_domains_json(dep_map_dir)
         if isinstance(d, dict) and d.get("name")
     }
-    files = {
-        p.stem: p
-        for p in dep_map_dir.glob("*.md")
-        if not p.name.startswith("_") and p.is_file()
-    }
+    files: Dict[str, Path] = {}
+    for p in dep_map_dir.glob("*.md"):
+        if p.name.startswith("_"):
+            continue
+        if p.is_symlink() or not p.is_file():
+            _skip_document(str(p))
+            continue
+        files[p.stem] = p
     participants: Dict[str, FrozenSet[str]] = {}
     display: Dict[str, str] = {}
     structured: Set[str] = set()
@@ -300,7 +389,7 @@ def build_depmap_model(dep_map_dir: Path, fingerprint: str) -> DepMapModel:
     analyzed: Optional[Set[str]] = None
     edges: List[Edge] = []
     index_file = dep_map_dir / INDEX_FILE
-    if index_file.is_file():
+    if index_file.is_file() and not index_file.is_symlink():
         analyzed, matrix, edges = _index_parts(index_file.read_text(encoding="utf-8"))
         structured |= matrix
         structured |= analyzed or set()
@@ -320,6 +409,25 @@ def build_depmap_model(dep_map_dir: Path, fingerprint: str) -> DepMapModel:
 
 
 FINGERPRINT_ATTEMPTS = 5
+_SKIPPED_LIMIT = 4096
+
+logger = logging.getLogger(__name__)
+_skipped_documents: Set[str] = set()
+_skipped_lock = threading.Lock()
+
+
+def _skip_document(path: str) -> None:
+    """One WARNING per skipped path: a symlink or non-regular ``*.md`` is
+    never read as a document."""
+    with _skipped_lock:
+        if path in _skipped_documents:
+            return
+        if len(_skipped_documents) >= _SKIPPED_LIMIT:
+            _skipped_documents.clear()
+        _skipped_documents.add(path)
+    logger.warning(
+        "Dependency-map entry %s is a symlink or not a regular file; skipped", path
+    )
 
 
 def _scan_fingerprint(dep_map_dir: Path) -> Optional[str]:
@@ -337,6 +445,11 @@ def _scan_fingerprint(dep_map_dir: Path) -> Optional[str]:
             if e.name.endswith(".md") or e.name == DOMAINS_JSON
         )
     for name, entry in names:
+        if name.endswith(".md") and (
+            entry.is_symlink() or not entry.is_file(follow_symlinks=False)
+        ):
+            _skip_document(entry.path)
+            continue
         est = entry.stat()
         parts.append(f"{name}:{est.st_mtime_ns}:{est.st_size}:{est.st_ino}")
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()

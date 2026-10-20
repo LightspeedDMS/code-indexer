@@ -55,17 +55,18 @@ from .alias_universe import AliasUniverse, UniverseSnapshot
 from .depmap_model import (
     CATALOG,
     GRAPH,
+    LINE_HEADER,
+    LINE_SEPARATOR,
+    LINE_TEXT,
     DepMapModel,
     TableKind,
     cell_names,
+    classify_lines,
     decoded_form,
-    is_separator,
     load_depmap_model,
     needs_decoding,
     normalize_name,
     single_repo_name,
-    table_cells,
-    table_kind,
 )
 from .visibility import MetaVisibility
 
@@ -339,10 +340,33 @@ def _project_text(line: str, view: _View) -> Optional[str]:
     return _redact(line, view)
 
 
+def _yaml_unfilterable(text: str) -> bool:
+    """Anchors, aliases or a flow collection spanning lines: YAML forms the
+    line rules cannot filter."""
+    if not any(char in text for char in "&*[{"):
+        return False
+    open_collections: List[int] = []
+    try:
+        for event in yaml.parse(text, Loader=yaml.SafeLoader):
+            if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None):
+                return True
+            if isinstance(event, (yaml.SequenceStartEvent, yaml.MappingStartEvent)):
+                flow = bool(event.flow_style)
+                open_collections.append(event.start_mark.line if flow else -1)
+            elif isinstance(event, (yaml.SequenceEndEvent, yaml.MappingEndEvent)):
+                start = open_collections.pop()
+                if start >= 0 and event.end_mark.line != start:
+                    return True
+    except yaml.YAMLError:
+        return True
+    return False
+
+
 def _frontmatter_span(lines: Sequence[str]) -> int:
     """How many leading lines are frontmatter that must be removed: an
-    unparseable or unclosed block, or YAML-shaped lines before a lone
-    delimiter (a frontmatter fragment of unknown validity); 0 otherwise."""
+    unparseable, unclosed or unfilterable block, or YAML-shaped lines before
+    a lone delimiter (a frontmatter fragment of unknown validity); 0
+    otherwise."""
     if not lines:
         return 0
     delimiters = [i for i, line in enumerate(lines) if line.strip() == "---"]
@@ -353,6 +377,8 @@ def _frontmatter_span(lines: Sequence[str]) -> int:
         try:
             parse_frontmatter_strict("\n".join(lines[: closing + 1]) + "\n")
         except (yaml.YAMLError, ValueError):
+            return closing + 1
+        if _yaml_unfilterable("\n".join(lines[1:closing])):
             return closing + 1
         return 0
     if delimiters:
@@ -381,44 +407,27 @@ def _diagnose(relative_path: str, fingerprint: str, line_numbers: List[int]) -> 
     )
 
 
-_UNRECOGNISED_TABLE = (None, -1)
-
-
 def _compute(
     lines: Sequence[str], relative_path: str, fingerprint: str, view: _View
 ) -> List[Optional[str]]:
     span = _frontmatter_span(lines)
     out: List[Optional[str]] = [None] * span
     malformed: List[int] = list(range(1, span + 1))
-    # None: outside a table; (kind, width) inside one; kind None: unrecognised.
-    table: Optional[Tuple[Optional[TableKind], int]] = None
-    for index in range(span, len(lines)):
-        line = lines[index]
-        cells = table_cells(line)
-        if cells is None:
-            table = None
+    body = lines[span:]
+    for offset, (line, (role, kind, cells)) in enumerate(
+        zip(body, classify_lines(body))
+    ):
+        if role == LINE_TEXT:
             out.append(_project_text(line, view))
-            continue
-        if table is None:
-            following = (
-                table_cells(lines[index + 1]) if index + 1 < len(lines) else None
-            )
-            kind = None
-            if following is not None and is_separator(following):
-                kind = None if is_separator(cells) else table_kind(cells)
-            if kind is not None:
-                table = (kind, len(cells))
-                out.append(_redact(line, view))
-                continue
-            table = _UNRECOGNISED_TABLE
-        kind, width = table
-        if kind is None or len(cells) != width:
-            malformed.append(index + 1)
-            out.append(None)
-        elif is_separator(cells):
+        elif role == LINE_HEADER:
+            out.append(_redact(line, view))
+        elif role == LINE_SEPARATOR:
             out.append(line)
-        else:
+        elif kind is not None and cells is not None:
             out.append(_project_row(line, kind, cells, view))
+        else:
+            malformed.append(span + offset + 1)
+            out.append(None)
     if malformed:
         _diagnose(relative_path, fingerprint, malformed)
     return out
