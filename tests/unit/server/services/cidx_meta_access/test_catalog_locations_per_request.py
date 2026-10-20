@@ -294,7 +294,7 @@ def test_search_for_caller_restricts_an_opaque_directory_while_the_pointer_is_un
         _set_pointer(env, opaque, state)
         sizes: List[int] = []
 
-        def run(k: int, mode: str, vector: Any, text: str) -> List[Any]:
+        def run(k: int, *rest: Any, **kwargs: Any) -> List[Any]:
             sizes.append(k)
             return []
 

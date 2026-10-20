@@ -104,3 +104,24 @@ def test_warning_is_logged_once_per_episode(
         _pointer(golden, "[]")
         catalog_locations(str(golden))
         assert warnings() == 2
+
+
+def test_clean_health_read_rearms_the_warning(
+    golden: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    def warnings() -> int:
+        return sum(
+            1
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "pointer" in r.getMessage()
+        )
+
+    with caplog.at_level(logging.WARNING):
+        _pointer(golden, "[]")
+        catalog_locations(str(golden))
+        assert warnings() == 1
+        _pointer(golden, "valid")
+        assert catalog_pointer_health_reasons(str(golden)) == []
+        _pointer(golden, "[]")
+        catalog_locations(str(golden))
+        assert warnings() == 2

@@ -91,6 +91,13 @@ def _warn_unusable_pointer(exc: AliasPointerUnusable) -> None:
     )
 
 
+def _rearm_unusable_warning() -> None:
+    """The pointer read cleanly: its next failure warns again."""
+    if _unusable_warned:
+        with _unusable_warned_lock:
+            _unusable_warned.clear()
+
+
 def catalog_locations(golden_repos_dir: str) -> Tuple[str, ...]:
     """Real paths of the catalog's base clone and current published copy;
     ``CATALOG_IDENTITY_UNKNOWN`` too when the catalog pointer exists but
@@ -102,9 +109,7 @@ def catalog_locations(golden_repos_dir: str) -> Tuple[str, ...]:
     except AliasPointerUnusable as exc:
         _warn_unusable_pointer(exc)
         return (*found, CATALOG_IDENTITY_UNKNOWN)
-    if _unusable_warned:
-        with _unusable_warned_lock:
-            _unusable_warned.clear()
+    _rearm_unusable_warning()
     if target:
         found.append(os.path.realpath(target))
     return tuple(found)
@@ -119,7 +124,8 @@ CATALOG_POINTER_UNREADABLE_REASON = (
 def catalog_pointer_health_reasons(golden_repos_dir: Optional[str]) -> List[str]:
     """The health reason while the catalog pointer exists but cannot be
     used (one small read, no fleet walk); none for a usable or missing
-    pointer or without a golden repositories directory."""
+    pointer or without a golden repositories directory. A clean read
+    re-arms the operator warning."""
     if not golden_repos_dir:
         return []
     aliases = Path(golden_repos_dir) / "aliases"
@@ -127,6 +133,7 @@ def catalog_pointer_health_reasons(golden_repos_dir: Optional[str]) -> List[str]
         read_alias_pointer_strict(aliases, CIDX_META_REPO_GLOBAL)
     except AliasPointerUnusable:
         return [CATALOG_POINTER_UNREADABLE_REASON]
+    _rearm_unusable_warning()
     return []
 
 
