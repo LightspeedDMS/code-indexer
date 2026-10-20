@@ -351,7 +351,8 @@ class TestRejections:
 
 class _ThreeActivated(_Repos):
     """ActivatedRepoManager stand-in with three activated repositories; each
-    record names its golden source, as every stored activation does."""
+    record names its golden source, as every stored single-repository
+    activation does."""
 
     _ALIASES = ["repo-a", "repo-b", "repo-c"]
 
