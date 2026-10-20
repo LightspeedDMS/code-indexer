@@ -38,6 +38,7 @@
 - [Bound every agent run](feedback_bound_every_agent_run.md) - every brief carries a time budget + check-ins
 - [Netns shares host PIDs](feedback_netns_shares_host_pids.md) - never kill by pgrep name (hits the dev server)
 - [No gates during edits](feedback_no_gates_while_worker_edits.md) - never run full gates while an agent edits the tree
+- [Probes isolate HOME](feedback_probes_must_isolate_server_home.md) - importing the server app writes the real ~/.cidx-server; point HOME at scratch
 - [Dispatch cap by tier](feedback_parallel_dispatch_cap_4_on_20x.md) - 20x: up to 3 agents (workers+reviewers); 5x: 1+1; extra usage: no timer polling
 
 ## Quality Standards
