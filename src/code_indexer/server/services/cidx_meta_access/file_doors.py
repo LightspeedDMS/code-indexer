@@ -20,7 +20,8 @@ carries no judgement at all (``refuse_unjudged_catalog``).
 Writes (``refuse_hidden_catalog_writes``) judge the canonical path before
 any existence check or read: a restricted caller may write only paths served
 unchanged (allowed files, memories); every other path gets one fixed refusal
-whether or not it exists.
+whether or not it exists. A ``powerusers`` member who sees every repository
+the registry names (``full_catalog_writer``) writes like an admin.
 
 Synchronous (stores and files): async callers use a worker thread.
 """
@@ -64,8 +65,11 @@ from .served_identity import (
     request_catalog_locations,
     served_path_is_catalog,
 )
+from ..analysis_agent_principal import ANALYSIS_AGENT_USERNAME
+from ..constants import DEFAULT_GROUP_POWERUSERS, is_internal_meta_repo
 from .universe_provider import process_alias_universe, registry_of
 from .visibility import (
+    ACTING_SCOPE,
     MetaVisibility,
     memory_visibility_fn,
     resolve_meta_visibility,
@@ -94,6 +98,7 @@ class CatalogFileView:
     root: Path
     access_service: Optional[Any]
     registry: Any
+    username: str = ""
     _participants: Optional[ParticipantsReader] = None
     _projector: Optional[MetaProjector] = None
 
@@ -349,7 +354,9 @@ def judge_file_door(
         return CatalogFileAccess(None, served_path)
     vis = resolve_meta_visibility(username, access_service)
     return CatalogFileAccess(
-        CatalogFileView(vis, Path(served_path), access_service, registry),
+        CatalogFileView(
+            vis, Path(served_path), access_service, registry, username=username
+        ),
         served_path,
     )
 
@@ -379,7 +386,9 @@ def served_tree_view(
         visibility = resolve_meta_visibility(username, access_service)
     if visibility.unrestricted:
         return None
-    return CatalogFileView(visibility, Path(served_path), access_service, registry)
+    return CatalogFileView(
+        visibility, Path(served_path), access_service, registry, username=username
+    )
 
 
 def visible_composite_entries(
@@ -453,7 +462,7 @@ def refuse_hidden_catalog_writes(
     before any existence check, hash comparison or read: hidden paths,
     descriptions and dependency-map documents are refused alike, from the
     path shape alone (no membership model or catalog file is read).
-    Unrestricted requests pass unchanged.
+    Unrestricted requests and full catalog writers pass unchanged.
 
     Raises:
         PermissionError: ``CATALOG_WRITE_REFUSAL``, identical whether or not
@@ -461,24 +470,51 @@ def refuse_hidden_catalog_writes(
             judgement or under a judgement made for another directory.
     """
     view = view_for(repo_path, access, PermissionError(CATALOG_WRITE_REFUSAL))
-    if view is None:
+    if view is None or full_catalog_writer(view):
         return
     if not all(_writable(view, path) for path in paths):
         raise PermissionError(CATALOG_WRITE_REFUSAL)
+
+
+def full_catalog_writer(view: CatalogFileView) -> bool:
+    """True when the caller writes the catalog like an admin: a
+    ``powerusers`` member (never the analysis-agent principal) with no
+    acting-user scope whose visible set covers every repository the registry
+    names, so nothing is hidden from them. Decided from the caller's group,
+    grants and the registry names alone; any read failure answers False."""
+    if not view.username or view.username == ANALYSIS_AGENT_USERNAME:
+        return False
+    if ACTING_SCOPE.get() is not None or view.access_service is None:
+        return False
+    try:
+        group = view.access_service.group_manager.get_user_group(view.username)
+        if group is None or group.name != DEFAULT_GROUP_POWERUSERS:
+            return False
+        names = process_alias_universe(view.registry).snapshot().names
+    except Exception as exc:
+        logger.warning(
+            "Catalog write eligibility undecided (%s); the restricted write "
+            "set applies",
+            type(exc).__name__,
+        )
+        return False
+    hidden = {name for name in names if not is_internal_meta_repo(name)}
+    return hidden <= view.vis.visible
 
 
 def restricted_catalog_view_applies(
     repo_path: str, access: Optional[CatalogFileAccess]
 ) -> bool:
     """True only when *access* is a judgement with a catalog view, made for
-    *repo_path*; False for no judgement, an unrestricted one, or one made
-    for another directory. Never raises."""
+    *repo_path*, for a caller who is not a full catalog writer; False for no
+    judgement, an unrestricted one, or one made for another directory."""
     if access is None or access.view is None:
         return False
     served = access.served
-    return served is not None and (
+    same = served is not None and (
         served == repo_path or os.path.realpath(served) == os.path.realpath(repo_path)
     )
+    return same and not full_catalog_writer(access.view)
 
 
 def _writable(view: CatalogFileView, path: str) -> bool:

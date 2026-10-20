@@ -1,9 +1,11 @@
 """Every golden repository alias known to the registry, for prose redaction.
 
-The universe only widens redaction (names that must not appear in prose
-for callers who cannot see them); it is never consulted for an allow
-decision. It comes from the cluster-aware registry (PostgreSQL in cluster
-mode), cached per process for a short TTL. A stale copy is served only
+The universe widens redaction (names that must not appear in prose for
+callers who cannot see them). Its one allow decision is catalog write
+eligibility: a power user writes the catalog like an admin only while their
+grants cover every name here, and a failed read answers "not every". It
+never widens what a caller may read. It comes from the cluster-aware
+registry (PostgreSQL in cluster mode), cached per process for a short TTL. A stale copy is served only
 while a refresh is in flight, never after a failed refresh and never once
 it is older than ``ALIAS_UNIVERSE_MAX_STALENESS_SECONDS``.
 """
