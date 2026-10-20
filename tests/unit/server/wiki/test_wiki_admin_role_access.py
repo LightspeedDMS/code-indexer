@@ -1,14 +1,10 @@
-"""Tests for wiki access control — role-based admin check consistency (Bug fix).
+"""Tests for wiki access control: admin means admins-group membership.
 
-The bug: _check_wiki_access() used access_svc.is_admin_user() (group membership)
-while the rest of the app uses user.has_permission("manage_users") (role-based).
-A user with role=admin but not in the "admins" group got 404 on the wiki.
-
-Fix: _check_wiki_access() (the golden-repo wiki these tests cover) accepts
-either group-based admin OR role-based admin. The user wiki
-(_check_user_wiki_access) is different: another user's wiki is readable by
-an admins-group member only (covered by
-tests/unit/server/routers/test_activated_repo_rest_listings_and_wiki.py).
+_check_wiki_access() (the golden-repo wiki these tests cover) lets an
+admins-group member read any wiki and everyone else only wikis of
+repositories granted to them; neither the ADMIN role nor the manage_users
+permission bypasses the grant. The user wiki (_check_user_wiki_access) is
+covered by tests/unit/server/routers/test_activated_repo_rest_listings_and_wiki.py.
 """
 
 import os
@@ -82,8 +78,9 @@ def _make_app(
 class TestAdminRoleWikiAccess:
     """Verify that role=admin users can access the wiki even without group membership."""
 
-    def test_admin_role_not_in_admins_group_can_access_wiki(self):
-        """Reproduces the bug: role=admin, is_admin_user()=False -> should get 200, was 404."""
+    def test_admin_role_outside_admins_group_gets_no_wiki_bypass(self):
+        """Admin means admins-group membership: role=admin alone (and its
+        manage_users permission) does not bypass the repository grant."""
         with tempfile.TemporaryDirectory() as tmpdir:
             Path(tmpdir, "home.md").write_text("# Home")
             user = _make_real_user("jane.doe", UserRole.ADMIN)
@@ -91,9 +88,7 @@ class TestAdminRoleWikiAccess:
             app = _make_app(user, tmpdir, set(), is_admin_group=False)
             client = TestClient(app)
             resp = client.get("/wiki/test-repo/")
-            assert resp.status_code == 200, (
-                "User with role=admin must bypass group check even if not in admins group"
-            )
+            assert resp.status_code == 404
 
     def test_admins_group_member_can_access_wiki(self):
         """Existing behavior: user in admins group (is_admin_user=True) still works."""

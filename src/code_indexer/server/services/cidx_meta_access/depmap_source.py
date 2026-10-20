@@ -130,9 +130,16 @@ def resolve_depmap_source(
     """The caller's source of *output_dir* and whether it is restricted.
     Visibility is resolved fresh (acting-user scope honoured)."""
     vis = resolve_meta_visibility(username, access_service)
+    return source_for_visibility(vis, output_dir, registry), not vis.unrestricted
+
+
+def source_for_visibility(
+    vis: MetaVisibility, output_dir: Path, registry: Any
+) -> DepMapSource:
+    """The source of *output_dir* for an already-resolved visibility."""
     if vis.unrestricted:
-        return FilesystemDepMapSource(output_dir), False
+        return FilesystemDepMapSource(output_dir)
     projector = MetaProjector(
         vis, dep_map_dir=output_dir, universe=process_alias_universe(registry)
     )
-    return ProjectedDepMapSource(output_dir, vis, projector), True
+    return ProjectedDepMapSource(output_dir, vis, projector)

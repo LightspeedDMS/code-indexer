@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional, Set, cast
 
 import markdown  # type: ignore[import-untyped]
 
+from .dep_map_source import DepMapSource, FilesystemDepMapSource
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,16 +32,41 @@ class DependencyMapDomainService:
       {golden_repos_dir}/cidx-meta/dependency-map/{domain_name}.md
     """
 
-    def __init__(self, dependency_map_service, config_manager) -> None:
+    def __init__(
+        self,
+        dependency_map_service,
+        config_manager,
+        source: Optional[DepMapSource] = None,
+    ) -> None:
         """
         Initialize the domain service.
 
         Args:
             dependency_map_service: DependencyMapService instance with golden_repos_dir property
             config_manager: ServerConfigManager (reserved for future use)
+            source: the caller's view of the dependency map (domains, domain
+                documents and _index.md); None reads the directory as it is
         """
         self._dependency_map_service = dependency_map_service
         self._config_manager = config_manager
+        self._source = source
+
+    def _depmap_source(self) -> DepMapSource:
+        if self._source is None:
+            self._source = FilesystemDepMapSource(self._get_depmap_dir())
+        return self._source
+
+    def _read_document(self, name: str) -> Optional[str]:
+        """``<name>.md`` from the caller's source; None when absent or
+        unreadable."""
+        try:
+            source = self._depmap_source()
+            if not source.has_domain(name):
+                return None
+            return source.read_text(name)
+        except Exception as e:
+            logger.warning("dependency_map_domain: failed to read %s.md: %s", name, e)
+            return None
 
     @staticmethod
     def _validate_domain_name(domain_name: str) -> bool:
@@ -306,20 +333,7 @@ class DependencyMapDomainService:
         Returns empty list if file is missing or unreadable.
         """
         try:
-            domains_path = self._get_depmap_dir() / "_domains.json"
-        except Exception as e:
-            logger.warning("dependency_map_domain: failed to get depmap dir: %s", e)
-            return []
-
-        if not domains_path.exists():
-            return []
-
-        try:
-            data = json.loads(domains_path.read_text())
-            if not isinstance(data, list):
-                logger.warning("dependency_map_domain: _domains.json is not a list")
-                return []
-            return data
+            return self._depmap_source().load_domains_json()
         except Exception as e:
             logger.warning("dependency_map_domain: failed to read _domains.json: %s", e)
             return []
@@ -340,19 +354,8 @@ class DependencyMapDomainService:
             List of dicts: {source, target, via_repos, relationship, dep_type, why}
             Empty list if file missing or no table found.
         """
-        try:
-            index_path = self._get_depmap_dir() / "_index.md"
-        except Exception as e:
-            logger.warning("dependency_map_domain: failed to get depmap dir: %s", e)
-            return []
-
-        if not index_path.exists():
-            return []
-
-        try:
-            content = index_path.read_text()
-        except Exception as e:
-            logger.warning("dependency_map_domain: failed to read _index.md: %s", e)
+        content = self._read_document("_index")
+        if content is None:
             return []
 
         deps: List[Dict[str, Any]] = []
@@ -419,21 +422,8 @@ class DependencyMapDomainService:
         if not self._validate_domain_name(domain_name):
             return None
 
-        try:
-            file_path = self._get_depmap_dir() / f"{domain_name}.md"
-        except Exception as e:
-            logger.warning("dependency_map_domain: failed to get depmap dir: %s", e)
-            return None
-
-        if not file_path.exists():
-            return None
-
-        try:
-            content = file_path.read_text()
-        except Exception as e:
-            logger.warning(
-                "dependency_map_domain: failed to read %s.md: %s", domain_name, e
-            )
+        content = self._read_document(domain_name)
+        if content is None:
             return None
 
         # Strip YAML frontmatter (---...---)
@@ -482,21 +472,8 @@ class DependencyMapDomainService:
         if not self._validate_domain_name(domain_name):
             return None
 
-        try:
-            file_path = self._get_depmap_dir() / f"{domain_name}.md"
-        except Exception as e:
-            logger.warning("dependency_map_domain: failed to get depmap dir: %s", e)
-            return None
-
-        if not file_path.exists():
-            return None
-
-        try:
-            content = file_path.read_text()
-        except Exception as e:
-            logger.warning(
-                "dependency_map_domain: failed to read %s.md: %s", domain_name, e
-            )
+        content = self._read_document(domain_name)
+        if content is None:
             return None
 
         # Extract YAML frontmatter

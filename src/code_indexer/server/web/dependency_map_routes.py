@@ -32,6 +32,7 @@ from fastapi.templating import Jinja2Templates
 
 from code_indexer.server.auth import dependencies
 from code_indexer.server.storage.json_column import parse_json_column
+from .depmap_caller_view import DepMapCallerView, resolve_caller_view
 from .routes import (
     _require_admin_session,
     _create_login_redirect,
@@ -1056,21 +1057,9 @@ def depmap_repo_coverage_partial(request: Request):
     if not session:
         return HTMLResponse(content="", status_code=401)
 
-    is_admin = session.role == "admin"
-
-    # Resolve accessible repos for non-admin users
-    accessible_repos = None  # None = admin (all repos)
-    if not is_admin:
-        try:
-            accessible_repos = _get_accessible_repos_for_user(session.username)
-        except Exception as e:
-            logger.warning(
-                "Failed to get accessible repos for %s: %s", session.username, e
-            )
-            accessible_repos = set()
-
-    # Get coverage data
-    coverage_data = _get_repo_coverage_data(accessible_repos)
+    view = resolve_caller_view(request, session.username)
+    is_admin = view.is_admin
+    coverage_data = _get_repo_coverage_data(view.accessible_repos)
 
     return templates.TemplateResponse(
         request,
@@ -1084,42 +1073,26 @@ def depmap_repo_coverage_partial(request: Request):
     )
 
 
-def _get_domain_service():
+def _get_domain_service(view: DepMapCallerView):
     """
-    Build DependencyMapDomainService from live server state.
+    Build DependencyMapDomainService over the caller's view of the map.
 
-    Returns a configured DependencyMapDomainService or None if
-    the dependency map service is not available (disabled or not initialized).
+    Returns None if the dependency map is not available (disabled, not
+    initialized, or the caller's source could not be built).
     """
     from ..services.dependency_map_domain_service import DependencyMapDomainService
     from ..services.config_service import get_config_service
 
+    if view.source is None:
+        return None
     try:
-        config_service = get_config_service()
-        config_manager = config_service.config_manager
-        dep_map_service = _get_dep_map_service_from_state()
-        if dep_map_service is None:
-            return None
-        return DependencyMapDomainService(dep_map_service, config_manager)
+        config_manager = get_config_service().config_manager
+        return DependencyMapDomainService(
+            view.dep_map_service, config_manager, source=view.source
+        )
     except Exception as e:
         logger.warning("Failed to build DependencyMapDomainService: %s", e)
         return None
-
-
-def _get_accessible_repos_for_user(username: str):
-    """Get the set of repos accessible to a non-admin user."""
-    from ..services.access_filtering_service import AccessFilteringService
-    from ..services.group_access_manager import GroupAccessManager
-    from ..services.config_service import get_config_service
-
-    config_service = get_config_service()
-    config_manager = config_service.config_manager
-    server_dir = config_manager.server_dir
-    db_path = str(server_dir / "data" / "cidx_server.db")
-
-    group_manager = GroupAccessManager(db_path)  # type: ignore[arg-type]
-    access_service = AccessFilteringService(group_manager)
-    return access_service.get_accessible_repos(username)
 
 
 def _get_repo_coverage_data(accessible_repos) -> dict:
@@ -1172,26 +1145,14 @@ def depmap_domain_explorer_partial(request: Request):
     if not session:
         return HTMLResponse(content="", status_code=401)
 
-    is_admin = session.role == "admin"
-
-    # Resolve accessible repos for non-admin users
-    accessible_repos = None  # None = admin (all repos)
-    if not is_admin:
-        try:
-            accessible_repos = _get_accessible_repos_for_user(session.username)
-        except Exception as e:
-            logger.warning(
-                "Failed to get accessible repos for %s: %s", session.username, e
-            )
-            accessible_repos = set()
-
-    # Get domain list data
-    domain_service = _get_domain_service()
+    view = resolve_caller_view(request, session.username)
+    is_admin = view.is_admin
+    domain_service = _get_domain_service(view)
     if domain_service is None:
         domain_data = {"domains": [], "total_count": 0}
     else:
         try:
-            domain_data = domain_service.get_domain_list(accessible_repos)
+            domain_data = domain_service.get_domain_list(view.accessible_repos)
         except Exception as e:
             logger.warning("Failed to get domain list: %s", e)
             domain_data = {"domains": [], "total_count": 0}
@@ -1227,26 +1188,13 @@ def depmap_domain_detail_partial(request: Request, name: str):
     if not session:
         return HTMLResponse(content="", status_code=401)
 
-    is_admin = session.role == "admin"
-
-    # Resolve accessible repos for non-admin users
-    accessible_repos = None  # None = admin (all repos)
-    if not is_admin:
-        try:
-            accessible_repos = _get_accessible_repos_for_user(session.username)
-        except Exception as e:
-            logger.warning(
-                "Failed to get accessible repos for %s: %s", session.username, e
-            )
-            accessible_repos = set()
-
-    # Get domain detail data
-    domain_service = _get_domain_service()
+    view = resolve_caller_view(request, session.username)
+    domain_service = _get_domain_service(view)
     if domain_service is None:
         detail_data = None
     else:
         try:
-            detail_data = domain_service.get_domain_detail(name, accessible_repos)
+            detail_data = domain_service.get_domain_detail(name, view.accessible_repos)
         except Exception as e:
             logger.warning("Failed to get domain detail for '%s': %s", name, e)
             detail_data = None
@@ -1281,24 +1229,13 @@ def depmap_graph_data(request: Request):
             content={"error": "Authentication required"}, status_code=401
         )
 
-    is_admin = session.role == "admin"
-
-    accessible_repos = None
-    if not is_admin:
-        try:
-            accessible_repos = _get_accessible_repos_for_user(session.username)
-        except Exception as e:
-            logger.warning(
-                "Failed to get accessible repos for %s: %s", session.username, e
-            )
-            accessible_repos = set()
-
-    domain_service = _get_domain_service()
+    view = resolve_caller_view(request, session.username)
+    domain_service = _get_domain_service(view)
     if domain_service is None:
         return JSONResponse(content={"nodes": [], "edges": []})
 
     try:
-        graph_data = domain_service.get_graph_data(accessible_repos)
+        graph_data = domain_service.get_graph_data(view.accessible_repos)
         return JSONResponse(content=graph_data)
     except Exception as e:
         logger.warning("Failed to get graph data: %s", e)
