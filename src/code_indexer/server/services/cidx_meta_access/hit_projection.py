@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -33,6 +34,7 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tup
 from ....utils.path_confinement import resolve_confined_path
 from .depmap_projection import MetaProjector, render_line_aligned
 from .fulltext_terms import (
+    FulltextOptions,
     FullTextTerms,
     VisibleMatch,
     first_visible_match,
@@ -49,6 +51,7 @@ CATALOG_HIT_FIELDS: FrozenSet[str] = frozenset(
     {
         "file_path",
         "path",
+        "line",
         "line_number",
         "line_start",
         "line_end",
@@ -122,6 +125,7 @@ class TextRematch:
     query: str
     regex: bool = False
     edit_distance: int = 0
+    options: FulltextOptions = field(default_factory=FulltextOptions, compare=False)
 
     @cached_property
     def terms(self) -> Optional[FullTextTerms]:
@@ -152,6 +156,22 @@ class CatalogScope:
     _matches: Dict[Tuple[str, FullTextTerms], Optional[VisibleMatch]] = field(
         default_factory=dict
     )
+    _allowed: Optional[FrozenSet[str]] = None
+
+    def allowed_paths(self) -> FrozenSet[str]:
+        """Every catalog file the caller may see (not denied), relative to
+        the copy, listed once per request; dot directories are skipped."""
+        if self._allowed is None:
+            found: List[str] = []
+            for directory, subdirs, names in os.walk(self.root):
+                subdirs[:] = [d for d in subdirs if not d.startswith(".")]
+                relative = Path(directory).relative_to(self.root)
+                for name in names:
+                    path = (relative / name).as_posix()
+                    if self.decide(path).kind is not DecisionKind.DENY:
+                        found.append(path)
+            self._allowed = frozenset(found)
+        return self._allowed
 
     def document(self, relative_path: str) -> Optional[List[str]]:
         """The current lines of a catalog file, read once per request;
@@ -413,7 +433,7 @@ def _project_fulltext(
     if _first_key(hit, ("match_text",)) is not None:
         updates["match_text"] = found.text
     rebuilt = _rebuild(hit, updates)
-    for key in ("line_number", "line_start", "line_end"):
+    for key in ("line", "line_number", "line_start", "line_end"):
         value = _get(hit, (key,))
         if isinstance(value, int) and value > 0:
             rebuilt = _with_line(rebuilt, key, found.line)
@@ -486,30 +506,27 @@ def project_meta_hits(
     return out
 
 
-def _score(hit: Any) -> float:
-    value = _get(hit, ("similarity_score", "score"))
-    return float(value) if isinstance(value, (int, float)) else 0.0
-
-
 def project_fulltext_documents(
     hits: Sequence[Any], scope: CatalogScope, terms: FullTextTerms
 ) -> List[Any]:
     """One row per catalog document among the candidate *hits* (any chunk
     of it, from any word's query) whose shown text holds every required
-    word: its best-scored hit, anchored on the first shown occurrence.
-    Rows are ordered best score first; which documents appear depends only
-    on their shown text."""
-    best: Dict[str, Any] = {}
-    for hit in sorted(hits, key=_score, reverse=True):
+    word, anchored on the first shown occurrence. Rows are ordered by how
+    often the required words occur in the shown text, then by path: which
+    documents appear, and their order, depend only on shown text."""
+    first_hit: Dict[str, Any] = {}
+    for hit in hits:
         path = _get(hit, _PATH_KEYS)
-        if isinstance(path, str) and path not in best:
-            best[path] = hit
-    out: List[Any] = []
-    for path, hit in best.items():
+        if isinstance(path, str) and path not in first_hit:
+            first_hit[path] = hit
+    ranked: List[Tuple[int, str, Any]] = []
+    for path, hit in first_hit.items():
         projected = _project_fulltext(hit, scope, path, terms)
-        if projected is not None:
-            out.append(projected)
-    return out
+        found = scope.shown_match(path, terms)
+        if projected is not None and found is not None:
+            ranked.append((-found.count, path, projected))
+    ranked.sort(key=lambda entry: (entry[0], entry[1]))
+    return [projected for _, _, projected in ranked]
 
 
 REGEX_MATCH_FIELDS: FrozenSet[str] = frozenset(

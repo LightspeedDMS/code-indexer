@@ -105,3 +105,19 @@ def test_checker_keeps_what_the_engine_returns(
 )
 def test_tokens_the_engine_drops_are_refused(word: str, accepted: bool) -> None:
     assert (parse_fulltext_terms(word, 0) is not None) is accepted
+
+
+def _chunk_overlap() -> int:
+    from code_indexer.indexing.fixed_size_chunker import FixedSizeChunker
+
+    smallest = min(FixedSizeChunker.MODEL_CHUNK_SIZES.values())
+    return int(smallest * FixedSizeChunker.OVERLAP_PERCENTAGE)
+
+
+@pytest.mark.parametrize("distance", [0, 1])
+def test_words_longer_than_the_chunk_overlap_are_refused(distance: int) -> None:
+    overlap = _chunk_overlap()
+    at_overlap = ("ab-" * overlap)[: overlap - 1] + "c"
+    assert len(at_overlap) == overlap
+    assert parse_fulltext_terms(at_overlap, distance) is not None
+    assert parse_fulltext_terms(at_overlap + "d", distance) is None

@@ -4,9 +4,10 @@ Real app, real handlers and routes, and a real Tantivy index holding one
 document per CHUNK (as production indexing writes it); only the caller
 (authentication) and the embedding provider are replaced. Through every
 full-text door that can include the catalog, the set of documents
-returned and every count stay the same when only text the caller cannot
-see changes; each document yields one row; and a document whose query
-words sit in different chunks is still found.
+returned at any limit (truncated pages included) and every count stay the
+same when only text the caller cannot see changes, even when the hidden
+change multiplies a query word; each document yields one row; and a
+document whose query words sit in different chunks is still found.
 """
 
 from __future__ import annotations
@@ -34,19 +35,43 @@ from tests.unit.server.query.catalog_search_env import (
 )
 from tests.unit.server.query.extension_filter_env_2047 import ranked_store_search
 
-pytestmark = pytest.mark.timeout(120)
-QUERIES = ["src", "python", "python src", "payments", "writes rows"]
-LIMIT = 40
-HIDDEN_ROW = (
+pytestmark = pytest.mark.timeout(300)
+PAYMENTS = "dependency-map/payments.md"
+CASES: List[Tuple[str, int]] = [
+    ("src", 40),
+    ("python", 40),
+    ("python src", 40),
+    ("writes rows", 40),
+    ("alpha", 1),
+    ("alpha", 2),
+    ("payments", 1),
+    ("payments", 2),
+    ("alpha payments", 1),
+]
+JOURNAL_ROW = (
     f"| {CANARY} | alpha | ledger | Data contracts | writes journal rows "
     "| db/journal.sql |"
 )
+STEP_ROW = f"| 1 | {CANARY} | step 1 local |"
+# Hidden-only edits: a hidden path, and hidden rows repeating a query word.
+EDITS = {
+    "hidden_path": (
+        JOURNAL_ROW,
+        JOURNAL_ROW.replace("db/journal.sql", "src/python.sql"),
+    ),
+    "hidden_alpha_boost": (STEP_ROW, STEP_ROW.replace("step 1 local", "alpha " * 12)),
+    "hidden_payments_boost": (
+        STEP_ROW,
+        STEP_ROW.replace("step 1 local", "payments " * 12),
+    ),
+}
 SPLIT_FILE = "xray-patterns/__any__/split.yaml"
 Row = Tuple[str, int]
 # (rows returned, the count the door REPORTS for them): /api/query/multi
 # reports metadata.total_results; the other doors carry no count field, so
 # they report their row count.
 Answer = Tuple[List[Row], int]
+Door = Callable[[TestClient, str, int], Answer]
 
 
 @pytest.fixture(scope="module")
@@ -87,10 +112,10 @@ def http(env: CatalogEnv) -> Iterator[TestClient]:
             overrides.pop(dep, None)
 
 
-def _mcp(alias: Any, mode: str) -> Callable[[TestClient, str], Answer]:
-    def run(_http: TestClient, text: str) -> Answer:
+def _mcp(alias: Any, mode: str) -> Door:
+    def run(_http: TestClient, text: str, limit: int) -> Answer:
         params = dict(
-            query_text=text, repository_alias=alias, search_mode=mode, limit=LIMIT
+            query_text=text, repository_alias=alias, search_mode=mode, limit=limit
         )
         response = search_code(params, RESTRICTED)
         payload = json.loads(response["content"][0]["text"])
@@ -105,13 +130,13 @@ def _mcp(alias: Any, mode: str) -> Callable[[TestClient, str], Answer]:
     return run
 
 
-def _rest(mode: str) -> Callable[[TestClient, str], Answer]:
-    def run(http: TestClient, text: str) -> Answer:
+def _rest(mode: str) -> Door:
+    def run(http: TestClient, text: str, limit: int) -> Answer:
         body = {
             "query_text": text,
             "repository_alias": CATALOG_ALIAS,
             "search_mode": mode,
-            "limit": LIMIT,
+            "limit": limit,
         }
         response = http.post("/api/query", json=body)
         assert response.status_code == 200, response.text
@@ -122,12 +147,12 @@ def _rest(mode: str) -> Callable[[TestClient, str], Answer]:
     return run
 
 
-def _multi(http: TestClient, text: str) -> Answer:
+def _multi(http: TestClient, text: str, limit: int) -> Answer:
     body = {
         "repositories": [CATALOG_ALIAS],
         "query": text,
         "search_type": "fts",
-        "limit": LIMIT,
+        "limit": limit,
     }
     response = http.post("/api/query/multi", json=body)
     assert response.status_code == 200, response.text
@@ -139,7 +164,7 @@ def _multi(http: TestClient, text: str) -> Answer:
     return rows, reported_count
 
 
-DOORS: Dict[str, Callable[[TestClient, str], Answer]] = {
+DOORS: Dict[str, Door] = {
     "mcp-single-fts": _mcp(CATALOG_ALIAS, "fts"),
     "mcp-single-hybrid": _mcp(CATALOG_ALIAS, "hybrid"),
     "mcp-omni-fts": _mcp([CATALOG_ALIAS], "fts"),
@@ -151,14 +176,12 @@ DOORS: Dict[str, Callable[[TestClient, str], Answer]] = {
 SEMANTIC_MIXED = {"mcp-single-hybrid"}
 
 
-def _answers(
-    http: TestClient, door: Callable[[TestClient, str], Answer]
-) -> Dict[str, Answer]:
-    out: Dict[str, Answer] = {}
+def _answers(http: TestClient, door: Door) -> Dict[Tuple[str, int], Answer]:
+    out: Dict[Tuple[str, int], Answer] = {}
     with ranked_store_search():
-        for text in QUERIES:
-            rows, reported_count = door(http, text)
-            out[text] = (sorted(rows), reported_count)
+        for text, limit in CASES:
+            rows, reported_count = door(http, text, limit)
+            out[(text, limit)] = (sorted(rows), reported_count)
     return out
 
 
@@ -176,25 +199,30 @@ def _rewritten(root: Path, rel: str, old: str, new: str) -> Iterator[None]:
         rebuild_indexes(root)
 
 
+@pytest.mark.parametrize("edit", sorted(EDITS))
 @pytest.mark.parametrize("door", sorted(DOORS))
 def test_hidden_text_change_keeps_results_and_counts(
-    env: CatalogEnv, http: TestClient, door: str
+    env: CatalogEnv, http: TestClient, door: str, edit: str
 ) -> None:
     before = _answers(http, DOORS[door])
     assert any(rows for rows, _ in before.values())
-    hidden_change = HIDDEN_ROW.replace("db/journal.sql", "src/python.sql")
-    with _rewritten(env.root, "dependency-map/payments.md", HIDDEN_ROW, hidden_change):
+    old, new = EDITS[edit]
+    with _rewritten(env.root, PAYMENTS, old, new):
         after = _answers(http, DOORS[door])
-    assert after == before
+    changed = {
+        key: (before[key], after[key]) for key in before if before[key] != after[key]
+    }
+    assert changed == {}
 
 
 @pytest.mark.parametrize("door", sorted(set(DOORS) - SEMANTIC_MIXED))
 def test_one_row_per_document(env: CatalogEnv, http: TestClient, door: str) -> None:
-    for text, (rows, reported_count) in _answers(http, DOORS[door]).items():
+    for key, (rows, reported_count) in _answers(http, DOORS[door]).items():
         paths = Counter(path for path, _ in rows)
-        assert [p for p, n in paths.items() if n > 1] == [], text
+        assert [p for p, n in paths.items() if n > 1] == [], key
         # The count a door reports is the number of rows it returns.
-        assert reported_count == len(rows), text
+        assert reported_count == len(rows), key
+        assert len(rows) <= key[1], key
 
 
 @pytest.mark.parametrize("door", sorted(DOORS))
@@ -207,7 +235,7 @@ def test_words_in_different_chunks_find_the_document(
     try:
         rebuild_fulltext(env.root)
         with ranked_store_search():
-            rows, reported_count = DOORS[door](http, "zephyrword quillword")
+            rows, reported_count = DOORS[door](http, "zephyrword quillword", 40)
     finally:
         split.unlink()
         rebuild_fulltext(env.root)

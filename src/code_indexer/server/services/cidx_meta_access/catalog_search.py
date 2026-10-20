@@ -27,16 +27,16 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Tuple
 
-from .fulltext_pages import deepening_ks, fulltext_page, requested_size, word_hits
+from .fulltext_pages import catalog_fulltext_rows, deepening_ks, requested_size
 from .hit_projection import (
     CatalogScope,
     TextRematch,
     open_catalog_scope,
-    project_fulltext_documents,
     project_meta_hits,
 )
 from ..constants import CIDX_META_REPO_GLOBAL, is_internal_meta_repo
 from .fulltext_terms import (
+    FulltextOptions,
     FullTextTerms,
     effective_edit_distance,
     parse_fulltext_terms,
@@ -205,21 +205,19 @@ def _multi_catalog_group(
     limit: int,
     scope: CatalogScope,
 ) -> List[Any]:
-    """The caller's rows of one catalog group: one per shown document, from
-    single-word queries over the copy at *root* with *request*'s filters."""
-    from ...multi.fts_rows import fts_search_rows, open_fts_index
+    """The caller's rows of one catalog group: one per shown document
+    (``catalog_fulltext_rows``) over the copy at *root* with *request*'s
+    filters, in the multi-search row shape."""
+    from ...multi.fts_rows import MULTI_FTS_SNIPPET_LINES, multi_fts_filters, multi_row
     from ...query.filtered_search import extension_overfetch_deadline
 
-    index = open_fts_index(root)
     deadline = extension_overfetch_deadline(request.file_extensions)
-    page = fulltext_page(
-        lambda word, k: fts_search_rows(index, request, word, k, deadline),
-        lambda: scope,
-        terms,
-        limit,
-        lambda: False,
+    options = FulltextOptions(
+        snippet_lines=MULTI_FTS_SNIPPET_LINES,
+        filters=multi_fts_filters(request, deadline),
     )
-    return [_marked_catalog(dict(row, repository_alias=alias)) for row in page]
+    rows = catalog_fulltext_rows(root, options, terms, scope, limit)
+    return [_marked_catalog(dict(multi_row(r), repository_alias=alias)) for r in rows]
 
 
 def project_multi_fulltext(
@@ -389,24 +387,47 @@ def rest_rows_for_caller(
     return list(access_service.filter_query_results(projected, username))
 
 
-def _fulltext_round(
+def _catalog_fulltext_page(
+    run: RunRound,
+    repo_path: Any,
+    alias: str,
+    rematch: TextRematch,
+    scope: LazyCatalogScope,
+    limit: int,
+) -> List[Any]:
+    """A literal query's catalog page: one row per shown document, chosen
+    and ordered from shown text (``catalog_fulltext_rows``). A copy without
+    a full-text index goes through the engine path first, which raises its
+    own missing-index error before any projection is set up."""
+    from ...query.semantic_query_manager import fts_query_results
+
+    terms = rematch.terms
+    if terms is None:
+        raise_fulltext_refusal()
+    root = Path(repo_path)
+    if not (root / ".code-indexer" / "tantivy_index").exists():
+        run(limit, "fts", None, rematch.query)
+    rows = catalog_fulltext_rows(
+        root, rematch.options, terms, scope.get(), limit, rematch.edit_distance
+    )
+    return fts_query_results(rows, alias, rematch.options.min_score)
+
+
+def _fulltext_rows(
     run: RunRound,
     k: int,
     scope: LazyCatalogScope,
     rematch: TextRematch,
     vector: Optional[List[float]],
+    fts_page: Optional[List[Any]],
 ) -> Tuple[List[Any], bool]:
-    """One round's full-text page and whether its hits are exhausted: per
-    document from single-word queries for a literal query; a regex query's
-    hits projected one by one."""
-    if rematch.regex:
-        raw = run(k, "fts", vector, rematch.query)
-        return project_meta_hits(raw, scope.get(), rematch), len(raw) < k
-    terms = rematch.terms
-    if terms is None:
-        raise_fulltext_refusal()
-    hits, exhausted = word_hits(lambda word, n: run(n, "fts", vector, word), terms, k)
-    return project_fulltext_documents(hits, scope.get(), terms), exhausted
+    """One round's full-text rows and whether they are complete: the
+    literal page computed up front, else a regex query's hits projected
+    one by one."""
+    if fts_page is not None:
+        return fts_page, True
+    raw = run(k, "fts", vector, rematch.query)
+    return project_meta_hits(raw, scope.get(), rematch), len(raw) < k
 
 
 def _round(
@@ -417,15 +438,16 @@ def _round(
     rematch: TextRematch,
     merge: Merge,
     vector: Optional[List[float]],
+    fts_page: Optional[List[Any]],
 ) -> Tuple[List[Any], bool]:
     """One round's projected page and whether the corpus is exhausted."""
     if mode == "fts":
-        return _fulltext_round(run, k, scope, rematch, vector)
+        return _fulltext_rows(run, k, scope, rematch, vector, fts_page)
     if mode == "hybrid":
-        fts_page, fts_exhausted = _fulltext_round(run, k, scope, rematch, vector)
+        fts_rows, fts_done = _fulltext_rows(run, k, scope, rematch, vector, fts_page)
         semantic_raw = run(k, "semantic", vector, rematch.query)
-        page = merge(fts_page, project_meta_hits(semantic_raw, scope.get()), k)
-        return page, fts_exhausted and len(semantic_raw) < k
+        page = merge(fts_rows, project_meta_hits(semantic_raw, scope.get()), k)
+        return page, fts_done and len(semantic_raw) < k
     raw = run(k, mode, vector, rematch.query)
     return project_meta_hits(raw, scope.get()), len(raw) < k
 
@@ -455,10 +477,32 @@ def catalog_rematch(
 ) -> Tuple[TextRematch, Optional[CatalogLocations]]:
     """One search request's full-text query (as every repository of it
     runs it) and its catalog locations, looked up at most once."""
+    from ...query.filtered_search import fts_filter_kwargs
+
     distance = effective_edit_distance(
         bool(request_kwargs.get("fuzzy")), int(request_kwargs.get("edit_distance") or 0)
     )
-    rematch = TextRematch(query_text, bool(request_kwargs.get("regex")), distance)
+    snippet_lines = request_kwargs.get("snippet_lines")
+    options = FulltextOptions(
+        case_sensitive=bool(request_kwargs.get("case_sensitive")),
+        snippet_lines=(
+            FulltextOptions().snippet_lines
+            if snippet_lines is None
+            else int(snippet_lines)
+        ),
+        min_score=request_kwargs.get("min_score"),
+        filters=fts_filter_kwargs(
+            language=request_kwargs.get("language"),
+            path_filter=request_kwargs.get("path_filter"),
+            exclude_language=request_kwargs.get("exclude_language"),
+            exclude_path=request_kwargs.get("exclude_path"),
+            file_extensions=request_kwargs.get("file_extensions"),
+            deadline=request_kwargs.get("extension_deadline"),
+        ),
+    )
+    rematch = TextRematch(
+        query_text, bool(request_kwargs.get("regex")), distance, options
+    )
     golden_repos_dir = golden_repos_dir_of(activated_repo_manager)
     locations = (
         request_catalog_locations(golden_repos_dir) if golden_repos_dir else None
@@ -531,6 +575,20 @@ def search_for_caller(
             username, access_service, Path(repo_path), registry_of(state)
         )
     )
+    fts_page = (
+        _catalog_fulltext_page(
+            run,
+            repo_path,
+            str(repo_info.get("user_alias") or ""),
+            rematch,
+            scope,
+            limit,
+        )
+        if fulltext
+        else None
+    )
+    if fts_page is not None and search_mode == "fts":
+        return [_marked_catalog(row) for row in fts_page]
     vector = query_vector
     embeds = search_mode in ("semantic", "hybrid")
     requested = requested_size(limit)
@@ -541,7 +599,9 @@ def search_for_caller(
         if vector is None and embeds and (proven or round_index > 0):
             vector = catalog_query_vector(repo_path, query, no_embedding_cache_shortcut)
         logger.debug("catalog round %d k=%d", round_index, k)
-        page, exhausted = _round(run, k, search_mode, scope, rematch, merge, vector)
+        page, exhausted = _round(
+            run, k, search_mode, scope, rematch, merge, vector, fts_page
+        )
         if len(page) >= requested or exhausted or k >= schedule[-1] or budget_spent():
             break
     return [_marked_catalog(row) for row in page[:requested]]

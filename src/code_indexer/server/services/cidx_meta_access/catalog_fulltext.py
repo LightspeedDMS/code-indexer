@@ -23,12 +23,12 @@ from .catalog_regex import catalog_regex_applies
 from .catalog_search import (
     CatalogProjectionUnavailable,
     FullTextQuery,
-    LazyCatalogScope,
     rows_include_catalog,
     server_app_state,
 )
-from .fulltext_pages import fulltext_page
+from .fulltext_pages import catalog_fulltext_rows
 from .fulltext_terms import (
+    FulltextOptions,
     effective_edit_distance,
     parse_fulltext_terms,
     raise_fulltext_refusal,
@@ -136,7 +136,12 @@ def rest_fulltext_rows(
     if repo_path is None or registry is None:
         raise CatalogProjectionUnavailable("catalog full-text needs the registry")
     root = Path(repo_path)
-    scope = LazyCatalogScope(
-        lambda: open_catalog_scope(username, access_service, root, registry)
+    scope = open_catalog_scope(username, access_service, root, registry)
+    if scope is None:
+        raise CatalogProjectionUnavailable("catalog full-text scope unavailable")
+    options = FulltextOptions(
+        case_sensitive=request.case_sensitive,
+        snippet_lines=request.snippet_lines,
+        filters=filters,
     )
-    return fulltext_page(search, scope.get, terms, request.limit, lambda: False)
+    return catalog_fulltext_rows(root, options, terms, scope, request.limit, distance)

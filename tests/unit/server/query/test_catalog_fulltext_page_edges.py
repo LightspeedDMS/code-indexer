@@ -7,7 +7,7 @@ Real app, real per-chunk Tantivy index over the neutral catalog fixture
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Tuple
 
 import pytest
 
@@ -26,11 +26,15 @@ from code_indexer.server.services.cidx_meta_access.catalog_search import (
     project_multi_fulltext,
 )
 from code_indexer.server.services.cidx_meta_access.fulltext_pages import (
-    fulltext_page,
+    CatalogFulltextIncomplete,
+    complete_hits,
+    engine_search_word,
 )
 from code_indexer.server.services.cidx_meta_access.fulltext_terms import (
+    FulltextOptions,
     parse_fulltext_terms,
 )
+from code_indexer.services.tantivy_index_manager import _FTS_UNLIMITED_HITS
 from code_indexer.server.services.cidx_meta_access.hit_projection import (
     open_catalog_scope,
 )
@@ -45,6 +49,7 @@ from tests.shared.cidx_meta_visibility_fixture import (
 from tests.unit.server.query.catalog_search_env import (
     CATALOG_ALIAS,
     QUERY,
+    VISIBLE_WIDGETS,
     CatalogEnv,
     catalog_app,
     dump,
@@ -143,29 +148,43 @@ def test_multi_drops_a_catalog_group_it_cannot_project(
     assert response.metadata.total_results == 0
 
 
-def test_page_stops_deepening_when_the_budget_is_spent(env: CatalogEnv) -> None:
-    index = open_fts_index(env.root)
+def test_gathering_doubles_until_a_word_is_complete(env: CatalogEnv) -> None:
     state = env.app.state
     scope = open_catalog_scope(
         RESTRICTED_USER, state.access_filtering_service, env.root, registry_of(state)
     )
     assert scope is not None
-    # The 25 hidden widget files rank first: a round of 24 shows nothing.
     terms = parse_fulltext_terms(QUERY, 0)
     assert terms is not None
+    engine = engine_search_word(open_fts_index(env.root), FulltextOptions(), 0)
+    asked: List[int] = []
 
-    def asked_with(spent: bool) -> List[int]:
-        asked: List[int] = []
+    def search(word: str, k: int, allowed: FrozenSet[str]) -> Tuple[List[Any], bool]:
+        asked.append(k)
+        return engine(word, k, allowed)
 
-        def search(word: str, k: int) -> List[Dict[str, Any]]:
-            asked.append(k)
-            return list(index.search(word, limit=k))
+    hits = complete_hits(search, terms, 2, scope.allowed_paths())
+    # 10 visible widget files: 4 and 8 hits leave matches, 16 is complete.
+    assert asked == [4, 8, 16]
+    paths = {hit["path"] for hit in hits}
+    assert len(paths) == VISIBLE_WIDGETS
+    assert not any(CANARY in path for path in paths)
 
-        fulltext_page(search, lambda: scope, terms, 12, lambda: spent)
-        return asked
 
-    assert asked_with(spent=True) == [24]
-    assert asked_with(spent=False)[:2] == [24, 48]
+def test_gathering_fails_loudly_when_nothing_completes() -> None:
+    terms = parse_fulltext_terms("alpha beta", 0)
+    assert terms is not None
+    asked: List[int] = []
+
+    def never_complete(
+        word: str, k: int, allowed: FrozenSet[str]
+    ) -> Tuple[List[Any], bool]:
+        asked.append(k)
+        return [], False
+
+    with pytest.raises(CatalogFulltextIncomplete):
+        complete_hits(never_complete, terms, 1, frozenset({"alpha.md"}))
+    assert asked[-1] == _FTS_UNLIMITED_HITS
 
 
 def test_restricted_regex_fulltext_projects_each_hit(env: CatalogEnv) -> None:

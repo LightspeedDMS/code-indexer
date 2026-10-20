@@ -14,18 +14,19 @@ the engine searched.
 
 Forms whose outcome cannot be decided on the shown text alone are refused
 before searching: boolean operators, wildcard, boost and slop syntax, a
-word with no token, an over-long token, and fuzzy matching of more than
-one word. One fuzzy word is judged by edit distance (an adjacent
+word with no token, an over-long token, a word longer than the chunker's
+overlap (it may be split across indexed chunks), and fuzzy matching of
+more than one word. One fuzzy word is judged by edit distance (an adjacent
 transposition costs one) against each shown token.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from functools import lru_cache
-from typing import Any, List, NoReturn, Optional, Sequence, Tuple
+from typing import Any, List, Mapping, NoReturn, Optional, Sequence, Tuple
 
 from .depmap_projection import DOMAIN_PLACEHOLDER, RESTRICTED_PLACEHOLDER
 
@@ -40,6 +41,16 @@ _PLACEHOLDERS = (RESTRICTED_PLACEHOLDER, DOMAIN_PLACEHOLDER)
 
 # (indexed form, or None when the engine drops the token; start; end)
 Token = Tuple[Optional[str], int, int]
+
+
+@lru_cache(maxsize=1)
+def _max_word_chars() -> int:
+    """The chunker's smallest overlap: a longer word may be split across
+    indexed chunks, so the engine could miss a word the caller sees."""
+    from ....indexing.fixed_size_chunker import FixedSizeChunker
+
+    smallest = min(FixedSizeChunker.MODEL_CHUNK_SIZES.values())
+    return int(smallest * FixedSizeChunker.OVERLAP_PERCENTAGE)
 
 
 @lru_cache(maxsize=1)
@@ -112,11 +123,25 @@ class FullTextTerms:
 
 @dataclass(frozen=True)
 class VisibleMatch:
-    """Where a document first shows its first required word: the 1-based
-    line and the matched text as shown."""
+    """Where a document first shows its first required word (the 1-based
+    line and the matched text as shown), and how many times the required
+    words occur in the shown text."""
 
     line: int
     text: str
+    count: int = 0
+
+
+@dataclass(frozen=True)
+class FulltextOptions:
+    """How a request asks the engine for full-text hits: case, snippet
+    size, minimum score, and the request filters as
+    ``TantivyIndexManager.search`` keyword arguments."""
+
+    case_sensitive: bool = False
+    snippet_lines: int = 5
+    min_score: Optional[float] = None
+    filters: Mapping[str, Any] = field(default_factory=dict, compare=False)
 
 
 def effective_edit_distance(fuzzy: bool, edit_distance: int) -> int:
@@ -138,6 +163,8 @@ def parse_fulltext_terms(query: str, edit_distance: int) -> Optional[FullTextTer
 
     words = sanitize_fts_query(query).split()
     if not words or any(word in _OPERATORS for word in words):
+        return None
+    if any(len(word) > _max_word_chars() for word in words):
         return None
     if any(ch in _GRAMMAR_CHARS for word in words for ch in word):
         return None
@@ -226,43 +253,43 @@ def _within_distance(word: str, token: str, limit: int) -> bool:
     return previous[-1] <= limit
 
 
-def _find(
+def _matches(
     runs: Sequence[List[Token]], terms: FullTextTerms, index: int
-) -> Optional[Tuple[int, int]]:
-    """Shown offsets of the first occurrence of required word *index*."""
+) -> List[Tuple[int, int]]:
+    """Shown offsets of every occurrence of required word *index*."""
+    found: List[Tuple[int, int]] = []
     if terms.fuzzy_word is not None:
         for run in runs:
             for token, start, end in run:
                 if token is not None and _within_distance(
                     terms.fuzzy_word, token, terms.edit_distance
                 ):
-                    return start, end
-        return None
+                    found.append((start, end))
+        return found
     phrase = terms.phrases[index]
     for run in runs:
         words = [token for token, _, _ in run]
         for i in range(len(run) - len(phrase) + 1):
             if tuple(words[i : i + len(phrase)]) == phrase:
-                return run[i][1], run[i + len(phrase) - 1][2]
-    return None
+                found.append((run[i][1], run[i + len(phrase) - 1][2]))
+    return found
 
 
 def first_visible_match(
     raw_lines: Sequence[str], shown_lines: Sequence[str], terms: FullTextTerms
 ) -> Optional[VisibleMatch]:
-    """Where the shown document first holds the first required word, when
-    it holds every required word; else None."""
-    pending = set(range(1 if terms.fuzzy_word is not None else len(terms.phrases)))
+    """Where the shown document first holds the first required word, with
+    the shown occurrence count of all required words, when it holds every
+    required word; else None. The whole document is read (the count)."""
+    counts = [0] * (1 if terms.fuzzy_word is not None else len(terms.phrases))
     first: Optional[VisibleMatch] = None
     for number, (raw, shown) in enumerate(zip(raw_lines, shown_lines), start=1):
         runs = _visible_runs(raw, shown)
-        for index in sorted(pending):
-            found = _find(runs, terms, index)
-            if found is None:
-                continue
-            pending.discard(index)
-            if index == 0:
-                first = VisibleMatch(number, shown[found[0] : found[1]])
-        if not pending:
-            return first
-    return None
+        for index in range(len(counts)):
+            spans = _matches(runs, terms, index)
+            if index == 0 and spans and first is None:
+                first = VisibleMatch(number, shown[spans[0][0] : spans[0][1]])
+            counts[index] += len(spans)
+    if first is None or not all(counts):
+        return None
+    return VisibleMatch(first.line, first.text, sum(counts))

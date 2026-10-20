@@ -81,7 +81,8 @@ def test_hidden_top_hits_still_fill_the_page(
     assert len(rows) == 3
     assert all(r["file_path"].startswith("xray-patterns/__any__/") for r in rows)
     assert CANARY not in dump(rows)
-    assert 1 < _rounds(caplog) <= 4
+    # The full-text page is complete up front: no deepening rounds.
+    assert _rounds(caplog) == 0
 
     caplog.clear()
     admin_rows = _rows(_query(env, ADMIN_USER, QUERY, "fts", 3))

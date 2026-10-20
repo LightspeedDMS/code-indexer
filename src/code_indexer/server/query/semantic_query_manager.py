@@ -462,6 +462,27 @@ def convert_temporal_result_to_query_result(
     )
 
 
+def fts_query_results(
+    raw_rows: List[Dict[str, Any]], repository_alias: str, min_score: Optional[float]
+) -> List[QueryResult]:
+    """Tantivy rows as QueryResults: a rank-based score (1.0 for the first
+    row), rows under *min_score* dropped; Tantivy reports 'line'."""
+    scored = [(1.0 - rank * 0.01, row) for rank, row in enumerate(raw_rows)]
+    return [
+        QueryResult(
+            file_path=row.get("path", ""),
+            line_number=row.get("line", 0),
+            code_snippet=row.get("snippet", ""),
+            similarity_score=score,
+            repository_alias=repository_alias,
+            source_repo=None,
+            match_text=row.get("match_text"),  # Story #680: FTS payload control
+        )
+        for score, row in scored
+        if min_score is None or score >= min_score
+    ]
+
+
 class SemanticQueryManager:
     """
     Manages semantic queries for CIDX server users.
@@ -3481,30 +3502,9 @@ class SemanticQueryManager:
                 ),
             )
 
-            # Convert FTS results to QueryResult objects
-            query_results: List[QueryResult] = []
-            for result in fts_raw_results:
-                # FTS doesn't have similarity scores in the same sense as semantic search
-                # Use a normalized score based on result ordering (1.0 for first result)
-                score = 1.0 - (len(query_results) * 0.01)  # Decreasing score
-
-                # Apply min_score filter if specified
-                if min_score is not None and score < min_score:
-                    continue
-
-                query_result = QueryResult(
-                    file_path=result.get("path", ""),
-                    line_number=result.get(
-                        "line", 0
-                    ),  # FIX: Tantivy returns 'line', not 'line_start'
-                    code_snippet=result.get("snippet", ""),
-                    similarity_score=score,
-                    repository_alias=repository_alias,
-                    source_repo=None,
-                    # Story #680: Preserve match_text for FTS payload control
-                    match_text=result.get("match_text"),
-                )
-                query_results.append(query_result)
+            query_results = fts_query_results(
+                fts_raw_results, repository_alias, min_score
+            )
 
             self.logger.debug(
                 f"FTS search completed for '{repository_alias}': "
