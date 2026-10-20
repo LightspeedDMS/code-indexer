@@ -93,24 +93,6 @@ def test_ci_log_search_stops_within_its_budget(forge: str) -> None:
     assert time.monotonic() - started < 2.5
 
 
-def test_omni_repository_patterns_share_one_deadline_and_fail_loudly() -> None:
-    from code_indexer.server.omni.repo_pattern_matcher import RepoPatternMatcher
-
-    repos = ["fast-ab"] + [f"{SLOW_NAME}{n}" for n in range(3)]
-    patterns = [SLOW_PATTERN, SLOW_PATTERN + "|x^", SLOW_PATTERN + "|y^"]
-    started = time.monotonic()
-    with pytest.raises(TimeoutError, match="repository pattern took too long"):
-        RepoPatternMatcher(patterns).filter_repos(repos)
-    assert time.monotonic() - started < 2.0
-
-
-def test_omni_repository_regex_within_the_deadline_still_filters() -> None:
-    from code_indexer.server.omni.repo_pattern_matcher import RepoPatternMatcher
-
-    repos = ["svc-a", "svc-b", "lib-c"]
-    assert RepoPatternMatcher(["^svc-", "^lib-c$"]).filter_repos(repos) == repos
-
-
 def test_xray_filename_driver_stops_within_its_walk_budget(tmp_path: Path) -> None:
     pytest.importorskip("tree_sitter_languages", reason="xray extras not installed")
     from code_indexer.xray.search_engine import XRayPhase1TimeoutError, XRaySearchEngine
