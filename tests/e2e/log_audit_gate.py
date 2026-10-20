@@ -499,7 +499,7 @@ LOG_AUDIT_EXACT_ALLOWLIST: List[Tuple[str, str]] = [
         r"create temporal indexes\.",
     ),
     # test_catalog_activation_is_refused admin activation of the non-git
-    # catalog; pending dev bug: b9_activation_git_config_non_git
+    # catalog; Bug #2178
     (
         "code_indexer.server.repositories.activated_repo_manager",
         r"Failed to set git config user\.(?P<key>email|name): command='git config "
@@ -507,13 +507,12 @@ LOG_AUDIT_EXACT_ALLOWLIST: List[Tuple[str, str]] = [
         r"stderr='fatal: not in a git directory\\n'",
     ),
     # Auto-watch on the non-git catalog clone (write-mode and activation
-    # scenarios); pending dev bug: b9_watch_git_unavailable_warning
+    # scenarios); Bug #2179
     (
         "code_indexer.services.git_aware_watch_handler",
         r"Git not available - proceeding with file-only monitoring",
     ),
-    # Stopping that auto-watch (exit_write_mode, deactivation); pending dev
-    # bug: b9_watch_thread_stop_timeout
+    # Stopping that auto-watch (exit_write_mode, deactivation); Bug #2180
     (
         "code_indexer.daemon.watch_manager",
         r"Watch thread did not stop within 5 seconds",
