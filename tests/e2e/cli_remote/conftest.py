@@ -387,8 +387,12 @@ def _phase4_log_audit_gate(
     e2e_http_client: httpx.Client,
     e2e_admin_token_provider: AdminTokenProvider,
     log_watermark_phase4: int,
+    pytestconfig: pytest.Config,
 ) -> Iterator[None]:
     """Autouse session fixture: run the log-audit gate at Phase 4 teardown.
+
+    The result is also recorded for ``pytest_sessionfinish`` (below), which
+    fails the session on a failed audit whatever the last test's outcome.
 
     Yields first (tests run), then at teardown:
       1. Poll until log count stabilises (async writer drain, Bug #1078).
@@ -425,5 +429,15 @@ def _phase4_log_audit_gate(
         watermark_id=log_watermark_phase4,
         phase_name="Phase 4 (CLI Remote / Live Server)",
     )
+    from tests.e2e.log_audit_claims import record_gate_result
+
+    record_gate_result(pytestconfig, result)
     if not result.passed:
         raise AssertionError(result.failure_message())
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """A failed Phase 4 log audit makes the session exit nonzero."""
+    from tests.e2e.log_audit_claims import apply_gate_exit_status
+
+    apply_gate_exit_status(session)

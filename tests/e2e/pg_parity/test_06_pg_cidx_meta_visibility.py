@@ -1,10 +1,11 @@
 """Phase 6: internal-catalog visibility on the PostgreSQL-backed server.
 
-Runs the full catalog door suite (``tests/e2e/cidx_meta_doors.py``) against
-the PG-backed uvicorn, so catalog search projection, the group store and the
-payload cache are exercised on PostgreSQL; adds a direct check that a
-restricted caller's catalog cache handle is bound to its view, round-trips
-through the PostgreSQL payload cache and is refused after a grant revocation.
+Runs the full catalog suite (``tests/e2e/cidx_meta_suite.py``) against the
+PG-backed uvicorn, so catalog search projection, the group store, the wiki
+and the payload cache are exercised on PostgreSQL (the suite's revocation
+test refuses a bound handle from the PG payload cache); adds a direct check
+that the restricted caller's catalog handle is bound to its own view and
+round-trips through the PostgreSQL payload cache.
 """
 
 from __future__ import annotations
@@ -16,11 +17,12 @@ from typing import Iterator, Optional, Tuple
 import httpx
 import pytest
 
-from tests.e2e.cidx_meta_doors import (
-    Caller,
+from tests.e2e.cidx_meta_doors import Caller
+from tests.e2e.cidx_meta_suite import (
     CatalogDoorSuite,
     Callers,
-    handle_refused_after_revocation,
+    open_catalog_doors,
+    restricted_catalog_handle,
 )
 from tests.e2e.cidx_meta_world import CATALOG_GLOBAL, provision_catalog_world
 from tests.e2e.helpers import require_voyage_key
@@ -64,19 +66,22 @@ def catalog_callers(
                 base_url=pg_server_url, timeout=CLIENT_TIMEOUT_SECONDS
             ),
         )
-        restricted_caller = Caller(
-            world=world,
-            restricted=True,
-            admin_user=admin_user,
-            admin_password=admin_pass,
+        callers = (
+            Caller(
+                world=world,
+                restricted=True,
+                admin_user=admin_user,
+                admin_password=admin_pass,
+            ),
+            Caller(
+                world=world,
+                restricted=False,
+                admin_user=admin_user,
+                admin_password=admin_pass,
+            ),
         )
-        admin_caller = Caller(
-            world=world,
-            restricted=False,
-            admin_user=admin_user,
-            admin_password=admin_pass,
-        )
-        yield restricted_caller, admin_caller
+        open_catalog_doors(callers)
+        yield callers
 
 
 class TestCatalogDoorsPostgres(CatalogDoorSuite):
@@ -87,24 +92,8 @@ class TestCatalogDoorsPostgres(CatalogDoorSuite):
     ) -> None:
         restricted_caller, admin_caller = catalog_callers
         assert restricted_caller.restricted and not admin_caller.restricted
-        args = {
-            "query_text": "domain analysis guidelines cite evidence",
-            "repository_alias": CATALOG_GLOBAL,
-            "limit": 5,
-        }
-
-        def first_handle(caller: Caller) -> str:
-            rows = (
-                (caller.mcp("search_code", args).body or {})
-                .get("results", {})
-                .get("results", [])
-            )
-            handles = [r["cache_handle"] for r in rows if r.get("cache_handle")]
-            assert handles, "catalog search returned no cache handle"
-            return str(handles[0])
-
-        restricted_handle = first_handle(restricted_caller)
-        admin_handle = first_handle(admin_caller)
+        restricted_handle = restricted_catalog_handle(restricted_caller)
+        admin_handle = restricted_catalog_handle(admin_caller)
         assert HANDLE_BINDING_MARK in restricted_handle
         assert HANDLE_BINDING_MARK in admin_handle
         assert restricted_handle.rsplit(".", 1)[1] != admin_handle.rsplit(".", 1)[1]
@@ -112,4 +101,4 @@ class TestCatalogDoorsPostgres(CatalogDoorSuite):
             "get_cached_content", {"handle": restricted_handle}
         )
         assert page.ok and "evidence files" in page.text, page.snippet()
-        handle_refused_after_revocation(restricted_caller)
+        assert CATALOG_GLOBAL not in restricted_handle

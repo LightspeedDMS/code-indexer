@@ -1047,8 +1047,13 @@ def _phase3_log_audit_gate(
     log_audit_app_client: TestClient,
     admin_token_provider: AdminTokenProvider,
     log_watermark: int,
+    pytestconfig: pytest.Config,
 ) -> Iterator[None]:
     """Autouse session fixture: run the log-audit gate at Phase 3 teardown.
+
+    The result is also recorded for ``pytest_sessionfinish`` (end of this
+    file), which fails the session on a failed audit whatever the last
+    test's outcome.
 
     Yields first (tests run), then at teardown:
       1. Flush the full logging pipeline (async_logging queue listener +
@@ -1079,6 +1084,9 @@ def _phase3_log_audit_gate(
         watermark_id=log_watermark,
         phase_name="Phase 3 (Server In-Process)",
     )
+    from tests.e2e.log_audit_claims import record_gate_result
+
+    record_gate_result(pytestconfig, result)
     if not result.passed:
         # pytest.fail() at session teardown surfaces as a test collection error;
         # raise AssertionError directly so it appears as a clear fixture failure.
@@ -1293,3 +1301,10 @@ def seeded_indexed_client(
 
     # Yield the UNIFIED client (same app, same lifespan, no dual-app bug).
     yield test_client, alias
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """A failed Phase 3 log audit makes the session exit nonzero."""
+    from tests.e2e.log_audit_claims import apply_gate_exit_status
+
+    apply_gate_exit_status(session)

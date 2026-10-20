@@ -1,7 +1,7 @@
 """Phase 4: every internal-catalog door over the live uvicorn server.
 
-Same door table as Phase 3 (``tests/e2e/cidx_meta_doors.py``), driven over
-real HTTP: the restricted caller (granted only ``alpha``) sees only visible
+Same suite as Phase 3 (``tests/e2e/cidx_meta_suite.py``), driven over real
+HTTP: the restricted caller (granted only ``alpha``) sees only visible
 catalog content or a refusal; the admin control sees the hidden content.
 """
 
@@ -12,7 +12,8 @@ from typing import Iterator
 import httpx
 import pytest
 
-from tests.e2e.cidx_meta_doors import Caller, CatalogDoorSuite, Callers
+from tests.e2e.cidx_meta_doors import Caller
+from tests.e2e.cidx_meta_suite import CatalogDoorSuite, Callers, open_catalog_doors
 from tests.e2e.cidx_meta_world import provision_catalog_world
 from tests.e2e.conftest import E2EConfig
 from tests.e2e.helpers import require_voyage_key
@@ -27,6 +28,7 @@ def catalog_callers(
     e2e_admin_token_provider: AdminTokenProvider,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[Callers]:
+    """(restricted caller, admin caller) on the live server."""
     require_voyage_key()
     base = e2e_config.server_url
 
@@ -41,8 +43,17 @@ def catalog_callers(
             tmp_path_factory.mktemp("catalog-repos"),
             _web_client,
         )
-        creds = (e2e_config.admin_user, e2e_config.admin_pass)
-        yield Caller(world, True, *creds), Caller(world, False, *creds)
+        user, password = e2e_config.admin_user, e2e_config.admin_pass
+        callers = (
+            Caller(
+                world=world, restricted=True, admin_user=user, admin_password=password
+            ),
+            Caller(
+                world=world, restricted=False, admin_user=user, admin_password=password
+            ),
+        )
+        open_catalog_doors(callers)
+        yield callers
 
 
 class TestCatalogDoorsLiveServer(CatalogDoorSuite):

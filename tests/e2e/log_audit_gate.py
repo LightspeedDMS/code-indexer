@@ -478,17 +478,6 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     "dependency-map/reports.md: while parsing a flow sequence",
     "Catalog document dependency-map/payments.md: 42 malformed line(s) removed for restricted callers",
     "Catalog document dependency-map/ledger.md: 2 malformed line(s) removed for restricted callers",
-    # The catalog has no temporal index by design: the restricted caller's
-    # temporal query is refused (logged by the MCP handler) and the admin
-    # control's temporal query reports the missing temporal index.
-    "Error in search_code: Temporal search is not available for this repository.",
-    "No temporal indexes available. Run cidx index --index-commits to create temporal indexes.",
-    # The fixed refusal for writes on hidden catalog paths (asserted signal).
-    "File create failed - permission denied: This path is not available for writing in this repository.",
-    "File delete failed - permission denied: This path is not available for writing in this repository.",
-    # A catalog cache handle fetched after a grant revocation is refused as
-    # not found (asserted signal of the revocation test).
-    "[MCP-GENERAL-117] Cache handle not found or expired",
 ]
 
 
@@ -812,9 +801,17 @@ def run_log_audit_gate(
     Returns:
         AuditGateResult with passed=True when no non-allowlisted entries found.
     """
+    from tests.e2e.log_audit_claims import claimed_ids
+
     entries = query_logs_via_mcp(client, token)
     new_entries = filter_new_entries(entries, watermark_id=watermark_id)
-    violations = [e for e in new_entries if not is_allowlisted(e, extra_allowlist)]
+    claimed = claimed_ids()
+    violations = [
+        e
+        for e in new_entries
+        if int(e.get("id") or 0) not in claimed
+        and not is_allowlisted(e, extra_allowlist)
+    ]
     passed = len(violations) == 0
     return AuditGateResult(passed=passed, violations=violations, phase_name=phase_name)
 

@@ -221,12 +221,15 @@ def _phase6_log_audit_gate(
     pg_http_client: httpx.Client,
     pg_admin_token: str,
     log_watermark_phase6: int,
+    pytestconfig: pytest.Config,
 ) -> Iterator[None]:
     """Autouse session fixture: run the log-audit gate at Phase 6 teardown.
 
     Operational log store is ALWAYS SQLite logs.db -- not the PG backend.
-    poll_until_stable_count drains the async writer before auditing.
+    poll_until_stable_count drains the async writer before auditing.  The
+    result is recorded for ``pytest_sessionfinish`` below.
     """
+    from tests.e2e.log_audit_claims import record_gate_result
     from tests.e2e.log_audit_gate import (
         poll_until_stable_count,
         query_logs_via_mcp,
@@ -247,5 +250,13 @@ def _phase6_log_audit_gate(
         watermark_id=log_watermark_phase6,
         phase_name="Phase 6 (PostgreSQL Parity)",
     )
+    record_gate_result(pytestconfig, result)
     if not result.passed:
         raise AssertionError(result.failure_message())
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """A failed Phase 6 log audit makes the session exit nonzero."""
+    from tests.e2e.log_audit_claims import apply_gate_exit_status
+
+    apply_gate_exit_status(session)

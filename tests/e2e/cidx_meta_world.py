@@ -12,24 +12,25 @@ World:
 - a restricted power user in a group granted only ``alpha``;
 - the catalog seeded with descriptions, a dependency map (visible and hidden
   domains, an edge through a hidden repository, intra-domain, roles and
-  frontmatter lists), memories and X-Ray patterns, then refreshed so the
-  semantic and full-text indexes serve it.
+  frontmatter lists), memories, X-Ray patterns and a visible/hidden asset
+  pair, then refreshed so the semantic and full-text indexes serve it.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import secrets
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
 import httpx
 
-from tests.e2e.helpers import GIT_SUBPROCESS_TIMEOUT, _auth_headers, wait_for_job
+from tests.e2e.helpers import GIT_SUBPROCESS_TIMEOUT, wait_for_job
 from tests.e2e.server.conftest import AdminTokenProvider
 from tests.shared.cidx_meta_visibility_fixture import (
     ALPHA,
@@ -45,6 +46,8 @@ CATALOG_GLOBAL = "cidx-meta-global"
 WORLD_REPOS = (ALPHA, CANARY, GAMMA, SHORT_ALIAS)
 RESTRICTED_USER = "e2e-catalog-viewer"
 RESTRICTED_GROUP = "e2e-catalog-alpha"
+VISIBLE_ASSET = f"{ALPHA}.svg"
+HIDDEN_ASSET = f"{CANARY}.svg"
 
 JOB_TIMEOUT_SECONDS = 300.0
 JOB_POLL_SECONDS = 1.0
@@ -54,9 +57,13 @@ REPLY_SNIPPET = 600
 # Long enough that a search hit on it exceeds the 2000-character preview and
 # is returned with a cache handle.
 GUIDELINE_LINES = 80
+# Repository internals never snapshotted or restored by the teardown.
+_INTERNAL_DIRS = (".code-indexer", ".git", ".locks", ".snapshot-reader-leases")
 
 _GAMMA_WORD = re.compile(rf"(?<![a-z0-9_-]){GAMMA}(?![a-z0-9_])", re.IGNORECASE)
 _SHORT_VALUES = frozenset({SHORT_ALIAS, f"{SHORT_ALIAS}-global", f"{SHORT_ALIAS}.md"})
+
+EchoPath = Tuple[str, ...]
 
 
 class HeaderSource(Protocol):
@@ -65,11 +72,18 @@ class HeaderSource(Protocol):
 
 @dataclass(frozen=True)
 class Reply:
-    """One front-door reply: HTTP status, parsed body (or None) and raw text."""
+    """One front-door reply.
+
+    ``text`` is the complete HTTP body; ``envelope`` its parsed JSON (None
+    for HTML); ``items`` every decoded MCP content item (the REST body as
+    the single item); ``body`` the first item.
+    """
 
     status: int
     body: Any
     text: str
+    envelope: Any = None
+    items: Tuple[Any, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -85,8 +99,17 @@ class Reply:
         return f"HTTP {self.status}: {self.text[:REPLY_SNIPPET]}"
 
 
+def _decode_item(item: Any) -> Any:
+    if isinstance(item, dict) and isinstance(item.get("text"), str):
+        try:
+            return json.loads(item["text"])
+        except ValueError:
+            return {"text": item["text"]}
+    return item
+
+
 def mcp(client: httpx.Client, headers: dict, tool: str, args: Dict[str, Any]) -> Reply:
-    """Call one MCP tool; the body is the decoded tool payload, or the
+    """Call one MCP tool; ``items`` holds every decoded content item, or the
     JSON-RPC error object when the dispatcher refused the call."""
     resp = client.post(
         "/mcp",
@@ -103,17 +126,12 @@ def mcp(client: httpx.Client, headers: dict, tool: str, args: Dict[str, Any]) ->
     except ValueError:
         return Reply(resp.status_code, None, resp.text)
     if isinstance(envelope, dict) and "error" in envelope:
-        error = envelope["error"]
-        return Reply(resp.status_code, {"success": False, "error": error}, resp.text)
+        refusal = {"success": False, "error": envelope["error"]}
+        return Reply(resp.status_code, refusal, resp.text, envelope, (refusal,))
     result = envelope.get("result", {}) if isinstance(envelope, dict) else {}
-    items = result.get("content", []) if isinstance(result, dict) else []
-    for item in items:
-        if isinstance(item, dict) and isinstance(item.get("text"), str):
-            try:
-                return Reply(resp.status_code, json.loads(item["text"]), resp.text)
-            except ValueError:
-                return Reply(resp.status_code, {"text": item["text"]}, resp.text)
-    return Reply(resp.status_code, result, resp.text)
+    content = result.get("content", []) if isinstance(result, dict) else []
+    items = tuple(_decode_item(item) for item in content) or (result,)
+    return Reply(resp.status_code, items[0], resp.text, envelope, items)
 
 
 def rest(
@@ -123,16 +141,34 @@ def rest(
     try:
         body: Any = resp.json()
     except ValueError:
-        body = None
-    return Reply(resp.status_code, body, resp.text)
+        return Reply(resp.status_code, None, resp.text)
+    return Reply(resp.status_code, body, resp.text, body, (body,))
 
 
-def _strip_keys(value: Any, ignore: FrozenSet[str]) -> Any:
-    if isinstance(value, dict):
-        return {k: _strip_keys(v, ignore) for k, v in value.items() if k not in ignore}
-    if isinstance(value, list):
-        return [_strip_keys(v, ignore) for v in value]
-    return value
+def _drop_path(value: Any, path: EchoPath) -> None:
+    """Remove the key at exactly *path* (nested dict keys), if present."""
+    node = value
+    for key in path[:-1]:
+        if not isinstance(node, dict) or key not in node:
+            return
+        node = node[key]
+    if isinstance(node, dict):
+        node.pop(path[-1], None)
+
+
+def _full_payload(reply: Reply, echo_paths: Sequence[EchoPath]) -> Any:
+    """The complete reply with every MCP content item decoded in place and
+    only the exact *echo_paths* removed from each item."""
+    items = [copy.deepcopy(item) for item in reply.items]
+    for item in items:
+        for path in echo_paths:
+            _drop_path(item, path)
+    envelope = copy.deepcopy(reply.envelope)
+    result = envelope.get("result") if isinstance(envelope, dict) else None
+    if isinstance(result, dict) and isinstance(result.get("content"), list):
+        result["content"] = items
+        return envelope
+    return items
 
 
 def _structured_short_alias(value: Any, where: str, out: List[str]) -> None:
@@ -149,20 +185,23 @@ def _structured_short_alias(value: Any, where: str, out: List[str]) -> None:
             out.append(f"short alias as a structured value at {where}")
 
 
-def leaks(reply: Reply, ignore_keys: Iterable[str] = ()) -> List[str]:
-    """Every way *reply* names a repository the restricted user cannot see:
-    the canary or ``gamma`` anywhere in the serialized reply, the short alias
-    as a whole structured value or path segment (3-character aliases in
-    prose are an accepted residual).  *ignore_keys* drops echoed request
-    fields (e.g. the query text) before the scan."""
-    ignore = frozenset(ignore_keys)
+def leaks(reply: Reply, echo_paths: Sequence[EchoPath] = ()) -> List[str]:
+    """Every way *reply* names a repository the restricted user cannot see.
+
+    The canary and ``gamma`` are searched in the COMPLETE reply: the raw
+    HTTP body, or, when exact request-echo paths are given (a request that
+    itself names the canary), the complete payload with only those paths
+    removed.  The short alias counts as a whole structured value or path
+    segment in any decoded item (3-character aliases in prose are an
+    accepted residual).
+    """
     found: List[str] = []
-    if reply.body is None:
+    if reply.envelope is None:
         text = reply.text
     else:
-        stripped = _strip_keys(reply.body, ignore)
-        text = json.dumps(stripped)
-        _structured_short_alias(stripped, "$", found)
+        payload = _full_payload(reply, echo_paths)
+        _structured_short_alias(payload, "$", found)
+        text = json.dumps(payload) if echo_paths else reply.text
     if CANARY in text.lower():
         found.append(f"canary {CANARY!r} present")
     if _GAMMA_WORD.search(text):
@@ -182,12 +221,14 @@ class CatalogWorld:
     restricted_password: str
     group_id: str
     web_client_factory: Callable[[], httpx.Client]
+    catalog_root: Path
+    snapshot: Dict[str, bytes] = field(default_factory=dict)
 
     def admin_mcp(self, tool: str, args: Dict[str, Any]) -> Reply:
         return mcp(self.client, self.admin.get_headers(), tool, args)
 
-    def user_mcp(self, tool: str, args: Dict[str, Any]) -> Reply:
-        return mcp(self.client, self.restricted.get_headers(), tool, args)
+    def admin_token(self) -> str:
+        return _token(self.admin)
 
     def set_alpha_grant(self, granted: bool) -> None:
         action = "add" if granted else "remove"
@@ -223,6 +264,17 @@ def _token(source: HeaderSource) -> str:
     return str(source.get_headers()["Authorization"]).split(" ", 1)[1]
 
 
+def _wait_completed(client: httpx.Client, admin: HeaderSource, job_id: str) -> None:
+    job = wait_for_job(
+        client,
+        job_id,
+        _token(admin),
+        timeout=JOB_TIMEOUT_SECONDS,
+        poll_interval=JOB_POLL_SECONDS,
+    )
+    assert job.get("status") == "completed", f"job {job_id}: {job}"
+
+
 def _register_repos(client: httpx.Client, admin: HeaderSource, work_dir: Path) -> None:
     for name in WORLD_REPOS:
         repo = work_dir / name
@@ -236,14 +288,38 @@ def _register_repos(client: httpx.Client, admin: HeaderSource, work_dir: Path) -
             json={"repo_url": str(repo), "alias": name},
         )
         assert reply.status in (200, 202), f"register {name}: {reply.snippet()}"
-        job = wait_for_job(
-            client,
-            reply.body["job_id"],
-            _token(admin),
-            timeout=JOB_TIMEOUT_SECONDS,
-            poll_interval=JOB_POLL_SECONDS,
-        )
-        assert job.get("status") == "completed", f"register {name}: {job}"
+        _wait_completed(client, admin, reply.body["job_id"])
+
+
+def _is_internal(relative: Path) -> bool:
+    return bool(relative.parts) and relative.parts[0] in _INTERNAL_DIRS
+
+
+def snapshot_catalog(catalog_root: Path) -> Dict[str, bytes]:
+    """Every catalog file outside the repository internals, by path."""
+    return {
+        str(path.relative_to(catalog_root)): path.read_bytes()
+        for path in sorted(catalog_root.rglob("*"))
+        if path.is_file() and not _is_internal(path.relative_to(catalog_root))
+    }
+
+
+def restore_catalog(catalog_root: Path, snapshot: Dict[str, bytes]) -> None:
+    """Put the catalog clone back to *snapshot*: files added since are
+    removed, changed or removed ones rewritten."""
+    for path in sorted(catalog_root.rglob("*"), reverse=True):
+        relative = path.relative_to(catalog_root)
+        if _is_internal(relative):
+            continue
+        if path.is_file() and str(relative) not in snapshot:
+            path.unlink()
+        elif path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+    for relative_name, content in snapshot.items():
+        target = catalog_root / relative_name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists() or target.read_bytes() != content:
+            target.write_bytes(content)
 
 
 def seed_catalog(catalog_root: Path) -> None:
@@ -262,11 +338,15 @@ def seed_catalog(catalog_root: Path) -> None:
         "# Domain analysis guidelines\n\n" + "\n".join(guidelines) + "\n",
         encoding="utf-8",
     )
+    for name in (ALPHA, CANARY):
+        (catalog_root / f"{name}.svg").write_text(
+            f'<svg xmlns="http://www.w3.org/2000/svg"><title>{name}</title></svg>\n',
+            encoding="utf-8",
+        )
 
 
-def refresh_catalog_until_served(client: httpx.Client, admin: HeaderSource) -> None:
-    """Refresh the catalog through REST, then wait until an admin full-text
-    search serves the seeded content (the refresh publishes a new snapshot)."""
+def refresh_catalog(client: httpx.Client, admin: HeaderSource) -> None:
+    """Refresh the catalog through REST and wait for its job."""
     reply = rest(
         client,
         "POST",
@@ -276,14 +356,13 @@ def refresh_catalog_until_served(client: httpx.Client, admin: HeaderSource) -> N
     assert reply.status == 202, f"catalog refresh: {reply.snippet()}"
     job_id = reply.body.get("job_id") if isinstance(reply.body, dict) else None
     if job_id:
-        job = wait_for_job(
-            client,
-            job_id,
-            _token(admin),
-            timeout=JOB_TIMEOUT_SECONDS,
-            poll_interval=JOB_POLL_SECONDS,
-        )
-        assert job.get("status") == "completed", f"catalog refresh: {job}"
+        _wait_completed(client, admin, job_id)
+
+
+def refresh_catalog_until_served(client: httpx.Client, admin: HeaderSource) -> None:
+    """Refresh the catalog, then wait until an admin full-text search serves
+    the seeded content (the refresh publishes a new snapshot)."""
+    refresh_catalog(client, admin)
     deadline = time.monotonic() + INDEX_READY_TIMEOUT_SECONDS
     last: Optional[Reply] = None
     while time.monotonic() < deadline:
@@ -355,8 +434,9 @@ def provision_catalog_world(
     work_dir: Path,
     web_client_factory: Callable[[], httpx.Client],
 ) -> CatalogWorld:
-    """Build the world through the front door; idempotent per server only
-    in the sense that it must run once per fresh server."""
+    """Build the world through the front door on a server that does not
+    hold it yet; ``teardown_catalog_world`` removes it again."""
+    snapshot = snapshot_catalog(catalog_root)
     _register_repos(client, admin, work_dir)
     seed_catalog(catalog_root)
     refresh_catalog_until_served(client, admin)
@@ -368,9 +448,62 @@ def provision_catalog_world(
         restricted_password=password,
         group_id=group_id,
         web_client_factory=web_client_factory,
+        catalog_root=catalog_root,
+        snapshot=snapshot,
     )
     world.set_alpha_grant(True)
     return world
+
+
+def teardown_catalog_world(world: CatalogWorld) -> None:
+    """Remove the world through the front doors: the restricted user, its
+    group and the four repositories; then put the catalog clone back to its
+    pre-seed state and refresh the catalog."""
+    client, admin = world.client, world.admin
+    deleted = rest(
+        client, "DELETE", f"/api/admin/users/{RESTRICTED_USER}", admin.get_headers()
+    )
+    assert deleted.status == 200, f"delete user: {deleted.snippet()}"
+    group = world.admin_mcp("delete_group", {"group_id": world.group_id})
+    assert group.ok, f"delete_group: {group.snippet()}"
+    for name in WORLD_REPOS:
+        removed = rest(
+            client, "DELETE", f"/api/admin/golden-repos/{name}", admin.get_headers()
+        )
+        assert removed.status in (200, 202, 204), f"remove {name}: {removed.snippet()}"
+        job_id = removed.body.get("job_id") if isinstance(removed.body, dict) else None
+        if job_id:
+            _wait_completed(client, admin, job_id)
+    # Removing a repository refreshes the catalog on its own; never submit a
+    # second refresh while that one runs.
+    wait_for_idle_catalog_refreshes(client, admin)
+    restore_catalog(world.catalog_root, world.snapshot)
+    refresh_catalog(client, admin)
+
+
+def wait_for_idle_catalog_refreshes(client: httpx.Client, admin: HeaderSource) -> None:
+    """Wait until no repository refresh job is pending or running."""
+    deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        busy = []
+        for status in ("pending", "running"):
+            listing = rest(
+                client,
+                "GET",
+                "/api/jobs",
+                admin.get_headers(),
+                params={"status": status, "limit": 100},
+            )
+            assert listing.status == 200, f"job listing: {listing.snippet()}"
+            busy += [
+                job
+                for job in listing.body.get("jobs", [])
+                if job.get("operation_type") == "global_repo_refresh"
+            ]
+        if not busy:
+            return
+        time.sleep(JOB_POLL_SECONDS)
+    raise TimeoutError("catalog refresh jobs still running")
 
 
 def web_session(world: CatalogWorld, username: str, password: str) -> httpx.Client:
@@ -386,7 +519,3 @@ def web_session(world: CatalogWorld, username: str, password: str) -> httpx.Clie
     )
     assert resp.status_code == 303, f"web login {username}: HTTP {resp.status_code}"
     return client
-
-
-def bearer(token: str) -> dict:
-    return _auth_headers(token)
