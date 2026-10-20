@@ -357,19 +357,29 @@ def multi_repository_query(
                 response = service.search(request)
                 from ..services.cidx_meta_access.catalog_search import (
                     TextRematch,
+                    project_multi_fulltext,
                     project_multi_response,
                 )
 
                 # Catalog rows and the count are projected before recording
-                # and caching.
-                project_multi_response(
-                    response,
-                    user.username,
-                    access_filtering_service,
-                    TextRematch(request.query, regex=request.search_type == "regex")
-                    if request.search_type in ("fts", "regex")
-                    else None,
-                )
+                # and caching; full-text catalog groups per shown document.
+                if request.search_type == "fts":
+                    project_multi_fulltext(
+                        response,
+                        request,
+                        lambda: service.per_repo_limit(request),
+                        user.username,
+                        access_filtering_service,
+                    )
+                else:
+                    project_multi_response(
+                        response,
+                        user.username,
+                        access_filtering_service,
+                        TextRematch(request.query, regex=True)
+                        if request.search_type == "regex"
+                        else None,
+                    )
                 search_event_recording.record_multi_repository_search(
                     writer,
                     response.results,

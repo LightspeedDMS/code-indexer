@@ -47,6 +47,7 @@ from code_indexer.server.cache.handle_binding import reset_handle_binding
 from code_indexer.server.services.cidx_meta_access import bind_catalog_handles
 from code_indexer.server.services.cidx_meta_access.catalog_fulltext import (
     refuse_unevaluable_rest_fulltext,
+    rest_fulltext_rows,
 )
 from code_indexer.server.services.cidx_meta_access.catalog_search import (
     rest_rows_for_caller,
@@ -899,24 +900,16 @@ def register_query_routes(
                             )
                             tantivy_manager.open_for_search()
 
-                            # Handle fuzzy flag
-                            edit_dist = request.edit_distance
-                            if request.fuzzy and edit_dist == 0:
-                                edit_dist = 1
-
                             from ..query.filtered_search import fts_filter_kwargs
 
-                            # Execute FTS query; the filters come from the one
-                            # shared builder (Story #503 Phase 1 excludes,
-                            # #2047 file_extensions under the request deadline).
-                            fts_raw_results = tantivy_manager.search(
-                                query_text=request.query_text,
-                                case_sensitive=request.case_sensitive,
-                                edit_distance=edit_dist,
-                                snippet_lines=request.snippet_lines,
-                                limit=request.limit,
-                                use_regex=request.regex,  # Story #503 Phase 1
-                                **fts_filter_kwargs(
+                            # The filters come from the one shared builder
+                            # (Story #503 Phase 1 excludes, #2047
+                            # file_extensions under the request deadline); a
+                            # restricted catalog search runs per shown document.
+                            fts_raw_results = rest_fulltext_rows(
+                                tantivy_manager,
+                                request,
+                                fts_filter_kwargs(
                                     language=request.language,
                                     path_filter=request.path_filter,
                                     exclude_language=request.exclude_language,
@@ -924,6 +917,9 @@ def register_query_routes(
                                     file_extensions=request.file_extensions,
                                     deadline=extension_deadline,
                                 ),
+                                request.repository_alias or fts_repo_alias,
+                                repo_path,
+                                current_user.username,
                             )
 
                             # Convert to API response format

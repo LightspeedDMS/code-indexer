@@ -1,11 +1,13 @@
 """Full-text queries re-evaluated on the text one restricted caller sees.
 
-A restricted caller's full-text hit on a projected catalog document is kept
-only when every required word of the query occurs in the text the caller
-is shown, so whether a document appears depends only on that text. A word
-is the engine's own unit: the sanitized query split on whitespace, each
-word reduced to its lower-cased alphanumeric tokens (the index tokenizer)
-and matched as a contiguous phrase within one line. Only text the
+A restricted caller's full-text hit on a catalog document is kept only
+when every required word of the query occurs in the text the caller is
+shown, so whether a document appears depends only on that text. A word is
+the engine's own unit: the sanitized query split on whitespace, each word
+reduced to its tokens exactly as the index analyzes text (``engine_tokens``:
+tantivy's ``default`` tokenizer of the content fields, i.e. the simple
+tokenizer, tokens of 40 bytes or more dropped, lower-cased), and matched as
+a contiguous phrase within one line. Only text the
 projection kept verbatim from the document counts (never a placeholder,
 never text a rewrite introduced), so a kept hit also matches the document
 the engine searched.
@@ -22,7 +24,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import List, NoReturn, Optional, Sequence, Tuple
+from functools import lru_cache
+from typing import Any, List, NoReturn, Optional, Sequence, Tuple
 
 from .depmap_projection import DOMAIN_PLACEHOLDER, RESTRICTED_PLACEHOLDER
 
@@ -30,21 +33,81 @@ FULLTEXT_FORM_REFUSAL = "this full-text query form is not available for this rep
 
 _OPERATORS = frozenset({"AND", "OR", "NOT"})
 _GRAMMAR_CHARS = frozenset("*^~")
+# The engine drops a token of this many bytes or more (remove_long).
 _MAX_TOKEN_BYTES = 40
-_TOKEN = re.compile(r"[^\W_]+")
+_ASCII_RUN = re.compile(r"[A-Za-z0-9]+")
 _PLACEHOLDERS = (RESTRICTED_PLACEHOLDER, DOMAIN_PLACEHOLDER)
 
-Token = Tuple[str, int, int]
+# (indexed form, or None when the engine drops the token; start; end)
+Token = Tuple[Optional[str], int, int]
+
+
+@lru_cache(maxsize=1)
+def _analyzer() -> Any:
+    """The analyzer of the index's content fields (tantivy ``default``)."""
+    from tantivy import Filter, TextAnalyzerBuilder, Tokenizer
+
+    return (
+        TextAnalyzerBuilder(Tokenizer.simple())
+        .filter(Filter.remove_long(_MAX_TOKEN_BYTES))
+        .filter(Filter.lowercase())
+        .build()
+    )
+
+
+@lru_cache(maxsize=65536)
+def _engine_char(ch: str) -> str:
+    """*ch* as the engine indexes it: lower-cased when the tokenizer keeps
+    it inside a token, empty when it separates tokens."""
+    tokens = _analyzer().analyze(ch)
+    return str(tokens[0]) if tokens else ""
+
+
+def _runs(text: str, start: int, end: int) -> List[Tuple[int, int]]:
+    """Spans of the maximal runs of token characters in text[start:end]."""
+    if text.isascii():
+        return [m.span() for m in _ASCII_RUN.finditer(text, start, end)]
+    spans: List[Tuple[int, int]] = []
+    run_start: Optional[int] = None
+    for index in range(start, end):
+        if _engine_char(text[index]):
+            run_start = index if run_start is None else run_start
+        elif run_start is not None:
+            spans.append((run_start, index))
+            run_start = None
+    if run_start is not None:
+        spans.append((run_start, end))
+    return spans
+
+
+def engine_tokens(text: str, start: int = 0, end: Optional[int] = None) -> List[Token]:
+    """The tokens of text[start:end] as the engine indexes them."""
+    tokens: List[Token] = []
+    for s, e in _runs(text, start, len(text) if end is None else end):
+        raw = text[s:e]
+        if len(raw.encode("utf-8")) >= _MAX_TOKEN_BYTES:
+            tokens.append((None, s, e))
+        elif raw.isascii():
+            tokens.append((raw.lower(), s, e))
+        else:
+            tokens.append(("".join(_engine_char(ch) for ch in raw), s, e))
+    return tokens
 
 
 @dataclass(frozen=True)
 class FullTextTerms:
-    """The required words of one full-text query: a token phrase per word,
-    and the single fuzzy word with its distance (None without fuzzy)."""
+    """The required words of one full-text query: each word as the engine
+    is asked for it, its token phrase, and the single fuzzy word with its
+    distance (None without fuzzy)."""
 
+    words: Tuple[str, ...]
     phrases: Tuple[Tuple[str, ...], ...]
     fuzzy_word: Optional[str] = None
     edit_distance: int = 0
+
+    def engine_queries(self) -> Tuple[str, ...]:
+        """One single-word engine query per required word."""
+        return self.words
 
 
 @dataclass(frozen=True)
@@ -68,10 +131,6 @@ def raise_fulltext_refusal() -> NoReturn:
     raise SearchParameterError(FULLTEXT_FORM_REFUSAL)
 
 
-def _tokens(text: str) -> List[str]:
-    return [token.lower() for token in _TOKEN.findall(text)]
-
-
 def parse_fulltext_terms(query: str, edit_distance: int) -> Optional[FullTextTerms]:
     """The query's required words, or None when its outcome cannot be
     decided on shown text alone (the form is refused)."""
@@ -82,23 +141,15 @@ def parse_fulltext_terms(query: str, edit_distance: int) -> Optional[FullTextTer
         return None
     if any(ch in _GRAMMAR_CHARS for word in words for ch in word):
         return None
-    phrases = tuple(tuple(_tokens(word)) for word in words)
-    if not all(phrases):
+    word_tokens = [[form for form, _, _ in engine_tokens(word)] for word in words]
+    if not all(word_tokens) or any(None in forms for forms in word_tokens):
         return None
-    if any(len(t.encode("utf-8")) > _MAX_TOKEN_BYTES for p in phrases for t in p):
-        return None
+    phrases = tuple(tuple(str(form) for form in forms) for forms in word_tokens)
     if edit_distance > 0:
         if len(words) != 1:
             return None
-        return FullTextTerms(phrases, words[0], edit_distance)
-    return FullTextTerms(phrases)
-
-
-def _spans(text: str, start: int, end: int) -> List[Token]:
-    return [
-        (m.group(0).lower(), m.start(), m.end())
-        for m in _TOKEN.finditer(text, start, end)
-    ]
+        return FullTextTerms(tuple(words), phrases, words[0], edit_distance)
+    return FullTextTerms(tuple(words), phrases)
 
 
 def _placeholder_spans(shown: str) -> List[Tuple[int, int]]:
@@ -113,7 +164,11 @@ def _placeholder_spans(shown: str) -> List[Tuple[int, int]]:
 
 def _cut(raw: str, at: int) -> bool:
     """True when a token of *raw* continues across offset *at*."""
-    return 0 < at < len(raw) and raw[at - 1].isalnum() and raw[at].isalnum()
+    return (
+        0 < at < len(raw)
+        and bool(_engine_char(raw[at - 1]))
+        and bool(_engine_char(raw[at]))
+    )
 
 
 def _visible_runs(raw: str, shown: str) -> List[List[Token]]:
@@ -130,10 +185,11 @@ def _visible_runs(raw: str, shown: str) -> List[List[Token]]:
     runs: List[List[Token]] = []
     for a, b, size in blocks:
         run: List[Token] = []
-        for token in _spans(shown, b, b + size):
+        for token in engine_tokens(shown, b, b + size):
             raw_start, raw_end = a + token[1] - b, a + token[2] - b
             masked = any(s < token[2] and token[1] < e for s, e in hidden)
-            if masked or _cut(raw, raw_start) or _cut(raw, raw_end):
+            dropped = token[0] is None
+            if masked or dropped or _cut(raw, raw_start) or _cut(raw, raw_end):
                 if run:
                     runs.append(run)
                 run = []
@@ -177,7 +233,9 @@ def _find(
     if terms.fuzzy_word is not None:
         for run in runs:
             for token, start, end in run:
-                if _within_distance(terms.fuzzy_word, token, terms.edit_distance):
+                if token is not None and _within_distance(
+                    terms.fuzzy_word, token, terms.edit_distance
+                ):
                     return start, end
         return None
     phrase = terms.phrases[index]

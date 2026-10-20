@@ -330,16 +330,16 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     if search_type == "fts":
         from ....services.cidx_meta_access.catalog_search import (
-            TextRematch,
-            project_multi_response,
+            project_multi_fulltext,
         )
 
-        # Catalog rows must match on the text the caller may see.
-        project_multi_response(
+        # Catalog groups are built per document the caller is shown.
+        project_multi_fulltext(
             response,
+            request,
+            lambda: service.per_repo_limit(request),
             user.username,
             _get_access_filtering_service(),
-            TextRematch(str(params.get("query_text", "") or "")),
         )
     category_map = _load_category_map("_omni_search_code")
     all_results = _flatten_multi_results(

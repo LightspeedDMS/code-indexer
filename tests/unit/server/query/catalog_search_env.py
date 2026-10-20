@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import shutil
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ import pytest
 
 from code_indexer.config import Config, ConfigManager
 from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.services.fts_file_documents import chunk_fts_documents
 from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 from tests.shared.cidx_meta_visibility_fixture import (
@@ -116,42 +118,65 @@ def _chunk_vector(provider: RankedEmbeddingProvider, chunk: str, n: int) -> List
     return [math.cos(angle), math.sin(angle)] + [0.0] * (VECTOR_DIM - 2)
 
 
+def _line_chunks(root: Path, rel: str) -> List[dict]:
+    """The file's chunks: CHUNK_LINES lines each, with 1-based line ranges."""
+    lines = (root / rel).read_text(encoding="utf-8").splitlines()
+    return [
+        {
+            "text": "\n".join(lines[start : start + CHUNK_LINES]),
+            "line_start": start + 1,
+            "line_end": min(start + CHUNK_LINES, len(lines)),
+        }
+        for start in range(0, len(lines), CHUNK_LINES)
+    ]
+
+
+def _add_fulltext(root: Path, rel: str, chunks: List[dict], fts: Any) -> None:
+    """One full-text document per chunk, through the production builder."""
+    for document in chunk_fts_documents(chunks, root / rel, root):
+        fts.add_document(document)
+
+
 def _points(root: Path, fts: TantivyIndexManager) -> List[dict]:
+    """The vector points of every file, and its full-text documents added
+    to *fts* (the same chunks)."""
     provider = RankedEmbeddingProvider()
     points: List[dict] = []
     for rel in catalog_files(root):
-        text = (root / rel).read_text(encoding="utf-8")
         suffix = PurePosixPath(rel).suffix.lstrip(".") or "txt"
-        lines = text.splitlines()
-        for start in range(0, len(lines), CHUNK_LINES):
-            chunk = "\n".join(lines[start : start + CHUNK_LINES])
+        chunks = _line_chunks(root, rel)
+        for chunk in chunks:
             points.append(
                 {
                     "id": f"chunk-{len(points)}",
-                    "vector": _chunk_vector(provider, chunk, len(points)),
+                    "vector": _chunk_vector(provider, chunk["text"], len(points)),
                     "payload": {
                         "path": rel,
-                        "line_start": start + 1,
-                        "line_end": min(start + CHUNK_LINES, len(lines)),
-                        "content": chunk,
+                        "line_start": chunk["line_start"],
+                        "line_end": chunk["line_end"],
+                        "content": chunk["text"],
                         "language": suffix,
                         "type": "content",
                         "git_available": True,
                     },
                 }
             )
-        fts.add_document(
-            {
-                "path": rel,
-                "content": text,
-                "content_raw": text,
-                "identifiers": text.split(),
-                "line_start": 1,
-                "line_end": len(lines),
-                "language": suffix,
-            }
-        )
+        _add_fulltext(root, rel, chunks, fts)
     return points
+
+
+def rebuild_fulltext(root: Path) -> None:
+    """Rebuild only the full-text index of *root* from its current files."""
+    index_dir = root / ".code-indexer" / "tantivy_index"
+    shutil.rmtree(index_dir)
+    fts = TantivyIndexManager(index_dir)
+    fts.initialize_index(create_new=True)
+    try:
+        for rel in catalog_files(root):
+            _add_fulltext(root, rel, _line_chunks(root, rel), fts)
+        fts.commit()
+    finally:
+        fts.close()
 
 
 def _index(root: Path) -> None:
@@ -174,6 +199,13 @@ def _index(root: Path) -> None:
         store.upsert_points(COLLECTION, points)
     finally:
         store.end_indexing(COLLECTION)
+
+
+def rebuild_indexes(root: Path) -> None:
+    """Rebuild the vector and full-text indexes of *root* from its files."""
+    for name in ("index", "tantivy_index"):
+        shutil.rmtree(root / ".code-indexer" / name)
+    _index(root)
 
 
 @dataclass

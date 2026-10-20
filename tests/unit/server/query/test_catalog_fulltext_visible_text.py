@@ -134,10 +134,23 @@ def test_hybrid_refuses_unevaluable_forms(env: CatalogEnv) -> None:
         _search(env, RESTRICTED_USER, f"payments NOT {CANARY}", mode="hybrid")
 
 
-def test_admin_catalog_queries_are_unchanged(env: CatalogEnv) -> None:
-    rows = _search(env, ADMIN_USER, f"payments NOT {ABSENT}")
-    assert "dependency-map/_domains.json" in _paths(rows)
-    assert _search(env, ADMIN_USER, f"payments NOT {CANARY}") == []
+def _engine_paths(env: CatalogEnv, text: str) -> List[str]:
+    """The raw engine's answer over the catalog's own (per-chunk) index."""
+    from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+    index = TantivyIndexManager(env.root / ".code-indexer" / "tantivy_index")
+    index.open_for_search()
+    return sorted(str(row["path"]) for row in index.search(text, limit=10))
+
+
+@pytest.mark.parametrize("text", [f"payments NOT {ABSENT}", f"payments NOT {CANARY}"])
+def test_admin_catalog_queries_are_unchanged(env: CatalogEnv, text: str) -> None:
+    rows = _search(env, ADMIN_USER, text)
+    assert rows and _paths(rows) == _engine_paths(env, text)
+    if CANARY in text:
+        assert CANARY not in dump(rows)
+    else:
+        assert "dependency-map/_domains.json" in _paths(rows)
 
 
 def test_catalog_locations_are_read_once_per_request(

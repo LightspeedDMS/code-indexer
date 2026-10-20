@@ -9,11 +9,11 @@ today's single pass. A restricted caller searching the catalog gets its
 hits projected (``project_meta_hits``) before anything sorts, limits,
 reranks or caches them, each marked with the catalog's identity
 (``source_repo``) so later re-checks judge the same thing, with bounded
-deepening so hidden top hits do not leave the page short: round r fetches
-``limit * 2**(r + 1)`` raw hits (capped at ``META_DEEPEN_MAX_K``), at most
-``META_DEEPEN_MAX_ROUNDS`` rounds, stopping early when the page is full,
-the corpus is exhausted, or the request's search budget is spent.
-Constants, not settings.
+deepening so hidden top hits do not leave the page short (the schedule of
+``fulltext_pages.deepening_ks``), stopping early when the page is full,
+the corpus is exhausted, or the request's search budget is spent. A
+literal full-text query (and the full-text half of hybrid) is answered per
+document from single-word engine queries (``fulltext_pages``).
 
 Rows outside that choke point (multi-repository results, stored job
 results, the access filter's safety net) are judged per row by their
@@ -27,14 +27,21 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Tuple
 
+from .fulltext_pages import deepening_ks, fulltext_page, requested_size, word_hits
 from .hit_projection import (
     CatalogScope,
     TextRematch,
     open_catalog_scope,
+    project_fulltext_documents,
     project_meta_hits,
 )
 from ..constants import CIDX_META_REPO_GLOBAL, is_internal_meta_repo
-from .fulltext_terms import effective_edit_distance, raise_fulltext_refusal
+from .fulltext_terms import (
+    FullTextTerms,
+    effective_edit_distance,
+    parse_fulltext_terms,
+    raise_fulltext_refusal,
+)
 from .served_identity import (
     CatalogLocations,
     golden_repos_dir_of,
@@ -51,10 +58,8 @@ from .visibility import (
 
 logger = logging.getLogger(__name__)
 
-META_DEEPEN_MAX_ROUNDS = 4
-META_DEEPEN_MAX_K = 1024
-
-RunRound = Callable[[int, str, Optional[List[float]]], List[Any]]
+# (k, mode, query vector or None, engine query text) -> raw hits.
+RunRound = Callable[[int, str, Optional[List[float]], str], List[Any]]
 Merge = Callable[[List[Any], List[Any], int], List[Any]]
 
 
@@ -72,7 +77,7 @@ def server_app_state() -> Optional[Any]:
     return None if app is None else app.state
 
 
-class _LazyScope:
+class LazyCatalogScope:
     """The restricted caller's scope, opened at the first projection (after
     the first raw round ran, so a search error surfaces unchanged)."""
 
@@ -184,7 +189,86 @@ def project_multi_response(
     response.results = project_grouped_results(
         response.results, username, access_service, rematch
     )
+    _recount_multi(response)
+
+
+def _recount_multi(response: Any) -> None:
+    """A multi-repository response's ``total_results`` from its rows."""
     response.metadata.total_results = sum(len(r) for r in response.results.values())
+
+
+def _multi_catalog_group(
+    alias: str,
+    root: Path,
+    request: Any,
+    terms: FullTextTerms,
+    limit: int,
+    scope: CatalogScope,
+) -> List[Any]:
+    """The caller's rows of one catalog group: one per shown document, from
+    single-word queries over the copy at *root* with *request*'s filters."""
+    from ...multi.fts_rows import fts_search_rows, open_fts_index
+    from ...query.filtered_search import extension_overfetch_deadline
+
+    index = open_fts_index(root)
+    deadline = extension_overfetch_deadline(request.file_extensions)
+    page = fulltext_page(
+        lambda word, k: fts_search_rows(index, request, word, k, deadline),
+        lambda: scope,
+        terms,
+        limit,
+        lambda: False,
+    )
+    return [_marked_catalog(dict(row, repository_alias=alias)) for row in page]
+
+
+def project_multi_fulltext(
+    response: Any,
+    request: Any,
+    per_repo_limit: Callable[[], int],
+    username: str,
+    access_service: Optional[Any],
+) -> None:
+    """A multi-repository full-text response as the caller may see it, in
+    place. For a restricted caller, the group of every requested alias that
+    serves the catalog (by name or served path) and did not fail is built
+    per shown document (``fulltext_page``), whatever the whole-query search
+    returned for it: a document whose words sit in different chunks has no
+    whole-query hit, and *per_repo_limit()* (read only then) sizes it.
+    Other groups are untouched; ``total_results`` is taken from the rows.
+
+    Raises:
+        SearchParameterError: a catalog group's query form cannot be judged
+            on shown text (the doors refuse it before searching).
+    """
+    if unrestricted_caller(username, access_service):
+        return
+    state = server_app_state()
+    served = _ServedCatalogRoots(username, state)
+    failed = response.errors or {}
+    default_root = None if state is None else _served_catalog_root(state)
+    registry = None if state is None else registry_of(state)
+    terms = parse_fulltext_terms(request.query, 0)
+    for alias in dict.fromkeys(request.repositories):
+        row = {"repository_alias": alias}
+        if alias in failed or not (_labels_catalog(row) or served.of(row)):
+            continue
+        if terms is None:
+            raise_fulltext_refusal()
+        root = served.of(row) or default_root
+        scope = (
+            open_catalog_scope(username, access_service, root, registry)
+            if root is not None and registry is not None
+            else None
+        )
+        if root is None or scope is None:
+            logger.warning("Catalog copy unresolvable; catalog rows dropped")
+            response.results.pop(alias, None)
+            continue
+        response.results[alias] = _multi_catalog_group(
+            alias, root, request, terms, per_repo_limit(), scope
+        )
+    _recount_multi(response)
 
 
 def reproject_job_result(
@@ -265,6 +349,8 @@ class FullTextQuery(Protocol):
     regex: bool
     fuzzy: bool
     edit_distance: int
+    limit: int
+    snippet_lines: int
 
 
 def rest_rows_for_caller(
@@ -295,7 +381,6 @@ def rest_rows_for_caller(
         if fts_query is None
         else TextRematch(
             fts_query.query_text,
-            fts_query.case_sensitive,
             fts_query.regex,
             effective_edit_distance(fts_query.fuzzy, fts_query.edit_distance),
         )
@@ -304,28 +389,45 @@ def rest_rows_for_caller(
     return list(access_service.filter_query_results(projected, username))
 
 
+def _fulltext_round(
+    run: RunRound,
+    k: int,
+    scope: LazyCatalogScope,
+    rematch: TextRematch,
+    vector: Optional[List[float]],
+) -> Tuple[List[Any], bool]:
+    """One round's full-text page and whether its hits are exhausted: per
+    document from single-word queries for a literal query; a regex query's
+    hits projected one by one."""
+    if rematch.regex:
+        raw = run(k, "fts", vector, rematch.query)
+        return project_meta_hits(raw, scope.get(), rematch), len(raw) < k
+    terms = rematch.terms
+    if terms is None:
+        raise_fulltext_refusal()
+    hits, exhausted = word_hits(lambda word, n: run(n, "fts", vector, word), terms, k)
+    return project_fulltext_documents(hits, scope.get(), terms), exhausted
+
+
 def _round(
     run: RunRound,
     k: int,
     mode: str,
-    scope: _LazyScope,
+    scope: LazyCatalogScope,
     rematch: TextRematch,
     merge: Merge,
     vector: Optional[List[float]],
 ) -> Tuple[List[Any], bool]:
     """One round's projected page and whether the corpus is exhausted."""
+    if mode == "fts":
+        return _fulltext_round(run, k, scope, rematch, vector)
     if mode == "hybrid":
-        fts_raw = run(k, "fts", vector)
-        semantic_raw = run(k, "semantic", vector)
-        page = merge(
-            project_meta_hits(fts_raw, scope.get(), rematch),
-            project_meta_hits(semantic_raw, scope.get()),
-            k,
-        )
-        return page, len(fts_raw) < k and len(semantic_raw) < k
-    raw = run(k, mode, vector)
-    page = project_meta_hits(raw, scope.get(), rematch if mode == "fts" else None)
-    return page, len(raw) < k
+        fts_page, fts_exhausted = _fulltext_round(run, k, scope, rematch, vector)
+        semantic_raw = run(k, "semantic", vector, rematch.query)
+        page = merge(fts_page, project_meta_hits(semantic_raw, scope.get()), k)
+        return page, fts_exhausted and len(semantic_raw) < k
+    raw = run(k, mode, vector, rematch.query)
+    return project_meta_hits(raw, scope.get()), len(raw) < k
 
 
 def catalog_query_vector(
@@ -356,12 +458,7 @@ def catalog_rematch(
     distance = effective_edit_distance(
         bool(request_kwargs.get("fuzzy")), int(request_kwargs.get("edit_distance") or 0)
     )
-    rematch = TextRematch(
-        query_text,
-        bool(request_kwargs.get("case_sensitive")),
-        bool(request_kwargs.get("regex")),
-        distance,
-    )
+    rematch = TextRematch(query_text, bool(request_kwargs.get("regex")), distance)
     golden_repos_dir = golden_repos_dir_of(activated_repo_manager)
     locations = (
         request_catalog_locations(golden_repos_dir) if golden_repos_dir else None
@@ -407,49 +504,44 @@ def search_for_caller(
     locations: Optional[CatalogLocations] = None,
 ) -> List[Any]:
     """One repository's hits for the caller (see the module docstring).
-    *run(k, mode, vector)* is the raw single-repository search over
-    *repo_path* (*vector*: the query embedding to reuse, or None); the
-    golden repositories beside *activated_repo_manager* hold the alias
-    pointers. Every deepening round reuses one query embedding:
-    *query_vector*, else one computed before the first round."""
+    *run(k, mode, vector, text)* is the raw single-repository search of
+    *text* (the query, or one of its words) over *repo_path* (*vector*:
+    the query embedding to reuse, or None); the golden repositories beside
+    *activated_repo_manager* hold the alias pointers. Every deepening round
+    reuses one query embedding: *query_vector*, else one computed before
+    the first round."""
+    query = rematch.query
     state = server_app_state()
     if state is None:
         if is_internal_meta_identity(meta_identity(repo_info)):
             raise CatalogProjectionUnavailable("catalog search needs the server state")
-        return run(limit, search_mode, query_vector)
+        return run(limit, search_mode, query_vector, query)
     access_service = getattr(state, "access_filtering_service", None)
     if unrestricted_caller(username, access_service):
-        return run(limit, search_mode, query_vector)
+        return run(limit, search_mode, query_vector, query)
     golden_repos_dir = golden_repos_dir_of(activated_repo_manager)
     proven = _catalog_judgement(repo_info, repo_path, golden_repos_dir, locations)
     if proven is False:
-        return run(limit, search_mode, query_vector)
+        return run(limit, search_mode, query_vector, query)
     fulltext = search_mode in ("fts", "hybrid") and not rematch.regex
     if fulltext and rematch.terms is None:
         raise_fulltext_refusal()
-    scope = _LazyScope(
+    scope = LazyCatalogScope(
         lambda: open_catalog_scope(
             username, access_service, Path(repo_path), registry_of(state)
         )
     )
     vector = query_vector
     embeds = search_mode in ("semantic", "hybrid")
-    requested = max(1, limit)
+    requested = requested_size(limit)
     page: List[Any] = []
-    for round_index in range(META_DEEPEN_MAX_ROUNDS):
+    schedule = deepening_ks(limit)
+    for round_index, k in enumerate(schedule):
         # An unresolved identity embeds only to deepen, never up front.
         if vector is None and embeds and (proven or round_index > 0):
-            vector = catalog_query_vector(
-                repo_path, rematch.query, no_embedding_cache_shortcut
-            )
-        k = min(requested * 2 ** (round_index + 1), META_DEEPEN_MAX_K)
+            vector = catalog_query_vector(repo_path, query, no_embedding_cache_shortcut)
         logger.debug("catalog round %d k=%d", round_index, k)
         page, exhausted = _round(run, k, search_mode, scope, rematch, merge, vector)
-        if (
-            len(page) >= requested
-            or exhausted
-            or k >= META_DEEPEN_MAX_K
-            or budget_spent()
-        ):
+        if len(page) >= requested or exhausted or k >= schedule[-1] or budget_spent():
             break
     return [_marked_catalog(row) for row in page[:requested]]

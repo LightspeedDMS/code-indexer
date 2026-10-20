@@ -7,11 +7,13 @@ a hit never shows more than its current document); a line the projection
 removed becomes an empty line, so line numbers stay valid. A catalog hit
 carries only ``CATALOG_HIT_FIELDS``: a field added to a hit shape later is
 dropped, never passed through. A full-text hit must still match on what
-the caller sees (``TextRematch``): literal terms by substring on the
-projected text; a regex match (full-text or ripgrep) keeps the engine's own
-match only when the lines it covers are shown verbatim. The caller's
-pattern is never evaluated here. So the existence of a hit never proves a
-hidden term is in the document. A hit with no text left is dropped.
+the caller sees (``TextRematch``): a literal query is judged on the whole
+shown document (``CatalogScope.shown_match``, once per path per request),
+and ``project_fulltext_documents`` keeps one row per document; a regex
+match (full-text or ripgrep) keeps the engine's own match only when the
+lines it covers are shown verbatim. The caller's pattern is never
+evaluated here. So the existence of a hit never proves a hidden term is
+in the document. A hit with no text left is dropped.
 
 Projection is idempotent: a line that already equals its projected form is
 recognised as such. One ``CatalogScope`` per request (``open_catalog_scope``):
@@ -26,11 +28,16 @@ import logging
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from ....utils.path_confinement import resolve_confined_path
 from .depmap_projection import MetaProjector, render_line_aligned
-from .fulltext_terms import FullTextTerms, first_visible_match, parse_fulltext_terms
+from .fulltext_terms import (
+    FullTextTerms,
+    VisibleMatch,
+    first_visible_match,
+    parse_fulltext_terms,
+)
 from .membership import request_participants_reader
 from .path_policy import DEP_MAP_DIR, Decision, DecisionKind, classify
 from .universe_provider import process_alias_universe
@@ -113,7 +120,6 @@ class TextRematch:
     """The full-text query a hit must still match on its projected text."""
 
     query: str
-    case_sensitive: bool = False
     regex: bool = False
     edit_distance: int = 0
 
@@ -125,21 +131,12 @@ class TextRematch:
     def match(
         self, raw: str, view: LineView, match_text: Optional[str]
     ) -> Optional[str]:
-        """The new ``match_text`` for a hit whose raw text *raw* is shown as
-        *view*, or None when the hit no longer matches. A regex query keeps
-        the engine's own *match_text* only on lines shown verbatim; it is
-        never evaluated here."""
-        if self.regex:
-            return engine_match_on_unchanged_lines(raw, view.unchanged, match_text)
-        text = "\n".join(view.lines)
-        needles = [match_text] if match_text else self.query.split()
-        haystack = text if self.case_sensitive else text.lower()
-        for needle in needles:
-            probe = needle if self.case_sensitive else needle.lower()
-            position = haystack.find(probe) if probe else -1
-            if position >= 0:
-                return text[position : position + len(needle)]
-        return None
+        """The new ``match_text`` for a regex hit whose raw text *raw* is
+        shown as *view*, or None when it no longer matches: the engine's own
+        *match_text* only on lines shown verbatim; the pattern is never
+        evaluated here. A literal query is judged per document
+        (``CatalogScope.shown_match``), never here."""
+        return engine_match_on_unchanged_lines(raw, view.unchanged, match_text)
 
 
 @dataclass
@@ -152,6 +149,9 @@ class CatalogScope:
     decide: Callable[[str], Decision]
     _documents: Dict[str, Optional[List[str]]] = field(default_factory=dict)
     _rendered: Dict[str, List[str]] = field(default_factory=dict)
+    _matches: Dict[Tuple[str, FullTextTerms], Optional[VisibleMatch]] = field(
+        default_factory=dict
+    )
 
     def document(self, relative_path: str) -> Optional[List[str]]:
         """The current lines of a catalog file, read once per request;
@@ -177,6 +177,31 @@ class CatalogScope:
             projected = self.projector.project(document, relative_path)
             self._rendered[relative_path] = render_line_aligned(projected).split("\n")
         return self._rendered[relative_path]
+
+    def shown_lines(self, relative_path: str) -> Optional[Tuple[List[str], List[str]]]:
+        """The document's (raw, shown) lines: a projected kind shows its
+        projection, any other allowed kind the document itself; None when
+        the path is denied or unreadable."""
+        kind = self.decide(relative_path).kind
+        doc = None if kind is DecisionKind.DENY else self.document(relative_path)
+        if doc is None:
+            return None
+        if kind in _PROJECTED_KINDS:
+            return doc, self.rendered(relative_path, doc)
+        return doc, doc
+
+    def shown_match(
+        self, relative_path: str, terms: FullTextTerms
+    ) -> Optional[VisibleMatch]:
+        """Where the shown document first holds the query when it holds
+        every required word, else None; judged once per path per request."""
+        key = (relative_path, terms)
+        if key not in self._matches:
+            lines = self.shown_lines(relative_path)
+            self._matches[key] = (
+                None if lines is None else first_visible_match(*lines, terms)
+            )
+        return self._matches[key]
 
 
 def open_catalog_scope(
@@ -370,19 +395,16 @@ def _shown_window(
 
 
 def _project_fulltext(
-    hit: Any, scope: CatalogScope, path: str, rematch: TextRematch
+    hit: Any, scope: CatalogScope, path: str, terms: Optional[FullTextTerms]
 ) -> Optional[Any]:
-    """A full-text hit on a projected document, kept only when the shown
-    document holds every required word, anchored on its first shown
-    occurrence; dropped for a form that cannot be judged on shown text."""
-    terms = rematch.terms
-    doc = scope.document(path)
-    if terms is None or doc is None:
+    """A literal full-text hit, kept only when the shown document holds
+    every required word, anchored on its first shown occurrence; dropped
+    for a form that cannot be judged on shown text."""
+    found = None if terms is None else scope.shown_match(path, terms)
+    lines = scope.shown_lines(path)
+    if found is None or lines is None:
         return None
-    shown = scope.rendered(path, doc)
-    found = first_visible_match(doc, shown, terms)
-    if found is None:
-        return None
+    doc, shown = lines
     updates: Dict[str, Optional[str]] = {}
     for key in _TEXT_KEYS:
         value = _get(hit, (key,))
@@ -414,8 +436,7 @@ def _project_one(
     if decision.kind is DecisionKind.DENY:
         return None
     if rematch is not None and not rematch.regex:
-        if decision.kind in _PROJECTED_KINDS:
-            return _project_fulltext(hit, scope, path, rematch)
+        return _project_fulltext(hit, scope, path, rematch.terms)
     texts = {key: value for key in _TEXT_KEYS if (value := _get(hit, (key,)))}
     projected_kind = decision.kind in _PROJECTED_KINDS
     updates: Dict[str, Optional[str]] = {}
@@ -460,6 +481,32 @@ def project_meta_hits(
     out: List[Any] = []
     for hit in hits:
         projected = _project_one(hit, scope, rematch)
+        if projected is not None:
+            out.append(projected)
+    return out
+
+
+def _score(hit: Any) -> float:
+    value = _get(hit, ("similarity_score", "score"))
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def project_fulltext_documents(
+    hits: Sequence[Any], scope: CatalogScope, terms: FullTextTerms
+) -> List[Any]:
+    """One row per catalog document among the candidate *hits* (any chunk
+    of it, from any word's query) whose shown text holds every required
+    word: its best-scored hit, anchored on the first shown occurrence.
+    Rows are ordered best score first; which documents appear depends only
+    on their shown text."""
+    best: Dict[str, Any] = {}
+    for hit in sorted(hits, key=_score, reverse=True):
+        path = _get(hit, _PATH_KEYS)
+        if isinstance(path, str) and path not in best:
+            best[path] = hit
+    out: List[Any] = []
+    for path, hit in best.items():
+        projected = _project_fulltext(hit, scope, path, terms)
         if projected is not None:
             out.append(projected)
     return out

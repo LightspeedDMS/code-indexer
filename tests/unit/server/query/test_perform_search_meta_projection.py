@@ -145,8 +145,8 @@ def _search_canary(
     sqm = env.app.state.semantic_query_manager
     info = repo_info or {"user_alias": CATALOG_ALIAS, "is_global": True}
 
-    def run(k: int, mode: str, vector: Optional[List[float]]) -> List[Any]:
-        return list(sqm._execute_fts_search(env.root, info["user_alias"], query, k))
+    def run(k: int, mode: str, vector: Optional[List[float]], text: str) -> List[Any]:
+        return list(sqm._execute_fts_search(env.root, info["user_alias"], text, k))
 
     return search_for_caller(
         run,
@@ -264,7 +264,7 @@ def _search_unresolved(
 
     sqm = env.app.state.semantic_query_manager
 
-    def run(k: int, mode: str, vector: Optional[List[float]]) -> List[Any]:
+    def run(k: int, mode: str, vector: Optional[List[float]], text: str) -> List[Any]:
         seen.append(vector)
         return list(raw(k))
 

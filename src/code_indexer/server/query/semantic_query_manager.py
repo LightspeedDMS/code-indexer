@@ -1568,10 +1568,10 @@ class SemanticQueryManager:
                 # Catalog hits are projected for the caller here, before sort and limit.
                 with searching_resolved_repository(str(repo_alias)), _tracking:
                     results = search_for_caller(
-                        lambda k, mode, vector: self._search_single_repository(
+                        lambda k, mode, vector, text: self._search_single_repository(
                             repo_path,
                             repo_alias,
-                            query_text,
+                            text,
                             k,
                             search_mode=mode,
                             precomputed_query_vector=vector,

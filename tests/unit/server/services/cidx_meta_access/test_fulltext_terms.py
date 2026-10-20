@@ -51,7 +51,7 @@ def test_forms_that_cannot_be_judged_on_shown_text_are_refused(query: str) -> No
 
 def test_fuzzy_is_judged_for_one_word_only() -> None:
     assert parse_fulltext_terms("ledger sample", 1) is None
-    assert _terms("ledgr", 1) == FullTextTerms((("ledgr",),), "ledgr", 1)
+    assert _terms("ledgr", 1) == FullTextTerms(("ledgr",), (("ledgr",),), "ledgr", 1)
 
 
 def test_words_become_token_phrases() -> None:
