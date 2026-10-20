@@ -254,6 +254,89 @@ def test_power_user_paths_are_identical_on_disk_after_refusal(
     assert {p: (power.fx.root / p).read_bytes() for p in before} == before
 
 
+RETIRED = "retired-sample.md"
+DENIED_FOR_FULL_WRITER = [
+    "README.md",
+    RETIRED,
+    "dependency-map/reports.md",
+    "dependency-map/legacy.md",
+    "dependency-map/_domains.json",
+    "dependency-map/_activity.md",
+    ".gitignore",
+]
+
+
+def _recorded(action: Any) -> Any:
+    from .test_catalog_write_gate import _RECORDING
+
+    _RECORDING.opened = []
+    try:
+        result = action()
+    finally:
+        opened = _RECORDING.opened
+        del _RECORDING.opened
+    return result, opened
+
+
+@pytest.mark.parametrize("path", DENIED_FOR_FULL_WRITER)
+def test_full_writer_is_refused_where_the_read_view_denies(
+    power: CatalogFileDoorEnv, path: str
+) -> None:
+    root = power.fx.root
+    (root / RETIRED).write_text("# retired-sample\n\nretired text\n")
+    target = root / path
+    before = target.read_bytes()
+    word = before.decode().split()[-1]
+    requests = [
+        {
+            "repository_alias": CATALOG_ALIAS,
+            "file_path": path,
+            "old_string": word,
+            "new_string": word,
+            "content_hash": content_hash,
+        }
+        for content_hash in ("0" * 64, hashlib.sha256(before).hexdigest())
+    ]
+
+    def attempts() -> list:
+        with power.serving():
+            edits = [
+                mcp_data(files_module.handle_edit_file(params, _caller()))
+                for params in requests
+            ]
+        return [*edits, _delete(power, path)]
+
+    replies, opened = _recorded(attempts)
+
+    assert replies == [REFUSED, REFUSED, REFUSED], replies
+    # A domain document's DENY needs its membership (the dependency-map
+    # model reads every domain document); every other path is decided by
+    # name and opens no catalog file.
+    name_decided = not path.startswith("dependency-map/") or "/_" in path
+    if name_decided:
+        assert [p for p in opened if p.startswith(str(root) + "/")] == []
+    assert target.read_bytes() == before
+
+
+def test_full_writer_decision_reads_the_registry_once_per_write(
+    power: CatalogFileDoorEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reads: list = []
+    real = power.fx.registry.list_repos
+
+    def counted() -> Any:
+        reads.append(1)
+        return real()
+
+    monkeypatch.setattr(power.fx.registry, "list_repos", counted)
+
+    assert _edit(power, DESCRIPTION)["success"] is True
+    assert len(reads) == 1
+    reads.clear()
+    assert _edit(power, ".git/config")["success"] is False
+    assert len(reads) <= 1
+
+
 def test_power_user_reaches_catalog_write_mode(power: CatalogFileDoorEnv) -> None:
     from code_indexer.server.mcp.protocol import _check_repository_access
     from code_indexer.server.mcp.tools import TOOL_REGISTRY

@@ -501,8 +501,9 @@ def refuse_hidden_catalog_writes(
     *paths* unchanged (ALLOW or MEMORY), decided on the canonical path
     before any existence check, hash comparison or read: hidden paths,
     descriptions and dependency-map documents are refused alike, from the
-    path shape alone (no membership model or catalog file is read).
-    Unrestricted requests and full catalog writers pass unchanged.
+    path shape alone (no membership model or catalog file is read). A full
+    catalog writer may also write every path their read view does not deny.
+    Unrestricted requests pass unchanged.
 
     Raises:
         PermissionError: ``CATALOG_WRITE_REFUSAL``, identical whether or not
@@ -510,9 +511,10 @@ def refuse_hidden_catalog_writes(
             judgement or under a judgement made for another directory.
     """
     view = view_for(repo_path, access, PermissionError(CATALOG_WRITE_REFUSAL))
-    if view is None or full_catalog_writer(view):
+    if view is None:
         return
-    if not all(_writable(view, path) for path in paths):
+    full = full_catalog_writer(view)
+    if not all(_writable(view, path, full) for path in paths):
         raise PermissionError(CATALOG_WRITE_REFUSAL)
 
 
@@ -550,23 +552,28 @@ def restricted_catalog_view_applies(
     repo_path: str, access: Optional[CatalogFileAccess]
 ) -> bool:
     """True only when *access* is a judgement with a catalog view, made for
-    *repo_path*, for a caller who is not a full catalog writer; False for no
-    judgement, an unrestricted one, or one made for another directory."""
+    *repo_path* (a full catalog writer included: an invalid spelling is
+    denied by every read view); False for no judgement, an unrestricted
+    one, or one made for another directory."""
     if access is None or access.view is None:
         return False
     served = access.served
-    same = served is not None and (
+    return served is not None and (
         served == repo_path or os.path.realpath(served) == os.path.realpath(repo_path)
     )
-    return same and not full_catalog_writer(access.view)
 
 
-def _writable(view: CatalogFileView, path: str) -> bool:
+def _writable(view: CatalogFileView, path: str, full: bool) -> bool:
+    """*full*: the caller is a full catalog writer, who may write every path
+    their read view does not deny; anyone else only paths served
+    unchanged."""
     canonical = view._canonical(path)
+    if canonical is None:
+        return False
+    if full:
+        return view.decide(canonical).kind is not DecisionKind.DENY
     return (
-        canonical is not None
-        and may_be_served_unchanged(canonical)
-        and view.decide(canonical).kind in _WRITABLE
+        may_be_served_unchanged(canonical) and view.decide(canonical).kind in _WRITABLE
     )
 
 
