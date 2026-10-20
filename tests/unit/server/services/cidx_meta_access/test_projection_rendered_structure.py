@@ -8,6 +8,7 @@ Real fixture files and real renderers; neutral names only.
 
 from __future__ import annotations
 
+import html as html_module
 import logging
 import re
 from pathlib import Path
@@ -16,13 +17,21 @@ from typing import List, Optional
 import markdown  # type: ignore[import-untyped]
 import pytest
 
-from code_indexer.server.services.cidx_meta_access import render_for_display
+from code_indexer.server.services.cidx_meta_access import (
+    AliasUniverse,
+    load_depmap_model,
+    project_lines,
+    render_for_display,
+)
 from tests.unit.server.services.cidx_meta_access.test_depmap_table_semantics import (
     HIDDEN_A,
     HIDDEN_B,
     VISIBLE_A,
+    VISIBLE_B,
+    StaticRegistry,
     build_real_format_map,
     project,
+    restricted,
 )
 
 ROLES = ["| Repo | Language | Role |", "|---|---|---|"]
@@ -147,3 +156,68 @@ def test_single_repo_name_rejects_unbalanced_backticks_and_pipes() -> None:
     assert single_repo_name(f"`{VISIBLE_A} | {HIDDEN_A}`") is None
     assert single_repo_name(f"{VISIBLE_A}|{HIDDEN_A}") is None
     assert single_repo_name(f"`{VISIBLE_A}`") == VISIBLE_A
+
+
+_TAG = re.compile(r"<!--.*?-->|<[^>]*>", re.S)
+
+
+def _rendered_text(projected: List[Optional[str]]) -> str:
+    """Visible text of the display rendering through both renderers."""
+    shown = render_for_display(projected)
+    pages = [markdown.markdown(shown, extensions=["tables", "fenced_code"])]
+    markdown_it = pytest.importorskip("markdown_it")
+    wiki = markdown_it.MarkdownIt("commonmark", {"html": True})
+    pages.append(wiki.enable(["table", "strikethrough"]).render(shown))
+    return "\n".join(html_module.unescape(_TAG.sub("", page)) for page in pages)
+
+
+SPLIT_PREFIX, SPLIT_SUFFIX = HIDDEN_A.split("-", 1)
+
+
+@pytest.mark.parametrize(
+    "split",
+    [
+        f"**{SPLIT_PREFIX}**-{SPLIT_SUFFIX}",
+        f"*{SPLIT_PREFIX}*-{SPLIT_SUFFIX}",
+        f"`{SPLIT_PREFIX}`-{SPLIT_SUFFIX}",
+        f"[{SPLIT_PREFIX}](https://example.com)-{SPLIT_SUFFIX}",
+    ],
+)
+def test_inline_markup_split_alias_removes_the_line(tmp_path: Path, split: str) -> None:
+    dep_map = build_real_format_map(tmp_path)
+    lines = [f"Settlement runs in {split} nightly.", f"See {HIDDEN_A} too."]
+    projected = project(dep_map, "payments.md", lines)
+    assert projected == [None, "See [restricted repository] too."]
+    assert HIDDEN_A not in _rendered_text(projected)
+
+
+SHORT_HIDDEN = "qzx"
+
+
+@pytest.mark.parametrize("alias", [SHORT_HIDDEN, HIDDEN_A])
+def test_blockquoted_table_lines_are_removed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, alias: str
+) -> None:
+    dep_map = build_real_format_map(tmp_path)
+    names = [VISIBLE_A, VISIBLE_B, HIDDEN_A, HIDDEN_B, SHORT_HIDDEN]
+    lines = [
+        "> | Repo | Language | Role |",
+        "> |---|---|---|",
+        f"> | {alias} | Go | secret |",
+        "> plain quote",
+        "> x | y",
+        "",
+        "After.",
+    ]
+    with caplog.at_level(logging.WARNING):
+        projected = project_lines(
+            lines,
+            "dependency-map/payments.md",
+            restricted(),
+            load_depmap_model(dep_map),
+            AliasUniverse(StaticRegistry(names)).snapshot(),
+        )
+    assert projected == [None, None, None, "> plain quote", None, "", "After."]
+    assert any("payments.md" in r.getMessage() for r in caplog.records)
+    shown = _rendered_text(projected)
+    assert alias not in shown and "secret" not in shown

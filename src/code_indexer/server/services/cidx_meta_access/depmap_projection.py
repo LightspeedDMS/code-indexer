@@ -62,10 +62,10 @@ from .depmap_model import (
     TableKind,
     cell_names,
     classify_lines,
-    decoded_form,
     load_depmap_model,
-    needs_decoding,
+    needs_rendering_check,
     normalize_name,
+    rendered_form,
     single_repo_name,
 )
 from .visibility import MetaVisibility
@@ -236,7 +236,8 @@ def _view_for(
 
 def _redact(line: str, view: _View) -> Optional[str]:
     """Plain hidden names become placeholders; a hidden name still present
-    in the decoded (rendered) form was encoded, so the line is removed."""
+    in the rendered form (decoded, inline markup stripped) was encoded or
+    split by markup, so the line is removed."""
     if view.prose is None:
         return line
 
@@ -251,12 +252,12 @@ def _redact(line: str, view: _View) -> Optional[str]:
         redacted = view.prose.sub(_placeholder, line)
     else:
         redacted = view.prose.sub(RESTRICTED_PLACEHOLDER, line)
-    if not needs_decoding(line):
+    if not needs_rendering_check(line):
         return redacted
     blanked = redacted.replace(RESTRICTED_PLACEHOLDER, " ").replace(
         DOMAIN_PLACEHOLDER, " "
     )
-    if view.prose.search(decoded_form(blanked)):
+    if view.prose.search(rendered_form(blanked)):
         return None
     return redacted
 
@@ -270,7 +271,10 @@ def _mentions_hidden(text: str, view: _View) -> bool:
         return False
     if view.prose.search(text):
         return True
-    return needs_decoding(text) and view.prose.search(decoded_form(text)) is not None
+    return (
+        needs_rendering_check(text)
+        and view.prose.search(rendered_form(text)) is not None
+    )
 
 
 def _repo_cell_allowed(cell: str, view: _View) -> bool:

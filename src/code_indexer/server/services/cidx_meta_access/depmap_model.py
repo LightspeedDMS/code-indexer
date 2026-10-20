@@ -86,6 +86,25 @@ def decoded_form(text: str) -> str:
     return _MD_ESCAPE.sub(r"\1", _INLINE_TAG.sub("", value))
 
 
+_INLINE_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_INLINE_MARKUP = re.compile(r"\*+|`+|~~")
+_EDGE_UNDERSCORE = re.compile(r"(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])")
+_MARKUP_CHARS = re.compile(r"[*_`\[~]")
+
+
+def needs_rendering_check(text: str) -> bool:
+    """False when *text* can render no differently from its characters."""
+    return needs_decoding(text) or _MARKUP_CHARS.search(text) is not None
+
+
+def rendered_form(text: str) -> str:
+    """``decoded_form`` without inline Markdown markup: link and image syntax
+    reduced to its text, emphasis, code-span and strikethrough markers
+    removed. Used for detection only, never for output."""
+    value = _INLINE_LINK.sub(r"\1", decoded_form(text))
+    return _EDGE_UNDERSCORE.sub("", _INLINE_MARKUP.sub("", value))
+
+
 def normalize_name(text: str) -> str:
     """Comparison form of a name found in a document: its decoded form, link
     text, without emphasis, quote or backtick wrappers and ``-global``,
@@ -263,9 +282,17 @@ LINE_DROP = "drop"
 LineRole = Tuple[str, Optional[TableKind], Optional[List[str]]]
 
 
+_BLOCKQUOTE = re.compile(r"^ {0,3}>")
+
+
 def _is_piped(line: str) -> bool:
+    """An outer-piped row, or a blockquote line holding a pipe (the
+    generator never writes blockquoted tables, so any such line is
+    dropped)."""
     stripped = line.strip()
-    return len(stripped) >= 2 and stripped[0] == "|" and stripped[-1] == "|"
+    if len(stripped) >= 2 and stripped[0] == "|" and stripped[-1] == "|":
+        return True
+    return "|" in line and _BLOCKQUOTE.match(line) is not None
 
 
 def _table_body_role(line: str, kind: Optional[TableKind], width: int) -> LineRole:
