@@ -12,6 +12,7 @@ the wrapped call (fail-open, observability-only).
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 
 import pytest
 
@@ -545,7 +546,7 @@ class TestTokensFromResultContract:
 def _fresh_usage_warning_throttle(monkeypatch):
     from code_indexer.server.services import embedding_call_instrumentation as eci
 
-    monkeypatch.setattr(eci, "_usage_warning_last", {}, raising=False)
+    monkeypatch.setattr(eci, "_usage_warning_last", OrderedDict(), raising=False)
 
 
 def _warnings(caplog):
@@ -556,6 +557,34 @@ class TestMissingUsage:
     """Issue #2173: a successful response without a readable usage figure
     records 0 and logs a WARNING throttled per (provider, call_type, model),
     so a vendor schema change cannot flood the indexing hot path."""
+
+    def test_throttle_memory_is_bounded_across_many_distinct_keys(
+        self, caplog, monkeypatch
+    ):
+        from code_indexer.server.services import embedding_call_instrumentation as eci
+
+        monkeypatch.setattr(eci, "_USAGE_WARNING_MAX_KEYS", 8, raising=False)
+        _install(_RecordingWriter())
+
+        def _call(model: str) -> None:
+            eci.instrument_call(
+                provider="voyageai",
+                call_type="embed",
+                model=model,
+                item_count=1,
+                tokens_from_result=lambda _r: None,
+                batch_size=1,
+                purpose="index",
+                fn=lambda: "resp",
+            )
+
+        with caplog.at_level("WARNING", logger=_ECI_LOGGER):
+            for i in range(50):
+                _call(f"example-model-{i}")
+            _call("example-model-49")
+
+        assert len(eci._usage_warning_last) <= 8
+        assert len(_warnings(caplog)) == 50
 
     @pytest.mark.parametrize(
         "body, expected",

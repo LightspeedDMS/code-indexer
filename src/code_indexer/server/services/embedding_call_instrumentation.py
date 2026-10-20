@@ -33,6 +33,7 @@ import contextvars
 import logging
 import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from typing import (
     TYPE_CHECKING,
@@ -227,7 +228,10 @@ def _record_call(
 #: Minimum gap between two missing-usage WARNINGs for one (provider,
 #: call_type, model, reason); the check runs on the indexing hot path.
 _USAGE_WARNING_INTERVAL_SECONDS = 600.0
-_usage_warning_last: "dict[tuple[str, str, str, str], float]" = {}
+#: LRU bound on remembered throttle keys; past it the oldest key is forgotten
+#: (at worst it is warned again before its interval ends).
+_USAGE_WARNING_MAX_KEYS = 256
+_usage_warning_last: "OrderedDict[tuple[str, str, str, str], float]" = OrderedDict()
 _usage_warning_lock = threading.Lock()
 
 
@@ -241,8 +245,12 @@ def _warn_usage_unavailable(
     with _usage_warning_lock:
         last = _usage_warning_last.get(key)
         if last is not None and now - last < _USAGE_WARNING_INTERVAL_SECONDS:
+            _usage_warning_last.move_to_end(key)
             return
         _usage_warning_last[key] = now
+        _usage_warning_last.move_to_end(key)
+        while len(_usage_warning_last) > _USAGE_WARNING_MAX_KEYS:
+            _usage_warning_last.popitem(last=False)
     logger.warning(
         "embedding stats: vendor token usage %s for provider=%s call_type=%s "
         "model=%s; token_count recorded as 0",
