@@ -26,11 +26,11 @@ from code_indexer.server.services.cidx_meta_access.catalog_search import (
     project_multi_fulltext,
 )
 from code_indexer.server.services.cidx_meta_access.fulltext_pages import (
-    CatalogFulltextIncomplete,
     complete_hits,
     engine_search_word,
 )
 from code_indexer.server.services.cidx_meta_access.fulltext_terms import (
+    FULLTEXT_TOO_BROAD,
     FulltextOptions,
     parse_fulltext_terms,
 )
@@ -182,7 +182,7 @@ def test_gathering_fails_loudly_when_nothing_completes() -> None:
         asked.append(k)
         return [], False
 
-    with pytest.raises(CatalogFulltextIncomplete):
+    with pytest.raises(SearchParameterError, match=FULLTEXT_TOO_BROAD):
         complete_hits(never_complete, terms, 1, frozenset({"alpha.md"}))
     assert asked[-1] == _FTS_UNLIMITED_HITS
 

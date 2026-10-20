@@ -7,10 +7,10 @@ the engine's own unit: the sanitized query split on whitespace, each word
 reduced to its tokens exactly as the index analyzes text (``engine_tokens``:
 tantivy's ``default`` tokenizer of the content fields, i.e. the simple
 tokenizer, tokens of 40 bytes or more dropped, lower-cased), and matched as
-a contiguous phrase within one line. Only text the
-projection kept verbatim from the document counts (never a placeholder,
-never text a rewrite introduced), so a kept hit also matches the document
-the engine searched.
+a contiguous phrase within one line. Only the shown text is read, never
+the raw document: a placeholder or any other text the caller is shown is
+ordinary shown text, so the verdict is a function of the shown text alone,
+computed in time linear in its size.
 
 Forms whose outcome cannot be decided on the shown text alone are refused
 before searching: boolean operators, wildcard, boost and slop syntax, a
@@ -24,20 +24,20 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from difflib import SequenceMatcher
 from functools import lru_cache
 from typing import Any, List, Mapping, NoReturn, Optional, Sequence, Tuple
 
-from .depmap_projection import DOMAIN_PLACEHOLDER, RESTRICTED_PLACEHOLDER
-
 FULLTEXT_FORM_REFUSAL = "this full-text query form is not available for this repository"
+FULLTEXT_TOO_BROAD = (
+    "this full-text query matches too many documents in this repository; "
+    "use more specific words"
+)
 
 _OPERATORS = frozenset({"AND", "OR", "NOT"})
 _GRAMMAR_CHARS = frozenset("*^~")
 # The engine drops a token of this many bytes or more (remove_long).
 _MAX_TOKEN_BYTES = 40
 _ASCII_RUN = re.compile(r"[A-Za-z0-9]+")
-_PLACEHOLDERS = (RESTRICTED_PLACEHOLDER, DOMAIN_PLACEHOLDER)
 
 # (indexed form, or None when the engine drops the token; start; end)
 Token = Tuple[Optional[str], int, int]
@@ -156,6 +156,13 @@ def raise_fulltext_refusal() -> NoReturn:
     raise SearchParameterError(FULLTEXT_FORM_REFUSAL)
 
 
+def raise_fulltext_too_broad() -> NoReturn:
+    """Refuse a query whose catalog candidates cannot be gathered whole."""
+    from ...query.semantic_query_manager import SearchParameterError
+
+    raise SearchParameterError(FULLTEXT_TOO_BROAD)
+
+
 def parse_fulltext_terms(query: str, edit_distance: int) -> Optional[FullTextTerms]:
     """The query's required words, or None when its outcome cannot be
     decided on shown text alone (the form is refused)."""
@@ -179,51 +186,20 @@ def parse_fulltext_terms(query: str, edit_distance: int) -> Optional[FullTextTer
     return FullTextTerms(tuple(words), phrases)
 
 
-def _placeholder_spans(shown: str) -> List[Tuple[int, int]]:
-    found: List[Tuple[int, int]] = []
-    for placeholder in _PLACEHOLDERS:
-        start = shown.find(placeholder)
-        while start >= 0:
-            found.append((start, start + len(placeholder)))
-            start = shown.find(placeholder, start + len(placeholder))
-    return found
-
-
-def _cut(raw: str, at: int) -> bool:
-    """True when a token of *raw* continues across offset *at*."""
-    return (
-        0 < at < len(raw)
-        and bool(_engine_char(raw[at - 1]))
-        and bool(_engine_char(raw[at]))
-    )
-
-
-def _visible_runs(raw: str, shown: str) -> List[List[Token]]:
-    """Runs of consecutive tokens of the shown line that are tokens of the
-    raw line too, adjacent there as well, outside every placeholder."""
-    if not shown.strip():
-        return []
-    if raw == shown:
-        blocks = [(0, 0, len(raw))]
-    else:
-        matcher = SequenceMatcher(None, raw, shown, autojunk=False)
-        blocks = [(a, b, n) for a, b, n in matcher.get_matching_blocks() if n]
-    hidden = _placeholder_spans(shown)
+def _shown_runs(shown: str) -> List[List[Token]]:
+    """The shown line's engine tokens, in runs of adjacent tokens (a token
+    the engine drops ends a run, as it breaks a phrase in the index)."""
     runs: List[List[Token]] = []
-    for a, b, size in blocks:
-        run: List[Token] = []
-        for token in engine_tokens(shown, b, b + size):
-            raw_start, raw_end = a + token[1] - b, a + token[2] - b
-            masked = any(s < token[2] and token[1] < e for s, e in hidden)
-            dropped = token[0] is None
-            if masked or dropped or _cut(raw, raw_start) or _cut(raw, raw_end):
-                if run:
-                    runs.append(run)
-                run = []
-                continue
+    run: List[Token] = []
+    for token in engine_tokens(shown):
+        if token[0] is None:
+            if run:
+                runs.append(run)
+            run = []
+        else:
             run.append(token)
-        if run:
-            runs.append(run)
+    if run:
+        runs.append(run)
     return runs
 
 
@@ -276,15 +252,15 @@ def _matches(
 
 
 def first_visible_match(
-    raw_lines: Sequence[str], shown_lines: Sequence[str], terms: FullTextTerms
+    shown_lines: Sequence[str], terms: FullTextTerms
 ) -> Optional[VisibleMatch]:
     """Where the shown document first holds the first required word, with
     the shown occurrence count of all required words, when it holds every
-    required word; else None. The whole document is read (the count)."""
+    required word; else None. Only the shown text is read, once."""
     counts = [0] * (1 if terms.fuzzy_word is not None else len(terms.phrases))
     first: Optional[VisibleMatch] = None
-    for number, (raw, shown) in enumerate(zip(raw_lines, shown_lines), start=1):
-        runs = _visible_runs(raw, shown)
+    for number, shown in enumerate(shown_lines, start=1):
+        runs = _shown_runs(shown)
         for index in range(len(counts)):
             spans = _matches(runs, terms, index)
             if index == 0 and spans and first is None:

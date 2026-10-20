@@ -381,6 +381,7 @@ def rest_rows_for_caller(
             fts_query.query_text,
             fts_query.regex,
             effective_edit_distance(fts_query.fuzzy, fts_query.edit_distance),
+            FulltextOptions(snippet_lines=fts_query.snippet_lines),
         )
     )
     projected = project_catalog_rows(rows, username, access_service, rematch)

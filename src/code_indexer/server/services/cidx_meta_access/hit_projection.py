@@ -8,8 +8,9 @@ removed becomes an empty line, so line numbers stay valid. A catalog hit
 carries only ``CATALOG_HIT_FIELDS``: a field added to a hit shape later is
 dropped, never passed through. A full-text hit must still match on what
 the caller sees (``TextRematch``): a literal query is judged on the whole
-shown document (``CatalogScope.shown_match``, once per path per request),
-and ``project_fulltext_documents`` keeps one row per document; a regex
+shown document and nothing else (``CatalogScope.shown_match``, once per
+path per request), and ``fulltext_document_rows`` builds one row per
+document from its shown text, with a snippet of the request's size; a regex
 match (full-text or ripgrep) keeps the engine's own match only when the
 lines it covers are shown verbatim. The caller's pattern is never
 evaluated here. So the existence of a hit never proves a hidden term is
@@ -28,8 +29,18 @@ import logging
 import os
 from dataclasses import dataclass, field
 from functools import cached_property
-from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
+from pathlib import Path, PurePosixPath
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from ....utils.path_confinement import resolve_confined_path
 from .depmap_projection import MetaProjector, render_line_aligned
@@ -41,7 +52,14 @@ from .fulltext_terms import (
     parse_fulltext_terms,
 )
 from .membership import request_participants_reader
-from .path_policy import DEP_MAP_DIR, Decision, DecisionKind, classify
+from .path_policy import (
+    DEP_MAP_DIR,
+    MEMORIES_DIR,
+    XRAY_PATTERNS_DIR,
+    Decision,
+    DecisionKind,
+    classify,
+)
 from .universe_provider import process_alias_universe
 from .visibility import MetaVisibility, memory_visibility_fn, resolve_meta_visibility
 
@@ -158,20 +176,46 @@ class CatalogScope:
     )
     _allowed: Optional[FrozenSet[str]] = None
 
+    def _listed(self, relative_dir: str, *, files: bool) -> List[str]:
+        """The non-dot files (or directories) of one catalog directory."""
+        try:
+            with os.scandir(self.root / relative_dir) as entries:
+                return [
+                    (Path(relative_dir) / e.name).as_posix()
+                    for e in entries
+                    if not e.name.startswith(".")
+                    and (e.is_file(follow_symlinks=False) if files else e.is_dir())
+                ]
+        except FileNotFoundError:
+            return []
+
     def allowed_paths(self) -> FrozenSet[str]:
         """Every catalog file the caller may see (not denied), relative to
-        the copy, listed once per request; dot directories are skipped."""
+        the copy, listed once per request without walking hidden subtrees:
+        the flat directories, then only the pattern scopes the caller may
+        see. Every file is still judged by ``decide``."""
         if self._allowed is None:
-            found: List[str] = []
-            for directory, subdirs, names in os.walk(self.root):
-                subdirs[:] = [d for d in subdirs if not d.startswith(".")]
-                relative = Path(directory).relative_to(self.root)
-                for name in names:
-                    path = (relative / name).as_posix()
-                    if self.decide(path).kind is not DecisionKind.DENY:
-                        found.append(path)
-            self._allowed = frozenset(found)
+            listed: List[str] = []
+            for flat in (".", MEMORIES_DIR, DEP_MAP_DIR):
+                listed += self._listed(flat, files=True)
+            for scope_dir in self._listed(XRAY_PATTERNS_DIR, files=False):
+                if self.decide(f"{scope_dir}/_").kind is DecisionKind.DENY:
+                    continue
+                for directory, subdirs, names in os.walk(self.root / scope_dir):
+                    subdirs[:] = [d for d in subdirs if not d.startswith(".")]
+                    relative = Path(directory).relative_to(self.root)
+                    listed += [(relative / name).as_posix() for name in names]
+            self._allowed = frozenset(
+                path
+                for path in listed
+                if self.decide(path).kind is not DecisionKind.DENY
+            )
         return self._allowed
+
+    def shows_projection(self, relative_path: str) -> bool:
+        """True when the caller is shown a projection of the document (its
+        text may differ from what the engine indexed)."""
+        return self.decide(relative_path).kind in _PROJECTED_KINDS
 
     def document(self, relative_path: str) -> Optional[List[str]]:
         """The current lines of a catalog file, read once per request;
@@ -218,9 +262,11 @@ class CatalogScope:
         key = (relative_path, terms)
         if key not in self._matches:
             lines = self.shown_lines(relative_path)
-            self._matches[key] = (
-                None if lines is None else first_visible_match(*lines, terms)
-            )
+            found = None
+            if lines is not None:
+                _raw, shown = lines
+                found = first_visible_match(shown, terms)
+            self._matches[key] = found
         return self._matches[key]
 
 
@@ -400,36 +446,36 @@ def _rebuild(hit: Any, updates: Dict[str, Optional[str]]) -> Any:
     raise TypeError(f"unsupported catalog hit type: {type(hit).__name__}")
 
 
-def _shown_window(
-    shown: List[str], doc: List[str], original: str, line: int, matched: str
-) -> str:
-    """The shown text replacing *original*: the matched text when
-    *original* was part of one line, else as many lines around *line*."""
-    lines = _chunk_candidates(_text_lines(original))[-1]
-    count = len(lines)
-    if count == 1 and lines[0] not in doc:
-        return matched
-    context = (count - 1) // 2
-    first = max(1, line - context)
-    return "\n".join(shown[first - 1 : min(len(shown), line + context)])
+def shown_snippet(shown: List[str], line: int, snippet_lines: int) -> str:
+    """The shown lines within *snippet_lines* of 1-based *line*, clipped to
+    the document; empty when no context is requested."""
+    if snippet_lines <= 0:
+        return ""
+    first = max(0, line - 1 - snippet_lines)
+    return "\n".join(shown[first : line + snippet_lines])
 
 
 def _project_fulltext(
-    hit: Any, scope: CatalogScope, path: str, terms: Optional[FullTextTerms]
+    hit: Any,
+    scope: CatalogScope,
+    path: str,
+    terms: Optional[FullTextTerms],
+    snippet_lines: int,
 ) -> Optional[Any]:
     """A literal full-text hit, kept only when the shown document holds
-    every required word, anchored on its first shown occurrence; dropped
-    for a form that cannot be judged on shown text."""
+    every required word, anchored on its first shown occurrence with a
+    snippet of the request's size; dropped for a form that cannot be judged
+    on shown text."""
     found = None if terms is None else scope.shown_match(path, terms)
     lines = scope.shown_lines(path)
     if found is None or lines is None:
         return None
-    doc, shown = lines
+    _raw, shown = lines
     updates: Dict[str, Optional[str]] = {}
     for key in _TEXT_KEYS:
         value = _get(hit, (key,))
         if isinstance(value, str) and value:
-            updates[key] = _shown_window(shown, doc, value, found.line, found.text)
+            updates[key] = shown_snippet(shown, found.line, snippet_lines)
     if _first_key(hit, ("match_text",)) is not None:
         updates["match_text"] = found.text
     rebuilt = _rebuild(hit, updates)
@@ -456,7 +502,9 @@ def _project_one(
     if decision.kind is DecisionKind.DENY:
         return None
     if rematch is not None and not rematch.regex:
-        return _project_fulltext(hit, scope, path, rematch.terms)
+        return _project_fulltext(
+            hit, scope, path, rematch.terms, rematch.options.snippet_lines
+        )
     texts = {key: value for key in _TEXT_KEYS if (value := _get(hit, (key,)))}
     projected_kind = decision.kind in _PROJECTED_KINDS
     updates: Dict[str, Optional[str]] = {}
@@ -506,27 +554,31 @@ def project_meta_hits(
     return out
 
 
-def project_fulltext_documents(
-    hits: Sequence[Any], scope: CatalogScope, terms: FullTextTerms
-) -> List[Any]:
-    """One row per catalog document among the candidate *hits* (any chunk
-    of it, from any word's query) whose shown text holds every required
-    word, anchored on the first shown occurrence. Rows are ordered by how
-    often the required words occur in the shown text, then by path: which
-    documents appear, and their order, depend only on shown text."""
-    first_hit: Dict[str, Any] = {}
-    for hit in hits:
-        path = _get(hit, _PATH_KEYS)
-        if isinstance(path, str) and path not in first_hit:
-            first_hit[path] = hit
-    ranked: List[Tuple[int, str, Any]] = []
-    for path, hit in first_hit.items():
-        projected = _project_fulltext(hit, scope, path, terms)
+def fulltext_document_rows(
+    paths: Iterable[str], scope: CatalogScope, terms: FullTextTerms, snippet_lines: int
+) -> List[Dict[str, Any]]:
+    """One engine-shaped row per candidate path whose shown text holds
+    every required word, built from the shown document alone (anchor at the
+    first shown occurrence, a snippet of the request's size, the language
+    as the indexer records it). Rows are ordered by how often the required
+    words occur in the shown text, then by path."""
+    ranked: List[Tuple[int, str, Dict[str, Any]]] = []
+    for path in sorted(set(paths)):
         found = scope.shown_match(path, terms)
-        if projected is not None and found is not None:
-            ranked.append((-found.count, path, projected))
+        lines = scope.shown_lines(path)
+        if found is None or lines is None:
+            continue
+        _raw, shown = lines
+        row = {
+            "path": path,
+            "line": found.line,
+            "match_text": found.text,
+            "snippet": shown_snippet(shown, found.line, snippet_lines),
+            "language": PurePosixPath(path).suffix.lstrip(".") or "txt",
+        }
+        ranked.append((-found.count, path, row))
     ranked.sort(key=lambda entry: (entry[0], entry[1]))
-    return [projected for _, _, projected in ranked]
+    return [row for _, _, row in ranked]
 
 
 REGEX_MATCH_FIELDS: FrozenSet[str] = frozenset(

@@ -99,6 +99,7 @@ def test_rest_rows_refuse_without_the_access_service(env: CatalogEnv) -> None:
         regex=False,
         fuzzy=False,
         edit_distance=0,
+        snippet_lines=5,
     )
     assert rest_rows_for_caller(service, RESTRICTED_USER, _rows(env), fts) == []
     plain = rest_rows_for_caller(service, RESTRICTED_USER, _rows(env))

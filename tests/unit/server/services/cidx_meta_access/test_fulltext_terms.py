@@ -1,5 +1,5 @@
-"""Full-text words judged on the text a restricted caller is shown (pure
-functions over raw and projected lines; neutral sample text)."""
+"""Full-text words judged on the text a restricted caller is shown, and on
+nothing else (pure functions over the shown lines; neutral sample text)."""
 
 from __future__ import annotations
 
@@ -28,7 +28,10 @@ def _terms(query: str, edit_distance: int = 0) -> FullTextTerms:
 def _match(
     raw: List[str], shown: List[str], query: str, d: int = 0
 ) -> Optional[VisibleMatch]:
-    return first_visible_match(raw, shown, _terms(query, d))
+    """The verdict on *shown*; *raw* is what the projection was computed
+    from, kept in each case to show it plays no part."""
+    del raw
+    return first_visible_match(shown, _terms(query, d))
 
 
 @pytest.mark.parametrize(
@@ -88,31 +91,42 @@ def test_anchor_is_the_first_shown_occurrence_of_the_first_word() -> None:
     assert _match(raw, shown, "ledger entries") == VisibleMatch(3, "LEDGER", 2)
 
 
-def test_placeholder_text_never_matches() -> None:
+def test_placeholder_text_matches_like_any_shown_text() -> None:
     raw = ["owned by restricted-team"]
     shown = [f"owned by {RESTRICTED_PLACEHOLDER}"]
-    assert _match(raw, shown, "restricted") is None
-    assert _match(raw, shown, "owned") == VisibleMatch(1, "owned", 1)
+    assert _match(raw, shown, "restricted") == VisibleMatch(1, "restricted", 1)
+    assert _match(raw, shown, "team") is None
 
 
-def test_text_introduced_by_a_rewrite_never_matches() -> None:
+def test_text_a_rewrite_shows_matches() -> None:
     raw = ["repos_analyzed_count: 4"]
     shown = ["repos_analyzed_count: 1"]
-    assert _match(raw, shown, "1") is None
-    assert _match(raw, shown, "count") == VisibleMatch(1, "count", 1)
+    assert _match(raw, shown, "1") == VisibleMatch(1, "1", 1)
+    assert _match(raw, shown, "4") is None
 
 
-def test_token_cut_by_a_rewrite_never_matches() -> None:
+def test_a_shown_token_counts_wherever_its_raw_text_came_from() -> None:
     raw = ["see sampleledger"]
     shown = ["see ledger"]
-    assert _match(raw, shown, "ledger") is None
+    assert _match(raw, shown, "ledger") == VisibleMatch(1, "ledger", 1)
 
 
-def test_phrase_never_spans_removed_text_or_lines() -> None:
+def test_phrase_matches_adjacent_shown_tokens_never_across_lines() -> None:
     raw = ["example, hidden-repo | ledger", "example", "repo"]
     shown = ["example | ledger", "example", "repo"]
-    assert _match(raw, shown, "example-ledger") is None
+    assert _match(raw, shown, "example-ledger") == VisibleMatch(
+        1, "example | ledger", 1
+    )
     assert _match(raw, shown, "example-repo") is None
+
+
+@pytest.mark.parametrize(
+    "raw_line",
+    ["zeta alphazeta alpha", "zeta zetazeta alpha", "zeta x alpha", "unrelated"],
+)
+def test_the_verdict_ignores_the_raw_line(raw_line: str) -> None:
+    shown = [f"zeta {RESTRICTED_PLACEHOLDER} alpha"]
+    assert _match([raw_line], shown, "alpha") == VisibleMatch(1, "alpha", 1)
 
 
 def test_fuzzy_counts_a_transposition_as_one_edit() -> None:

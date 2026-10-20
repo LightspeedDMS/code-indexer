@@ -82,7 +82,7 @@ def _checker(word: str) -> List[str]:
     return sorted(
         name
         for name, text in DOCS.items()
-        if first_visible_match([text], [text], terms) is not None
+        if first_visible_match([text], terms) is not None
     )
 
 
