@@ -63,5 +63,16 @@ def test_finditer_shares_the_budget() -> None:
     pattern = BoundedPattern(SLOW_PATTERN, budget_seconds=0.3, purpose="test")
     started = time.monotonic()
     with pytest.raises(PatternBudgetExhausted):
-        pattern.finditer((SLOW_TEXT + "\n") * 5)
+        list(pattern.finditer((SLOW_TEXT + "\n") * 5))
     assert time.monotonic() - started < 2.0
+    assert pattern.exhausted
+
+
+def test_finditer_returns_a_match_without_scanning_the_rest() -> None:
+    pattern = BoundedPattern(SLOW_PATTERN + "|c", budget_seconds=0.5, purpose="test")
+    matches = pattern.finditer("c" + SLOW_TEXT)
+    first = next(matches)
+    assert first.group(0) == "c"
+    assert not pattern.exhausted
+    with pytest.raises(PatternBudgetExhausted):
+        next(matches)

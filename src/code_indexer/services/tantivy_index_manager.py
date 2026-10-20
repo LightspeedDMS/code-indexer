@@ -32,7 +32,7 @@ _BOOL_OPS: frozenset = frozenset({"OR", "AND", "NOT"})
 # "job" -- no single term ever contains the substring "cancel_job". This new
 # field stores each document's raw content as ONE untokenized term
 # (tokenizer_name="raw"), so a regex wrapped for substring semantics can
-# match it via Tantivy's own DFA-based regex engine (ReDoS-immune, unlike
+# match it via Tantivy's own DFA-based regex engine (linear time, unlike
 # falling back to Python-level regex scanning across broad candidate sets).
 _REGEX_VERBATIM_FIELD = "content_raw_verbatim"
 
@@ -55,29 +55,10 @@ _REGEX_VERBATIM_FIELD = "content_raw_verbatim"
 # Query.term_query() against it matches only the exact path.
 _PATH_EXACT_FIELD = "path_exact_raw"
 
-# Bug #1497 (follow-up, ReDoS-immunity + accurate highlighting): sentinel for
-# "no precise match position available". Tantivy's DFA-based regex engine
-# already confirms the ACCEPT/REJECT decision for a regex query against the
-# verbatim field (ReDoS-immune, see the use_regex branch in search() below).
-# A separate Python-level match-position/text EXTRACTION step re-scans the
-# matched document with a bounded-timeout `regex.search(content_raw,
-# timeout=_REGEX_EXTRACTION_TIMEOUT_SECONDS)` call (see below) to recover the
-# actual matched substring/line/column for snippet/highlight display. This
-# sentinel is used only when that bounded extraction times out or otherwise
-# fails -- the document is still a genuine Tantivy-confirmed match, just
-# without a precisely-extracted highlight span.
+# Bug #1497: a Tantivy-decided hit with no extracted highlight keeps this position.
 _NO_MATCH_POSITION = -1
 
-# Bug #1497 (follow-up): bounded timeout (seconds) for the Python-level
-# match-position/text EXTRACTION step. This is a SEPARATE, backtracking
-# `regex.search(content_raw)` call that exists only to recover the matched
-# substring/position for snippet/highlight display -- it is NOT the query
-# decision itself (that is Tantivy's own DFA engine, already ReDoS-immune).
-# For an adversarial pattern like "(a|a)*b" this extraction call could, in
-# principle, itself backtrack catastrophically. Bounding it keeps the
-# overall search provably fast (well under the DFA-safety test's 0.1s
-# ceiling) while remaining far larger than the microseconds a legitimate
-# match normally takes to extract.
+# Bug #1497: per-call cap on highlight extraction (one budget per search).
 _REGEX_EXTRACTION_TIMEOUT_SECONDS = 0.03
 
 # Bug #1497 (follow-up): substring marker identifying Tantivy's
@@ -1118,8 +1099,8 @@ class TantivyIndexManager:
         content. Wrapping with [\\s\\S]* on both sides (rather than a global
         (?s) DOTALL flag) lets the wrapper span newlines while leaving the
         user's own pattern semantics (e.g. their own ".") untouched -- proven
-        via Tantivy's DFA regex engine to remain ReDoS-immune regardless of
-        pattern complexity.
+        via Tantivy's DFA regex engine to keep linear-time matching for any
+        pattern.
 
         Args:
             pattern: The user-supplied regex pattern (unwrapped).
@@ -1286,10 +1267,7 @@ class TantivyIndexManager:
             search_field = "content_raw" if case_sensitive else "content"
 
             # Build query based on regex flag
-            # IMPORTANT: Tantivy uses DFA-based regex engine (via tantivy-fst crate)
-            # which is immune to ReDoS attacks. All regex queries complete in linear
-            # time O(n) regardless of pattern complexity. Patterns like (a+)+, (a|a)*b
-            # that cause catastrophic backtracking in PCRE/Python are safe here.
+            # Tantivy regex queries run in linear time for any caller pattern.
             if use_regex:
                 # Build regex query using Tantivy's regex_query
                 assert self._schema is not None  # For mypy
@@ -1497,14 +1475,9 @@ class TantivyIndexManager:
             # result). This reduces 100x compilation overhead for searches with many
             # results.
             #
-            # Bug #1497 (follow-up): this Python-level regex is used ONLY to extract
-            # the matched text/position for snippet/highlight display from
-            # content_raw -- Tantivy's own DFA-based regex engine already made the
-            # ACCEPT/REJECT decision above and is ReDoS-immune regardless of pattern
-            # complexity (see the use_regex branch above). Each .search() call below
-            # is bounded by _REGEX_EXTRACTION_TIMEOUT_SECONDS so this extraction step
-            # can never regress that ReDoS-immunity guarantee, even for an
-            # adversarial pattern like "(a|a)*b".
+            # Bug #1497: this Python-level regex only extracts the highlight;
+            # Tantivy made the match decision, and the extraction shares one
+            # bounded evaluation budget per search.
             compiled_regex_pattern: Optional[BoundedPattern] = None
             # Story #1494 AC2 (Finding A4): count of candidates that
             # actually received the real (GIL-held) Python-level extraction

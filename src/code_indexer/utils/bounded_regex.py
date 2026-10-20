@@ -3,9 +3,9 @@
 Every caller-supplied pattern that is matched in Python goes through
 ``BoundedPattern``: one use (one search request) has one total matching
 budget, each call gets what remains of it (optionally capped per call),
-and a call that runs out raises ``PatternBudgetExhausted``. One WARNING is
-logged per use, naming its purpose and never the pattern. Only time spent
-matching counts.
+matches are produced only as the caller consumes them, and a call that
+runs out raises ``PatternBudgetExhausted``. One WARNING is logged per use,
+naming its purpose and never the pattern. Only time spent matching counts.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Any, Callable, List, Optional, TypeVar
+from typing import Any, Callable, Iterator, Optional, TypeVar
 
 import regex
 
@@ -64,23 +64,36 @@ class BoundedPattern:
         """
         return self._timed(lambda timeout: self._compiled.search(text, timeout=timeout))
 
-    def finditer(self, text: str) -> List[Any]:
-        """Every match in *text*, in order (a list: a drop-in for
-        ``re.Pattern.finditer`` that iterates the result).
+    def finditer(self, text: str) -> Iterator[Any]:
+        """The matches in *text*, in order, each found only when the caller
+        asks for it, so a caller that stops early never pays for the rest.
 
         Raises:
             PatternBudgetExhausted: this call ran out of time.
         """
-        return self._timed(
-            lambda timeout: list(self._compiled.finditer(text, timeout=timeout))
-        )
+        timeout = self._call_timeout()
+        matches = self._compiled.finditer(text, timeout=timeout)
+        while True:
+            started = time.monotonic()
+            try:
+                found = next(matches, None)
+            except TimeoutError as exc:
+                raise self._out_of_time() from exc
+            finally:
+                self._remaining -= time.monotonic() - started
+            if found is None:
+                return
+            yield found
 
-    def _timed(self, match: Callable[[float], T]) -> T:
+    def _call_timeout(self) -> float:
         if self.exhausted:
             raise self._out_of_time()
-        timeout = self._remaining
-        if self._call_seconds is not None:
-            timeout = min(timeout, self._call_seconds)
+        if self._call_seconds is None:
+            return self._remaining
+        return min(self._remaining, self._call_seconds)
+
+    def _timed(self, match: Callable[[float], T]) -> T:
+        timeout = self._call_timeout()
         started = time.monotonic()
         try:
             return match(timeout)

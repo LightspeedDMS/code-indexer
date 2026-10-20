@@ -1,5 +1,6 @@
 """Every server site that matches a caller-supplied pattern in Python shares a
-bounded evaluation budget."""
+bounded evaluation budget, stops at its result cap, and reports running out
+as an error rather than a partial result."""
 
 from __future__ import annotations
 
@@ -28,6 +29,27 @@ def test_python_multiline_regex_search_stops_within_its_timeout(
             SLOW_PATTERN, tmp_path, None, None, True, 100, timeout_seconds=1
         )
     assert time.monotonic() - started < 2.0
+
+
+def test_python_multiline_search_stops_at_its_result_cap() -> None:
+    import tracemalloc
+
+    from code_indexer.global_repos.regex_search import RegexMatch, RegexSearchService
+    from code_indexer.utils.bounded_regex import BoundedPattern
+
+    content = "x" * 1_000_000
+    every_position = BoundedPattern(r"(?=)", purpose="test", budget_seconds=30)
+    matches: list[RegexMatch] = []
+    tracemalloc.start()
+    try:
+        stop, count = RegexSearchService._scan_multiline_content(
+            content, every_position, "wide.txt", matches, 5
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert (stop, count, len(matches)) == (True, 6, 5)
+    assert peak < 4 * 1024 * 1024, f"peak allocation {peak} bytes"
 
 
 def _forge(jobs: Any, log_text: str) -> Any:
@@ -71,13 +93,22 @@ def test_ci_log_search_stops_within_its_budget(forge: str) -> None:
     assert time.monotonic() - started < 2.5
 
 
-def test_omni_repository_regex_stops_within_its_budget() -> None:
+def test_omni_repository_patterns_share_one_deadline_and_fail_loudly() -> None:
     from code_indexer.server.omni.repo_pattern_matcher import RepoPatternMatcher
 
     repos = ["fast-ab"] + [f"{SLOW_NAME}{n}" for n in range(3)]
+    patterns = [SLOW_PATTERN, SLOW_PATTERN + "|x^", SLOW_PATTERN + "|y^"]
     started = time.monotonic()
-    assert RepoPatternMatcher([SLOW_PATTERN]).filter_repos(repos) == ["fast-ab"]
+    with pytest.raises(TimeoutError, match="repository pattern took too long"):
+        RepoPatternMatcher(patterns).filter_repos(repos)
     assert time.monotonic() - started < 2.0
+
+
+def test_omni_repository_regex_within_the_deadline_still_filters() -> None:
+    from code_indexer.server.omni.repo_pattern_matcher import RepoPatternMatcher
+
+    repos = ["svc-a", "svc-b", "lib-c"]
+    assert RepoPatternMatcher(["^svc-", "^lib-c$"]).filter_repos(repos) == repos
 
 
 def test_xray_filename_driver_stops_within_its_walk_budget(tmp_path: Path) -> None:

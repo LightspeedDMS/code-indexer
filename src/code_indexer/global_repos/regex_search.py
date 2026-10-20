@@ -2255,7 +2255,7 @@ class RegexSearchService:
         returned is a genuine match within that substring.
 
         Bug #1611: this method previously had NO timeout enforcement of
-        any kind -- a slow multiline regex (catastrophic backtracking) or
+        any kind -- a slow multiline regex or
         a large repo scanned via this fallback could run unbounded,
         regardless of the caller's requested ``timeout_seconds``, since
         this synchronous ``os.walk`` loop is the whole unit of work

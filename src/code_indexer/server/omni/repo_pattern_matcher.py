@@ -4,10 +4,22 @@ Repository pattern matching for omni-search.
 Filters repository aliases by wildcard patterns and regex.
 """
 
+import re
+import time
 import pathspec
 from typing import List
 
-from code_indexer.utils.bounded_regex import BoundedPattern
+from code_indexer.utils.bounded_regex import (
+    CALLER_PATTERN_BUDGET_SECONDS,
+    BoundedPattern,
+    PatternBudgetExhausted,
+)
+
+REPOSITORY_PATTERN_TIMEOUT_MESSAGE = "repository pattern took too long to evaluate"
+
+
+class RepositoryPatternTimeout(PatternBudgetExhausted):
+    """The repository patterns of one request ran out of evaluation time."""
 
 
 class RepoPatternMatcher:
@@ -45,11 +57,16 @@ class RepoPatternMatcher:
 
         Returns:
             List of repositories matching any pattern (preserves input order)
+
+        Raises:
+            RepositoryPatternTimeout: the regex patterns, together, ran out
+                of their one evaluation deadline; no partial result is given.
         """
         if not self.patterns:
             return []
 
         matched = set()
+        deadline = time.monotonic() + CALLER_PATTERN_BUDGET_SECONDS
 
         for pattern in self.patterns:
             if self.is_pattern(pattern):
@@ -57,15 +74,22 @@ class RepoPatternMatcher:
                 is_regex = any(op in pattern for op in ["^", "$", "+", "|"])
 
                 if is_regex:
-                    # Use regex for advanced patterns
                     try:
-                        # Bounded: exhausting the budget stops this pattern.
-                        regex = BoundedPattern(pattern, purpose="repository alias")
+                        regex = BoundedPattern(
+                            pattern,
+                            purpose="repository alias",
+                            budget_seconds=max(0.0, deadline - time.monotonic()),
+                        )
+                    except re.error:
+                        continue
+                    try:
                         for repo in repos:
                             if regex.search(repo):
                                 matched.add(repo)
-                    except Exception:
-                        pass
+                    except PatternBudgetExhausted as exc:
+                        raise RepositoryPatternTimeout(
+                            REPOSITORY_PATTERN_TIMEOUT_MESSAGE
+                        ) from exc
                 else:
                     # Use pathspec for wildcard patterns (*, ?, [abc], **)
                     # This correctly handles ** as "zero or more directories"
