@@ -512,12 +512,15 @@ def document_participants(
 def read_domain_entries(
     dep_map_dir: Path,
 ) -> Tuple[Tuple[Mapping[str, Any], ...], bool]:
-    """The ``_domains.json`` entries, and True when the file is present but
-    does not parse (unreadable, invalid JSON, not a list, or an entry that is
-    not an object): then no entry is trusted."""
+    """The ``_domains.json`` entries, and True when the path is present but
+    does not parse (not a regular file, unreadable, invalid JSON, not a
+    list, or an entry that is not an object): then no entry is trusted.
+    Only a missing path is absent."""
     path = Path(dep_map_dir) / DOMAINS_JSON
-    if not path.is_file():
+    if not os.path.lexists(path):
         return (), False
+    if not path.is_file():
+        return (), True
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):

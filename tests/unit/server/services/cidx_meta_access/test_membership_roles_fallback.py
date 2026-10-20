@@ -250,6 +250,16 @@ def test_unparsable_domains_json_never_falls_back(
     assert any("_domains.json" in r.getMessage() for r in caplog.records)
 
 
+def test_present_domains_json_that_is_not_a_file_never_falls_back(
+    fx: CidxMetaFixture,
+) -> None:
+    _probe_domain(fx, "domain_kind: probe", [])
+    domains_file = fx.dep_map_dir / "_domains.json"
+    domains_file.unlink()
+    domains_file.mkdir()
+    _assert_hidden(fx)
+
+
 def test_frontmatter_membership_still_counts_when_domains_json_is_unparsable(
     fx: CidxMetaFixture,
 ) -> None:
