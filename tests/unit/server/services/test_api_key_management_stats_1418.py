@@ -139,3 +139,63 @@ class TestCohereConnectivityFailure:
         assert result.success is False
         assert len(writer.records) == 1
         assert writer.records[0].success is False
+
+
+def _tester(status: int, body: dict) -> ApiKeyConnectivityTester:
+    return ApiKeyConnectivityTester(
+        http_client_factory=_FakeAsyncHttpClientFactory(
+            lambda request: httpx.Response(status, json=body)
+        )
+    )
+
+
+class TestConnectivityRecordsVendorTokens:
+    """Issue #2173: the key test records the vendor-reported tokens; a
+    failed key test records 0."""
+
+    @pytest.mark.asyncio
+    async def test_voyageai_records_vendor_usage_total_tokens(self):
+        writer = _install_writer()
+        tester = _tester(
+            200, {"data": [{"embedding": [0.1]}], "usage": {"total_tokens": 1}}
+        )
+
+        result = await tester.test_voyageai_connectivity("test-key")
+
+        assert result.success is True
+        assert [r.token_count for r in writer.records] == [1]
+
+    @pytest.mark.asyncio
+    async def test_cohere_records_billed_input_tokens(self):
+        writer = _install_writer()
+        tester = _tester(
+            200,
+            {
+                "embeddings": {"float": [[0.1]]},
+                "meta": {"billed_units": {"input_tokens": 2, "image_tokens": 0}},
+            },
+        )
+
+        result = await tester.test_cohere_connectivity("test-key")
+
+        assert result.success is True
+        assert [r.token_count for r in writer.records] == [2]
+
+    @pytest.mark.asyncio
+    async def test_failures_record_zero_tokens(self):
+        writer = _install_writer()
+        tester = _tester(
+            401,
+            {
+                "usage": {"total_tokens": 1},
+                "meta": {"billed_units": {"input_tokens": 2}},
+            },
+        )
+
+        await tester.test_voyageai_connectivity("bad-key")
+        await tester.test_cohere_connectivity("bad-key")
+
+        assert [(r.provider, r.success, r.token_count) for r in writer.records] == [
+            ("voyageai", False, 0),
+            ("cohere", False, 0),
+        ]

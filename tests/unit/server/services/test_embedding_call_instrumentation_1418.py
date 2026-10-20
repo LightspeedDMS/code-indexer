@@ -72,7 +72,7 @@ class TestInstrumentCallSuccess:
             call_type="embed",
             model="voyage-code-3",
             item_count=3,
-            token_count=42,
+            tokens_from_result=lambda _r: 42,
             batch_size=3,
             purpose="index",
             fn=lambda: {"data": "ok"},
@@ -104,7 +104,7 @@ class TestInstrumentCallSuccess:
             call_type="rerank",
             model="rerank-v3.5",
             item_count=1,
-            token_count=0,
+            tokens_from_result=lambda _r: 0,
             batch_size=1,
             purpose="query",
             fn=lambda: None,
@@ -137,7 +137,7 @@ class TestInstrumentCallFailure:
                 call_type="rerank",
                 model="rerank-2.5",
                 item_count=5,
-                token_count=0,
+                tokens_from_result=lambda _r: 0,
                 batch_size=5,
                 purpose="query",
                 fn=_boom,
@@ -160,7 +160,7 @@ class TestInstrumentCallStatsWriterFailOpen:
             call_type="embed",
             model="voyage-code-3",
             item_count=1,
-            token_count=1,
+            tokens_from_result=lambda _r: 1,
             batch_size=1,
             purpose="index",
             fn=lambda: "real-result",
@@ -184,7 +184,7 @@ class TestInstrumentCallStatsWriterFailOpen:
                 call_type="embed",
                 model="voyage-code-3",
                 item_count=1,
-                token_count=1,
+                tokens_from_result=lambda _r: 1,
                 batch_size=1,
                 purpose="index",
                 fn=_boom,
@@ -202,7 +202,7 @@ class TestInstrumentCallDefaultsToNoOpWhenNoWriterInstalled:
             call_type="embed",
             model="voyage-code-3",
             item_count=1,
-            token_count=1,
+            tokens_from_result=lambda _r: 1,
             batch_size=1,
             purpose="index",
             fn=lambda: 42,
@@ -232,7 +232,7 @@ class TestInstrumentCallAsyncSuccess:
             call_type="embed",
             model="voyage-code-3",
             item_count=1,
-            token_count=0,
+            tokens_from_result=lambda _r: 0,
             batch_size=1,
             purpose="key_test",
             fn=_fn,
@@ -263,7 +263,7 @@ class TestInstrumentCallAsyncFailure:
                 call_type="embed",
                 model="embed-v4.0",
                 item_count=1,
-                token_count=0,
+                tokens_from_result=lambda _r: 0,
                 batch_size=1,
                 purpose="key_test",
                 fn=_boom,
@@ -288,7 +288,7 @@ class TestInstrumentCallAsyncFailure:
             call_type="embed",
             model="voyage-code-3",
             item_count=1,
-            token_count=0,
+            tokens_from_result=lambda _r: 0,
             batch_size=1,
             purpose="key_test",
             fn=_fn,
@@ -323,7 +323,7 @@ class TestInstrumentCallStatsPurposeOverride:
                 call_type="embed",
                 model="voyage-code-3",
                 item_count=1,
-                token_count=1,
+                tokens_from_result=lambda _r: 1,
                 batch_size=1,
                 purpose="query",
                 fn=lambda: "ok",
@@ -344,7 +344,7 @@ class TestInstrumentCallStatsPurposeOverride:
             call_type="embed",
             model="voyage-code-3",
             item_count=1,
-            token_count=1,
+            tokens_from_result=lambda _r: 1,
             batch_size=1,
             purpose="query",
             fn=lambda: "ok",
@@ -369,7 +369,7 @@ class TestInstrumentCallStatsPurposeOverride:
             call_type="embed",
             model="voyage-code-3",
             item_count=1,
-            token_count=1,
+            tokens_from_result=lambda _r: 1,
             batch_size=1,
             purpose="index",
             fn=lambda: "ok",
@@ -396,13 +396,277 @@ class TestInstrumentCallStatsPurposeOverride:
                 call_type="embed",
                 model="embed-v4.0",
                 item_count=1,
-                token_count=1,
+                tokens_from_result=lambda _r: 1,
                 batch_size=1,
                 purpose="query",
                 fn=_fn,
             )
 
         assert writer.records[0].purpose == "cache_shadow_audit"
+
+
+_ECI_LOGGER = "code_indexer.server.services.embedding_call_instrumentation"
+
+
+def _sync_call(fn, tokens_from_result):
+    from code_indexer.server.services.embedding_call_instrumentation import (
+        instrument_call,
+    )
+
+    return instrument_call(
+        provider="voyageai",
+        call_type="embed",
+        model="voyage-code-3",
+        item_count=1,
+        tokens_from_result=tokens_from_result,
+        batch_size=1,
+        purpose="index",
+        fn=fn,
+    )
+
+
+async def _async_call(fn, tokens_from_result):
+    from code_indexer.server.services.embedding_call_instrumentation import (
+        instrument_call_async,
+    )
+
+    async def _afn():
+        return fn()
+
+    return await instrument_call_async(
+        provider="voyageai",
+        call_type="embed",
+        model="voyage-code-3",
+        item_count=1,
+        tokens_from_result=tokens_from_result,
+        batch_size=1,
+        purpose="key_test",
+        fn=_afn,
+    )
+
+
+def _raise_vendor_error():
+    raise RuntimeError("vendor error")
+
+
+def _broken_extractor(_result):
+    raise KeyError("usage")
+
+
+def _recording_extractor(seen):
+    def _extract(result):
+        seen.append(result)
+        return 23
+
+    return _extract
+
+
+class TestTokensFromResultContract:
+    """Issue #2173: the vendor token count is read from fn()'s result AFTER
+    a successful call; a failed call records 0 without calling the
+    extractor; an extractor error records 0, warns and never raises."""
+
+    def test_success_records_extractor_result(self):
+        writer = _RecordingWriter()
+        _install(writer)
+        seen: list = []
+
+        result = _sync_call(lambda: "resp", _recording_extractor(seen))
+
+        assert result == "resp"
+        assert seen == ["resp"]
+        assert [(r.success, r.token_count) for r in writer.records] == [(True, 23)]
+
+    def test_fn_raises_records_zero_and_skips_extractor(self):
+        writer = _RecordingWriter()
+        _install(writer)
+        seen: list = []
+
+        with pytest.raises(RuntimeError, match="vendor error"):
+            _sync_call(_raise_vendor_error, _recording_extractor(seen))
+
+        assert seen == []
+        assert [(r.success, r.token_count) for r in writer.records] == [(False, 0)]
+
+    def test_extractor_raises_returns_result_records_zero_and_warns(self, caplog):
+        writer = _RecordingWriter()
+        _install(writer)
+
+        with caplog.at_level("WARNING", logger=_ECI_LOGGER):
+            result = _sync_call(lambda: "resp", _broken_extractor)
+
+        assert result == "resp"
+        assert [(r.success, r.token_count) for r in writer.records] == [(True, 0)]
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "voyageai" in warnings[0].getMessage()
+        assert "KeyError" in warnings[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_async_success_records_extractor_result(self):
+        writer = _RecordingWriter()
+        _install(writer)
+
+        result = await _async_call(lambda: "resp", lambda r: 23)
+
+        assert result == "resp"
+        assert [(r.success, r.token_count) for r in writer.records] == [(True, 23)]
+
+    @pytest.mark.asyncio
+    async def test_async_fn_raises_records_zero_and_skips_extractor(self):
+        writer = _RecordingWriter()
+        _install(writer)
+        seen: list = []
+
+        with pytest.raises(RuntimeError, match="vendor error"):
+            await _async_call(_raise_vendor_error, _recording_extractor(seen))
+
+        assert seen == []
+        assert [(r.success, r.token_count) for r in writer.records] == [(False, 0)]
+
+    @pytest.mark.asyncio
+    async def test_async_extractor_raises_returns_result_records_zero_and_warns(
+        self, caplog
+    ):
+        writer = _RecordingWriter()
+        _install(writer)
+
+        with caplog.at_level("WARNING", logger=_ECI_LOGGER):
+            result = await _async_call(lambda: "resp", _broken_extractor)
+
+        assert result == "resp"
+        assert [(r.success, r.token_count) for r in writer.records] == [(True, 0)]
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "KeyError" in warnings[0].getMessage()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_usage_warning_throttle(monkeypatch):
+    from code_indexer.server.services import embedding_call_instrumentation as eci
+
+    monkeypatch.setattr(eci, "_usage_warning_last", {}, raising=False)
+
+
+def _warnings(caplog):
+    return [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+class TestMissingUsage:
+    """Issue #2173: a successful response without a readable usage figure
+    records 0 and logs a WARNING throttled per (provider, call_type, model),
+    so a vendor schema change cannot flood the indexing hot path."""
+
+    @pytest.mark.parametrize(
+        "body, expected",
+        [
+            ({"usage": {"total_tokens": 12}}, 12),
+            ({"usage": {"total_tokens": 0}}, 0),
+            ({}, None),
+            ({"usage": None}, None),
+            ({"usage": {"total_tokens": True}}, None),
+            ({"usage": {"total_tokens": -1}}, None),
+            ({"usage": {"total_tokens": "12"}}, None),
+            (["not", "a", "dict"], None),
+        ],
+    )
+    def test_voyage_usage_tokens_reads_only_a_non_negative_int(self, body, expected):
+        import httpx
+
+        from code_indexer.server.services.embedding_call_instrumentation import (
+            voyage_usage_tokens,
+        )
+
+        assert voyage_usage_tokens(httpx.Response(200, json=body)) == expected
+
+    @pytest.mark.parametrize(
+        "body, expected",
+        [
+            ({"meta": {"billed_units": {"input_tokens": 2, "image_tokens": 6}}}, 2),
+            ({}, None),
+            ({"meta": {}}, None),
+            ({"meta": {"billed_units": {"search_units": 1}}}, None),
+            ({"meta": {"billed_units": {"input_tokens": False}}}, None),
+            ({"meta": {"billed_units": {"input_tokens": -3}}}, None),
+        ],
+    )
+    def test_cohere_billed_input_tokens_reads_only_a_non_negative_int(
+        self, body, expected
+    ):
+        import httpx
+
+        from code_indexer.server.services.embedding_call_instrumentation import (
+            cohere_billed_input_tokens,
+        )
+
+        assert cohere_billed_input_tokens(httpx.Response(200, json=body)) == expected
+
+    @pytest.mark.parametrize(
+        "billed_units, expected",
+        [({"search_units": 1}, 0), ({"search_units": 1, "input_tokens": 3}, 3)],
+    )
+    def test_cohere_rerank_billed_tokens_is_zero_without_input_tokens(
+        self, billed_units, expected
+    ):
+        import httpx
+
+        from code_indexer.server.services.embedding_call_instrumentation import (
+            cohere_rerank_billed_tokens,
+        )
+
+        response = httpx.Response(200, json={"meta": {"billed_units": billed_units}})
+        assert cohere_rerank_billed_tokens(response) == expected
+
+    def test_missing_usage_records_zero_and_warns_naming_the_call(self, caplog):
+        writer = _RecordingWriter()
+        _install(writer)
+
+        with caplog.at_level("WARNING", logger=_ECI_LOGGER):
+            result = _sync_call(lambda: "resp", lambda _r: None)
+
+        assert result == "resp"
+        assert [(r.success, r.token_count) for r in writer.records] == [(True, 0)]
+        [warning] = _warnings(caplog)
+        message = warning.getMessage()
+        assert "missing" in message
+        assert "voyageai" in message
+        assert "embed" in message
+        assert "voyage-code-3" in message
+
+    def test_repeat_within_interval_is_not_warned_again(self, caplog):
+        _install(_RecordingWriter())
+
+        with caplog.at_level("WARNING", logger=_ECI_LOGGER):
+            _sync_call(lambda: "resp", lambda _r: None)
+            _sync_call(lambda: "resp", lambda _r: None)
+            _sync_call(lambda: "resp", _broken_extractor)
+            _sync_call(lambda: "resp", _broken_extractor)
+
+        assert len(_warnings(caplog)) == 2
+
+    def test_warns_again_once_the_interval_has_elapsed(self, caplog, monkeypatch):
+        from code_indexer.server.services import embedding_call_instrumentation as eci
+
+        monkeypatch.setattr(eci, "_USAGE_WARNING_INTERVAL_SECONDS", 0.0, raising=False)
+        _install(_RecordingWriter())
+
+        with caplog.at_level("WARNING", logger=_ECI_LOGGER):
+            _sync_call(lambda: "resp", lambda _r: None)
+            _sync_call(lambda: "resp", lambda _r: None)
+
+        assert len(_warnings(caplog)) == 2
+
+    @pytest.mark.asyncio
+    async def test_async_missing_usage_records_zero_and_warns(self, caplog):
+        writer = _RecordingWriter()
+        _install(writer)
+
+        with caplog.at_level("WARNING", logger=_ECI_LOGGER):
+            result = await _async_call(lambda: "resp", lambda _r: None)
+
+        assert result == "resp"
+        assert [(r.success, r.token_count) for r in writer.records] == [(True, 0)]
+        assert len(_warnings(caplog)) == 1
 
 
 class TestInstrumentCallLatencyMeasurement:
@@ -423,7 +687,7 @@ class TestInstrumentCallLatencyMeasurement:
             call_type="embed",
             model="voyage-code-3",
             item_count=1,
-            token_count=1,
+            tokens_from_result=lambda _r: 1,
             batch_size=1,
             purpose="index",
             fn=_slow,

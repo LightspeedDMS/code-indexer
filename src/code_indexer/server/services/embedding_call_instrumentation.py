@@ -16,6 +16,12 @@ raising) is caught and logged -- it NEVER masks or replaces the wrapped
 call's own return value or exception. This is observability-only
 side-channel code; it must never affect indexing/query/rerank behavior.
 
+token_count is what the vendor billed, read AFTER fn() succeeds by the call
+site's ``tokens_from_result`` extractor -- one shared parser per vendor
+(voyage_usage_tokens, cohere_billed_input_tokens, cohere_rerank_billed_tokens),
+never the local tokenizer. A failed call records 0; a successful response
+without a readable usage figure records 0 and logs a rate-limited WARNING.
+
 instrument_call_async() is the async twin needed by
 api_key_management.py's async VoyageAI/Cohere connectivity-test methods
 (injection points 9/10) -- identical contract, awaits an async ``fn``.
@@ -28,9 +34,21 @@ import logging
 import threading
 import time
 from contextlib import contextmanager
-from typing import Awaitable, Callable, Iterator, Optional, Sequence, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Iterator,
+    Optional,
+    Sequence,
+    TypeVar,
+)
 
 from code_indexer.server.services.embedding_call_stats import EmbeddingCallRecord
+
+if TYPE_CHECKING:
+    import httpx
 
 # Child-side module (src/code_indexer/services/run_spend_meter.py): the meter
 # belongs to the `cidx index` child process, not to a server service.
@@ -86,6 +104,42 @@ _GENERIC_INDEX_PURPOSE = "index"
 _TEMPORAL_PURPOSE = "temporal"
 _REFRESH_PURPOSE = "refresh"
 _TEMPORAL_REFRESH_PURPOSE = "temporal_refresh"
+
+
+def _usage_int(body: Any, *path: str) -> Optional[int]:
+    """The non-negative int at ``path`` in a vendor JSON body, else None."""
+    value = body
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def voyage_usage_tokens(response: "httpx.Response") -> Optional[int]:
+    """Voyage-reported ``usage.total_tokens`` of a successful response
+    (embeddings, contextualized, multimodal and rerank endpoints); None when
+    the response carries no readable figure."""
+    return _usage_int(response.json(), "usage", "total_tokens")
+
+
+def cohere_billed_input_tokens(response: "httpx.Response") -> Optional[int]:
+    """Cohere-billed ``meta.billed_units.input_tokens`` of a successful
+    ``/v2/embed`` response (text and multimodal); None when absent. Image
+    tokens are billed separately and not counted here."""
+    return _usage_int(response.json(), "meta", "billed_units", "input_tokens")
+
+
+def cohere_rerank_billed_tokens(response: "httpx.Response") -> int:
+    """Cohere ``/v2/rerank`` input tokens when reported, else 0.
+
+    Rerank is billed in ``search_units``, which are not tokens and are never
+    stored in token_count; an absent token figure is therefore expected and
+    not a missing-usage case."""
+    tokens = cohere_billed_input_tokens(response)
+    return 0 if tokens is None else tokens
 
 
 def _current_attribution() -> Optional[StatsAttribution]:
@@ -170,13 +224,66 @@ def _record_call(
         logger.warning("embedding stats recording failed: %s", exc)
 
 
+#: Minimum gap between two missing-usage WARNINGs for one (provider,
+#: call_type, model, reason); the check runs on the indexing hot path.
+_USAGE_WARNING_INTERVAL_SECONDS = 600.0
+_usage_warning_last: "dict[tuple[str, str, str, str], float]" = {}
+_usage_warning_lock = threading.Lock()
+
+
+def _warn_usage_unavailable(
+    provider: str, call_type: str, model: str, reason: str
+) -> None:
+    """Log that a successful call's vendor usage was not recorded, at most
+    once per (provider, call_type, model, reason) per interval."""
+    key = (provider, call_type, model, reason)
+    now = time.monotonic()
+    with _usage_warning_lock:
+        last = _usage_warning_last.get(key)
+        if last is not None and now - last < _USAGE_WARNING_INTERVAL_SECONDS:
+            return
+        _usage_warning_last[key] = now
+    logger.warning(
+        "embedding stats: vendor token usage %s for provider=%s call_type=%s "
+        "model=%s; token_count recorded as 0",
+        reason,
+        provider,
+        call_type,
+        model,
+    )
+
+
+def _tokens_for_success(
+    result: T,
+    tokens_from_result: Callable[[T], Optional[int]],
+    provider: str,
+    call_type: str,
+    model: str,
+) -> int:
+    """The vendor token count of a successful call; fail-open to 0.
+
+    A None from the extractor means the response carried no readable usage
+    figure; that, like an extractor error, records 0 and warns."""
+    try:
+        tokens = tokens_from_result(result)
+    except Exception as exc:  # fail-open: never raise into indexing/query
+        _warn_usage_unavailable(
+            provider, call_type, model, f"unreadable ({type(exc).__name__})"
+        )
+        return 0
+    if tokens is None:
+        _warn_usage_unavailable(provider, call_type, model, "missing")
+        return 0
+    return tokens
+
+
 def instrument_call(
     *,
     provider: str,
     call_type: str,
     model: str,
     item_count: int,
-    token_count: int,
+    tokens_from_result: Callable[[T], Optional[int]],
     batch_size: int,
     purpose: str,
     fn: Callable[[], T],
@@ -192,7 +299,12 @@ def instrument_call(
         call_type: "embed" | "embed_multimodal" | "rerank".
         model: Vendor model name actually used for the call.
         item_count: Number of items (texts/documents) in this call.
-        token_count: Token count for this call (0 when not applicable/known).
+        tokens_from_result: Called with ``fn()``'s return value, only after
+            ``fn()`` succeeded; returns the vendor-reported token count
+            recorded as ``token_count``. A failed call records 0 (not
+            billed) and this is not called. A None return (no readable
+            usage figure) or an exception records 0 and logs a rate-limited
+            WARNING; neither ever reaches the caller.
         batch_size: Batch size sent to the vendor for this call.
         purpose: "index" | "refresh" | "query" | "temporal" | "key_test" |
             "cache_shadow_audit".
@@ -222,9 +334,13 @@ def instrument_call(
     get_run_spend_meter().charge(purpose=purpose, inputs=inputs)
     start = time.time()
     success = False
+    token_count = 0
     try:
         result = fn()
         success = True
+        token_count = _tokens_for_success(
+            result, tokens_from_result, provider, call_type, model
+        )
         return result
     finally:
         latency_ms = int((time.time() - start) * 1000)
@@ -250,7 +366,7 @@ async def instrument_call_async(
     call_type: str,
     model: str,
     item_count: int,
-    token_count: int,
+    tokens_from_result: Callable[[T], Optional[int]],
     batch_size: int,
     purpose: str,
     fn: Callable[[], Awaitable[T]],
@@ -265,9 +381,13 @@ async def instrument_call_async(
     get_run_spend_meter().charge(purpose=purpose, inputs=inputs)
     start = time.time()
     success = False
+    token_count = 0
     try:
         result = await fn()
         success = True
+        token_count = _tokens_for_success(
+            result, tokens_from_result, provider, call_type, model
+        )
         return result
     finally:
         latency_ms = int((time.time() - start) * 1000)

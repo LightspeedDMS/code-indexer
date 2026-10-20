@@ -251,7 +251,7 @@ def _instrumented(purpose: str, inputs, sent: List[int]) -> None:
         call_type="embed",
         model="voyage-code-3",
         item_count=len(inputs or []),
-        token_count=0,
+        tokens_from_result=lambda _r: 0,
         batch_size=len(inputs or []),
         purpose=purpose,
         fn=_fn,

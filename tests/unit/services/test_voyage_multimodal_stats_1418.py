@@ -40,10 +40,13 @@ def _reset_active_writer():
     from code_indexer.server.services.embedding_stats_writer import (
         EmbeddingStatsWriter,
     )
+    from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
     EmbeddingStatsWriter._active = None
+    ProviderHealthMonitor.reset_instance()
     yield
     EmbeddingStatsWriter._active = None
+    ProviderHealthMonitor.reset_instance()
 
 
 def _install_writer() -> _RecordingWriter:
@@ -185,3 +188,94 @@ class TestSubmitMultimodalBatch:
 
         assert len(writer.records) == 1
         assert writer.records[0].success is False
+
+
+class TestMultimodalRecordsVendorTokens:
+    """Issue #2173: token_count is Voyage's usage.total_tokens (image pixels
+    already folded into it by the vendor); a failed call records 0."""
+
+    def test_single_item_records_vendor_total_tokens(self, monkeypatch, mock_api_key):
+        writer = _install_writer()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"embedding": [0.1] * 1024}],
+                    "usage": {
+                        "text_tokens": 1,
+                        "image_pixels": 50000,
+                        "video_pixels": 0,
+                        "total_tokens": 90,
+                    },
+                },
+            )
+
+        _patch_httpx_client_with_mock_transport(monkeypatch, handler)
+        client = VoyageMultimodalClient(VoyageAIConfig(model="voyage-multimodal-3"))
+
+        client.get_multimodal_embedding("hello", image_paths=[])
+
+        assert [r.token_count for r in writer.records] == [90]
+
+    def test_batch_records_vendor_total_tokens(self, monkeypatch, mock_api_key):
+        writer = _install_writer()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"embedding": [0.1] * 1024}, {"embedding": [0.2] * 1024}],
+                    "usage": {"text_tokens": 7, "total_tokens": 7},
+                },
+            )
+
+        _patch_httpx_client_with_mock_transport(monkeypatch, handler)
+        client = VoyageMultimodalClient(VoyageAIConfig(model="voyage-multimodal-3"))
+
+        client._submit_multimodal_batch(
+            [{"text": "a", "image_paths": []}, {"text": "b", "image_paths": []}]
+        )
+
+        assert [r.token_count for r in writer.records] == [7]
+
+    def test_failed_call_records_zero_tokens(self, monkeypatch, mock_api_key):
+        writer = _install_writer()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={"usage": {"total_tokens": 7}})
+
+        _patch_httpx_client_with_mock_transport(monkeypatch, handler)
+        client = VoyageMultimodalClient(VoyageAIConfig(model="voyage-multimodal-3"))
+
+        with pytest.raises(httpx.HTTPStatusError):
+            client.get_multimodal_embedding("hello", image_paths=[])
+
+        assert [(r.success, r.token_count) for r in writer.records] == [(False, 0)]
+
+    def test_fake_server_multimodal_reply_carries_usage(self, caplog, tmp_path):
+        """Real-CLI tests route the multimodal client to the repo's fake
+        VoyageAI server; its reply must carry the usage block the real API
+        returns, or every such call logs the missing-usage WARNING."""
+        from tests.utils.fake_voyage_provider import running_fake_voyage_server
+
+        image = tmp_path / "example.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"example-image")
+        writer = _install_writer()
+        sentinel = "issue-2173-fake-key"
+        with running_fake_voyage_server(sentinel) as server:
+            with patch.dict(os.environ, {"VOYAGE_API_KEY": sentinel}):
+                client = VoyageMultimodalClient(
+                    VoyageAIConfig(model="voyage-multimodal-3")
+                )
+            client.config.api_endpoint = server.base_url + "/v1/multimodalembeddings"
+            with caplog.at_level(
+                "WARNING",
+                logger="code_indexer.server.services.embedding_call_instrumentation",
+            ):
+                client.get_multimodal_embedding("hello fake", image_paths=[image])
+
+        [rec] = writer.records
+        assert rec.success is True
+        assert rec.token_count > 0
+        assert [r for r in caplog.records if r.levelname == "WARNING"] == []

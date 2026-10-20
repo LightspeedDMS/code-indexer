@@ -301,6 +301,7 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                 return cast(httpx.Response, _response)
 
             from code_indexer.server.services.embedding_call_instrumentation import (
+                cohere_billed_input_tokens,
                 instrument_call,
             )
 
@@ -326,7 +327,7 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                     call_type="embed",
                     model=self.config.model,
                     item_count=len(texts),
-                    token_count=0,
+                    tokens_from_result=cohere_billed_input_tokens,
                     batch_size=len(texts),
                     purpose="query" if not retry else "index",
                     fn=_do_post_and_validate,

@@ -70,7 +70,7 @@ def _embed(purpose: str, **kwargs: str) -> None:
         call_type="embed",
         model="voyage-code-3",
         item_count=3,
-        token_count=0,
+        tokens_from_result=lambda _r: 0,
         batch_size=3,
         purpose=purpose,
         fn=lambda: None,

@@ -252,6 +252,7 @@ class CohereMultimodalClient:
         _start = time.time()
 
         from code_indexer.server.services.embedding_call_instrumentation import (
+            cohere_billed_input_tokens,
             instrument_call,
         )
         from code_indexer.services.provider_request_timeout import (
@@ -322,7 +323,7 @@ class CohereMultimodalClient:
                     call_type="embed_multimodal",
                     model=self.config.model,
                     item_count=len(inputs),
-                    token_count=0,
+                    tokens_from_result=cohere_billed_input_tokens,
                     batch_size=len(inputs),
                     purpose=stats_purpose,
                     fn=_do_post_and_validate,

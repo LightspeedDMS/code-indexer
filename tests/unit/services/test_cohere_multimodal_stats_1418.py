@@ -37,10 +37,13 @@ def _reset_active_writer():
     from code_indexer.server.services.embedding_stats_writer import (
         EmbeddingStatsWriter,
     )
+    from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
     EmbeddingStatsWriter._active = None
+    ProviderHealthMonitor.reset_instance()
     yield
     EmbeddingStatsWriter._active = None
+    ProviderHealthMonitor.reset_instance()
 
 
 def _install_writer() -> _RecordingWriter:
@@ -93,6 +96,65 @@ class TestCohereMultimodalMakeRequestSuccess:
         assert rec.model == "embed-v4.0"
         assert rec.purpose == "index"
         assert rec.success is True
+
+
+_BILLED_RESPONSE = {
+    "embeddings": {"float": [[0.1] * 1536]},
+    "meta": {
+        "api_version": {"version": "2"},
+        "billed_units": {"input_tokens": 1, "image_tokens": 6},
+    },
+}
+
+
+class TestCohereMultimodalRecordsVendorTokens:
+    """Issue #2173: token_count is meta.billed_units.input_tokens; image
+    tokens are billed separately and not recorded in this column."""
+
+    def test_success_records_billed_input_tokens(self, monkeypatch):
+        writer = _install_writer()
+        _patch_httpx_client_with_mock_transport(
+            monkeypatch, lambda request: httpx.Response(200, json=_BILLED_RESPONSE)
+        )
+        client = CohereMultimodalClient(
+            CohereConfig(api_key="test-key", model="embed-v4.0")
+        )
+
+        client._make_request(
+            [{"content": [{"type": "text", "text": "hi"}]}], "search_document"
+        )
+
+        assert [r.token_count for r in writer.records] == [1]
+
+    def test_5xx_attempt_records_zero_then_success_records_tokens(self, monkeypatch):
+        writer = _install_writer()
+        call_count = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return httpx.Response(500, json=_BILLED_RESPONSE)
+            return httpx.Response(200, json=_BILLED_RESPONSE)
+
+        _patch_httpx_client_with_mock_transport(monkeypatch, handler)
+        client = CohereMultimodalClient(
+            CohereConfig(
+                api_key="test-key",
+                model="embed-v4.0",
+                max_retries=3,
+                retry_delay=0.01,
+                exponential_backoff=False,
+            )
+        )
+
+        client._make_request(
+            [{"content": [{"type": "text", "text": "hi"}]}], "search_document"
+        )
+
+        assert [(r.success, r.token_count) for r in writer.records] == [
+            (False, 0),
+            (True, 1),
+        ]
 
 
 class TestCohereMultimodalMakeRequestRetryCounting:

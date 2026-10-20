@@ -53,10 +53,13 @@ def _reset_active_writer():
     from code_indexer.server.services.embedding_stats_writer import (
         EmbeddingStatsWriter,
     )
+    from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
     EmbeddingStatsWriter._active = None
+    ProviderHealthMonitor.reset_instance()
     yield
     EmbeddingStatsWriter._active = None
+    ProviderHealthMonitor.reset_instance()
 
 
 def _install_writer() -> _RecordingWriter:
@@ -113,6 +116,42 @@ class TestVoyageRerankerClientVendorError:
 
         assert len(writer.records) == 1
         assert writer.records[0].success is False
+
+
+def _voyage_rerank(handler) -> None:
+    with patch.dict(os.environ, {"VOYAGE_API_KEY": "test-key"}):
+        VoyageRerankerClient(
+            http_client_factory=_FakeSyncClientFactory(handler)
+        ).rerank("query", ["doc1", "doc2"])
+
+
+class TestVoyageRerankerRecordsVendorTokens:
+    """Issue #2173: token_count is Voyage's usage.total_tokens."""
+
+    def test_success_records_vendor_usage_total_tokens(self):
+        writer = _install_writer()
+
+        _voyage_rerank(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "data": [{"index": 0, "relevance_score": 0.9}],
+                    "usage": {"total_tokens": 2},
+                },
+            )
+        )
+
+        assert [r.token_count for r in writer.records] == [2]
+
+    def test_vendor_error_records_zero_tokens(self):
+        writer = _install_writer()
+
+        with pytest.raises(httpx.HTTPStatusError):
+            _voyage_rerank(
+                lambda request: httpx.Response(400, json={"usage": {"total_tokens": 2}})
+            )
+
+        assert [(r.success, r.token_count) for r in writer.records] == [(False, 0)]
 
 
 class TestVoyageRerankerClientApiKeyPreflight:
@@ -174,6 +213,64 @@ class TestCohereRerankerClientVendorError:
 
         assert len(writer.records) == 1
         assert writer.records[0].success is False
+
+
+def _cohere_rerank(handler) -> None:
+    with patch.dict(os.environ, {"CO_API_KEY": "test-key"}):
+        CohereRerankerClient(
+            http_client_factory=_FakeSyncClientFactory(handler)
+        ).rerank("query", ["doc1", "doc2"])
+
+
+def _cohere_rerank_response(billed_units: dict) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "results": [{"index": 0, "relevance_score": 0.9}],
+            "meta": {"api_version": {"version": "2"}, "billed_units": billed_units},
+        },
+    )
+
+
+class TestCohereRerankerRecordsVendorTokens:
+    """Issue #2173: Cohere bills rerank in search units, which are not
+    tokens -- record 0 (no missing-usage warning) unless input tokens are
+    reported."""
+
+    def test_search_units_only_records_zero_without_warning(self, caplog):
+        writer = _install_writer()
+
+        with caplog.at_level(
+            "WARNING",
+            logger="code_indexer.server.services.embedding_call_instrumentation",
+        ):
+            _cohere_rerank(lambda request: _cohere_rerank_response({"search_units": 1}))
+
+        assert [(r.success, r.token_count) for r in writer.records] == [(True, 0)]
+        assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
+    def test_reported_input_tokens_are_recorded(self):
+        writer = _install_writer()
+
+        _cohere_rerank(
+            lambda request: _cohere_rerank_response(
+                {"search_units": 1, "input_tokens": 3}
+            )
+        )
+
+        assert [r.token_count for r in writer.records] == [3]
+
+    def test_vendor_error_records_zero_tokens(self):
+        writer = _install_writer()
+
+        with pytest.raises(httpx.HTTPStatusError):
+            _cohere_rerank(
+                lambda request: httpx.Response(
+                    400, json={"meta": {"billed_units": {"input_tokens": 3}}}
+                )
+            )
+
+        assert [(r.success, r.token_count) for r in writer.records] == [(False, 0)]
 
 
 class TestCohereRerankerClientApiKeyPreflight:
