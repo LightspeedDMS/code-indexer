@@ -15,10 +15,15 @@ from __future__ import annotations
 
 import importlib
 from typing import Any, Dict
+from unittest.mock import patch
 
 import pytest
 
+from code_indexer.config import Config, ConfigManager
 from code_indexer.server.services.constants import CIDX_META_REPO
+from tests.unit.server.query.content_unavailable_env_1991 import (
+    FakeEmbeddingProvider,
+)
 from tests.unit.server.query.query_repo_access_env import (
     ADMIN,
     CATALOG_FILE,
@@ -41,6 +46,9 @@ from tests.unit.server.routers.activated_repo_access_env import (  # noqa: F401
 
 META_COPY = "my-catalog"
 ADMIN_META_COPY = "admin-catalog"
+EMBEDDING_PROVIDER_FACTORY = (
+    "code_indexer.server.services.search_service.EmbeddingProviderFactory.create"
+)
 
 CONTENT: Dict[str, Probe] = {
     "v2_files": ("GET", "/api/repositories/{a}/files", {}, 200),
@@ -167,6 +175,13 @@ class TestExistingCopy:
         assert_refused_as_unknown(client, USER, CONTENT[route], META_COPY)
 
     def test_existing_copy_rows_are_never_returned_by_query(self, client, catalog):
+        # The catalog carries its index configuration (written at bootstrap),
+        # so the copy does too; a restricted caller's catalog search embeds
+        # the query once from the served copy's own configuration.
+        golden = catalog.repo_paths[CIDX_META_REPO]
+        ConfigManager(golden / ".code-indexer" / "config.json").save(
+            Config(codebase_dir=golden)
+        )
         catalog.activate_for(USER, CIDX_META_REPO, META_COPY)
         query: Probe = (
             "POST",
@@ -175,7 +190,9 @@ class TestExistingCopy:
             0,
         )
 
-        response = call(client, USER, query, META_COPY)
+        # Only the embedding provider (external service) is replaced.
+        with patch(EMBEDDING_PROVIDER_FACTORY, return_value=FakeEmbeddingProvider()):
+            response = call(client, USER, query, META_COPY)
 
         assert response.status_code in (200, 403, 404), response.text
         rows = response.json().get("results", []) if response.status_code == 200 else []

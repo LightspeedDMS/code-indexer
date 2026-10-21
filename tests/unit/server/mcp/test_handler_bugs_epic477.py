@@ -4,10 +4,11 @@ These tests expose runtime errors caused by calling non-existent methods or usin
 """
 
 import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import ANY, Mock, patch, MagicMock
 from code_indexer.server.mcp.handlers import list_files
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.models.api_models import FileListQueryParams
+from code_indexer.server.services.cidx_meta_access.file_doors import CatalogFileAccess
 import json
 
 
@@ -136,6 +137,7 @@ class TestGetFileContentBug:
 
             # Verify service was called with correct parameters
             # Story #33: Handler now passes offset, limit, and skip_truncation
+            # Every file read hands the service the request's catalog judgement.
             mock_file_service.get_file_content.assert_called_once_with(
                 repository_alias="my-repo",
                 file_path="src/main.py",
@@ -143,7 +145,10 @@ class TestGetFileContentBug:
                 offset=None,
                 limit=None,
                 skip_truncation=True,
+                access=ANY,
             )
+            access = mock_file_service.get_file_content.call_args.kwargs["access"]
+            assert isinstance(access, CatalogFileAccess)
 
 
 class TestGetRepositoryStatisticsBug:
