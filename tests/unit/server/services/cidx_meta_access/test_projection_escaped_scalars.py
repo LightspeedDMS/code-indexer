@@ -12,7 +12,10 @@ projector, real file-door judgement.
 
 from __future__ import annotations
 
+import html
 import json
+import re
+import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Set
 
@@ -174,6 +177,44 @@ def test_inline_list_drops_only_the_escaped_entry(tmp_path: Path) -> None:
         parsed = _block(door)
         assert parsed.get("notes") == ["a"], parsed
         assert CANARY not in json.dumps(parsed, default=str)
+    _assert_tokens_subset(raw, shown)
+
+
+ESCAPED_TEXT = f"{BS}x{ord(FIRST):02x}{REST}"  # the name, YAML hex-escaped
+# A value continued on an indented line that holds the escaped name.
+MULTI_LINE_VALUES = {
+    "double_quoted": f'notes: "uses the\n  {ESCAPED_TEXT} service"',
+    "single_quoted": f"notes: 'uses the\n  {ESCAPED_TEXT} service'",
+    "plain": f"notes: uses the\n  {ESCAPED_TEXT} service",
+}
+_YAML_HEX = re.compile(r"\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8}))")
+
+
+def _every_decoding(text: str) -> str:
+    """*text* with YAML hex/unicode escapes, percent escapes and HTML
+    entities decoded, repeatedly."""
+    for _ in range(4):
+        decoded = _YAML_HEX.sub(
+            lambda m: chr(int(next(g for g in m.groups() if g), 16)), text
+        )
+        decoded = urllib.parse.unquote(html.unescape(decoded))
+        if decoded == text:
+            break
+        text = decoded
+    return text
+
+
+@pytest.mark.parametrize("case", sorted(MULTI_LINE_VALUES))
+def test_continuation_line_never_carries_an_escaped_hidden_name(
+    tmp_path: Path, case: str
+) -> None:
+    fx = _fixture(tmp_path, MULTI_LINE_VALUES[case] + "\nnext_key: kept")
+    raw, shown = _search_view(fx)
+    for door in (_file_door(fx), shown):
+        parsed = _block(door)
+        assert parsed.get("description") and parsed.get("next_key") == "kept"
+        assert CANARY not in json.dumps(parsed, default=str)
+        assert CANARY not in _every_decoding("\n".join(door))
     _assert_tokens_subset(raw, shown)
 
 

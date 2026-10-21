@@ -9,7 +9,6 @@ repository are removed, never placeholdered. Real fixture, no mocks.
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 from typing import Any, Dict
 
@@ -120,9 +119,10 @@ def test_list_items_naming_hidden_repositories_are_removed(
     assert fm["tags"] == [ALPHA]
 
 
-def test_frontmatter_that_cannot_stay_valid_is_removed_with_a_diagnostic(
-    fx: CidxMetaFixture, caplog: pytest.LogCaptureFixture
+def test_value_continued_across_lines_is_removed_with_its_continuation(
+    fx: CidxMetaFixture,
 ) -> None:
+    # The escaped line break joins the two halves of the hidden name.
     (fx.dep_map_dir / "spaced.md").write_text(
         "---\ndomain: spaced\nparticipating_repos:\n"
         f'  - {ALPHA}\ntitle: "the {CANARY[:5]}\\\n  {CANARY[5:]} owns it"\n---\n\n'
@@ -132,15 +132,12 @@ def test_frontmatter_that_cannot_stay_valid_is_removed_with_a_diagnostic(
     source = source_for_visibility(
         MetaVisibility.restricted([ALPHA]), fx.dep_map_dir, fx.registry
     )
-    with caplog.at_level(logging.WARNING):
-        text = source.read_text("spaced")
-    assert CANARY not in text
-    assert "participating_repos" not in text and "---" not in text
+    text = source.read_text("spaced")
+    assert CANARY not in text and CANARY[5:] not in text
+    assert "title" not in text
+    fm = parse_frontmatter_strict(text)
+    assert fm == {"domain": "spaced", "participating_repos": [ALPHA]}
     assert f"{ALPHA} body text." in text
-    assert any(
-        "spaced.md" in r.getMessage() and "malformed" in r.getMessage()
-        for r in caplog.records
-    )
 
 
 def test_the_domain_is_still_summarised_for_a_restricted_caller(

@@ -28,14 +28,17 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import html
 import logging
 import re
 import threading
+import urllib.parse
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     Any,
+    Callable,
     Dict,
     FrozenSet,
     List,
@@ -63,8 +66,8 @@ from .depmap_model import (
     TableKind,
     cell_names,
     classify_lines,
-    decoded_form,
     load_depmap_model,
+    needs_decoding,
     needs_rendering_check,
     normalize_name,
     rendered_form,
@@ -278,7 +281,7 @@ def _redact(line: str, view: _View) -> Optional[str]:
         return RESTRICTED_PLACEHOLDER
 
     redacted = view.prose.sub(_placeholder, line)
-    if refused or _link_parts_name_hidden(redacted, view):
+    if refused or _decoded_variants_name_hidden(redacted, view):
         return None
     if not needs_rendering_check(line):
         return redacted
@@ -294,32 +297,83 @@ def _blocked(cell: str, names: FrozenSet[str]) -> bool:
     return any(name in names for name in cell_names(cell))
 
 
-_LINK_SYNTAX = re.compile(r"\]\(|<|\]:")
-# What a renderer does not show but a reader follows: an inline link or
-# image destination with its title, an autolink, a reference definition.
-_LINK_PART_PATTERNS = (
-    re.compile(r"\]\(([^)]*)\)"),
-    re.compile(r"<([^<>]*)>"),
-    re.compile(r"^\s*\[[^\]]+\]:\s*(.+)$"),
+# Decodings a reader may apply to any part of a line, in any order.
+_YAML_ESCAPE = re.compile(
+    r"\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|(.))", re.DOTALL
 )
+# YAML's single-character double-quote escapes (code points, so the table
+# itself carries no escape text).
+_YAML_SIMPLE_ESCAPES = {
+    "0": chr(0x00),
+    "a": chr(0x07),
+    "b": chr(0x08),
+    "t": chr(0x09),
+    chr(0x09): chr(0x09),
+    "n": chr(0x0A),
+    "v": chr(0x0B),
+    "f": chr(0x0C),
+    "r": chr(0x0D),
+    "e": chr(0x1B),
+    " ": " ",
+    '"': '"',
+    "/": "/",
+    chr(0x5C): chr(0x5C),
+    "N": chr(0x85),
+    "_": chr(0xA0),
+    "L": chr(0x2028),
+    "P": chr(0x2029),
+}
 
 
-def _link_parts_name_hidden(text: str, view: _View) -> bool:
-    """A link part of *text*, fully decoded (entities and percent escapes,
-    nested), names a hidden repository."""
-    if view.prose is None or not _LINK_SYNTAX.search(text):
+def _yaml_unescaped(value: str) -> str:
+    """*value* with YAML double-quoted escapes decoded wherever they occur
+    (a code point beyond Unicode, or an unknown escape, stays as written)."""
+
+    def _one(match: "re.Match[str]") -> str:
+        code = match.group(1) or match.group(2) or match.group(3)
+        if code is not None:
+            point = int(code, 16)
+            return chr(point) if point <= 0x10FFFF else match.group(0)
+        return _YAML_SIMPLE_ESCAPES.get(match.group(4), match.group(0))
+
+    return _YAML_ESCAPE.sub(_one, value)
+
+
+_DECODE_STEPS: Tuple[Callable[[str], str], ...] = (
+    html.unescape,
+    urllib.parse.unquote,
+    _yaml_unescaped,
+    lambda value: value.replace("\\", ""),
+)
+_DECODE_PASSES = 4
+
+
+def _decoded_variants_name_hidden(text: str, view: _View) -> bool:
+    """Some decoding of the whole of *text* (entities, percent escapes and
+    backslash escapes, each repeated, in any order, at most _DECODE_PASSES
+    deep) names a hidden repository."""
+    if view.prose is None or not needs_decoding(text):
         return False
-    return any(
-        view.prose.search(decoded_form(match.group(1))) is not None
-        for pattern in _LINK_PART_PATTERNS
-        for match in pattern.finditer(text)
-    )
+    seen = {text}
+    frontier = [text]
+    for _ in range(_DECODE_PASSES):
+        found = []
+        for value in frontier:
+            for step in _DECODE_STEPS:
+                decoded = step(value)
+                if decoded not in seen:
+                    seen.add(decoded)
+                    found.append(decoded)
+        if not found:
+            break
+        frontier = found
+    return any(view.prose.search(value) for value in seen)
 
 
 def _mentions_hidden(text: str, view: _View) -> bool:
     if view.prose is None:
         return False
-    if view.prose.search(text) or _link_parts_name_hidden(text, view):
+    if view.prose.search(text) or _decoded_variants_name_hidden(text, view):
         return True
     return (
         needs_rendering_check(text)
@@ -629,6 +683,21 @@ def _frontmatter_unsafe(out: Sequence[Optional[str]], end: int, view: _View) -> 
     return _parsed_names_hidden(parsed, view)
 
 
+def _frontmatter_line_in_block(
+    line: str, view: _View, dropped_at: Optional[int]
+) -> Tuple[Optional[str], Optional[int]]:
+    """One frontmatter line, and the indentation of a removed value still
+    open after it. A non-blank line indented deeper than the last removed
+    line continues that value (YAML structure) and is removed with it."""
+    if not line.strip():
+        return _project_frontmatter_line(line, view), dropped_at
+    indent = len(line) - len(line.lstrip())
+    if dropped_at is not None and indent > dropped_at:
+        return None, dropped_at
+    projected = _project_frontmatter_line(line, view)
+    return projected, indent if projected is None else None
+
+
 def _compute(
     lines: Sequence[str], relative_path: str, fingerprint: str, view: _View
 ) -> List[Optional[str]]:
@@ -638,11 +707,13 @@ def _compute(
     out: List[Optional[str]] = [None] * span
     malformed: List[int] = list(range(1, span + 1))
     body = lines[span:]
+    dropped_at: Optional[int] = None
     for offset, (line, (role, kind, cells)) in enumerate(
         zip(body, classify_lines(body))
     ):
         if role == LINE_TEXT and 0 < span + offset < end:
-            out.append(_project_frontmatter_line(line, view))
+            projected, dropped_at = _frontmatter_line_in_block(line, view, dropped_at)
+            out.append(projected)
         elif role == LINE_TEXT:
             out.append(_project_text(line, view, synthesizes=synthesizes))
         elif role == LINE_HEADER:

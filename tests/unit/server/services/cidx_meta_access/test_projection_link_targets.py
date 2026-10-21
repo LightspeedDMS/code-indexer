@@ -40,6 +40,7 @@ from tests.shared.cidx_meta_visibility_fixture import (
 )
 
 DESCRIPTION = f"{ALPHA}.md"
+BS = chr(92)  # built at runtime: no tool or editor can decode the escapes
 FIRST, REST = CANARY[0], CANARY[1:]
 PCT = f"%{ord(FIRST):02X}{REST}"  # percent-encoded first character
 ENT = f"&#{ord(FIRST)};{REST}"  # HTML-entity first character
@@ -52,13 +53,23 @@ ENCODED_LINKS = {
     "reference_definition": f"[ref]: https://example.com/{PCT}",
     "entity_in_percent": f"see [docs](https://example.com/%26%23{ord(FIRST)};{REST})",
     "percent_in_entity": f"see [docs](https://example.com/&#37;{ord(FIRST):02X}{REST})",
+    "balanced_paren": f"[docs](https://example.com/(x){PCT})",
+    "balanced_paren_inner": f"see [docs](https://example.com/a(b){PCT})",
+    "nested_paren": f"see [docs](https://example.com/((x)y){PCT}) here",
+    "escaped_paren": f"see [docs](https://example.com/a{BS})/{PCT}) here",
+    "angle_destination": f"see [x](<https://example.com/a b/{PCT}>) here",
+    "title_with_parens": f'see [docs](https://example.com/a "(t) {PCT}") here',
+    "double_percent": f"see [docs](https://example.com/%25{ord(FIRST):02X}{REST})",
+    "prose_percent": f"talks to {PCT} daily",
+    "prose_entity": f"talks to {ENT} daily",
 }
 
 
 def _decoded(text: str) -> str:
-    """*text* after repeated HTML-entity and percent decoding."""
+    """*text* after repeated HTML-entity, percent and backslash-escape
+    decoding."""
     for _ in range(4):
-        decoded = urllib.parse.unquote(html.unescape(text))
+        decoded = urllib.parse.unquote(html.unescape(text)).replace(BS, "")
         if decoded == text:
             break
         text = decoded
