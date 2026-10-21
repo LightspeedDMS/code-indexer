@@ -179,9 +179,14 @@ class DaemonWatchManager:
         Returns:
             Status dictionary with success/error status, message, and statistics
         """
+        # ^ inv a stop seen in progress on entry answers this call too
+        seen = self._stopping
         owned: Optional[_StopInProgress] = None
         with self._lock:
             pending = self._stopping
+            if pending is None and seen is not None:
+                # ^ ord done is set before _stopping clears: seen.result is final
+                return dict(seen.result)
             if pending is None:
                 begun = self._begin_stop_locked()
                 if not isinstance(begun, _StopInProgress):
@@ -233,8 +238,8 @@ class DaemonWatchManager:
             return stop.result
         finally:
             with self._lock:
+                stop.done.set()
                 self._stopping = None
-            stop.done.set()
 
     def _begin_stop_locked(self) -> Union[_StopInProgress, Dict[str, Any]]:
         """Signal the watch to stop and stop its handler (caller holds

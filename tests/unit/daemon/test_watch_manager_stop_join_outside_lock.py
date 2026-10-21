@@ -97,13 +97,22 @@ def test_stop_watch_returns_promptly_once_worker_exits(caplog) -> None:
 
 
 class _TracingLock:
-    """The manager's state lock, signalling when a named thread releases it."""
+    """The manager's state lock, signalling when a named thread releases it;
+    a gated thread signals its arrival and waits for its gate to acquire."""
 
-    def __init__(self, thread_names: Tuple[str, ...]) -> None:
+    def __init__(
+        self, thread_names: Tuple[str, ...], gated: Tuple[str, ...] = ()
+    ) -> None:
         self._lock = threading.Lock()
         self.released = {name: threading.Event() for name in thread_names}
+        self.arrived = {name: threading.Event() for name in gated}
+        self.gates = {name: threading.Event() for name in gated}
 
     def __enter__(self) -> "_TracingLock":
+        name = threading.current_thread().name
+        if name in self.gates:
+            self.arrived[name].set()
+            self.gates[name].wait(timeout=_HANDLER_WAIT_SECONDS)
         self._lock.acquire()
         return self
 
@@ -123,7 +132,9 @@ class _HeldWorkerManager(DaemonWatchManager):
         super().__init__()
         self.handlers: List[_FakeHandler] = []
         self.release_worker = threading.Event()
-        self.tracing = _TracingLock(("first-stopper", "second-stopper"))
+        self.tracing = _TracingLock(
+            ("first-stopper", "second-stopper"), gated=("late-stopper",)
+        )
         self._lock = cast(Any, self.tracing)
 
     def _create_watch_handler(self, project_path, config, mutation_lock=None, **kw):
@@ -220,3 +231,50 @@ def test_start_during_a_stop_is_refused() -> None:
     assert manager.start_watch("/repo/other", config=None)["status"] == "success"
     _wait_until_watching(manager, _handler_at(manager, 1))
     assert manager.stop_watch()["status"] == "success"
+
+
+@pytest.mark.timeout(30)
+def test_stop_reaching_the_lock_after_the_first_completed_gets_its_result() -> None:
+    manager = _HeldWorkerManager()
+    results: Dict[str, Any] = {}
+    first = _first_stop_in_its_join(manager, results)
+
+    late = _stop_on_thread(manager, "late-stopper", results)
+    assert manager.tracing.arrived["late-stopper"].wait(_HANDLER_WAIT_SECONDS)
+    _finish(manager, first)
+    manager.tracing.gates["late-stopper"].set()
+    late.join(timeout=_HANDLER_WAIT_SECONDS)
+    assert not late.is_alive()
+
+    assert results["first-stopper"]["status"] == "success", results
+    assert results["late-stopper"] == results["first-stopper"]
+    assert manager.handlers[0].stop_calls == 1
+    sequential = manager.stop_watch()
+    assert sequential == {"status": "error", "message": "Watch not running"}
+
+
+@pytest.mark.timeout(30)
+def test_status_rpc_during_a_stop_reports_stopping() -> None:
+    from code_indexer.daemon.service import CIDXDaemonService
+
+    service = CIDXDaemonService()
+    try:
+        manager = _HeldWorkerManager()
+        service.watch_manager = manager
+        results: Dict[str, Any] = {}
+        first = _first_stop_in_its_join(manager, results)
+
+        status = service.exposed_watch_status()
+        _finish(manager, first)
+
+        assert status["running"] is False, status
+        assert status["stopping"] is True
+        assert status["project_path"] == "/repo/held"
+        assert results["first-stopper"]["status"] == "success", results
+        assert service.exposed_watch_status() == {
+            "running": False,
+            "project_path": None,
+        }
+    finally:
+        service.eviction_thread.stop()
+        service.eviction_thread.join(timeout=1)
