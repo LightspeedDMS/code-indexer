@@ -21,9 +21,10 @@ server-managed default endpoint (so a broken mock cannot silently pass) and
 that the repository-configured endpoint never received anything. A real
 local loopback listener is kept running as an independent, defense-in-depth
 check that it is never really contacted. An autouse network guard proves
-neither test needs real external network access at all. The poll loop
-below exits as soon as the default endpoint's call is recorded, so the test
-finishes in a few seconds rather than waiting out a fixed deadline.
+neither test needs real external network access at all. The file change
+is made only once the watch handler is observing, the debounce is
+shortened through the watch manager's own kwarg, and the poll loop exits
+as soon as the expected call is recorded.
 """
 
 from __future__ import annotations
@@ -42,8 +43,13 @@ import httpx
 import pytest
 
 from code_indexer.config import ConfigManager, VoyageAIConfig
+from code_indexer.daemon.watch_manager import DaemonWatchManager
 from code_indexer.server.services.auto_watch_manager import AutoWatchManager
 import code_indexer.server.utils.server_managed_provider_settings as smps
+
+# Production debounces watch events for 2 s; these tests only need the
+# event to be processed, not the batching window.
+_TEST_DEBOUNCE_SECONDS = 0.1
 
 
 class _RecordingHandler(http.server.BaseHTTPRequestHandler):
@@ -81,6 +87,20 @@ def _block_external_network(monkeypatch):
         return real_getaddrinfo(host, *args, **kwargs)
 
     monkeypatch.setattr(socket, "getaddrinfo", _guarded_getaddrinfo)
+
+
+@pytest.fixture(autouse=True)
+def _short_watch_debounce(monkeypatch):
+    """Passes a short debounce through DaemonWatchManager.start_watch's own
+    `debounce_seconds` kwarg (AutoWatchManager uses the default); the real
+    start path still runs. `_wait_until_observing` asserts it took effect."""
+    real_start_watch = DaemonWatchManager.start_watch
+
+    def _start_watch(self, project_path, config, mutation_lock=None, **kwargs):
+        kwargs.setdefault("debounce_seconds", _TEST_DEBOUNCE_SECONDS)
+        return real_start_watch(self, project_path, config, mutation_lock, **kwargs)
+
+    monkeypatch.setattr(DaemonWatchManager, "start_watch", _start_watch)
 
 
 @pytest.fixture
@@ -142,35 +162,47 @@ def _canned_post(called_urls: List[str], lock: threading.Lock):
     return _fake_post
 
 
+def _wait_until_observing(manager: AutoWatchManager, repo_path: Path) -> None:
+    """Bounded wait until the real GitAwareWatchHandler is watching: its
+    `is_watching()` turns true only after the filesystem observer is
+    armed, so a file change made afterwards cannot be missed."""
+    watch_instance = manager._watch_state[str(repo_path)]["watch_instance"]
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        handler = watch_instance.watch_handler
+        if handler is not None and handler.is_watching():
+            assert handler.debounce_seconds == _TEST_DEBOUNCE_SECONDS
+            return
+        time.sleep(0.01)
+    pytest.fail(f"watch handler never started: {watch_instance.get_stats()}")
+
+
 def _run_watch_and_edit(
     repo_path: Path, called_urls: List[str], lock: threading.Lock, stop_predicate
 ) -> None:
-    """Start the real watch, trigger a file change, and poll (bounded,
-    exiting early via `stop_predicate`) before always stopping the watch."""
+    """Start the real watch, trigger a file change once it is observing,
+    and poll (bounded, exiting early via `stop_predicate`) before always
+    stopping the watch."""
     manager = AutoWatchManager()
     result = manager.start_watch(str(repo_path), timeout=60)
     assert result["status"] == "success", result
 
     try:
-        # Give the background watch thread time to construct its handler
-        # before the file change that should trigger a real incremental
-        # reindex (GitAwareWatchHandler debounces ~2s by default, plus
-        # watchdog OS-level filesystem event latency).
-        time.sleep(0.3)
+        _wait_until_observing(manager, repo_path)
         (repo_path / "hello.py").write_text("def hello():\n    return 2\n")
 
-        deadline = time.time() + 13
-        while time.time() < deadline:
+        deadline = time.monotonic() + 13
+        while time.monotonic() < deadline:
             with lock:
                 if stop_predicate(called_urls):
                     break
-            time.sleep(0.2)
+            time.sleep(0.02)
     finally:
         manager.stop_watch(str(repo_path))
 
 
-# A real watch plus the debounced reindex, polled up to 13 s (~8.4 s idle):
-# the wait is the behaviour under test, slower under gate load.
+# A real watch plus the debounced reindex: under 2 s idle, the 13 s poll
+# deadline is headroom for gate load only.
 @pytest.mark.timeout(45)
 def test_auto_watch_never_sends_repo_configured_provider_endpoint(
     tmp_path, loopback_listener, monkeypatch
@@ -202,7 +234,7 @@ def test_auto_watch_never_sends_repo_configured_provider_endpoint(
     )
 
 
-# Same real watch and debounced-reindex poll (~7.5 s idle) as above.
+# Same real watch and debounced-reindex poll as above.
 @pytest.mark.timeout(45)
 def test_auto_watch_targets_repo_endpoint_when_enforcement_is_skipped(
     tmp_path, loopback_listener, monkeypatch

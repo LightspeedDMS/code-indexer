@@ -198,22 +198,30 @@ class DaemonWatchManager:
                 except Exception as e:
                     logger.error(f"Error stopping watch handler: {e}")
 
-            # Wait for thread to finish (max 5 seconds)
-            if self.watch_thread and self.watch_thread.is_alive():
-                self.watch_thread.join(timeout=5.0)
-
-                if self.watch_thread.is_alive():
-                    logger.warning("Watch thread did not stop within 5 seconds")
-
-            # Clean up state
-            self.watch_thread = None
-            self.watch_handler = None
+            stopped_thread = self.watch_thread
+            stopped_handler = self.watch_handler
             project = self.project_path
-            self.project_path = None
-            self.start_time = None
 
-            logger.info(f"Watch stopped for project: {project}")
-            return {"status": "success", "message": "Watch stopped", "stats": stats}
+        # ^ inv join outside _lock: the worker's exit path takes _lock
+        if stopped_thread is not None and stopped_thread.is_alive():
+            stopped_thread.join(timeout=5.0)
+
+            if stopped_thread.is_alive():
+                logger.warning("Watch thread did not stop within 5 seconds")
+
+        with self._lock:
+            # ^ inv never clear state of a watch started while joining
+            if self.watch_thread is stopped_thread or (
+                self.watch_thread is None
+                and self.watch_handler in (stopped_handler, None)
+            ):
+                self.watch_thread = None
+                self.watch_handler = None
+                self.project_path = None
+                self.start_time = None
+
+        logger.info(f"Watch stopped for project: {project}")
+        return {"status": "success", "message": "Watch stopped", "stats": stats}
 
     def get_stats(self) -> Dict[str, Any]:
         """Get current watch statistics.
