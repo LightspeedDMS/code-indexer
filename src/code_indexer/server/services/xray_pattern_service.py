@@ -373,24 +373,32 @@ class XrayPatternService:
             return None
 
         try:
-            locked_result = self._run_with_coarse_lock(owner, _write_and_commit)
+            locked_result, piggyback = self._run_with_coarse_lock(
+                owner, _write_and_commit
+            )
         except PatternCommitError as exc:
             return {"success": False, "error": "commit_failed", "message": str(exc)}
         if locked_result is not None:
             return dict(locked_result)
-        self._request_refresh()
+        self._request_refresh(piggyback)
         return {"success": True, "path": result_path}
 
-    def _request_refresh(self) -> None:
-        """Request the catalog refresh a completed pattern write is owed,
-        after the coarse lock is released (a refresh starting under the
-        lock skips and owes nothing). No-op without a scheduler."""
+    def _request_refresh(self, piggyback: bool) -> None:
+        """Owe the catalog refresh a completed pattern write needs. A refresh
+        starting under a held lock skips and owes nothing: after our own
+        lock is released the refresh is requested; a write made under
+        another owner's lock is owed to the debouncer. No-op without a
+        scheduler."""
         if self._scheduler is None:
             return
         from code_indexer.global_repos.meta_description_hook import (
+            owe_cidx_meta_refresh,
             request_cidx_meta_refresh,
         )
 
+        if piggyback:
+            owe_cidx_meta_refresh()
+            return
         request_cidx_meta_refresh(self._scheduler)
 
     @staticmethod
@@ -659,8 +667,8 @@ class XrayPatternService:
                     message=f"xray-patterns: delete {scope}/{name}",
                 )
 
-        self._run_with_coarse_lock(owner, _delete_and_commit)
-        self._request_refresh()
+        _, piggyback = self._run_with_coarse_lock(owner, _delete_and_commit)
+        self._request_refresh(piggyback)
 
         return {"success": True}
 
@@ -696,20 +704,21 @@ class XrayPatternService:
         self,
         owner: str,
         operation: Callable[[bool], Any],
-    ) -> Any:
+    ) -> Tuple[Any, bool]:
         """Acquire coarse lock (or piggyback), run operation, release lock.
 
         The operation receives a single ``piggyback`` bool argument.  When
         True the operation must skip any git commit (the lock-holder's refresh
         will pick up filesystem changes via ``git add -A``).
 
+        Returns ``(operation result, piggyback)``.
         Guarantees coarse lock release via try/finally when we hold it.
         Operation exceptions propagate; the coarse lock is still released.
         """
         piggyback = self._coarse_piggyback_or_acquire(owner)
         coarse_held = not piggyback
         try:
-            return operation(piggyback)
+            return operation(piggyback), piggyback
         finally:
             if coarse_held:
                 self._release_coarse_lock(owner)

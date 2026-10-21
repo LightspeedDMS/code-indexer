@@ -10,8 +10,9 @@ Algorithm (issue #877 body lines 67-143):
 3. Schema validate; enforce summary length cap; rate-limit check.
 4. Piggyback-or-acquire coarse `cidx-meta` lock.
 5. Atomic write (or delete) to base clone path.
-6. Refresh trigger: direct-acquire path calls trigger_refresh_for_repo with
-   DuplicateJobError / exception fallback to debouncer. Piggyback path ALWAYS
+6. Release the coarse lock, then trigger refresh: direct-acquire path calls
+   the shared request_cidx_meta_refresh (in-flight refresh owed to the
+   debouncer, deferral left to the scheduler). Piggyback path ALWAYS
    signals debouncer.
 7. Release per-memory lock in finally.
 """
@@ -26,7 +27,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Protocol, TypeVar, runtime_checkable
 
-from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.services.memory_file_lock_manager import (
     MemoryFileLockManager,
     _validate_memory_id,
@@ -48,7 +48,6 @@ _T = TypeVar("_T")
 logger = logging.getLogger(__name__)
 
 _COARSE_ALIAS = "cidx-meta"
-_COARSE_REFRESH_ALIAS = "cidx-meta-global"
 
 
 # ---------------------------------------------------------------------------
@@ -327,30 +326,18 @@ class MemoryStoreService:
     def _signal_refresh(self, piggyback: bool) -> None:
         """Signal refresh. Piggyback always uses debouncer.
 
-        A refresh already queued or running may have listed the catalog
-        before this write; the debouncer owes the refresh that follows it.
+        The direct path is the shared writer helper: a refresh already
+        queued or running is owed to the debouncer, a deferral is left to
+        the refresh scheduler, any other failure is retried by the debouncer.
         """
-        from code_indexer.server.repositories.background_jobs import (
-            DuplicateJobError as SubmittedDuplicateJobError,
+        from code_indexer.global_repos.meta_description_hook import (
+            request_cidx_meta_refresh,
         )
 
         if piggyback:
             self._debouncer.signal_dirty()
             return
-        try:
-            self._scheduler.trigger_refresh_for_repo(_COARSE_REFRESH_ALIAS)
-        except (SubmittedDuplicateJobError, DuplicateJobError):
-            logger.debug(
-                "cidx-meta refresh already queued or running — owed to the debouncer"
-            )
-            self._debouncer.signal_dirty()
-        except Exception:
-            logger.warning(
-                "trigger_refresh_for_repo raised unexpected exception — "
-                "falling back to debouncer",
-                exc_info=True,
-            )
-            self._debouncer.signal_dirty()
+        request_cidx_meta_refresh(self._scheduler, debouncer=self._debouncer)
 
     def _release_coarse_lock(self, owner: str) -> None:
         """Release coarse lock."""

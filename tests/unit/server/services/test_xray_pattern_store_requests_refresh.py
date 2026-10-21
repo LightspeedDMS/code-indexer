@@ -9,8 +9,11 @@ double keeps real write-lock state.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
+import pytest
+
+from code_indexer.global_repos.meta_description_hook import set_debouncer
 from code_indexer.server.services.xray_pattern_service import XrayPatternService
 
 MINIMAL_PATTERN_YAML = """\
@@ -79,3 +82,63 @@ def test_delete_requests_refresh_after_releasing_the_lock(tmp_path: Path) -> Non
     assert result == {"success": True}
     assert not pattern.exists()
     assert scheduler.lock_held_at_trigger == [False]
+
+
+class _CountingDebouncer:
+    def __init__(self) -> None:
+        self.signals = 0
+
+    def signal_dirty(self) -> None:
+        self.signals += 1
+
+
+@pytest.fixture
+def module_debouncer() -> Iterator[_CountingDebouncer]:
+    debouncer = _CountingDebouncer()
+    set_debouncer(debouncer)  # type: ignore[arg-type]
+    try:
+        yield debouncer
+    finally:
+        set_debouncer(None)
+
+
+def test_piggyback_store_owes_refresh_to_debouncer(
+    tmp_path: Path, module_debouncer: _CountingDebouncer
+) -> None:
+    # Another writer holds the catalog lock: a refresh requested now would
+    # skip on that lock and owe nothing, so the write is owed to the
+    # debouncer instead.
+    catalog = tmp_path / "cidx-meta"
+    catalog.mkdir()
+    scheduler = _LockingScheduler()
+    scheduler.holder = "dependency-map-writer"
+    svc = XrayPatternService(catalog, refresh_scheduler=scheduler)
+
+    result = svc.store_xray_pattern_audited(
+        scope="__any__",
+        pattern_yaml=MINIMAL_PATTERN_YAML,
+        overwrite=False,
+        actor="alice",
+        may_replace_global=True,
+    )
+
+    assert result.get("success") is True, result
+    assert scheduler.lock_held_at_trigger == []
+    assert module_debouncer.signals == 1
+    assert scheduler.holder == "dependency-map-writer"
+
+
+def test_piggyback_delete_owes_refresh_to_debouncer(
+    tmp_path: Path, module_debouncer: _CountingDebouncer
+) -> None:
+    catalog = tmp_path / "cidx-meta"
+    pattern = catalog / "xray-patterns" / "__any__" / "test-pattern.yaml"
+    pattern.parent.mkdir(parents=True)
+    pattern.write_text(MINIMAL_PATTERN_YAML, encoding="utf-8")
+    scheduler = _LockingScheduler()
+    scheduler.holder = "dependency-map-writer"
+    svc = XrayPatternService(catalog, refresh_scheduler=scheduler)
+
+    assert svc.delete_pattern("__any__", "test-pattern") == {"success": True}
+    assert scheduler.lock_held_at_trigger == []
+    assert module_debouncer.signals == 1

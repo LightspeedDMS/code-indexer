@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
+from code_indexer.global_repos.refresh_failure_recovery import RefreshDeferredError
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.services.memory_file_lock_manager import MemoryFileLockManager
 from code_indexer.server.services.memory_rate_limiter import (
@@ -139,5 +140,36 @@ def test_refresh_already_running_is_owed_to_debouncer_without_warning(
         svc.create_memory(_payload("first"), username="alice")
 
     assert debouncer.signals == 1
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == [], [r.getMessage() for r in warnings]
+
+
+class _DeferringScheduler(_LockingScheduler):
+    """The failure backoff persisted the trigger as pending."""
+
+    def trigger_refresh_for_repo(
+        self,
+        alias_name: str,
+        submitter_username: str = "system",
+        force_reset: bool = False,
+    ) -> Optional[str]:
+        super().trigger_refresh_for_repo(alias_name)
+        raise RefreshDeferredError(alias_name, backoff_until=2_000_000_000.0)
+
+
+def test_deferred_refresh_is_left_to_the_scheduler(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The deferral is durable: the refresh scheduler fires it when the
+    # backoff ends. A debouncer retry would only spin against the backoff.
+    scheduler = _DeferringScheduler()
+    debouncer = _CountingDebouncer()
+    svc = _service(tmp_path, scheduler, debouncer)
+
+    with caplog.at_level(logging.DEBUG):
+        svc.create_memory(_payload("first"), username="alice")
+
+    assert scheduler.lock_held_at_trigger == [False]
+    assert debouncer.signals == 0
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert warnings == [], [r.getMessage() for r in warnings]
