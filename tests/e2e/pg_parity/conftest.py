@@ -20,19 +20,19 @@ CIDX data, not for the operational log store.
 from __future__ import annotations
 
 import os
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional, Tuple
 
 import httpx
 import pytest
 
 from tests.e2e.helpers import (
-    login,
     require_postgres,
     require_voyage_key,
     rest_call,
     wait_for_job,
     wait_for_repo_activation,
 )
+from tests.e2e.server.conftest import AdminTokenProvider
 
 
 # ---------------------------------------------------------------------------
@@ -61,21 +61,41 @@ def pg_http_client(pg_server_url: str) -> Iterator[httpx.Client]:
 
 
 @pytest.fixture(scope="session")
-def pg_admin_token(pg_server_url: str) -> str:
-    """Authenticate once per session against the PG-backed server.
+def pg_admin_token_provider(pg_server_url: str) -> AdminTokenProvider:
+    """Session-scoped auto-refreshing admin token for the PG-backed server.
 
     Reads credentials from the same E2E_ADMIN_USER / E2E_ADMIN_PASS env
-    vars used by all other phases.
+    vars used by all other phases. Fixtures that run at the END of the
+    phase (the log-audit teardown) call ``get_token()`` there, so a phase
+    longer than the token lifetime never presents an expired token.
     """
     admin_user = os.environ.get("E2E_ADMIN_USER", "")
     admin_pass = os.environ.get("E2E_ADMIN_PASS", "")
     if not admin_user or not admin_pass:
         pytest.skip("E2E_ADMIN_USER / E2E_ADMIN_PASS not set")
-    return login(
-        base_url=pg_server_url,
-        username=admin_user,
-        password=admin_pass,
+
+    def _relogin() -> Tuple[str, Optional[str]]:
+        resp = httpx.post(
+            f"{pg_server_url}/auth/login",
+            json={"username": admin_user, "password": admin_pass},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        return str(body["access_token"]), body.get("refresh_token")
+
+    initial_access, initial_refresh = _relogin()
+    return AdminTokenProvider(
+        login_fn=_relogin,
+        initial_access_token=initial_access,
+        initial_refresh_token=initial_refresh,
     )
+
+
+@pytest.fixture(scope="session")
+def pg_admin_token(pg_admin_token_provider: AdminTokenProvider) -> str:
+    """An admin JWT for session-scoped setup fixtures (used at setup time)."""
+    return pg_admin_token_provider.get_token()
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +239,7 @@ def log_watermark_phase6(
 @pytest.fixture(scope="session", autouse=True)
 def _phase6_log_audit_gate(
     pg_http_client: httpx.Client,
-    pg_admin_token: str,
+    pg_admin_token_provider: AdminTokenProvider,
     log_watermark_phase6: int,
     pytestconfig: pytest.Config,
 ) -> Iterator[None]:
@@ -227,7 +247,8 @@ def _phase6_log_audit_gate(
 
     Operational log store is ALWAYS SQLite logs.db -- not the PG backend.
     poll_until_stable_count drains the async writer before auditing.  The
-    result is recorded for ``pytest_sessionfinish`` below.
+    result is recorded for ``pytest_sessionfinish`` below. The token is
+    fetched at teardown: the phase may outlive a token issued at setup.
     """
     from tests.e2e.log_audit_claims import record_gate_result
     from tests.e2e.log_audit_gate import (
@@ -240,13 +261,15 @@ def _phase6_log_audit_gate(
 
     # --- Teardown: audit phase logs ---
     poll_until_stable_count(
-        count_fn=lambda: len(query_logs_via_mcp(pg_http_client, pg_admin_token)),
+        count_fn=lambda: len(
+            query_logs_via_mcp(pg_http_client, pg_admin_token_provider.get_token())
+        ),
         max_attempts=10,
         sleep_seconds=0.3,
     )
     result = run_log_audit_gate(
         pg_http_client,
-        pg_admin_token,
+        pg_admin_token_provider.get_token(),
         watermark_id=log_watermark_phase6,
         phase_name="Phase 6 (PostgreSQL Parity)",
     )
