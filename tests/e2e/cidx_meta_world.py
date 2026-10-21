@@ -25,6 +25,7 @@ import re
 import secrets
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,7 @@ from typing import (
     Callable,
     Dict,
     FrozenSet,
+    Iterator,
     List,
     Optional,
     Protocol,
@@ -42,6 +44,7 @@ from typing import (
 
 import httpx
 
+from code_indexer.global_repos.write_lock_manager import WriteLockManager
 from tests.e2e.helpers import GIT_SUBPROCESS_TIMEOUT, wait_for_job
 from tests.e2e.server.conftest import AdminTokenProvider
 from tests.shared.cidx_meta_visibility_fixture import (
@@ -75,6 +78,9 @@ REPLY_SNIPPET = 600
 # Long enough that a search hit on it exceeds the 2000-character preview and
 # is returned with a cache handle.
 GUIDELINE_LINES = 80
+# The teardown's holder name and lease on the server's catalog write lock.
+_WORLD_LOCK_OWNER = "e2e_catalog_world"
+_WORLD_LOCK_TTL_SECONDS = 600
 # Repository internals never snapshotted or restored by the teardown.
 _INTERNAL_DIRS = (".code-indexer", ".git", ".locks", ".snapshot-reader-leases")
 
@@ -265,6 +271,9 @@ class WorldLedger:
     admin: HeaderSource
     catalog_root: Path
     snapshot: Optional[Dict[str, bytes]] = None
+    # The catalog repository's HEAD when the snapshot was taken (None: the
+    # catalog is not a git repository).
+    catalog_head: Optional[str] = None
     repos: List[str] = field(default_factory=list)
     user_created: bool = False
     group_id: Optional[str] = None
@@ -369,17 +378,77 @@ def snapshot_catalog(catalog_root: Path) -> Dict[str, bytes]:
     }
 
 
-def restore_catalog(catalog_root: Path, snapshot: Dict[str, bytes]) -> None:
-    """Put the catalog clone back to *snapshot*: files added since are
-    removed, changed or removed ones rewritten."""
-    removed: List[str] = []
+def _catalog_git(
+    catalog_root: Path, *args: str, check: bool = True
+) -> "subprocess.CompletedProcess[str]":
+    return subprocess.run(
+        ["git", "-c", "user.name=e2e", "-c", "user.email=e2e@example.com", *args],
+        cwd=catalog_root,
+        capture_output=True,
+        text=True,
+        check=check,
+        timeout=GIT_SUBPROCESS_TIMEOUT,
+    )
+
+
+def catalog_head(catalog_root: Path) -> Optional[str]:
+    """The catalog repository's HEAD commit, or None when it is not a git
+    repository (Phases 3 and 6)."""
+    if not (catalog_root / ".git").exists():
+        return None
+    return _catalog_git(catalog_root, "rev-parse", "HEAD").stdout.strip()
+
+
+@contextmanager
+def catalog_write_lock(
+    catalog_root: Path, wait_seconds: float = JOB_TIMEOUT_SECONDS
+) -> Iterator[None]:
+    """Hold the server's write lock on the catalog (the file lock its
+    refresh and catalog writers take), taken as any external writer takes
+    it; waits at most *wait_seconds* for the current holder."""
+    locks = WriteLockManager(catalog_root.parent)
+    deadline = time.monotonic() + wait_seconds
+    while not locks.acquire(
+        CATALOG, owner_name=_WORLD_LOCK_OWNER, ttl_seconds=_WORLD_LOCK_TTL_SECONDS
+    ):
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"catalog write lock still held after {wait_seconds}s: "
+                f"{locks.get_lock_info(CATALOG)}"
+            )
+        time.sleep(JOB_POLL_SECONDS)
+    try:
+        yield
+    finally:
+        if not locks.release(CATALOG, owner_name=_WORLD_LOCK_OWNER):
+            raise RuntimeError("catalog write lock was taken over during the restore")
+
+
+def restore_catalog(
+    catalog_root: Path,
+    snapshot: Dict[str, bytes],
+    base_head: Optional[str] = None,
+    lock_wait_seconds: float = JOB_TIMEOUT_SECONDS,
+) -> None:
+    """Put the catalog clone back to *snapshot* under the server's catalog
+    write lock: files added since are removed, changed or removed ones
+    rewritten, and what the server committed to those paths since
+    *base_head* is committed back (``_commit_world_paths``)."""
+    with catalog_write_lock(catalog_root, lock_wait_seconds):
+        touched = _restore_files(catalog_root, snapshot)
+        _commit_world_paths(catalog_root, base_head, touched)
+
+
+def _restore_files(catalog_root: Path, snapshot: Dict[str, bytes]) -> List[str]:
+    """Rewrite the catalog files to *snapshot*; the paths removed or rewritten."""
+    touched: List[str] = []
     for path in sorted(catalog_root.rglob("*"), reverse=True):
         relative = path.relative_to(catalog_root)
         if _is_internal(relative):
             continue
         if path.is_file() and str(relative) not in snapshot:
             path.unlink()
-            removed.append(str(relative))
+            touched.append(str(relative))
         elif path.is_dir() and not any(path.iterdir()):
             path.rmdir()
     for relative_name, content in snapshot.items():
@@ -387,44 +456,37 @@ def restore_catalog(catalog_root: Path, snapshot: Dict[str, bytes]) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists() or target.read_bytes() != content:
             target.write_bytes(content)
-    _commit_tracked_removals(catalog_root, removed)
+            touched.append(relative_name)
+    return touched
 
 
-def _commit_tracked_removals(catalog_root: Path, removed: List[str]) -> None:
-    """Commit the removal of the *removed* files the catalog repository
-    tracks (the server commits a pattern stored through its front door), so
-    its working tree matches HEAD again: an activation copies tracked
-    changes and logs them.  Only those paths are committed."""
-    if not removed or not (catalog_root / ".git").exists():
+def _commit_world_paths(
+    catalog_root: Path, base_head: Optional[str], touched: List[str]
+) -> None:
+    """Commit the *touched* paths whose committed version changed since
+    *base_head* (the server committed them during the world: a stored
+    pattern, an update to a snapshot file), so the working tree matches HEAD
+    again -- an activation copies tracked changes and logs them.  No other
+    path is ever committed, so a tracked change the world did not make stays
+    as it was."""
+    if base_head is None or not touched:
         return
-    listed = subprocess.run(
-        ["git", "ls-files", "-z", "--", *removed],
-        cwd=catalog_root,
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=GIT_SUBPROCESS_TIMEOUT,
+    diff = _catalog_git(
+        catalog_root, "diff", "--name-only", "-z", base_head, "HEAD", "--", *touched
     )
-    tracked = [name for name in listed.stdout.split("\0") if name]
-    if not tracked:
+    owned = [name for name in diff.stdout.split("\0") if name]
+    if not owned:
         return
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=e2e",
-            "-c",
-            "user.email=e2e@example.com",
-            "commit",
-            "-qm",
-            "e2e: remove the catalog world's files",
-            "--",
-            *tracked,
-        ],
-        cwd=catalog_root,
-        capture_output=True,
-        check=True,
-        timeout=GIT_SUBPROCESS_TIMEOUT,
+    _catalog_git(catalog_root, "add", "-A", "--", *owned)
+    staged = _catalog_git(
+        catalog_root, "diff", "--cached", "--quiet", "--", *owned, check=False
+    )
+    # ^ why exit 0 = the restore equals HEAD there already, 1 = changes staged
+    if staged.returncode == 0:
+        return
+    assert staged.returncode == 1, staged.stderr
+    _catalog_git(
+        catalog_root, "commit", "-qm", "e2e: restore the catalog world", "--", *owned
     )
 
 
@@ -549,6 +611,7 @@ def provision_catalog_world(
     step rolls back everything created before it."""
     ledger = WorldLedger(client, admin, catalog_root)
     try:
+        ledger.catalog_head = catalog_head(catalog_root)
         ledger.snapshot = snapshot_catalog(catalog_root)
         _register_repos(ledger, work_dir)
         ledger.catalog_seeded = True
@@ -615,11 +678,13 @@ def _restore_and_refresh(ledger: WorldLedger, snapshot: Dict[str, bytes]) -> Non
     # Removing a repository refreshes the catalog on its own, deferred by the
     # server's debounce: a refresh starting after the restore publishes it.
     # Only when none comes within the debounce window is one submitted, so a
-    # second refresh is never submitted while one runs.
+    # second refresh is never submitted while one runs.  A refresh starting
+    # while the restore holds the catalog write lock skips, so only one
+    # starting after the restore released it counts.
     client, admin = ledger.client, ledger.admin
     wait_for_idle_catalog_refreshes(client, admin)
+    restore_catalog(ledger.catalog_root, snapshot, ledger.catalog_head)
     restored_at = datetime.now(timezone.utc)
-    restore_catalog(ledger.catalog_root, snapshot)
     if not _catalog_refreshed_after(
         client, admin, restored_at, CATALOG_DEBOUNCE_GRACE_SECONDS
     ):
