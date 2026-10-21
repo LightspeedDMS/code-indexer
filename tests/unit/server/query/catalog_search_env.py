@@ -184,7 +184,9 @@ def _index(root: Path) -> None:
         Config(codebase_dir=root)
     )
     store = FilesystemVectorStore(
-        base_path=root / ".code-indexer" / "index", project_root=root
+        base_path=root / ".code-indexer" / "index",
+        project_root=root,
+        hnsw_num_threads=1,
     )
     store.create_collection(COLLECTION, vector_size=VECTOR_DIM)
     fts = TantivyIndexManager(root / ".code-indexer" / "tantivy_index")

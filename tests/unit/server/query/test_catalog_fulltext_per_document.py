@@ -188,6 +188,67 @@ def _answers(http: TestClient, door: Door) -> Dict[Tuple[str, int], Answer]:
     return out
 
 
+Key = Tuple[str, int]
+# One hybrid fusion's inputs, as ranked rows: (full-text half, semantic half).
+Halves = Tuple[List[Row], List[Row]]
+Recorded = Tuple[Dict[Key, Answer], Dict[Key, List[Halves]]]
+
+
+@contextmanager
+def _recorded_halves() -> Iterator[List[Halves]]:
+    """Record the two real ranked lists every hybrid fusion receives; the
+    real fusion still runs and its answer is returned unchanged."""
+    from code_indexer.server.query.semantic_query_manager import (
+        SemanticQueryManager,
+    )
+
+    calls: List[Halves] = []
+    real = SemanticQueryManager._merge_hybrid_results
+
+    def recording(self: Any, fts_results: Any, semantic_results: Any, limit: int):
+        calls.append(
+            (
+                [(r.file_path, int(r.line_number or 0)) for r in fts_results],
+                [(r.file_path, int(r.line_number or 0)) for r in semantic_results],
+            )
+        )
+        return real(self, fts_results, semantic_results, limit)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(SemanticQueryManager, "_merge_hybrid_results", recording)
+        yield calls
+
+
+def _answers_and_halves(http: TestClient, door: Door) -> Recorded:
+    answers: Dict[Key, Answer] = {}
+    halves: Dict[Key, List[Halves]] = {}
+    with ranked_store_search(), _recorded_halves() as calls:
+        for text, limit in CASES:
+            del calls[:]
+            rows, reported_count = door(http, text, limit)
+            answers[(text, limit)] = (sorted(rows), reported_count)
+            halves[(text, limit)] = list(calls)
+    return answers, halves
+
+
+def _assert_hybrid_unchanged(before: Recorded, after: Recorded) -> None:
+    # ^ why semantic candidates are outside this invariant (design residual 2); an HNSW build can degrade knn
+    fused_checked = 0
+    for key in before[0]:
+        rounds_before, rounds_after = before[1][key], after[1][key]
+        assert rounds_before and rounds_after, key
+        # Every deepening round, before and after, fuses ONE full-text page.
+        pages = {tuple(sorted(fts)) for fts, _ in rounds_before + rounds_after}
+        assert len(pages) == 1, (key, pages)
+        semantic_before = [semantic for _, semantic in rounds_before]
+        semantic_after = [semantic for _, semantic in rounds_after]
+        if semantic_before == semantic_after:
+            assert before[0][key] == after[0][key], key
+            fused_checked += 1
+    assert any(fts for rounds in before[1].values() for fts, _ in rounds)
+    assert fused_checked > 0
+
+
 @contextmanager
 def _rewritten(root: Path, rel: str, old: str, new: str) -> Iterator[None]:
     path = root / rel
@@ -207,9 +268,16 @@ def _rewritten(root: Path, rel: str, old: str, new: str) -> Iterator[None]:
 def test_hidden_text_change_keeps_results_and_counts(
     env: CatalogEnv, http: TestClient, door: str, edit: str
 ) -> None:
+    old, new = EDITS[edit]
+    if door in SEMANTIC_MIXED:
+        recorded_before = _answers_and_halves(http, DOORS[door])
+        assert any(rows for rows, _ in recorded_before[0].values())
+        with _rewritten(env.root, PAYMENTS, old, new):
+            recorded_after = _answers_and_halves(http, DOORS[door])
+        _assert_hybrid_unchanged(recorded_before, recorded_after)
+        return
     before = _answers(http, DOORS[door])
     assert any(rows for rows, _ in before.values())
-    old, new = EDITS[edit]
     with _rewritten(env.root, PAYMENTS, old, new):
         after = _answers(http, DOORS[door])
     changed = {
