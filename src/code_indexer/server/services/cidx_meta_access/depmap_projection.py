@@ -75,6 +75,9 @@ logger = logging.getLogger(__name__)
 
 RESTRICTED_PLACEHOLDER = "[restricted repository]"
 DOMAIN_PLACEHOLDER = "[restricted domain]"
+# The only documents whose projection synthesizes text beyond the marker
+# strings and recomputed numbers: the dependency-map summary line.
+SYNTHESIZING_DOCUMENTS = frozenset({"dependency-map/_index.md"})
 MIN_PROSE_ALIAS_LENGTH = 4
 VIEW_CACHE_MAX_ENTRIES = 64
 PROJECTION_CACHE_MAX_ENTRIES = 256
@@ -329,12 +332,14 @@ def _project_row(
     return _redact(line, view)
 
 
-def _project_text(line: str, view: _View) -> Optional[str]:
+def _project_text(
+    line: str, view: _View, *, synthesizes: bool = False
+) -> Optional[str]:
     count = _COUNT_LINE.match(line)
     if count:
         return f"{count.group('prefix')}{view.counts[count.group('key')]}"
     if _SUMMARY_LINE.match(line):
-        return view.summary
+        return view.summary if synthesizes else None
     inline = _INLINE_LIST.match(line)
     if inline:
         entries = [e.strip() for e in inline.group("body").split(",") if e.strip()]
@@ -426,34 +431,6 @@ def _frontmatter_end(lines: Sequence[str], span: int) -> int:
     return next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), 0)
 
 
-_YAML_ESCAPES = {'"': '\\"', "\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r"}
-_YAML_LINE_BREAKS = (0x2028, 0x2029, 0xFEFF)
-
-
-def _yaml_printable(char: str) -> bool:
-    """True when PyYAML reads *char* literally inside a quoted scalar."""
-    code = ord(char)
-    in_ascii = 0x20 <= code <= 0x7E
-    in_bmp = 0xA0 <= code <= 0xFFFD and not 0xD800 <= code <= 0xDFFF
-    in_supplementary = code >= 0x10000
-    return in_ascii or (in_bmp and code not in _YAML_LINE_BREAKS) or in_supplementary
-
-
-def _yaml_quoted(value: str) -> str:
-    """*value* as a double-quoted YAML scalar that parses back to it."""
-    out = []
-    for char in value:
-        if char in _YAML_ESCAPES:
-            out.append(_YAML_ESCAPES[char])
-        elif _yaml_printable(char):
-            out.append(char)
-        elif ord(char) <= 0xFF:
-            out.append(f"\\x{ord(char):02x}")
-        else:
-            out.append(f"\\u{ord(char):04x}")
-    return '"' + "".join(out) + '"'
-
-
 def _scalar_string(text: str) -> Optional[str]:
     """The string a YAML value spells; None for any other value."""
     try:
@@ -514,11 +491,17 @@ def _project_frontmatter_line(line: str, view: _View) -> Optional[str]:
         return redacted
     if _mentions_hidden(scalar.group("prefix"), view):
         return None
-    value = _scalar_string(scalar.group("value"))
-    projected = None if value is None else _redact(value, view)
-    if projected is None:
+    value = _redact(scalar.group("value"), view)
+    if not value:
         return None
-    return scalar.group("prefix") + _yaml_quoted(projected)
+    if not value.startswith(('"', "'")):
+        # A plain value: single quotes keep it a string with no escapes.
+        if " #" in value:
+            return None
+        value = "'" + value.replace("'", "''") + "'"
+    if _scalar_string(value) is None:
+        return None
+    return scalar.group("prefix") + value
 
 
 #: Parsed values that render as digits and separators only (datetime is a
@@ -556,6 +539,7 @@ def _frontmatter_unsafe(out: Sequence[Optional[str]], end: int, view: _View) -> 
 def _compute(
     lines: Sequence[str], relative_path: str, fingerprint: str, view: _View
 ) -> List[Optional[str]]:
+    synthesizes = relative_path in SYNTHESIZING_DOCUMENTS
     span = _frontmatter_span(lines)
     end = _frontmatter_end(lines, span)
     out: List[Optional[str]] = [None] * span
@@ -567,7 +551,7 @@ def _compute(
         if role == LINE_TEXT and 0 < span + offset < end:
             out.append(_project_frontmatter_line(line, view))
         elif role == LINE_TEXT:
-            out.append(_project_text(line, view))
+            out.append(_project_text(line, view, synthesizes=synthesizes))
         elif role == LINE_HEADER:
             out.append(_redact(line, view))
         elif role == LINE_SEPARATOR:

@@ -23,9 +23,10 @@ from fastapi.testclient import TestClient
 
 from code_indexer.server.cache.payload_cache import PayloadCache, PayloadCacheConfig
 from code_indexer.server.mcp.handlers.search.code_search import search_code
-from tests.shared.cidx_meta_visibility_fixture import CANARY
+from tests.shared.cidx_meta_visibility_fixture import CANARY, RESTRICTED_USER
 from tests.unit.server.query.catalog_search_env import (
     CATALOG_ALIAS,
+    QUERY,
     RESTRICTED,
     CatalogEnv,
     catalog_app,
@@ -44,8 +45,10 @@ CASES: List[Tuple[str, int]] = [
     ("writes rows", 40),
     ("alpha", 1),
     ("alpha", 2),
+    ("alpha", 10),
     ("payments", 1),
     ("payments", 2),
+    ("payments", 10),
     ("alpha payments", 1),
 ]
 JOURNAL_ROW = (
@@ -244,3 +247,62 @@ def test_words_in_different_chunks_find_the_document(
         return
     assert [path for path, _ in rows] == [SPLIT_FILE]
     assert reported_count == 1
+
+
+CAPS = (1, 2, 4, 8, 16)
+
+
+def _page_outcomes(
+    env: CatalogEnv, monkeypatch: pytest.MonkeyPatch
+) -> Dict[Tuple[str, int, int], Any]:
+    """Each case's page under each engine cap: its paths, or the refusal."""
+    from code_indexer.server.query.semantic_query_manager import SearchParameterError
+    from code_indexer.server.services.cidx_meta_access import fulltext_pages
+    from code_indexer.server.services.cidx_meta_access.fulltext_terms import (
+        FulltextOptions,
+        parse_fulltext_terms,
+    )
+    from code_indexer.server.services.cidx_meta_access.hit_projection import (
+        open_catalog_scope,
+    )
+    from code_indexer.server.services.cidx_meta_access.universe_provider import (
+        registry_of,
+    )
+
+    state = env.app.state
+    out: Dict[Tuple[str, int, int], Any] = {}
+    for cap in CAPS:
+        # QUERY is held by many visible stored files: refused at small caps.
+        for text, limit in CASES + [(QUERY, 1)]:
+            scope = open_catalog_scope(
+                RESTRICTED_USER,
+                state.access_filtering_service,
+                env.root,
+                registry_of(state),
+            )
+            terms = parse_fulltext_terms(text, 0)
+            assert scope is not None and terms is not None
+            monkeypatch.setattr(fulltext_pages, "_engine_cap", lambda c=cap: c)
+            try:
+                rows = fulltext_pages.catalog_fulltext_rows(
+                    env.root, FulltextOptions(), terms, scope, limit
+                )
+                out[(text, limit, cap)] = sorted(str(r["path"]) for r in rows)
+            except SearchParameterError as refused:
+                out[(text, limit, cap)] = str(refused)
+    monkeypatch.undo()
+    return out
+
+
+@pytest.mark.parametrize("edit", sorted(EDITS))
+def test_refusal_never_depends_on_hidden_text(
+    env: CatalogEnv, edit: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _page_outcomes(env, monkeypatch)
+    assert any(isinstance(v, str) for v in before.values())
+    assert any(isinstance(v, list) and v for v in before.values())
+    old, new = EDITS[edit]
+    with _rewritten(env.root, PAYMENTS, old, new):
+        after = _page_outcomes(env, monkeypatch)
+    changed = {k: (before[k], after[k]) for k in before if before[k] != after[k]}
+    assert changed == {}

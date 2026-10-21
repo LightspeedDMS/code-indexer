@@ -148,7 +148,9 @@ class TextRematch:
     @cached_property
     def terms(self) -> Optional[FullTextTerms]:
         """The query's required words; None for a refused literal form."""
-        return parse_fulltext_terms(self.query, self.edit_distance)
+        return parse_fulltext_terms(
+            self.query, self.edit_distance, self.options.case_sensitive
+        )
 
     def match(
         self, raw: str, view: LineView, match_text: Optional[str]

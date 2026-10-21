@@ -135,12 +135,14 @@ def test_denied_documents_take_no_engine_slots(
 
     monkeypatch.setattr(TantivyIndexManager, "search", recording)
     assert _single(env) == [VISIBLE]
-    # One word, answered completely by the first round of 2 * limit hits.
-    assert [call["limit"] for call in asked] == [2 * LIMIT]
-    allowed = asked[0]["allowed_paths"]
-    assert VISIBLE in allowed
-    assert not any(path.startswith("fleet-repo-") for path in allowed)
-    assert not any(CANARY in path for path in allowed)
+    # Stored documents by the word, projected ones by its anchor: each
+    # answered completely by the first round of 2 * limit hits.
+    assert [call["limit"] for call in asked] == [2 * LIMIT, 2 * LIMIT]
+    assert any(VISIBLE in call["allowed_paths"] for call in asked)
+    for call in asked:
+        allowed = call["allowed_paths"]
+        assert not any(path.startswith("fleet-repo-") for path in allowed)
+        assert not any(CANARY in path for path in allowed)
 
 
 def test_allowed_paths_read_only_visible_directories(

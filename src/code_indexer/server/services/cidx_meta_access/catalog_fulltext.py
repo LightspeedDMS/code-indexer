@@ -129,7 +129,7 @@ def rest_fulltext_rows(
         or not rows_include_catalog([{"repository_alias": alias}], username)
     ):
         return search(request.query_text, request.limit)
-    terms = parse_fulltext_terms(request.query_text, distance)
+    terms = parse_fulltext_terms(request.query_text, distance, request.case_sensitive)
     if terms is None:
         raise_fulltext_refusal()
     registry = None if state is None else registry_of(state)

@@ -25,7 +25,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, List, Mapping, NoReturn, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    FrozenSet,
+    List,
+    Mapping,
+    NoReturn,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 FULLTEXT_FORM_REFUSAL = "this full-text query form is not available for this repository"
 FULLTEXT_TOO_BROAD = (
@@ -108,13 +117,18 @@ def engine_tokens(text: str, start: int = 0, end: Optional[int] = None) -> List[
 @dataclass(frozen=True)
 class FullTextTerms:
     """The required words of one full-text query: each word as the engine
-    is asked for it, its token phrase, and the single fuzzy word with its
-    distance (None without fuzzy)."""
+    is asked for it, its token phrase (original case when case-sensitive),
+    the single fuzzy word with its distance (None without fuzzy), and the
+    anchors: engine queries for tokens projection cannot introduce, so any
+    document showing every word holds an anchor in its raw text (empty when
+    every token could be introduced)."""
 
     words: Tuple[str, ...]
     phrases: Tuple[Tuple[str, ...], ...]
     fuzzy_word: Optional[str] = None
     edit_distance: int = 0
+    case_sensitive: bool = False
+    anchors: Tuple[str, ...] = field(default=(), compare=False)
 
     def engine_queries(self) -> Tuple[str, ...]:
         """One single-word engine query per required word."""
@@ -163,7 +177,47 @@ def raise_fulltext_too_broad() -> NoReturn:
     raise SearchParameterError(FULLTEXT_TOO_BROAD)
 
 
-def parse_fulltext_terms(query: str, edit_distance: int) -> Optional[FullTextTerms]:
+@lru_cache(maxsize=1)
+def introducible_tokens() -> FrozenSet[str]:
+    """The tokens projection can add to a document outside the
+    synthesizing set besides numbers: those of the marker strings."""
+    from .depmap_projection import DOMAIN_PLACEHOLDER, RESTRICTED_PLACEHOLDER
+
+    return frozenset(
+        str(form)
+        for marker in (RESTRICTED_PLACEHOLDER, DOMAIN_PLACEHOLDER)
+        for form, _, _ in engine_tokens(marker)
+        if form
+    )
+
+
+def _introducible(token: str) -> bool:
+    return token.isdigit() or token in introducible_tokens()
+
+
+def _fuzzy_may_match_introducible(word: str, distance: int) -> bool:
+    """True when *word* is within *distance* of a marker token or could
+    become a number by editing its non-digit characters."""
+    if sum(not ch.isdigit() for ch in word) <= distance:
+        return True
+    return any(_within_distance(word, t, distance) for t in introducible_tokens())
+
+
+def _anchors(
+    words: Sequence[str], forms: Sequence[Sequence[str]], edit_distance: int
+) -> Tuple[str, ...]:
+    if edit_distance > 0:
+        fuzzy = words[0]
+        if _fuzzy_may_match_introducible(fuzzy.lower(), edit_distance):
+            return ()
+        return (fuzzy,)
+    safe = [t for word in forms for t in word if not _introducible(t)]
+    return tuple(dict.fromkeys(safe))
+
+
+def parse_fulltext_terms(
+    query: str, edit_distance: int, case_sensitive: bool = False
+) -> Optional[FullTextTerms]:
     """The query's required words, or None when its outcome cannot be
     decided on shown text alone (the form is refused)."""
     from ....services.tantivy_index_manager import sanitize_fts_query
@@ -175,29 +229,39 @@ def parse_fulltext_terms(query: str, edit_distance: int) -> Optional[FullTextTer
         return None
     if any(ch in _GRAMMAR_CHARS for word in words for ch in word):
         return None
-    word_tokens = [[form for form, _, _ in engine_tokens(word)] for word in words]
-    if not all(word_tokens) or any(None in forms for forms in word_tokens):
+    tokens = [engine_tokens(word) for word in words]
+    if not all(tokens) or any(f is None for t in tokens for f, _, _ in t):
         return None
-    phrases = tuple(tuple(str(form) for form in forms) for forms in word_tokens)
-    if edit_distance > 0:
-        if len(words) != 1:
-            return None
-        return FullTextTerms(tuple(words), phrases, words[0], edit_distance)
-    return FullTextTerms(tuple(words), phrases)
+    forms = [[str(f) for f, _, _ in t] for t in tokens]
+    phrases = tuple(
+        tuple(word[s:e] for _, s, e in t) if case_sensitive else tuple(f)
+        for word, t, f in zip(words, tokens, forms)
+    )
+    if edit_distance > 0 and len(words) != 1:
+        return None
+    return FullTextTerms(
+        tuple(words),
+        phrases,
+        words[0] if edit_distance > 0 else None,
+        edit_distance,
+        case_sensitive,
+        _anchors(words, forms, edit_distance),
+    )
 
 
-def _shown_runs(shown: str) -> List[List[Token]]:
+def _shown_runs(shown: str, case_sensitive: bool = False) -> List[List[Token]]:
     """The shown line's engine tokens, in runs of adjacent tokens (a token
-    the engine drops ends a run, as it breaks a phrase in the index)."""
+    the engine drops ends a run, as it breaks a phrase in the index); a
+    case-sensitive query compares each token's original text."""
     runs: List[List[Token]] = []
     run: List[Token] = []
-    for token in engine_tokens(shown):
-        if token[0] is None:
+    for form, start, end in engine_tokens(shown):
+        if form is None:
             if run:
                 runs.append(run)
             run = []
         else:
-            run.append(token)
+            run.append((shown[start:end] if case_sensitive else form, start, end))
     if run:
         runs.append(run)
     return runs
@@ -260,7 +324,7 @@ def first_visible_match(
     counts = [0] * (1 if terms.fuzzy_word is not None else len(terms.phrases))
     first: Optional[VisibleMatch] = None
     for number, shown in enumerate(shown_lines, start=1):
-        runs = _shown_runs(shown)
+        runs = _shown_runs(shown, terms.case_sensitive)
         for index in range(len(counts)):
             spans = _matches(runs, terms, index)
             if index == 0 and spans and first is None:

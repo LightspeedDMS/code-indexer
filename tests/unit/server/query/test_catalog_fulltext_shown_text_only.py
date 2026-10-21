@@ -141,7 +141,9 @@ def _doors(env: CatalogEnv, http: TestClient, text: str) -> Dict[str, Answer]:
     }
 
 
-@pytest.mark.parametrize("text", [WORD, f"zeta {WORD}", "restricted"])
+@pytest.mark.parametrize(
+    "text", [WORD, f"zeta {WORD}", "restricted", "restricted repository"]
+)
 def test_same_shown_line_answers_the_same_whatever_was_hidden(
     env: CatalogEnv, http: TestClient, text: str
 ) -> None:
@@ -154,6 +156,71 @@ def test_same_shown_line_answers_the_same_whatever_was_hidden(
     assert answers[0] == answers[1]
     for paths, count in answers[0].values():
         assert DESCRIPTION in paths and count == len(paths)
+
+
+def _single(env: CatalogEnv, text: str, **options: Any) -> List[str]:
+    sqm = env.app.state.semantic_query_manager
+    with ranked_store_search():
+        rows = sqm.query_user_repositories(
+            username=RESTRICTED_USER,
+            query_text=text,
+            repository_alias=CATALOG_ALIAS,
+            limit=40,
+            search_mode="fts",
+            **options,
+        )["results"]
+    return sorted(str(r["file_path"]) for r in rows)
+
+
+def _rest(http: TestClient, text: str, **options: Any) -> List[str]:
+    body = {
+        "query_text": text,
+        "repository_alias": CATALOG_ALIAS,
+        "search_mode": "fts",
+        "limit": 40,
+        **options,
+    }
+    response = http.post("/api/query", json=body)
+    assert response.status_code == 200, response.text
+    return sorted(str(r["path"]) for r in response.json()["fts_results"])
+
+
+def test_path_filter_applies_to_every_catalog_document(
+    env: CatalogEnv, http: TestClient
+) -> None:
+    pattern = "xray-patterns/*"
+    multi = http.post(
+        "/api/query/multi",
+        json={
+            "repositories": [CATALOG_ALIAS],
+            "query": "alpha",
+            "search_type": "fts",
+            "limit": 40,
+            "path_filter": pattern,
+        },
+    )
+    assert multi.status_code == 200, multi.text
+    multi_paths = [
+        str(r["file_path"]) for r in multi.json()["results"].get(CATALOG_ALIAS, [])
+    ]
+    for paths in (
+        _single(env, "alpha", path_filter=pattern),
+        _rest(http, "alpha", path_filter=pattern),
+        multi_paths,
+    ):
+        assert all(path.startswith("xray-patterns/") for path in paths), paths
+    assert DESCRIPTION in _single(env, "alpha")
+
+
+def test_case_sensitive_query_respects_case(env: CatalogEnv, http: TestClient) -> None:
+    with _described(env, "zeta Mixedword"):
+        for door in (
+            lambda text, **o: _single(env, text, **o),
+            lambda text, **o: _rest(http, text, **o),
+        ):
+            assert DESCRIPTION not in door("mixedword", case_sensitive=True)
+            assert DESCRIPTION in door("Mixedword", case_sensitive=True)
+            assert DESCRIPTION in door("mixedword")
 
 
 def test_a_long_changed_line_is_judged_in_milliseconds(env: CatalogEnv) -> None:

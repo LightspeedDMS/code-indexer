@@ -1080,7 +1080,6 @@ class TantivyIndexManager:
         from code_indexer.services.extension_filter import (
             fts_pushdown_terms,
             normalize_extensions,
-            path_matches_extensions,
         )
 
         extension_set = normalize_extensions(file_extensions)
@@ -1304,39 +1303,18 @@ class TantivyIndexManager:
             search_results = first_page.hits
             match_count = first_page.count
 
-            # Build allowed and excluded extension sets once before loop
-            allowed_extensions = set()
-            excluded_extensions = set()
+            # The per-hit filters, as one predicate shared with callers that
+            # judge paths outside the engine (precedence in fts_hit_filter).
+            from code_indexer.services.fts_hit_filter import build_hit_filter
 
-            if languages or exclude_languages:
-                from code_indexer.services.language_mapper import LanguageMapper
-
-                mapper = LanguageMapper()
-
-                # Build excluded extensions from excluded languages (processed FIRST)
-                if exclude_languages:
-                    for lang in exclude_languages:
-                        extensions = mapper.get_extensions(lang)
-                        if extensions:
-                            excluded_extensions.update(extensions)
-
-                # Build allowed extensions from included languages (processed SECOND)
-                if languages:
-                    for lang in languages:
-                        extensions = mapper.get_extensions(lang)
-                        if extensions:
-                            allowed_extensions.update(extensions)
-
-            # Create PathPatternMatcher once before loop (for path filtering and exclusions)
-            path_matcher = None
-            exclude_matcher = None
-            if active_path_filters or exclude_paths:
-                from code_indexer.services.path_pattern_matcher import (
-                    PathPatternMatcher,
-                )
-
-                path_matcher = PathPatternMatcher()
-                exclude_matcher = PathPatternMatcher()  # Use same class for exclusions
+            _passes_filters = build_hit_filter(
+                allowed_paths=allowed_set,
+                languages=languages,
+                exclude_languages=exclude_languages,
+                path_filters=active_path_filters,
+                exclude_paths=exclude_paths,
+                file_extensions=file_extensions,
+            )
 
             # PERFORMANCE OPTIMIZATION: Compile regex pattern ONCE before loop (not per
             # result). This reduces 100x compilation overhead for searches with many
@@ -1389,45 +1367,6 @@ class TantivyIndexManager:
                     doc.get_first("path") or "",
                     str(language).strip("/") if language else language,
                 )
-
-            def _passes_filters(path: str, language: Optional[str]) -> bool:
-                """Per-hit filters. CRITICAL PRECEDENCE ORDER: 1. language
-                exclusions, 2. language inclusions, 3. path exclusions,
-                4. path inclusions (#2047's suffix re-check sits after 2)."""
-                if allowed_set is not None and path not in allowed_set:
-                    return False
-                # 1. Exclusions take precedence over inclusions.
-                if excluded_extensions and language in excluded_extensions:
-                    return False
-                # 2. Language filtering was already done in the query for
-                # performance, but exclude_languages needs post-processing.
-                if allowed_extensions and language not in allowed_extensions:
-                    return False
-                # #2047: post-verify the pushed-down extension filter on the
-                # path itself (drops extensionless "txt" documents).
-                if extension_set and not path_matches_extensions(path, extension_set):
-                    return False
-                # 3. Path exclusions before path inclusions.
-                if (
-                    exclude_matcher
-                    and exclude_paths
-                    and any(
-                        exclude_matcher.matches_pattern(path, p) for p in exclude_paths
-                    )
-                ):
-                    return False
-                # 4. Path inclusions: ANY path filter (OR), PathPatternMatcher
-                # for consistency with semantic search (** recursive globs).
-                if (
-                    path_matcher
-                    and active_path_filters
-                    and not any(
-                        path_matcher.matches_pattern(path, p)
-                        for p in active_path_filters
-                    )
-                ):
-                    return False
-                return True
 
             # #2047: hits that fail the suffix re-check (extensionless "txt"
             # files, or values that cannot be pushed down) must not leave the
