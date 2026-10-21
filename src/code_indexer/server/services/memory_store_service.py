@@ -339,9 +339,9 @@ class MemoryStoreService:
             return
         request_cidx_meta_refresh(self._scheduler, debouncer=self._debouncer)
 
-    def _release_coarse_lock(self, owner: str) -> None:
-        """Release coarse lock."""
-        self._scheduler.release_write_lock(_COARSE_ALIAS, owner)
+    def _release_coarse_lock(self, owner: str) -> bool:
+        """Release coarse lock; False when the lock could not be removed."""
+        return bool(self._scheduler.release_write_lock(_COARSE_ALIAS, owner))
 
     def _run_with_coarse_lock(self, owner: str, operation: Callable[[], Any]) -> Any:
         """Acquire coarse lock (or piggyback), run operation, release the
@@ -350,13 +350,22 @@ class MemoryStoreService:
         The refresh is requested only after the lock is released: a refresh
         that starts while the lock is held skips the cycle and owes nothing,
         so a trigger sent under our own lock would leave the write unindexed.
+        A lock that is still held (another owner's, or ours when the release
+        failed) owes the refresh to the debouncer instead.
         Operation exceptions propagate; coarse lock is still released.
         """
         piggyback = self._coarse_piggyback_or_acquire(owner)
+        released = True
         try:
             result = operation()
         finally:
             if not piggyback:
-                self._release_coarse_lock(owner)
-        self._signal_refresh(piggyback)
+                released = self._release_coarse_lock(owner)
+        if not released:
+            logger.warning(
+                "cidx-meta write lock release failed for owner=%r; the "
+                "refresh is owed to the debouncer",
+                owner,
+            )
+        self._signal_refresh(piggyback or not released)
         return result

@@ -39,9 +39,10 @@ class _LockingScheduler:
         self.holder = owner
         return True
 
-    def release_write_lock(self, alias: str, owner: str) -> None:
+    def release_write_lock(self, alias: str, owner: str) -> bool:
         assert self.holder == owner
         self.holder = None
+        return True
 
     def trigger_refresh_for_repo(self, alias_name: str) -> Optional[str]:
         assert alias_name == "cidx-meta-global"
@@ -126,6 +127,35 @@ def test_piggyback_store_owes_refresh_to_debouncer(
     assert scheduler.lock_held_at_trigger == []
     assert module_debouncer.signals == 1
     assert scheduler.holder == "dependency-map-writer"
+
+
+class _StuckLockScheduler(_LockingScheduler):
+    """The lock could not be removed: release reports False, still held."""
+
+    def release_write_lock(self, alias: str, owner: str) -> bool:  # type: ignore[override]
+        assert self.holder == owner
+        return False
+
+
+def test_failed_lock_release_owes_refresh_to_debouncer(
+    tmp_path: Path, module_debouncer: _CountingDebouncer
+) -> None:
+    catalog = tmp_path / "cidx-meta"
+    catalog.mkdir()
+    scheduler = _StuckLockScheduler()
+    svc = XrayPatternService(catalog, refresh_scheduler=scheduler)
+
+    result = svc.store_xray_pattern_audited(
+        scope="__any__",
+        pattern_yaml=MINIMAL_PATTERN_YAML,
+        overwrite=False,
+        actor="alice",
+        may_replace_global=True,
+    )
+
+    assert result.get("success") is True, result
+    assert scheduler.lock_held_at_trigger == []
+    assert module_debouncer.signals == 1
 
 
 def test_piggyback_delete_owes_refresh_to_debouncer(

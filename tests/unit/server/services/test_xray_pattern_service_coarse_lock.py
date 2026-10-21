@@ -65,8 +65,9 @@ class FakeScheduler:
         self.acquire_write_lock_calls.append((alias, owner))
         return self._acquire_returns
 
-    def release_write_lock(self, alias: str, owner: str) -> None:
+    def release_write_lock(self, alias: str, owner: str) -> bool:
         self.release_write_lock_calls.append((alias, owner))
+        return True
 
 
 # ---------------------------------------------------------------------------

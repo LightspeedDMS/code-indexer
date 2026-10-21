@@ -144,6 +144,29 @@ def test_refresh_already_running_is_owed_to_debouncer_without_warning(
     assert warnings == [], [r.getMessage() for r in warnings]
 
 
+class _StuckLockScheduler(_LockingScheduler):
+    """The lock could not be removed: release reports False, still held."""
+
+    def release_write_lock(
+        self, alias: str, owner_name: str, owner_token: Optional[str] = None
+    ) -> bool:
+        assert self.holder == owner_name
+        return False
+
+
+def test_failed_lock_release_owes_refresh_to_debouncer(tmp_path: Path) -> None:
+    # A refresh requested now would skip on the still-held lock and owe
+    # nothing, so the write is owed to the debouncer instead.
+    scheduler = _StuckLockScheduler()
+    debouncer = _CountingDebouncer()
+    svc = _service(tmp_path, scheduler, debouncer)
+
+    svc.create_memory(_payload("first"), username="alice")
+
+    assert scheduler.lock_held_at_trigger == []
+    assert debouncer.signals == 1
+
+
 class _DeferringScheduler(_LockingScheduler):
     """The failure backoff persisted the trigger as pending."""
 

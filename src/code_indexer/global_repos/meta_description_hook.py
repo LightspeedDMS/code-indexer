@@ -645,29 +645,10 @@ def on_repo_added(
     logger.info(f"Created meta description file: {md_file}")
 
     # Trigger cidx-meta reindex to make the new description searchable
+    # (atomic_write_description has released the write lock by now).
     if _refresh_scheduler is not None:
-        try:
-            _refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
-            logger.info(f"Triggered cidx-meta refresh after adding {repo_name}")
-        except Exception as e:
-            from code_indexer.server.repositories.background_jobs import (
-                DuplicateJobError,
-            )
-
-            if isinstance(e, DuplicateJobError):
-                if _debouncer is not None:
-                    _debouncer.signal_dirty()
-                    logger.info(
-                        f"cidx-meta refresh deferred (debounced) for {repo_name}"
-                    )
-                else:
-                    logger.warning(
-                        f"cidx-meta refresh skipped for {repo_name}: no debouncer"
-                    )
-            else:
-                logger.warning(
-                    f"Failed to trigger cidx-meta refresh for {repo_name}: {e}"
-                )
+        request_cidx_meta_refresh(_refresh_scheduler)
+        logger.info(f"Requested cidx-meta refresh after adding {repo_name}")
 
 
 def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
@@ -736,28 +717,8 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
         # Trigger cidx-meta reindex after the deletion, once the write lock is
         # released (a refresh starting under the lock skips and owes nothing).
         if _deleted and _refresh_scheduler is not None:
-            try:
-                _refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
-                logger.info(f"Triggered cidx-meta refresh after removing {repo_name}")
-            except Exception as e:
-                from code_indexer.server.repositories.background_jobs import (
-                    DuplicateJobError,
-                )
-
-                if isinstance(e, DuplicateJobError):
-                    if _debouncer is not None:
-                        _debouncer.signal_dirty()
-                        logger.info(
-                            f"cidx-meta refresh deferred (debounced) for {repo_name}"
-                        )
-                    else:
-                        logger.warning(
-                            f"cidx-meta refresh skipped for {repo_name}: no debouncer"
-                        )
-                else:
-                    logger.warning(
-                        f"Failed to trigger cidx-meta refresh for {repo_name}: {e}"
-                    )
+            request_cidx_meta_refresh(_refresh_scheduler)
+            logger.info(f"Requested cidx-meta refresh after removing {repo_name}")
     else:
         logger.debug(f"No meta description file to delete for {repo_name}")
 
