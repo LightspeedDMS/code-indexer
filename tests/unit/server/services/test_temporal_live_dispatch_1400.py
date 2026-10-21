@@ -20,6 +20,7 @@ fusion/embedding work is substituted via a fast fake worker function
 anti-mock hierarchy (external/expensive boundaries only).
 """
 
+import threading
 import time
 from typing import Dict, List, Optional
 
@@ -32,6 +33,9 @@ from code_indexer.server.services.maintenance_service import (
     get_maintenance_state,
 )
 from code_indexer.server.services.temporal_dedup_cache import TemporalDedupCache
+from code_indexer.server.services.temporal_freshness_cache import (
+    TemporalFreshnessSignalCache,
+)
 from code_indexer.server.services.temporal_snapshot_store import (
     store_temporal_snapshot,
 )
@@ -571,22 +575,50 @@ class TestConfigServiceThreading:
         assert captured["config_service"] is sentinel_config_service
 
 
+#: Upper bound on every event wait in the dedup-join test (never reached
+#: on a healthy run; turns a broken gate into a failure, not a hang).
+_GATE_TIMEOUT_SECONDS = 10.0
+
+
 class TestSingleFlightDedupJoin:
     def test_identical_signature_joins_in_flight_job_no_second_submit(
         self, tmp_path, payload_cache, bgm
     ):
         from code_indexer.server.services.temporal_live_dispatch import (
+            TEMPORAL_OPERATION_TYPE,
             execute_live_temporal_search,
         )
 
-        dedup_cache = TemporalDedupCache()
         worker_input = _make_worker_input(tmp_path, query_text="dedup test query")
-        submit_count = {"n": 0}
-        slow_worker = _make_slow_worker(payload_cache, delay_seconds=2.0)
+        started = threading.Event()
+        release = threading.Event()
 
-        def _counting_worker(*args, **kwargs):
-            submit_count["n"] += 1
-            return slow_worker(*args, **kwargs)
+        # Explicit worker contract (never *args/**kwargs): BGM injects job_id
+        # only when the signature names it, else the job dies at once.
+        def _gated_worker(
+            worker_input,
+            payload_cache,
+            job_id,
+            progress_callback=None,
+            cancel_check=None,
+            query_tracker=None,
+            activated_repo_manager=None,
+        ):
+            started.set()
+            if not release.wait(timeout=_GATE_TIMEOUT_SECONDS):
+                raise AssertionError("gated temporal worker was never released")
+            store_temporal_snapshot(
+                payload_cache,
+                job_id,
+                {
+                    "results": [],
+                    "shards_completed": 1,
+                    "shards_total": 1,
+                    "ctx": {"requested_limit": worker_input.requested_limit},
+                },
+                terminal=True,
+            )
+            return {"result_ready": True}
 
         kwargs = dict(
             background_job_manager=bgm,
@@ -596,15 +628,32 @@ class TestSingleFlightDedupJoin:
             inline_wait_seconds=0.05,
             handler_deadline_monotonic=None,
             response_reserve_seconds=1.0,
-            dedup_cache=dedup_cache,
-            worker_fn=_counting_worker,
+            dedup_cache=TemporalDedupCache(),
+            # ^ why no activated_repo_manager=>signal changes per recompute;#1547
+            freshness_cache=TemporalFreshnessSignalCache(
+                min_recheck_interval_seconds=3600.0
+            ),
+            worker_fn=_gated_worker,
         )
 
-        result1 = execute_live_temporal_search(worker_input=worker_input, **kwargs)
-        result2 = execute_live_temporal_search(worker_input=worker_input, **kwargs)
+        try:
+            result1 = execute_live_temporal_search(worker_input=worker_input, **kwargs)
+            assert started.wait(timeout=_GATE_TIMEOUT_SECONDS)
+            result2 = execute_live_temporal_search(worker_input=worker_input, **kwargs)
+            joined_status = bgm.get_job_status(result1["job_id"], "alice", False)
+        finally:
+            release.set()
 
-        assert result1["job_id"] == result2["job_id"]
-        assert submit_count["n"] == 1
+        assert result1["status"] == "waiting"
+        assert joined_status is not None
+        assert joined_status["status"] == "running"
+        assert result2["job_id"] == result1["job_id"]
+        temporal_jobs = [
+            job
+            for job in bgm.list_jobs("alice", limit=50)["jobs"]
+            if job["operation_type"] == TEMPORAL_OPERATION_TYPE
+        ]
+        assert [job["job_id"] for job in temporal_jobs] == [result1["job_id"]]
 
 
 class TestQueryTrackerForwarding:
