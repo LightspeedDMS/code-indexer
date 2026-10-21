@@ -5,9 +5,12 @@ from __future__ import annotations
 import logging
 import re
 import time
+import types
+from typing import Callable, Optional
 
 import pytest
 
+from code_indexer.utils import bounded_regex
 from code_indexer.utils.bounded_regex import BoundedPattern, PatternBudgetExhausted
 
 pytestmark = pytest.mark.timeout(30)
@@ -76,3 +79,61 @@ def test_finditer_returns_a_match_without_scanning_the_rest() -> None:
     assert not pattern.exhausted
     with pytest.raises(PatternBudgetExhausted):
         next(matches)
+
+
+@pytest.fixture
+def frozen_module_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine times itself on its own clock (process CPU time, from the
+    start of the scan); freezing the module's clock makes that clock run
+    ahead of the module's accounting, as other threads or consumer time do."""
+    monkeypatch.setattr(
+        bounded_regex, "time", types.SimpleNamespace(monotonic=lambda: 0.0)
+    )
+
+
+USES = pytest.mark.parametrize(
+    "use",
+    [
+        lambda p: p.search(SLOW_TEXT),
+        lambda p: list(p.finditer((SLOW_TEXT + "\n") * 3)),
+    ],
+    ids=["search", "finditer"],
+)
+
+
+@USES
+@pytest.mark.parametrize(
+    "call_seconds", [None, 5.0, 0.05], ids=["uncapped", "loose-cap", "equal-cap"]
+)
+def test_engine_timeout_marks_budget_spent_before_raising(
+    frozen_module_clock: None,
+    use: Callable[[BoundedPattern], object],
+    call_seconds: Optional[float],
+) -> None:
+    pattern = BoundedPattern(
+        SLOW_PATTERN, budget_seconds=0.05, call_seconds=call_seconds, purpose="test"
+    )
+    with pytest.raises(PatternBudgetExhausted):
+        try:
+            use(pattern)
+        except PatternBudgetExhausted:
+            assert pattern.exhausted
+            raise
+    assert pattern.exhausted
+    with pytest.raises(PatternBudgetExhausted):
+        pattern.search("aab")
+
+
+@USES
+def test_engine_timeout_under_a_call_cap_keeps_the_budget(
+    frozen_module_clock: None,
+    use: Callable[[BoundedPattern], object],
+) -> None:
+    pattern = BoundedPattern(
+        SLOW_PATTERN, budget_seconds=5.0, call_seconds=0.05, purpose="test"
+    )
+    with pytest.raises(PatternBudgetExhausted):
+        use(pattern)
+    assert not pattern.exhausted
+    found = pattern.search("aab")
+    assert found is not None and found.group(0) == "aab"

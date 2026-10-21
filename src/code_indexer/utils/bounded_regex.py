@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
-from typing import Any, Callable, Iterator, Optional, TypeVar
+from typing import Any, Callable, Iterator, Optional, Tuple, TypeVar
 
 import regex
 
@@ -50,11 +51,13 @@ class BoundedPattern:
         self._remaining = budget_seconds
         self._call_seconds = call_seconds
         self._warned = False
+        self._lock = threading.Lock()
 
     @property
     def exhausted(self) -> bool:
         """True once the total budget is spent."""
-        return self._remaining <= 0
+        with self._lock:
+            return self._remaining <= 0
 
     def search(self, text: str) -> Optional[Any]:
         """The first match in *text*, or None.
@@ -71,40 +74,57 @@ class BoundedPattern:
         Raises:
             PatternBudgetExhausted: this call ran out of time.
         """
-        timeout = self._call_timeout()
+        timeout, budget_binds = self._call_limit()
         matches = self._compiled.finditer(text, timeout=timeout)
         while True:
             started = time.monotonic()
             try:
                 found = next(matches, None)
             except TimeoutError as exc:
-                raise self._out_of_time() from exc
+                raise self._timed_out(budget_binds) from exc
             finally:
-                self._remaining -= time.monotonic() - started
+                self._charge(started)
             if found is None:
                 return
             yield found
 
-    def _call_timeout(self) -> float:
-        if self.exhausted:
+    def _call_limit(self) -> Tuple[float, bool]:
+        """This call's engine timeout, and whether it is the remaining
+        budget (rather than a tighter per-call cap)."""
+        with self._lock:
+            remaining = self._remaining
+        if remaining <= 0:
             raise self._out_of_time()
-        if self._call_seconds is None:
-            return self._remaining
-        return min(self._remaining, self._call_seconds)
+        if self._call_seconds is None or self._call_seconds >= remaining:
+            return remaining, True
+        return self._call_seconds, False
+
+    def _charge(self, started: float) -> None:
+        elapsed = time.monotonic() - started
+        with self._lock:
+            self._remaining -= elapsed
+
+    def _timed_out(self, budget_binds: bool) -> PatternBudgetExhausted:
+        # ^ why engine clock=process CPU, not ours; budget-bound timeout=spent
+        if budget_binds:
+            with self._lock:
+                self._remaining = min(self._remaining, 0.0)
+        return self._out_of_time()
 
     def _timed(self, match: Callable[[float], T]) -> T:
-        timeout = self._call_timeout()
+        timeout, budget_binds = self._call_limit()
         started = time.monotonic()
         try:
             return match(timeout)
         except TimeoutError as exc:
-            raise self._out_of_time() from exc
+            raise self._timed_out(budget_binds) from exc
         finally:
-            self._remaining -= time.monotonic() - started
+            self._charge(started)
 
     def _out_of_time(self) -> PatternBudgetExhausted:
-        if not self._warned:
-            self._warned = True
+        with self._lock:
+            first, self._warned = not self._warned, True
+        if first:
             logger.warning(
                 "A caller-supplied %s pattern exceeded its matching time budget; "
                 "its remaining matches are skipped",
