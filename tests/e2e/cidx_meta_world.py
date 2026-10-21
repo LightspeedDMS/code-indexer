@@ -372,12 +372,14 @@ def snapshot_catalog(catalog_root: Path) -> Dict[str, bytes]:
 def restore_catalog(catalog_root: Path, snapshot: Dict[str, bytes]) -> None:
     """Put the catalog clone back to *snapshot*: files added since are
     removed, changed or removed ones rewritten."""
+    removed: List[str] = []
     for path in sorted(catalog_root.rglob("*"), reverse=True):
         relative = path.relative_to(catalog_root)
         if _is_internal(relative):
             continue
         if path.is_file() and str(relative) not in snapshot:
             path.unlink()
+            removed.append(str(relative))
         elif path.is_dir() and not any(path.iterdir()):
             path.rmdir()
     for relative_name, content in snapshot.items():
@@ -385,6 +387,45 @@ def restore_catalog(catalog_root: Path, snapshot: Dict[str, bytes]) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists() or target.read_bytes() != content:
             target.write_bytes(content)
+    _commit_tracked_removals(catalog_root, removed)
+
+
+def _commit_tracked_removals(catalog_root: Path, removed: List[str]) -> None:
+    """Commit the removal of the *removed* files the catalog repository
+    tracks (the server commits a pattern stored through its front door), so
+    its working tree matches HEAD again: an activation copies tracked
+    changes and logs them.  Only those paths are committed."""
+    if not removed or not (catalog_root / ".git").exists():
+        return
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--", *removed],
+        cwd=catalog_root,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=GIT_SUBPROCESS_TIMEOUT,
+    )
+    tracked = [name for name in listed.stdout.split("\0") if name]
+    if not tracked:
+        return
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=e2e",
+            "-c",
+            "user.email=e2e@example.com",
+            "commit",
+            "-qm",
+            "e2e: remove the catalog world's files",
+            "--",
+            *tracked,
+        ],
+        cwd=catalog_root,
+        capture_output=True,
+        check=True,
+        timeout=GIT_SUBPROCESS_TIMEOUT,
+    )
 
 
 def seed_catalog(catalog_root: Path) -> None:

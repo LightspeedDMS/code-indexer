@@ -265,13 +265,17 @@ def _write_memory(
 
 def _write_tree(root: Path) -> None:
     write_catalog_content(root)
+    _write(root / ".gitignore", "*.tmp\n")
+    _write(root / ".self-check-probe", "probe\n")
     _write(root / ".git" / "config", f"[remote] {CANARY}\n")
     _write(root / ".code-indexer" / "index" / "meta.json", json.dumps([CANARY]))
 
 
 def write_catalog_content(root: Path) -> None:
-    """Every fixture file except the repository internals (``.git``,
-    ``.code-indexer``), so a live server's catalog clone can be seeded."""
+    """Every fixture file except the repository's own files (``.git``,
+    ``.code-indexer``, ``.gitignore``, ``.self-check-probe``), so a live
+    server's catalog clone can be seeded without changing a file its
+    repository tracks (the backup bootstrap commits ``.gitignore``)."""
     _write(
         root / f"{ALPHA}.md",
         f"# {ALPHA}\n\n{ALPHA} talks to {CANARY} and {GAMMA} over HTTP.\n"
@@ -285,8 +289,6 @@ def write_catalog_content(root: Path) -> None:
     )
     _write(root / f"{GAMMA}.md", f"# {GAMMA}\n\nInventory service.\n")
     _write(root / "README.md", f"# Catalog\n\nLists {CANARY} and {ALPHA}.\n")
-    _write(root / ".gitignore", "*.tmp\n")
-    _write(root / ".self-check-probe", "probe\n")
     _write(root / "xray-patterns" / "__any__" / "p.yaml", "name: p\n")
     _write(root / "xray-patterns" / CANARY / "p.yaml", f"name: {CANARY}\n")
     memories = root / "memories"
