@@ -32,6 +32,7 @@ import html
 import logging
 import re
 import threading
+import unicodedata
 import urllib.parse
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -339,21 +340,37 @@ def _yaml_unescaped(value: str) -> str:
     return _YAML_ESCAPE.sub(_one, value)
 
 
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 _DECODE_STEPS: Tuple[Callable[[str], str], ...] = (
     html.unescape,
     urllib.parse.unquote,
     _yaml_unescaped,
     lambda value: value.replace("\\", ""),
+    lambda value: unicodedata.normalize("NFKC", value),
+    lambda value: _HTML_COMMENT.sub("", value),
 )
 _DECODE_PASSES = 4
 
 
+def _decode_one_layer(value: str) -> str:
+    """*value* with one layer of every decoding removed."""
+    for step in _DECODE_STEPS:
+        value = step(value)
+    return value
+
+
 def _decoded_variants_name_hidden(text: str, view: _View) -> bool:
-    """Some decoding of the whole of *text* (entities, percent escapes and
-    backslash escapes, each repeated, in any order, at most _DECODE_PASSES
-    deep) names a hidden repository."""
+    """Some decoding of the whole of *text* (entities, percent, YAML and
+    backslash escapes, NFKC forms, inline comments; each repeated, in any
+    order, at most _DECODE_PASSES deep) names a hidden repository, or the
+    text is encoded more deeply than that (fail closed)."""
     if view.prose is None or not needs_decoding(text):
         return False
+    layered = text
+    for _ in range(_DECODE_PASSES):
+        layered = _decode_one_layer(layered)
+    if _decode_one_layer(layered) != layered:
+        return True
     seen = {text}
     frontier = [text]
     for _ in range(_DECODE_PASSES):
@@ -698,6 +715,26 @@ def _frontmatter_line_in_block(
     return projected, indent if projected is None else None
 
 
+def _inside_open_comments(lines: Sequence[str]) -> List[bool]:
+    """Per line: it opens an HTML comment it does not close, or lies inside
+    one (through the line that closes it, or to the end). A renderer joins
+    the text around such a comment, so these lines are never shown."""
+    marked: List[bool] = []
+    inside = False
+    for line in lines:
+        rest, hit = line, inside
+        if inside:
+            close = rest.find("-->")
+            if close < 0:
+                marked.append(True)
+                continue
+            rest, inside = rest[close + 3 :], False
+        if "<!--" in _HTML_COMMENT.sub("", rest):
+            inside = hit = True
+        marked.append(hit)
+    return marked
+
+
 def _compute(
     lines: Sequence[str], relative_path: str, fingerprint: str, view: _View
 ) -> List[Optional[str]]:
@@ -708,10 +745,15 @@ def _compute(
     malformed: List[int] = list(range(1, span + 1))
     body = lines[span:]
     dropped_at: Optional[int] = None
+    commented = _inside_open_comments(body)
     for offset, (line, (role, kind, cells)) in enumerate(
         zip(body, classify_lines(body))
     ):
-        if role == LINE_TEXT and 0 < span + offset < end:
+        if commented[offset]:
+            out.append(None)
+            if 0 < span + offset < end:
+                dropped_at = len(line) - len(line.lstrip())
+        elif role == LINE_TEXT and 0 < span + offset < end:
             projected, dropped_at = _frontmatter_line_in_block(line, view, dropped_at)
             out.append(projected)
         elif role == LINE_TEXT:
