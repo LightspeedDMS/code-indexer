@@ -1,8 +1,10 @@
 """DaemonWatchManager.stop_watch() must not hold the state lock while it
 joins the watch thread: the worker's exit path takes that same lock, so a
-join under it can only end by timing out.
+join under it can only end by timing out. While that join runs the watch is
+STOPPING: a second stop must not stop the handler again, stats must not
+report it running, and a start must not slip in.
 
-The watch thread here is real; only the watch handler it builds is a
+The watch threads here are real; only the watch handler they build is a
 test double, so no filesystem observer or indexer is involved.
 """
 
@@ -11,7 +13,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import pytest
 
@@ -19,16 +21,23 @@ from code_indexer.daemon.watch_manager import DaemonWatchManager
 
 # Far below the 5 s join timeout, generous for a loaded gate.
 _PROMPT_STOP_SECONDS = 2.0
+_HANDLER_WAIT_SECONDS = 5
+_POLL_SECONDS = 0.01
 
 
 class _FakeHandler:
-    def __init__(self) -> None:
+    def __init__(self, hold: Optional[threading.Event] = None) -> None:
         self._watching = threading.Event()
+        self._hold = hold
+        self.stop_calls = 0
 
     def start_watching(self) -> None:
         self._watching.set()
+        if self._hold is not None:
+            self._hold.wait(timeout=_HANDLER_WAIT_SECONDS)
 
     def stop_watching(self) -> None:
+        self.stop_calls += 1
         self._watching.clear()
 
     def is_watching(self) -> bool:
@@ -48,11 +57,11 @@ class _ManagerWithFakeHandler(DaemonWatchManager):
 
 
 def _wait_until_watching(manager: DaemonWatchManager, handler: _FakeHandler) -> None:
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + _HANDLER_WAIT_SECONDS
     while time.monotonic() < deadline:
         if manager.watch_handler is handler and handler.is_watching():
             return
-        time.sleep(0.01)
+        time.sleep(_POLL_SECONDS)
     pytest.fail("watch thread never installed and started its handler")
 
 
@@ -77,6 +86,7 @@ def test_stop_watch_returns_promptly_once_worker_exits(caplog) -> None:
         "instead of letting the worker exit"
     )
     assert not worker.is_alive()
+    assert handler.stop_calls == 1
     assert "did not stop" not in caplog.text
     assert "Watch stopped for project: /repo/example" in caplog.text
     assert manager.watch_thread is None
@@ -86,56 +96,127 @@ def test_stop_watch_returns_promptly_once_worker_exits(caplog) -> None:
     assert not manager.is_running()
 
 
-class _RestartingManager(DaemonWatchManager):
-    """Its first worker, once its own exit path has cleared the state,
-    starts a second watch -- i.e. a watch started after the stopped worker
-    exited but before stop_watch() takes the lock back."""
+class _TracingLock:
+    """The manager's state lock, signalling when a named thread releases it."""
+
+    def __init__(self, thread_names: Tuple[str, ...]) -> None:
+        self._lock = threading.Lock()
+        self.released = {name: threading.Event() for name in thread_names}
+
+    def __enter__(self) -> "_TracingLock":
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._lock.release()
+        event = self.released.get(threading.current_thread().name)
+        if event is not None:
+            event.set()
+
+
+class _HeldWorkerManager(DaemonWatchManager):
+    """The held watch's worker stays inside its handler's start_watching()
+    until the test releases it: the worker is alive, its handler still in
+    the manager's state, so the first stop stays inside its join."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.handlers: list = []
+        self.handlers: List[_FakeHandler] = []
+        self.release_worker = threading.Event()
+        self.tracing = _TracingLock(("first-stopper", "second-stopper"))
+        self._lock = cast(Any, self.tracing)
 
     def _create_watch_handler(self, project_path, config, mutation_lock=None, **kw):
-        handler = _FakeHandler()
+        hold = self.release_worker if project_path == "/repo/held" else None
+        handler = _FakeHandler(hold)
         self.handlers.append(handler)
         return handler
 
-    def _watch_thread_worker(self, project_path, config, mutation_lock=None, **kw):
-        super()._watch_thread_worker(project_path, config, mutation_lock, **kw)
-        if project_path == "/repo/first":
-            assert self.start_watch("/repo/second", config=None)["status"] == "success"
 
-
-_HANDLER_WAIT_SECONDS = 5
-_POLL_SECONDS = 0.01
-
-
-def _handler_at(manager: _RestartingManager, index: int) -> _FakeHandler:
+def _handler_at(manager: _HeldWorkerManager, index: int) -> _FakeHandler:
     deadline = time.monotonic() + _HANDLER_WAIT_SECONDS
     while time.monotonic() < deadline:
         if len(manager.handlers) > index:
-            handler: _FakeHandler = manager.handlers[index]
-            return handler
+            return manager.handlers[index]
         time.sleep(_POLL_SECONDS)
     pytest.fail(f"watch thread never built handler #{index}")
 
 
-@pytest.mark.timeout(30)
-def test_stop_watch_keeps_a_watch_started_while_it_was_joining() -> None:
-    manager = _RestartingManager()
-    assert manager.start_watch("/repo/first", config=None)["status"] == "success"
+def _stop_on_thread(
+    manager: DaemonWatchManager, name: str, results: Dict[str, Any]
+) -> threading.Thread:
+    def _stop() -> None:
+        results[name] = manager.stop_watch()
+
+    thread = threading.Thread(target=_stop, name=name, daemon=True)
+    thread.start()
+    return thread
+
+
+def _first_stop_in_its_join(
+    manager: _HeldWorkerManager, results: Dict[str, Any]
+) -> threading.Thread:
+    assert manager.start_watch("/repo/held", config=None)["status"] == "success"
     _wait_until_watching(manager, _handler_at(manager, 0))
-    first_worker = manager.watch_thread
+    first = _stop_on_thread(manager, "first-stopper", results)
+    assert manager.tracing.released["first-stopper"].wait(_HANDLER_WAIT_SECONDS)
+    return first
 
-    result = manager.stop_watch()
 
-    assert result["status"] == "success", result
-    assert first_worker is not None and not first_worker.is_alive()
-    assert manager.project_path == "/repo/second"
-    assert manager.watch_thread is not None
-    assert manager.watch_thread is not first_worker
-    _wait_until_watching(manager, _handler_at(manager, 1))
-    assert manager.is_running()
+def _finish(manager: _HeldWorkerManager, *threads: threading.Thread) -> None:
+    manager.release_worker.set()
+    for thread in threads:
+        thread.join(timeout=_HANDLER_WAIT_SECONDS * 2)
+        assert not thread.is_alive(), f"{thread.name} never returned"
 
-    assert manager.stop_watch()["status"] == "success"
+
+@pytest.mark.timeout(30)
+def test_concurrent_stops_stop_the_handler_once() -> None:
+    manager = _HeldWorkerManager()
+    results: Dict[str, Any] = {}
+    first = _first_stop_in_its_join(manager, results)
+
+    second = _stop_on_thread(manager, "second-stopper", results)
+    assert manager.tracing.released["second-stopper"].wait(_HANDLER_WAIT_SECONDS)
+    stop_calls_while_joining = manager.handlers[0].stop_calls
+    _finish(manager, first, second)
+
+    assert stop_calls_while_joining == 1
+    assert manager.handlers[0].stop_calls == 1
+    assert results["first-stopper"]["status"] == "success", results
+    assert results["second-stopper"] == results["first-stopper"]
     assert not manager.is_running()
+
+
+@pytest.mark.timeout(30)
+def test_stats_during_a_stop_report_stopping() -> None:
+    manager = _HeldWorkerManager()
+    results: Dict[str, Any] = {}
+    first = _first_stop_in_its_join(manager, results)
+
+    stats = manager.get_stats()
+    _finish(manager, first)
+
+    assert stats["status"] == "stopping", stats
+    assert stats["project_path"] == "/repo/held"
+    assert results["first-stopper"]["status"] == "success", results
+    assert manager.get_stats()["status"] == "idle"
+
+
+@pytest.mark.timeout(30)
+def test_start_during_a_stop_is_refused() -> None:
+    manager = _HeldWorkerManager()
+    results: Dict[str, Any] = {}
+    first = _first_stop_in_its_join(manager, results)
+
+    started = manager.start_watch("/repo/other", config=None)
+    _finish(manager, first)
+
+    assert started["status"] == "error", started
+    assert "stopping" in started["message"]
+    assert len(manager.handlers) == 1
+    assert results["first-stopper"]["status"] == "success", results
+    assert not manager.is_running()
+    assert manager.start_watch("/repo/other", config=None)["status"] == "success"
+    _wait_until_watching(manager, _handler_at(manager, 1))
+    assert manager.stop_watch()["status"] == "success"
