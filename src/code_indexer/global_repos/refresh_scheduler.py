@@ -21,6 +21,7 @@ from typing import (
     List,
     NoReturn,
     Optional,
+    Set,
     Tuple,
     Union,
     TYPE_CHECKING,
@@ -37,6 +38,11 @@ from code_indexer.server.git.git_subprocess_env import (
     remote_url_without_credentials,
 )
 from .git_pull_updater import GitPullUpdater
+from .local_change_detection import (
+    iter_visible_files,
+    published_listing_watermark,
+    visible_paths,
+)
 from .meta_directory_updater import MetaDirectoryUpdater
 from .update_strategy import UpdateStrategy
 from .query_tracker import QueryTracker
@@ -1056,8 +1062,8 @@ class RefreshScheduler:
             return self._DEFAULT_SNAPSHOT_RETENTION_KEEP_LAST
         return keep
 
-    def _latest_versioned_timestamp(self, alias_name: str) -> Optional[int]:
-        """Return the newest snapshot timestamp for *alias_name*, or None (Bug #1084 A7).
+    def _latest_versioned_snapshot(self, alias_name: str) -> Optional[Tuple[str, int]]:
+        """Return the newest snapshot ``(path, timestamp)`` for *alias_name*, or None (Bug #1084 A7).
 
         Uses the discovery API (:meth:`VersionedSnapshotManager.list_snapshots`)
         when a snapshot_manager is wired — this is backend-correct on cow-daemon
@@ -1071,28 +1077,28 @@ class RefreshScheduler:
                 snaps = self._snapshot_manager.list_snapshots(alias_name)
             except Exception as exc:
                 logger.warning(
-                    f"_latest_versioned_timestamp: discovery failed for "
+                    f"_latest_versioned_snapshot: discovery failed for "
                     f"{alias_name} (non-fatal): {type(exc).__name__}: {exc}"
                 )
                 return None
             if not snaps:
                 return None
             # snaps sorted ascending by ts; last is newest.
-            return int(snaps[-1][1])
+            return str(snaps[-1][0]), int(snaps[-1][1])
 
         # Local fallback: glob golden_repos_dir/.versioned/{repo}/v_*.
         repo_name = alias_name.removesuffix("-global")
         versioned_base = self.golden_repos_dir / ".versioned" / repo_name
         if not versioned_base.exists():
             return None
-        timestamps = []
+        found: List[Tuple[str, int]] = []
         for d in versioned_base.iterdir():
             if d.is_dir() and d.name.startswith("v_"):
                 try:
-                    timestamps.append(int(d.name[2:]))
+                    found.append((str(d), int(d.name[2:])))
                 except (ValueError, IndexError):
                     continue
-        return max(timestamps) if timestamps else None
+        return max(found, key=lambda snap: snap[1]) if found else None
 
     def _enforce_retention(self, alias_name: str, current_target: str) -> None:
         """Schedule deletion of superseded snapshots beyond keep-last-N (Bug #1084 A6).
@@ -4983,20 +4989,12 @@ class RefreshScheduler:
 
     def _has_local_changes(self, source_path: str, alias_name: str) -> bool:
         """
-        Detect changes in a local (non-git) repository using file mtime comparison.
+        Detect changes in a local (non-git) repository against the newest snapshot.
 
-        Compares the maximum mtime of all non-hidden files in source_path against
-        the timestamp embedded in the latest versioned directory name.
-
-        Algorithm:
-        1. Derive repo_name from alias_name (strip "-global")
-        2. Look in .versioned/{repo_name}/ for v_* directories
-        3. If none exist -> return True (first version needed)
-        4. Parse latest version timestamp from directory name
-        5. Walk source_path, skip hidden dirs/files (starting with '.')
-        6. Get max mtime of all non-hidden files
-        7. If no visible files -> return False
-        8. Return max_mtime > latest_version_timestamp
+        A change is any non-hidden file whose mtime is after the
+        published run's listing-start watermark (a write the run could not
+        have listed, including one landing while it indexed). See
+        ``local_change_detection`` for the baseline rules.
 
         Args:
             source_path: Path to the live local repository directory
@@ -5009,46 +5007,45 @@ class RefreshScheduler:
         # golden_repos_dir/.versioned. On cow-daemon the snapshots live under the
         # NFS mount, so the old glob always missed -> always "first version" ->
         # spurious re-index + snapshot every cycle.
-        latest_timestamp = self._latest_versioned_timestamp(alias_name)
+        latest = self._latest_versioned_snapshot(alias_name)
 
-        if latest_timestamp is None:
+        if latest is None:
             logger.debug(
                 f"No versioned snapshot found for {alias_name} — treating as first version"
             )
             return True
 
-        logger.debug(
-            f"Latest versioned snapshot timestamp for {alias_name}: {latest_timestamp}"
-        )
+        snapshot_path, snapshot_ts = latest
+        watermark = published_listing_watermark(snapshot_path, snapshot_ts)
 
-        # Walk source_path, skip hidden dirs and files
-        max_mtime: float = 0.0
-        found_files = False
+        max_mtime: float = float("-inf")
+        source_paths: Set[str] = set()
+        for relative, file_path in iter_visible_files(source_path):
+            source_paths.add(relative)
+            try:
+                mtime = os.stat(file_path).st_mtime
+            except OSError as e:
+                logger.debug(f"Cannot stat {file_path}: {e}")
+                continue
+            max_mtime = max(max_mtime, mtime)
 
-        for root, dirs, files in os.walk(source_path):
-            # Skip hidden directories in-place (prevents descent into them)
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
+        if max_mtime <= watermark:
+            deleted = visible_paths(snapshot_path) - source_paths
+            if deleted:
+                logger.debug(
+                    f"{len(deleted)} file(s) of {snapshot_path} deleted from "
+                    f"{source_path} -> changes=True"
+                )
+                return True
 
-            for filename in files:
-                if filename.startswith("."):
-                    continue
-                file_path = os.path.join(root, filename)
-                try:
-                    mtime = os.stat(file_path).st_mtime
-                    found_files = True
-                    if mtime > max_mtime:
-                        max_mtime = mtime
-                except OSError as e:
-                    logger.debug(f"Cannot stat {file_path}: {e}")
-
-        if not found_files:
+        if not source_paths:
             logger.debug(f"No visible files in {source_path} — no changes")
             return False
 
-        has_changes = max_mtime > latest_timestamp
+        has_changes = max_mtime > watermark
         logger.debug(
-            f"mtime check for {alias_name}: max_mtime={max_mtime:.0f} "
-            f"vs latest_version={latest_timestamp} -> changes={has_changes}"
+            f"mtime check for {alias_name}: max_mtime={max_mtime:.3f} "
+            f"vs listing watermark={watermark:.3f} -> changes={has_changes}"
         )
         return has_changes
 

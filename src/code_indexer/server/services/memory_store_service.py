@@ -325,16 +325,23 @@ class MemoryStoreService:
         return not acquired
 
     def _signal_refresh(self, piggyback: bool) -> None:
-        """Signal refresh. Piggyback always uses debouncer."""
+        """Signal refresh. Piggyback always uses debouncer.
+
+        A refresh already queued or running may have listed the catalog
+        before this write; the debouncer owes the refresh that follows it.
+        """
+        from code_indexer.server.repositories.background_jobs import (
+            DuplicateJobError as SubmittedDuplicateJobError,
+        )
+
         if piggyback:
             self._debouncer.signal_dirty()
             return
         try:
             self._scheduler.trigger_refresh_for_repo(_COARSE_REFRESH_ALIAS)
-        except DuplicateJobError:
+        except (SubmittedDuplicateJobError, DuplicateJobError):
             logger.debug(
-                "trigger_refresh_for_repo raised DuplicateJobError — "
-                "falling back to debouncer"
+                "cidx-meta refresh already queued or running — owed to the debouncer"
             )
             self._debouncer.signal_dirty()
         except Exception:
@@ -350,22 +357,19 @@ class MemoryStoreService:
         self._scheduler.release_write_lock(_COARSE_ALIAS, owner)
 
     def _run_with_coarse_lock(self, owner: str, operation: Callable[[], Any]) -> Any:
-        """Acquire coarse lock (or piggyback), run operation, trigger refresh.
+        """Acquire coarse lock (or piggyback), run operation, release the
+        lock, then trigger refresh.
 
-        Guarantees coarse lock release via try/finally when we hold it.
+        The refresh is requested only after the lock is released: a refresh
+        that starts while the lock is held skips the cycle and owes nothing,
+        so a trigger sent under our own lock would leave the write unindexed.
         Operation exceptions propagate; coarse lock is still released.
         """
         piggyback = self._coarse_piggyback_or_acquire(owner)
-        coarse_held = not piggyback
         try:
             result = operation()
-        except Exception:
-            if coarse_held:
-                self._release_coarse_lock(owner)
-            raise
-        try:
-            self._signal_refresh(piggyback)
         finally:
-            if coarse_held:
+            if not piggyback:
                 self._release_coarse_lock(owner)
+        self._signal_refresh(piggyback)
         return result

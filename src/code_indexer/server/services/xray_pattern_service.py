@@ -378,7 +378,20 @@ class XrayPatternService:
             return {"success": False, "error": "commit_failed", "message": str(exc)}
         if locked_result is not None:
             return dict(locked_result)
+        self._request_refresh()
         return {"success": True, "path": result_path}
+
+    def _request_refresh(self) -> None:
+        """Request the catalog refresh a completed pattern write is owed,
+        after the coarse lock is released (a refresh starting under the
+        lock skips and owes nothing). No-op without a scheduler."""
+        if self._scheduler is None:
+            return
+        from code_indexer.global_repos.meta_description_hook import (
+            request_cidx_meta_refresh,
+        )
+
+        request_cidx_meta_refresh(self._scheduler)
 
     @staticmethod
     def _holds(target_path: Path, pattern_yaml: str) -> bool:
@@ -647,6 +660,7 @@ class XrayPatternService:
                 )
 
         self._run_with_coarse_lock(owner, _delete_and_commit)
+        self._request_refresh()
 
         return {"success": True}
 
