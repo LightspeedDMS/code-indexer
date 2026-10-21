@@ -235,14 +235,27 @@ def test_shared_startup_snapshot_rejects_a_wrong_binding(
         _assert_bindings_are_shared_apps_own,
         _assert_shared_workers_live,
         _assert_solo_mode_wiring,
+        _assert_write_mode_dirs_are_shared_apps,
     )
 
     shared_app = getattr(test_client, "app")
     recorded = dict(_golden_app_wiring_snapshot["values"])
     _assert_bindings_are_shared_apps_own(recorded, shared_app)
     _assert_auth_stores_in_shared_data_dir(recorded, shared_app, test_client_data_dir)
+    _assert_write_mode_dirs_are_shared_apps(recorded, shared_app)
     _assert_solo_mode_wiring(recorded)
     _assert_shared_workers_live(recorded)
+
+    marker_dir, exceptions = recorded["file_crud_write_mode_dirs"]
+    elsewhere = Path("elsewhere") / "golden-repos"
+    for foreign in (
+        (elsewhere, exceptions),
+        (marker_dir, {"cidx-meta-global": elsewhere}),
+    ):
+        with pytest.raises(AssertionError, match="file_crud_write_mode_dirs"):
+            _assert_write_mode_dirs_are_shared_apps(
+                {**recorded, "file_crud_write_mode_dirs": foreign}, shared_app
+            )
 
     foreign_db = {
         **recorded,
@@ -421,6 +434,63 @@ def test_shared_session_logout_revocation_survives_a_throwaway_app_lifespan(
         "logout revoked the token outside the shared app's store -- another "
         "worker would still accept it"
     )
+
+
+def _mcp_tool_result(
+    client: TestClient, tool: str, arguments: Dict[str, Any], headers: dict
+) -> Dict[str, Any]:
+    resp = call_mcp_tool(client, tool, arguments, headers)
+    assert resp.status_code == _HTTP_OK, f"{tool}: {resp.text[:300]}"
+    return parse_mcp_result(resp.json())
+
+
+def test_shared_session_catalog_write_mode_survives_a_throwaway_app_lifespan(
+    test_client: TestClient,
+    admin_token_provider: AdminTokenProvider,
+    restore_shared_app_wiring: Callable[[], None],
+    tmp_path: Path,
+) -> None:
+    """create_app() binds the process-wide FileCRUDService's cidx-meta-global
+    write exception and write-mode marker directory to its OWN golden repos
+    dir, while enter_write_mode writes the marker under the shared app's.
+    After the guards' restore, write mode on the shared app must gate and
+    land every write in the shared app's own catalog."""
+    _run_throwaway_app_lifespan(tmp_path / "throwaway")
+    restore_shared_app_wiring()
+    headers = admin_token_provider.get_headers()
+    state = getattr(test_client.app, "state")
+    shared_catalog = Path(state.golden_repos_dir) / "cidx-meta"
+    name = f"e2e-write-mode-iso-{uuid.uuid4().hex[:8]}.md"
+    entered = _mcp_tool_result(
+        test_client, "enter_write_mode", {"repo_alias": "cidx-meta-global"}, headers
+    )
+    assert entered.get("success") is True, entered
+    target: Dict[str, Any] = {"repository_alias": "cidx-meta-global", "file_path": name}
+    try:
+        assert Path(entered["source_path"]) == shared_catalog, (
+            f"write mode targets {entered['source_path']!r}, not the shared "
+            f"app's catalog {shared_catalog} (a throwaway app's directory?)"
+        )
+        created = _mcp_tool_result(
+            test_client, "create_file", {**target, "content": "x"}, headers
+        )
+        assert created.get("success") is True, created
+        assert (shared_catalog / name).is_file(), "create_file missed the catalog"
+        deleted = _mcp_tool_result(test_client, "delete_file", target, headers)
+        assert deleted.get("success") is True, deleted
+        assert not (shared_catalog / name).exists()
+    finally:
+        try:
+            if (shared_catalog / name).exists():
+                call_mcp_tool(test_client, "delete_file", target, headers)
+        finally:
+            exited = _mcp_tool_result(
+                test_client,
+                "exit_write_mode",
+                {"repo_alias": "cidx-meta-global"},
+                headers,
+            )
+            assert exited.get("success") is True, exited
 
 
 def test_shared_session_elevation_window_survives_a_throwaway_app_lifespan(
