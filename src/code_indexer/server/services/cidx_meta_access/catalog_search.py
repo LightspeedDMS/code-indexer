@@ -25,7 +25,17 @@ from __future__ import annotations
 import dataclasses
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Tuple,
+    overload,
+)
 
 from .fulltext_pages import catalog_fulltext_rows, deepening_ks, requested_size
 from .hit_projection import (
@@ -267,6 +277,24 @@ def project_multi_fulltext(
             alias, root, request, terms, per_repo_limit(), scope
         )
     _recount_multi(response)
+
+
+@overload
+def reproject_job_result(
+    result: Dict[str, Any], username: str, access_service: Optional[Any]
+) -> Dict[str, Any]: ...
+
+
+@overload
+def reproject_job_result(
+    result: None, username: str, access_service: Optional[Any]
+) -> None: ...
+
+
+@overload
+def reproject_job_result(
+    result: object, username: str, access_service: Optional[Any]
+) -> object: ...
 
 
 def reproject_job_result(

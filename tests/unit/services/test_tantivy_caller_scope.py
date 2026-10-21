@@ -25,7 +25,7 @@ def index(tmp_path: Path) -> TantivyIndexManager:
     for n in range(30):
         fts.add_document(
             {
-                "path": f"docs/p{n:02d}.md",
+                "path": f"notes/p{n:02d}.md",
                 "content": f"{WORD} " * (n + 1),
                 "content_raw": WORD,
                 "identifiers": [WORD],
@@ -48,7 +48,7 @@ def _search(
     return sorted(str(r["path"]) for r in rows), complete
 
 
-ALLOWED = ["docs/p01.md", "docs/p02.md", "docs/p03.md"]
+ALLOWED = ["notes/p01.md", "notes/p02.md", "notes/p03.md"]
 
 
 def test_completeness_reports_whether_every_match_was_inspected(

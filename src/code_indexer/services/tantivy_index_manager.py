@@ -1299,9 +1299,15 @@ class TantivyIndexManager:
                     _FTS_UNLIMITED_HITS,
                 )
 
-            first_page = searcher.search(tantivy_query, search_limit)
+            first_page = searcher.search(tantivy_query, search_limit, count=True)
             search_results = first_page.hits
-            match_count = first_page.count
+            # ^ ext tantivy 0.25 stub omits SearchResult.count (int when count=True)
+            raw_count = getattr(first_page, "count", None)
+            match_count: Optional[int] = (
+                raw_count
+                if isinstance(raw_count, int) and not isinstance(raw_count, bool)
+                else None
+            )
 
             # The per-hit filters, as one predicate shared with callers that
             # judge paths outside the engine (precedence in fts_hit_filter).
@@ -1547,7 +1553,9 @@ class TantivyIndexManager:
                     break
 
             if completeness_out is not None:
-                fetched_all = match_count is None or match_count <= len(search_results)
+                fetched_all = match_count is not None and match_count <= len(
+                    search_results
+                )
                 completeness_out[-1] = fetched_all and not stopped_at_limit
             # Return results (slice only if limit > 0)
             return docs if limit == 0 else docs[:limit]

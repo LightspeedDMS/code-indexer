@@ -185,7 +185,7 @@ def poll_temporal_job_status(
 
             # Catalog rows of a stored result are re-checked on every read.
             response = dict(
-                reproject_job_result(job_result, username, access_filtering_service)  # type: ignore[call-overload]
+                reproject_job_result(job_result, username, access_filtering_service)
             )
             response["status"] = "completed"
             response["continue_polling"] = False
