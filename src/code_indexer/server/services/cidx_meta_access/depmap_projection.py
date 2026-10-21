@@ -340,7 +340,8 @@ def _yaml_unescaped(value: str) -> str:
     return _YAML_ESCAPE.sub(_one, value)
 
 
-_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+# A complete HTML comment, the abrupt empty forms <!--> and <!---> included.
+_HTML_COMMENT = re.compile(r"<!--(?:-?>|.*?-->)", re.DOTALL)
 _DECODE_STEPS: Tuple[Callable[[str], str], ...] = (
     html.unescape,
     urllib.parse.unquote,
@@ -366,10 +367,10 @@ def _decoded_variants_name_hidden(text: str, view: _View) -> bool:
     text is encoded more deeply than that (fail closed)."""
     if view.prose is None or not needs_decoding(text):
         return False
-    layered = text
+    layers = [text]
     for _ in range(_DECODE_PASSES):
-        layered = _decode_one_layer(layered)
-    if _decode_one_layer(layered) != layered:
+        layers.append(_decode_one_layer(layers[-1]))
+    if _decode_one_layer(layers[-1]) != layers[-1]:
         return True
     seen = {text}
     frontier = [text]
@@ -384,7 +385,11 @@ def _decoded_variants_name_hidden(text: str, view: _View) -> bool:
         if not found:
             break
         frontier = found
-    return any(view.prose.search(value) for value in seen)
+    else:
+        # The bound was reached: a further step nothing checked fails closed.
+        if any(step(v) not in seen for v in frontier for step in _DECODE_STEPS):
+            return True
+    return any(view.prose.search(value) for value in (*layers, *seen))
 
 
 def _mentions_hidden(text: str, view: _View) -> bool:

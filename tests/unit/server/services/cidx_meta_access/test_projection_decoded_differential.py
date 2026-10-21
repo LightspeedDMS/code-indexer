@@ -96,6 +96,21 @@ SPECIAL = {
     "block_comment": (f"note: |\n  {CANARY}\n  # c\n  {X}\nother: kept", True),
     "pass_bound_bare_url": (f"see https://example.com/%25252525{HEX}{REST}", False),
     "fullwidth_prose": (f"talks to {FORMS['fullwidth']} daily", False),
+    # Mixed chains: only all decodings together, in some order, reach it.
+    "mix_fullwidth_percent_entity_comment": (
+        f"probevalue {chr(0xFF05)}2526#{ord(FIRST)};{REST[0]}<!-- x -->{REST[1:]}",
+        False,
+    ),
+    "mix_entity_of_fullwidth_percent": (f"see &#xFF05;{HEX}{REST} now", False),
+    "mix_fullwidth_hex_digits": (
+        "see %" + "".join(chr(ord(c) + 0xFEE0) for c in HEX) + f"{REST} now",
+        False,
+    ),
+    "mix_percent_encoded_comment": (
+        f"see {CANARY[:3]}%3C!-- x --%3E{CANARY[3:]} now",
+        False,
+    ),
+    "mix_comment_inside_entity": (f"see &#{ord(FIRST)}<!---->;{REST} now", False),
     "comment_split_lines": (f"talks to {CANARY[:6]}<!--\n-->{CANARY[6:]} daily", False),
     "comment_inline": (f"talks to {CANARY[:6]}<!-- x -->{CANARY[6:]} daily", False),
     "comment_unclosed": (f"talks <!-- open\n{CANARY[:6]}\n{CANARY[6:]}", False),
@@ -180,6 +195,16 @@ def test_no_form_of_a_hidden_name_survives(
         assert CANARY not in text, (label, served)
     extra = _tokens(list(projected)) - _tokens(list(lines)) - MARKERS
     assert all(token.isdigit() for token in extra), (label, sorted(extra))
+
+
+@pytest.mark.parametrize("comment", ["<!-->", "<!--->"])
+def test_abrupt_empty_comment_is_complete(
+    projector: MetaProjector, comment: str
+) -> None:
+    line = f"probevalue alpha{comment} visible"
+    projected = projector.project(_document(line, False), "alpha.md")
+    assert line in projected
+    assert projected[-1] == "alpha visible"
 
 
 @pytest.mark.parametrize("label", sorted(VISIBLE))
