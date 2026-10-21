@@ -63,6 +63,7 @@ from .depmap_model import (
     TableKind,
     cell_names,
     classify_lines,
+    decoded_form,
     load_depmap_model,
     needs_rendering_check,
     normalize_name,
@@ -83,7 +84,10 @@ VIEW_CACHE_MAX_ENTRIES = 64
 PROJECTION_CACHE_MAX_ENTRIES = 256
 _DIAGNOSTIC_LIMIT = 4096
 
-_ALIAS_CHARS = "A-Za-z0-9_-"
+# A hidden name is matched between characters outside this ASCII class; a
+# match touching a non-ASCII word character is still found, and _redact
+# removes its line rather than split that token.
+_NAME_EDGE = "A-Za-z0-9_-"
 _LIST_ITEM = re.compile(r"^\s*-\s+(?P<value>.+?)\s*$")
 _YAML_SHAPED = re.compile(r"^\s*(?:[A-Za-z_][\w-]*\s*:.*|-\s+.*)?$")
 _INLINE_LIST = re.compile(r"^(?P<prefix>\s*[A-Za-z_][\w-]*:\s*)\[(?P<body>.*)\]\s*$")
@@ -160,7 +164,7 @@ def _redaction_regex(names: Sequence[str]) -> Optional[Pattern[str]]:
             node = node.setdefault(char, {})
         node[""] = {}
     return re.compile(
-        rf"(?<![{_ALIAS_CHARS}]){_trie_pattern(trie)}(?:-global)?(?![{_ALIAS_CHARS}])",
+        rf"(?<![{_NAME_EDGE}]){_trie_pattern(trie)}(?:-global)?(?![{_NAME_EDGE}])",
         re.IGNORECASE,
     )
 
@@ -241,24 +245,41 @@ def _view_for(
     return view
 
 
+def _splits_engine_token(text: str, start: int, end: int) -> bool:
+    """A non-ASCII character next to text[start:end] is a word character or
+    one the engine keeps inside a token: replacing the match would split
+    that token."""
+    from .fulltext_terms import is_engine_token_char
+
+    edges = (text[start - 1] if start else "", text[end] if end < len(text) else "")
+    return any(
+        ch and not ch.isascii() and (ch.isalnum() or is_engine_token_char(ch))
+        for ch in edges
+    )
+
+
 def _redact(line: str, view: _View) -> Optional[str]:
     """Plain hidden names become placeholders; a hidden name still present
     in the rendered form (decoded, inline markup stripped) was encoded or
-    split by markup, so the line is removed."""
+    split by markup, and one inside an engine token cannot be replaced
+    without splitting that token, so such a line is removed."""
     if view.prose is None:
         return line
 
     domain_only = view.domain_only
+    refused: List[bool] = []
 
     def _placeholder(match: "re.Match[str]") -> str:
+        if _splits_engine_token(match.string, match.start(), match.end()):
+            refused.append(True)
+            return match.group(0)
         if match.group(0).lower() in domain_only:
             return DOMAIN_PLACEHOLDER
         return RESTRICTED_PLACEHOLDER
 
-    if domain_only:
-        redacted = view.prose.sub(_placeholder, line)
-    else:
-        redacted = view.prose.sub(RESTRICTED_PLACEHOLDER, line)
+    redacted = view.prose.sub(_placeholder, line)
+    if refused or _link_parts_name_hidden(redacted, view):
+        return None
     if not needs_rendering_check(line):
         return redacted
     blanked = redacted.replace(RESTRICTED_PLACEHOLDER, " ").replace(
@@ -273,10 +294,32 @@ def _blocked(cell: str, names: FrozenSet[str]) -> bool:
     return any(name in names for name in cell_names(cell))
 
 
+_LINK_SYNTAX = re.compile(r"\]\(|<|\]:")
+# What a renderer does not show but a reader follows: an inline link or
+# image destination with its title, an autolink, a reference definition.
+_LINK_PART_PATTERNS = (
+    re.compile(r"\]\(([^)]*)\)"),
+    re.compile(r"<([^<>]*)>"),
+    re.compile(r"^\s*\[[^\]]+\]:\s*(.+)$"),
+)
+
+
+def _link_parts_name_hidden(text: str, view: _View) -> bool:
+    """A link part of *text*, fully decoded (entities and percent escapes,
+    nested), names a hidden repository."""
+    if view.prose is None or not _LINK_SYNTAX.search(text):
+        return False
+    return any(
+        view.prose.search(decoded_form(match.group(1))) is not None
+        for pattern in _LINK_PART_PATTERNS
+        for match in pattern.finditer(text)
+    )
+
+
 def _mentions_hidden(text: str, view: _View) -> bool:
     if view.prose is None:
         return False
-    if view.prose.search(text):
+    if view.prose.search(text) or _link_parts_name_hidden(text, view):
         return True
     return (
         needs_rendering_check(text)
@@ -455,18 +498,16 @@ def _decoded_hidden(text: str, view: _View) -> bool:
 
 
 def _project_frontmatter_line(line: str, view: _View) -> Optional[str]:
-    """A frontmatter line stays YAML of the same shape: list entries naming
-    a hidden name are removed; a scalar changed by redaction is re-quoted;
-    a scalar continuation line (literal text) keeps its redaction; the
-    caller re-parses the whole block."""
+    """A frontmatter line stays YAML of the same shape, judged by what a
+    YAML reader decodes: list items and values naming a hidden name are
+    removed; a value is redacted in place only when written literally,
+    never re-encoded; a scalar continuation line (literal text) keeps its
+    redaction; the caller re-parses the whole block."""
     if _COUNT_LINE.match(line):
         return _project_text(line, view)
     item = _LIST_ITEM.match(line)
-    if item is not None and (
-        normalize_name(item.group("value")) in view.blocked_repos
-        or _decoded_hidden(item.group("value"), view)
-    ):
-        return None
+    if item is not None:
+        return _project_list_item(line, item, view)
     escaped = _SCALAR_LINE.match(line) if "\\" in line else None
     if escaped is not None and _decoded_hidden(escaped.group("value"), view):
         return None
@@ -478,30 +519,82 @@ def _project_frontmatter_line(line: str, view: _View) -> Optional[str]:
             for e in entries
             if normalize_name(e) not in view.blocked_repos
             and not _mentions_hidden(e, view)
+            and _decoded_value_safe(e, view)
         ]
         line = f"{inline.group('prefix')}[{', '.join(kept)}]"
         return None if _mentions_hidden(line, view) else line
+    scalar = _SCALAR_LINE.match(line) if item is None else None
+    if scalar is not None:
+        return _project_scalar_line(line, scalar, view)
     redacted = _redact(line, view)
     if redacted == line:
         return line
-    if _LIST_ITEM.match(line):
+    if item is not None:
         return None
-    scalar = _SCALAR_LINE.match(line)
-    if scalar is None:
-        return redacted
-    if _mentions_hidden(scalar.group("prefix"), view):
+    return redacted
+
+
+def _decoded_value_safe(raw: str, view: _View) -> bool:
+    """*raw* decodes (safe loader, no custom tags) and no decoded leaf (a
+    mapping key or value, a sequence item, at any depth) names a hidden
+    repository."""
+    try:
+        value = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        return False
+    return not _parsed_names_hidden(value, view)
+
+
+def _project_list_item(line: str, item: "re.Match[str]", view: _View) -> Optional[str]:
+    """A block-sequence item, judged by what it decodes to: removed when it
+    is a hidden name, does not decode, or decodes to one; kept as written
+    only when no redaction would change it."""
+    raw = item.group("value")
+    if normalize_name(raw) in view.blocked_repos:
         return None
-    value = _redact(scalar.group("value"), view)
+    if not _decoded_value_safe(raw, view):
+        return None
+    return line if _redact(line, view) == line else None
+
+
+def _scalar_content(raw: str) -> str:
+    """The characters of a scalar value as written (inside its quotes)."""
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        return raw[1:-1]
+    return raw
+
+
+def _project_scalar_line(
+    line: str, scalar: "re.Match[str]", view: _View
+) -> Optional[str]:
+    """A ``key: value`` line judged by the string a YAML reader decodes:
+    kept as written when neither form needs redaction, redacted in place
+    only when the value is written literally, else removed (an encoded
+    value is never rewritten, nor a decoded form emitted)."""
+    prefix, raw = scalar.group("prefix"), scalar.group("value")
+    if _mentions_hidden(prefix, view):
+        return None
+    decoded = _scalar_string(raw)
+    if decoded is None:
+        # Not a string (number, date, flow collection): every decoded leaf
+        # is judged, and the line is kept only as written.
+        if not _decoded_value_safe(raw, view):
+            return None
+        return line if _redact(line, view) == line else None
+    if _redact(decoded, view) == decoded and _redact(raw, view) == raw:
+        return line
+    if _scalar_content(raw) != decoded:
+        return None
+    value = _redact(raw, view)
     if not value:
         return None
     if not value.startswith(('"', "'")):
         # A plain value: single quotes keep it a string with no escapes.
-        if " #" in value:
-            return None
         value = "'" + value.replace("'", "''") + "'"
-    if _scalar_string(value) is None:
+    projected = _scalar_string(value)
+    if projected is None or _mentions_hidden(projected, view):
         return None
-    return scalar.group("prefix") + value
+    return prefix + value
 
 
 #: Parsed values that render as digits and separators only (datetime is a

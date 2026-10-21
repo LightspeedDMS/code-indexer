@@ -43,6 +43,13 @@ SUMMARY = (
     "**Summary**: 7 cross-domain edges across 9 domains. 2 standalone domains: Zq."
 )
 ANCHOR = "description: Payment processing across services\n"
+# The hidden name right after a non-ASCII letter: one engine token.
+ADJACENT = (
+    f"naï{CANARY} tail",
+    f"zeta é{CANARY}",
+    f"{CANARY}é after",
+    f"see [é{CANARY}](docs.md) here",
+)
 
 
 def _tokens(lines: Iterable[str]) -> Set[str]:
@@ -56,7 +63,12 @@ def fixture(tmp_path: Path) -> CidxMetaFixture:
     text = domain.read_text(encoding="utf-8")
     assert ANCHOR in text
     text = text.replace(ANCHOR, f"{ANCHOR}{ESCAPED}\n{ESCAPED_HIDDEN}\n{TABBED}\n", 1)
-    domain.write_text(text + f"\n{SUMMARY}\n", encoding="utf-8")
+    adjacent = "\n".join(ADJACENT)
+    domain.write_text(text + f"\n{SUMMARY}\n\n{adjacent}\n", encoding="utf-8")
+    description = fx.root / "alpha.md"
+    description.write_text(
+        description.read_text(encoding="utf-8") + f"\n{adjacent}\n", encoding="utf-8"
+    )
     return fx
 
 
@@ -101,3 +113,29 @@ def test_redacted_frontmatter_keeps_its_encoding_and_stays_yaml(
     assert "\t" in tabbed and "\\t" not in tabbed
     assert parsed["remark"] == f"tab\there near {RESTRICTED_PLACEHOLDER}"
     assert CANARY not in "\n".join(shown) and HIDDEN_DOMAIN not in "\n".join(shown)
+
+
+@pytest.mark.parametrize("path", ["alpha.md", PAYMENTS])
+def test_unicode_adjacent_hidden_name_is_never_shown(
+    fixture: CidxMetaFixture, path: str
+) -> None:
+    from code_indexer.server.services.cidx_meta_access.file_doors import (
+        judge_file_door,
+    )
+
+    access = judge_file_door(
+        "cidx-meta-global",
+        str(fixture.root),
+        RESTRICTED_USER,
+        fixture.access_service,
+        None,
+        str(fixture.root.parent),
+        fixture.registry,
+    )
+    served = access.served_text(path, (fixture.root / path).read_text("utf-8"))
+    lines = _scope(fixture).shown_lines(path)
+    assert lines is not None
+    for text in (served, "\n".join(lines[1])):
+        assert CANARY not in text
+        # The adjacent lines are removed, never redacted inside the token.
+        assert "é" not in text and "ï" not in text

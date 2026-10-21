@@ -223,6 +223,55 @@ def test_case_sensitive_query_respects_case(env: CatalogEnv, http: TestClient) -
             assert DESCRIPTION in door("mixedword")
 
 
+def _multi(http: TestClient, text: str) -> List[str]:
+    response = http.post(
+        "/api/query/multi",
+        json={
+            "repositories": [CATALOG_ALIAS],
+            "query": text,
+            "search_type": "fts",
+            "limit": 40,
+        },
+    )
+    assert response.status_code == 200, response.text
+    rows = response.json()["results"].get(CATALOG_ALIAS, [])
+    return sorted(str(r["file_path"]) for r in rows)
+
+
+@pytest.mark.parametrize(
+    "template", ["zeta é{hidden} tail", "zeta naï{hidden} tail", "zeta {hidden}é tail"]
+)
+def test_unicode_adjacent_hidden_name_answers_from_shown_text(
+    env: CatalogEnv, http: TestClient, template: str
+) -> None:
+    from code_indexer.server.services.cidx_meta_access.fulltext_terms import (
+        engine_tokens,
+    )
+
+    def tokens(lines: List[str]) -> set:
+        return {f for line in lines for f, _, _ in engine_tokens(line) if f}
+
+    with _described(env, template.format(hidden=HIDDEN_ALIASES[1])):
+        raw, shown = _scope(env).shown_lines(DESCRIPTION)
+        text_shown = "\n".join(shown)
+        assert HIDDEN_ALIASES[1] not in text_shown
+        assert "é" not in text_shown and "ï" not in text_shown
+        markers = tokens(["[restricted repository]", "[restricted domain]"])
+        assert tokens(shown) - tokens(raw) - markers == set()
+        for text, fuzzy in (("é", False), ("éé", True)):
+            terms = parse_fulltext_terms(text, 1 if fuzzy else 0)
+            assert terms is not None
+            expected = _scope(env).shown_match(DESCRIPTION, terms) is not None
+            options: Dict[str, Any] = {"fuzzy": True} if fuzzy else {}
+            answers = [
+                DESCRIPTION in _single(env, text, **options),
+                DESCRIPTION in _rest(http, text, **options),
+            ]
+            if not fuzzy:
+                answers.append(DESCRIPTION in _multi(http, text))
+            assert answers == [expected] * len(answers), (text, expected, answers)
+
+
 def test_a_long_changed_line_is_judged_in_milliseconds(env: CatalogEnv) -> None:
     long_line = f"{WORD} " + " ".join(["zedhidden", "filler"] * 300)
     assert len(long_line) >= 4096

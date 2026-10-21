@@ -83,6 +83,13 @@ def _engine_char(ch: str) -> str:
     return str(tokens[0]) if tokens else ""
 
 
+def is_engine_token_char(ch: str) -> bool:
+    """True when the engine's analyzer keeps *ch* inside a token."""
+    if ch.isascii():
+        return ch.isalnum()
+    return bool(_engine_char(ch))
+
+
 def _runs(text: str, start: int, end: int) -> List[Tuple[int, int]]:
     """Spans of the maximal runs of token characters in text[start:end]."""
     if text.isascii():
