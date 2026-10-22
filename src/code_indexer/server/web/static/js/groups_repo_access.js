@@ -1,10 +1,4 @@
-/**
- * Groups > Repository Access matrix: filter box and per-group bulk Yes/No.
- *
- * The filter hides rows with the .repo-filter-hidden class; a collapsed
- * category hides its rows with an inline display:none (repo_categories.js).
- * A bulk action applies only to rows hidden by neither.
- */
+//^ invariant filter hides rows via .repo-filter-hidden, a collapsed category via inline display:none; bulk acts only on rows hidden by neither
 
 var _repoAccessFilterTimer = null;
 var REPO_ACCESS_FILTER_DEBOUNCE_MS = 150;
