@@ -102,7 +102,5 @@ def test_change_check_baseline_stays_on_the_previous_good_snapshot(
     with pytest.raises(subprocess.CalledProcessError):
         manager.create_snapshot(REPO, str(source))
 
-    assert sorted(p.name for p in _namespace(golden).iterdir()) == [
-        f"v_{PREVIOUS_TS}"
-    ]
+    assert sorted(p.name for p in _namespace(golden).iterdir()) == [f"v_{PREVIOUS_TS}"]
     assert scheduler._latest_versioned_timestamp(f"{REPO}-global") == PREVIOUS_TS
