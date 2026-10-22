@@ -18,13 +18,51 @@ user's username, so the raw name is logged server-side only.
 from __future__ import annotations
 
 import logging
-from typing import Any, FrozenSet, Optional, Tuple
+from contextlib import contextmanager
+from typing import Any, FrozenSet, Iterator, Optional, Protocol, Tuple
 
 logger = logging.getLogger(__name__)
 
 CATALOG_LOCK_ALIAS = "cidx-meta"
 # ^ coupled server/mcp/handlers/files.py acquires write mode as owner_name "mcp_write_mode"
 _WRITE_MODE_OWNER = "mcp_write_mode"
+# ^ invariant never cooperative: while the backup's git writes run no catalog writer piggybacks
+CATALOG_BACKUP_LOCK_OWNER = "catalog_backup"
+# ^ why a backup push carries no timeout, so the lock must outlive a slow push
+CATALOG_BACKUP_LOCK_TTL_SECONDS = 24 * 60 * 60
+
+
+class CatalogLockManager(Protocol):
+    """The lock-manager surface the backup lock needs (file lock manager or
+    alias-lock coordinator)."""
+
+    def acquire(self, alias: str, owner_name: str, ttl_seconds: int) -> bool: ...
+
+    def release(self, alias: str, owner_name: str) -> bool: ...
+
+
+@contextmanager
+def held_catalog_backup_lock(
+    write_lock_manager: CatalogLockManager, alias: str = CATALOG_LOCK_ALIAS
+) -> Iterator[bool]:
+    """Hold the catalog write lock as the exclusive backup owner for the
+    backup's git write sequence; yields False (nothing held) when another
+    owner holds it. Released on exit, including after an exception."""
+    acquired = write_lock_manager.acquire(
+        alias,
+        owner_name=CATALOG_BACKUP_LOCK_OWNER,
+        ttl_seconds=CATALOG_BACKUP_LOCK_TTL_SECONDS,
+    )
+    try:
+        yield acquired
+    finally:
+        if acquired and not write_lock_manager.release(
+            alias, owner_name=CATALOG_BACKUP_LOCK_OWNER
+        ):
+            logger.warning(
+                f"catalog backup lock release for {alias!r} returned False; "
+                f"staleness eviction reclaims it"
+            )
 
 
 class CatalogLockedExclusively(Exception):

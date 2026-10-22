@@ -58,9 +58,11 @@ from code_indexer.utils.subprocess_diagnostics import (
 from code_indexer.server.repositories.golden_repo_manager import (
     _make_hnsw_orphan_event_logger,
 )
+from code_indexer.global_repos.catalog_lock_holder import held_catalog_backup_lock
 from code_indexer.server.services.cidx_meta_backup import (
     CidxMetaBackupBootstrap,
     CidxMetaBackupSync,
+    SyncResult,
     detect_default_branch,
 )
 from code_indexer.server.services.config_service import get_config_service
@@ -3632,13 +3634,11 @@ class RefreshScheduler:
         remote_url: Optional[str],
         alias_name: str,
         cancel_check: Optional[Callable[[], bool]],
-    ) -> Optional[Any]:
-        """Bootstrap (when a remote is configured) and sync the catalog's
-        backup mirror while holding the lock the refresh publishes with, so
-        no backup git write races another writer. None when another owner
-        holds it: the refresh skips this cycle. Every backup git call is
-        bound to the job's cancel check; the remote is a passive mirror."""
-        with self._held_write_lock_for_publish(repo_name) as acquired:
+    ) -> Optional[SyncResult]:
+        """Bootstrap (when a remote is configured) and sync the backup mirror
+        holding the catalog lock as the exclusive backup owner, bound to the
+        job's cancel check; None when another owner holds it (skip a cycle)."""
+        with held_catalog_backup_lock(self.write_lock_manager, repo_name) as acquired:
             if not acquired:
                 logger.info(
                     f"Skipping refresh for {alias_name}, write lock held by "

@@ -17,7 +17,7 @@ import subprocess
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Iterator
+from typing import Any, Callable, Dict, Iterator, Optional
 from unittest.mock import patch
 
 import pytest
@@ -85,7 +85,9 @@ def _git_out(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _backed_up_catalog(harness: Harness, origin: Path) -> Path:
+def _backed_up_catalog(
+    harness: Harness, origin: Path, repo_url: Optional[str] = "local://cidx-meta"
+) -> Path:
     from code_indexer.server.services.cidx_meta_backup.bootstrap import (
         CidxMetaBackupBootstrap,
     )
@@ -106,7 +108,7 @@ def _backed_up_catalog(harness: Harness, origin: Path) -> Path:
     harness.registry.register_global_repo(
         CATALOG,
         META_ALIAS,
-        "local://cidx-meta",
+        repo_url,
         index_path=str(meta),
         allow_reserved=True,
     )
@@ -183,3 +185,173 @@ def test_writer_locking_after_the_check_is_never_committed_by_the_backup(
         writer_holds.set()
         checked.set()
         scheduler.write_lock_manager.release(CATALOG, owner_name="mcp_write_mode")
+
+
+PATTERN_YAML = """\
+name: test-pattern
+description: "A test pattern"
+language: java
+evaluator_code: |
+  fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }
+"""
+BRANCHES = pytest.mark.parametrize(
+    "repo_url", ["local://cidx-meta", None], ids=["local", "legacy"]
+)
+LOCK_KINDS = pytest.mark.parametrize("lock_kind", ["file", "sqlite", "postgres"])
+
+
+class _Debouncer:
+    def signal_dirty(self) -> None:
+        pass
+
+    def note_direct_write(self) -> int:
+        return 1
+
+    def track_submission(self, job_id: str, seq: int) -> None:
+        pass
+
+
+def _memory_writer(scheduler: Any, meta: Path, tmp_path: Path) -> Callable[[], str]:
+    """A real memory create; returns "" when written, else the refusal."""
+    from code_indexer.server.services.memory_file_lock_manager import (
+        MemoryFileLockManager,
+    )
+    from code_indexer.server.services.memory_rate_limiter import (
+        MemoryRateLimiter,
+        RateLimitConfig,
+    )
+    from code_indexer.server.services.memory_store_service import (
+        ConflictError,
+        MemoryStoreConfig,
+        MemoryStoreService,
+    )
+
+    service = MemoryStoreService(
+        config=MemoryStoreConfig(memories_dir=meta / "memories"),
+        lock_manager=MemoryFileLockManager(tmp_path / "memory-locks"),
+        refresh_scheduler=scheduler,
+        refresh_debouncer=_Debouncer(),
+        rate_limiter=MemoryRateLimiter(
+            RateLimitConfig(capacity=100, refill_per_second=100.0)
+        ),
+        hostname="testhost",
+    )
+    payload = {
+        "type": "architectural-fact",
+        "scope": "global",
+        "summary": "example fact",
+        "evidence": [{"commit": "abc123"}],
+    }
+
+    def _attempt() -> str:
+        try:
+            service.create_memory(payload, username="carol")
+        except ConflictError as refused:
+            return str(refused)
+        return ""
+
+    return _attempt
+
+
+def _xray_writer(scheduler: Any, meta: Path, tmp_path: Path) -> Callable[[], str]:
+    """A real X-Ray pattern store; returns "" when written, else the refusal."""
+    from code_indexer.server.services.xray_pattern_service import XrayPatternService
+
+    service = XrayPatternService(meta, refresh_scheduler=scheduler)
+
+    def _attempt() -> str:
+        result: Dict[str, Any] = service.store_xray_pattern_audited(
+            scope="__any__",
+            pattern_yaml=PATTERN_YAML,
+            overwrite=False,
+            actor="carol",
+            may_replace_global=True,
+        )
+        return "" if result.get("success") else str(result.get("message"))
+
+    return _attempt
+
+
+WRITERS = {"memory": (_memory_writer, "memories"), "xray": (_xray_writer, "xray-")}
+
+
+@pytest.mark.parametrize("writer", sorted(WRITERS))
+@LOCK_KINDS
+@BRANCHES
+def test_catalog_writer_is_refused_while_the_backup_sync_runs(
+    tmp_path: Path,
+    metadata: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    lock_kind: str,
+    repo_url: Optional[str],
+    writer: str,
+) -> None:
+    from code_indexer.server.services.cidx_meta_backup.sync import (
+        CidxMetaBackupSync,
+    )
+
+    harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
+    _use_lock_store(harness, lock_kind, tmp_path)
+    scheduler = harness.scheduler
+    origin = tmp_path / "cidx-meta-backup.git"
+    meta = _backed_up_catalog(harness, origin, repo_url)
+    make_writer, written_prefix = WRITERS[writer]
+    attempt = make_writer(scheduler, meta, tmp_path)
+    refusals = []
+    real_sync = CidxMetaBackupSync.sync
+
+    def _sync_with_a_writer_arriving(self: Any) -> Any:
+        refusals.append(attempt())
+        return real_sync(self)
+
+    monkeypatch.setattr(CidxMetaBackupSync, "sync", _sync_with_a_writer_arriving)
+    with _backup_enabled(tmp_path, origin):
+        scheduler._execute_refresh(META_ALIAS)
+
+    assert len(refusals) == 1, "the backup sync did not run"
+    assert "another exclusive operation" in refusals[0], (
+        "a catalog writer piggybacked on the backup's lock"
+    )
+    backed_up = _git_out(origin, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert not [name for name in backed_up if name.startswith(written_prefix)]
+    tracked = _git_out(meta, "ls-files").splitlines()
+    assert not [name for name in tracked if name.startswith(written_prefix)]
+    assert not [p for p in meta.iterdir() if p.name.startswith(written_prefix)]
+    assert not scheduler.write_lock_manager.get_lock_info(CATALOG)
+
+
+@LOCK_KINDS
+@BRANCHES
+def test_backup_lock_is_released_when_the_sync_raises(
+    tmp_path: Path,
+    metadata: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    lock_kind: str,
+    repo_url: Optional[str],
+) -> None:
+    from code_indexer.server.services.cidx_meta_backup.sync import (
+        CidxMetaBackupSync,
+    )
+
+    harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
+    _use_lock_store(harness, lock_kind, tmp_path)
+    scheduler = harness.scheduler
+    origin = tmp_path / "cidx-meta-backup.git"
+    _backed_up_catalog(harness, origin, repo_url)
+    held_during_sync = []
+
+    def _failing_sync(self: Any) -> Any:
+        held_during_sync.append(scheduler.write_lock_manager.get_lock_info(CATALOG))
+        raise RuntimeError("backup sync failed")
+
+    monkeypatch.setattr(CidxMetaBackupSync, "sync", _failing_sync)
+    with _backup_enabled(tmp_path, origin):
+        try:
+            scheduler._execute_refresh(META_ALIAS)
+        except RuntimeError as raised:
+            assert "backup sync failed" in str(raised)
+
+    assert held_during_sync and held_during_sync[0], "the sync ran without the lock"
+    assert not scheduler.write_lock_manager.get_lock_info(CATALOG)
+    assert scheduler.write_lock_manager.acquire(CATALOG, owner_name="mcp_write_mode")
+    assert scheduler.write_lock_manager.release(CATALOG, owner_name="mcp_write_mode")

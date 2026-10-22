@@ -53,6 +53,7 @@ COOPERATIVE_HOLDERS = [
 #: Holders expecting exclusive access, with the category a refusal names.
 EXCLUSIVE_HOLDERS = {
     "mcp_write_mode": "write mode",
+    "catalog_backup": "another exclusive operation",
     "reconciliation": "another exclusive operation",
     "restore@testhost/bob": "another exclusive operation",
 }
