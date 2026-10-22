@@ -102,7 +102,9 @@ class AliasLockStoreFactory:
         postgres_dsn: Optional[str] = None,
         server_data_dir: Optional[str] = None,
         golden_repos_dir: Optional[str] = None,
+        node_id: str = "",
     ) -> None:
+        self._node_id = node_id  # configured cluster.node_id; "" when none
         self._postgres_dsn = postgres_dsn
         self._server_data_dir = server_data_dir
         self._golden_repos_dir = golden_repos_dir
@@ -136,7 +138,9 @@ class AliasLockStoreFactory:
                     )
                 from .postgres_store import PostgresAliasLockStore
 
-                self._postgres_store = PostgresAliasLockStore(self._postgres_dsn)
+                self._postgres_store = PostgresAliasLockStore(
+                    self._postgres_dsn, node_id=self._node_id
+                )
             return self._postgres_store
 
     def resolve(self) -> "AliasLockStore":

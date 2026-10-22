@@ -15,7 +15,7 @@ identity -- never by the database session that inserted it.
       (database clock: ``now - last_renewed_at > ttl_seconds``), or the
       holder process on THIS host is gone, or the holder is from an earlier
       boot of this machine (``holder_from_earlier_boot``: SQLite by boot id,
-      PostgreSQL by machine id plus boot id). Default lease
+      PostgreSQL by the configured cluster node id plus boot id). Default lease
       ``DEFAULT_LOCK_TTL_SECONDS``; callers guarding long work pass a longer
       ``ttl_seconds`` or renew, exactly as with the file lock.
     - Release/renew: by the EXACT owner token plus operation
@@ -47,24 +47,13 @@ from typing import Any, Dict, Optional, Protocol
 
 
 @functools.lru_cache(maxsize=1)
-def _local_machine_id() -> Optional[str]:
-    try:
-        with open("/etc/machine-id", encoding="ascii") as handle:
-            machine_id = handle.read().strip()
-    except OSError:
-        return None
-    return machine_id or None
-
-
-@functools.lru_cache(maxsize=1)
 def local_holder_identity() -> str:
     """Identity under which a holder's PID is meaningful: host name, kernel
-    boot id, PID namespace and (when readable) the machine id. Two
-    containers sharing a host name (or one host after a reboot) get
-    different identities, so a PID is only ever checked inside the namespace
-    that issued it. When the ids cannot be read, the identity is unique to
-    this process: PID liveness is then never applied to its locks, which
-    fall back to their lease alone."""
+    boot id and PID namespace. Two containers sharing a host name (or one
+    host after a reboot) get different identities, so a PID is only ever
+    checked inside the namespace that issued it. When the ids cannot be
+    read, the identity is unique to this process: PID liveness is then never
+    applied to its locks, which fall back to their lease alone."""
     hostname = socket.gethostname()
     try:
         with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
@@ -72,19 +61,28 @@ def local_holder_identity() -> str:
         pid_namespace = os.readlink("/proc/self/ns/pid")
     except OSError:
         return f"{hostname}|unidentified|{uuid.uuid4().hex}"
-    machine_id = _local_machine_id()
-    identity = f"{hostname}|{boot_id}|{pid_namespace}"
-    return f"{identity}|{machine_id}" if machine_id else identity
+    return f"{hostname}|{boot_id}|{pid_namespace}"
 
 
-def holder_from_earlier_boot(recorded: Optional[str], *, node_local: bool) -> bool:
+def shared_holder_identity(node_id: str) -> str:
+    """The identity a shared (PostgreSQL) store records: the local identity
+    plus the configured cluster node id when there is one."""
+    if "|" in node_id:
+        raise ValueError(f"cluster node_id must not contain '|': {node_id!r}")
+    identity = local_holder_identity()
+    return f"{identity}|{node_id}" if node_id else identity
+
+
+def holder_from_earlier_boot(
+    recorded: Optional[str], *, node_local: bool, node_id: str = ""
+) -> bool:
     """True when ``recorded`` (a holder identity) is provably an earlier boot
-    of THIS machine, so none of its processes can still be running. A
-    node-local store only ever holds this machine's rows, so a different
-    boot id is enough; a shared store also needs the same host name AND
-    machine id (cloned VMs and images can duplicate a machine id). An
-    unreadable id, or a row without a machine id in a shared store, proves
-    nothing."""
+    of THIS node, so none of its processes can still be running. A
+    node-local store only ever holds this node's rows, so a different boot
+    id is enough. On a shared store host names and machine ids can be
+    duplicated (cloned VMs, images), so only the configured cluster
+    ``node_id`` identifies a node: the row must record this non-empty node
+    id. An unreadable id, or no node id on either side, proves nothing."""
     if not recorded:
         return False
     theirs = recorded.split("|")
@@ -95,12 +93,8 @@ def holder_from_earlier_boot(recorded: Optional[str], *, node_local: bool) -> bo
         return False
     if node_local:
         return True
-    return (
-        len(theirs) == 4
-        and len(mine) == 4
-        and theirs[0] == mine[0]
-        and theirs[3] == mine[3]
-    )
+    # ^ invariant cluster node ids are unique (leader election, job claims); host and machine ids are not
+    return bool(node_id) and len(theirs) == 4 and theirs[3] == node_id
 
 
 class AliasLockOwnershipLostError(RuntimeError):

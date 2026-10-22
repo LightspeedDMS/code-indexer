@@ -1,11 +1,14 @@
-"""A lock held by an earlier boot of THIS machine is stale.
+"""A lock held by an earlier boot of THIS node is stale.
 
 After a reboot no process of the previous boot exists, so its locks must not
 wait out their (up to 24 h) lease. SQLite lock files are node-local: any
-holder from a different boot id is stale. PostgreSQL is shared by machines:
-only a holder carrying this machine's id with a different boot id is stale;
-another machine's holder, or a row without a machine id, keeps its lease.
-Real stores; the recorded holder is rewritten to stand for the earlier boot.
+holder from a different boot id is stale. PostgreSQL is shared by nodes, and
+host names and machine ids are duplicated by cloned VMs and images, so only
+the configured cluster node id identifies a node: a holder is an earlier boot
+of this node only when it recorded this node's (non-empty) node id and a
+different boot id. Without a node id, a row frees only by its lease (or the
+death of a same-identity process). Real stores; the recorded holder is
+rewritten to stand for the earlier boot.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ import socket
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Callable, Iterator, Tuple
+from typing import Any, Callable, Iterator, List
 
 import pytest
 
@@ -28,44 +31,35 @@ from tests.shared.alias_lock_pg import postgres_lock_store_dsn
 _KEY = "example-repo"
 _DAY_SECONDS = 24 * 3600
 _OTHER_BOOT = "00000000-0000-0000-0000-000000000000"
-_OTHER_MACHINE = "0123456789abcdef0123456789abcdef"
+_THIS_NODE = "node-a"
+_OTHER_NODE = "node-b"
 
-Backend = Tuple[str, Callable[[], Any]]
+MakeStore = Callable[..., Any]
 
 
-def _fields() -> list:
-    """This process's holder identity fields, read from the system itself:
-    host name, kernel boot id, PID namespace, machine id."""
+def _fields() -> List[str]:
+    """Host name, kernel boot id and PID namespace, read from the system."""
     try:
         boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         namespace = os.readlink("/proc/self/ns/pid")
+    except OSError:
+        pytest.skip("boot id or PID namespace unreadable on this host")
+    return [socket.gethostname(), boot, namespace]
+
+
+def _earlier_boot(*suffix: str) -> str:
+    host, _boot, namespace = _fields()
+    return "|".join([host, _OTHER_BOOT, namespace, *suffix])
+
+
+def _machine_id() -> str:
+    try:
         machine = Path("/etc/machine-id").read_text().strip()
     except OSError:
-        pytest.skip("boot id, PID namespace or machine id unreadable on this host")
+        pytest.skip("machine id unreadable on this host")
     if not machine:
         pytest.skip("empty machine id on this host")
-    return [socket.gethostname(), boot, namespace, machine]
-
-
-def _previous_boot() -> str:
-    host, _boot, namespace, machine = _fields()
-    return "|".join([host, _OTHER_BOOT, namespace, machine])
-
-
-def _foreign_machine() -> str:
-    host, _boot, namespace, _machine = _fields()
-    return "|".join([host, _OTHER_BOOT, namespace, _OTHER_MACHINE])
-
-
-def _cloned_machine() -> str:
-    # ^ why VMs cloned from one template (or one image) can share a machine id
-    _host, _boot, namespace, machine = _fields()
-    return "|".join(["clone-host.example.com", _OTHER_BOOT, namespace, machine])
-
-
-def _legacy_previous_boot() -> str:
-    host, _boot, namespace, _machine = _fields()
-    return "|".join([host, _OTHER_BOOT, namespace])
+    return machine
 
 
 def _dead_pid() -> int:
@@ -76,17 +70,25 @@ def _dead_pid() -> int:
     return child.pid
 
 
-@pytest.fixture(params=["sqlite", "postgres"])
-def backend(request, tmp_path: Path) -> Iterator[Backend]:
-    if request.param == "sqlite":
-        yield "sqlite", lambda: SqliteAliasLockStore(tmp_path / "locks")
-        return
+@pytest.fixture
+def sqlite_store(tmp_path: Path) -> MakeStore:
+    return lambda: SqliteAliasLockStore(tmp_path / "locks")
+
+
+@pytest.fixture
+def pg_store() -> Iterator[MakeStore]:
     from code_indexer.server.services.alias_lock_store.postgres_store import (
         PostgresAliasLockStore,
     )
 
     with postgres_lock_store_dsn(_KEY) as dsn:
-        yield "postgres", lambda: PostgresAliasLockStore(dsn)
+
+        def make(node_id: str = "") -> Any:
+            if node_id:
+                return PostgresAliasLockStore(dsn, node_id=node_id)
+            return PostgresAliasLockStore(dsn)
+
+        yield make
 
 
 def _record_holder(store: Any, identity: str) -> None:
@@ -108,38 +110,44 @@ def _record_holder(store: Any, identity: str) -> None:
         )
 
 
-def _held_by(make_store: Callable[[], Any], identity: str) -> Any:
-    store = make_store()
+def _successor_after(make: Callable[[], Any], identity: str) -> Any:
+    """Acquire with a 24 h lease, rewrite the holder as ``identity`` with a
+    dead PID, and return what a second acquirer gets."""
+    store = make()
     assert store.try_acquire(_KEY, "refresh_scheduler", ttl_seconds=_DAY_SECONDS)
     _record_holder(store, identity)
-    return make_store().try_acquire(_KEY, "successor")
+    return make().try_acquire(_KEY, "successor")
 
 
-class TestEarlierBootHolder:
-    def test_holder_from_an_earlier_boot_of_this_machine_is_taken_over(
-        self, backend: Backend
+class TestNodeLocalStore:
+    def test_holder_from_an_earlier_boot_is_taken_over(
+        self, sqlite_store: MakeStore
     ) -> None:
-        _kind, make_store = backend
-        assert _held_by(make_store, _previous_boot()) is not None
+        assert _successor_after(sqlite_store, _earlier_boot()) is not None
 
-    def test_holder_of_another_machine_keeps_its_lease(self, backend: Backend) -> None:
-        kind, make_store = backend
-        if kind == "sqlite":
-            pytest.skip("SQLite lock files are node-local: no other machine")
-        assert _held_by(make_store, _foreign_machine()) is None
 
-    def test_cloned_machine_id_on_another_host_keeps_its_lease(
-        self, backend: Backend
+class TestSharedStore:
+    def test_cloned_vm_with_same_host_and_machine_id_keeps_its_lease(
+        self, pg_store: MakeStore
     ) -> None:
-        kind, make_store = backend
-        if kind == "sqlite":
-            pytest.skip("SQLite lock files are node-local: no other host")
-        assert _held_by(make_store, _cloned_machine()) is None
+        # ^ why VMs cloned from one template share host name and machine id
+        identity = _earlier_boot(_machine_id())
+        assert _successor_after(pg_store, identity) is None
 
-    def test_row_without_a_machine_id(self, backend: Backend) -> None:
-        kind, make_store = backend
-        successor = _held_by(make_store, _legacy_previous_boot())
-        if kind == "sqlite":
-            assert successor is not None  # node-local: a different boot is enough
-        else:
-            assert successor is None  # shared: an unproven machine keeps its lease
+    def test_holder_of_another_node_keeps_its_lease(self, pg_store: MakeStore) -> None:
+        identity = _earlier_boot(_OTHER_NODE)
+        assert _successor_after(lambda: pg_store(_THIS_NODE), identity) is None
+
+    def test_holder_from_an_earlier_boot_of_this_node_is_taken_over(
+        self, pg_store: MakeStore
+    ) -> None:
+        identity = _earlier_boot(_THIS_NODE)
+        assert _successor_after(lambda: pg_store(_THIS_NODE), identity) is not None
+
+    def test_no_configured_node_id_proves_nothing(self, pg_store: MakeStore) -> None:
+        identity = _earlier_boot(_THIS_NODE)
+        assert _successor_after(pg_store, identity) is None
+
+    def test_row_without_a_node_id_keeps_its_lease(self, pg_store: MakeStore) -> None:
+        identity = _earlier_boot()
+        assert _successor_after(lambda: pg_store(_THIS_NODE), identity) is None

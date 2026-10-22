@@ -34,9 +34,9 @@ from .base import (
     AliasLockHandle,
     LockOutcome,
     holder_from_earlier_boot,
-    local_holder_identity,
     release_handle,
     renew_handle,
+    shared_holder_identity,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,15 +149,17 @@ def _connect(dsn: str, connect_timeout_seconds: float) -> Any:
     )
 
 
-def _holder_is_stale(row: _HolderRow) -> bool:
+def _holder_is_stale(row: _HolderRow, node_id: str) -> bool:
     _token, _operation, hostname, pid, ttl_seconds, _acquired, elapsed = row
-    # ^ invariant shared store: an earlier boot is proven only by this machine's id
-    return holder_from_earlier_boot(hostname, node_local=False) or lock_holder_is_stale(
+    # ^ invariant shared store: an earlier boot is proven only by this node's configured cluster node id
+    if holder_from_earlier_boot(hostname, node_local=False, node_id=node_id):
+        return True
+    return lock_holder_is_stale(
         hostname,
         pid,
         float(elapsed) if elapsed is not None else None,
         ttl_seconds,
-        local_host=local_holder_identity(),
+        local_host=shared_holder_identity(node_id),
     )
 
 
@@ -174,6 +176,7 @@ class PostgresAliasLockStore:
         *,
         acquire_lock_timeout_seconds: float = _DEFAULT_ACQUIRE_LOCK_TIMEOUT_SECONDS,
         connect_timeout_seconds: float = _DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        node_id: str = "",
     ) -> None:
         """
         Args:
@@ -182,7 +185,11 @@ class PostgresAliasLockStore:
                 in-flight takeover, or a legacy uncommitted holder). Must be
                 > 0 -- never indefinite.
             connect_timeout_seconds: bound on connection establishment.
+            node_id: this node's configured ``cluster.node_id``. Empty: an
+                earlier boot of this node is never inferred.
         """
+        shared_holder_identity(node_id)  # validates node_id
+        self._node_id = node_id
         self._dsn = _validate_non_empty_str(dsn, "dsn")
         self._acquire_lock_timeout_seconds = _validate_acquire_lock_timeout_seconds(
             acquire_lock_timeout_seconds
@@ -214,7 +221,7 @@ class PostgresAliasLockStore:
         operation = _validate_non_empty_str(operation, "operation")
         ttl = _validate_ttl(ttl_seconds)
         token = owner_token or str(uuid.uuid4())
-        holder = (local_holder_identity(), os.getpid())
+        holder = (shared_holder_identity(self._node_id), os.getpid())
 
         conn = self._open()
         try:
@@ -226,7 +233,7 @@ class PostgresAliasLockStore:
                     current = conn.execute(
                         _SELECT_HOLDER_SQL + " FOR UPDATE", (lock_key,)
                     ).fetchone()
-                    if current is None or not _holder_is_stale(current):
+                    if current is None or not _holder_is_stale(current, self._node_id):
                         conn.rollback()
                         return None
                     conn.execute(
@@ -276,7 +283,7 @@ class PostgresAliasLockStore:
             if not _owner_matches(current, operation, owner_token):
                 conn.rollback()
                 return LockOutcome.OWNER_MISMATCH
-            if only_if_stale and not _holder_is_stale(current):
+            if only_if_stale and not _holder_is_stale(current, self._node_id):
                 conn.rollback()
                 return LockOutcome.STILL_HELD
             conn.execute(_DELETE_SQL, (lock_key, current[0]))
@@ -306,7 +313,7 @@ class PostgresAliasLockStore:
             if not _owner_matches(current, operation, owner_token):
                 conn.rollback()
                 return LockOutcome.OWNER_MISMATCH
-            if _holder_is_stale(current):
+            if _holder_is_stale(current, self._node_id):
                 conn.rollback()
                 return LockOutcome.LAPSED
             conn.execute(
@@ -346,7 +353,7 @@ class PostgresAliasLockStore:
             if probe is not None:
                 return False
             current = conn.execute(_SELECT_HOLDER_SQL, (lock_key,)).fetchone()
-            return current is not None and not _holder_is_stale(current)
+            return current is not None and not _holder_is_stale(current, self._node_id)
         finally:
             conn.rollback()
             conn.close()
@@ -359,7 +366,7 @@ class PostgresAliasLockStore:
         finally:
             conn.rollback()
             conn.close()
-        if current is None or _holder_is_stale(current):
+        if current is None or _holder_is_stale(current, self._node_id):
             return None
         _token, operation, hostname, pid, ttl_seconds, acquired_at, _elapsed = current
         return {
