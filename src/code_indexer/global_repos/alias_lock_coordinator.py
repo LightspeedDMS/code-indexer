@@ -41,7 +41,7 @@ sequence; it is process-local and gives no cross-process guarantee.
 
 Typing note: ``AliasLockStore`` is imported only under ``TYPE_CHECKING`` so
 this module (loaded in CLI/solo processes too) never pulls in the
-server-only ``alias_lock_store`` package eagerly (Bug #1468); runtime
+server-only ``alias_lock_store`` package eagerly (keeps CLI imports light); runtime
 imports from it are local.
 """
 

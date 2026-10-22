@@ -9,7 +9,7 @@ nothing pins ``GetOldestXmin``.
 Schema: migration 043 (table) + migration 077 (holder/lease columns),
 applied by ``MigrationRunner``; this module issues no DDL.
 
-psycopg is imported lazily (Bug #1468 discipline) so importing this module
+psycopg is imported lazily so importing this module
 never loads psycopg for callers that never construct the store.
 
 Rolling upgrade: a node still running the previous release holds its lock
@@ -141,7 +141,7 @@ def _connect(dsn: str, connect_timeout_seconds: float) -> Any:
         apply_dead_peer_detection,
     )
 
-    # Bug #2005: the server must drop a crashed client's session within ~60s.
+    # Dead-peer detection: the server drops a crashed client's session within ~60s.
     return psycopg.connect(
         apply_dead_peer_detection(dsn),
         connect_timeout=int(connect_timeout_seconds),
