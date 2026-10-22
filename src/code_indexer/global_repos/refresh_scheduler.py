@@ -1819,17 +1819,9 @@ class RefreshScheduler:
     def _cleanup_single_write_mode_marker(
         self, marker_path: Path, alias: str, force: bool
     ) -> None:
-        """
-        Evaluate and optionally remove a single write mode marker file.
-
-        If force=True, the marker is always removed (startup cleanup).
-        If force=False, the marker is removed only when:
-        - it contains invalid/corrupt JSON, OR
-        - the 'entered_at' field is missing, OR
-        - entered_at + WRITE_MODE_MARKER_TTL_SECONDS < now.
-
-        When a marker is removed the corresponding write lock is released.
-        """
+        """Remove one marker when force, corrupt, missing entered_at, or older than
+        WRITE_MODE_MARKER_TTL_SECONDS; its write lock is released with the
+        marker's own token before the marker is removed."""
         import json as _json
         from datetime import datetime, timezone
 
@@ -1886,26 +1878,23 @@ class RefreshScheduler:
             except (OSError, _json.JSONDecodeError):
                 pass  # File gone or corrupt — proceed with cleanup
 
-        # Remove the marker file
+        # ^ ord release with the marker's token BEFORE deleting it: the token is the only release capability
         try:
+            token = _json.loads(marker_path.read_text()).get("owner_token") or None
+        except (OSError, ValueError, AttributeError):
+            token = None
+        if token is None:
+            logger.warning(f"Write mode marker {marker_path.name} has no lock token")
+        try:
+            self.release_write_lock(alias, "mcp_write_mode", owner_token=token)
             marker_path.unlink(missing_ok=True)
-            logger.info(
-                f"Cleaned up {'orphaned' if not force else 'startup'} write mode marker: "
-                f"{marker_path.name} (alias={alias!r})"
-            )
-        except OSError as exc:
-            logger.warning(
-                f"Could not delete write mode marker {marker_path.name}: {exc}"
-            )
+        except Exception as exc:
+            logger.warning(f"Keeping write mode marker {marker_path.name}: {exc!r}")
             return
-
-        # Release the corresponding write lock so the scheduler is not blocked
-        self.release_write_lock(alias, owner_name="mcp_write_mode")
-        if self.is_write_locked(alias):
-            logger.warning(
-                f"Stale marker removed for {alias!r} but write lock release was refused "
-                f"(owner mismatch). Lock may be held by a different service."
-            )
+        logger.info(
+            f"Cleaned up {'orphaned' if not force else 'startup'} write mode marker: "
+            f"{marker_path.name} (alias={alias!r})"
+        )
 
     def _resolve_global_alias(self, alias_name: str) -> str:
         """Resolve bare alias to global alias format.
