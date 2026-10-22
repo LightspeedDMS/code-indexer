@@ -210,17 +210,33 @@ def request_cidx_meta_refresh(
             owed_to.signal_dirty()
 
 
-def owe_cidx_meta_refresh() -> None:
-    """Owe a cidx-meta refresh for a write made under ANOTHER owner's catalog
-    write lock. A refresh requested now would skip on that lock and owe
-    nothing, so the debouncer carries it to a later refresh."""
-    if _debouncer is None:
+def owe_cidx_meta_refresh(debouncer: Optional[Any] = None) -> None:
+    """Owe a cidx-meta refresh for a write made while the catalog write lock
+    was still held (another writer's, the refresh's own publish lock, or ours
+    after a failed release). A refresh requested now would skip on that lock
+    and owe nothing, so the debouncer (*debouncer*, else the module's)
+    carries it to a later refresh."""
+    owed_to = debouncer if debouncer is not None else _debouncer
+    if owed_to is None:
         logger.warning(
-            "cidx-meta write under another writer's lock not retried "
-            "(no debouncer); the lock holder's own refresh must cover it"
+            "cidx-meta write made under a held catalog write lock is not "
+            "retried (no debouncer); it is indexed only by a later cidx-meta "
+            "refresh"
         )
         return
-    _debouncer.signal_dirty()
+    owed_to.signal_dirty()
+
+
+def refresh_after_catalog_write(
+    refresh_scheduler: Any, lock_still_held: bool, debouncer: Optional[Any] = None
+) -> None:
+    """The refresh a completed catalog write needs, for every writer:
+    requested now once the writer released its own lock, owed to the
+    debouncer while a lock is still held. Never raises into the writer."""
+    if lock_still_held:
+        owe_cidx_meta_refresh(debouncer)
+        return
+    request_cidx_meta_refresh(refresh_scheduler, debouncer=debouncer)
 
 
 def atomic_write_description(
@@ -595,11 +611,7 @@ def on_repo_added(
     # Trigger cidx-meta reindex to make the new description searchable, once
     # no lock of ours can still be held.
     if _refresh_scheduler is not None:
-        if refresh_now:
-            request_cidx_meta_refresh(_refresh_scheduler)
-            logger.info(f"Requested cidx-meta refresh after adding {repo_name}")
-        else:
-            owe_cidx_meta_refresh()
+        refresh_after_catalog_write(_refresh_scheduler, lock_still_held=not refresh_now)
 
 
 def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
@@ -668,11 +680,7 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
         # Trigger cidx-meta reindex after the deletion, once the write lock is
         # released (a refresh starting under the lock skips and owes nothing).
         if _deleted and _refresh_scheduler is not None:
-            if _lock_still_held:
-                owe_cidx_meta_refresh()
-            else:
-                request_cidx_meta_refresh(_refresh_scheduler)
-                logger.info(f"Requested cidx-meta refresh after removing {repo_name}")
+            refresh_after_catalog_write(_refresh_scheduler, _lock_still_held)
     else:
         logger.debug(f"No meta description file to delete for {repo_name}")
 

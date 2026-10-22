@@ -23,21 +23,17 @@ from unittest.mock import patch
 
 import pytest
 
-from code_indexer.server.services.embedding_stats_attribution import (
-    StatsAttribution,
-)
 from code_indexer.server.utils.config_manager import (
     CidxMetaBackupConfig,
     ServerConfig,
 )
-from code_indexer.server.utils.index_command_layout import append_server_layout_args
 from tests.utils.cidx_fake_provider_repo import unique_python_text
 from tests.utils.fatal_chunk_store_fixtures import COLLECTION_NAME, cidx_child_command
 from tests.utils.golden_repo_metadata_stores import golden_repo_metadata_store
 from tests.utils.refresh_fake_provider_env import (
     ENDPOINT_PIN_FLAG,
     fake_provider_refresh_env,
-    point_repo_at_fake,
+    index_repo_for_real,
 )
 from tests.utils.refresh_fatal_store_harness import ALIAS, Harness, build_harness
 
@@ -96,24 +92,7 @@ def _indexed_non_git_source(fake: Any, env: Dict[str, str]) -> Callable[[Path], 
         for i in range(3):
             name = f"note_{i:03d}"
             (source / f"{name}.py").write_text(unique_python_text(name, 20))
-        run = dict(cwd=source, env=env, capture_output=True, text=True, timeout=180)
-        init = subprocess.run(cidx_child_command(["init"]), **run)  # type: ignore[call-overload]
-        assert init.returncode == 0, init.stderr[-3000:]
-        point_repo_at_fake(source, fake)
-        args = append_server_layout_args(
-            ["cidx", "index", "--fts", "--progress-json"],
-            attribution=StatsAttribution(
-                golden_repo_alias=ALIAS,
-                job_id="nojob:test",
-                node_id="node-a",
-                purpose="index",
-            ),
-        )
-        index = subprocess.run(
-            cidx_child_command([a for a in args[1:] if a != ENDPOINT_PIN_FLAG]),
-            **run,  # type: ignore[call-overload]
-        )
-        assert index.returncode == 0, index.stderr[-3000:]
+        index_repo_for_real(source, fake, env, ALIAS)
 
     return build
 
@@ -224,7 +203,7 @@ def _git_backed_catalog(
     (meta / "memories" / "seed.md").write_text("# seed\n\nseed memory body\n")
     _git(tmp_path, "init", "-q", "--bare", str(_origin(tmp_path)))
     CidxMetaBackupBootstrap().bootstrap(str(meta), str(_origin(tmp_path)))
-    _indexed_catalog(meta, fake, env)
+    index_repo_for_real(meta, fake, env, META_ALIAS)
     snapshot = meta.parent / ".versioned" / "cidx-meta" / "v_1000000000"
     shutil.copytree(meta, snapshot, symlinks=True)
     harness.registry.register_global_repo(
@@ -238,18 +217,6 @@ def _git_backed_catalog(
         META_ALIAS, str(snapshot), repo_name="cidx-meta"
     )
     return meta
-
-
-def _indexed_catalog(meta: Path, fake: Any, env: Dict[str, str]) -> None:
-    run = dict(cwd=meta, env=env, capture_output=True, text=True, timeout=180)
-    init = subprocess.run(cidx_child_command(["init"]), **run)  # type: ignore[call-overload]
-    assert init.returncode == 0, init.stderr[-3000:]
-    point_repo_at_fake(meta, fake)
-    index = subprocess.run(
-        cidx_child_command(["index", "--fts", "--new-collection-layout=chunks_db"]),
-        **run,  # type: ignore[call-overload]
-    )
-    assert index.returncode == 0, index.stderr[-3000:]
 
 
 @contextlib.contextmanager

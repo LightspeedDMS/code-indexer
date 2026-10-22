@@ -135,10 +135,10 @@ class XrayPatternService:
     Args:
         cidx_meta_path: The mutable cidx-meta base path (from get_cidx_meta_path()).
         refresh_scheduler: Optional RefreshScheduler instance. When provided,
-            store_xray_pattern_audited() and delete_pattern() acquire the
+            store_xray_pattern_audited() acquires the
             cidx-meta coarse write lock (mirroring
             MemoryStoreService._run_with_coarse_lock) before touching the shared
-            git index; when the lock is already held they piggyback (write the
+            git index; when the lock is already held it piggybacks (write the
             file, skip the commit, which the holder's refresh picks up). When
             None (default) there is no coarse lock: writes and commits run
             directly.
@@ -392,14 +392,10 @@ class XrayPatternService:
         if self._scheduler is None:
             return
         from code_indexer.global_repos.meta_description_hook import (
-            owe_cidx_meta_refresh,
-            request_cidx_meta_refresh,
+            refresh_after_catalog_write,
         )
 
-        if lock_still_held:
-            owe_cidx_meta_refresh()
-            return
-        request_cidx_meta_refresh(self._scheduler)
+        refresh_after_catalog_write(self._scheduler, lock_still_held)
 
     @staticmethod
     def _holds(target_path: Path, pattern_yaml: str) -> bool:
@@ -624,54 +620,6 @@ class XrayPatternService:
                 message="xray-patterns: add seed patterns to __any__/",
             )
 
-    def delete_pattern(self, scope: str, name: str) -> Dict[str, Any]:
-        """Delete a pattern from cidx-meta/xray-patterns/{scope}/{name}.yaml.
-
-        Removes the YAML file from disk under the coarse write lock.
-        When piggybacking (lock already held by another operation) the file
-        is removed from disk but _git_commit is skipped — the lock-holder's
-        refresh picks up the deletion via ``git add -A``.
-
-        Args:
-            scope: Target scope — "__any__" for cross-repo or a repo alias.
-            name: Name of the pattern (filename stem without .yaml).
-
-        Returns:
-            Dict with {"success": True} on success, or
-            {"error": "<code>", "message": "<detail>"} on failure.
-        """
-        for field_label, field_value in (("scope", scope), ("name", name)):
-            if "/" in field_value or "\\" in field_value or ".." in field_value:
-                return {
-                    "error": "path_traversal_rejected",
-                    "message": (
-                        f"{field_label} '{field_value}' contains path traversal sequences"
-                    ),
-                }
-
-        target_path = self._patterns_root / scope / f"{name}.yaml"
-
-        if not target_path.exists():
-            return {
-                "error": "pattern_not_found",
-                "message": f"Pattern '{name}' not found in scope '{scope}'",
-            }
-
-        owner = f"xray-pattern:delete:{name}"
-
-        def _delete_and_commit(piggyback: bool) -> None:
-            target_path.unlink()
-            if not piggyback:
-                self._git_commit_tolerating_failure(
-                    files=[target_path],
-                    message=f"xray-patterns: delete {scope}/{name}",
-                )
-
-        _, lock_still_held = self._run_with_coarse_lock(owner, _delete_and_commit)
-        self._request_refresh(lock_still_held)
-
-        return {"success": True}
-
     # ------------------------------------------------------------------
     # Coarse write-lock coordination (Bug #1037)
     # Mirrors MemoryStoreService._coarse_piggyback_or_acquire /
@@ -735,7 +683,7 @@ class XrayPatternService:
 
     def _git_commit_tolerating_failure(self, files: List[Path], message: str) -> None:
         """:meth:`_git_commit`, logging a failed commit as a WARNING
-        (seed and delete paths, where a missing commit is tolerated)."""
+        (the seed path, where a missing commit is tolerated)."""
         try:
             self._git_commit(files, message)
         except PatternCommitError as exc:

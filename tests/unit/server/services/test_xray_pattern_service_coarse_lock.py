@@ -1,6 +1,6 @@
 """Unit tests for XrayPatternService coarse-lock coordination — Bug #1037.
 
-Tests that store_xray_pattern() and delete_pattern() acquire the cidx-meta
+Tests that store_xray_pattern() acquires the cidx-meta
 coarse write lock (mirroring MemoryStoreService._run_with_coarse_lock) before
 touching the shared git index.
 
@@ -260,74 +260,6 @@ def test_store_pattern_does_not_release_when_piggybacking(
     assert len(scheduler.release_write_lock_calls) == 0, (
         "release_write_lock must NOT be called when piggybacking (never owned the lock)"
     )
-
-
-# ---------------------------------------------------------------------------
-# Test 6: delete_pattern acquires coarse lock
-# ---------------------------------------------------------------------------
-
-
-def test_delete_pattern_acquires_coarse_lock(
-    cidx_meta: Path,
-) -> None:
-    """delete_pattern must call acquire_write_lock with alias='cidx-meta' and owner='xray-pattern:delete:<name>'."""
-    scheduler = FakeScheduler(is_locked=False, acquire_returns=True)
-    svc = XrayPatternService(cidx_meta_path=cidx_meta, refresh_scheduler=scheduler)
-
-    # Pre-create the pattern file so delete_pattern can find it
-    scope_dir = cidx_meta / "xray-patterns" / "__any__"
-    scope_dir.mkdir(parents=True)
-    (scope_dir / "test-pattern.yaml").write_text(MINIMAL_PATTERN_YAML, encoding="utf-8")
-
-    with patch.object(svc, "_git_commit", return_value=None):
-        result = svc.delete_pattern(scope="__any__", name="test-pattern")
-
-    assert result.get("success") is True, f"Expected success, got {result}"
-    assert len(scheduler.acquire_write_lock_calls) == 1
-    alias, owner = scheduler.acquire_write_lock_calls[0]
-    assert alias == _COARSE_ALIAS
-    assert owner == "xray-pattern:delete:test-pattern"
-    assert len(scheduler.release_write_lock_calls) == 1
-    rel_alias, rel_owner = scheduler.release_write_lock_calls[0]
-    assert rel_alias == _COARSE_ALIAS
-    assert rel_owner == owner
-
-
-# ---------------------------------------------------------------------------
-# Test 7: delete_pattern piggybacks when lock held — file still removed
-# ---------------------------------------------------------------------------
-
-
-def test_delete_pattern_piggybacks_when_locked(
-    cidx_meta: Path,
-) -> None:
-    """When piggybacking, delete_pattern removes file from disk but skips _git_commit."""
-    scheduler = FakeScheduler(is_locked=True, acquire_returns=True)
-    svc = XrayPatternService(cidx_meta_path=cidx_meta, refresh_scheduler=scheduler)
-
-    # Pre-create pattern file
-    scope_dir = cidx_meta / "xray-patterns" / "__any__"
-    scope_dir.mkdir(parents=True)
-    pattern_file = scope_dir / "test-pattern.yaml"
-    pattern_file.write_text(MINIMAL_PATTERN_YAML, encoding="utf-8")
-
-    git_commit_called: list[Any] = []
-
-    def _capture_git_commit(files: list, message: str) -> None:
-        git_commit_called.append((files, message))
-
-    with patch.object(svc, "_git_commit", side_effect=_capture_git_commit):
-        result = svc.delete_pattern(scope="__any__", name="test-pattern")
-
-    assert result.get("success") is True, f"Expected success, got {result}"
-    assert not pattern_file.exists(), (
-        "File must be removed from disk even when piggybacking"
-    )
-    assert len(git_commit_called) == 0, (
-        "_git_commit must NOT be called when piggybacking"
-    )
-    assert len(scheduler.acquire_write_lock_calls) == 0
-    assert len(scheduler.release_write_lock_calls) == 0
 
 
 # ---------------------------------------------------------------------------

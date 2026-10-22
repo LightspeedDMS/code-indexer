@@ -331,13 +331,12 @@ class MemoryStoreService:
         the refresh scheduler, any other failure is retried by the debouncer.
         """
         from code_indexer.global_repos.meta_description_hook import (
-            request_cidx_meta_refresh,
+            refresh_after_catalog_write,
         )
 
-        if piggyback:
-            self._debouncer.signal_dirty()
-            return
-        request_cidx_meta_refresh(self._scheduler, debouncer=self._debouncer)
+        refresh_after_catalog_write(
+            self._scheduler, lock_still_held=piggyback, debouncer=self._debouncer
+        )
 
     def _release_coarse_lock(self, owner: str) -> bool:
         """Release coarse lock; False when the lock could not be removed."""

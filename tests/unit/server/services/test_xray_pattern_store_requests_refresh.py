@@ -70,21 +70,6 @@ def test_store_requests_refresh_after_releasing_the_lock(tmp_path: Path) -> None
     assert scheduler.holder is None
 
 
-def test_delete_requests_refresh_after_releasing_the_lock(tmp_path: Path) -> None:
-    catalog = tmp_path / "cidx-meta"
-    pattern = catalog / "xray-patterns" / "__any__" / "test-pattern.yaml"
-    pattern.parent.mkdir(parents=True)
-    pattern.write_text(MINIMAL_PATTERN_YAML, encoding="utf-8")
-    scheduler = _LockingScheduler()
-    svc = XrayPatternService(catalog, refresh_scheduler=scheduler)
-
-    result = svc.delete_pattern("__any__", "test-pattern")
-
-    assert result == {"success": True}
-    assert not pattern.exists()
-    assert scheduler.lock_held_at_trigger == [False]
-
-
 class _CountingDebouncer:
     def __init__(self) -> None:
         self.signals = 0
@@ -154,21 +139,5 @@ def test_failed_lock_release_owes_refresh_to_debouncer(
     )
 
     assert result.get("success") is True, result
-    assert scheduler.lock_held_at_trigger == []
-    assert module_debouncer.signals == 1
-
-
-def test_piggyback_delete_owes_refresh_to_debouncer(
-    tmp_path: Path, module_debouncer: _CountingDebouncer
-) -> None:
-    catalog = tmp_path / "cidx-meta"
-    pattern = catalog / "xray-patterns" / "__any__" / "test-pattern.yaml"
-    pattern.parent.mkdir(parents=True)
-    pattern.write_text(MINIMAL_PATTERN_YAML, encoding="utf-8")
-    scheduler = _LockingScheduler()
-    scheduler.holder = "dependency-map-writer"
-    svc = XrayPatternService(catalog, refresh_scheduler=scheduler)
-
-    assert svc.delete_pattern("__any__", "test-pattern") == {"success": True}
     assert scheduler.lock_held_at_trigger == []
     assert module_debouncer.signals == 1
