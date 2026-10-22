@@ -143,10 +143,17 @@ def test_failed_bulk_grant_leaves_no_partial_grants(pg) -> None:
             ["example-a", _POISON, "example-c"], group.id, actor=_ACTOR
         )
     assert _granted(manager, group.id) == []
-    assert [r[0] for r in _rows(tmp, "repo_access_grant")] == ["failure"]
+    assert _rows(tmp, "repo_access_grant") == []
 
 
-def test_failed_bulk_revoke_revokes_nothing(pg) -> None:
+@pytest.mark.parametrize(
+    "entry_point, rows",
+    [
+        ("revoke_repos_access_audited", ["failure"]),  # existing callers
+        ("revoke_repos_access_audited_aliases", []),  # the bulk door
+    ],
+)
+def test_failed_bulk_revoke_revokes_nothing(pg, entry_point, rows) -> None:
     import psycopg
 
     manager, group, dsn, tmp = pg
@@ -154,8 +161,8 @@ def test_failed_bulk_revoke_revokes_nothing(pg) -> None:
         manager.grant_repo_access(alias, group.id, "setup")
     _poison(dsn, "DELETE", "OLD")
     with pytest.raises(psycopg.Error):
-        manager.revoke_repos_access_audited(
+        getattr(manager, entry_point)(
             ["example-a", _POISON, "example-c"], group.id, actor=_ACTOR
         )
     assert _granted(manager, group.id) == ["example-a", "example-c", _POISON]
-    assert [r[0] for r in _rows(tmp, "repo_access_revoke")] == ["failure"]
+    assert [r[0] for r in _rows(tmp, "repo_access_revoke")] == rows

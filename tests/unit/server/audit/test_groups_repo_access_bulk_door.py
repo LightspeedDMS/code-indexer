@@ -212,6 +212,40 @@ class TestRefusals:
         self._refused(door, resp, 403)
 
 
+def _sqlite_poison(door, event: str, row: str) -> None:
+    """A real trigger aborting the statement that touches example-gamma."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(door.groups.db_path))
+    try:
+        conn.execute(
+            f"CREATE TRIGGER poison BEFORE {event} ON repo_group_access "
+            f"WHEN {row}.repo_name = 'example-gamma' "
+            "BEGIN SELECT RAISE(ABORT, 'injected'); END"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestDatabaseFailure:
+    def test_failed_bulk_grant_changes_nothing_and_writes_no_row(self, door) -> None:
+        _sqlite_poison(door, "INSERT", "NEW")
+        resp = door.post(_body(door, "grant", _REPOS))
+        assert resp.status_code == 500, resp.text
+        assert _granted(door) == []
+        assert door.env.rows("repo_access_grant") == []
+
+    def test_failed_bulk_revoke_changes_nothing_and_writes_no_row(self, door) -> None:
+        for alias in _REPOS:
+            door.groups.grant_repo_access(alias, door.group.id, "setup")
+        _sqlite_poison(door, "DELETE", "OLD")
+        resp = door.post(_body(door, "revoke", _REPOS))
+        assert resp.status_code == 500, resp.text
+        assert _granted(door) == _REPOS
+        assert door.env.rows("repo_access_revoke") == []
+
+
 _PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "")
 
 
@@ -305,5 +339,4 @@ class TestPostgresGroupsBackend:
         resp = door.post(_body(door, "grant", _REPOS))
         assert resp.status_code == 500, resp.text
         assert _granted(door) == []
-        outcomes = [r.outcome for r in door.env.rows("repo_access_grant")]
-        assert outcomes == ["failure"]
+        assert door.env.rows("repo_access_grant") == []

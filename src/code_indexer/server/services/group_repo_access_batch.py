@@ -127,19 +127,15 @@ class RepoAccessBatchMixin:
 
         cidx-meta and duplicates are skipped.  One ``success`` row per newly
         granted repository, written after the grants committed; names already
-        granted write nothing.  A missing group or a failed batch (nothing
-        granted) writes one ``failure`` row and the exception propagates.
+        granted write nothing.  A missing group or a failed batch grants
+        nothing, writes no row and the exception propagates.
 
         Raises:
             GroupNotFoundError: *group_id* names no group.
         """
         names = [n for n in dict.fromkeys(repo_names) if n != CIDX_META_REPO]
-        try:
-            group = self._existing_group(group_id)
-            granted = self.grant_repos_access(names, group_id, actor) if names else []
-        except Exception:
-            self._record_group_outcome(actor, _GRANT, "repo", None, "failure", None)
-            raise
+        group = self._existing_group(group_id)
+        granted = self.grant_repos_access(names, group_id, actor) if names else []
         self._record_successes(actor, _GRANT, granted, group)
         return granted
 
@@ -152,19 +148,15 @@ class RepoAccessBatchMixin:
         repository (as the single-repository door writes), written after the
         batch committed; the requested names that were not in the group write
         ONE ``failure`` row between them carrying only their count.  A missing
-        group, or a failed batch (nothing revoked), writes one ``failure`` row
-        and the exception propagates.
+        group or a failed batch revokes nothing, writes no row and the
+        exception propagates.
 
         Raises:
             GroupNotFoundError: *group_id* names no group.
         """
         unique = [n for n in dict.fromkeys(repo_names) if n != CIDX_META_REPO]
-        try:
-            group = self._existing_group(group_id)
-            revoked = self.revoke_repos_access(unique, group_id) if unique else []
-        except Exception:
-            self._record_group_outcome(actor, _REVOKE, "repo", None, "failure", None)
-            raise
+        group = self._existing_group(group_id)
+        revoked = self.revoke_repos_access(unique, group_id) if unique else []
         self._record_successes(actor, _REVOKE, revoked, group)
         not_in_group = len(unique) - len(revoked)
         if not_in_group:
@@ -175,7 +167,14 @@ class RepoAccessBatchMixin:
     def revoke_repos_access_audited(
         self, repo_names: List[str], group_id: int, *, actor: str
     ) -> int:
-        """Count form of :meth:`revoke_repos_access_audited_aliases`."""
-        return len(
-            self.revoke_repos_access_audited_aliases(repo_names, group_id, actor=actor)
-        )
+        """Count form of :meth:`revoke_repos_access_audited_aliases` for the
+        REST and MCP bulk-revoke doors: a missing group or a failed batch
+        also writes one ``failure`` row before the exception propagates."""
+        try:
+            revoked = self.revoke_repos_access_audited_aliases(
+                repo_names, group_id, actor=actor
+            )
+        except Exception:
+            self._record_group_outcome(actor, _REVOKE, "repo", None, "failure", None)
+            raise
+        return len(revoked)

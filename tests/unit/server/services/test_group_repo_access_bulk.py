@@ -99,11 +99,11 @@ class TestBulkGrant:
         assert granted == ["example-a"]
         assert [r[2] for r in _rows(tmp, "repo_access_grant")] == ["example-a"]
 
-    def test_unknown_group_raises_and_records_one_failure(self, env) -> None:
+    def test_unknown_group_raises_and_writes_no_row(self, env) -> None:
         m, tmp = env["m"], env["tmp"]
         with pytest.raises(GroupNotFoundError):
             m.grant_repos_access_audited(["example-a"], 987654, actor=_ACTOR)
-        assert [r[1] for r in _rows(tmp, "repo_access_grant")] == ["failure"]
+        assert _rows(tmp, "repo_access_grant") == []
 
     def test_database_failure_rolls_back_every_grant(self, env) -> None:
         m, g, tmp = env["m"], env["g"], env["tmp"]
@@ -116,7 +116,7 @@ class TestBulkGrant:
         with pytest.raises(sqlite3.DatabaseError):
             m.grant_repos_access_audited(names, g.id, actor=_ACTOR)
         assert _granted(m, g.id) == []
-        assert [r[1] for r in _rows(tmp, "repo_access_grant")] == ["failure"]
+        assert _rows(tmp, "repo_access_grant") == []
 
 
 class TestBulkRevoke:
@@ -147,7 +147,7 @@ class TestBulkRevoke:
             )
         ]
 
-    def test_database_failure_mid_batch_revokes_nothing(self, env) -> None:
+    def _poisoned_revoke(self, env) -> List[str]:
         m, g, tmp = env["m"], env["g"], env["tmp"]
         for alias in ("example-a", _POISON, "example-c"):
             m.grant_repo_access(alias, g.id, "setup")
@@ -156,11 +156,23 @@ class TestBulkRevoke:
             "CREATE TRIGGER poison BEFORE DELETE ON repo_group_access "
             f"WHEN OLD.repo_name = '{_POISON}' BEGIN SELECT RAISE(ABORT, 'x'); END",
         )
-        names = ["example-a", _POISON, "example-c"]
+        return ["example-a", _POISON, "example-c"]
+
+    def test_count_api_failure_keeps_its_failure_row(self, env) -> None:
+        m, g, tmp = env["m"], env["g"], env["tmp"]
+        names = self._poisoned_revoke(env)
         with pytest.raises(sqlite3.DatabaseError):
             m.revoke_repos_access_audited(names, g.id, actor=_ACTOR)
         assert _granted(m, g.id) == ["example-a", "example-c", _POISON]
         assert [r[1] for r in _rows(tmp, "repo_access_revoke")] == ["failure"]
+
+    def test_door_revoke_failure_revokes_nothing_and_writes_no_row(self, env) -> None:
+        m, g, tmp = env["m"], env["g"], env["tmp"]
+        names = self._poisoned_revoke(env)
+        with pytest.raises(sqlite3.DatabaseError):
+            m.revoke_repos_access_audited_aliases(names, g.id, actor=_ACTOR)
+        assert _granted(m, g.id) == ["example-a", "example-c", _POISON]
+        assert _rows(tmp, "repo_access_revoke") == []
 
 
 class TestSoloBackendShape:
