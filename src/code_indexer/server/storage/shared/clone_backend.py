@@ -208,12 +208,35 @@ class LocalCloneBackend:
             name,
             source_path,
         )
-        subprocess.run(
-            ["cp", "--reflink=auto", "-a", source_path, str(dest)],
-            check=True,
-            capture_output=True,
-            timeout=timeout,
-        )
+        created_here = not dest.exists()
+        try:
+            subprocess.run(
+                ["cp", "--reflink=auto", "-a", source_path, str(dest)],
+                check=True,
+                capture_output=True,
+                timeout=timeout,
+            )
+        except BaseException:
+            # A failed copy must not leave a partial v_<ts> behind: it would be
+            # listed as the newest snapshot. Only a destination this call
+            # created is removed -- never one that existed before it.
+            if created_here and dest.exists():
+                try:
+                    shutil.rmtree(dest)
+                    logger.info(
+                        "LocalCloneBackend: removed partial clone '%s' after a "
+                        "failed copy",
+                        dest,
+                    )
+                except OSError as cleanup_error:
+                    logger.error(
+                        "LocalCloneBackend: could not remove partial clone '%s': "
+                        "%s: %s",
+                        dest,
+                        type(cleanup_error).__name__,
+                        cleanup_error,
+                    )
+            raise
         return str(dest)
 
     def create_clone_at_path(
