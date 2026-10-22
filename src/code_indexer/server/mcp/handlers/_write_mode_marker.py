@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -34,6 +35,8 @@ def write_marker(
 
     target = marker_path(golden_repos_dir, alias)
     target.parent.mkdir(mode=_MARKER_DIR_MODE, parents=True, exist_ok=True)
+    if stat.S_IMODE(target.parent.stat().st_mode) != _MARKER_DIR_MODE:
+        os.chmod(target.parent, _MARKER_DIR_MODE)
     payload = json.dumps(
         {
             "alias": alias,

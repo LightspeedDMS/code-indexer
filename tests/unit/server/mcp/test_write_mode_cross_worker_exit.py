@@ -242,6 +242,17 @@ class TestMarkerPermissions:
         assert stat.S_IMODE((marker_dir / f"{_ALIAS}.json").stat().st_mode) == 0o600
         assert _call("handle_exit_write_mode", worker, golden_repos_dir)["success"]
 
+    def test_existing_marker_directory_is_made_private(
+        self, golden_repos_dir: Path, make_store
+    ) -> None:
+        marker_dir = golden_repos_dir / ".write_mode"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        marker_dir.chmod(0o755)
+        worker = _Worker(golden_repos_dir, make_store())
+        assert _call("handle_enter_write_mode", worker, golden_repos_dir)["success"]
+        assert stat.S_IMODE(marker_dir.stat().st_mode) == 0o700
+        assert _call("handle_exit_write_mode", worker, golden_repos_dir)["success"]
+
 
 _AGE_SQL = (
     "UPDATE golden_repo_alias_locks SET last_renewed_at = "
