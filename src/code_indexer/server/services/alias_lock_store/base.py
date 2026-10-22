@@ -89,7 +89,8 @@ class AliasLockHandle:
     """
 
     lock_key: str
-    owner_token: str
+    # ^ security the token is the release capability: never in repr, logs or errors
+    owner_token: str = field(repr=False)
     operation: str
     _connection: Any = field(default=None, repr=False)
     _store: Optional["AliasLockStore"] = field(default=None, repr=False, compare=False)
@@ -137,7 +138,7 @@ def release_handle(store: "AliasLockStore", handle: AliasLockHandle) -> None:
         if handle._released:
             raise AliasLockOwnershipLostError(
                 f"release() called again for lock_key={handle.lock_key!r} "
-                f"owner_token={handle.owner_token!r} -- already released"
+                f"owner={handle.operation!r} -- already released"
             )
         handle._released = True
         outcome = store.release_owned(
@@ -146,7 +147,7 @@ def release_handle(store: "AliasLockStore", handle: AliasLockHandle) -> None:
     if outcome is not LockOutcome.RELEASED:
         raise AliasLockOwnershipLostError(
             f"release() for lock_key={handle.lock_key!r} "
-            f"owner_token={handle.owner_token!r} found {outcome.value} -- "
+            f"owner={handle.operation!r} found {outcome.value} -- "
             f"ownership already lost"
         )
 
@@ -159,7 +160,7 @@ def renew_handle(
         if handle._released:
             raise AliasLockOwnershipLostError(
                 f"renew() called for lock_key={handle.lock_key!r} "
-                f"owner_token={handle.owner_token!r} but the lock was "
+                f"owner={handle.operation!r} but the lock was "
                 f"already released -- ownership already lost"
             )
         outcome = store.renew_owned(
@@ -171,7 +172,7 @@ def renew_handle(
     if outcome is not LockOutcome.RENEWED:
         raise AliasLockOwnershipLostError(
             f"renew() for lock_key={handle.lock_key!r} "
-            f"owner_token={handle.owner_token!r} found {outcome.value} -- "
+            f"owner={handle.operation!r} found {outcome.value} -- "
             f"ownership already lost"
         )
 
