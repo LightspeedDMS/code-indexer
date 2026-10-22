@@ -1786,20 +1786,14 @@ class RefreshScheduler:
         exit_write_mode, the marker file persists indefinitely because there is no
         session-lifecycle hook to trigger cleanup.
 
-        This method is called:
-        - On start() with force=True: removes ALL markers because no MCP sessions
-          survive a server restart (every marker left over is definitively orphaned).
-        - On each _scheduler_loop iteration: removes markers older than
-          WRITE_MODE_MARKER_TTL_SECONDS (30 minutes), preserving fresh markers for
-          active sessions.
-
-        For each removed marker the corresponding write lock (owner='mcp_write_mode')
-        is released so the refresh scheduler is not permanently blocked.
+        Markers live on shared storage: a live session of another node or worker
+        survives this process's restart. A marker and its write lock are removed
+        only when the lock has no live holder (lease lapsed, or holder process
+        gone), releasing with the marker's own token.
 
         Args:
-            force: If True, remove ALL markers regardless of age (startup cleanup).
-                   If False (default), only remove markers older than
-                   WRITE_MODE_MARKER_TTL_SECONDS.
+            force: startup: skip only the marker-age filter. Otherwise only
+                markers older than WRITE_MODE_MARKER_TTL_SECONDS are considered.
         """
         write_mode_dir = self.golden_repos_dir / ".write_mode"
         if not write_mode_dir.exists():
@@ -1819,81 +1813,17 @@ class RefreshScheduler:
     def _cleanup_single_write_mode_marker(
         self, marker_path: Path, alias: str, force: bool
     ) -> None:
-        """Remove one marker when force, corrupt, missing entered_at, or older than
-        WRITE_MODE_MARKER_TTL_SECONDS; its write lock is released with the
-        marker's own token before the marker is removed."""
-        import json as _json
-        from datetime import datetime, timezone
+        """Release a gone holder's write-mode lock and remove its marker; a live
+        holder keeps both (see write_mode_marker_cleanup)."""
+        from .write_mode_marker_cleanup import cleanup_write_mode_marker
 
-        should_remove = force  # Always remove on startup
-        entered_at_str = ""  # H1: initialized here so TOCTOU guard can reference it
-
-        if not should_remove:
-            # Determine staleness from marker content
-            try:
-                content = _json.loads(marker_path.read_text())
-            except (OSError, _json.JSONDecodeError) as exc:
-                logger.warning(
-                    f"Corrupt write mode marker {marker_path.name} ({exc}), treating as stale"
-                )
-                should_remove = True
-            else:
-                entered_at_str = content.get("entered_at", "")
-                if not entered_at_str:
-                    logger.warning(
-                        f"Write mode marker {marker_path.name} has no 'entered_at', treating as stale"
-                    )
-                    should_remove = True
-                else:
-                    try:
-                        entered_at = datetime.fromisoformat(entered_at_str)
-                        if entered_at.tzinfo is None:
-                            entered_at = entered_at.replace(tzinfo=timezone.utc)
-                        elapsed = (
-                            datetime.now(timezone.utc) - entered_at
-                        ).total_seconds()
-                        if elapsed > WRITE_MODE_MARKER_TTL_SECONDS:
-                            should_remove = True
-                    except (ValueError, TypeError):
-                        logger.warning(
-                            f"Write mode marker {marker_path.name} has unparseable "
-                            f"'entered_at' ({entered_at_str!r}), treating as stale"
-                        )
-                        should_remove = True
-
-        if not should_remove:
-            return
-
-        # H1 fix: Re-read marker to check a new session hasn't taken over (TOCTOU guard).
-        # Only applies for non-force cleanups: startup force=True removes everything unconditionally.
-        if not force:
-            try:
-                current_content = _json.loads(marker_path.read_text())
-                current_entered_at = current_content.get("entered_at", "")
-                if current_entered_at != entered_at_str:
-                    logger.debug(
-                        f"Write mode marker {marker_path.name} was refreshed by new session, skipping cleanup"
-                    )
-                    return
-            except (OSError, _json.JSONDecodeError):
-                pass  # File gone or corrupt — proceed with cleanup
-
-        # ^ ord release with the marker's token BEFORE deleting it: the token is the only release capability
-        try:
-            token = _json.loads(marker_path.read_text()).get("owner_token") or None
-        except (OSError, ValueError, AttributeError):
-            token = None
-        if token is None:
-            logger.warning(f"Write mode marker {marker_path.name} has no lock token")
-        try:
-            self.release_write_lock(alias, "mcp_write_mode", owner_token=token)
-            marker_path.unlink(missing_ok=True)
-        except Exception as exc:
-            logger.warning(f"Keeping write mode marker {marker_path.name}: {exc!r}")
-            return
-        logger.info(
-            f"Cleaned up {'orphaned' if not force else 'startup'} write mode marker: "
-            f"{marker_path.name} (alias={alias!r})"
+        cleanup_write_mode_marker(
+            marker_path,
+            alias,
+            force=force,
+            ttl_seconds=WRITE_MODE_MARKER_TTL_SECONDS,
+            is_locked=self.is_write_locked,
+            release=self.release_write_lock,
         )
 
     def _resolve_global_alias(self, alias_name: str) -> str:
