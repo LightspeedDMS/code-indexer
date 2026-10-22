@@ -141,7 +141,8 @@ class SnapshotReaderLease:
         self._released = False
         self._ttl_seconds = ttl_seconds
         # ^ invariant renew and release serialize: a renewal never recreates a released lease
-        self._lock = threading.Lock()
+        # ^ why RLock: a weakref finalizer may release on the renewing thread
+        self._lock = threading.RLock()
 
     def acquire(self) -> None:
         payload = {
@@ -171,6 +172,8 @@ class SnapshotReaderLease:
             try:
                 temporary.write_text(json.dumps(payload), encoding="utf-8")
                 os.replace(str(temporary), str(self._path))
+                if self._released:  # released re-entrantly during this renewal
+                    self._path.unlink(missing_ok=True)
             finally:
                 try:
                     temporary.unlink()

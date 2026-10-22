@@ -72,3 +72,29 @@ def test_renew_and_release_in_either_order_end_released(
     ):
         step()
     assert list(lease_dir.glob("*.json")) == []
+
+
+def test_release_reentered_during_renew_neither_deadlocks_nor_revives(
+    tmp_path: Path, monkeypatch
+):
+    lease_root = tmp_path / "cidx-meta"
+    lease_root.mkdir()
+    lease_dir = ensure_primary_lease_directory(lease_root)
+    lease = SnapshotReaderLease(
+        str(tmp_path / "v_1"), _TTL_SECONDS, lease_root=lease_root
+    )
+    lease.acquire()
+    real_replace = os.replace
+
+    def release_then_replace(src, dst):
+        # ^ why stands in for a weakref finalizer releasing on the renewing thread
+        lease.release()
+        real_replace(src, dst)
+
+    monkeypatch.setattr(snapshot_reader_lease.os, "replace", release_then_replace)
+    renewer = threading.Thread(target=lease.renew, daemon=True)
+    renewer.start()
+    renewer.join(_JOIN_TIMEOUT_SECONDS)
+
+    assert not renewer.is_alive()
+    assert list(lease_dir.glob("*.json")) == []
