@@ -32,6 +32,7 @@ from code_indexer.global_repos.write_lock_manager import (
 from .base import (
     AliasLockHandle,
     LockOutcome,
+    holder_from_earlier_boot,
     local_holder_identity,
     release_handle,
     renew_handle,
@@ -128,7 +129,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
 def _holder_is_stale(row: _HolderRow) -> bool:
     _token, _operation, hostname, pid, ttl_seconds, _acquired, elapsed = row
-    return lock_holder_is_stale(
+    # ^ invariant lock files are node-local: a different boot id is an earlier boot of this machine
+    return holder_from_earlier_boot(hostname, node_local=True) or lock_holder_is_stale(
         hostname,
         pid,
         float(elapsed) if elapsed is not None else None,

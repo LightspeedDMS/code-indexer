@@ -33,8 +33,13 @@ from tests.fixtures.refresh_scheduler_stores import real_metadata_store
 
 _ALIAS = "cidx-meta"
 _OWNER = "mcp_write_mode"
-_FOREIGN_IDENTITY = "foreign-host.example.com|boot-id|pid:[4026531836]"
 _JOIN_TIMEOUT_SECONDS = 30
+
+
+def _foreign_identity() -> str:
+    # ^ why another PID namespace on THIS boot: a different boot id would be an earlier boot
+    boot = local_holder_identity().split("|")[1]
+    return f"foreign-host.example.com|{boot}|pid:[4026531836]"
 
 MakeStore = Callable[..., Any]
 
@@ -149,7 +154,7 @@ class TestCleanupReleasesOnlyAGoneHolder:
         golden = tmp_path / "golden-repos"
         store = make_store()
         marker = _enter(golden, store, "live-token")
-        _set_holder(store, _FOREIGN_IDENTITY, _dead_pid())
+        _set_holder(store, _foreign_identity(), _dead_pid())
 
         _scheduler(tmp_path, make_store()).cleanup_stale_write_mode_markers(force=True)
 

@@ -33,6 +33,7 @@ from code_indexer.global_repos.write_lock_manager import (
 from .base import (
     AliasLockHandle,
     LockOutcome,
+    holder_from_earlier_boot,
     local_holder_identity,
     release_handle,
     renew_handle,
@@ -150,7 +151,8 @@ def _connect(dsn: str, connect_timeout_seconds: float) -> Any:
 
 def _holder_is_stale(row: _HolderRow) -> bool:
     _token, _operation, hostname, pid, ttl_seconds, _acquired, elapsed = row
-    return lock_holder_is_stale(
+    # ^ invariant shared store: an earlier boot is proven only by this machine's id
+    return holder_from_earlier_boot(hostname, node_local=False) or lock_holder_is_stale(
         hostname,
         pid,
         float(elapsed) if elapsed is not None else None,
