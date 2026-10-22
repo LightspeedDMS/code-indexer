@@ -13,7 +13,7 @@ test approach in test_xray_pattern_service.py).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from unittest.mock import patch
 
 import pytest
@@ -49,13 +49,16 @@ class FakeScheduler:
         self,
         is_locked: bool = False,
         acquire_returns: bool = True,
+        holder: str = "refresh_scheduler",
     ) -> None:
         self._is_locked = is_locked
         self._acquire_returns = acquire_returns
+        self._holder = holder
         # Call records
         self.is_write_locked_calls: list[tuple[str, ...]] = []
         self.acquire_write_lock_calls: list[tuple[str, str]] = []
         self.release_write_lock_calls: list[tuple[str, str]] = []
+        self.write_lock_manager = self
 
     def is_write_locked(self, alias: str) -> bool:
         self.is_write_locked_calls.append((alias,))
@@ -63,7 +66,11 @@ class FakeScheduler:
 
     def acquire_write_lock(self, alias: str, owner: str) -> bool:
         self.acquire_write_lock_calls.append((alias, owner))
-        return self._acquire_returns
+        return self._acquire_returns and not self._is_locked
+
+    def get_lock_info(self, alias: str) -> Optional[dict]:
+        held = self._is_locked or not self._acquire_returns
+        return {"owner": self._holder} if held else None
 
     def release_write_lock(self, alias: str, owner: str) -> bool:
         self.release_write_lock_calls.append((alias, owner))
@@ -148,8 +155,8 @@ def test_store_pattern_piggybacks_when_already_locked(
         )
 
     assert result.get("success") is True, f"Expected success, got {result}"
-    assert len(scheduler.acquire_write_lock_calls) == 0, (
-        "acquire_write_lock must NOT be called when piggybacking"
+    assert len(scheduler.acquire_write_lock_calls) == 1, (
+        "piggybacking follows exactly one failed acquire attempt"
     )
     assert len(scheduler.release_write_lock_calls) == 0, (
         "release_write_lock must NOT be called when piggybacking"

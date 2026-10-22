@@ -84,6 +84,9 @@ class RateLimitError(Exception):
 class RefreshSchedulerProtocol(Protocol):
     """Minimal subset of refresh_scheduler used by MemoryStoreService."""
 
+    #: Lock manager whose get_lock_info names the current holder.
+    write_lock_manager: Any
+
     def acquire_write_lock(
         self,
         alias: str,
@@ -313,19 +316,27 @@ class MemoryStoreService:
     def _coarse_piggyback_or_acquire(self, owner: str) -> bool:
         """Return True if piggybacking (skip acquire/release).
 
-        Piggyback when is_write_locked returns True, or when acquire
-        returns False (race — another process acquired between check and here).
+        Piggybacks only on a lock held by a refresh, which publishes the
+        write; any other holder (write mode, a restore, another writer)
+        holds it exclusively and the write is refused with ConflictError.
         """
-        if self._scheduler.is_write_locked(_COARSE_ALIAS):
-            return True
         # Story #932 follow-up: ttl_seconds NOT forwarded here — the real
         # RefreshScheduler.acquire_write_lock delegates to WriteLockManager which
         # owns TTL internally.  coarse_lock_ttl_seconds is kept in the config
         # dataclass as a documented knob for future use should WriteLockManager
         # ever expose an override.
-        acquired = self._scheduler.acquire_write_lock(_COARSE_ALIAS, owner)
-        # acquired=False means a race into piggyback; we never held the lock.
-        return not acquired
+        if self._scheduler.acquire_write_lock(_COARSE_ALIAS, owner):
+            return False
+        from code_indexer.global_repos.catalog_lock_holder import (
+            CatalogLockedExclusively,
+            require_publishing_holder,
+        )
+
+        try:
+            require_publishing_holder(self._scheduler)
+        except CatalogLockedExclusively as exc:
+            raise ConflictError(str(exc)) from exc
+        return True
 
     def _signal_refresh(self, piggyback: bool) -> None:
         """Signal refresh. Piggyback always uses debouncer.

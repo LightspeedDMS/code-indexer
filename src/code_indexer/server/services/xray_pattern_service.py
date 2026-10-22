@@ -46,6 +46,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
+from code_indexer.global_repos.catalog_lock_holder import (
+    CatalogLockedExclusively,
+    require_publishing_holder,
+)
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from code_indexer.server.services.cidx_meta_backup.branch_detect import (
     detect_default_branch,
@@ -378,6 +382,8 @@ class XrayPatternService:
             )
         except PatternCommitError as exc:
             return {"success": False, "error": "commit_failed", "message": str(exc)}
+        except CatalogLockedExclusively as exc:
+            return {"success": False, "error": "catalog_locked", "message": str(exc)}
         if locked_result is not None:
             return dict(locked_result)
         self._request_refresh(lock_still_held)
@@ -629,18 +635,19 @@ class XrayPatternService:
     def _coarse_piggyback_or_acquire(self, owner: str) -> bool:
         """Return True if piggybacking (caller must skip acquire/release).
 
-        Piggyback when is_write_locked returns True, or when acquire returns
-        False (race — another process acquired between check and here).
-        When no scheduler is injected, always returns False (caller owns lock
-        conceptually and will call _git_commit directly).
+        Piggybacks only on a lock held by a refresh, which publishes the
+        write; any other holder (write mode, a restore, another writer)
+        holds it exclusively: CatalogLockedExclusively is raised before
+        anything is written. When no scheduler is injected, always returns
+        False (caller owns lock conceptually and will call _git_commit
+        directly).
         """
         if self._scheduler is None:
             return False
-        if self._scheduler.is_write_locked(_COARSE_ALIAS):
-            return True
-        acquired = self._scheduler.acquire_write_lock(_COARSE_ALIAS, owner)
-        # acquired=False means a race into piggyback; we never held the lock.
-        return not acquired
+        if self._scheduler.acquire_write_lock(_COARSE_ALIAS, owner):
+            return False
+        require_publishing_holder(self._scheduler)
+        return True
 
     def _release_coarse_lock(self, owner: str) -> bool:
         """Release the coarse write lock; False when it could not be removed.
