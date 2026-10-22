@@ -499,54 +499,29 @@ class WriteLockManager:
 
         Backward compatibility: locks without a hostname field are treated as local.
         """
-        hostname = content.get("hostname")
-        local_hostname = socket.gethostname()
-        is_local = hostname is None or hostname == local_hostname
-
         pid = content.get("pid")
-        if is_local and pid is not None:
-            try:
-                os.kill(pid, 0)
-            except OSError as e:
-                if e.errno == errno.ESRCH:
-                    return True
-                # EPERM: process exists but we lack permission to signal it — not stale
-            except (TypeError, ValueError):
-                # pid field is present but not a valid integer — cannot check liveness;
-                # fall through to TTL check rather than incorrectly evicting the lock
-                pass
-
         acquired_at_str = content.get("acquired_at", "")
 
-        # Validate ttl_seconds explicitly; non-numeric values fall back to default
-        raw_ttl = content.get("ttl_seconds")
-        try:
-            ttl_seconds = (
-                int(raw_ttl) if raw_ttl is not None else DEFAULT_LOCK_TTL_SECONDS
-            )
-        except (TypeError, ValueError):
-            ttl_seconds = DEFAULT_LOCK_TTL_SECONDS
-
+        elapsed: Optional[float] = None
         if acquired_at_str:
             try:
                 acquired_at = datetime.fromisoformat(acquired_at_str)
-                now = datetime.now(timezone.utc)
                 # Ensure acquired_at is timezone-aware for comparison
                 if acquired_at.tzinfo is None:
                     acquired_at = acquired_at.replace(tzinfo=timezone.utc)
-                elapsed = (now - acquired_at).total_seconds()
-                if elapsed > ttl_seconds:
-                    return True
+                elapsed = (datetime.now(timezone.utc) - acquired_at).total_seconds()
             except (ValueError, TypeError):
                 # Malformed acquired_at timestamp cannot be parsed;
-                # treat the lock as non-stale rather than incorrectly evicting it
-                pass
+                # treat the lock as non-stale by time rather than evicting it
+                elapsed = None
 
         # If lock has neither PID nor timestamp, it cannot be validated — treat as stale
         if pid is None and not acquired_at_str:
             return True
 
-        return False
+        return lock_holder_is_stale(
+            content.get("hostname"), pid, elapsed, content.get("ttl_seconds")
+        )
 
     def _evict_if_stale(self, lock_file: Path) -> bool:
         """
@@ -580,6 +555,41 @@ class WriteLockManager:
             return True
 
         return False
+
+
+def lock_holder_is_stale(
+    hostname: Optional[str],
+    pid: Any,
+    elapsed_seconds: Optional[float],
+    ttl_seconds: Any,
+) -> bool:
+    """The write-lock lease rule shared by the file lock and the DB-backed
+    alias lock stores.
+
+    A holder is stale when its lease lapsed (``elapsed_seconds`` since the
+    last acquire/renew is greater than ``ttl_seconds``; a missing or
+    non-numeric TTL means ``DEFAULT_LOCK_TTL_SECONDS``), or when it was taken
+    on THIS host (``hostname`` absent or equal to the local host name) by a
+    process that no longer exists. A foreign host's PID is never checked.
+    ``elapsed_seconds=None`` (unknown) never makes a holder stale by time.
+    """
+    is_local = hostname is None or hostname == socket.gethostname()
+    if is_local and pid is not None:
+        try:
+            os.kill(pid, 0)
+        except OSError as e:
+            if e.errno == errno.ESRCH:
+                return True
+            # EPERM: process exists but we lack permission to signal it — not stale
+        except (TypeError, ValueError):
+            # pid is not a valid integer — cannot check liveness; use the TTL only
+            pass
+
+    try:
+        ttl = int(ttl_seconds) if ttl_seconds is not None else DEFAULT_LOCK_TTL_SECONDS
+    except (TypeError, ValueError):
+        ttl = DEFAULT_LOCK_TTL_SECONDS
+    return elapsed_seconds is not None and elapsed_seconds > ttl
 
 
 def describe_lock_holder(lock_manager: Any, alias: str) -> str:

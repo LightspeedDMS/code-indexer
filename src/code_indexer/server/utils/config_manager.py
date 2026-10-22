@@ -1228,7 +1228,7 @@ class AliasLockConfig:
     golden-repo registration/removal/reconcile via a file-based lock on
     the golden-repos NFS mount (`vers=3,nolock,hard` -- file locking does
     not actually work across nodes there). Issue #1546 replaces it with a
-    DB-backed, session-held-transaction lock (SQLite solo / PostgreSQL
+    DB-backed, row-owned leased lock (SQLite solo / PostgreSQL
     cluster), but the independent per-node auto-updater means nodes
     upgrade on their own schedule -- an implicit cutover where some nodes
     use file locks and others use DB locks is unsafe (they would not see
