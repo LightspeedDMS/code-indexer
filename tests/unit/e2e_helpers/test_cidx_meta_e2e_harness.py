@@ -263,11 +263,6 @@ EXACT_ALLOWLISTED: List[Tuple[str, str, str]] = [
         "Git not available - proceeding with file-only monitoring",
         "Git monitoring stopped unexpectedly",
     ),
-    (
-        "code_indexer.daemon.watch_manager",
-        "Watch thread did not stop within 5 seconds",
-        "Watch thread did not stop within 50 seconds",
-    ),
 ]
 
 
@@ -285,6 +280,16 @@ class TestExactLogAllowlist:
             assert not is_allowlisted(
                 {"source": "example.other_logger", "message": message}
             ), message
+
+    def test_stuck_watch_thread_is_not_excused(self) -> None:
+        """A normal watch stop no longer times out, so this warning means a
+        genuinely stuck worker and must fail the audit."""
+        assert not is_allowlisted(
+            {
+                "source": "code_indexer.daemon.watch_manager",
+                "message": "Watch thread did not stop within 5 seconds",
+            }
+        )
 
 
 class TestCleanupSteps:

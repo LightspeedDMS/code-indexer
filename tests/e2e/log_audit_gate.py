@@ -504,11 +504,6 @@ LOG_AUDIT_EXACT_ALLOWLIST: List[Tuple[str, str]] = [
         "code_indexer.services.git_aware_watch_handler",
         r"Git not available - proceeding with file-only monitoring",
     ),
-    # Stopping that auto-watch (exit_write_mode, deactivation); Bug #2180
-    (
-        "code_indexer.daemon.watch_manager",
-        r"Watch thread did not stop within 5 seconds",
-    ),
 ]
 
 
