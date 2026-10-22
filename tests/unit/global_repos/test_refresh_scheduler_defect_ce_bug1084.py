@@ -17,6 +17,7 @@ import pytest
 
 from code_indexer.global_repos.local_source_manifest import record_source_manifest
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
+from tests.utils.source_tree_age import age_source_files
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 
@@ -66,6 +67,7 @@ class TestDefectCHasLocalChanges:
         source.mkdir()
         (source / ".code-indexer").mkdir()
         (source / "file.txt").write_text("x")
+        age_source_files(source)
         record_source_manifest(str(source), None)
         snapshot = tmp_path / "cow-storage" / ".versioned" / "cidx-meta" / "v_5"
         shutil.copytree(source, snapshot)

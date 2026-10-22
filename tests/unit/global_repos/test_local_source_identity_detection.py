@@ -12,6 +12,7 @@ and a real SQLite metadata store.
 from __future__ import annotations
 
 import contextlib
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -36,6 +37,7 @@ from tests.utils.refresh_fake_provider_env import (
     index_repo_for_real,
 )
 from tests.utils.refresh_fatal_store_harness import ALIAS, Harness, build_harness
+from tests.utils.source_tree_age import age_source_files
 
 pytestmark = pytest.mark.timeout(300)
 
@@ -135,6 +137,7 @@ def _harness(
         snapshot_mode="clean",
         source_builder=_indexed_non_git_source(fake, env),
     )
+    age_source_files(harness.source)  # a quiet catalog: nothing is racy
     # The pre-manifest snapshot is an unknown baseline: the first refresh
     # publishes and records the run's source manifest.
     first = harness.scheduler._execute_refresh(ALIAS)
@@ -154,6 +157,32 @@ class TestUnchangedSource:
 
         assert result["message"] == "No changes detected", result
         assert _published(harness) == before
+
+
+class TestRacilyCleanEdit:
+    def test_same_size_rewrite_with_the_recorded_mtime_is_indexed(
+        self, tmp_path: Path, metadata: Any, provider_env
+    ) -> None:
+        harness, env = _harness(tmp_path, metadata, provider_env)
+        target = harness.source / "note_000.py"
+        # Written just before the refresh lists it: its metadata is racy.
+        target.write_text(unique_python_text("racy_000", 20))
+        first = harness.scheduler._execute_refresh(ALIAS)
+        assert first["message"] == "Refresh complete", first
+        recorded = target.stat()
+        # Rewritten after the listing, within the same timestamp tick.
+        target.write_text(unique_python_text("edit_000", 20))
+        assert target.stat().st_size == recorded.st_size
+        os.utime(target, ns=(recorded.st_atime_ns, recorded.st_mtime_ns))
+
+        second = harness.scheduler._execute_refresh(ALIAS)
+
+        assert second["message"] == "Refresh complete", second
+        assert "note_000.py" in _fts_hits(
+            _published(harness), env, "edit_000_function_2"
+        )
+        third = harness.scheduler._execute_refresh(ALIAS)
+        assert third["message"] == "No changes detected", third
 
 
 class TestIncompleteListing:

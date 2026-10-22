@@ -7,9 +7,15 @@ source's ``.code-indexer/``; the snapshot that run publishes inherits it, so
 the manifest of the PUBLISHED snapshot describes exactly what that index
 was built from. A later check compares the live source with that manifest by
 equality: any added, removed or re-stamped file is a change. Equality (not
-"newer than") is immune to coarse or skewed mtimes and sees deletions; a
-missing, unreadable or invalid manifest is an unknown baseline, which is a
-change.
+"newer than") is immune to skewed mtimes and sees deletions; a missing,
+unreadable or invalid manifest is an unknown baseline, which is a change.
+
+Racily clean entries: a file whose recorded mtime lies within one timestamp
+tick of the moment the listing started can be rewritten after it was stat'ed
+without its (size, mtime) changing (coarse filesystem clocks, 1 s export
+granularity). Such entries are recorded as racy and count as changed at the
+next check; that refresh records them again, later, and converges. The tick
+is judged on the filesystem's own clock: a file created just before listing.
 
 Hidden files and directories (leading ``.``) are not repository content, and
 symlinked directories are not followed (the indexer descends into neither).
@@ -22,12 +28,14 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 MANIFEST_RELATIVE_PATH = Path(".code-indexer") / "refresh_source_manifest.json"
-_MANIFEST_FORMAT = 1
+_MANIFEST_FORMAT = 2
+#: Covers 1 s timestamp granularity plus the coarse kernel clock tick.
+_RACY_MARGIN_NS = 2_000_000_000
 
 _UNREADABLE_SHOWN = 5
 
@@ -44,6 +52,13 @@ class SourceListing:
     files: Dict[str, FileIdentity]
     #: Relative paths (``.`` for the root) that could not be listed or stat'ed.
     unreadable: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RecordedManifest:
+    files: Dict[str, FileIdentity]
+    #: Entries whose metadata could not prove them unchanged when recorded.
+    racy: FrozenSet[str]
 
 
 def list_source(root: str) -> SourceListing:
@@ -79,7 +94,15 @@ def list_source(root: str) -> SourceListing:
     return SourceListing(files, tuple(unreadable))
 
 
-def read_manifest(snapshot_root: str) -> Tuple[Optional[Dict[str, FileIdentity]], str]:
+def _valid_identity(identity: object) -> bool:
+    return (
+        isinstance(identity, list)
+        and len(identity) == 2
+        and all(type(v) is int for v in identity)
+    )
+
+
+def read_manifest(snapshot_root: str) -> Tuple[Optional[RecordedManifest], str]:
     """The manifest a published snapshot carries, or ``(None, why)``."""
     path = Path(snapshot_root) / MANIFEST_RELATIVE_PATH
     try:
@@ -91,18 +114,15 @@ def read_manifest(snapshot_root: str) -> Tuple[Optional[Dict[str, FileIdentity]]
     if not isinstance(raw, dict) or raw.get("format") != _MANIFEST_FORMAT:
         return None, f"source manifest {path} has an unknown format"
     entries = raw.get("files")
-    if not isinstance(entries, dict):
+    racy = raw.get("racy")
+    if not isinstance(entries, dict) or not isinstance(racy, list):
         return None, f"source manifest {path} has no file table"
-    manifest: Dict[str, FileIdentity] = {}
-    for rel, identity in entries.items():
-        if not (
-            isinstance(identity, list)
-            and len(identity) == 2
-            and all(type(v) is int for v in identity)
-        ):
-            return None, f"source manifest {path} has an invalid entry"
-        manifest[rel] = (identity[0], identity[1])
-    return manifest, ""
+    if not all(_valid_identity(identity) for identity in entries.values()) or not all(
+        isinstance(rel, str) for rel in racy
+    ):
+        return None, f"source manifest {path} has an invalid entry"
+    files = {rel: (identity[0], identity[1]) for rel, identity in entries.items()}
+    return RecordedManifest(files, frozenset(racy)), ""
 
 
 def source_change_reason(
@@ -117,14 +137,16 @@ def source_change_reason(
     manifest, why = read_manifest(published_snapshot)
     if manifest is None:
         return why
+    if manifest.racy:
+        return f"{len(manifest.racy)} file(s) were racily clean when recorded"
     listing = list_source(source_root)
     if listing.unreadable:
         return f"{len(listing.unreadable)} source entries could not be read"
-    removed = sum(1 for rel in manifest if rel not in listing.files)
+    removed = sum(1 for rel in manifest.files if rel not in listing.files)
     if removed:
         return f"{removed} file(s) removed since the published snapshot"
     for rel, identity in listing.files.items():
-        recorded = manifest.get(rel)
+        recorded = manifest.files.get(rel)
         if recorded is None:
             return f"{rel} added since the published snapshot"
         if recorded != identity:
@@ -140,18 +162,27 @@ def record_source_manifest(source_root: str, published_snapshot: Optional[str]) 
     must never inherit an older run's manifest; raises
     IncompleteSourceListingError (writing nothing) when an entry could not
     be listed or stat'ed -- an unreadable file is never a deletion."""
+    path = Path(source_root) / MANIFEST_RELATIVE_PATH
+    temp = path.with_name(path.name + ".tmp")
+    # ^ why a freshly created file: its mtime is the filesystem clock when listing starts
+    temp.unlink(missing_ok=True)
+    with open(temp, "x", encoding="utf-8") as probe:
+        listing_started_ns = os.fstat(probe.fileno()).st_mtime_ns
     listing = list_source(source_root)
     if listing.unreadable:
+        temp.unlink(missing_ok=True)
         shown = ", ".join(listing.unreadable[:_UNREADABLE_SHOWN])
         raise IncompleteSourceListingError(
             f"{len(listing.unreadable)} source entries of {source_root} could "
             f"not be read ({shown}); refresh stopped before indexing"
         )
-    path = Path(source_root) / MANIFEST_RELATIVE_PATH
-    temp = path.with_name(path.name + ".tmp")
+    racy_from = listing_started_ns - _RACY_MARGIN_NS
     payload = {
         "format": _MANIFEST_FORMAT,
         "files": {rel: list(identity) for rel, identity in listing.files.items()},
+        "racy": sorted(
+            rel for rel, (_, mtime_ns) in listing.files.items() if mtime_ns >= racy_from
+        ),
     }
     with open(temp, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, separators=(",", ":"))
@@ -164,4 +195,4 @@ def record_source_manifest(source_root: str, published_snapshot: Optional[str]) 
     if published is None:
         logger.info(f"{why}; this run removes gone paths")
         return True
-    return any(rel not in listing.files for rel in published)
+    return any(rel not in listing.files for rel in published.files)

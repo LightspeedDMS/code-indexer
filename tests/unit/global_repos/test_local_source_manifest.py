@@ -24,6 +24,7 @@ from code_indexer.global_repos.local_source_manifest import (
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from tests.fixtures.refresh_scheduler_stores import real_metadata_store
+from tests.utils.source_tree_age import age_source_files
 
 
 @pytest.fixture
@@ -33,6 +34,7 @@ def source(tmp_path: Path) -> Path:
     (root / ".code-indexer").mkdir()
     (root / "memories" / "a.md").write_text("alpha\n")
     (root / "repo-one.md").write_text("one\n")
+    age_source_files(root)
     return root
 
 
@@ -129,6 +131,10 @@ class TestSourceChangeReason:
             json.dumps({"format": 1, "files": {"a.md": [1]}}),
             json.dumps({"format": 1, "files": {"a.md": ["1", 2]}}),
             json.dumps({"format": 1, "files": {"a.md": [True, 2]}}),
+            json.dumps({"format": 2, "files": {"a.md": [1, 2]}}),
+            json.dumps({"format": 2, "files": {"a.md": [1, 2]}, "racy": "a.md"}),
+            json.dumps({"format": 2, "files": {"a.md": [1, 2]}, "racy": [3]}),
+            json.dumps({"format": 2, "files": {"a.md": [1]}, "racy": []}),
         ],
     )
     def test_invalid_manifest_is_an_unknown_baseline(
@@ -139,6 +145,26 @@ class TestSourceChangeReason:
 
         assert read_manifest(str(snapshot))[0] is None
         assert source_change_reason(str(snapshot), str(source)) is not None
+
+
+class TestRacilyCleanEntries:
+    def test_quiet_files_are_not_racy(self, source: Path) -> None:
+        record_source_manifest(str(source), None)
+
+        recorded, _ = read_manifest(str(source))
+        assert recorded is not None and recorded.racy == frozenset()
+
+    def test_file_written_just_before_recording_is_a_change_next_time(
+        self, source: Path
+    ) -> None:
+        (source / "memories" / "fresh.md").write_text("fresh\n")
+        snapshot = _publish(source)
+
+        recorded, _ = read_manifest(str(snapshot))
+        assert recorded is not None
+        assert recorded.racy == frozenset({"memories/fresh.md"})
+        reason = source_change_reason(str(snapshot), str(source))
+        assert reason is not None and "racily clean" in reason
 
 
 class TestRecordSourceManifest:
@@ -158,7 +184,7 @@ class TestRecordSourceManifest:
 
         assert record_source_manifest(str(source), str(snapshot)) is False
         recorded, _ = read_manifest(str(source))
-        assert recorded is not None and "added.md" in recorded
+        assert recorded is not None and "added.md" in recorded.files
         assert not (
             source / ".code-indexer" / "refresh_source_manifest.json.tmp"
         ).exists()
@@ -196,6 +222,7 @@ class TestSchedulerBaseline:
     ) -> None:
         published = _publish(source, "v_1000")
         (source / "repo-one.md").write_text("one, edited\n")
+        age_source_files(source)
         # A newer snapshot that was created but never published (failed swap).
         _publish(source, "v_2000")
         scheduler = _scheduler(source.parent, tmp_path)

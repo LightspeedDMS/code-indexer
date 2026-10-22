@@ -38,6 +38,7 @@ from tests.utils.golden_repo_metadata_stores import (
     golden_repo_metadata_store,
 )
 from tests.utils.refresh_fatal_store_harness import Harness, build_harness
+from tests.utils.source_tree_age import age_source_files
 
 if TYPE_CHECKING:
     from code_indexer.server.storage.protocols.golden_repo_metadata_backend import (
@@ -75,6 +76,7 @@ def _meta_harness(
     make_chunks_db_repo(meta_dir, metadata_marker="meta")
     # Published as a completed refresh leaves it: a snapshot carrying the
     # source manifest its run recorded.
+    age_source_files(meta_dir)
     record_source_manifest(str(meta_dir), None)
     published = meta_dir.parent / ".versioned" / "cidx-meta" / "v_1000000000"
     shutil.copytree(meta_dir, published, symlinks=True)
