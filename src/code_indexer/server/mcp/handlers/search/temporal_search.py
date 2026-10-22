@@ -16,6 +16,9 @@ Refactoring is tracked separately.
 from typing import Any, Dict, Optional, Tuple
 
 from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.services.cidx_meta_access.history_policy import (
+    refuse_catalog_temporal,
+)
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.search_event_outcomes import (
     REPOSITORY_NOT_FOUND_CODE,
@@ -140,6 +143,12 @@ def _execute_temporal_via_live_dispatch(
             }
         )
 
+    refuse_catalog_temporal(
+        worker_input.repository_alias,
+        user.username,
+        _get_access_filtering_service(),
+        _utils._get_activated_repo_manager(),
+    )
     repo_path, err = _resolve_temporal_repo_path(worker_input.repository_alias, user)
     if err is not None:
         return err

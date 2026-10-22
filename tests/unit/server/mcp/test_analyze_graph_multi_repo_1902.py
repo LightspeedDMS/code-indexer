@@ -96,6 +96,22 @@ VALID_PARAMS: Dict[str, Any] = {
 }
 
 
+_GUARD_ACCESS_SERVICE = (
+    "code_indexer.server.mcp.handlers.xray._catalog_guard.xray_access_service"
+)
+
+
+class _AccessService:
+    """The access filtering service production wires on app.state: the
+    caller is an administrator or a restricted user."""
+
+    def __init__(self, admin: bool) -> None:
+        self._admin = admin
+
+    def is_admin_user(self, username: str) -> bool:
+        return self._admin
+
+
 # ---------------------------------------------------------------------------
 # Fast, boundary-level tests -- fail before repo resolution, no binary needed.
 # ---------------------------------------------------------------------------
@@ -166,15 +182,36 @@ async def test_malformed_json_like_string_treated_as_literal_alias_not_a_list() 
     handler = _import_handler()
     malformed = '["repo-a", "repo-b"'  # missing closing bracket/quote
     params = {**VALID_PARAMS, "repository_alias": malformed}
-    with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
-        return_value=None,
-    ) as mock_resolve:
-        result = await handler(params, _make_user())
+    with patch(_GUARD_ACCESS_SERVICE, lambda: _AccessService(admin=True)):
+        with patch(
+            "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+            return_value=None,
+        ) as mock_resolve:
+            result = await handler(params, _make_user())
     mock_resolve.assert_called_once_with(malformed)
     parsed = _parse_response(result)
     assert parsed["error"] == "repository_not_found"
     assert malformed in parsed["message"]
+
+
+@pytest.mark.asyncio
+async def test_malformed_json_like_string_refused_for_restricted_caller() -> None:
+    """For a restricted caller the catalog gate fails closed on an alias
+    shaped like a pattern: the request is refused before any repository is
+    resolved."""
+    handler = _import_handler()
+    malformed = '["repo-a", "repo-b"'
+    params = {**VALID_PARAMS, "repository_alias": malformed}
+    with patch(_GUARD_ACCESS_SERVICE, lambda: _AccessService(admin=False)):
+        with patch(
+            "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+            return_value=None,
+        ) as mock_resolve:
+            result = await handler(params, _make_user())
+    mock_resolve.assert_not_called()
+    parsed = _parse_response(result)
+    assert parsed["error"] == "xray_not_available"
+    assert parsed["repository_alias"] == malformed
 
 
 @pytest.mark.asyncio

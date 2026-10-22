@@ -36,7 +36,7 @@ This is the deployed-CLI case (repos_client.py always sends
 recursive=false), verified here end-to-end (nested files present).
 
 The composite-repository branch (routed through the REAL
-_list_composite_files, not mocked) is untouched by this fix and must keep
+visible_composite_files, not mocked) is untouched by this fix and must keep
 working exactly as before (recursive: bool = False default, no Optional).
 
 Uses the shared route-lookup / closure-patch helpers from
@@ -62,23 +62,33 @@ class _FakeActivatedRepoManager:
     """Non-composite stand-in for the route's `activated_repo_manager`
     closure variable -- get_repository() returning None routes the
     handler past the composite-repo branch into the regular listing path
-    (the one under test here) without raising."""
+    (the one under test here) without raising. The route judges the
+    directory it serves (get_activated_repo_path) before listing."""
+
+    def __init__(self, repo_path: str = ""):
+        self._repo_path = repo_path
 
     def get_repository(self, username: str, repo_id: str):
         return None
+
+    def get_activated_repo_path(self, username: str, user_alias: str) -> str:
+        return self._repo_path
 
 
 class _CompositeActivatedRepoManager:
     """Composite stand-in for the route's `activated_repo_manager`
     closure variable -- get_repository() returns a full, valid
     ActivatedRepository dict so ActivatedRepository.from_dict() (called by
-    the route before invoking the REAL _list_composite_files) succeeds."""
+    the route before invoking the REAL visible_composite_files) succeeds."""
 
     def __init__(self, repo_dict: dict):
         self._repo_dict = repo_dict
 
     def get_repository(self, username: str, repo_id: str):
         return self._repo_dict
+
+    def get_activated_repo_path(self, username: str, user_alias: str) -> str:
+        return str(self._repo_dict["path"])
 
 
 def _real_file_service(repo_path: str) -> FileListingService:
@@ -113,7 +123,8 @@ def _mixed_tree(tmp_path) -> None:
 def _list_files(user_client, tmp_path, query: str = ""):
     handler = _find_route_handler("/api/repositories/{repo_id}/files", "GET")
     real_service = _real_file_service(str(tmp_path))
-    with _patch_closure(handler, "activated_repo_manager", _FakeActivatedRepoManager()):
+    fake_arm = _FakeActivatedRepoManager(str(tmp_path))
+    with _patch_closure(handler, "activated_repo_manager", fake_arm):
         with patch(
             "code_indexer.server.routers.inline_repos_v2.file_service", real_service
         ):
@@ -283,9 +294,9 @@ def _composite_repo_dict(composite_path) -> dict:
     }
 
 
-def _list_composite_files_via_route(user_client, tmp_path, query: str = ""):
+def visible_composite_files_via_route(user_client, tmp_path, query: str = ""):
     """Build a real composite repo on disk and drive it through the REAL
-    (unmocked) route + _list_composite_files, mirroring _list_files'
+    (unmocked) route + visible_composite_files, mirroring _list_files'
     non-composite helper above."""
     composite_path = _build_composite_repo(tmp_path)
     handler = _find_route_handler("/api/repositories/{repo_id}/files", "GET")
@@ -295,19 +306,19 @@ def _list_composite_files_via_route(user_client, tmp_path, query: str = ""):
 
 
 class TestCompositeRepositoryBranchUnchanged:
-    """The composite-repo branch (REAL _list_composite_files, not mocked)
+    """The composite-repo branch (REAL visible_composite_files, not mocked)
     is byte-identical to HEAD: `recursive: bool = False` default, no
     Optional[bool], no bool() coercion."""
 
     def test_composite_repo_recursive_unspecified_returns_direct_children_only(
         self, user_client, tmp_path
     ):
-        response = _list_composite_files_via_route(user_client, tmp_path)
+        response = visible_composite_files_via_route(user_client, tmp_path)
 
         assert response.status_code == 200
         paths = sorted(f["full_path"] for f in response.json()["files"])
         # Non-recursive composite listing includes directory entries too
-        # (pre-existing _list_composite_files/_walk_directory behavior,
+        # (pre-existing visible_composite_files/_walk_directory behavior,
         # untouched by this fix) -- "sub1/nested/deep.txt" must NOT appear.
         assert paths == ["sub1/nested", "sub1/top.txt"], (
             "recursive unspecified must be treated as False for composite "
@@ -315,7 +326,7 @@ class TestCompositeRepositoryBranchUnchanged:
         )
 
     def test_composite_repo_recursive_true_returns_nested(self, user_client, tmp_path):
-        response = _list_composite_files_via_route(
+        response = visible_composite_files_via_route(
             user_client, tmp_path, "?recursive=true"
         )
 

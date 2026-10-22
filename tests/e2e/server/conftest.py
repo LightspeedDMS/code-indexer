@@ -374,6 +374,36 @@ def _repoint_auth_store(store: Any, attr: str, path: str) -> None:
         store.set_sqlite_path(path)
 
 
+_FILE_CRUD_WRITE_MODE_ATTRS = ("_golden_repos_dir", "_global_write_exceptions")
+
+
+def _file_crud_write_mode_dirs() -> Tuple[Any, Dict[str, Path]]:
+    """(marker dir, write exceptions) the process-wide FileCRUDService uses.
+
+    Invariant: every create_app() rebinds both to ITS golden repos dir
+    (service_init.py register_write_exception / set_golden_repos_dir), while
+    enter_write_mode writes the marker under the shared app's
+    app.state.golden_repos_dir.  Neither has a public reader -- no fallback:
+    a renamed attribute fails here, loudly.
+    """
+    from code_indexer.server.services.file_crud_service import file_crud_service
+
+    state = vars(file_crud_service)
+    for attr in _FILE_CRUD_WRITE_MODE_ATTRS:
+        assert attr in state, f"FileCRUDService.{attr} no longer exists"
+    return (state["_golden_repos_dir"], dict(state["_global_write_exceptions"]))
+
+
+def _bind_file_crud_write_mode_dirs(value: Tuple[Any, Dict[str, Path]]) -> None:
+    from code_indexer.server.services.file_crud_service import file_crud_service
+
+    golden_repos_dir, exceptions = value
+    file_crud_service._global_write_exceptions.clear()
+    for alias, path in exceptions.items():
+        file_crud_service.register_write_exception(alias, path)
+    file_crud_service.set_golden_repos_dir(golden_repos_dir)
+
+
 def _create_app_bindings() -> Dict[str, _Binding]:
     from code_indexer.server import app as app_module
     from code_indexer.server.web import auth as web_auth
@@ -427,6 +457,11 @@ def _create_app_bindings() -> Dict[str, _Binding]:
             web_auth,
             "_session_manager",
             functools.partial(setattr, web_auth, "_session_manager"),
+        ),
+        # service_init.py:704 register_write_exception, :708 set_golden_repos_dir
+        "file_crud_write_mode_dirs": (
+            _file_crud_write_mode_dirs,
+            _bind_file_crud_write_mode_dirs,
         ),
         # service_init.py:269 elevated_session_manager.set_sqlite_path(db_path)
         "elevated_session_sqlite_path": (
@@ -551,7 +586,12 @@ def _assert_bindings_are_shared_apps_own(
             ),
         }
     )
-    classified = set(pairs) | set(_PRESENCE_ONLY_BINDINGS) | _PATH_OWNED_BINDINGS
+    classified = (
+        set(pairs)
+        | set(_PRESENCE_ONLY_BINDINGS)
+        | _PATH_OWNED_BINDINGS
+        | {_WRITE_MODE_BINDING}
+    )
     unclassified = set(values) - classified - {"temporal_metadata_factory"}
     assert not unclassified, f"bindings with no stated invariant: {unclassified}"
     for name, (bound, own) in pairs.items():
@@ -562,6 +602,25 @@ def _assert_bindings_are_shared_apps_own(
 
 
 _PATH_OWNED_BINDINGS = {"token_blacklist_sqlite_path", "elevated_session_sqlite_path"}
+_WRITE_MODE_BINDING = "file_crud_write_mode_dirs"
+
+
+def _assert_write_mode_dirs_are_shared_apps(
+    values: Dict[str, Any], shared_app: FastAPI
+) -> None:
+    """Write mode checks markers and writes the catalog in the shared app's
+    own golden repos dir -- the dir enter_write_mode writes markers under."""
+    own = Path(getattr(shared_app.state, "golden_repos_dir"))
+    marker_dir, exceptions = values[_WRITE_MODE_BINDING]
+    assert marker_dir is not None and Path(marker_dir) == own, (
+        f"{_WRITE_MODE_BINDING}: marker dir {marker_dir!r} is not the shared "
+        f"app's golden repos dir {own}"
+    )
+    expected = {"cidx-meta-global": own / "cidx-meta"}
+    assert {k: Path(v) for k, v in exceptions.items()} == expected, (
+        f"{_WRITE_MODE_BINDING}: write exceptions {exceptions!r} are not the "
+        f"shared app's {expected!r}"
+    )
 
 
 def _assert_auth_stores_in_shared_data_dir(
@@ -623,6 +682,7 @@ def _golden_app_wiring_snapshot(
     values = {name: read() for name, (read, _write) in bindings.items()}
     _assert_bindings_are_shared_apps_own(values, shared_app)
     _assert_auth_stores_in_shared_data_dir(values, shared_app, test_client_data_dir)
+    _assert_write_mode_dirs_are_shared_apps(values, shared_app)
     _assert_solo_mode_wiring(values)
     _assert_shared_workers_live(values)
     return {"bindings": bindings, "values": values}
@@ -1047,8 +1107,13 @@ def _phase3_log_audit_gate(
     log_audit_app_client: TestClient,
     admin_token_provider: AdminTokenProvider,
     log_watermark: int,
+    pytestconfig: pytest.Config,
 ) -> Iterator[None]:
     """Autouse session fixture: run the log-audit gate at Phase 3 teardown.
+
+    The result is also recorded for ``pytest_sessionfinish`` (end of this
+    file), which fails the session on a failed audit whatever the last
+    test's outcome.
 
     Yields first (tests run), then at teardown:
       1. Flush the full logging pipeline (async_logging queue listener +
@@ -1079,6 +1144,9 @@ def _phase3_log_audit_gate(
         watermark_id=log_watermark,
         phase_name="Phase 3 (Server In-Process)",
     )
+    from tests.e2e.log_audit_claims import record_gate_result
+
+    record_gate_result(pytestconfig, result)
     if not result.passed:
         # pytest.fail() at session teardown surfaces as a test collection error;
         # raise AssertionError directly so it appears as a clear fixture failure.
@@ -1293,3 +1361,10 @@ def seeded_indexed_client(
 
     # Yield the UNIFIED client (same app, same lifespan, no dual-app bug).
     yield test_client, alias
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """A failed Phase 3 log audit makes the session exit nonzero."""
+    from tests.e2e.log_audit_claims import apply_gate_exit_status
+
+    apply_gate_exit_status(session)

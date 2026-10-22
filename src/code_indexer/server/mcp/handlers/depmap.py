@@ -10,12 +10,20 @@ app.state.dependency_map_service.cidx_meta_read_path — never cached.
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
+from code_indexer.server.services.cidx_meta_access.depmap_source import (
+    resolve_depmap_source,
+)
+from code_indexer.server.services.cidx_meta_access.universe_provider import (
+    registry_of,
+)
+from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
 from code_indexer.server.services.dep_map_parser_hygiene import (
     AnomalyAggregate,
     AnomalyEntry,
 )
+from code_indexer.server.services.dep_map_source import DepMapSource
 
 from code_indexer.server.services.dep_map_parser_graph import _aggregate_graph
 
@@ -50,19 +58,19 @@ def _anomaly_to_dict(anomaly: "AnomalyEntry | AnomalyAggregate") -> Dict[str, st
     return {"file": anomaly.file, "error": anomaly.message}
 
 
-def _is_repo_indexed(output_dir: Path, repo_name: str) -> bool:
-    """Return True if repo_name appears in any domain's participating_repos.
-
-    output_dir is dep_map_path/"dependency-map" — the same path used internally
-    by DepMapMCPParser.  This function is called only when output_dir exists.
-    """
-    from code_indexer.server.services.dep_map_file_utils import load_domains_json
-
-    domains = load_domains_json(output_dir)
+def _is_repo_indexed(source: DepMapSource, repo_name: str) -> bool:
+    """Return True if repo_name appears in any domain's participating_repos
+    as the caller's source shows them. Called only when the source exists."""
     return any(
         isinstance(d, dict) and repo_name in (d.get("participating_repos") or [])
-        for d in domains
+        for d in source.load_domains_json()
     )
+
+
+def _shown(anomalies: List[Any], restricted: bool) -> List[Any]:
+    """Anomalies carry server paths and repository names: never shown to a
+    restricted caller."""
+    return [] if restricted else anomalies
 
 
 def depmap_find_consumers_handler(params: Dict[str, Any], user: Any) -> Dict[str, Any]:
@@ -116,32 +124,22 @@ def depmap_find_consumers_handler(params: Dict[str, Any], user: Any) -> Dict[str
     # not see that scoping and would have to fall back to the caller's
     # full access, so the single check point stays at the dispatcher.
 
-    # Resolve dep_map_path fresh — NEVER cached
-    dep_map_path: Path = (
-        _utils.app_module.app.state.dependency_map_service.cidx_meta_read_path
-    )
-
-    if not dep_map_path.exists():
-        logger.warning(
-            "depmap_find_consumers: dep_map_path not found: %s", dep_map_path
-        )
+    parser, restricted, err = _resolve_parser("depmap_find_consumers", user)
+    if parser is None:
         success, resolution = False, "repo_not_indexed"
         assert_resolution_valid(resolution)
         assert_success_resolution_consistent(success, resolution)
         return _mcp_response(
             {
-                "success": success,
+                **(err or {}),
                 "resolution": resolution,
-                "error": "dep_map_path not found",
                 "consumers": [],
                 "anomalies": [],
             }
         )
 
-    from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
-
-    parser = DepMapMCPParser(dep_map_path)
-    consumers, anomalies = parser.find_consumers(repo_name)
+    consumers, raw_anomalies = parser.find_consumers(repo_name)
+    anomalies = _shown(raw_anomalies, restricted)
 
     if consumers:
         # AC3/AC5: canonical 'repo' + deprecated 'consuming_repo' alias dual-write
@@ -159,12 +157,8 @@ def depmap_find_consumers_handler(params: Dict[str, Any], user: Any) -> Dict[str
         )
 
     # No consumers found — determine whether repo is indexed at all (AC7)
-    # output_dir is the same "dependency-map" sub-path DepMapMCPParser uses internally
-    output_dir = dep_map_path / "dependency-map"
-    if not output_dir.exists():
-        logger.warning(
-            "depmap_find_consumers: dependency-map dir not found: %s", output_dir
-        )
+    if not parser.source.is_present():
+        logger.warning("depmap_find_consumers: dependency-map dir not found")
         success, resolution = False, "repo_not_indexed"
         assert_resolution_valid(resolution)
         assert_success_resolution_consistent(success, resolution)
@@ -180,7 +174,7 @@ def depmap_find_consumers_handler(params: Dict[str, Any], user: Any) -> Dict[str
 
     resolution = (
         "repo_has_no_consumers"
-        if _is_repo_indexed(output_dir, repo_name)
+        if _is_repo_indexed(parser.source, repo_name)
         else "repo_not_indexed"
     )
     success = False
@@ -196,27 +190,35 @@ def depmap_find_consumers_handler(params: Dict[str, Any], user: Any) -> Dict[str
     )
 
 
-def _resolve_parser(tool_name: str):
-    """Resolve a fresh dep_map_path and construct a DepMapMCPParser.
+def _resolve_source(tool_name: str, user: Any) -> Tuple[Optional[DepMapSource], bool]:
+    """The caller's source of the dependency map and whether it is
+    restricted; (None, False) when dep_map_path does not exist.
 
-    Reads dep_map_path from app.state on every call — never cached.
-
-    Args:
-        tool_name: Caller name used in the warning log when path is missing.
-
-    Returns:
-        (DepMapMCPParser, None) when dep_map_path exists.
-        (None, error_response_dict) when dep_map_path does not exist.
+    Reads dep_map_path from app.state and the caller's visibility on every
+    call — never cached.
     """
-    from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
-
-    dep_map_path: Path = (
-        _utils.app_module.app.state.dependency_map_service.cidx_meta_read_path
-    )
-    if not dep_map_path.exists():
+    state = _utils.app_module.app.state
+    dep_map_path = state.dependency_map_service.cidx_meta_read_path
+    if not isinstance(dep_map_path, Path) or not dep_map_path.exists():
         logger.warning("%s: dep_map_path not found: %s", tool_name, dep_map_path)
-        return None, {"success": False, "error": "dep_map_path not found"}
-    return DepMapMCPParser(dep_map_path), None
+        return None, False
+    return resolve_depmap_source(
+        user.username,
+        getattr(state, "access_filtering_service", None),
+        dep_map_path / "dependency-map",
+        registry_of(state),
+    )
+
+
+def _resolve_parser(
+    tool_name: str, user: Any
+) -> Tuple[Optional[DepMapMCPParser], bool, Optional[Dict[str, Any]]]:
+    """(parser, restricted, None) over the caller's source, or
+    (None, False, error_response_dict) when dep_map_path does not exist."""
+    source, restricted = _resolve_source(tool_name, user)
+    if source is None:
+        return None, False, {"success": False, "error": "dep_map_path not found"}
+    return DepMapMCPParser(source=source), restricted, None
 
 
 def _str_param(params: Dict[str, Any], key: str) -> str:
@@ -268,16 +270,17 @@ def depmap_get_repo_domains_handler(
     # dispatcher (mcp/protocol.py::_check_repository_access) before this
     # handler is ever invoked.
 
-    parser, err = _resolve_parser("depmap_get_repo_domains")
-    if err is not None:
+    parser, restricted, err = _resolve_parser("depmap_get_repo_domains", user)
+    if parser is None:
         success, resolution = False, "repo_not_indexed"
         assert_resolution_valid(resolution)
         assert_success_resolution_consistent(success, resolution)
         return _mcp_response(
-            {**err, "resolution": resolution, "domains": [], "anomalies": []}
+            {**(err or {}), "resolution": resolution, "domains": [], "anomalies": []}
         )
 
-    domains, anomalies = parser.get_repo_domains(repo_name)
+    domains, raw_anomalies = parser.get_repo_domains(repo_name)
+    anomalies = _shown(raw_anomalies, restricted)
 
     if not domains:
         success, resolution = False, "repo_not_indexed"
@@ -344,16 +347,17 @@ def depmap_get_domain_summary_handler(
             }
         )
 
-    parser, err = _resolve_parser("depmap_get_domain_summary")
-    if err is not None:
+    parser, restricted, err = _resolve_parser("depmap_get_domain_summary", user)
+    if parser is None:
         success, resolution = False, "domain_not_indexed"
         assert_resolution_valid(resolution)
         assert_success_resolution_consistent(success, resolution)
         return _mcp_response(
-            {**err, "resolution": resolution, "summary": None, "anomalies": []}
+            {**(err or {}), "resolution": resolution, "summary": None, "anomalies": []}
         )
 
-    summary, anomalies = parser.get_domain_summary(domain_name)
+    summary, raw_anomalies = parser.get_domain_summary(domain_name)
+    anomalies = _shown(raw_anomalies, restricted)
     if summary is None:
         success, resolution = False, "domain_not_indexed"
         assert_resolution_valid(resolution)
@@ -412,16 +416,22 @@ def depmap_get_stale_domains_handler(
             }
         )
 
-    parser, err = _resolve_parser("depmap_get_stale_domains")
-    if err is not None:
+    parser, restricted, err = _resolve_parser("depmap_get_stale_domains", user)
+    if parser is None:
         success, resolution = False, "invalid_input"
         assert_resolution_valid(resolution)
         assert_success_resolution_consistent(success, resolution)
         return _mcp_response(
-            {**err, "resolution": resolution, "stale_domains": [], "anomalies": []}
+            {
+                **(err or {}),
+                "resolution": resolution,
+                "stale_domains": [],
+                "anomalies": [],
+            }
         )
 
-    stale_domains, anomalies = parser.get_stale_domains(raw)
+    stale_domains, raw_anomalies = parser.get_stale_domains(raw)
+    anomalies = _shown(raw_anomalies, restricted)
     success, resolution = True, "ok"
     assert_resolution_valid(resolution)
     assert_success_resolution_consistent(success, resolution)
@@ -510,14 +520,14 @@ def depmap_get_cross_domain_graph_handler(
     if not _admission.allowed:
         return _mcp_response(memory_pressure_mcp_payload(_admission))
 
-    parser, err = _resolve_parser("depmap_get_cross_domain_graph")
-    if err is not None:
+    parser, restricted, err = _resolve_parser("depmap_get_cross_domain_graph", user)
+    if parser is None:
         success, resolution = False, "invalid_input"
         assert_resolution_valid(resolution)
         assert_success_resolution_consistent(success, resolution)
         return _mcp_response(
             {
-                **err,
+                **(err or {}),
                 "resolution": resolution,
                 "edges": [],
                 "anomalies": [],
@@ -608,9 +618,15 @@ def depmap_get_cross_domain_graph_handler(
             "success": success,
             "resolution": resolution,
             "edges": filtered_edges,
-            "anomalies": [_anomaly_to_dict(a) for a in all_anomalies],
-            "parser_anomalies": [_anomaly_to_dict(a) for a in parser_anomalies],
-            "data_anomalies": [_anomaly_to_dict(a) for a in data_anomalies],
+            "anomalies": _shown(
+                [_anomaly_to_dict(a) for a in all_anomalies], restricted
+            ),
+            "parser_anomalies": _shown(
+                [_anomaly_to_dict(a) for a in parser_anomalies], restricted
+            ),
+            "data_anomalies": _shown(
+                [_anomaly_to_dict(a) for a in data_anomalies], restricted
+            ),
         }
     )
 
@@ -625,7 +641,7 @@ _BY_TO_METRIC_KEY = {
 
 
 def _compute_hub_domains(
-    output_dir: Path,
+    source: DepMapSource,
     top_n: int = 5,
     by: str = "total_degree",
 ) -> List[Dict[str, Any]]:
@@ -635,7 +651,7 @@ def _compute_hub_domains(
     AC7 (Story #889): on-the-fly computation on every call — no cache.
 
     Args:
-        output_dir: Path to the dependency-map directory.
+        source:     The caller's view of the dependency-map directory.
         top_n:      Maximum number of entries to return; must be a positive int.
         by:         Ranking metric — must be one of _VALID_BY_VALUES.
 
@@ -644,14 +660,14 @@ def _compute_hub_domains(
 
     Returns:
         List of {domain, in_degree, out_degree, total} dicts sorted descending by `by`,
-        truncated to top_n. Returns [] when output_dir is absent or graph is empty.
+        truncated to top_n. Returns [] when the directory is absent or graph is empty.
     """
     if by not in _VALID_BY_VALUES:
         raise ValueError(f"by must be one of {sorted(_VALID_BY_VALUES)}, got {by!r}")
     if not isinstance(top_n, int) or isinstance(top_n, bool) or top_n < 1:
         raise ValueError(f"top_n must be a positive integer, got {top_n!r}")
 
-    edge_data, _ = _aggregate_graph(output_dir)
+    edge_data, _ = _aggregate_graph(source)
     if not edge_data:
         return []
 
@@ -737,17 +753,11 @@ def depmap_get_hub_domains_handler(params: Dict[str, Any], user: Any) -> Dict[st
     else:
         top_n = raw_top_n
 
-    dep_map_path = (
-        _utils.app_module.app.state.dependency_map_service.cidx_meta_read_path
-    )
-    if not isinstance(dep_map_path, Path) or not dep_map_path.exists():
-        logger.warning(
-            "depmap_get_hub_domains: dep_map_path missing or invalid: %s", dep_map_path
-        )
+    source, _restricted = _resolve_source("depmap_get_hub_domains", user)
+    if source is None:
         return _hub_invalid_input_response("dep_map_path not found")
 
-    output_dir = dep_map_path / "dependency-map"
-    hubs = _compute_hub_domains(output_dir, top_n=top_n, by=raw_by)
+    hubs = _compute_hub_domains(source, top_n=top_n, by=raw_by)
     success, resolution = True, "ok"
     assert_resolution_valid(resolution)
     assert_success_resolution_consistent(success, resolution)

@@ -83,7 +83,6 @@ def _make_access_service(
 
         service.filter_repo_listing = Mock(side_effect=_filter)
 
-    service.filter_cidx_meta_results = Mock(side_effect=lambda results, uid: results)
     service.calculate_over_fetch_limit = Mock(side_effect=lambda limit: limit * 2)
     service.filter_query_results = Mock(side_effect=lambda results, uid: results)
     return service
@@ -816,37 +815,6 @@ class TestAC7OmniSearchErrorsFiltered:
         assert "secret-repo-global" not in errors, (
             f"Errors dict must not leak unauthorized repo aliases. "
             f"Found: {list(errors.keys())}"
-        )
-
-
-# ===========================================================================
-# AC6: cidx-meta results filtered for referenced repos
-# ===========================================================================
-
-
-class TestAC6CidxMetaFiltering:
-    """AC6: When querying cidx-meta, results that reference inaccessible repos
-    must be filtered out using AccessFilteringService.filter_cidx_meta_results().
-    """
-
-    def test_cidx_meta_search_results_filtered(self):
-        """search_code querying cidx-meta must call filter_cidx_meta_results."""
-        import inspect
-
-        # Verify that filter_cidx_meta_results exists on AccessFilteringService
-        from code_indexer.server.services.access_filtering_service import (
-            AccessFilteringService,
-        )
-
-        assert hasattr(AccessFilteringService, "filter_cidx_meta_results")
-
-        # Verify via source inspection that the search pipeline calls filter_cidx_meta_results
-        # After Story #496 extraction, this logic lives in _apply_rerank_and_filter
-        from code_indexer.server.mcp.handlers.search import _apply_rerank_and_filter
-
-        source = inspect.getsource(_apply_rerank_and_filter)
-        assert "filter_cidx_meta_results" in source, (
-            "search pipeline must call filter_cidx_meta_results for cidx-meta queries"
         )
 
 

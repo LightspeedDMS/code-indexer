@@ -402,6 +402,7 @@ class VoyageAIClient(EmbeddingProvider):
 
             from code_indexer.server.services.embedding_call_instrumentation import (
                 instrument_call,
+                voyage_usage_tokens,
             )
 
             def _count_batch_tokens() -> int:
@@ -425,7 +426,7 @@ class VoyageAIClient(EmbeddingProvider):
                     call_type="embed",
                     model=model_name,
                     item_count=len(texts),
-                    token_count=0,
+                    tokens_from_result=voyage_usage_tokens,
                     batch_size=len(texts),
                     purpose="query" if not retry else "index",
                     fn=_do_post_and_validate,
@@ -609,6 +610,7 @@ class VoyageAIClient(EmbeddingProvider):
 
             from code_indexer.server.services.embedding_call_instrumentation import (
                 instrument_call,
+                voyage_usage_tokens,
             )
 
             def _count_contextualized_tokens() -> int:
@@ -631,11 +633,9 @@ class VoyageAIClient(EmbeddingProvider):
                     call_type="embed",
                     model=model_name,
                     item_count=len(documents),
-                    token_count=0,
+                    tokens_from_result=voyage_usage_tokens,
                     batch_size=len(documents),
-                    # CONTEXTUALIZED_EMBEDDINGS_ENDPOINT is used exclusively by
-                    # the per-commit temporal contextual embedder
-                    # (voyage-context-4) -- purpose is always "temporal".
+                    # ^ why CONTEXTUALIZED_EMBEDDINGS_ENDPOINT=temporal contextual embedder only=>purpose "temporal"
                     purpose="temporal",
                     fn=_do_post_and_validate,
                     inputs=[chunk for doc in documents for chunk in doc],

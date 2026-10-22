@@ -36,7 +36,6 @@ from ..query.filtered_search import (
     SearchBudgetExhausted,
     extension_budget_spent,
     filtered_semantic_search,
-    fts_filter_kwargs,
 )
 from code_indexer.server.logging_utils import format_error_log, public_error_message
 
@@ -164,7 +163,7 @@ class MultiSearchService:
         shard_ownership = getattr(self, "_shard_ownership", None)
         return shard_ownership is not None and shard_ownership.owns(repo_id)
 
-    def _per_repo_limit(self, request: MultiSearchRequest) -> int:
+    def per_repo_limit(self, request: MultiSearchRequest) -> int:
         """Per-repository retrieval limit for every omni search path.
 
         Bounded by the request limit, the operator per-repo setting
@@ -518,7 +517,7 @@ class MultiSearchService:
             search_items = filtered_semantic_search(
                 search_service.search_repository_path,
                 query=request.query,
-                limit=self._per_repo_limit(request),
+                limit=self.per_repo_limit(request),
                 language=request.language,
                 path_filter=request.path_filter,
                 exclude_language=request.exclude_language,
@@ -575,56 +574,18 @@ class MultiSearchService:
         Raises:
             Exception: If FTS search fails
         """
-        from pathlib import Path as PathLib
-        from ...services.tantivy_index_manager import TantivyIndexManager
+        from .fts_rows import fts_search_rows, open_fts_index
 
         try:
-            # Get repository path
-            repo_path = self._get_repository_path(repo_id)
-
-            # FTS index is in .code-indexer/tantivy_index
-            fts_index_dir = PathLib(repo_path) / ".code-indexer" / "tantivy_index"
-
-            if not fts_index_dir.exists():
-                raise FileNotFoundError(
-                    f"FTS index not found for repository {repo_id} at {fts_index_dir}"
-                )
-
-            # Initialize FTS manager and search
-            tantivy_manager = TantivyIndexManager(fts_index_dir)
-            tantivy_manager.open_for_search()
-
-            # Execute FTS search; the filters come from the one shared builder
-            # (#2047: file_extensions push-down under the request deadline).
-            fts_results = tantivy_manager.search(
-                query_text=request.query,
-                limit=self._per_repo_limit(request),
-                use_regex=False,
-                snippet_lines=3,
-                **fts_filter_kwargs(
-                    language=request.language,
-                    path_filter=request.path_filter,
-                    exclude_language=request.exclude_language,
-                    exclude_path=request.exclude_path,
-                    file_extensions=request.file_extensions,
-                    deadline=_extension_deadline_of(request),
-                ),
+            # The filters come from the one shared builder (#2047:
+            # file_extensions push-down under the request deadline).
+            return fts_search_rows(
+                open_fts_index(Path(self._get_repository_path(repo_id))),
+                request,
+                request.query,
+                self.per_repo_limit(request),
+                _extension_deadline_of(request),
             )
-
-            # Convert FTS results to standardized format
-            results = []
-            for fts_result in fts_results:
-                result_dict = {
-                    "file_path": fts_result.get("path", ""),
-                    "line_start": fts_result.get("line", 0),
-                    "line_end": fts_result.get("line", 0),
-                    "score": fts_result.get("score", 0.0),
-                    "content": fts_result.get("match_text", ""),
-                    "language": fts_result.get("language", ""),
-                }
-                results.append(result_dict)
-
-            return results
 
         except Exception as e:
             logger.error(
@@ -738,7 +699,7 @@ class MultiSearchService:
                 index_path=index_dir,
                 vector_store=vector_store_client,
                 query_text=request.query,
-                limit=self._per_repo_limit(request),
+                limit=self.per_repo_limit(request),
                 language=request.language,
                 file_path_filter=request.path_filter,
                 # Story #1108 (S4): forward per-request cache bypass flag
@@ -815,7 +776,7 @@ class MultiSearchService:
                 request.query,
                 "--quiet",
                 "--limit",
-                str(self._per_repo_limit(request)),
+                str(self.per_repo_limit(request)),
                 "--fts",
                 "--regex",
             ]

@@ -84,6 +84,7 @@ from ..models.repository_discovery import RepositoryDiscoveryResponse
 
 from ..auth import dependencies
 from ..auth.user_manager import UserRole
+from ..services.cidx_meta_access.file_doors import judge_app_request
 from ..app_helpers import (
     _execute_repository_sync,
     build_sync_progress_webhook_callback,
@@ -384,7 +385,15 @@ def register_repo_routes(
         repo_access_http.enforce_activation_allowed(
             _access_service(),
             current_user.username,
-            request.golden_repo_aliases or request.golden_repo_alias,
+            [
+                alias
+                for alias in [
+                    *(request.golden_repo_aliases or []),
+                    request.golden_repo_alias,
+                    request.user_alias,
+                ]
+                if alias
+            ],
         )
 
         try:
@@ -710,6 +719,9 @@ def register_repo_routes(
             HTTPException: If repository not found or branch switch fails
         """
         _enforce_activation_access(current_user.username, user_alias)
+        repo_access_http.refuse_catalog_history(
+            _access_service(), activated_repo_manager, current_user.username, user_alias
+        )
         try:
             # Get repository path and validate it's not a composite repository
             repo_path = activated_repo_manager.get_activated_repo_path(
@@ -1195,6 +1207,9 @@ def register_repo_routes(
             HTTPException: If repository not found or branch listing fails
         """
         _enforce_activation_access(current_user.username, user_alias)
+        repo_access_http.refuse_catalog_history(
+            _access_service(), activated_repo_manager, current_user.username, user_alias
+        )
         try:
             result = activated_repo_manager.list_repository_branches(
                 username=current_user.username,
@@ -1311,6 +1326,9 @@ def register_repo_routes(
         # Reading a golden repository requires group access to it, checked
         # before its existence is looked up.
         _enforce_repo_access(current_user.username, alias)
+        repo_access_http.refuse_golden_catalog_history(
+            app.state, current_user.username, alias
+        )
         try:
             # Check if golden repository exists
             if not golden_repo_manager.golden_repo_exists(alias):
@@ -1991,9 +2009,14 @@ def register_repo_routes(
                 detail="Invalid path: must be a relative path within the repository",
             )
 
-        # A path inside the repository's .git is answered as a missing path.
+        access = judge_app_request(
+            app.state, user_alias, str(repo_path), current_user.username, arm
+        )
+        base = scan_root.relative_to(repo_resolved)
+        # A path inside .git, or one the caller may not see, is a missing path.
         if (
-            has_git_segment(scan_root.relative_to(repo_resolved).parts)
+            has_git_segment(base.parts)
+            or not access.lists(base.as_posix(), True)
             or not scan_root.exists()
         ):
             raise HTTPException(
@@ -2010,9 +2033,11 @@ def register_repo_routes(
         def _listable(candidate: Path) -> bool:
             # A symlink is listed only when it resolves inside the repository
             # and outside its .git -- the same rule every file read applies.
-            return not candidate.is_symlink() or is_readable_within_root(
-                candidate, repo_resolved
-            )
+            rel = candidate.relative_to(repo_resolved).as_posix()
+            return (
+                not candidate.is_symlink()
+                or is_readable_within_root(candidate, repo_resolved)
+            ) and access.lists(rel, candidate.is_dir())
 
         try:
             if not recursive:

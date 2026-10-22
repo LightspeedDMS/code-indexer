@@ -10,8 +10,9 @@ Algorithm (issue #877 body lines 67-143):
 3. Schema validate; enforce summary length cap; rate-limit check.
 4. Piggyback-or-acquire coarse `cidx-meta` lock.
 5. Atomic write (or delete) to base clone path.
-6. Refresh trigger: direct-acquire path calls trigger_refresh_for_repo with
-   DuplicateJobError / exception fallback to debouncer. Piggyback path ALWAYS
+6. Release the coarse lock, then trigger refresh: direct-acquire path calls
+   the shared request_cidx_meta_refresh (in-flight refresh owed to the
+   debouncer, deferral left to the scheduler). Piggyback path ALWAYS
    signals debouncer.
 7. Release per-memory lock in finally.
 """
@@ -26,7 +27,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Protocol, TypeVar, runtime_checkable
 
-from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.services.memory_file_lock_manager import (
     MemoryFileLockManager,
     _validate_memory_id,
@@ -48,7 +48,6 @@ _T = TypeVar("_T")
 logger = logging.getLogger(__name__)
 
 _COARSE_ALIAS = "cidx-meta"
-_COARSE_REFRESH_ALIAS = "cidx-meta-global"
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +147,6 @@ class MemoryStoreService:
         hostname: Optional[str] = None,
         clock: Optional[Callable[[], datetime]] = None,
         id_factory: Optional[Callable[[], str]] = None,
-        metadata_cache_invalidator: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._config = config
         self._lock_manager = lock_manager
@@ -160,11 +158,6 @@ class MemoryStoreService:
             lambda: datetime.now(timezone.utc)
         )
         self._id_factory: Callable[[], str] = id_factory or (lambda: uuid.uuid4().hex)
-        # Story #877 Phase 3-A: optional callback to invalidate metadata cache
-        # after successful write. Called with memory_id; never on exception paths.
-        self._cache_invalidator: Optional[Callable[[str], None]] = (
-            metadata_cache_invalidator
-        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -194,7 +187,6 @@ class MemoryStoreService:
             content_hash = self._run_with_coarse_lock(
                 owner, lambda: atomic_write_memory_file(path, full_payload)
             )
-            self._invalidate_cache(memory_id)
             return {"id": memory_id, "content_hash": content_hash, "path": str(path)}
 
         return self._run_with_per_memory_lock(memory_id, owner, _body)
@@ -231,7 +223,6 @@ class MemoryStoreService:
             content_hash = self._run_with_coarse_lock(
                 owner, lambda: atomic_write_memory_file(path, merged)
             )
-            self._invalidate_cache(memory_id)
             return {"id": memory_id, "content_hash": content_hash, "path": str(path)}
 
         return self._run_with_per_memory_lock(memory_id, owner, _body)
@@ -260,34 +251,12 @@ class MemoryStoreService:
                 raise RateLimitError(f"Rate limit exceeded for user {username!r}")
 
             self._run_with_coarse_lock(owner, lambda: atomic_delete_memory_file(path))
-            self._invalidate_cache(memory_id)
 
         self._run_with_per_memory_lock(memory_id, owner, _body)
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
-
-    def _invalidate_cache(self, memory_id: str) -> None:
-        """Call the metadata cache invalidator if one was injected.
-
-        Invoked after a successful write (create/edit/delete). Never called
-        on exception paths so callers can rely on: invalidator called ↔ write succeeded.
-
-        Exceptions from the invalidator are logged as warnings and suppressed
-        so they never mask the successful write result.
-        """
-        if self._cache_invalidator is None:
-            return
-        try:
-            self._cache_invalidator(memory_id)
-        except Exception:
-            logger.warning(
-                "metadata_cache_invalidator raised an exception for memory_id=%r — "
-                "cache entry may be stale until TTL; write was successful.",
-                memory_id,
-                exc_info=True,
-            )
 
     def _owner_name(self, username: str) -> str:
         return f"memory_store@{self._hostname}/{username}"
@@ -355,47 +324,48 @@ class MemoryStoreService:
         return not acquired
 
     def _signal_refresh(self, piggyback: bool) -> None:
-        """Signal refresh. Piggyback always uses debouncer."""
+        """Signal refresh. Piggyback always uses debouncer.
+
+        The direct path is the shared writer helper: a refresh already
+        queued or running is owed to the debouncer, a deferral is left to
+        the refresh scheduler, any other failure is retried by the debouncer.
+        """
+        from code_indexer.global_repos.meta_description_hook import (
+            request_cidx_meta_refresh,
+        )
+
         if piggyback:
             self._debouncer.signal_dirty()
             return
-        try:
-            self._scheduler.trigger_refresh_for_repo(_COARSE_REFRESH_ALIAS)
-        except DuplicateJobError:
-            logger.debug(
-                "trigger_refresh_for_repo raised DuplicateJobError — "
-                "falling back to debouncer"
-            )
-            self._debouncer.signal_dirty()
-        except Exception:
-            logger.warning(
-                "trigger_refresh_for_repo raised unexpected exception — "
-                "falling back to debouncer",
-                exc_info=True,
-            )
-            self._debouncer.signal_dirty()
+        request_cidx_meta_refresh(self._scheduler, debouncer=self._debouncer)
 
-    def _release_coarse_lock(self, owner: str) -> None:
-        """Release coarse lock."""
-        self._scheduler.release_write_lock(_COARSE_ALIAS, owner)
+    def _release_coarse_lock(self, owner: str) -> bool:
+        """Release coarse lock; False when the lock could not be removed."""
+        return bool(self._scheduler.release_write_lock(_COARSE_ALIAS, owner))
 
     def _run_with_coarse_lock(self, owner: str, operation: Callable[[], Any]) -> Any:
-        """Acquire coarse lock (or piggyback), run operation, trigger refresh.
+        """Acquire coarse lock (or piggyback), run operation, release the
+        lock, then trigger refresh.
 
-        Guarantees coarse lock release via try/finally when we hold it.
+        The refresh is requested only after the lock is released: a refresh
+        that starts while the lock is held skips the cycle and owes nothing,
+        so a trigger sent under our own lock would leave the write unindexed.
+        A lock that is still held (another owner's, or ours when the release
+        failed) owes the refresh to the debouncer instead.
         Operation exceptions propagate; coarse lock is still released.
         """
         piggyback = self._coarse_piggyback_or_acquire(owner)
-        coarse_held = not piggyback
+        released = True
         try:
             result = operation()
-        except Exception:
-            if coarse_held:
-                self._release_coarse_lock(owner)
-            raise
-        try:
-            self._signal_refresh(piggyback)
         finally:
-            if coarse_held:
-                self._release_coarse_lock(owner)
+            if not piggyback:
+                released = self._release_coarse_lock(owner)
+        if not released:
+            logger.warning(
+                "cidx-meta write lock release failed for owner=%r; the "
+                "refresh is owed to the debouncer",
+                owner,
+            )
+        self._signal_refresh(piggyback or not released)
         return result

@@ -21,6 +21,27 @@ import pytest
 from code_indexer.server.auth.user_manager import User, UserRole
 
 
+@pytest.fixture(autouse=True)
+def caller_is_admin(tmp_path, monkeypatch):
+    """testuser is an admins-group member: the catalog's history is
+    admin-only (refused earlier for anyone else), so these tests reach the
+    local:// refusal they cover."""
+    from code_indexer.server.mcp.handlers import _utils
+    from code_indexer.server.services.access_filtering_service import (
+        AccessFilteringService,
+    )
+    from code_indexer.server.services.group_access_manager import (
+        GroupAccessManager,
+    )
+
+    groups = GroupAccessManager(tmp_path / "groups.db")
+    admins = groups.get_group_by_name("admins")
+    assert admins is not None
+    groups.assign_user_to_group("testuser", admins.id, assigned_by="test")
+    service = AccessFilteringService(groups)
+    monkeypatch.setattr(_utils, "_get_access_filtering_service", lambda: service)
+
+
 @pytest.fixture
 def mock_user():
     """Create a test user."""

@@ -26,6 +26,7 @@ import json
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Iterator, Optional
 from unittest.mock import Mock, patch
 
@@ -120,6 +121,12 @@ def _indexed_dep_map_state(tmp_path: Path, repo_name: str) -> Mock:
     )
     state = Mock()
     state.dependency_map_service.cidx_meta_read_path = tmp_path
+    # The alias registry production always wires: a restricted caller's
+    # depmap view is projected against its repository names.
+    registry_rows = {f"{repo_name}-global": {"repo_name": repo_name}}
+    state.backend_registry = SimpleNamespace(
+        global_repos=SimpleNamespace(list_repos=lambda: registry_rows)
+    )
     return state
 
 

@@ -11,12 +11,12 @@ Covers:
 5. Memory file with scope=file follows the same repo-access rule as scope=repo.
 6. Missing memory file → filtered out (fail-closed).
 7. Corrupt YAML frontmatter memory file → filtered out (fail-closed).
-8. Cache-miss path reads from filesystem and caches result.
+8. Memory scope is read fresh from disk on every decision (no cache).
 9. Admin user sees all memory files including those for repos the admins group
    has not been explicitly granted (admin sees everything).
 
-Real filesystem (tmp_path), real GroupAccessManager, real MemoryMetadataCache,
-real memory_io writes. No mocks for the service under test.
+Real filesystem (tmp_path), real GroupAccessManager, real memory_io writes.
+No mocks for the service under test.
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ import pytest
 from code_indexer.server.services.access_filtering_service import AccessFilteringService
 from code_indexer.server.services.group_access_manager import GroupAccessManager
 from code_indexer.server.services.memory_io import atomic_write_memory_file
-from code_indexer.server.services.memory_metadata_cache import MemoryMetadataCache
 
 
 # ---------------------------------------------------------------------------
@@ -93,17 +92,10 @@ def group_manager(temp_db: Path) -> GroupAccessManager:
 
 
 @pytest.fixture
-def cache(memories_dir: Path) -> MemoryMetadataCache:
-    return MemoryMetadataCache(memories_dir, ttl_seconds=60)
-
-
-@pytest.fixture
 def service(
-    group_manager: GroupAccessManager, cache: MemoryMetadataCache, memories_dir: Path
+    group_manager: GroupAccessManager, memories_dir: Path
 ) -> AccessFilteringService:
-    return AccessFilteringService(
-        group_manager, memory_metadata_cache=cache, memories_dir=memories_dir
-    )
+    return AccessFilteringService(group_manager, memories_dir=memories_dir)
 
 
 @pytest.fixture
@@ -140,38 +132,35 @@ MEMORY_ID_MISSING = "dddddddd" * 4
 
 
 # ---------------------------------------------------------------------------
-# Test 1: Non-memory files pass through unchanged (all listed files verified)
+# Test 1: Files that are neither a visible description nor a memory are denied
 # ---------------------------------------------------------------------------
 
 
-def test_non_memory_md_files_all_pass_through_for_poweruser(
+def test_non_memory_md_files_are_denied_for_poweruser(
     service: AccessFilteringService, poweruser: str
 ) -> None:
-    """Non-UUID .md stems that are not known repo aliases always pass through.
-
-    All listed files must appear in the result unchanged.
-    """
-    files = ["README.md", "notes.md"]
+    """Root .md files that are not a granted repo's description are denied."""
+    files = ["README.md", "notes.md", "my-repo.md"]
     result = service.filter_cidx_meta_files(files, poweruser)
-    assert set(result) == {"README.md", "notes.md"}
+    assert result == ["my-repo.md"]
 
 
-def test_non_memory_md_files_all_pass_through_for_regular_user(
+def test_non_memory_md_files_are_denied_for_regular_user(
     service: AccessFilteringService, regular_user: str
 ) -> None:
-    """Non-UUID .md files pass through for unprivileged users too."""
+    """Unprivileged users see none of them either."""
     files = ["README.md", "CHANGELOG.md"]
     result = service.filter_cidx_meta_files(files, regular_user)
-    assert set(result) == {"README.md", "CHANGELOG.md"}
+    assert result == []
 
 
-def test_non_md_files_all_pass_through(
+def test_non_md_files_are_denied(
     service: AccessFilteringService, regular_user: str
 ) -> None:
-    """Non-.md files (e.g. .gitignore) always pass through."""
+    """Non-.md files (e.g. .gitignore) are denied by default."""
     files = [".gitignore", "config.yaml"]
     result = service.filter_cidx_meta_files(files, regular_user)
-    assert set(result) == {".gitignore", "config.yaml"}
+    assert result == []
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +175,7 @@ def test_global_memory_file_visible_to_regular_user(
 ) -> None:
     """scope=global memory files are visible to all users regardless of repo access."""
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
-    filename = f"{MEMORY_ID_GLOBAL}.md"
+    filename = f"memories/{MEMORY_ID_GLOBAL}.md"
 
     result = service.filter_cidx_meta_files([filename], regular_user)
     assert filename in result
@@ -198,7 +187,7 @@ def test_global_memory_file_visible_to_poweruser(
     poweruser: str,
 ) -> None:
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
-    filename = f"{MEMORY_ID_GLOBAL}.md"
+    filename = f"memories/{MEMORY_ID_GLOBAL}.md"
 
     result = service.filter_cidx_meta_files([filename], poweruser)
     assert filename in result
@@ -218,7 +207,7 @@ def test_repo_scoped_memory_visible_when_repo_accessible(
     _write_memory_file(
         memories_dir, MEMORY_ID_REPO, scope="repo", referenced_repo="my-repo"
     )
-    filename = f"{MEMORY_ID_REPO}.md"
+    filename = f"memories/{MEMORY_ID_REPO}.md"
 
     result = service.filter_cidx_meta_files([filename], poweruser)
     assert filename in result
@@ -238,7 +227,7 @@ def test_repo_scoped_memory_hidden_when_repo_inaccessible(
     _write_memory_file(
         memories_dir, MEMORY_ID_REPO, scope="repo", referenced_repo="my-repo"
     )
-    filename = f"{MEMORY_ID_REPO}.md"
+    filename = f"memories/{MEMORY_ID_REPO}.md"
 
     result = service.filter_cidx_meta_files([filename], regular_user)
     assert filename not in result
@@ -262,7 +251,7 @@ def test_file_scoped_memory_visible_when_referenced_repo_accessible(
         referenced_repo="my-repo",
         referenced_file="src/foo.py",
     )
-    filename = f"{MEMORY_ID_FILE}.md"
+    filename = f"memories/{MEMORY_ID_FILE}.md"
 
     result = service.filter_cidx_meta_files([filename], poweruser)
     assert filename in result
@@ -280,7 +269,7 @@ def test_file_scoped_memory_hidden_when_referenced_repo_inaccessible(
         referenced_repo="my-repo",
         referenced_file="src/foo.py",
     )
-    filename = f"{MEMORY_ID_FILE}.md"
+    filename = f"memories/{MEMORY_ID_FILE}.md"
 
     result = service.filter_cidx_meta_files([filename], regular_user)
     assert filename not in result
@@ -296,7 +285,7 @@ def test_missing_memory_file_filtered_out(
     poweruser: str,
 ) -> None:
     """A memory file that does not exist on disk is excluded (fail-closed)."""
-    filename = f"{MEMORY_ID_MISSING}.md"
+    filename = f"memories/{MEMORY_ID_MISSING}.md"
     # File is intentionally NOT written to disk
 
     result = service.filter_cidx_meta_files([filename], poweruser)
@@ -319,38 +308,34 @@ def test_corrupt_yaml_memory_file_filtered_out(
     # Valid delimiters, invalid YAML content (unbalanced brace triggers parse error)
     path.write_text("---\nkey: {unclosed brace\n---\nbody\n")
 
-    filename = f"{corrupt_id}.md"
+    filename = f"memories/{corrupt_id}.md"
     result = service.filter_cidx_meta_files([filename], poweruser)
     assert filename not in result
 
 
 # ---------------------------------------------------------------------------
-# Test 8: Cache-miss path reads from filesystem and caches result
+# Test 8: Memory scope is read fresh from disk on every decision
 # ---------------------------------------------------------------------------
 
 
-def test_cache_miss_reads_from_filesystem_then_caches(
+def test_listing_reads_memory_scope_fresh(
     memories_dir: Path,
     group_manager: GroupAccessManager,
     poweruser: str,
 ) -> None:
-    """On cache miss, service reads from disk; subsequent call uses cache."""
-    cache = MemoryMetadataCache(memories_dir, ttl_seconds=60)
-    svc = AccessFilteringService(group_manager, memory_metadata_cache=cache)
+    """The memory's frontmatter is read fresh for every listing, so a
+    deleted memory disappears at once."""
+    svc = AccessFilteringService(group_manager, memories_dir=memories_dir)
 
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
-    filename = f"{MEMORY_ID_GLOBAL}.md"
+    filename = f"memories/{MEMORY_ID_GLOBAL}.md"
 
-    # First call: cache miss → reads from disk
     result1 = svc.filter_cidx_meta_files([filename], poweruser)
     assert filename in result1
 
-    # Remove file from disk; second call should use cached result
-    (memories_dir / filename).unlink()
+    (memories_dir / f"{MEMORY_ID_GLOBAL}.md").unlink()
     result2 = svc.filter_cidx_meta_files([filename], poweruser)
-    assert filename in result2, (
-        "Second call should return cached result after file deletion"
-    )
+    assert filename not in result2
 
 
 # ---------------------------------------------------------------------------
@@ -374,11 +359,11 @@ def test_admin_sees_memory_files_for_repos_not_granted_to_admins(
     )
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
 
-    files = [f"{MEMORY_ID_REPO}.md", f"{MEMORY_ID_GLOBAL}.md"]
+    files = [f"memories/{MEMORY_ID_REPO}.md", f"memories/{MEMORY_ID_GLOBAL}.md"]
     result = service.filter_cidx_meta_files(files, admin_user)
 
-    assert f"{MEMORY_ID_REPO}.md" in result
-    assert f"{MEMORY_ID_GLOBAL}.md" in result
+    assert f"memories/{MEMORY_ID_REPO}.md" in result
+    assert f"memories/{MEMORY_ID_GLOBAL}.md" in result
 
 
 # ---------------------------------------------------------------------------
@@ -455,18 +440,11 @@ def test_visible_memory_ids_resolve_grants_once_per_call(
 def test_visible_memory_ids_see_scope_change_written_by_another_instance(
     group_manager: GroupAccessManager, memories_dir: Path, poweruser: str
 ) -> None:
-    """Each node authorizes from the file as it is now, never a cached scope.
-
-    The reader's cache stays warm with the old scope on purpose: on another
-    cluster node nothing invalidates it when the writer node edits the file.
-    """
-    writer_cache = MemoryMetadataCache(memories_dir, ttl_seconds=60)
-    reader_cache = MemoryMetadataCache(memories_dir, ttl_seconds=60)
-    reader = AccessFilteringService(
-        group_manager, memory_metadata_cache=reader_cache, memories_dir=memories_dir
-    )
+    """Each node authorizes from the file as it is now, never a scope it
+    read earlier: on another cluster node nothing tells this instance that
+    the writer node edited the file."""
+    reader = AccessFilteringService(group_manager, memories_dir=memories_dir)
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
-    reader_cache.get(MEMORY_ID_GLOBAL)
     assert reader.filter_visible_memory_ids([MEMORY_ID_GLOBAL], poweruser) == [
         MEMORY_ID_GLOBAL
     ]
@@ -474,7 +452,6 @@ def test_visible_memory_ids_see_scope_change_written_by_another_instance(
     _write_memory_file(
         memories_dir, MEMORY_ID_GLOBAL, scope="repo", referenced_repo="ungranted-repo"
     )
-    writer_cache.invalidate(MEMORY_ID_GLOBAL)
 
     assert reader.filter_visible_memory_ids([MEMORY_ID_GLOBAL], poweruser) == []
 
@@ -502,14 +479,13 @@ def test_visible_memory_ids_hide_non_string_referenced_repo(
 
 def test_visible_memory_ids_hide_everything_without_memories_dir(
     group_manager: GroupAccessManager,
-    cache: MemoryMetadataCache,
     memories_dir: Path,
     poweruser: str,
 ) -> None:
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
-    cache_only = AccessFilteringService(group_manager, memory_metadata_cache=cache)
+    no_dir = AccessFilteringService(group_manager)
 
-    assert cache_only.filter_visible_memory_ids([MEMORY_ID_GLOBAL], poweruser) == []
+    assert no_dir.filter_visible_memory_ids([MEMORY_ID_GLOBAL], poweruser) == []
 
 
 def test_visible_memory_ids_hide_unreadable_memory_path(

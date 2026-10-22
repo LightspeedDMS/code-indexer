@@ -29,9 +29,10 @@ flush_log_pipeline        : (client) -> None  -- full two-stage drain barrier
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, List, Sequence, cast
+from typing import Any, Callable, List, Sequence, Tuple, cast
 
 # ---------------------------------------------------------------------------
 # Allowlist: known-benign WARNING/ERROR patterns (minimal, explicitly reviewed)
@@ -330,14 +331,6 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # Anchored on the static message prefix; a sentinel claim failure or corruption
     # surfaces with a different message shape.
     "SharedJobSentinel.release: no sentinel for op_type=",
-    # meta_description_hook.on_repo_removed: when the cidx-meta coarse write lock is
-    # held by another operation during repo removal, the description-.md deletion is
-    # gracefully skipped and the orphan is reaped on the next pass.  This is the
-    # documented non-fatal lock-contention path (the write lock guard intentionally
-    # returns False rather than blocking).  Appears during Phase-3 test teardown when
-    # concurrent cidx-meta operations overlap.  Anchored on the static message prefix;
-    # a genuine write-failure would surface with a different error shape.
-    "on_repo_removed: write lock not acquired, skipping deletion of",
     # test_01_mcp_search.py's parametrized test_mcp_search_tool[search_code_fts] case
     # calls the MCP search_code tool with search_mode="fts" and deliberately omits
     # repository_alias.  query_user_repositories (semantic_query_manager.py:~404,
@@ -464,7 +457,68 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     "/golden-repos/cidx-meta/.code-indexer/index/voyage-code-3, "
     "model=voyage-code-3 -- Run 'cidx index' to build the index. "
     "Returning empty results.",
+    # Catalog visibility door tests (tests/e2e/cidx_meta_doors.py) seed the
+    # catalog with the neutral unit fixture, which deliberately carries a
+    # domain whose frontmatter does not parse ("reports"), a legacy domain
+    # without participating repositories ("legacy") and tables the catalog
+    # projection does not support (payments notes, ledger rows).  These are
+    # the operator diagnostics those fixture files exist to provoke; each is
+    # anchored on the fixture's own file or domain name.
+    "Dependency-map domain reports: frontmatter does not parse; hidden from restricted callers",
+    "dependency-map/reports.md names no participating repositories",
+    "dependency-map/legacy.md names no participating repositories",
+    "dependency-map/reports.md (suppressing future repeats)",
+    "dependency-map/reports.md: while parsing a flow sequence",
+    "Catalog document dependency-map/payments.md: 42 malformed line(s) removed for restricted callers",
+    "Catalog document dependency-map/ledger.md: 2 malformed line(s) removed for restricted callers",
 ]
+
+# Exact entries: (logger, regex the WHOLE message must match).  Used for
+# diagnostics the catalog visibility suite (tests/e2e/cidx_meta_suite.py)
+# provokes off the request thread, which carry no correlation id and name no
+# resource of the test, so a test cannot claim them.
+LOG_AUDIT_EXACT_ALLOWLIST: List[Tuple[str, str]] = [
+    # Wiki doors render the fixture's deliberately unparsable "reports" domain.
+    (
+        "code_indexer.server.wiki.wiki_service",
+        r"Failed to parse front matter, treating as plain content",
+    ),
+    # mcp_search_temporal admin control: temporal query on a catalog with no
+    # temporal index (operator advice, correct).
+    (
+        "code_indexer.services.temporal.temporal_fusion_dispatch",
+        r"No temporal indexes available\. Run cidx index --index-commits to "
+        r"create temporal indexes\.",
+    ),
+    # test_catalog_activation_is_refused admin activation of the non-git
+    # catalog; Bug #2178
+    (
+        "code_indexer.server.repositories.activated_repo_manager",
+        r"Failed to set git config user\.(?P<key>email|name): command='git config "
+        r"user\.(?P=key) [^']+' exit_code=128 stdout='' "
+        r"stderr='fatal: not in a git directory\\n'",
+    ),
+    # Auto-watch on the non-git catalog clone (write-mode and activation
+    # scenarios); Bug #2179
+    (
+        "code_indexer.services.git_aware_watch_handler",
+        r"Git not available - proceeding with file-only monitoring",
+    ),
+    # Stopping that auto-watch (exit_write_mode, deactivation); Bug #2180
+    (
+        "code_indexer.daemon.watch_manager",
+        r"Watch thread did not stop within 5 seconds",
+    ),
+]
+
+
+def _exactly_allowlisted(entry: dict[str, Any]) -> bool:
+    source = entry.get("source")
+    message = str(entry.get("message") or "")
+    return any(
+        source == logger and re.fullmatch(pattern, message) is not None
+        for logger, pattern in LOG_AUDIT_EXACT_ALLOWLIST
+    )
 
 
 def is_allowlisted(entry: dict[str, Any], extra_allowlist: Sequence[str] = ()) -> bool:
@@ -481,6 +535,8 @@ def is_allowlisted(entry: dict[str, Any], extra_allowlist: Sequence[str] = ()) -
     Returns:
         True if the entry is known-benign (allowlisted), False otherwise.
     """
+    if _exactly_allowlisted(entry):
+        return True
     message = (entry.get("message") or "").lower()
     patterns = list(LOG_AUDIT_ALLOWLIST) + list(extra_allowlist)
     return any(pattern.lower() in message for pattern in patterns)
@@ -787,9 +843,17 @@ def run_log_audit_gate(
     Returns:
         AuditGateResult with passed=True when no non-allowlisted entries found.
     """
+    from tests.e2e.log_audit_claims import claimed_ids
+
     entries = query_logs_via_mcp(client, token)
     new_entries = filter_new_entries(entries, watermark_id=watermark_id)
-    violations = [e for e in new_entries if not is_allowlisted(e, extra_allowlist)]
+    claimed = claimed_ids()
+    violations = [
+        e
+        for e in new_entries
+        if int(e.get("id") or 0) not in claimed
+        and not is_allowlisted(e, extra_allowlist)
+    ]
     passed = len(violations) == 0
     return AuditGateResult(passed=passed, violations=violations, phase_name=phase_name)
 

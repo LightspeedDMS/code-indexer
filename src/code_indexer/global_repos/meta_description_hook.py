@@ -43,8 +43,8 @@ def _describe_cidx_meta_holder(refresh_scheduler: Optional[Any]) -> str:
     lock, for use in contention diagnostics (Bug #1842 AC4).
 
     Before this helper existed, both atomic_write_description()'s
-    LifecycleLockUnavailableError and on_repo_removed()'s "write lock not
-    acquired" warning hardcoded "(owner='lifecycle_writer')" -- the
+    LifecycleLockUnavailableError and on_repo_removed()'s lock-contention
+    message hardcoded "(owner='lifecycle_writer')" -- the
     FAILED CALLER's own attempted identity, not the actual holder (e.g.
     'dependency_map_service' running a real multi-domain Claude CLI
     analysis). Delegates to the shared describe_scheduler_lock_holder()
@@ -338,19 +338,27 @@ def set_debouncer(debouncer: Optional["CidxMetaRefreshDebouncer"]) -> None:
     _debouncer = debouncer
 
 
-def request_cidx_meta_refresh(refresh_scheduler: Any) -> None:
+def request_cidx_meta_refresh(
+    refresh_scheduler: Any, debouncer: Optional[Any] = None
+) -> None:
     """Trigger a cidx-meta refresh for a writer; never raises into the writer
-    (callers run it in ``finally`` blocks). A refresh already running is
-    handed to the debouncer, which retries later. A refresh deferred by the
-    Bug #2022 failure backoff was persisted as a pending trigger, which the
-    refresh scheduler fires once the backoff ends. Any other failure (store
-    or job tracker unavailable) is logged at ERROR and handed to the
-    debouncer for a retry."""
+    (callers run it in ``finally`` blocks). A refresh already queued or
+    running may have listed the catalog before the write, so it is handed
+    to the debouncer (*debouncer*, else the module's), which owes the
+    refresh that follows. A refresh deferred by the Bug #2022 failure
+    backoff was persisted as a pending trigger, which the refresh scheduler
+    fires once the backoff ends. Any other failure (store or job tracker
+    unavailable) is logged at ERROR and handed to the debouncer for a
+    retry."""
     from code_indexer.global_repos.refresh_failure_recovery import (
         RefreshDeferredError,
     )
     from code_indexer.server.repositories.background_jobs import DuplicateJobError
+    from code_indexer.server.services.job_tracker import (
+        DuplicateJobError as TrackedDuplicateJobError,
+    )
 
+    owed_to = debouncer if debouncer is not None else _debouncer
     try:
         refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
     except RefreshDeferredError as exc:
@@ -359,41 +367,63 @@ def request_cidx_meta_refresh(refresh_scheduler: Any) -> None:
             f"{exc.reason or 'persisted failure backoff'}; "
             f"the refresh scheduler fires it then"
         )
-    except DuplicateJobError as exc:
-        if _debouncer is None:
+    except (DuplicateJobError, TrackedDuplicateJobError) as exc:
+        if owed_to is None:
             logger.warning(f"cidx-meta refresh not retried (no debouncer): {exc}")
             return
-        logger.info(f"cidx-meta refresh debounced for retry: {exc}")
-        _debouncer.signal_dirty()
+        logger.debug(f"cidx-meta refresh debounced for retry: {exc}")
+        owed_to.signal_dirty()
     except Exception as exc:
         logger.error(
             f"cidx-meta refresh request failed (the write itself succeeded; "
-            f"{'retried by the debouncer' if _debouncer else 'not retried'}): "
+            f"{'retried by the debouncer' if owed_to else 'not retried'}): "
             f"{type(exc).__name__}: {exc}"
         )
-        if _debouncer is not None:
-            _debouncer.signal_dirty()
+        if owed_to is not None:
+            owed_to.signal_dirty()
+
+
+def owe_cidx_meta_refresh() -> None:
+    """Owe a cidx-meta refresh for a write made under ANOTHER owner's catalog
+    write lock. A refresh requested now would skip on that lock and owe
+    nothing, so the debouncer carries it to a later refresh."""
+    if _debouncer is None:
+        logger.warning(
+            "cidx-meta write under another writer's lock not retried "
+            "(no debouncer); the lock holder's own refresh must cover it"
+        )
+        return
+    _debouncer.signal_dirty()
 
 
 def atomic_write_description(
     target_path: Path,
     content: str,
     refresh_scheduler: Optional[Any] = None,
-) -> None:
+) -> bool:
     """
-    Write content to target_path atomically via tempfile + os.replace.
+    Write content to target_path atomically.
 
-    Creates a temporary file in the same directory as target_path (same
-    filesystem), writes all content, then swaps atomically.  If
-    refresh_scheduler is provided, acquires the cidx-meta write lock
-    before the write and releases it in a finally block.  Lock acquisition
-    failure propagates to the caller.
+    The temp file is staged in ``_STAGING_DIR_NAME``, a hidden sibling of the
+    real cidx-meta directory (same filesystem), fsync'd, then moved into place
+    with ``os.replace``: neither a snapshot copy nor the backup sync's
+    ``git add -A`` of cidx-meta can see an unfinished file. If
+    refresh_scheduler is provided, acquires the cidx-meta write lock before
+    the write and releases it afterwards. Lock acquisition failure propagates
+    to the caller.
 
     Args:
         target_path: Destination Path object.
         content: Text content to write (UTF-8).
         refresh_scheduler: Optional scheduler exposing acquire_write_lock /
             release_write_lock.  Skipped when None.
+
+    Returns:
+        True when a refresh may be requested now; False when this call's own
+        lock release failed (the lock may still be held, so a refresh
+        requested now would skip) or the catalog directory could not be
+        fsync'd after the description was put in place -- either way the
+        caller owes the refresh to the debouncer.
 
     Raises:
         LifecycleLockUnavailableError: If refresh_scheduler is provided and
@@ -417,29 +447,129 @@ def atomic_write_description(
                 f"{_describe_cidx_meta_holder(refresh_scheduler)} -- retry later"
             )
 
+    released = True
+    durable = True
     try:
-        fd, tmp_path = tempfile.mkstemp(dir=str(target_path.parent), suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(content)
-            os.replace(tmp_path, str(target_path))
-        except Exception:
-            # Best-effort cleanup: remove the temp file so it does not linger.
-            # A failure here is non-fatal; the original exception is the real error.
-            try:
-                os.unlink(tmp_path)
-            except OSError as cleanup_exc:
-                logger.debug(
-                    "atomic_write_description: temp file cleanup failed "
-                    "(non-fatal, original exception will propagate): %s",
-                    cleanup_exc,
-                )
-            raise
+        durable = _write_staged(target_path, content)
     finally:
-        if lock_acquired and refresh_scheduler is not None:
+        if lock_acquired:
+            released = _release_cidx_meta_lock(refresh_scheduler)
+    return released and durable
+
+
+#: Hidden staging directory beside the real cidx-meta directory (same
+#: filesystem, outside the catalog tree) for description temp files.
+_STAGING_DIR_NAME = ".cidx-meta-staging"
+#: A staging temp file older than this was left by a crashed writer.
+_STALE_STAGING_SECONDS = 15 * 60
+
+
+def _sweep_stale_staging(staging_dir: Path) -> None:
+    """Remove staging temp files (``.*.tmp``) older than
+    ``_STALE_STAGING_SECONDS``: a crashed writer's leftovers. Only the staging
+    directory is scanned (the destination lives in the catalog), and a file
+    another writer removes concurrently is tolerated. Cleanup never blocks the
+    write: any other filesystem error ends the sweep with a WARNING."""
+    cutoff = time.time() - _STALE_STAGING_SECONDS
+    try:
+        with os.scandir(staging_dir) as entries:
+            for entry in entries:
+                if not (entry.name.startswith(".") and entry.name.endswith(".tmp")):
+                    continue
+                try:
+                    if entry.is_file(follow_symlinks=False) and (
+                        entry.stat(follow_symlinks=False).st_mtime < cutoff
+                    ):
+                        os.unlink(entry.path)
+                        logger.info(
+                            "Removed stale description staging file %s", entry.path
+                        )
+                except FileNotFoundError:
+                    continue
+    except OSError as exc:
+        logger.warning(
+            "Description staging sweep of %s stopped (%s: %s); the write proceeds",
+            staging_dir,
+            type(exc).__name__,
+            getattr(exc, "filename", None) or staging_dir,
+        )
+
+
+def _write_staged(target_path: Path, content: str) -> bool:
+    """Stage *content* outside the catalog, fsync, and move it into place.
+
+    Returns False when the content is in place but the catalog directory
+    could not be fsync'd (logged): the caller then owes the refresh."""
+    catalog_dir = Path(os.path.realpath(target_path.parent))
+    staging_dir = catalog_dir.parent / _STAGING_DIR_NAME
+    staging_dir.mkdir(exist_ok=True)
+    _sweep_stale_staging(staging_dir)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(staging_dir), prefix=f".{target_path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            # mkstemp creates 0600; a snapshot copy (possibly as another OS
+            # user) must be able to read the description.
+            os.fchmod(fh.fileno(), 0o644)
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, str(catalog_dir / target_path.name))
+    except Exception:
+        # Best-effort cleanup: remove the temp file so it does not linger.
+        # A failure here is non-fatal; the original exception is the real error.
+        try:
+            os.unlink(tmp_path)
+        except OSError as cleanup_exc:
+            logger.debug(
+                "atomic_write_description: temp file cleanup failed "
+                "(non-fatal, original exception will propagate): %s",
+                cleanup_exc,
+            )
+        raise
+    try:
+        dir_fd = os.open(str(catalog_dir), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError as exc:
+        logger.warning(
+            "Description %s is in place but %s could not be fsync'd (%s: %s); "
+            "the refresh is owed to the debouncer",
+            target_path.name,
+            catalog_dir,
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    return True
+
+
+def _release_cidx_meta_lock(refresh_scheduler: Any) -> bool:
+    """Release the lifecycle writer's cidx-meta lock; False (logged) when the
+    release failed or raised, i.e. the lock may still be held."""
+    try:
+        released = bool(
             refresh_scheduler.release_write_lock(
                 "cidx-meta", owner_name="lifecycle_writer"
             )
+        )
+    except Exception as exc:
+        logger.warning(
+            "cidx-meta write lock release raised (%s: %s); the refresh is "
+            "owed to the debouncer",
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    if not released:
+        logger.warning(
+            "cidx-meta write lock release failed for lifecycle_writer; the "
+            "refresh is owed to the debouncer"
+        )
+    return released
 
 
 def on_repo_added(
@@ -607,46 +737,42 @@ def on_repo_added(
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    # Single atomic write with (verified or original) content — always ONCE.
-    # Bug #1506 7th-pass review: forward the configured module-level
-    # _refresh_scheduler so the cidx-meta write-lock protection added to
-    # atomic_write_description() in the 6th-pass review actually engages on
-    # this real production writer (it was previously called with no
-    # scheduler, making the lock check inert here). A LifecycleLockUnavailable
-    # Error raised here propagates out of on_repo_added(); both real callers
-    # (golden_repo_manager.py) already wrap this call in a broad
-    # try/except Exception that logs and continues without failing golden
-    # repo registration, so this is a safe, already-handled failure mode.
-    atomic_write_description(
-        md_file, verified_content, refresh_scheduler=_refresh_scheduler
+    # Single atomic write with (verified or original) content — always ONCE
+    # (the content is generated once, above). Bug #1506 7th-pass review: the
+    # configured module-level _refresh_scheduler is forwarded so the write
+    # takes the cidx-meta write lock when it is free.
+    from code_indexer.global_repos.lifecycle_batch_runner import (
+        LifecycleLockUnavailableError,
     )
 
-    logger.info(f"Created meta description file: {md_file}")
+    try:
+        refresh_now = atomic_write_description(
+            md_file, verified_content, refresh_scheduler=_refresh_scheduler
+        )
+    except LifecycleLockUnavailableError as lock_busy:
+        # The lock stayed busy past the bounded retry (a refresh across
+        # indexing and publish, write mode, the dependency map...). The
+        # description is never discarded: it is written atomically now, and
+        # the refresh is owed to the debouncer since one requested now would
+        # skip on the held lock.
+        atomic_write_description(md_file, verified_content, refresh_scheduler=None)
+        logger.info(
+            f"Created meta description file {md_file} while the cidx-meta "
+            f"write lock was held ({lock_busy}); the refresh is owed to the "
+            f"debouncer"
+        )
+        refresh_now = False
+    else:
+        logger.info(f"Created meta description file: {md_file}")
 
-    # Trigger cidx-meta reindex to make the new description searchable
+    # Trigger cidx-meta reindex to make the new description searchable, once
+    # no lock of ours can still be held.
     if _refresh_scheduler is not None:
-        try:
-            _refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
-            logger.info(f"Triggered cidx-meta refresh after adding {repo_name}")
-        except Exception as e:
-            from code_indexer.server.repositories.background_jobs import (
-                DuplicateJobError,
-            )
-
-            if isinstance(e, DuplicateJobError):
-                if _debouncer is not None:
-                    _debouncer.signal_dirty()
-                    logger.info(
-                        f"cidx-meta refresh deferred (debounced) for {repo_name}"
-                    )
-                else:
-                    logger.warning(
-                        f"cidx-meta refresh skipped for {repo_name}: no debouncer"
-                    )
-            else:
-                logger.warning(
-                    f"Failed to trigger cidx-meta refresh for {repo_name}: {e}"
-                )
+        if refresh_now:
+            request_cidx_meta_refresh(_refresh_scheduler)
+            logger.info(f"Requested cidx-meta refresh after adding {repo_name}")
+        else:
+            owe_cidx_meta_refresh()
 
 
 def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
@@ -676,6 +802,11 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
     # Delete .md file if it exists
     if md_file.exists():
         _lock_acquired = False
+        # True while a refresh requested now would skip on a held lock: the
+        # lock stayed busy past the bounded retry (any holder), or our own
+        # release failed. The deletion is never skipped; the refresh is then
+        # owed to the debouncer.
+        _lock_still_held = False
         if _refresh_scheduler is not None:
             try:
                 _lock_acquired = _acquire_cidx_meta_lock_with_bounded_retry(
@@ -686,57 +817,35 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
                     "on_repo_removed: could not acquire write lock: %s", _lock_err
                 )
             if not _lock_acquired:
-                logger.warning(
-                    "on_repo_removed: write lock not acquired, skipping "
-                    "deletion of %s -- %s",
+                _lock_still_held = True
+                logger.info(
+                    "on_repo_removed: deleting %s while the cidx-meta write lock "
+                    "is held -- %s; the refresh is owed to the debouncer",
                     md_file,
                     _describe_cidx_meta_holder(_refresh_scheduler),
                 )
-                return
+        _deleted = False
         try:
             md_file.unlink()
+            _deleted = True
             logger.info(f"Deleted meta description file: {md_file}")
-
-            # Trigger cidx-meta reindex after successful deletion
-            if _refresh_scheduler is not None:
-                try:
-                    _refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
-                    logger.info(
-                        f"Triggered cidx-meta refresh after removing {repo_name}"
-                    )
-                except Exception as e:
-                    from code_indexer.server.repositories.background_jobs import (
-                        DuplicateJobError,
-                    )
-
-                    if isinstance(e, DuplicateJobError):
-                        if _debouncer is not None:
-                            _debouncer.signal_dirty()
-                            logger.info(
-                                f"cidx-meta refresh deferred (debounced) for {repo_name}"
-                            )
-                        else:
-                            logger.warning(
-                                f"cidx-meta refresh skipped for {repo_name}: no debouncer"
-                            )
-                    else:
-                        logger.warning(
-                            f"Failed to trigger cidx-meta refresh for {repo_name}: {e}"
-                        )
-
         except Exception as e:
             logger.error(
                 f"Failed to delete meta description for {repo_name}: {e}", exc_info=True
             )
             # Don't crash the golden repo remove operation - log and continue
         finally:
-            if _lock_acquired and _refresh_scheduler is not None:
-                try:
-                    _refresh_scheduler.release_write_lock(
-                        "cidx-meta", owner_name="lifecycle_writer"
-                    )
-                except Exception:
-                    pass
+            if _lock_acquired and not _release_cidx_meta_lock(_refresh_scheduler):
+                _lock_still_held = True
+
+        # Trigger cidx-meta reindex after the deletion, once the write lock is
+        # released (a refresh starting under the lock skips and owes nothing).
+        if _deleted and _refresh_scheduler is not None:
+            if _lock_still_held:
+                owe_cidx_meta_refresh()
+            else:
+                request_cidx_meta_refresh(_refresh_scheduler)
+                logger.info(f"Requested cidx-meta refresh after removing {repo_name}")
     else:
         logger.debug(f"No meta description file to delete for {repo_name}")
 

@@ -231,6 +231,7 @@ class VoyageRerankerClient(RerankerClient):
 
             from code_indexer.server.services.embedding_call_instrumentation import (
                 instrument_call,
+                voyage_usage_tokens,
             )
 
             response = instrument_call(
@@ -238,7 +239,7 @@ class VoyageRerankerClient(RerankerClient):
                 call_type="rerank",
                 model=self._get_model(),
                 item_count=len(documents),
-                token_count=0,
+                tokens_from_result=voyage_usage_tokens,
                 batch_size=len(documents),
                 purpose="query",
                 fn=_do_post_and_validate,
@@ -595,6 +596,7 @@ class CohereRerankerClient(RerankerClient):
                 return _response
 
             from code_indexer.server.services.embedding_call_instrumentation import (
+                cohere_rerank_billed_tokens,
                 instrument_call,
             )
 
@@ -603,7 +605,7 @@ class CohereRerankerClient(RerankerClient):
                 call_type="rerank",
                 model=self._get_model(),
                 item_count=len(documents),
-                token_count=0,
+                tokens_from_result=cohere_rerank_billed_tokens,
                 batch_size=len(documents),
                 purpose="query",
                 fn=_do_post_and_validate,

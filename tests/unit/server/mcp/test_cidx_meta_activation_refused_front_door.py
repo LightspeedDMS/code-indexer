@@ -38,6 +38,7 @@ from tests.unit.server.query.query_repo_access_env import (
     CATALOG_FILE,
     CATALOG_TEXT,
     GRANTED_REPO,
+    GRANTED_REPOS,
     UNGRANTED_REPO,
     USER,
     QueryAccessEnv,
@@ -220,6 +221,30 @@ class TestActivationRefused:
         _refusal(body, CIDX_META_REPO)
         assert _activations(env, POWER) == []
 
+    def test_manage_composite_named_like_the_catalog_is_refused(self, client, env):
+        def _create(user_alias: str, golden: List[str]) -> Dict[str, Any]:
+            return {
+                "operation": "create",
+                "user_alias": user_alias,
+                "golden_repo_aliases": golden,
+            }
+
+        named = _mcp(
+            client,
+            POWER,
+            "manage_composite_repository",
+            _create(CIDX_META_REPO, list(GRANTED_REPOS)),
+        )
+        ungranted = _mcp(
+            client,
+            POWER,
+            "manage_composite_repository",
+            _create("my-composite", [GRANTED_REPO, UNGRANTED_REPO]),
+        )
+
+        assert _refusal(named, CIDX_META_REPO) == _refusal(ungranted, UNGRANTED_REPO)
+        assert _activations(env, POWER) == []
+
     def test_json_array_string_aliases_are_refused_like_an_ungranted_repo(
         self, client, env
     ):
@@ -351,12 +376,26 @@ class TestUnchanged:
 
         assert CATALOG_TEXT in _file_text(_payload(body))
 
-    def test_shared_catalog_read_for_a_normal_user_is_unchanged(self, client, env):
-        body = _mcp(
+    def test_normal_user_reads_granted_descriptions_but_not_other_catalog_files(
+        self, client, env
+    ):
+        catalog = Path(env.golden_repo_manager.golden_repos_dir) / CIDX_META_REPO
+        (catalog / f"{GRANTED_REPO}.md").write_text(f"{README_TEXT}\n")
+
+        granted = _mcp(
             client,
             USER,
             "get_file_content",
-            {"repository_alias": META_GLOBAL, "file_path": README},
+            {"repository_alias": META_GLOBAL, "file_path": f"{GRANTED_REPO}.md"},
+        )
+        readme = _payload(
+            _mcp(
+                client,
+                USER,
+                "get_file_content",
+                {"repository_alias": META_GLOBAL, "file_path": README},
+            )
         )
 
-        assert README_TEXT in _file_text(_payload(body))
+        assert README_TEXT in _file_text(_payload(granted))
+        assert readme["success"] is False

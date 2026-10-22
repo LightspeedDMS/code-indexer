@@ -762,7 +762,14 @@ def handle_xray_search_batch(
     repo_errors: List[Dict[str, Any]] = []
     resolved_repos: List[Dict[str, Any]] = []
 
+    from .xray._catalog_guard import catalog_xray_refusal
+
+    access_service = _get_access_filtering_service()
     for alias in aliases:
+        catalog_refusal = catalog_xray_refusal(alias, user.username, access_service)
+        if catalog_refusal is not None:
+            repo_errors.append({"error_level": "repo", **catalog_refusal})
+            continue
         # Try direct resolution.
         path_str = _resolve_repo_path(alias)
 

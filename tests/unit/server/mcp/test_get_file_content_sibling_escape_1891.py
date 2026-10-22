@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, cast
 from unittest.mock import MagicMock, patch
@@ -83,12 +84,24 @@ def _call_handler(params: Dict[str, Any], repo_root):
     arm = MagicMock()
     arm.get_activated_repo_path.return_value = str(repo_root)
 
+    # The caller has no activation named like the alias (catalog detection
+    # reads it); with no golden repo manager the bare-to-global fallback
+    # stays disabled.
+    activations = MagicMock()
+    activations.get_repository.return_value = None
+
     original_arm = getattr(file_service, "_activated_repo_manager_lazy", None)
     file_service._activated_repo_manager_lazy = arm
     try:
+        # A configured golden directory lets the door confirm the served
+        # directory is not the catalog.
         with (
-            patch(_ARM_PATH, new=None),
+            patch(_ARM_PATH, new=activations),
             patch(_GRM_PATH, new=None),
+            patch(
+                "code_indexer.server.mcp.handlers.files._get_golden_repos_dir",
+                return_value=str(Path(repo_root).parent),
+            ),
         ):
             return get_file_content(params, user)
     finally:

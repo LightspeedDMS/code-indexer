@@ -22,6 +22,7 @@ from code_indexer.server.services.access_filtering_service import (
 from code_indexer.server.services.analysis_agent_principal import (
     analysis_agent_tool_refusal,
 )
+from code_indexer.server.services.cidx_meta_access import acting_scope
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.repo_access_guard import catalog_aliases
 from sse_starlette.sse import EventSourceResponse
@@ -859,7 +860,7 @@ def _check_repository_access(
         for param_name, value in present:
             if param_name in ("golden_repo_alias", "golden_repo_aliases"):
                 requested.extend(value if isinstance(value, list) else [value])
-        catalog = catalog_aliases(requested)
+        catalog = catalog_aliases(requested + [arguments.get("user_alias")])
         if catalog and not _is_admin():
             _deny_single(catalog[0])
 
@@ -949,11 +950,12 @@ def _authorize_tool_call(
     arguments: Dict[str, Any],
     effective_user: User,
     tool_access_memo: ToolAccessMemo,
-) -> None:
+) -> Optional[Set[str]]:
     """Every authorization step of one ``tools/call``, in order; raises
     ValueError on the first refusal and pops ``acting_users`` from
     *arguments*. It reads the group, grant and activation stores
-    synchronously: :func:`_dispatch_tool_call` runs it on a worker thread."""
+    synchronously: :func:`_dispatch_tool_call` runs it on a worker thread.
+    Returns the acting-users repository scope (None without one)."""
     from .tools import TOOL_REGISTRY
 
     # Invariant for per-group tool grants (Bug #2076): a grant may only
@@ -986,6 +988,7 @@ def _authorize_tool_call(
     # Story #319: Centralized repository access guard.
     # Check repo access BEFORE invoking handler, using effective_user.
     # Lazy import to avoid circular dependency (handlers imports from protocol).
+    _scoped_repos: Optional[Set[str]] = None
     try:
         from code_indexer.server.mcp import handlers as _handlers_module
 
@@ -996,7 +999,6 @@ def _authorize_tool_call(
         # A missing service or user manager raises AttributeError here (the
         # "service unavailable" refusal below); a failure inside a read
         # fails closed with a fixed message (_read_for_access_check).
-        _scoped_repos = None
         if acting_users_emails is not None:
             _is_admin_user = _access_service.is_admin_user
             if _read_for_access_check(
@@ -1052,6 +1054,7 @@ def _authorize_tool_call(
             "Access filtering service not available for tool %s (no repo param), proceeding",
             tool_name,
         )
+    return _scoped_repos
 
 
 async def _dispatch_tool_call(
@@ -1084,7 +1087,7 @@ async def _dispatch_tool_call(
     # Every authorization step reads the group, grant and activation stores
     # (database and filesystem I/O): run them, in order, on a worker thread,
     # never on the event loop.
-    await anyio.to_thread.run_sync(
+    scoped_repos = await anyio.to_thread.run_sync(
         functools.partial(
             _authorize_tool_call,
             tool_name,
@@ -1132,11 +1135,48 @@ async def _dispatch_tool_call(
         # Graceful degradation: if service unavailable, continue without tracing
         logger.debug("Langfuse service unavailable, skipping span logging: %s", e)
 
-    # If we should intercept and service is available, wrap with span logging
-    if should_intercept and langfuse_service:
-        # Create async wrapper for handler execution
-        async def handler_wrapper():
-            return await _invoke_handler(
+    # The acting-users scope is bound for the handler call only; the context
+    # copied into a sync handler's worker thread carries it.
+    with acting_scope(scoped_repos):
+        # If we should intercept and service is available, wrap with span logging
+        if should_intercept and langfuse_service:
+            # Create async wrapper for handler execution
+            async def handler_wrapper():
+                return await _invoke_handler(
+                    handler,
+                    arguments,
+                    effective_user,
+                    session_state,
+                    sig,
+                    is_async,
+                    session_id=session_id,
+                    elevation_key=elevation_key,
+                    timeout_seconds=handler_timeout,
+                    http_request=http_request,
+                    http_response=http_response,
+                    tool_access_memo=tool_access_memo,
+                )
+
+            # Execute through span interceptor
+            try:
+                result = await langfuse_service.span_logger.intercept_tool_call(
+                    session_id=session_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    handler=handler_wrapper,
+                    username=user.username,
+                )
+            except Exception as e:
+                # If span logging fails, execute handler directly (graceful degradation)
+                logger.debug(
+                    "Span logging failed for tool %s, continuing without tracing: %s",
+                    tool_name,
+                    e,
+                )
+                result = await handler_wrapper()
+        else:
+            # No interception - execute handler directly
+            result = await _invoke_handler(
                 handler,
                 arguments,
                 effective_user,
@@ -1148,43 +1188,9 @@ async def _dispatch_tool_call(
                 timeout_seconds=handler_timeout,
                 http_request=http_request,
                 http_response=http_response,
+                tool_name=tool_name,
                 tool_access_memo=tool_access_memo,
             )
-
-        # Execute through span interceptor
-        try:
-            result = await langfuse_service.span_logger.intercept_tool_call(
-                session_id=session_id,
-                tool_name=tool_name,
-                arguments=arguments,
-                handler=handler_wrapper,
-                username=user.username,
-            )
-        except Exception as e:
-            # If span logging fails, execute handler directly (graceful degradation)
-            logger.debug(
-                "Span logging failed for tool %s, continuing without tracing: %s",
-                tool_name,
-                e,
-            )
-            result = await handler_wrapper()
-    else:
-        # No interception - execute handler directly
-        result = await _invoke_handler(
-            handler,
-            arguments,
-            effective_user,
-            session_state,
-            sig,
-            is_async,
-            session_id=session_id,
-            elevation_key=elevation_key,
-            timeout_seconds=handler_timeout,
-            http_request=http_request,
-            http_response=http_response,
-            tool_name=tool_name,
-            tool_access_memo=tool_access_memo,
-        )
 
     # Bug #350: Protocol-level API metrics tracking.
     # Track all MCP tool calls except self-tracking tools.

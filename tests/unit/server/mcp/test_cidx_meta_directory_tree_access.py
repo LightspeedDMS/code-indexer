@@ -27,7 +27,7 @@ def _make_tree_result(filenames: list) -> DirectoryTreeResult:
         is_directory=True,
         children=children,
     )
-    # Build a simple tree_string matching the format _format_tree_string produces
+    # Build a simple tree_string matching the format format_tree_string produces
     lines = ["cidx-meta/"]
     for i, name in enumerate(filenames):
         connector = "+--" if i == len(filenames) - 1 else "|--"
@@ -79,7 +79,7 @@ class TestDirectoryTreeCidxMetaAccessFiltering:
         """
         Finding 1: regular_user (cidx-meta only) calls directory_tree on cidx-meta.
         repo-a.md, repo-b.md, repo-c.md must not appear in children or tree_string.
-        README.md is not a repo-specific file and must be visible.
+        README.md is denied by default and must not be visible either.
         """
         result = self._call_handle("cidx-meta", regular_user, access_filtering_service)
 
@@ -91,14 +91,14 @@ class TestDirectoryTreeCidxMetaAccessFiltering:
         assert "repo-a.md" not in child_names
         assert "repo-b.md" not in child_names
         assert "repo-c.md" not in child_names
-        assert "README.md" in child_names
+        assert "README.md" not in child_names
 
         # Check tree_string does not leak unauthorized names
         tree_str = data["tree_string"]
         assert "repo-a.md" not in tree_str
         assert "repo-b.md" not in tree_str
         assert "repo-c.md" not in tree_str
-        assert "README.md" in tree_str
+        assert "README.md" not in tree_str
 
     def test_power_user_sees_only_accessible_files_in_tree(
         self, power_user, access_filtering_service
@@ -115,43 +115,56 @@ class TestDirectoryTreeCidxMetaAccessFiltering:
         child_names = [c["name"] for c in data["root"]["children"]]
         assert "repo-a.md" in child_names
         assert "repo-b.md" in child_names
-        assert "README.md" in child_names
+        assert "README.md" not in child_names
         assert "repo-c.md" not in child_names
 
         tree_str = data["tree_string"]
         assert "repo-a.md" in tree_str
         assert "repo-b.md" in tree_str
-        assert "README.md" in tree_str
+        assert "README.md" not in tree_str
         assert "repo-c.md" not in tree_str
 
-    def test_no_access_filtering_service_returns_full_tree(self, regular_user):
-        """If access_filtering_service is not configured, all files are returned."""
+    def test_no_access_filtering_service_shows_no_files(self, regular_user):
+        """If access_filtering_service is not configured, no file is shown."""
         result = self._call_handle("cidx-meta", regular_user, None)
 
         data = extract_mcp_data(result)
         assert data["success"] is True
 
         child_names = [c["name"] for c in data["root"]["children"]]
-        assert len(child_names) == 4
+        assert child_names == []
 
         tree_str = data["tree_string"]
         for name in _ALL_FILES:
-            assert name in tree_str
+            assert name not in tree_str
 
     def test_non_cidx_meta_repo_is_not_filtered(
-        self, regular_user, access_filtering_service
+        self, power_user, access_filtering_service, tmp_path
     ):
         """Non-cidx-meta repos must not have filtering applied."""
         fake_tree = _make_tree_result(["src/auth.py", "src/secret.py"])
         mock_explorer = MagicMock()
         mock_explorer.generate_tree.return_value = fake_tree
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value="/fake/golden-repos",
+        no_activation = MagicMock()
+        no_activation.get_repository.return_value = None
+        no_activation.user_has_activated_repo.return_value = False
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.files._activations",
+                return_value=no_activation,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/fake/golden-repos",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.files._get_golden_repos_dir",
+                return_value=str(tmp_path),
+            ),
         ):
             with patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path",
-                return_value="/fake/golden-repos/some-other-repo",
+                return_value="/fake/golden-repos/repo-a",
             ):
                 with patch(
                     "code_indexer.global_repos.directory_explorer.DirectoryExplorerService",
@@ -162,7 +175,7 @@ class TestDirectoryTreeCidxMetaAccessFiltering:
                         return_value=access_filtering_service,
                     ):
                         result = handle_directory_tree(
-                            {"repository_alias": "some-other-repo"}, regular_user
+                            {"repository_alias": "repo-a"}, power_user
                         )
 
         data = extract_mcp_data(result)

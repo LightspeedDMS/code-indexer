@@ -169,7 +169,11 @@ def _voyage_embed_200(dims: int = 1024) -> Callable[[httpx.Request], httpx.Respo
         payload = json.loads(request.content.decode())
         texts = payload["input"]
         data = [{"embedding": [0.1] * dims} for _ in texts]
-        return httpx.Response(200, json={"data": data}, request=request)
+        return httpx.Response(
+            200,
+            json={"data": data, "usage": {"total_tokens": len(texts)}},
+            request=request,
+        )
 
     return _outcome
 

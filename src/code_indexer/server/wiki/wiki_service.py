@@ -25,6 +25,27 @@ _URL_SCHEME = re.compile(r"^\s*[A-Za-z][A-Za-z0-9+.\-]*:")
 class WikiService:
     """Renders markdown articles with front matter parsing and image path rewriting."""
 
+    def render_article_text(
+        self,
+        raw_content: str,
+        file_path: Path,
+        repo_alias: str,
+        wiki_config: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """``render_article`` of *raw_content* (the text of *file_path*,
+        which names the article for its fallback title)."""
+        metadata, content = self._strip_front_matter(raw_content)
+        # AC1/AC2: Skip header block parsing when toggle is OFF
+        header_parsing_enabled = True
+        if wiki_config is not None and not wiki_config.enable_header_block_parsing:
+            header_parsing_enabled = False
+        if header_parsing_enabled:
+            content = self._strip_header_block(content, metadata)
+        title = self._extract_title(metadata, file_path)
+        html = self._render_markdown(content)
+        html = self._rewrite_image_paths(html, repo_alias)
+        return {"html": html, "title": title, "metadata": metadata}
+
     def render_article(
         self,
         file_path: Path,
@@ -40,17 +61,7 @@ class WikiService:
                          None means "use all defaults" (same as WikiConfig()).
         """
         raw_content = file_path.read_text(encoding="utf-8")
-        metadata, content = self._strip_front_matter(raw_content)
-        # AC1/AC2: Skip header block parsing when toggle is OFF
-        header_parsing_enabled = True
-        if wiki_config is not None and not wiki_config.enable_header_block_parsing:
-            header_parsing_enabled = False
-        if header_parsing_enabled:
-            content = self._strip_header_block(content, metadata)
-        title = self._extract_title(metadata, file_path)
-        html = self._render_markdown(content)
-        html = self._rewrite_image_paths(html, repo_alias)
-        return {"html": html, "title": title, "metadata": metadata}
+        return self.render_article_text(raw_content, file_path, repo_alias, wiki_config)
 
     def _strip_front_matter(self, content: str) -> Tuple[Dict[str, Any], str]:
         """Parse YAML front matter, return (metadata, content_without_frontmatter)."""

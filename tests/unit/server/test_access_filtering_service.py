@@ -117,9 +117,11 @@ class TestFilterQueryResultsAC1AC2:
     def test_users_group_filters_out_inaccessible_repos(
         self, group_access_manager, access_filtering_service
     ):
-        """AC1: User in users group only sees results from cidx-meta."""
+        """AC1: User in users group only sees results from granted repos; a
+        catalog row is never returned raw (f1.py is no catalog path)."""
         users = group_access_manager.get_group_by_name("users")
         group_access_manager.assign_user_to_group("test_user", users.id, "admin")
+        group_access_manager.grant_repo_access("repo-a", users.id, "admin")
 
         results = [
             MockQueryResult("f1.py", 10, "code1", 0.95, "cidx-meta"),
@@ -129,8 +131,7 @@ class TestFilterQueryResultsAC1AC2:
 
         filtered = access_filtering_service.filter_query_results(results, "test_user")
 
-        assert len(filtered) == 1
-        assert filtered[0].repository_alias == "cidx-meta"
+        assert [r.repository_alias for r in filtered] == ["repo-a"]
 
     def test_admins_see_all_results(
         self, group_access_manager, access_filtering_service
@@ -152,9 +153,11 @@ class TestFilterQueryResultsAC1AC2:
     def test_filter_works_with_dict_results(
         self, group_access_manager, access_filtering_service
     ):
-        """Test that filtering works with dictionary results (API format)."""
+        """Test that filtering works with dictionary results (API format); a
+        catalog row is never returned raw (f1.py is no catalog path)."""
         users = group_access_manager.get_group_by_name("users")
         group_access_manager.assign_user_to_group("test_user", users.id, "admin")
+        group_access_manager.grant_repo_access("repo-a", users.id, "admin")
 
         # API returns dict format, not dataclass
         results = [
@@ -165,8 +168,7 @@ class TestFilterQueryResultsAC1AC2:
 
         filtered = access_filtering_service.filter_query_results(results, "test_user")
 
-        assert len(filtered) == 1
-        assert filtered[0]["repository_alias"] == "cidx-meta"
+        assert [r["repository_alias"] for r in filtered] == ["repo-a"]
 
 
 @pytest.mark.slow
@@ -199,63 +201,6 @@ class TestFilterRepoListing:
         filtered = access_filtering_service.filter_repo_listing(all_repos, "admin_user")
 
         assert len(filtered) == 4
-
-
-@pytest.mark.slow
-class TestFilterCidxMetaResults:
-    """Tests for AC3: cidx-meta Summary Filtering."""
-
-    def test_cidx_meta_summaries_filtered_by_accessible_repos(
-        self, group_access_manager, access_filtering_service
-    ):
-        """AC3: Summaries referencing inaccessible repos are filtered."""
-        users = group_access_manager.get_group_by_name("users")
-        group_access_manager.assign_user_to_group("test_user", users.id, "admin")
-
-        results = [
-            MockQueryResult(
-                "sum1.md",
-                1,
-                "Summary of cidx-meta",
-                0.95,
-                "cidx-meta",
-                metadata={"referenced_repo": "cidx-meta"},
-            ),
-            MockQueryResult(
-                "sum2.md",
-                1,
-                "Summary of repo-a",
-                0.90,
-                "cidx-meta",
-                metadata={"referenced_repo": "repo-a"},
-            ),
-        ]
-
-        filtered = access_filtering_service.filter_cidx_meta_results(
-            results, "test_user"
-        )
-
-        assert len(filtered) == 1
-        assert filtered[0].metadata["referenced_repo"] == "cidx-meta"
-
-    def test_cidx_meta_results_without_metadata_pass_through(
-        self, group_access_manager, access_filtering_service
-    ):
-        """Results without referenced_repo metadata should pass through."""
-        users = group_access_manager.get_group_by_name("users")
-        group_access_manager.assign_user_to_group("test_user", users.id, "admin")
-
-        results = [
-            MockQueryResult(
-                "general.md", 1, "General content", 0.95, "cidx-meta", metadata=None
-            ),
-        ]
-
-        filtered = access_filtering_service.filter_cidx_meta_results(
-            results, "test_user"
-        )
-
-        assert len(filtered) == 1
 
 
 @pytest.mark.slow

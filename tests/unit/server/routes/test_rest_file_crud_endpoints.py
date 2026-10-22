@@ -11,7 +11,7 @@ import pytest
 from datetime import datetime, timezone
 from fastapi import status
 from fastapi.testclient import TestClient
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from code_indexer.server.app import create_app
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -31,11 +31,11 @@ def client(app):
 
 @pytest.fixture
 def mock_user():
-    """Create mock authenticated user."""
+    """Create mock authenticated user holding repository:write."""
     return User(
         username="testuser",
         password_hash="hash",
-        role=UserRole.NORMAL_USER,
+        role=UserRole.POWER_USER,
         created_at=datetime.now(timezone.utc),
     )
 
@@ -95,6 +95,7 @@ class TestCreateFileEndpoint:
                     file_path="src/test.py",
                     content="print('hello')",
                     username="testuser",
+                    access_for=ANY,
                 )
         finally:
             # Clean up dependency override
@@ -109,6 +110,33 @@ class TestCreateFileEndpoint:
 
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
         assert "WWW-Authenticate" in response.headers
+
+    def test_create_file_endpoint_requires_write_permission(self, app, client):
+        """A caller without repository:write is refused before the service."""
+        from code_indexer.server.auth.dependencies import get_current_user
+
+        lower = User(
+            username="testuser",
+            password_hash="hash",
+            role=UserRole.NORMAL_USER,
+            created_at=datetime.now(timezone.utc),
+        )
+        app.dependency_overrides[get_current_user] = lambda: lower
+        try:
+            with patch(
+                "code_indexer.server.routers.files.file_crud_service"
+            ) as mock_service:
+                response = client.post(
+                    "/api/v1/repos/test-repo/files",
+                    json={"file_path": "src/test.py", "content": "x"},
+                )
+                assert response.status_code == status.HTTP_403_FORBIDDEN
+                assert response.json() == {
+                    "detail": "Insufficient permissions: repository:write required"
+                }
+                mock_service.create_file.assert_not_called()
+        finally:
+            app.dependency_overrides.clear()
 
     def test_create_file_endpoint_git_blocked(self, app, client, mock_user):
         """Test create file in .git/ directory returns 403."""

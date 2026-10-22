@@ -1399,6 +1399,13 @@ class CIDXDaemonService(Service):
                 "error": stats.get("error"),
                 "stats": stats,
             }
+        elif stats["status"] == "stopping":
+            return {
+                "running": False,
+                "stopping": True,
+                "project_path": stats["project_path"],
+                "stats": stats,
+            }
         else:
             return {
                 "running": False,

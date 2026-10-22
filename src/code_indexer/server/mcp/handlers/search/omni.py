@@ -33,6 +33,7 @@ from .._utils import (
     _expand_wildcard_patterns,
     _format_omni_response,
     _get_access_filtering_service,
+    _get_activated_repo_manager,
     _get_temporal_status,
     _get_wiki_enabled_repos,
     _is_temporal_query,
@@ -244,6 +245,24 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     )
 
     search_type = _resolve_search_type(params, user)
+    if search_type == "fts":
+        from ....query.semantic_query_manager import SearchParameterError
+        from ....services.cidx_meta_access.catalog_fulltext import (
+            refuse_unevaluable_catalog_fulltext,
+        )
+
+        try:
+            refuse_unevaluable_catalog_fulltext(
+                str(params.get("query_text", "") or ""),
+                0,
+                repo_aliases,
+                None,
+                user.username,
+                _get_access_filtering_service(),
+                _get_activated_repo_manager(),
+            )
+        except SearchParameterError as refusal:
+            return _mcp_response({"success": False, "error": str(refusal)})
     effective_limit = _compute_effective_limit(requested_limit, user)
     request = _build_multi_search_request(
         repo_aliases, params, search_type, effective_limit
@@ -309,11 +328,30 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             errors={"service_error": classify_search_error(e).message}
         )
 
+    if search_type == "fts":
+        from ....services.cidx_meta_access.catalog_search import (
+            project_multi_fulltext,
+        )
+
+        # Catalog groups are built per document the caller is shown.
+        project_multi_fulltext(
+            response,
+            request,
+            lambda: service.per_repo_limit(request),
+            user.username,
+            _get_access_filtering_service(),
+        )
     category_map = _load_category_map("_omni_search_code")
     all_results = _flatten_multi_results(
         response, category_map, _get_wiki_enabled_repos()
     )
     errors = _filter_errors_for_user(response.errors or {}, user)
+    # Access filter (catalog rows projected) before the limit and the cache.
+    access_filtering_service = _get_access_filtering_service()
+    if access_filtering_service:
+        all_results = access_filtering_service.filter_query_results(
+            all_results, user.username
+        )
     final_results = _aggregate_results(all_results, aggregation_mode, requested_limit)
 
     response_format = params.get(
@@ -324,13 +362,6 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         final_results, fts_truncation_meta = _apply_search_truncation(
             final_results, search_mode, params, owner=user.username
         )
-
-    access_filtering_service = _get_access_filtering_service()
-    if access_filtering_service:
-        final_results = access_filtering_service.filter_query_results(
-            final_results, user.username
-        )
-        final_results = final_results[:requested_limit]
 
     formatted = _format_omni_response(
         all_results=final_results,

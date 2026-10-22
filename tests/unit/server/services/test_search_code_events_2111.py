@@ -350,7 +350,9 @@ class TestRejections:
 
 
 class _ThreeActivated(_Repos):
-    """ActivatedRepoManager stand-in with three activated repositories."""
+    """ActivatedRepoManager stand-in with three activated repositories; each
+    record names its golden source, as every stored single-repository
+    activation does."""
 
     _ALIASES = ["repo-a", "repo-b", "repo-c"]
 
@@ -358,7 +360,10 @@ class _ThreeActivated(_Repos):
         self.activated_repos_dir = str(directory)
 
     def list_activated_repositories(self, username: str) -> List[Dict[str, Any]]:
-        return [{"user_alias": a, "username": username} for a in self._ALIASES]
+        return [
+            {"user_alias": a, "username": username, "golden_repo_alias": a}
+            for a in self._ALIASES
+        ]
 
     def get_activated_repo_path(self, username: str, alias: str) -> str:
         return self.activated_repos_dir
@@ -488,7 +493,7 @@ class TestOnlySearchedRepositoriesGetRows:
         repos = _ListedRepos(
             tmp_path,
             [
-                {"user_alias": "repo-a"},
+                {"user_alias": "repo-a", "golden_repo_alias": "repo-a"},
                 {"user_alias": "repo-b-global", "is_global": True},
             ],
         )
@@ -501,9 +506,9 @@ class TestOnlySearchedRepositoriesGetRows:
         repos = _ListedRepos(
             tmp_path,
             [
-                {"user_alias": "repo-a"},
-                {"user_alias": "repo-b"},
-                {"user_alias": "repo-c"},
+                {"user_alias": "repo-a", "golden_repo_alias": "repo-a"},
+                {"user_alias": "repo-b", "golden_repo_alias": "repo-b"},
+                {"user_alias": "repo-c", "golden_repo_alias": "repo-c"},
             ],
         )
         searched: List[str] = []

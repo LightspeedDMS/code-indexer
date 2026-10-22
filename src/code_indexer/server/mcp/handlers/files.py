@@ -14,6 +14,23 @@ from pathlib import Path
 
 from code_indexer.server.auth.user_manager import User
 from . import _utils
+from code_indexer.server.services.cidx_meta_access.catalog_requests import (
+    resolve_served_repository,
+)
+from code_indexer.server.services.cidx_meta_access.file_doors import (
+    CatalogFileAccess,
+    bound_handles,
+    judge_file_door,
+    served_tree_view,
+)
+from code_indexer.server.services.cidx_meta_access.universe_provider import (
+    registry_of,
+)
+from code_indexer.server.services.cidx_meta_access.tree_projection import (
+    UNSCANNED_LIMIT,
+    catalog_tree_root,
+    restrict_catalog_tree,
+)
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.file_listing_paths import (
     normalize_listing_path,
@@ -406,31 +423,65 @@ def _serialize_file_results(result: Any) -> list:
     ]
 
 
-def _filter_cidx_meta_files(
-    serialized_files: list, repository_alias: Any, user: User
-) -> list:
-    """Bug #336: Filter cidx-meta files to only show repos user can access.
+def _activations() -> Any:
+    return _utils._lazy_module_attr_or_none("activated_repo_manager")
 
-    NOTE: When access_filtering_service is unavailable (e.g. during startup or
-    in test environments), this preserves the existing _legacy.py fail-open
-    behavior and returns files unfiltered with a warning log. Changing to
-    fail-closed would be a behavioral change requiring a separate story.
-    """
-    if not repository_alias or "cidx-meta" not in str(repository_alias):
-        return serialized_files
-    access_filtering_service = _get_access_filtering_service()
-    if not access_filtering_service:
-        logger.warning(
-            "Access filtering service unavailable for cidx-meta filtering; "
-            "returning unfiltered results",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return serialized_files
-    filenames = [Path(f["path"]).name for f in serialized_files]
-    allowed = set(
-        access_filtering_service.filter_cidx_meta_files(filenames, user.username)
+
+def _judge(alias: Any, served_path: Optional[str], user: User) -> CatalogFileAccess:
+    """The request's catalog judgement for the directory actually served
+    (an unconfigured golden directory restricts a restricted caller)."""
+    return judge_file_door(
+        alias,
+        served_path,
+        user.username,
+        _get_access_filtering_service(),
+        _activations(),
+        _golden_dir_or_none(),
+        registry_of(_utils.app_module.app.state),
+        may_write=user.has_permission("repository:write"),
     )
-    return [f for f in serialized_files if Path(f["path"]).name in allowed]
+
+
+def _golden_dir_or_none() -> Optional[str]:
+    try:
+        return _get_golden_repos_dir()
+    except RuntimeError:
+        return None
+
+
+def _promote_bare_alias(repository_alias: Any, user: User) -> Any:
+    """Story #1039: the ``-global`` form of a bare alias the caller has not
+    activated when its golden repository is globally active, else as given."""
+    if not isinstance(repository_alias, str) or repository_alias.endswith("-global"):
+        return repository_alias
+    # Bug #1709: lazy probes never construct the process-wide app singletons.
+    arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+    grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
+    if arm is None or grm is None:
+        return repository_alias
+    if arm.user_has_activated_repo(user.username, repository_alias):
+        return repository_alias
+    from ._global_fallback import try_global_fallback
+
+    promoted = try_global_fallback(repository_alias, grm)
+    if promoted is None:
+        return repository_alias
+    logger.info(
+        "bare-alias fallback: %r -> %r for user %r",
+        repository_alias,
+        promoted,
+        user.username,
+    )
+    return promoted
+
+
+def _activation_dir(alias: str, user: User) -> Optional[str]:
+    """The caller's activation directory for *alias*, from the activation
+    manager the file service serves it with (None without one)."""
+    arm = _utils.app_module.file_service.activated_repo_manager
+    if arm is None:
+        return None
+    return str(arm.get_activated_repo_path(user.username, alias))
 
 
 def _build_browse_path_pattern(
@@ -667,36 +718,6 @@ def _tree_node_to_dict(node: Any) -> dict:
     return result_dict
 
 
-def _filter_cidx_meta_tree(result: Any, user: User) -> Any:
-    """Bug #336: Filter cidx-meta tree to only show repos user can access."""
-    _tree_access_svc = _get_access_filtering_service()
-    if not _tree_access_svc or result.root.children is None:
-        return result
-
-    _all_names = [node.name for node in result.root.children if not node.is_directory]
-    _allowed = set(_tree_access_svc.filter_cidx_meta_files(_all_names, user.username))
-    result.root.children = [
-        node
-        for node in result.root.children
-        if node.is_directory or node.name in _allowed
-    ]
-    _filtered_lines = []
-    for _line in result.tree_string.splitlines():
-        _stripped = _line.strip()
-        _name = _stripped.lstrip("|+- ")
-        if not _name.endswith("/") and _name in _all_names and _name not in _allowed:
-            continue
-        _filtered_lines.append(_line)
-    return result.__class__(
-        root=result.root,
-        tree_string="\n".join(_filtered_lines),
-        total_directories=result.total_directories,
-        total_files=len(result.root.children),
-        max_depth_reached=result.max_depth_reached,
-        root_path=result.root_path,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Omni-list helpers
 # ---------------------------------------------------------------------------
@@ -814,30 +835,8 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, list):
             return _omni_list_files(params, user)
 
-        # Story #1039: bare-to-global alias fallback (read-only handler).
-        if isinstance(repository_alias, str) and not repository_alias.endswith(
-            "-global"
-        ):
-            # Bug #1709: probes via _utils._lazy_module_attr_or_none()
-            # instead of a bare getattr(_utils.app_module, name, None),
-            # which would otherwise permanently construct the process-wide
-            # app singleton as a side effect of merely reading it.
-            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
-            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
-            if _arm is not None and _grm is not None:
-                if not _arm.user_has_activated_repo(user.username, repository_alias):
-                    from ._global_fallback import try_global_fallback
-
-                    _promoted = try_global_fallback(repository_alias, _grm)
-                    if _promoted is not None:
-                        logger.info(
-                            "bare-alias fallback: %r -> %r for user %r",
-                            repository_alias,
-                            _promoted,
-                            user.username,
-                        )
-                        params["repository_alias"] = _promoted
-                        repository_alias = _promoted
+        repository_alias = _promote_bare_alias(repository_alias, user)
+        params["repository_alias"] = repository_alias
 
         path = params.get("path", "")
         recursive = params.get("recursive", True)
@@ -877,22 +876,24 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             if error_resp is not None:
                 return error_resp
 
-            result = _utils.app_module.file_service.list_files_by_path(
-                repo_path=target_path,
-                query_params=query_params,
-            )
+            access = _judge(repository_alias, target_path, user)
+            with bound_handles(access):
+                result = _utils.app_module.file_service.list_files_by_path(
+                    repo_path=target_path, query_params=query_params, access=access
+                )
         else:
-            result = _utils.app_module.file_service.list_files(
-                repo_id=repository_alias,
-                username=user.username,
-                query_params=query_params,
+            access = _judge(
+                repository_alias, _activation_dir(repository_alias, user), user
             )
+            with bound_handles(access):
+                result = _utils.app_module.file_service.list_files(
+                    repo_id=repository_alias,
+                    username=user.username,
+                    query_params=query_params,
+                    access=access,
+                )
 
         serialized_files = _serialize_file_results(result)
-        serialized_files = _filter_cidx_meta_files(
-            serialized_files, repository_alias, user
-        )
-
         return _mcp_response({"success": True, "files": serialized_files})
     except Exception as e:
         logger.exception(
@@ -909,51 +910,9 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(memory_pressure_mcp_payload(_admission))
 
     try:
-        repository_alias = params["repository_alias"]
+        repository_alias = _promote_bare_alias(params["repository_alias"], user)
+        params["repository_alias"] = repository_alias
         file_path = params["file_path"]
-
-        # Story #1039: bare-to-global alias fallback (read-only handler).
-        if isinstance(repository_alias, str) and not repository_alias.endswith(
-            "-global"
-        ):
-            # Bug #1709: probes via _utils._lazy_module_attr_or_none()
-            # instead of a bare getattr(_utils.app_module, name, None),
-            # which would otherwise permanently construct the process-wide
-            # app singleton as a side effect of merely reading it.
-            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
-            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
-            if _arm is not None and _grm is not None:
-                if not _arm.user_has_activated_repo(user.username, repository_alias):
-                    from ._global_fallback import try_global_fallback
-
-                    _promoted = try_global_fallback(repository_alias, _grm)
-                    if _promoted is not None:
-                        logger.info(
-                            "bare-alias fallback: %r -> %r for user %r",
-                            repository_alias,
-                            _promoted,
-                            user.username,
-                        )
-                        params["repository_alias"] = _promoted
-                        repository_alias = _promoted
-
-        # Bug #336: Check cidx-meta file-level access before returning content
-        if repository_alias and "cidx-meta" in repository_alias:
-            access_filtering_svc = _get_access_filtering_service()
-            if access_filtering_svc:
-                basename = Path(file_path).name
-                allowed = access_filtering_svc.filter_cidx_meta_files(
-                    [basename], user.username
-                )
-                if not allowed:
-                    return _mcp_response(
-                        {
-                            "success": False,
-                            "error": f"Access denied: you are not authorized to access '{basename}'",
-                            "file_content": [],
-                            "metadata": {},
-                        }
-                    )
 
         pagination = _parse_pagination_params(params)
         if isinstance(pagination[0], dict):
@@ -967,23 +926,31 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             if error_resp is not None:
                 return error_resp
 
-            result = _utils.app_module.file_service.get_file_content_by_path(
-                repo_path=target_path,
-                file_path=file_path,
-                offset=offset,
-                limit=limit,
-                skip_truncation=True,
-            )
-        else:
-            try:
-                result = _utils.app_module.file_service.get_file_content(
-                    repository_alias=repository_alias,
+            access = _judge(repository_alias, target_path, user)
+            with bound_handles(access):
+                result = _utils.app_module.file_service.get_file_content_by_path(
+                    repo_path=target_path,
                     file_path=file_path,
-                    username=user.username,
                     offset=offset,
                     limit=limit,
                     skip_truncation=True,
+                    access=access,
                 )
+        else:
+            try:
+                access = _judge(
+                    repository_alias, _activation_dir(repository_alias, user), user
+                )
+                with bound_handles(access):
+                    result = _utils.app_module.file_service.get_file_content(
+                        repository_alias=repository_alias,
+                        file_path=file_path,
+                        username=user.username,
+                        offset=offset,
+                        limit=limit,
+                        skip_truncation=True,
+                        access=access,
+                    )
             except FileNotFoundError as not_found:
                 # Story #1039 recovery: the user's own activation of this bare
                 # alias could not be resolved (e.g. a stale activation record
@@ -1086,13 +1053,16 @@ def _recover_file_content_via_global(
         promoted,
         user.username,
     )
-    result = _utils.app_module.file_service.get_file_content_by_path(
-        repo_path=target_path,
-        file_path=file_path,
-        offset=offset,
-        limit=limit,
-        skip_truncation=True,
-    )
+    access = _judge(promoted, target_path, user)
+    with bound_handles(access):
+        result = _utils.app_module.file_service.get_file_content_by_path(
+            repo_path=target_path,
+            file_path=file_path,
+            offset=offset,
+            limit=limit,
+            skip_truncation=True,
+            access=access,
+        )
     return result, promoted
 
 
@@ -1131,41 +1101,16 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         bp = _normalize_browse_params(params)
         repository_alias = bp["repository_alias"]
 
-        # Story #1039: bare-to-global alias fallback (read-only handler).
-        if isinstance(repository_alias, str) and not repository_alias.endswith(
-            "-global"
-        ):
-            # Bug #1709: probes via _utils._lazy_module_attr_or_none()
-            # instead of a bare getattr(_utils.app_module, name, None),
-            # which would otherwise permanently construct the process-wide
-            # app singleton as a side effect of merely reading it.
-            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
-            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
-            if _arm is not None and _grm is not None:
-                if not _arm.user_has_activated_repo(user.username, repository_alias):
-                    from ._global_fallback import try_global_fallback
+        repository_alias = _promote_bare_alias(repository_alias, user)
+        params["repository_alias"] = bp["repository_alias"] = repository_alias
 
-                    _promoted = try_global_fallback(repository_alias, _grm)
-                    if _promoted is not None:
-                        logger.info(
-                            "bare-alias fallback: %r -> %r for user %r",
-                            repository_alias,
-                            _promoted,
-                            user.username,
-                        )
-                        params["repository_alias"] = _promoted
-                        bp["repository_alias"] = _promoted
-                        repository_alias = _promoted
-
-        is_global_repo = False
+        target_path: Optional[str] = None
         if repository_alias and repository_alias.endswith("-global"):
             target_path, error_resp = _resolve_global_repo_target(
                 repository_alias, user, {"structure": {}}
             )
             if error_resp is not None:
                 return error_resp
-            repository_alias = target_path
-            is_global_repo = True
 
         final_path_pattern = _build_browse_path_pattern(
             bp["path"], bp["recursive"], bp["user_path_pattern"]
@@ -1213,22 +1158,25 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             direct_children_of=direct_children_of,
         )
 
-        if is_global_repo:
-            result = _utils.app_module.file_service.list_files_by_path(
-                repo_path=repository_alias,
-                query_params=query_params,
-            )
-        else:
-            result = _utils.app_module.file_service.list_files(
-                repo_id=repository_alias,
-                username=user.username,
-                query_params=query_params,
-            )
+        access = _judge(
+            repository_alias,
+            target_path or _activation_dir(repository_alias, user),
+            user,
+        )
+        with bound_handles(access):
+            if target_path is not None:
+                result = _utils.app_module.file_service.list_files_by_path(
+                    repo_path=target_path, query_params=query_params, access=access
+                )
+            else:
+                result = _utils.app_module.file_service.list_files(
+                    repo_id=repository_alias,
+                    username=user.username,
+                    query_params=query_params,
+                    access=access,
+                )
 
         serialized_files = _serialize_file_results(result)
-        serialized_files = _filter_cidx_meta_files(
-            serialized_files, repository_alias, user
-        )
 
         path_normalized = normalized_browse_path or "/"
         structure = {
@@ -1340,6 +1288,7 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             file_path=file_path,
             content=params["content"],
             username=user.username,
+            access_for=lambda served: _judge(repository_alias, served, user),
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
@@ -1383,6 +1332,7 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             content_hash=params["content_hash"],
             replace_all=params.get("replace_all", False),
             username=user.username,
+            access_for=lambda served: _judge(repository_alias, served, user),
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
@@ -1410,6 +1360,7 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             file_path=file_path,
             content_hash=params.get("content_hash"),
             username=user.username,
+            access_for=lambda served: _judge(repository_alias, served, user),
         )
 
         _invalidate_wiki_cache(repository_alias, file_path)
@@ -1592,57 +1543,65 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
 
-    # Story #1039: bare-to-global alias fallback (read-only handler).
-    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
-        # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
-        # of a bare getattr(_utils.app_module, name, None), which would
-        # otherwise permanently construct the process-wide app singleton
-        # as a side effect of merely reading it.
-        _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
-        _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
-        if _arm is not None and _grm is not None:
-            if not _arm.user_has_activated_repo(user.username, repository_alias):
-                from ._global_fallback import try_global_fallback
-
-                _promoted = try_global_fallback(repository_alias, _grm)
-                if _promoted is not None:
-                    logger.info(
-                        "bare-alias fallback: %r -> %r for user %r",
-                        repository_alias,
-                        _promoted,
-                        user.username,
-                    )
-                    args["repository_alias"] = _promoted
-                    repository_alias = _promoted
-
+    access_service = _get_access_filtering_service()
+    grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     try:
+        from ._global_fallback import try_global_fallback
+
         golden_repos_dir = _get_golden_repos_dir()
-        repo_path = _get_legacy()._resolve_repo_path(repository_alias, golden_repos_dir)
-        if repo_path is None:
-            available_repos = _get_available_repos(user)
+        # Story #1039: bare-to-global promotion only without an activation.
+        served = resolve_served_repository(
+            repository_alias,
+            user.username,
+            access_service,
+            _activations(),
+            lambda alias: _get_legacy()._resolve_repo_path(alias, golden_repos_dir),
+            lambda alias: try_global_fallback(alias, grm) if grm else None,
+        )
+        if served.path is None:
             return _mcp_response(
                 _error_with_suggestions(
                     error_msg=f"Repository '{repository_alias}' not found",
                     attempted_value=repository_alias,
-                    available_values=available_repos,
+                    available_values=_get_available_repos(user),
                 )
             )
-
-        service = DirectoryExplorerService(Path(repo_path))
-        result = service.generate_tree(
-            path=args.get("path"),
+        args["repository_alias"] = served.alias
+        files_per_dir = _coerce_int(
+            args.get("max_files_per_dir"), _DEFAULT_MAX_FILES_PER_DIR
+        )
+        view = served_tree_view(
+            served.visibility,
+            served.path,
+            user.username,
+            access_service,
+            _golden_dir_or_none(),
+            registry_of(_utils.app_module.app.state),
+            composite_activation=served.composite,
+        )
+        visibility = view.vis if view is not None else None
+        base = args.get("path") or ""
+        if view is not None:
+            base = catalog_tree_root(view, base)
+        result = DirectoryExplorerService(Path(served.path)).generate_tree(
+            path=base or None,
             max_depth=_coerce_int(args.get("max_depth"), _DEFAULT_TREE_DEPTH),
-            max_files_per_dir=_coerce_int(
-                args.get("max_files_per_dir"), _DEFAULT_MAX_FILES_PER_DIR
-            ),
+            max_files_per_dir=UNSCANNED_LIMIT if visibility else files_per_dir,
             include_patterns=args.get("include_patterns"),
             exclude_patterns=args.get("exclude_patterns"),
             show_stats=args.get("show_stats", False),
             include_hidden=args.get("include_hidden", False),
         )
-
-        if repository_alias and "cidx-meta" in repository_alias:
-            result = _filter_cidx_meta_tree(result, user)
+        if visibility is not None:
+            result = restrict_catalog_tree(
+                result,
+                base,
+                visibility,
+                access_service,
+                bool(args.get("show_stats")),
+                files_per_dir,
+                view.listable if view is not None else None,
+            )
 
         return _mcp_response(
             {

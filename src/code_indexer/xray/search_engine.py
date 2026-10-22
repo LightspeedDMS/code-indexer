@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import re
 import threading
 import time
 from pathlib import Path
@@ -1079,27 +1078,24 @@ class XRaySearchEngine:
                 discarding the work done.
         """
         from code_indexer.services.path_pattern_matcher import PathPatternMatcher
+        from code_indexer.utils.bounded_regex import BoundedPattern
+        from code_indexer.utils.bounded_regex import PatternBudgetExhausted
 
-        # Bug #1876 items 5/6: built ONCE for the whole walk, not once per
-        # file -- the same shared selector every other glob-filtering call
-        # site in this codebase now uses.
+        # Bug #1876 items 5/6: ONE shared selector for the whole walk.
         selector = PathPatternMatcher().create_selector(
             include_patterns, exclude_patterns
         )
-        pattern = re.compile(driver_regex)
+        pattern = BoundedPattern(
+            driver_regex, purpose="X-Ray path driver", budget_seconds=timeout_seconds
+        )
         candidates: List[Path] = []
         all_rel_paths: List[str] = []
         start = time.monotonic()
         # Resolved ONCE for the whole walk, never per candidate.
         resolved_repo_root = repo_path.resolve()
 
-        # Bug #1598: iterate rglob() directly (unsorted) instead of
-        # sorted(repo_path.rglob("*")) -- sorted() would fully drain and
-        # sort the entire tree in memory BEFORE the loop body executes even
-        # once, so a time-check inside the loop alone could never bound
-        # that initial traversal on a large tree. Sort only the final,
-        # already-bounded candidate list to preserve deterministic output
-        # ordering.
+        # Bug #1598: iterate rglob() unsorted so the time check bounds the
+        # traversal itself; only the bounded candidate list is sorted.
         for p in repo_path.rglob("*"):
             if time.monotonic() - start > timeout_seconds:
                 raise XRayPhase1TimeoutError(candidates=sorted(candidates))
@@ -1131,8 +1127,11 @@ class XRaySearchEngine:
             if not selector.select(rel):
                 continue
 
-            if pattern.search(rel):
-                candidates.append(p)
+            try:
+                if pattern.search(rel):
+                    candidates.append(p)
+            except PatternBudgetExhausted:
+                raise XRayPhase1TimeoutError(candidates=sorted(candidates)) from None
 
         self._last_phase1_warnings = self._check_zero_match_patterns(
             include_patterns, all_rel_paths

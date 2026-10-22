@@ -81,7 +81,7 @@ Retrieve cached content by handle with pagination support.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `handle` | string | yes | UUID4 cache handle returned from search_code results |
+| `handle` | string | yes | Cache handle returned from search results (a UUID4 that may carry a suffix); pass it back exactly as returned |
 | `page` | integer | no | Page number (0-indexed). |
 
 ## `get_file_content`

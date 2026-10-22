@@ -162,21 +162,21 @@ def _get_activated_repo_manager():
     return manager
 
 
-async def _require_activation_access(user_alias: str, current_user: User) -> None:
+async def _require_activation_access(
+    user_alias: str, current_user: User, history: bool = False
+) -> None:
     """Every route here serves the caller's own activation *user_alias*:
     require the caller's grants on its source golden repositories (the MCP
-    rule), refusing exactly like an alias never activated. The lookup runs
-    on a worker thread, never on the event loop. Called first in each route
-    body, outside its broad except. An admin (admins group) bypasses, which
-    also keeps the admin-only ``owner`` parameter working."""
-    await repo_access_http.enforce_activated_repo_access_async(
-        repo_access_http.module_app_access_filtering_service(),
+    rule), refusing exactly like an alias never activated; with *history*
+    the catalog's history is refused too. Lookups run on a worker thread.
+    Called first in each route body, outside its broad except. An admin
+    (admins group) bypasses, which also keeps the admin-only ``owner``
+    parameter working."""
+    await repo_access_http.enforce_own_activation_async(
         current_user.username,
         user_alias,
-        refusal=HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Activated repository '{user_alias}' not found",
-        ),
+        _get_activated_repo_manager() if history else None,
+        f"Activated repository '{user_alias}' not found",
     )
 
 
@@ -956,7 +956,7 @@ async def switch_branch(
             ),
         )
 
-    await _require_activation_access(user_alias, current_user)
+    await _require_activation_access(user_alias, current_user, history=True)
     try:
         # Get managers
         activated_manager = _get_activated_repo_manager()
@@ -1053,7 +1053,7 @@ async def list_branches(
         HTTPException 404: Repository not found
         HTTPException 500: Failed to list branches
     """
-    await _require_activation_access(user_alias, current_user)
+    await _require_activation_access(user_alias, current_user, history=True)
     try:
         # Get activated repo manager
         activated_manager = _get_activated_repo_manager()

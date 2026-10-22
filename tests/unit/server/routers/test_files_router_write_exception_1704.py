@@ -82,7 +82,7 @@ def mock_user() -> User:
     return User(
         username="bug1704-testuser",
         password_hash="hash",
-        role=UserRole.NORMAL_USER,
+        role=UserRole.POWER_USER,
         created_at=datetime.now(timezone.utc),
     )
 

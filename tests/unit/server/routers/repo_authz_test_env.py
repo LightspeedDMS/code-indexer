@@ -169,6 +169,9 @@ class Env:
         )
         app.include_router(global_routes.router)
         app.state.access_filtering_service = access_service
+        # Lifespan sets it in production; without it a restricted caller's
+        # served directory cannot be judged and history is refused.
+        app.state.golden_repos_dir = str(self.golden_repo_manager.golden_repos_dir)
         app.dependency_overrides[dependencies.get_current_power_user] = lambda: user
         app.dependency_overrides[dependencies.get_current_user] = lambda: user
         return TestClient(app, raise_server_exceptions=False)

@@ -118,12 +118,14 @@ class TestOnRepoRemovedNamesRealHolder:
         )
         set_refresh_scheduler(scheduler)
         try:
-            with caplog.at_level(logging.WARNING):
+            with caplog.at_level(logging.INFO):
                 on_repo_removed(
                     repo_name=repo_name, golden_repos_dir=temp_golden_repos_dir
                 )
 
-            assert md_file.exists(), "file must not be deleted when lock unavailable"
+            # The description is deleted under the held lock (refresh owed);
+            # the contention message still names the REAL holder.
+            assert not md_file.exists(), "description must be deleted"
             assert any(
                 "dependency_map_service" in record.message for record in caplog.records
             ), [r.message for r in caplog.records]

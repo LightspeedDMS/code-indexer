@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,31 @@ class _WatchError:
 # Global sentinel instances
 WATCH_STARTING = _WatchStarting()
 
+# Cap on joining the watch thread, and on a second stop awaiting the first.
+_STOP_JOIN_TIMEOUT_SECONDS = 5.0
+
+
+class _StopInProgress:
+    """A stop that has released the state lock to join the watch thread.
+    Until it finishes, the watch is STOPPING and belongs to that stop."""
+
+    def __init__(
+        self,
+        thread: Optional[threading.Thread],
+        handler: Optional[Any],
+        project_path: Optional[str],
+        stats: Dict[str, Any],
+    ):
+        self.thread = thread
+        self.handler = handler
+        self.project_path = project_path
+        self.stats = stats
+        self.done = threading.Event()
+        self.result: Dict[str, Any] = {
+            "status": "error",
+            "message": "Watch stop failed",
+        }
+
 
 class DaemonWatchManager:
     """Manages watch mode in daemon with non-blocking background threads.
@@ -62,6 +87,7 @@ class DaemonWatchManager:
         self.start_time: Optional[float] = None
         self._lock = threading.Lock()  # Thread safety for state management
         self._stop_event = threading.Event()  # Signal to stop watch thread
+        self._stopping: Optional[_StopInProgress] = None
 
     def is_running(self) -> bool:
         """Check if watch is currently running.
@@ -103,6 +129,14 @@ class DaemonWatchManager:
             Status dictionary with success/error status and message
         """
         with self._lock:
+            if self._stopping is not None:
+                message = (
+                    f"Watch is stopping for {self._stopping.project_path}; "
+                    f"start it again once the stop completes"
+                )
+                logger.warning(message)
+                return {"status": "error", "message": message}
+
             # Check if already running
             if self._is_running_unsafe():
                 logger.warning(
@@ -145,75 +179,124 @@ class DaemonWatchManager:
         Returns:
             Status dictionary with success/error status, message, and statistics
         """
+        # ^ inv a stop seen in progress on entry answers this call too
+        seen = self._stopping
+        owned: Optional[_StopInProgress] = None
         with self._lock:
-            # Bug #1717: a _WatchError sentinel means the previous start
-            # attempt's construction FAILED -- nothing ever actually
-            # started, and the sentinel has no stop_watching() method.
-            # Treat it as "not running" up front (deliberate error status,
-            # not the misleading "success" a fall-through would produce)
-            # and clear the stale error state so it doesn't linger forever
-            # once the caller has been told about it.
-            if isinstance(self.watch_handler, _WatchError):
-                error = self.watch_handler.error
-                logger.warning(
-                    f"No watch running to stop (last start attempt failed: {error})"
-                )
-                self.watch_handler = None
-                self.project_path = None
-                self.start_time = None
-                return {
-                    "status": "error",
-                    "message": (
-                        f"Watch not running (last start attempt failed: {error})"
-                    ),
-                }
+            pending = self._stopping
+            if pending is None and seen is not None:
+                # ^ ord done is set before _stopping clears: seen.result is final
+                return dict(seen.result)
+            if pending is None:
+                begun = self._begin_stop_locked()
+                if not isinstance(begun, _StopInProgress):
+                    return begun
+                self._stopping = owned = begun
 
-            # Check if running
-            if not self.watch_handler and not self.watch_thread:
-                logger.warning("No watch running to stop")
-                return {"status": "error", "message": "Watch not running"}
+        if owned is not None:
+            return self._finish_stop(owned)
+        assert pending is not None
+        return self._await_stop(pending)
 
-            stats = {}
+    def _await_stop(self, pending: _StopInProgress) -> Dict[str, Any]:
+        """A second caller waits for the stop already in progress; it never
+        stops the handler again."""
+        if not pending.done.wait(timeout=_STOP_JOIN_TIMEOUT_SECONDS):
+            return {
+                "status": "error",
+                "message": f"Watch stop still in progress for {pending.project_path}",
+            }
+        return dict(pending.result)
 
-            # Get statistics before stopping
-            if (
-                self.watch_handler
-                and not isinstance(self.watch_handler, (_WatchStarting, _WatchError))
-                and hasattr(self.watch_handler, "get_stats")
-            ):
-                try:
-                    stats = self.watch_handler.get_stats()
-                except Exception as e:
-                    logger.error(f"Failed to get watch stats: {e}")
+    def _finish_stop(self, stop: _StopInProgress) -> Dict[str, Any]:
+        """Join the stopped watch thread, then clear its state."""
+        try:
+            # ^ inv join outside _lock: the worker's exit path takes _lock
+            if stop.thread is not None and stop.thread.is_alive():
+                stop.thread.join(timeout=_STOP_JOIN_TIMEOUT_SECONDS)
 
-            # Signal stop
-            self._stop_event.set()
-
-            # Stop the watch handler
-            if self.watch_handler and not isinstance(
-                self.watch_handler, (_WatchStarting, _WatchError)
-            ):
-                try:
-                    self.watch_handler.stop_watching()
-                except Exception as e:
-                    logger.error(f"Error stopping watch handler: {e}")
-
-            # Wait for thread to finish (max 5 seconds)
-            if self.watch_thread and self.watch_thread.is_alive():
-                self.watch_thread.join(timeout=5.0)
-
-                if self.watch_thread.is_alive():
+                if stop.thread.is_alive():
                     logger.warning("Watch thread did not stop within 5 seconds")
 
-            # Clean up state
-            self.watch_thread = None
+            with self._lock:
+                # ^ inv never clear state of a watch started while joining
+                if self.watch_thread is stop.thread or (
+                    self.watch_thread is None
+                    and self.watch_handler in (stop.handler, None)
+                ):
+                    self.watch_thread = None
+                    self.watch_handler = None
+                    self.project_path = None
+                    self.start_time = None
+                stop.result = {
+                    "status": "success",
+                    "message": "Watch stopped",
+                    "stats": stop.stats,
+                }
+
+            logger.info(f"Watch stopped for project: {stop.project_path}")
+            return stop.result
+        finally:
+            with self._lock:
+                stop.done.set()
+                self._stopping = None
+
+    def _begin_stop_locked(self) -> Union[_StopInProgress, Dict[str, Any]]:
+        """Signal the watch to stop and stop its handler (caller holds
+        _lock). Returns the stop to finish, or an error result."""
+        # Bug #1717: a _WatchError sentinel means the previous start
+        # attempt's construction FAILED -- nothing ever actually
+        # started, and the sentinel has no stop_watching() method.
+        # Treat it as "not running" up front (deliberate error status,
+        # not the misleading "success" a fall-through would produce)
+        # and clear the stale error state so it doesn't linger forever
+        # once the caller has been told about it.
+        if isinstance(self.watch_handler, _WatchError):
+            error = self.watch_handler.error
+            logger.warning(
+                f"No watch running to stop (last start attempt failed: {error})"
+            )
             self.watch_handler = None
-            project = self.project_path
             self.project_path = None
             self.start_time = None
+            return {
+                "status": "error",
+                "message": (f"Watch not running (last start attempt failed: {error})"),
+            }
 
-            logger.info(f"Watch stopped for project: {project}")
-            return {"status": "success", "message": "Watch stopped", "stats": stats}
+        # Check if running
+        if not self.watch_handler and not self.watch_thread:
+            logger.warning("No watch running to stop")
+            return {"status": "error", "message": "Watch not running"}
+
+        stats = {}
+
+        # Get statistics before stopping
+        if (
+            self.watch_handler
+            and not isinstance(self.watch_handler, (_WatchStarting, _WatchError))
+            and hasattr(self.watch_handler, "get_stats")
+        ):
+            try:
+                stats = self.watch_handler.get_stats()
+            except Exception as e:
+                logger.error(f"Failed to get watch stats: {e}")
+
+        # Signal stop
+        self._stop_event.set()
+
+        # Stop the watch handler
+        if self.watch_handler and not isinstance(
+            self.watch_handler, (_WatchStarting, _WatchError)
+        ):
+            try:
+                self.watch_handler.stop_watching()
+            except Exception as e:
+                logger.error(f"Error stopping watch handler: {e}")
+
+        return _StopInProgress(
+            self.watch_thread, self.watch_handler, self.project_path, stats
+        )
 
     def get_stats(self) -> Dict[str, Any]:
         """Get current watch statistics.
@@ -236,6 +319,14 @@ class DaemonWatchManager:
                     "error": self.watch_handler.error,
                     "uptime_seconds": 0,
                     "files_processed": 0,
+                }
+
+            if self._stopping is not None:
+                return {
+                    "status": "stopping",
+                    "project_path": self._stopping.project_path,
+                    "uptime_seconds": 0,
+                    "files_processed": self._stopping.stats.get("files_processed", 0),
                 }
 
             if not self._is_running_unsafe():

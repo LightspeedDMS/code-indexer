@@ -307,6 +307,8 @@ class TestHandleDirectoryTreeAliasResolution:
         fake_user.role = "admin"
 
         args = {"repository_alias": "my-local-repo"}
+        admin_access = MagicMock()
+        admin_access.is_admin_user.return_value = True
 
         with (
             patch(
@@ -316,6 +318,10 @@ class TestHandleDirectoryTreeAliasResolution:
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path",
                 return_value=str(repo_dir),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.files._get_access_filtering_service",
+                return_value=admin_access,
             ),
         ):
             response = handle_directory_tree(args, fake_user)

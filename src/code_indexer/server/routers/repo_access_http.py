@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Set, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import anyio.to_thread
 from fastapi import HTTPException, status
@@ -193,6 +193,162 @@ def enforce_activated_repo_access(
         raise _access_not_verified(username, f"activated repository '{user_alias}'")
     if not allowed:
         raise refusal if refusal is not None else activated_repo_not_found(user_alias)
+
+
+def enforce_activated_history_access(
+    activated_repo_manager: Optional[Any], username: str, user_alias: str
+) -> None:
+    """enforce_activated_repo_access() for a git route (a copy of the
+    internal catalog is refused there like an unknown alias), then refuse
+    the catalog's history (by the golden identity of *user_alias*) to every
+    restricted caller: 403 with a fixed text naming no content. The second
+    check stands on its own, whatever the activation rule allows.
+    Synchronous: call it from a sync route."""
+    service = module_app_access_filtering_service()
+    enforce_activated_repo_access(service, username, user_alias)
+    refuse_catalog_history(service, activated_repo_manager, username, user_alias)
+
+
+def _history_refused(refusal: Optional[str]) -> None:
+    if refusal is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
+
+
+def refuse_catalog_history(
+    access_filtering_service: Optional[AccessFilteringService],
+    activated_repo_manager: Optional[Any],
+    username: str,
+    alias: Any,
+    locations: Optional[Callable[[], Tuple[str, ...]]] = None,
+) -> None:
+    """Refuse the catalog's history (commit and branch metadata, moving a
+    clone's HEAD) when *alias* -- a golden alias or the caller's activation,
+    judged by golden identity -- serves the catalog and the caller is
+    restricted. *locations* is the request's ``request_catalog_locations``.
+    Synchronous: call it from a sync route.
+
+    Raises:
+        HTTPException 403: fixed text naming no repository content.
+    """
+    from ..services.cidx_meta_access.history_policy import (
+        CatalogSurface,
+        catalog_surface_refusal,
+    )
+
+    _history_refused(
+        catalog_surface_refusal(
+            CatalogSurface.GIT_HISTORY,
+            alias,
+            username,
+            access_filtering_service,
+            activated_repo_manager,
+            locations,
+        )
+    )
+
+
+async def refuse_catalog_history_async(
+    access_filtering_service: Optional[AccessFilteringService],
+    activated_repo_manager: Optional[Any],
+    username: str,
+    alias: Any,
+) -> None:
+    """refuse_catalog_history() on a worker thread, never on the event loop."""
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            refuse_catalog_history,
+            access_filtering_service,
+            activated_repo_manager,
+            username,
+            alias,
+        )
+    )
+
+
+async def enforce_own_activation_async(
+    username: str,
+    user_alias: str,
+    activated_repo_manager: Optional[Any],
+    not_found_detail: str,
+) -> None:
+    """enforce_activated_repo_access_async() with the module app's access
+    service, answering 404 *not_found_detail*; with *activated_repo_manager*
+    the catalog's history is then refused too (403, fixed text)."""
+    service = module_app_access_filtering_service()
+    await enforce_activated_repo_access_async(
+        service,
+        username,
+        user_alias,
+        refusal=HTTPException(status_code=404, detail=not_found_detail),
+    )
+    if activated_repo_manager is not None:
+        await refuse_catalog_history_async(
+            service, activated_repo_manager, username, user_alias
+        )
+
+
+def refuse_golden_catalog_history(state: Any, username: str, alias: Any) -> None:
+    """refuse_catalog_history() for a door that serves golden repositories
+    only, with the access service and golden directory of the app *state*
+    (alias pointer targets are checked too). Synchronous: call it from a
+    sync route.
+
+    Raises:
+        HTTPException 403: fixed text naming no repository content.
+    """
+    from ..services.cidx_meta_access.history_policy import (
+        CatalogSurface,
+        golden_catalog_surface_refusal,
+    )
+    from ..services.cidx_meta_access.served_identity import state_golden_repos_dir
+
+    _history_refused(
+        golden_catalog_surface_refusal(
+            CatalogSurface.GIT_HISTORY,
+            alias,
+            username,
+            getattr(state, "access_filtering_service", None),
+            state_golden_repos_dir(state),
+        )
+    )
+
+
+def refuse_served_catalog_history(
+    state: Any,
+    activated_repo_manager: Optional[Any],
+    username: str,
+    alias: str,
+    served_path: Any,
+) -> None:
+    """refuse_catalog_history() for the repository a door actually selected
+    (*alias*), then for the directory it serves. Synchronous.
+
+    Raises:
+        HTTPException 403: fixed text naming no repository content.
+    """
+    from ..services.cidx_meta_access.history_policy import (
+        CatalogSurface,
+        served_catalog_surface_refusal,
+    )
+    from ..services.cidx_meta_access.served_identity import (
+        request_catalog_locations,
+        state_golden_repos_dir,
+    )
+
+    service = getattr(state, "access_filtering_service", None)
+    golden = state_golden_repos_dir(state)
+    locations = request_catalog_locations(golden) if golden else None
+    refuse_catalog_history(service, activated_repo_manager, username, alias, locations)
+    _history_refused(
+        served_catalog_surface_refusal(
+            CatalogSurface.GIT_HISTORY,
+            str(served_path),
+            username,
+            service,
+            golden,
+            locations,
+        )
+    )
 
 
 async def enforce_activated_repo_access_async(

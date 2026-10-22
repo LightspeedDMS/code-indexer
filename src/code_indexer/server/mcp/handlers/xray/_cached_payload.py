@@ -139,9 +139,20 @@ def handle_cidx_fetch_cached_payload(
             }
         )
 
+    from code_indexer.server.services.cidx_meta_access.cached_handles import (
+        require_catalog_handle_visible,
+    )
+
+    from ._catalog_guard import xray_access_service
+
     try:
         # Cached content is served only to its creator: a handle this
         # caller did not create answers cache_expired, like a missing one.
+        # A handle bound to the caller's catalog view answers the same once
+        # that view changed.
+        require_catalog_handle_visible(
+            cache_handle, user.username, xray_access_service()
+        )
         result = xray_truncation.fetch_cached_page(
             payload_cache, cache_handle, page, user.username
         )

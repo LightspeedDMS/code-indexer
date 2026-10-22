@@ -454,7 +454,16 @@ def _make_handler(server: "FakeVoyageServer") -> type:
                 }
                 for i, identity in enumerate(identities)
             ]
-            self._reply(200, {"object": "list", "data": data, "model": model})
+            text_tokens = sum(max(1, len(t) // 4) for t in texts)
+            usage = {
+                "text_tokens": text_tokens,
+                "image_pixels": 0,
+                "video_pixels": 0,
+                "total_tokens": text_tokens,
+            }
+            self._reply(
+                200, {"object": "list", "data": data, "model": model, "usage": usage}
+            )
 
         def do_OPTIONS(self) -> None:  # noqa: N802 - health probe
             self.send_response(200)

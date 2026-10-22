@@ -413,6 +413,20 @@ class TestWebQueryPage:
 # ---------------------------------------------------------------------------
 
 
+class _Activations:
+    """ActivatedRepoManager stand-in: every alias is the caller's activation
+    of the same-named golden repository, as a stored activation records."""
+
+    def get_repository(
+        self, username: str, user_alias: str, *, touch: bool = True
+    ) -> Dict[str, Any]:
+        return {
+            "user_alias": user_alias,
+            "username": username,
+            "golden_repo_alias": user_alias,
+        }
+
+
 def _wiki_get(env: Env, path: str, manager: _QueryManager) -> Any:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -424,7 +438,8 @@ def _wiki_get(env: Env, path: str, manager: _QueryManager) -> Any:
     app.state.search_event_log_writer = env.rec.writer
     app.state.semantic_query_manager = manager
     app.state.query_tracker = None
-    app.state.activated_repo_manager = None
+    # The user-wiki access check always reads this manager in production.
+    app.state.activated_repo_manager = _Activations()
     app.dependency_overrides[wiki_routes.get_current_user_hybrid] = lambda: make_user(
         "frank"
     )

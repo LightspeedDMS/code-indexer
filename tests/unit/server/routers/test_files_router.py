@@ -10,7 +10,7 @@ Test coverage (incremental approach):
 - Phase 3: delete_file endpoint tests (to be added)
 """
 
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import pytest
 from fastapi import status
@@ -79,6 +79,7 @@ def test_create_file_endpoint_success(test_client):
             file_path="src/new_file.py",
             content="def hello(): pass",
             username="testuser",
+            access_for=ANY,
         )
 
 
@@ -204,6 +205,7 @@ def test_edit_file_endpoint_success(test_client):
             content_hash="old_hash_123",
             replace_all=False,
             username="testuser",
+            access_for=ANY,
         )
 
 
@@ -282,6 +284,7 @@ def test_delete_file_endpoint_success(test_client):
             file_path="src/obsolete.py",
             content_hash=None,
             username="testuser",
+            access_for=ANY,
         )
 
 
@@ -337,4 +340,5 @@ def test_delete_file_endpoint_path_with_slashes(test_client):
             file_path="deep/nested/path/file.py",
             content_hash=None,
             username="testuser",
+            access_for=ANY,
         )

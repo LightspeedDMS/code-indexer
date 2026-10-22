@@ -1,0 +1,123 @@
+"""Which repositories participate in a dependency-map domain.
+
+Membership comes from the domain file's frontmatter ``participating_repos``
+(block or flow list, parsed with the strict YAML helper), else from
+``_domains.json``, else from the repository column of the file's recognised
+roles table (``depmap_model.document_participants``, the one derivation the
+model uses too). When none names a repository, membership is unknown (None)
+and the domain stays hidden from restricted callers, with one operator
+diagnostic per (path, file fingerprint) of an existing domain file; a name
+with no domain file logs nothing.
+"""
+
+from __future__ import annotations
+
+import logging
+import stat
+import threading
+from pathlib import Path
+from typing import Callable, Dict, FrozenSet, Optional, Set, Tuple
+
+from .depmap_model import (
+    DepMapModel,
+    document_participants,
+    load_depmap_model,
+    read_domain_entries,
+)
+
+logger = logging.getLogger(__name__)
+
+_WARNED_LIMIT = 4096
+_warned: Set[Tuple[str, Tuple[int, int, int]]] = set()
+_warned_lock = threading.Lock()
+
+ParticipantsReader = Callable[[str], Optional[FrozenSet[str]]]
+
+
+def domain_participants(dep_map_dir: Path, domain: str) -> Optional[FrozenSet[str]]:
+    """Read one domain's membership fresh from disk (no caching)."""
+    if not domain or "/" in domain or domain in (".", ".."):
+        raise ValueError(f"not a domain name: {domain!r}")
+    md_file = Path(dep_map_dir) / f"{domain}.md"
+    content = md_file.read_text(encoding="utf-8") if md_file.is_file() else ""
+    entries, unparsable = read_domain_entries(Path(dep_map_dir))
+    entry = next((d for d in entries if d.get("name") == domain), None)
+    return document_participants(
+        content, entry, name=domain, domains_unparsable=unparsable
+    )
+
+
+def _fingerprint(path: Path) -> Optional[Tuple[int, int, int]]:
+    """The regular file's identity, or None when there is no such file."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+def _warn_unknown_membership(md_file: Path) -> None:
+    fingerprint = _fingerprint(md_file)
+    if fingerprint is None:
+        # ^ why no file=>caller-chosen name, never logged
+        return
+    key = (str(md_file), fingerprint)
+    with _warned_lock:
+        if key in _warned:
+            return
+        if len(_warned) >= _WARNED_LIMIT:
+            _warned.clear()
+        _warned.add(key)
+    logger.warning(
+        "Dependency-map domain file %s names no participating repositories "
+        "(frontmatter, _domains.json and roles table); hidden from restricted "
+        "callers",
+        md_file,
+    )
+
+
+def _diagnosed(
+    dep_map_dir: Path, lookup: Callable[[str], Optional[FrozenSet[str]]]
+) -> ParticipantsReader:
+    def _read(domain: str) -> Optional[FrozenSet[str]]:
+        participants = lookup(domain)
+        if participants is None:
+            _warn_unknown_membership(Path(dep_map_dir) / f"{domain}.md")
+        return participants
+
+    return _read
+
+
+def participants_reader(dep_map_dir: Path) -> ParticipantsReader:
+    """A ``participants_fn`` for ``classify`` that reads membership fresh."""
+    return _diagnosed(
+        dep_map_dir, lambda domain: domain_participants(dep_map_dir, domain)
+    )
+
+
+def request_participants_reader(
+    dep_map_dir: Path, model: Optional[Callable[[], DepMapModel]] = None
+) -> ParticipantsReader:
+    """Membership for ONE request, answered from ONE dependency-map model:
+    ``model()`` (the request's own) when given, else the model of
+    *dep_map_dir* loaded on first use. No domain file is read per domain,
+    and every decision of the request agrees on membership."""
+    source = model or (lambda: load_depmap_model(dep_map_dir))
+    loaded: Dict[str, DepMapModel] = {}
+
+    def _lookup(domain: str) -> Optional[FrozenSet[str]]:
+        if "model" not in loaded:
+            loaded["model"] = source()
+        return loaded["model"].domain_participants(domain)
+
+    return _diagnosed(dep_map_dir, _lookup)
+
+
+def model_participants_reader(
+    dep_map_dir: Path, model: DepMapModel
+) -> ParticipantsReader:
+    """A ``participants_fn`` answering from an already loaded *model* of
+    *dep_map_dir* (no file read)."""
+    return _diagnosed(dep_map_dir, model.domain_participants)

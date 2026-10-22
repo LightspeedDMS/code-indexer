@@ -8,14 +8,26 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Callable, Dict, Optional
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
+from code_indexer.server.services.cidx_meta_access import (
+    Decision,
+    DecisionKind,
+    MetaVisibility,
+    resolve_meta_visibility,
+)
+from code_indexer.server.services.cidx_meta_access.catalog_articles import (
+    catalog_decider,
+    visible_articles,
+)
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.constants import is_internal_meta_repo
+from code_indexer.server.services.repo_access_guard import normalize_repo_alias
 
 from . import _utils
 from ._utils import (
@@ -42,7 +54,7 @@ _WIKI_ANALYTICS_MAX_SEARCH_RESULTS = 100
 
 
 def _build_langfuse_section(
-    config: Any, golden_repo_manager: Any
+    config: Any, golden_repo_manager: Any, vis: MetaVisibility
 ) -> Optional[Dict[str, Any]]:
     """
     Build Langfuse trace search section for quick reference (Story #169).
@@ -50,6 +62,8 @@ def _build_langfuse_section(
     Args:
         config: ServerConfig object with langfuse_config
         golden_repo_manager: GoldenRepoManager instance for listing repos
+        vis: the caller's visibility; a restricted caller is shown only the
+            trace repositories it may see
 
     Returns:
         Dictionary with Langfuse search documentation when pull_enabled is True,
@@ -73,26 +87,39 @@ def _build_langfuse_section(
         except Exception as e:
             logger.warning(f"Failed to list golden repos for Langfuse section: {e}")
             langfuse_repos = []
-
-    # Get project count
-    pull_projects = getattr(langfuse, "pull_projects", [])
-    project_count = len(pull_projects) if pull_projects else 0
+    if not vis.unrestricted:
+        langfuse_repos = [
+            alias
+            for alias in langfuse_repos
+            if normalize_repo_alias(alias) in vis.visible
+        ]
 
     # Build compact 4-field section (Story #222 TODO 10)
-    return {
+    section: Dict[str, Any] = {
         "description": "Langfuse AI traces indexed for semantic search.",
         "search_pattern": "search_code('query', repository_alias='langfuse_<project>_<userId>')",
         "available_repositories": langfuse_repos,
-        "configured_projects_count": project_count,
     }
+    # The configured project list is global: only an unrestricted caller
+    # is shown its size.
+    if vis.unrestricted:
+        pull_projects = getattr(langfuse, "pull_projects", [])
+        section["configured_projects_count"] = (
+            len(pull_projects) if pull_projects else 0
+        )
+    return section
 
 
-def _build_dependency_map_section(cidx_meta_path: Path) -> str:
+def _build_dependency_map_section(
+    cidx_meta_path: Path, decide: Optional[Callable[[str], Decision]]
+) -> str:
     """
     Build dependency map section for quick reference (Story #194).
 
     Args:
         cidx_meta_path: Path to cidx-meta directory
+        decide: the caller's catalog path decision (None = unrestricted);
+            a restricted caller counts only the domains it may see
 
     Returns:
         String with dependency map documentation when conditions met,
@@ -114,6 +141,12 @@ def _build_dependency_map_section(cidx_meta_path: Path) -> str:
         for f in dependency_map_dir.glob("*.md")
         if f.name != "_index.md" and not f.name.startswith("_")
     ]
+    if decide is not None:
+        domain_files = [
+            f
+            for f in domain_files
+            if decide(f"dependency-map/{f.name}").kind is DecisionKind.TRANSFORM
+        ]
     domain_count = len(domain_files)
 
     # Return compact string (Story #222 TODO 11, enhanced Story #194)
@@ -344,19 +377,29 @@ def quick_reference(
         if category_filter is not None:
             response["category_filter"] = category_filter
 
+        access_service = _utils._get_access_filtering_service()
+        vis = resolve_meta_visibility(user.username, access_service)
+
         # Story #194: Add dependency map section when available (prominent positioning)
         if _utils.app_module.golden_repo_manager:
             cidx_meta_path = (
                 Path(_utils.app_module.golden_repo_manager.golden_repos_dir)
                 / "cidx-meta"
             )
-            dependency_map_section = _build_dependency_map_section(cidx_meta_path)
+            decide = (
+                None
+                if vis.unrestricted
+                else catalog_decider(cidx_meta_path, vis, access_service)
+            )
+            dependency_map_section = _build_dependency_map_section(
+                cidx_meta_path, decide
+            )
             if dependency_map_section:
                 response["dependency_map"] = dependency_map_section
 
         # Conditionally add Langfuse section
         langfuse_section = _build_langfuse_section(
-            config, _utils.app_module.golden_repo_manager
+            config, _utils.app_module.golden_repo_manager, vis
         )
         if langfuse_section:
             response["langfuse_trace_search"] = langfuse_section
@@ -777,6 +820,17 @@ def handle_wiki_article_analytics(params: Dict[str, Any], user: User) -> Dict[st
             all_views = [
                 v for v in all_views if v["article_path"] in article_paths_filter
             ]
+        if is_internal_meta_repo(wiki_alias):
+            access_service = _utils._get_access_filtering_service()
+            vis = resolve_meta_visibility(user.username, access_service)
+            if not vis.unrestricted:
+                catalog_root = Path(
+                    _utils.app_module.app.state.dependency_map_service.cidx_meta_read_path
+                )
+                decide = catalog_decider(catalog_root, vis, access_service)
+                all_views = visible_articles(
+                    all_views, lambda v: str(v["article_path"]), decide
+                )
 
         # AC3: Sort with alphabetical tie-breaking
         if sort_by == "least_viewed":

@@ -30,10 +30,17 @@ class _FakeActivatedRepoManager:
     """Non-composite stand-in for the route's `activated_repo_manager`
     closure variable -- get_repository() returning None routes the
     handler past the composite-repo branch into the regular listing path
-    (the one under test here) without raising."""
+    (the one under test here) without raising. The route judges the
+    directory it serves (get_activated_repo_path) before listing."""
+
+    def __init__(self, repo_path: str = ""):
+        self._repo_path = repo_path
 
     def get_repository(self, username: str, repo_id: str):
         return None
+
+    def get_activated_repo_path(self, username: str, user_alias: str) -> str:
+        return self._repo_path
 
 
 def _real_file_service(repo_path: str) -> FileListingService:
@@ -74,7 +81,8 @@ def _question_tree(tmp_path) -> None:
 def _list_files(user_client, tmp_path, query: str = ""):
     handler = _find_route_handler("/api/repositories/{repo_id}/files", "GET")
     real_service = _real_file_service(str(tmp_path))
-    with _patch_closure(handler, "activated_repo_manager", _FakeActivatedRepoManager()):
+    fake_arm = _FakeActivatedRepoManager(str(tmp_path))
+    with _patch_closure(handler, "activated_repo_manager", fake_arm):
         with patch(
             "code_indexer.server.routers.inline_repos_v2.file_service", real_service
         ):

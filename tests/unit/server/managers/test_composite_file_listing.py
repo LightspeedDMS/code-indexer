@@ -200,163 +200,85 @@ class TestWalkDirectory:
         assert file_info.component_repo == "test-repo"
 
 
-class TestListCompositeFiles:
-    """Test _list_composite_files for aggregating files from multiple repos."""
+def _composite(tmp_path, components):
+    """A composite directory whose proxy config names *components* (name ->
+    {relative file: content})."""
+    import json
 
-    def test_list_composite_files_aggregates_multiple_repos(
-        self, tmp_path, mock_activated_repo
-    ):
-        """Test _list_composite_files aggregates files from all component repos."""
-        from code_indexer.server.managers.composite_file_listing import (
-            _list_composite_files,
+    composite_path = tmp_path / "composite"
+    composite_path.mkdir()
+    for name, files in components.items():
+        (composite_path / name).mkdir()
+        for relative, content in files.items():
+            target = composite_path / name / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+    config_dir = composite_path / ".code-indexer"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps({"proxy_mode": True, "discovered_repos": list(components)})
+    )
+    return composite_path
+
+
+def _visible_listing(repo, path="", recursive=False):
+    """The production aggregation: every component's confined listing, kept
+    and sorted by ``visible_composite_entries`` (unrestricted judgement)."""
+    from code_indexer.server.managers.composite_file_listing import (
+        list_composite_components,
+    )
+    from code_indexer.server.services.cidx_meta_access.file_doors import (
+        UNRESTRICTED,
+        visible_composite_entries,
+    )
+
+    return visible_composite_entries(
+        list_composite_components(repo, path, recursive), lambda _name: UNRESTRICTED
+    )
+
+
+class TestVisibleCompositeListing:
+    """The composite listing aggregates every component repository."""
+
+    def test_aggregates_multiple_repos(self, tmp_path, mock_activated_repo):
+        path = _composite(
+            tmp_path,
+            {"backend-api": {"main.py": "test"}, "frontend-app": {"app.js": "test"}},
         )
+        repo = mock_activated_repo(path=path, is_composite=True)
 
-        # Create composite repo structure
-        composite_path = tmp_path / "composite"
-        composite_path.mkdir()
+        file_paths = [f.full_path for f in _visible_listing(repo)]
 
-        # Create component repos
-        repo1 = composite_path / "backend-api"
-        repo1.mkdir()
-        (repo1 / "main.py").write_text("test")
-
-        repo2 = composite_path / "frontend-app"
-        repo2.mkdir()
-        (repo2 / "app.js").write_text("test")
-
-        # Create .code-indexer/config.json for proxy mode
-        config_dir = composite_path / ".code-indexer"
-        config_dir.mkdir()
-        config_file = config_dir / "config.json"
-        import json
-
-        config_data = {
-            "proxy_mode": True,
-            "discovered_repos": ["backend-api", "frontend-app"],
-        }
-        config_file.write_text(json.dumps(config_data))
-
-        # Create activated repo mock
-        repo = mock_activated_repo(path=composite_path, is_composite=True)
-
-        # List files
-        files = _list_composite_files(repo, path="", recursive=False)
-
-        # Should aggregate files from both repos
-        file_paths = [f.full_path for f in files]
         assert "backend-api/main.py" in file_paths
         assert "frontend-app/app.js" in file_paths
 
-    def test_list_composite_files_sorts_by_path(self, tmp_path, mock_activated_repo):
-        """Test _list_composite_files sorts files by full_path."""
-        from code_indexer.server.managers.composite_file_listing import (
-            _list_composite_files,
+    def test_sorts_by_path(self, tmp_path, mock_activated_repo):
+        path = _composite(
+            tmp_path, {"zeta-repo": {"file.py": "test"}, "alpha-repo": {"file.py": "t"}}
         )
+        repo = mock_activated_repo(path=path, is_composite=True)
 
-        # Create composite repo with multiple files
-        composite_path = tmp_path / "composite"
-        composite_path.mkdir()
+        file_paths = [f.full_path for f in _visible_listing(repo)]
 
-        repo1 = composite_path / "zeta-repo"
-        repo1.mkdir()
-        (repo1 / "file.py").write_text("test")
-
-        repo2 = composite_path / "alpha-repo"
-        repo2.mkdir()
-        (repo2 / "file.py").write_text("test")
-
-        # Create proxy config
-        config_dir = composite_path / ".code-indexer"
-        config_dir.mkdir()
-        config_file = config_dir / "config.json"
-        import json
-
-        config_data = {
-            "proxy_mode": True,
-            "discovered_repos": ["zeta-repo", "alpha-repo"],
-        }
-        config_file.write_text(json.dumps(config_data))
-
-        repo = mock_activated_repo(path=composite_path, is_composite=True)
-
-        # List files
-        files = _list_composite_files(repo, path="", recursive=False)
-
-        # Should be sorted alphabetically by full_path
-        file_paths = [f.full_path for f in files]
         assert file_paths == sorted(file_paths)
         assert file_paths[0].startswith("alpha-repo")
 
-    def test_list_composite_files_handles_path_filter(
-        self, tmp_path, mock_activated_repo
-    ):
-        """Test _list_composite_files respects path parameter for filtering."""
-        from code_indexer.server.managers.composite_file_listing import (
-            _list_composite_files,
+    def test_handles_path_filter(self, tmp_path, mock_activated_repo):
+        path = _composite(
+            tmp_path, {"backend": {"root.py": "test", "src/main.py": "test"}}
         )
+        repo = mock_activated_repo(path=path, is_composite=True)
 
-        # Create repo with nested structure
-        composite_path = tmp_path / "composite"
-        composite_path.mkdir()
+        file_paths = [f.full_path for f in _visible_listing(repo, path="src")]
 
-        repo1 = composite_path / "backend"
-        repo1.mkdir()
-        (repo1 / "root.py").write_text("test")
-        src_dir = repo1 / "src"
-        src_dir.mkdir()
-        (src_dir / "main.py").write_text("test")
+        assert any("main.py" in p for p in file_paths)
+        assert not any("root.py" in p for p in file_paths)
 
-        # Create proxy config
-        config_dir = composite_path / ".code-indexer"
-        config_dir.mkdir()
-        config_file = config_dir / "config.json"
-        import json
+    def test_handles_nonexistent_path(self, tmp_path, mock_activated_repo):
+        path = _composite(tmp_path, {"backend": {}})
+        repo = mock_activated_repo(path=path, is_composite=True)
 
-        config_data = {"proxy_mode": True, "discovered_repos": ["backend"]}
-        config_file.write_text(json.dumps(config_data))
-
-        repo = mock_activated_repo(path=composite_path, is_composite=True)
-
-        # List files in specific subdirectory
-        files = _list_composite_files(repo, path="src", recursive=False)
-
-        # Should only include files from src directory
-        file_paths = [f.full_path for f in files]
-        # When listing with path="src", files are relative to src directory
-        assert any("main.py" in path for path in file_paths)
-        assert not any("root.py" in path for path in file_paths)
-
-    def test_list_composite_files_handles_nonexistent_path(
-        self, tmp_path, mock_activated_repo
-    ):
-        """Test _list_composite_files gracefully handles nonexistent paths."""
-        from code_indexer.server.managers.composite_file_listing import (
-            _list_composite_files,
-        )
-
-        # Create minimal composite repo
-        composite_path = tmp_path / "composite"
-        composite_path.mkdir()
-
-        repo1 = composite_path / "backend"
-        repo1.mkdir()
-
-        # Create proxy config
-        config_dir = composite_path / ".code-indexer"
-        config_dir.mkdir()
-        config_file = config_dir / "config.json"
-        import json
-
-        config_data = {"proxy_mode": True, "discovered_repos": ["backend"]}
-        config_file.write_text(json.dumps(config_data))
-
-        repo = mock_activated_repo(path=composite_path, is_composite=True)
-
-        # List files in nonexistent path
-        files = _list_composite_files(repo, path="nonexistent", recursive=False)
-
-        # Should return empty list, not error
-        assert files == []
+        assert _visible_listing(repo, path="nonexistent") == []
 
 
 @pytest.fixture

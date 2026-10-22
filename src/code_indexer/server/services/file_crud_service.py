@@ -15,15 +15,17 @@ Concurrency control:
 """
 
 import hashlib
+import logging
 import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Optional, TYPE_CHECKING
+from typing import Callable, Dict, Any, Optional, TYPE_CHECKING
 
 from code_indexer.utils.file_locking import nfs_safe_fsync
 from code_indexer.utils.path_confinement import (
     reject_if_within_git_directory,
+    reject_if_within_index_directory,
     resolve_confined_path,
 )
 
@@ -31,6 +33,14 @@ if TYPE_CHECKING:
     from code_indexer.server.repositories.activated_repo_manager import (
         ActivatedRepoManager,
     )
+    from code_indexer.server.services.cidx_meta_access.file_doors import (
+        CatalogFileAccess,
+    )
+
+logger = logging.getLogger(__name__)
+
+# A door's catalog judgement of the directory a write lands in.
+AccessFor = Callable[[str], "CatalogFileAccess"]
 
 
 def _get_activated_repo_manager() -> "ActivatedRepoManager":
@@ -292,8 +302,64 @@ class FileCRUDService:
 
         return repo_path
 
+    @staticmethod
+    def _refuse_hidden_catalog_path(
+        repo_path: Path, file_path: str, access_for: Optional[AccessFor]
+    ) -> None:
+        """The catalog write gate, before any existence check or read:
+        *access_for* judges the directory written (a door passing none is
+        refused on a catalog directory)."""
+        from code_indexer.server.services.cidx_meta_access.file_doors import (
+            refuse_hidden_catalog_writes,
+        )
+
+        served = str(repo_path)
+        access = access_for(served) if access_for is not None else None
+        refuse_hidden_catalog_writes(served, [file_path], access)
+
+    def _validate_path_or_refuse(
+        self,
+        repo_alias: str,
+        file_path: str,
+        username: str,
+        operation: str,
+        access_for: Optional[AccessFor],
+    ) -> None:
+        """``_validate_crud_path``; a path it rejects gets the catalog write
+        refusal instead only when a restricted catalog view is established
+        for the repository, so every spelling answers alike there. In every
+        other case, a failing resolution or judgement included, the original
+        error is raised unchanged."""
+        from code_indexer.server.services.cidx_meta_access.file_doors import (
+            CATALOG_WRITE_REFUSAL,
+            restricted_catalog_view_applies,
+        )
+
+        try:
+            self._validate_crud_path(file_path, operation)
+        except PermissionError as invalid:
+            try:
+                served = str(self._resolve_repo_path(repo_alias, username))
+                access = access_for(served) if access_for is not None else None
+                restricted = restricted_catalog_view_applies(served, access)
+            except Exception as judging:
+                # ^ inv original validation error survives any judging failure
+                logger.debug(
+                    "Catalog judgement of a rejected path failed (%s)",
+                    type(judging).__name__,
+                )
+                raise invalid from None
+            if restricted:
+                raise PermissionError(CATALOG_WRITE_REFUSAL) from None
+            raise
+
     def create_file(
-        self, repo_alias: str, file_path: str, content: str, username: str
+        self,
+        repo_alias: str,
+        file_path: str,
+        content: str,
+        username: str,
+        access_for: Optional[AccessFor] = None,
     ) -> Dict[str, Any]:
         """
         Create a new file in the activated repository.
@@ -321,10 +387,13 @@ class FileCRUDService:
         self._check_write_mode_active(repo_alias)
 
         # Validate path security
-        self._validate_crud_path(file_path, "create_file")
+        self._validate_path_or_refuse(
+            repo_alias, file_path, username, "create_file", access_for
+        )
 
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
+        self._refuse_hidden_catalog_path(repo_path, file_path, access_for)
 
         # Bug #1891: resolve + confine BEFORE any exists()/open() call.
         # _validate_crud_path() above only rejects literal ".." components
@@ -340,6 +409,7 @@ class FileCRUDService:
         # repo_path/.git/hooks/pre-commit), letting a write-mode user
         # plant a hook that executes on the server's next `git commit`.
         reject_if_within_git_directory(repo_path, full_path, "create_file")
+        reject_if_within_index_directory(repo_path, full_path, "create_file")
 
         # Check if file already exists
         if full_path.exists():
@@ -374,6 +444,7 @@ class FileCRUDService:
         content_hash: str,
         replace_all: bool,
         username: str,
+        access_for: Optional[AccessFor] = None,
     ) -> Dict[str, Any]:
         """
         Edit a file by replacing string occurrences.
@@ -409,10 +480,13 @@ class FileCRUDService:
         self._check_write_mode_active(repo_alias)
 
         # Validate path security
-        self._validate_crud_path(file_path, "edit_file")
+        self._validate_path_or_refuse(
+            repo_alias, file_path, username, "edit_file", access_for
+        )
 
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
+        self._refuse_hidden_catalog_path(repo_path, file_path, access_for)
 
         # Bug #1891: resolve + confine BEFORE any exists()/open() call.
         # _validate_crud_path() above only rejects literal ".." components
@@ -425,6 +499,7 @@ class FileCRUDService:
         # comment -- a tracked in-repo symlink (e.g. "gitlink" -> ".git")
         # is confined to repo_path yet still resolves into ".git".
         reject_if_within_git_directory(repo_path, full_path, "edit_file")
+        reject_if_within_index_directory(repo_path, full_path, "edit_file")
 
         if not full_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -479,6 +554,7 @@ class FileCRUDService:
         file_path: str,
         content_hash: Optional[str],
         username: str,
+        access_for: Optional[AccessFor] = None,
     ) -> Dict[str, Any]:
         """
         Delete a file from the activated repository.
@@ -507,10 +583,13 @@ class FileCRUDService:
         self._check_write_mode_active(repo_alias)
 
         # Validate path security
-        self._validate_crud_path(file_path, "delete_file")
+        self._validate_path_or_refuse(
+            repo_alias, file_path, username, "delete_file", access_for
+        )
 
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
+        self._refuse_hidden_catalog_path(repo_path, file_path, access_for)
 
         # Bug #1891: resolve + confine BEFORE any exists()/open() call.
         # _validate_crud_path() above only rejects literal ".." components
@@ -567,6 +646,8 @@ class FileCRUDService:
         # symlink node; either landing inside/at ".git" is forbidden).
         reject_if_within_git_directory(repo_path, full_path, "delete_file")
         reject_if_within_git_directory(repo_path, lexical_path, "delete_file")
+        reject_if_within_index_directory(repo_path, full_path, "delete_file")
+        reject_if_within_index_directory(repo_path, lexical_path, "delete_file")
 
         if not full_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")

@@ -85,10 +85,22 @@ def _user_repos(repo: Path) -> List[Dict[str, Any]]:
 
 
 @pytest.fixture
-def rest(env: Tuple[Any, Path]) -> Iterator[Tuple[TestClient, Path]]:
+def rest(
+    env: Tuple[Any, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Tuple[TestClient, Path]]:
     from code_indexer.server.auth.dependencies import get_current_user
+    from code_indexer.server.services.access_filtering_service import (
+        AccessFilteringService,
+    )
+    from code_indexer.server.services.group_access_manager import GroupAccessManager
 
     app, repo = env
+    groups = GroupAccessManager(tmp_path / "groups.db")
+    admins = groups.get_group_by_name("admins")
+    assert admins is not None
+    groups.assign_user_to_group(ADMIN.username, admins.id, assigned_by="test")
+    service = AccessFilteringService(groups)
+    monkeypatch.setattr(app.state, "access_filtering_service", service, raising=False)
     app.dependency_overrides[get_current_user] = lambda: ADMIN
     arm = app.state.semantic_query_manager.activated_repo_manager
     try:

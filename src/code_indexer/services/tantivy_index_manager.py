@@ -7,18 +7,26 @@ providing fast exact text search capabilities.
 
 import json
 import logging
+import re
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Collection, Dict, List, Optional, Tuple, cast
+
+from ..utils.bounded_regex import BoundedPattern, PatternBudgetExhausted
 
 if TYPE_CHECKING:
     from tantivy import Index, Schema  # type: ignore[import-untyped]
 
-logger = logging.getLogger(__name__)
+from .fts_query_syntax import (  # noqa: F401  (re-exported query syntax)
+    _BOOL_OPS,
+    _contains_valid_boolean_ops,
+    _drop_orphaned_bool_ops,
+    sanitize_fts_query,
+)
 
-_BOOL_OPS: frozenset = frozenset({"OR", "AND", "NOT"})
+logger = logging.getLogger(__name__)
 
 # Bug #1497: field name for verbatim (untokenized) regex matching.
 #
@@ -29,7 +37,7 @@ _BOOL_OPS: frozenset = frozenset({"OR", "AND", "NOT"})
 # "job" -- no single term ever contains the substring "cancel_job". This new
 # field stores each document's raw content as ONE untokenized term
 # (tokenizer_name="raw"), so a regex wrapped for substring semantics can
-# match it via Tantivy's own DFA-based regex engine (ReDoS-immune, unlike
+# match it via Tantivy's own DFA-based regex engine (linear time, unlike
 # falling back to Python-level regex scanning across broad candidate sets).
 _REGEX_VERBATIM_FIELD = "content_raw_verbatim"
 
@@ -52,29 +60,10 @@ _REGEX_VERBATIM_FIELD = "content_raw_verbatim"
 # Query.term_query() against it matches only the exact path.
 _PATH_EXACT_FIELD = "path_exact_raw"
 
-# Bug #1497 (follow-up, ReDoS-immunity + accurate highlighting): sentinel for
-# "no precise match position available". Tantivy's DFA-based regex engine
-# already confirms the ACCEPT/REJECT decision for a regex query against the
-# verbatim field (ReDoS-immune, see the use_regex branch in search() below).
-# A separate Python-level match-position/text EXTRACTION step re-scans the
-# matched document with a bounded-timeout `regex.search(content_raw,
-# timeout=_REGEX_EXTRACTION_TIMEOUT_SECONDS)` call (see below) to recover the
-# actual matched substring/line/column for snippet/highlight display. This
-# sentinel is used only when that bounded extraction times out or otherwise
-# fails -- the document is still a genuine Tantivy-confirmed match, just
-# without a precisely-extracted highlight span.
+# Bug #1497: a Tantivy-decided hit with no extracted highlight keeps this position.
 _NO_MATCH_POSITION = -1
 
-# Bug #1497 (follow-up): bounded timeout (seconds) for the Python-level
-# match-position/text EXTRACTION step. This is a SEPARATE, backtracking
-# `regex.search(content_raw)` call that exists only to recover the matched
-# substring/position for snippet/highlight display -- it is NOT the query
-# decision itself (that is Tantivy's own DFA engine, already ReDoS-immune).
-# For an adversarial pattern like "(a|a)*b" this extraction call could, in
-# principle, itself backtrack catastrophically. Bounding it keeps the
-# overall search provably fast (well under the DFA-safety test's 0.1s
-# ceiling) while remaining far larger than the microseconds a legitimate
-# match normally takes to extract.
+# Bug #1497: per-call cap on highlight extraction (one budget per search).
 _REGEX_EXTRACTION_TIMEOUT_SECONDS = 0.03
 
 # Bug #1497 (follow-up): substring marker identifying Tantivy's
@@ -125,178 +114,6 @@ def _is_regex_state_limit_error(exc: Exception) -> bool:
     just this one search, rather than failing the entire query.
     """
     return _REGEX_STATE_LIMIT_ERROR_MARKER in str(exc).lower()
-
-
-def _drop_orphaned_bool_ops(tokens: List[str]) -> List[str]:
-    """Remove OR/AND/NOT tokens that are leading, trailing or doubled.
-
-    'foo OR OR bar' -> 'foo OR bar' (the first of a run is kept),
-    'AND foo' -> 'foo', 'foo OR' -> 'foo'.
-    """
-    result: List[str] = []
-    for tok in tokens:
-        if tok in _BOOL_OPS and (not result or result[-1] in _BOOL_OPS):
-            continue
-        result.append(tok)
-    if result and result[-1] in _BOOL_OPS:
-        # The loop never keeps two operators in a row, so at most one trails.
-        result.pop()
-    return result
-
-
-def sanitize_fts_query(query_text: str) -> str:
-    """Sanitize an FTS query to prevent Tantivy parse errors.
-
-    Tantivy's parse_query() raises errors for:
-      1. Unmatched double-quotes (odd count)
-      2. Syntax characters used in code identifiers (colon, parentheses, brackets, braces)
-      3. Bare boolean operators with no valid operands (e.g. bare "OR", trailing "term OR",
-         leading "OR term", adjacent "term OR AND other")
-
-    Algorithm:
-      Phase 1 - Unmatched quotes:
-        - 0 quotes: skip (fast path)
-        - even count: unchanged (valid phrase search like "hello world")
-        - odd count: strip all " characters
-
-      Phase 2 - Escape Tantivy syntax characters:
-        Characters that cause parse errors in code identifiers are escaped/removed.
-        Safe characters (., ~, *, ^, +, -) are preserved (useful for wildcards, fuzzy, etc.).
-        - Colon (:): replaced with space — prevents "Field does not exist" ValueError
-          (Tantivy interprets field:value syntax)
-        - Parentheses (), brackets [], braces {}: stripped — prevent "Syntax Error" or
-          "Unsupported query" ValueError (Tantivy grouping/range syntax)
-
-      Phase 2b - '+'/'-' operators:
-        - Tokens consisting only of '+'/'-' are dropped ("Syntax Error: -").
-        - When a token was dropped, OR/AND/NOT operators it left leading,
-          trailing or doubled are removed ('foo OR -' -> 'foo',
-          'foo OR - OR bar' -> 'foo OR bar').
-        - If the query then has no valid boolean operator, a leading '+'/'-'
-          run is stripped, so '-bar' / '--verbose' search the literal word
-          (per-term parsing rejects '-bar' alone). A valid boolean query keeps
-          its prefixes: parse_query() handles 'foo AND -bar' itself.
-        - Inner and trailing operators ('foo-bar', 'foo+') are kept.
-
-      Phase 3 - Bare boolean operators:
-        Runs AFTER Phase 2 so boolean validation sees the final token structure
-        after all character escaping. This ensures that e.g. 'ns:OR' (one token)
-        first becomes 'ns OR' (via Phase 2), then 'ns or' (via Phase 3, trailing OR).
-        Only all-uppercase "OR", "AND", "NOT" are Tantivy operators.
-        Mixed-case variants ("Or", "aNd") are treated as literals — unchanged.
-        - OR and AND require a non-operator term on BOTH left and right sides.
-          If either side is missing or is another operator, lowercase the token.
-        - NOT requires only a non-operator term on the RIGHT side.
-          If the right side is missing or is another operator, lowercase the token.
-
-    Bug #353: By preventing the parse error at source, error bursts (e.g.
-    ~120 repeated errors across repositories) are eliminated implicitly.
-    Bug #357: Phase 2 must run before Phase 3. When a colon-separated identifier
-    like 'ns:OR' is split by the colon, the resulting tokens must be evaluated
-    for boolean validity rather than left as an unsafe trailing operator.
-    """
-    # Phase 1: handle unmatched quotes
-    quote_count = query_text.count('"')
-    if quote_count != 0 and quote_count % 2 != 0:
-        query_text = query_text.replace('"', "")
-
-    # Phase 2: escape Tantivy query syntax characters that appear in code identifiers.
-    # This must run BEFORE Phase 3 (boolean validation) so that colon-separated tokens
-    # like 'ns:OR' are split into ['ns', 'OR'] before boolean validity is checked.
-    # Colon: causes "Field does not exist" ValueError (Tantivy field:value syntax)
-    query_text = query_text.replace(":", " ")
-    # Parentheses, brackets, braces: cause "Syntax Error" or "Unsupported query" ValueError
-    for ch in "()[]{}":
-        query_text = query_text.replace(ch, "")
-
-    # Phase 2b: '+'/'-' operators. A token made only of '+'/'-' is always
-    # dropped ("Syntax Error: -"), together with any boolean operator that
-    # removal orphans ('foo OR -'), rather than searching it as a literal word.
-    # A valid boolean query goes whole to parse_query(), which handles
-    # '-term'/'+term' itself, so prefixes are kept there. Every other query is
-    # split into per-term queries where '-bar' alone fails ("Only excluding
-    # terms given"), so a leading run is stripped and the literal word searched.
-    # Inner and trailing operators ('foo-bar', 'foo+') parse fine and are kept.
-    tokens = query_text.split()
-    if any(tok[0] in "+-" for tok in tokens):
-        kept = [tok for tok in tokens if tok.strip("+-")]
-        if len(kept) < len(tokens):
-            kept = _drop_orphaned_bool_ops(kept)
-        if not _contains_valid_boolean_ops(" ".join(kept)):
-            # '-OR' strips to the literal word 'or', never a live operator:
-            # the query was classified as non-boolean above.
-            stripped = (tok.lstrip("+-") for tok in kept)
-            kept = [tok.lower() if tok in _BOOL_OPS else tok for tok in stripped]
-        query_text = " ".join(kept)
-
-    # Phase 3: handle bare boolean operators (runs after syntax escaping)
-    tokens = query_text.split()
-    if any(tok in _BOOL_OPS for tok in tokens):
-        result = list(tokens)
-        for i, tok in enumerate(tokens):
-            if tok not in _BOOL_OPS:
-                continue
-
-            # Check immediate neighbors (not skipping over other operators).
-            # An operator immediately adjacent to another operator means invalid usage.
-            immediate_left = tokens[i - 1] if i > 0 else None
-            immediate_right = tokens[i + 1] if i < len(tokens) - 1 else None
-
-            # A valid left operand: exists AND is not itself a boolean operator
-            has_left = immediate_left is not None and immediate_left not in _BOOL_OPS
-            # A valid right operand: exists AND is not itself a boolean operator
-            has_right = immediate_right is not None and immediate_right not in _BOOL_OPS
-
-            # Determine validity:
-            # NOT is valid when it has a non-operator term on the right.
-            # OR and AND are valid when they have non-operator terms on BOTH sides.
-            if tok == "NOT":
-                is_valid = has_right
-            else:
-                is_valid = has_left and has_right
-
-            if not is_valid:
-                result[i] = tok.lower()
-
-        query_text = " ".join(result) if tokens else query_text
-
-    return query_text
-
-
-def _contains_valid_boolean_ops(query_text: str) -> bool:
-    """Detect if a sanitized query contains valid boolean operators.
-
-    Returns True if the query contains OR/AND/NOT operators with proper operands,
-    meaning it should be passed directly to Tantivy's parse_query() instead of
-    being split into per-term queries.
-
-    Uses the same validation rules as sanitize_fts_query():
-    - OR/AND need non-operator terms on BOTH left and right sides
-    - NOT needs non-operator terms on BOTH sides (bare 'NOT term' rejected
-      by Tantivy: 'Only excluding terms given')
-    - Only all-uppercase OR, AND, NOT are Tantivy operators
-    """
-    tokens = query_text.split()
-    if len(tokens) < 2:
-        return False
-
-    for i, token in enumerate(tokens):
-        if token not in _BOOL_OPS:
-            continue
-
-        left = tokens[i - 1] if i > 0 else None
-        right = tokens[i + 1] if i < len(tokens) - 1 else None
-        has_left = left is not None and left not in _BOOL_OPS
-        has_right = right is not None and right not in _BOOL_OPS
-
-        # All operators (OR, AND, NOT) require non-operator terms on both sides.
-        # OR/AND: standard boolean grammar requires operands on both sides.
-        # NOT: Tantivy rejects bare 'NOT term' ('Only excluding terms given'),
-        #      so only compound 'positive_term NOT excluded_term' is valid.
-        if has_left and has_right:
-            return True
-
-    return False
 
 
 class TantivyIndexManager:
@@ -1115,8 +932,8 @@ class TantivyIndexManager:
         content. Wrapping with [\\s\\S]* on both sides (rather than a global
         (?s) DOTALL flag) lets the wrapper span newlines while leaving the
         user's own pattern semantics (e.g. their own ".") untouched -- proven
-        via Tantivy's DFA regex engine to remain ReDoS-immune regardless of
-        pattern complexity.
+        via Tantivy's DFA regex engine to keep linear-time matching for any
+        pattern.
 
         Args:
             pattern: The user-supplied regex pattern (unwrapped).
@@ -1182,6 +999,8 @@ class TantivyIndexManager:
         use_regex: bool = False,  # NEW: Enable regex pattern matching
         file_extensions: Optional[List[str]] = None,
         deadline: Optional[float] = None,
+        allowed_paths: Optional[Collection[str]] = None,
+        completeness_out: Optional[List[bool]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search the FTS index with configurable options.
@@ -1214,6 +1033,12 @@ class TantivyIndexManager:
                 shared with its other repositories): no further extension
                 refetch page is fetched once it has passed. The first page
                 always runs.
+            allowed_paths: Only documents stored under one of these paths
+                may match (an exact term-set restriction on the exact-path
+                field when the index has it; every hit is re-checked).
+            completeness_out: Receives one bool: True when every document
+                matching the query was inspected (the result is complete for
+                its filters), False when the limit cut matches off.
 
         Returns:
             List of dictionaries with keys:
@@ -1240,6 +1065,11 @@ class TantivyIndexManager:
         elif path_filter is not None:
             active_path_filters = [path_filter]
 
+        # Complete unless matches are left uninspected (set at the end).
+        if completeness_out is not None:
+            completeness_out.append(True)
+        allowed_set = None if allowed_paths is None else frozenset(allowed_paths)
+
         # Handle language filtering: languages takes precedence over language_filter
         active_language_filter: Optional[List[str]] = None
         if languages is not None:
@@ -1250,7 +1080,6 @@ class TantivyIndexManager:
         from code_indexer.services.extension_filter import (
             fts_pushdown_terms,
             normalize_extensions,
-            path_matches_extensions,
         )
 
         extension_set = normalize_extensions(file_extensions)
@@ -1283,10 +1112,7 @@ class TantivyIndexManager:
             search_field = "content_raw" if case_sensitive else "content"
 
             # Build query based on regex flag
-            # IMPORTANT: Tantivy uses DFA-based regex engine (via tantivy-fst crate)
-            # which is immune to ReDoS attacks. All regex queries complete in linear
-            # time O(n) regardless of pattern complexity. Patterns like (a+)+, (a|a)*b
-            # that cause catastrophic backtracking in PCRE/Python are safe here.
+            # Tantivy regex queries run in linear time for any caller pattern.
             if use_regex:
                 # Build regex query using Tantivy's regex_query
                 assert self._schema is not None  # For mypy
@@ -1432,6 +1258,25 @@ class TantivyIndexManager:
                     ]
                 )
 
+            # Only the allowed paths may match: pushed down (zero score)
+            # when the index has the exact-path field, re-checked per hit.
+            if allowed_set is not None and not allowed_set:
+                return []
+            if allowed_set is not None and self._path_exact_field_available():
+                assert self._schema is not None  # For mypy
+                path_query = TantivyQuery.term_set_query(
+                    self._schema, _PATH_EXACT_FIELD, sorted(allowed_set)
+                )
+                tantivy_query = TantivyQuery.boolean_query(
+                    [
+                        (tantivy.Occur.Must, tantivy_query),
+                        (
+                            tantivy.Occur.Must,
+                            TantivyQuery.const_score_query(path_query, 0.0),
+                        ),
+                    ]
+                )
+
             # Handle limit=0 for unlimited results (grep-like output)
             # Tantivy requires limit > 0, so use very large limit and disable snippets
             if limit == 0:
@@ -1454,56 +1299,37 @@ class TantivyIndexManager:
                     _FTS_UNLIMITED_HITS,
                 )
 
-            search_results = searcher.search(tantivy_query, search_limit).hits
+            first_page = searcher.search(tantivy_query, search_limit, count=True)
+            search_results = first_page.hits
+            # ^ ext tantivy 0.25 stub omits SearchResult.count (int when count=True)
+            raw_count = getattr(first_page, "count", None)
+            match_count: Optional[int] = (
+                raw_count
+                if isinstance(raw_count, int) and not isinstance(raw_count, bool)
+                else None
+            )
 
-            # Build allowed and excluded extension sets once before loop
-            allowed_extensions = set()
-            excluded_extensions = set()
+            # The per-hit filters, as one predicate shared with callers that
+            # judge paths outside the engine (precedence in fts_hit_filter).
+            from code_indexer.services.fts_hit_filter import build_hit_filter
 
-            if languages or exclude_languages:
-                from code_indexer.services.language_mapper import LanguageMapper
-
-                mapper = LanguageMapper()
-
-                # Build excluded extensions from excluded languages (processed FIRST)
-                if exclude_languages:
-                    for lang in exclude_languages:
-                        extensions = mapper.get_extensions(lang)
-                        if extensions:
-                            excluded_extensions.update(extensions)
-
-                # Build allowed extensions from included languages (processed SECOND)
-                if languages:
-                    for lang in languages:
-                        extensions = mapper.get_extensions(lang)
-                        if extensions:
-                            allowed_extensions.update(extensions)
-
-            # Create PathPatternMatcher once before loop (for path filtering and exclusions)
-            path_matcher = None
-            exclude_matcher = None
-            if active_path_filters or exclude_paths:
-                from code_indexer.services.path_pattern_matcher import (
-                    PathPatternMatcher,
-                )
-
-                path_matcher = PathPatternMatcher()
-                exclude_matcher = PathPatternMatcher()  # Use same class for exclusions
+            _passes_filters = build_hit_filter(
+                allowed_paths=allowed_set,
+                languages=languages,
+                exclude_languages=exclude_languages,
+                path_filters=active_path_filters,
+                exclude_paths=exclude_paths,
+                file_extensions=file_extensions,
+            )
 
             # PERFORMANCE OPTIMIZATION: Compile regex pattern ONCE before loop (not per
             # result). This reduces 100x compilation overhead for searches with many
             # results.
             #
-            # Bug #1497 (follow-up): this Python-level regex is used ONLY to extract
-            # the matched text/position for snippet/highlight display from
-            # content_raw -- Tantivy's own DFA-based regex engine already made the
-            # ACCEPT/REJECT decision above and is ReDoS-immune regardless of pattern
-            # complexity (see the use_regex branch above). Each .search() call below
-            # is bounded by _REGEX_EXTRACTION_TIMEOUT_SECONDS so this extraction step
-            # can never regress that ReDoS-immunity guarantee, even for an
-            # adversarial pattern like "(a|a)*b".
-            compiled_regex_pattern = None
-            regex_module_supports_timeout = False
+            # Bug #1497: this Python-level regex only extracts the highlight;
+            # Tantivy made the match decision, and the extraction shares one
+            # bounded evaluation budget per search.
+            compiled_regex_pattern: Optional[BoundedPattern] = None
             # Story #1494 AC2 (Finding A4): count of candidates that
             # actually received the real (GIL-held) Python-level extraction
             # step; once this reaches _MAX_REGEX_EXTRACTION_CANDIDATES,
@@ -1516,26 +1342,15 @@ class TantivyIndexManager:
             regex_extraction_evaluated_count = 0
             regex_extraction_cap_warned = False
             if use_regex:
-                # Use 'regex' library for enhanced Unicode support and bounded-timeout
-                # search(). Falls back to stdlib 're' (no timeout kwarg support) only
-                # if 'regex' is somehow unavailable -- it is a hard pyproject.toml
-                # dependency, so this branch is a defensive legacy fallback.
+                # One total extraction budget per search, each call capped.
                 try:
-                    import regex
-                except ImportError:
-                    import re as regex  # type: ignore
-
-                    logger.debug(
-                        "regex library not installed. Using standard 're' module "
-                        "(bounded-timeout extraction unavailable)."
+                    compiled_regex_pattern = BoundedPattern(
+                        query_text,
+                        0 if case_sensitive else re.IGNORECASE,
+                        purpose="full-text highlight",
+                        call_seconds=_REGEX_EXTRACTION_TIMEOUT_SECONDS,
                     )
-                regex_module_supports_timeout = regex.__name__ == "regex"
-
-                # Pre-compile pattern with appropriate flags
-                try:
-                    flags = 0 if case_sensitive else regex.IGNORECASE
-                    compiled_regex_pattern = regex.compile(query_text, flags=flags)
-                except (regex.error, AttributeError) as e:
+                except re.error as e:
                     # Regex compilation failed - raise early before processing results
                     error_msg = f"Invalid regex pattern '{query_text}': {str(e)}"
                     logger.error(error_msg)
@@ -1558,43 +1373,6 @@ class TantivyIndexManager:
                     doc.get_first("path") or "",
                     str(language).strip("/") if language else language,
                 )
-
-            def _passes_filters(path: str, language: Optional[str]) -> bool:
-                """Per-hit filters. CRITICAL PRECEDENCE ORDER: 1. language
-                exclusions, 2. language inclusions, 3. path exclusions,
-                4. path inclusions (#2047's suffix re-check sits after 2)."""
-                # 1. Exclusions take precedence over inclusions.
-                if excluded_extensions and language in excluded_extensions:
-                    return False
-                # 2. Language filtering was already done in the query for
-                # performance, but exclude_languages needs post-processing.
-                if allowed_extensions and language not in allowed_extensions:
-                    return False
-                # #2047: post-verify the pushed-down extension filter on the
-                # path itself (drops extensionless "txt" documents).
-                if extension_set and not path_matches_extensions(path, extension_set):
-                    return False
-                # 3. Path exclusions before path inclusions.
-                if (
-                    exclude_matcher
-                    and exclude_paths
-                    and any(
-                        exclude_matcher.matches_pattern(path, p) for p in exclude_paths
-                    )
-                ):
-                    return False
-                # 4. Path inclusions: ANY path filter (OR), PathPatternMatcher
-                # for consistency with semantic search (** recursive globs).
-                if (
-                    path_matcher
-                    and active_path_filters
-                    and not any(
-                        path_matcher.matches_pattern(path, p)
-                        for p in active_path_filters
-                    )
-                ):
-                    return False
-                return True
 
             # #2047: hits that fail the suffix re-check (extensionless "txt"
             # files, or values that cannot be pushed down) must not leave the
@@ -1653,7 +1431,8 @@ class TantivyIndexManager:
 
             # Process results
             docs = []
-            for score, address in search_results:
+            stopped_at_limit = False
+            for position, (score, address) in enumerate(search_results):
                 hit_key = (address.segment_ord, address.doc)
                 if hit_key in inspected:
                     doc = inspected[hit_key]
@@ -1670,97 +1449,52 @@ class TantivyIndexManager:
                 if not _passes_filters(path, language):
                     continue
 
-                # Find match position in content
-                # CRITICAL (Bug #1497 follow-up): Tantivy's DFA-based regex engine
-                # already confirmed a genuine match against the verbatim field
-                # (ReDoS-immune, see the use_regex branch in search() above). The
-                # Python-level extraction below is a SEPARATE, bounded-timeout
-                # operation used only to recover the actual matched text/position
-                # for snippet/highlight display -- it can never regress the
-                # project's ReDoS-immunity guarantee because
-                # _REGEX_EXTRACTION_TIMEOUT_SECONDS caps it well under the
-                # DFA-safety test's 0.1s ceiling, even for an adversarial pattern
-                # like "(a|a)*b". If the 'regex' module (which alone supports the
-                # timeout= kwarg) is unavailable, extraction is skipped entirely
-                # in favor of the sentinel position -- never an UNBOUNDED
-                # backtracking call via stdlib 're'.
+                # Find match position in content. Tantivy's DFA engine already
+                # decided the hit; the Python extraction below only recovers the
+                # highlight, bounded per call and per search (BoundedPattern).
+                # A candidate that ran out of time, or past the candidate cap
+                # (Story #1494 AC2), keeps its hit without a highlight and is
+                # marked regex_extraction_capped (never silently dropped).
                 regex_extraction_capped = False
-                if (
-                    use_regex
-                    and compiled_regex_pattern
-                    and regex_module_supports_timeout
-                ):
-                    if (
+                match_obj: Optional[Any] = None
+                if use_regex and compiled_regex_pattern is not None:
+                    if compiled_regex_pattern.exhausted:
+                        regex_extraction_capped = True
+                    elif (
                         regex_extraction_evaluated_count
                         < _MAX_REGEX_EXTRACTION_CANDIDATES
                     ):
                         regex_extraction_evaluated_count += 1
                         try:
-                            match_obj = compiled_regex_pattern.search(
-                                content_raw, timeout=_REGEX_EXTRACTION_TIMEOUT_SECONDS
-                            )
-
-                            if match_obj:
-                                # Extract actual matched text and position
-                                match_text = match_obj.group(0)
-                                match_start = match_obj.start()
-
-                                # Validate for zero-length matches
-                                if len(match_text) == 0:
-                                    logger.warning(
-                                        f"Regex pattern '{query_text}' produced zero-length match "
-                                        f"in {path} at line {line_start}. Consider using a more specific pattern."
-                                    )
-                            else:
-                                # No match found (shouldn't happen since Tantivy found it)
-                                logger.debug(
-                                    f"Regex pattern '{query_text}' matched in Tantivy but not in Python regex "
-                                    f"for file {path}. This may indicate indexing/search inconsistency."
-                                )
-                                match_text = query_text
-                                match_start = _NO_MATCH_POSITION
-                        except Exception as e:
-                            # Bounded-timeout extraction failed (adversarial pattern)
-                            # or any other unexpected extraction error. Tantivy
-                            # already confirmed this is a genuine match via its
-                            # ReDoS-immune DFA engine, so fall back gracefully to
-                            # the sentinel position instead of raising or letting a
-                            # slow Python-level backtrack regress the DFA-safety
-                            # guarantee.
-                            logger.warning(
-                                f"Regex extraction timed out or failed for pattern "
-                                f"'{query_text}' in {path} (falling back to "
-                                f"line-based position): {e}"
-                            )
-                            match_text = query_text
-                            match_start = _NO_MATCH_POSITION
+                            match_obj = compiled_regex_pattern.search(content_raw)
+                        except PatternBudgetExhausted:
+                            # BoundedPattern itself logs one WARNING per search.
+                            regex_extraction_capped = True
                     else:
-                        # Story #1494 AC2: candidate cap reached -- never
-                        # silently drop the result (anti-silent-failure
-                        # rule). Skip the expensive extraction, mark the
-                        # result so callers can distinguish "capped" from a
-                        # genuine no-match, and use the same sentinel
-                        # position the module-unavailable branch below uses.
                         regex_extraction_capped = True
                         if not regex_extraction_cap_warned:
                             logger.warning(
-                                f"Regex extraction candidate cap "
-                                f"({_MAX_REGEX_EXTRACTION_CANDIDATES}) reached for "
-                                f"pattern '{query_text}'; remaining candidates use a "
-                                f"sentinel match position and are marked "
-                                f"regex_extraction_capped."
+                                "Regex extraction candidate cap (%d) reached; "
+                                "remaining candidates use a sentinel match position "
+                                "and are marked regex_extraction_capped.",
+                                _MAX_REGEX_EXTRACTION_CANDIDATES,
                             )
                             regex_extraction_cap_warned = True
+                    if match_obj is not None:
+                        match_text = match_obj.group(0)
+                        match_start = match_obj.start()
+                        if len(match_text) == 0:
+                            logger.warning(
+                                "Regex pattern produced a zero-length match in %s "
+                                "at line %s; consider a more specific pattern.",
+                                path,
+                                line_start,
+                            )
+                    else:
+                        # No highlight: skipped, out of time, or (unexpected)
+                        # no Python-level match for a Tantivy hit.
                         match_text = query_text
                         match_start = _NO_MATCH_POSITION
-                elif use_regex:
-                    # 'regex' module unavailable (defensive legacy fallback --
-                    # it is a hard pyproject.toml dependency, so this branch is
-                    # not expected to run in practice): no timeout-bounded
-                    # search is possible, so skip Python-level extraction
-                    # entirely rather than risk an unbounded backtracking call.
-                    match_text = query_text
-                    match_start = _NO_MATCH_POSITION
                 else:
                     # Non-regex search: literal string matching, most precise
                     # candidate first (see snippet_candidates).
@@ -1815,8 +1549,14 @@ class TantivyIndexManager:
 
                 # Enforce limit after path filtering (unless limit=0 for unlimited)
                 if limit > 0 and len(docs) >= limit:
+                    stopped_at_limit = position < len(search_results) - 1
                     break
 
+            if completeness_out is not None:
+                fetched_all = match_count is not None and match_count <= len(
+                    search_results
+                )
+                completeness_out[-1] = fetched_all and not stopped_at_limit
             # Return results (slice only if limit > 0)
             return docs if limit == 0 else docs[:limit]
 

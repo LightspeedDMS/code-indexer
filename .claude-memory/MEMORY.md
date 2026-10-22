@@ -38,6 +38,7 @@
 - [Bound every agent run](feedback_bound_every_agent_run.md) - every brief carries a time budget + check-ins
 - [Netns shares host PIDs](feedback_netns_shares_host_pids.md) - never kill by pgrep name (hits the dev server)
 - [No gates during edits](feedback_no_gates_while_worker_edits.md) - never run full gates while an agent edits the tree
+- [Probes isolate HOME](feedback_probes_must_isolate_server_home.md) - importing the server app writes the real ~/.cidx-server; point HOME at scratch
 - [Dispatch cap by tier](feedback_parallel_dispatch_cap_4_on_20x.md) - 20x: up to 3 agents (workers+reviewers); 5x: 1+1; extra usage: no timer polling
 
 ## Quality Standards
@@ -74,7 +75,7 @@
 - [Autonomous iterate](feedback_autonomous_overnight_file_fix_iterate.md) - every defect = file + fix + iterate until clean
 - [Bug report = report](feedback_bug_report_means_report_not_fix.md) - "root cause + bug report" = investigate, file, STOP
 - [Issue routing](feedback_issue_routing_public_vs_security.md) - issues -> PRIVATE dev repo; security -> private security repo; never public
-- [Commit issue refs](feedback_commit_issue_refs_overlap.md) - never bare #N in commits; use owner/repo#N, no closing keyword
+- [Commit issue refs](feedback_commit_issue_refs_overlap.md) - never bare #N; public issues as owner/repo#N; NEVER name the private tracker in a commit (describe the change)
 - [Commit on development](feedback_always_checkout_development_before_commit.md) - never commit on master/staging
 - [Bump before staging](feedback_bump_version_before_staging.md) - bump version BEFORE promoting to staging
 - [Lint before commit](feedback_lint_before_commit.md) - ruff/mypy before staging

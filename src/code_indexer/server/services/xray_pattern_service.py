@@ -373,12 +373,33 @@ class XrayPatternService:
             return None
 
         try:
-            locked_result = self._run_with_coarse_lock(owner, _write_and_commit)
+            locked_result, lock_still_held = self._run_with_coarse_lock(
+                owner, _write_and_commit
+            )
         except PatternCommitError as exc:
             return {"success": False, "error": "commit_failed", "message": str(exc)}
         if locked_result is not None:
             return dict(locked_result)
+        self._request_refresh(lock_still_held)
         return {"success": True, "path": result_path}
+
+    def _request_refresh(self, lock_still_held: bool) -> None:
+        """Owe the catalog refresh a completed pattern write needs. A refresh
+        starting under a held lock skips and owes nothing: after our own
+        lock is released the refresh is requested; while the lock is still
+        held (another owner's, or ours after a failed release) the refresh
+        is owed to the debouncer. No-op without a scheduler."""
+        if self._scheduler is None:
+            return
+        from code_indexer.global_repos.meta_description_hook import (
+            owe_cidx_meta_refresh,
+            request_cidx_meta_refresh,
+        )
+
+        if lock_still_held:
+            owe_cidx_meta_refresh()
+            return
+        request_cidx_meta_refresh(self._scheduler)
 
     @staticmethod
     def _holds(target_path: Path, pattern_yaml: str) -> bool:
@@ -646,7 +667,8 @@ class XrayPatternService:
                     message=f"xray-patterns: delete {scope}/{name}",
                 )
 
-        self._run_with_coarse_lock(owner, _delete_and_commit)
+        _, lock_still_held = self._run_with_coarse_lock(owner, _delete_and_commit)
+        self._request_refresh(lock_still_held)
 
         return {"success": True}
 
@@ -672,33 +694,44 @@ class XrayPatternService:
         # acquired=False means a race into piggyback; we never held the lock.
         return not acquired
 
-    def _release_coarse_lock(self, owner: str) -> None:
-        """Release the coarse write lock. No-op when no scheduler is injected."""
+    def _release_coarse_lock(self, owner: str) -> bool:
+        """Release the coarse write lock; False when it could not be removed.
+        No-op (True) when no scheduler is injected."""
         if self._scheduler is None:
-            return
-        self._scheduler.release_write_lock(_COARSE_ALIAS, owner)
+            return True
+        return bool(self._scheduler.release_write_lock(_COARSE_ALIAS, owner))
 
     def _run_with_coarse_lock(
         self,
         owner: str,
         operation: Callable[[bool], Any],
-    ) -> Any:
+    ) -> Tuple[Any, bool]:
         """Acquire coarse lock (or piggyback), run operation, release lock.
 
         The operation receives a single ``piggyback`` bool argument.  When
         True the operation must skip any git commit (the lock-holder's refresh
         will pick up filesystem changes via ``git add -A``).
 
+        Returns ``(operation result, lock_still_held)``: True when the write
+        ran under another owner's lock, or when releasing our own failed --
+        a refresh requested now would skip on that lock.
         Guarantees coarse lock release via try/finally when we hold it.
         Operation exceptions propagate; the coarse lock is still released.
         """
         piggyback = self._coarse_piggyback_or_acquire(owner)
-        coarse_held = not piggyback
+        released = True
         try:
-            return operation(piggyback)
+            result = operation(piggyback)
         finally:
-            if coarse_held:
-                self._release_coarse_lock(owner)
+            if not piggyback:
+                released = self._release_coarse_lock(owner)
+        if not released:
+            logger.warning(
+                "xray_pattern_service: cidx-meta write lock release failed for "
+                "owner=%r; the refresh is owed to the debouncer",
+                owner,
+            )
+        return result, piggyback or not released
 
     def _git_commit_tolerating_failure(self, files: List[Path], message: str) -> None:
         """:meth:`_git_commit`, logging a failed commit as a WARNING

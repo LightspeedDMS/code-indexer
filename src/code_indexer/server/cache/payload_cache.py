@@ -28,6 +28,7 @@ from typing import List, Optional, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import CacheConfig
     from code_indexer.server.storage.protocols import PayloadCacheBackend
+from code_indexer.server.cache.handle_binding import mint_handle
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -276,7 +277,7 @@ class PayloadCache:
         Returns:
             UUID4 handle for retrieving the content
         """
-        handle = str(uuid.uuid4())
+        handle = mint_handle(str(uuid.uuid4()))
 
         if self._backend is not None:
             # PG/cluster mode: delegate to backend
@@ -315,7 +316,7 @@ class PayloadCache:
 
         preview_size = self.config.preview_size_chars
         ttl = self.config.cache_ttl_seconds
-        handles = [str(uuid.uuid4()) for _ in contents]
+        handles = [mint_handle(str(uuid.uuid4())) for _ in contents]
 
         if self._backend is not None:
             # Server mode (PG cluster OR solo SQLite server via BackendRegistry):

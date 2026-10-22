@@ -22,6 +22,7 @@ from code_indexer.server.clients.ci_identifiers import (
     encode_github_repository,
 )
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.utils.bounded_regex import BoundedPattern
 
 logger = logging.getLogger(__name__)
 
@@ -458,7 +459,7 @@ class GitHubActionsClient:
 
             # Search logs for each job
             matches = []
-            pattern_re = re.compile(pattern, re.IGNORECASE)
+            pattern_re = BoundedPattern(pattern, re.IGNORECASE, purpose="CI log search")
 
             for job in jobs:
                 job_id = job["id"]

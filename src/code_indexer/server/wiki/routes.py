@@ -16,8 +16,18 @@ from ..auth.user_manager import User
 from ..middleware.correlation import get_correlation_id
 from ..routers import repo_access_http
 from ..services import search_event_recording
+from ..services.cidx_meta_access import is_catalog_request
+from ..services.constants import is_internal_meta_repo
 from ..services.deactivation_query_drain import track_activated_repo_query
 from ..utils.registry_factory import resolve_backend_registry_attr
+from .catalog_wiki import (
+    CatalogWikiView,
+    filter_articles,
+    filter_sidebar,
+    render_projected_page,
+    restricted_catalog_view,
+    served_relative_path,
+)
 from .wiki_cache import WikiCache
 from .wiki_service import WikiService
 
@@ -206,10 +216,7 @@ def _check_wiki_access(request: Request, repo_alias: str, current_user: User) ->
     """Validate wiki access; return resolved filesystem path. 404 on any failure (invisible repo)."""
     manager = request.app.state.golden_repo_manager
     access_svc = request.app.state.access_filtering_service
-    if not (
-        access_svc.is_admin_user(current_user.username)
-        or current_user.has_permission("manage_users")
-    ):
+    if not access_svc.is_admin_user(current_user.username):
         accessible = access_svc.get_accessible_repos(current_user.username)
         if repo_alias not in accessible:
             raise HTTPException(status_code=404, detail="Not found")
@@ -298,6 +305,91 @@ def _article_response(
     )
 
 
+def _sidebar(
+    cache: WikiCache,
+    cache_alias: str,
+    repo_dir: Path,
+    url_prefix: str,
+    catalog: Optional[CatalogWikiView],
+):
+    """The shared (unfiltered) sidebar; a catalog view gets a filtered copy
+    and the shared cache only ever holds the unfiltered tree."""
+    sidebar = cache.get_sidebar(cache_alias, repo_dir)
+    if sidebar is None:
+        sidebar = _wiki_service.build_sidebar_tree(repo_dir, url_prefix)
+        cache.put_sidebar(cache_alias, sidebar, repo_dir)
+    return sidebar if catalog is None else filter_sidebar(sidebar, catalog)
+
+
+def _index_articles(repo_dir: Path, catalog: Optional[CatalogWikiView]) -> list:
+    """Root article index (no home page), filtered for a catalog view."""
+    articles = []
+    for md_file in sorted(repo_dir.rglob("*.md")):
+        rel = md_file.relative_to(repo_dir)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        if not is_readable_within_root(md_file, repo_dir.resolve()):
+            continue
+        stem = md_file.stem.replace("-", " ").replace("_", " ").title()
+        articles.append({"path": str(rel.with_suffix("")), "title": stem})
+    return articles if catalog is None else filter_articles(articles, catalog)
+
+
+def _page(
+    cache: WikiCache,
+    wiki_config,
+    cache_key: str,
+    url_prefix: str,
+    article_rel_path: str,
+    current_dir: str,
+    file_path: Path,
+    catalog: Optional[CatalogWikiView],
+    relative_file: str,
+) -> dict:
+    """The article page: shared cache for everyone but a restricted catalog
+    caller, whose projected page is rendered per request and never cached."""
+    if catalog is None:
+        return _cached_page(
+            cache,
+            wiki_config,
+            cache_key,
+            url_prefix,
+            article_rel_path,
+            current_dir,
+            file_path,
+        )
+    return render_projected_page(
+        catalog,
+        _wiki_service,
+        file_path,
+        relative_file,
+        url_prefix,
+        current_dir,
+        wiki_config,
+    )
+
+
+def _home_allowed(catalog: Optional[CatalogWikiView]) -> bool:
+    """True when the caller may see the wiki home page (``home.md``)."""
+    if catalog is None:
+        return True
+    try:
+        served_relative_path(catalog, "home.md")
+    except HTTPException:
+        return False
+    return True
+
+
+def _user_catalog_view(
+    request: Request, username: str, alias: str, viewer: str, repo_dir: Path
+) -> Optional[CatalogWikiView]:
+    """Catalog view of a user-wiki activation whose source is the catalog."""
+    arm = getattr(request.app.state, "activated_repo_manager", None)
+    return restricted_catalog_view(
+        request, viewer, repo_dir, is_catalog_request(alias, username, arm)
+    )
+
+
 # ---------------------------------------------------------------------------
 # User wiki routes (Story #291) — MUST be defined before golden repo routes
 # to avoid FastAPI matching "u" as a repo_alias in the catch-all routes.
@@ -313,8 +405,14 @@ def serve_user_wiki_asset(
     current_user: User = Depends(get_wiki_user_hybrid),
 ):
     """Serve image/asset files from user's activated repo wiki (Story #291)."""
-    repo_path = _check_user_wiki_access(request, username, alias, current_user)
-    return _asset_response(Path(repo_path), asset_path)
+    repo_dir = Path(_check_user_wiki_access(request, username, alias, current_user))
+    catalog = _user_catalog_view(
+        request, username, alias, current_user.username, repo_dir
+    )
+    if catalog is not None:
+        # Raises 404 unless the request is the canonical, allowed path.
+        asset_path = served_relative_path(catalog, asset_path)[1]
+    return _asset_response(repo_dir, asset_path)
 
 
 @wiki_router.get("/u/{username}/{alias}/_search")
@@ -327,7 +425,10 @@ def user_wiki_search(
     current_user: User = Depends(get_current_user_hybrid),
 ) -> JSONResponse:
     """Search user's activated repo wiki (Story #291)."""
-    _check_user_wiki_access(request, username, alias, current_user)
+    repo_dir = Path(_check_user_wiki_access(request, username, alias, current_user))
+    catalog = _user_catalog_view(
+        request, username, alias, current_user.username, repo_dir
+    )
 
     if len(q.strip()) < 2:
         return JSONResponse(content=[])
@@ -393,6 +494,8 @@ def user_wiki_search(
                 "title": title,
             }
         )
+    if catalog is not None:
+        mapped = filter_articles(mapped, catalog)
     return JSONResponse(content=mapped)
 
 
@@ -411,34 +514,33 @@ def serve_user_wiki_root(
     # URL prefix for link rewriting: "u/{username}/{alias}"
     url_prefix = f"u/{username}/{alias}"
 
+    catalog = _user_catalog_view(
+        request, username, alias, current_user.username, repo_dir
+    )
     home_md = repo_dir / "home.md"
     cache = _get_wiki_cache(request)
     wiki_config = _get_wiki_config(request)
+    sidebar = _sidebar(cache, cache_repo_alias, repo_dir, url_prefix, catalog)
 
-    sidebar = cache.get_sidebar(cache_repo_alias, repo_dir)
-    if sidebar is None:
-        sidebar = _wiki_service.build_sidebar_tree(repo_dir, url_prefix)
-        cache.put_sidebar(cache_repo_alias, sidebar, repo_dir)
-
-    if home_md.exists() and home_md.is_file():
+    if _home_allowed(catalog) and home_md.exists() and home_md.is_file():
         cache.increment_view(cache_repo_alias, "")
-        page = _cached_page(
-            cache, wiki_config, cache_repo_alias, url_prefix, "", "", home_md
+        page = _page(
+            cache,
+            wiki_config,
+            cache_repo_alias,
+            url_prefix,
+            "",
+            "",
+            home_md,
+            catalog,
+            "home.md",
         )
         return _article_response(
             request, cache, wiki_config, page, url_prefix, "", sidebar
         )
 
     # No home.md — render article index
-    articles = []
-    for md_file in sorted(repo_dir.rglob("*.md")):
-        rel = md_file.relative_to(repo_dir)
-        if any(part.startswith(".") for part in rel.parts):
-            continue
-        if not is_readable_within_root(md_file, repo_dir.resolve()):
-            continue
-        stem = md_file.stem.replace("-", " ").replace("_", " ").title()
-        articles.append({"path": str(rel.with_suffix("")), "title": stem})
+    articles = _index_articles(repo_dir, catalog)
     return wiki_templates.TemplateResponse(
         request,
         "index.html",
@@ -464,6 +566,12 @@ def serve_user_wiki_article(
     repo_dir = Path(repo_path)
     cache_repo_alias = f"u:{username}:{alias}"
     url_prefix = f"u/{username}/{alias}"
+    catalog = _user_catalog_view(
+        request, username, alias, current_user.username, repo_dir
+    )
+    if catalog is not None:
+        # Raises 404 unless the request is the canonical, allowed file.
+        path = served_relative_path(catalog, path, md_fallback=True)[1]
 
     article_path = repo_dir / path
     _refuse_unreadable(repo_dir, article_path)
@@ -488,13 +596,8 @@ def serve_user_wiki_article(
     cache = _get_wiki_cache(request)
     wiki_config = _get_wiki_config(request)
     cache.increment_view(cache_repo_alias, article_rel_path)
-
-    sidebar = cache.get_sidebar(cache_repo_alias, repo_dir)
-    if sidebar is None:
-        sidebar = _wiki_service.build_sidebar_tree(repo_dir, url_prefix)
-        cache.put_sidebar(cache_repo_alias, sidebar, repo_dir)
-
-    page = _cached_page(
+    sidebar = _sidebar(cache, cache_repo_alias, repo_dir, url_prefix, catalog)
+    page = _page(
         cache,
         wiki_config,
         cache_repo_alias,
@@ -502,6 +605,8 @@ def serve_user_wiki_article(
         article_rel_path,
         current_dir,
         article_path,
+        catalog,
+        rel_path.as_posix(),
     )
     return _article_response(
         request, cache, wiki_config, page, url_prefix, article_rel_path, sidebar
@@ -521,8 +626,14 @@ def serve_wiki_asset(
     current_user: User = Depends(get_wiki_user_hybrid),
 ):
     """Serve image/asset files from wiki repo."""
-    actual_path = _check_wiki_access(request, repo_alias, current_user)
-    return _asset_response(Path(actual_path), asset_path)
+    repo_dir = Path(_check_wiki_access(request, repo_alias, current_user))
+    catalog = restricted_catalog_view(
+        request, current_user.username, repo_dir, is_internal_meta_repo(repo_alias)
+    )
+    if catalog is not None:
+        # Raises 404 unless the request is the canonical, allowed path.
+        asset_path = served_relative_path(catalog, asset_path)[1]
+    return _asset_response(repo_dir, asset_path)
 
 
 @wiki_router.get("/{repo_alias}/", response_class=HTMLResponse)
@@ -534,30 +645,31 @@ def serve_wiki_root(
     """Serve wiki root page - home.md or article index."""
     actual_path = _check_wiki_access(request, repo_alias, current_user)
     repo_dir = Path(actual_path)
+    catalog = restricted_catalog_view(
+        request, current_user.username, repo_dir, is_internal_meta_repo(repo_alias)
+    )
     home_md = repo_dir / "home.md"
     cache = _get_wiki_cache(request)
     wiki_config = _get_wiki_config(request)
+    sidebar = _sidebar(cache, repo_alias, repo_dir, repo_alias, catalog)
 
-    sidebar = cache.get_sidebar(repo_alias, repo_dir)
-    if sidebar is None:
-        sidebar = _wiki_service.build_sidebar_tree(repo_dir, repo_alias)
-        cache.put_sidebar(repo_alias, sidebar, repo_dir)
-
-    if home_md.exists() and home_md.is_file():
+    if _home_allowed(catalog) and home_md.exists() and home_md.is_file():
         cache.increment_view(repo_alias, "")
-        page = _cached_page(cache, wiki_config, repo_alias, repo_alias, "", "", home_md)
+        page = _page(
+            cache,
+            wiki_config,
+            repo_alias,
+            repo_alias,
+            "",
+            "",
+            home_md,
+            catalog,
+            "home.md",
+        )
         return _article_response(
             request, cache, wiki_config, page, repo_alias, "", sidebar
         )
-    articles = []
-    for md_file in sorted(repo_dir.rglob("*.md")):
-        rel = md_file.relative_to(repo_dir)
-        if any(part.startswith(".") for part in rel.parts):
-            continue
-        if not is_readable_within_root(md_file, repo_dir.resolve()):
-            continue
-        stem = md_file.stem.replace("-", " ").replace("_", " ").title()
-        articles.append({"path": str(rel.with_suffix("")), "title": stem})
+    articles = _index_articles(repo_dir, catalog)
     breadcrumbs = _wiki_service.build_breadcrumbs("", repo_alias)
     return wiki_templates.TemplateResponse(
         request,
@@ -584,7 +696,10 @@ def wiki_search(
     current_user: User = Depends(get_current_user_hybrid),
 ) -> JSONResponse:
     """Search wiki articles via SemanticQueryManager (Story #290)."""
-    _check_wiki_access(request, repo_alias, current_user)
+    repo_dir = Path(_check_wiki_access(request, repo_alias, current_user))
+    catalog = restricted_catalog_view(
+        request, current_user.username, repo_dir, is_internal_meta_repo(repo_alias)
+    )
 
     # Validate query — return empty for short/empty queries
     if len(q.strip()) < 2:
@@ -656,6 +771,8 @@ def wiki_search(
             }
         )
 
+    if catalog is not None:
+        mapped = filter_articles(mapped, catalog)
     return JSONResponse(content=mapped)
 
 
@@ -669,6 +786,12 @@ def serve_wiki_article(
     """Serve rendered wiki article."""
     actual_path = _check_wiki_access(request, repo_alias, current_user)
     repo_dir = Path(actual_path)
+    catalog = restricted_catalog_view(
+        request, current_user.username, repo_dir, is_internal_meta_repo(repo_alias)
+    )
+    if catalog is not None:
+        # Raises 404 unless the request is the canonical, allowed file.
+        path = served_relative_path(catalog, path, md_fallback=True)[1]
     article_path = repo_dir / path
     _refuse_unreadable(repo_dir, article_path)
     if not article_path.exists() and not article_path.suffix:
@@ -692,20 +815,17 @@ def serve_wiki_article(
     cache = _get_wiki_cache(request)
     wiki_config = _get_wiki_config(request)
     cache.increment_view(repo_alias, article_rel_path)
-
-    sidebar = cache.get_sidebar(repo_alias, repo_dir)
-    if sidebar is None:
-        sidebar = _wiki_service.build_sidebar_tree(repo_dir, repo_alias)
-        cache.put_sidebar(repo_alias, sidebar, repo_dir)
-
-    page = _cached_page(
+    sidebar = _sidebar(cache, repo_alias, repo_dir, repo_alias, catalog)
+    page = _page(
         cache,
         wiki_config,
-        repo_alias,
-        repo_alias,
+        repo_alias,  # cache key
+        repo_alias,  # url prefix
         article_rel_path,
         current_dir,
         article_path,
+        catalog,
+        rel_path.as_posix(),
     )
     return _article_response(
         request, cache, wiki_config, page, repo_alias, article_rel_path, sidebar

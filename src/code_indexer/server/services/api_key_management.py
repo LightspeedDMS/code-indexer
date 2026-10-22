@@ -471,6 +471,7 @@ class ApiKeyConnectivityTester:
         try:
             from code_indexer.server.services.embedding_call_instrumentation import (
                 instrument_call_async,
+                voyage_usage_tokens,
             )
 
             await instrument_call_async(
@@ -478,7 +479,7 @@ class ApiKeyConnectivityTester:
                 call_type="embed",
                 model=self.VOYAGEAI_TEST_MODEL,
                 item_count=1,
-                token_count=0,
+                tokens_from_result=voyage_usage_tokens,
                 batch_size=1,
                 purpose="key_test",
                 fn=_do_post_and_validate,
@@ -558,6 +559,7 @@ class ApiKeyConnectivityTester:
 
         try:
             from code_indexer.server.services.embedding_call_instrumentation import (
+                cohere_billed_input_tokens,
                 instrument_call_async,
             )
 
@@ -566,7 +568,7 @@ class ApiKeyConnectivityTester:
                 call_type="embed",
                 model="embed-v4.0",
                 item_count=1,
-                token_count=0,
+                tokens_from_result=cohere_billed_input_tokens,
                 batch_size=1,
                 purpose="key_test",
                 fn=_do_post_and_validate,

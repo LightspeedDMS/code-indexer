@@ -38,6 +38,10 @@ from typing import Iterable, List, Optional, Tuple, Union, cast
 
 import anyio.to_thread
 
+from code_indexer.utils.bounded_regex import (
+    CALLER_PATTERN_BUDGET_SECONDS,
+    BoundedPattern,
+)
 from code_indexer.utils.path_confinement import (
     has_git_segment,
     resolves_into_git_directory,
@@ -2251,7 +2255,7 @@ class RegexSearchService:
         returned is a genuine match within that substring.
 
         Bug #1611: this method previously had NO timeout enforcement of
-        any kind -- a slow multiline regex (catastrophic backtracking) or
+        any kind -- a slow multiline regex or
         a large repo scanned via this fallback could run unbounded,
         regardless of the caller's requested ``timeout_seconds``, since
         this synchronous ``os.walk`` loop is the whole unit of work
@@ -2293,8 +2297,14 @@ class RegexSearchService:
         flags = re.DOTALL
         if not case_sensitive:
             flags |= re.IGNORECASE
+        # Matching time is bounded too: running out raises a TimeoutError.
         try:
-            compiled = re.compile(pattern, flags)
+            compiled = BoundedPattern(
+                pattern,
+                flags,
+                purpose="regex search",
+                budget_seconds=timeout_seconds or CALLER_PATTERN_BUDGET_SECONDS,
+            )
         except re.error as e:
             raise ValueError(f"Invalid regex pattern: {e}") from e
 
@@ -2313,11 +2323,7 @@ class RegexSearchService:
                 continue
 
             for fname in files:
-                # Bug #1611: per-file elapsed-time check against the
-                # ABSOLUTE deadline computed above -- the coarsest
-                # granularity that still guarantees the walk cannot
-                # continue past a genuinely large/slow repo's worth of
-                # files once the caller's timeout_seconds has elapsed.
+                # Bug #1611: per-file check against the absolute deadline.
                 if deadline is not None and time.monotonic() >= deadline:
                     raise TimeoutError(
                         f"Python multiline regex search for pattern={pattern!r} "
@@ -2337,15 +2343,7 @@ class RegexSearchService:
 
                 try:
                     with open(file_path, "rb") as f:
-                        # Read one byte beyond the ceiling as a cheap probe
-                        # for "did this file actually exceed the ceiling",
-                        # without a second pass over the file. Priority 3
-                        # remediation: read in BINARY mode so the ceiling
-                        # is enforced in true BYTES, not text-mode decoded
-                        # characters (a text-mode f.read(n) counts
-                        # characters, letting a multi-byte-UTF-8-heavy file
-                        # read up to ~4x the intended byte ceiling before
-                        # tripping).
+                        # One byte past the BYTE ceiling probes "exceeded" (P3).
                         raw_content = f.read(_MAX_READ_BYTES + 1)
                 except OSError:
                     logger.debug("Skipping unreadable file: %s", file_path)

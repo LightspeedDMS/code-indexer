@@ -140,6 +140,7 @@ class VoyageMultimodalClient:
 
         from code_indexer.server.services.embedding_call_instrumentation import (
             instrument_call,
+            voyage_usage_tokens,
         )
         from code_indexer.services.embedding_metrics_telemetry import (
             time_and_record_embedding_call,
@@ -155,7 +156,7 @@ class VoyageMultimodalClient:
                 call_type="embed_multimodal",
                 model=self.config.model,
                 item_count=1,
-                token_count=0,
+                tokens_from_result=voyage_usage_tokens,
                 batch_size=1,
                 purpose="query" if input_type == "query" else "index",
                 fn=_do_post_and_validate,
@@ -361,6 +362,7 @@ class VoyageMultimodalClient:
 
         from code_indexer.server.services.embedding_call_instrumentation import (
             instrument_call,
+            voyage_usage_tokens,
         )
         from code_indexer.services.embedding_metrics_telemetry import (
             time_and_record_embedding_call,
@@ -378,7 +380,7 @@ class VoyageMultimodalClient:
                 call_type="embed_multimodal",
                 model=self.config.model,
                 item_count=len(items),
-                token_count=0,
+                tokens_from_result=voyage_usage_tokens,
                 batch_size=len(items),
                 purpose="query" if input_type == "query" else "index",
                 fn=_do_post_and_validate,

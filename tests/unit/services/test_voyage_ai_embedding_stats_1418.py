@@ -56,10 +56,13 @@ def _reset_active_writer():
     from code_indexer.server.services.embedding_stats_writer import (
         EmbeddingStatsWriter,
     )
+    from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
     EmbeddingStatsWriter._active = None
+    ProviderHealthMonitor.reset_instance()
     yield
     EmbeddingStatsWriter._active = None
+    ProviderHealthMonitor.reset_instance()
 
 
 @pytest.fixture
@@ -162,6 +165,65 @@ class TestMakeSyncRequestIndexingPathRetryCounting:
         assert all(r.success is False for r in writer.records)
 
 
+class TestMakeSyncRequestRecordsVendorTokens:
+    """Issue #2173: token_count is the vendor-reported usage.total_tokens of
+    the successful response; a failed attempt is not billed and records 0."""
+
+    def test_success_records_vendor_usage_total_tokens(self, mock_api_key):
+        writer = _install_writer()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"embedding": [0.1] * 1024}],
+                    "usage": {"total_tokens": 17},
+                },
+            )
+
+        client = VoyageAIClient(
+            VoyageAIConfig(model="voyage-code-3"),
+            http_client_factory=_FakeSyncClientFactory(handler),
+        )
+
+        client._make_sync_request(["hello"], retry=False)
+
+        assert [r.token_count for r in writer.records] == [17]
+
+    def test_failed_attempt_records_zero_tokens(self, mock_api_key):
+        writer = _install_writer()
+        call_count = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return httpx.Response(500, json={"usage": {"total_tokens": 99}})
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"embedding": [0.1] * 1024}],
+                    "usage": {"total_tokens": 17},
+                },
+            )
+
+        client = VoyageAIClient(
+            VoyageAIConfig(
+                model="voyage-code-3",
+                max_retries=2,
+                retry_delay=0.01,
+                exponential_backoff=False,
+            ),
+            http_client_factory=_FakeSyncClientFactory(handler),
+        )
+
+        client._make_sync_request(["hello"], retry=True)
+
+        assert [(r.success, r.token_count) for r in writer.records] == [
+            (False, 0),
+            (True, 17),
+        ]
+
+
 class TestMakeSyncContextualizedRequestAlwaysTemporalPurpose:
     def test_contextualized_endpoint_records_purpose_temporal(self, mock_api_key):
         writer = _install_writer()
@@ -195,6 +257,54 @@ class TestMakeSyncContextualizedRequestAlwaysTemporalPurpose:
         assert rec.call_type == "embed"
         assert rec.purpose == "temporal"
         assert rec.success is True
+
+    def test_contextualized_success_records_vendor_usage_total_tokens(
+        self, mock_api_key
+    ):
+        writer = _install_writer()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "index": 0,
+                            "data": [{"index": 0, "embedding": [0.1] * 1024}],
+                        }
+                    ],
+                    "usage": {"total_tokens": 4},
+                },
+            )
+
+        client = VoyageAIClient(
+            VoyageAIConfig(model="voyage-context-4"),
+            http_client_factory=_FakeSyncClientFactory(handler),
+        )
+
+        client._make_sync_contextualized_request(
+            [["chunk1"]], input_type="document", output_dimension=1024, retry=False
+        )
+
+        assert [r.token_count for r in writer.records] == [4]
+
+    def test_contextualized_failure_records_zero_tokens(self, mock_api_key):
+        writer = _install_writer()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={"usage": {"total_tokens": 4}})
+
+        client = VoyageAIClient(
+            VoyageAIConfig(model="voyage-context-4"),
+            http_client_factory=_FakeSyncClientFactory(handler),
+        )
+
+        with pytest.raises(httpx.HTTPStatusError):
+            client._make_sync_contextualized_request(
+                [["chunk1"]], input_type="document", output_dimension=1024, retry=False
+            )
+
+        assert [(r.success, r.token_count) for r in writer.records] == [(False, 0)]
 
 
 class TestNoRegressionInReturnedResult:

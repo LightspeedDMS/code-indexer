@@ -162,8 +162,6 @@ class GroupAccessManager:
             storage_backend:  Optional backend implementing GroupsBackend protocol.
                               When provided (PG mode), all DB operations delegate to it.
         """
-        # Bug #338: Callbacks invoked after any repo access change (grant or revoke)
-        self._on_repo_change_callbacks: List[Callable[[], None]] = []
         # Story #399: Optional AuditLogService delegation
         self._audit_service: Optional["AuditLogService"] = None
         self._backend = storage_backend
@@ -195,20 +193,6 @@ class GroupAccessManager:
             audit_service: AuditLogService instance
         """
         self._audit_service = audit_service
-
-    def register_on_repo_change(self, callback: Callable[[], None]) -> None:
-        """
-        Register a callback to be invoked after any repo access change.
-
-        Bug #338: Centralizes cache invalidation so all call sites (MCP handlers,
-        REST routes, Web UI routes, lifecycle hooks) automatically trigger
-        invalidation without requiring each caller to do it manually.
-
-        Args:
-            callback: Zero-argument callable invoked after grant_repo_access()
-                      or revoke_repo_access() successfully mutates the DB.
-        """
-        self._on_repo_change_callbacks.append(callback)
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get a database connection with foreign key enforcement.
@@ -929,11 +913,7 @@ class GroupAccessManager:
             ValueError: If the group does not exist
         """
         if self._backend is not None:
-            granted = self._backend.grant_repo_access(repo_name, group_id, granted_by)
-            if granted:
-                for cb in self._on_repo_change_callbacks:
-                    cb()
-            return granted  # type: ignore[no-any-return]
+            return self._backend.grant_repo_access(repo_name, group_id, granted_by)  # type: ignore[no-any-return]
         # Validate group exists
         group = self.get_group(group_id)
         if group is None:
@@ -957,9 +937,6 @@ class GroupAccessManager:
             result["granted"] = cursor.rowcount > 0
 
         self._conn_manager.execute_atomic(_do_grant)
-        if result["granted"]:
-            for cb in self._on_repo_change_callbacks:
-                cb()
         return result["granted"]  # type: ignore[no-any-return]
 
     def revoke_repo_access(self, repo_name: str, group_id: int) -> bool:
@@ -999,9 +976,6 @@ class GroupAccessManager:
             result["revoked"] = cursor.rowcount > 0
 
         self._conn_manager.execute_atomic(_do_revoke)
-        if result["revoked"]:
-            for cb in self._on_repo_change_callbacks:
-                cb()
         return result["revoked"]  # type: ignore[no-any-return]
 
     def revoke_repo_access_audited(

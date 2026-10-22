@@ -144,7 +144,7 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 
 | Suite | Scope | When Required | Time |
 |-------|-------|---------------|------|
-| `fast-automation.sh` | CLI, core logic, chunking, storage (ignores `tests/unit/server/`) | ALL changes | ~62 min alone (19,552 tests in 62 min measured 2026-10-11, up from 49 min on 2026-10-08; grows faster than test count -- re-measure); use `timeout 5400` (3600 now kills a healthy solo run); NEVER run it concurrently with server-fast |
+| `fast-automation.sh` | CLI, core logic, chunking, storage (ignores `tests/unit/server/`) | ALL changes | ~65 min alone (19,888 tests in 65 min measured 2026-10-21; 19,552 in 62 min on 2026-10-11; grows faster than test count -- re-measure); use `timeout 7200` (a run sharing the host with other load reached only 52% in 72 min on 2026-10-21, so 5400 can kill a healthy run); NEVER run it concurrently with server-fast |
 | `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage), 6 parallel chunks | Touching `src/code_indexer/server/` | ~22 min (measured 2026-10-08; chunk 6 "rest2" and chunk 4 `web/repositories/routers` are the long poles) |
 | `slow-automation.sh` | `@pytest.mark.slow` unit tests (Bug #1798) | Not yet in the required gate sequence | ~45 min |
 | `rust-automation.sh` | Rust X-Ray engine: `cargo test --workspace` (447 tests incl. AC18 PREAMBLE parity) + `cargo clippy --workspace --all-targets -D warnings` | Touching `rust/` | seconds warm |

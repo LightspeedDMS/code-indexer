@@ -6,12 +6,16 @@ with OAuth authentication and service layer integration.
 """
 
 import logging
-from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from typing import Callable, Optional
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
-from code_indexer.server.auth.dependencies import get_current_user
+from code_indexer.server.auth.dependencies import require_permission
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.cidx_meta_access.file_doors import (
+    CatalogFileAccess,
+    judge_app_request,
+)
 from code_indexer.server.services.file_crud_service import (
     HashMismatchError,
     file_crud_service,
@@ -35,6 +39,21 @@ def _require_activation_access(alias: str, user: User) -> None:
         return
     repo_access_http.enforce_activated_repo_access(
         repo_access_http.module_app_access_filtering_service(), user.username, alias
+    )
+
+
+def _catalog_judge(
+    request: Request, alias: str, user: User
+) -> Callable[[str], CatalogFileAccess]:
+    """The request's catalog judgement of the directory a write lands in."""
+    state = request.app.state
+    return lambda served: judge_app_request(
+        state,
+        alias,
+        served,
+        user.username,
+        getattr(state, "activated_repo_manager", None),
+        may_write=user.has_permission("repository:write"),
     )
 
 
@@ -112,7 +131,10 @@ class DeleteFileResponse(BaseModel):
     description="Create a new file in the activated repository with specified content",
 )
 def create_file(
-    alias: str, request: CreateFileRequest, user: User = Depends(get_current_user)
+    alias: str,
+    request: CreateFileRequest,
+    http_request: Request,
+    user: User = Depends(require_permission("repository:write")),
 ) -> CreateFileResponse:
     """
     Create a new file in the repository.
@@ -136,6 +158,7 @@ def create_file(
             file_path=request.file_path,
             content=request.content,
             username=user.username,
+            access_for=_catalog_judge(http_request, alias, user),
         )
         return CreateFileResponse(**result)
 
@@ -204,7 +227,8 @@ def edit_file(
     alias: str,
     file_path: str,
     request: EditFileRequest,
-    user: User = Depends(get_current_user),
+    http_request: Request,
+    user: User = Depends(require_permission("repository:write")),
 ) -> EditFileResponse:
     """
     Edit an existing file in the repository.
@@ -232,6 +256,7 @@ def edit_file(
             content_hash=request.content_hash,
             replace_all=request.replace_all,
             username=user.username,
+            access_for=_catalog_judge(http_request, alias, user),
         )
         return EditFileResponse(**result)
 
@@ -297,10 +322,11 @@ def edit_file(
 def delete_file(
     alias: str,
     file_path: str,
+    http_request: Request,
     content_hash: Optional[str] = Query(
         None, description="Expected content hash for verification"
     ),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("repository:write")),
 ) -> DeleteFileResponse:
     """
     Delete a file from the repository.
@@ -325,6 +351,7 @@ def delete_file(
             file_path=file_path,
             content_hash=content_hash,
             username=user.username,
+            access_for=_catalog_judge(http_request, alias, user),
         )
         return DeleteFileResponse(**result)
 

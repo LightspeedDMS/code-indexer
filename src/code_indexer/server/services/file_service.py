@@ -42,8 +42,21 @@ if TYPE_CHECKING:
     from code_indexer.server.repositories.activated_repo_manager import (
         ActivatedRepoManager,
     )
+    from code_indexer.server.services.cidx_meta_access.file_doors import (
+        CatalogFileAccess,
+        CatalogFileView,
+    )
 
 logger = logging.getLogger(__name__)
+
+
+def _catalog_view(
+    repo_path: str, access: "Optional[CatalogFileAccess]", missing: Exception
+) -> "Optional[CatalogFileView]":
+    from code_indexer.server.services.cidx_meta_access.file_doors import view_for
+
+    return view_for(repo_path, access, missing)
+
 
 # Per-request latency: _collect_files walks the FULL repo tree (rglob + a stat
 # and an is_indexed check per file). On large repos this dominates list_files /
@@ -217,7 +230,11 @@ class FileListingService:
         return _Adapter(content_limits)
 
     def list_files(
-        self, repo_id: str, username: str, query_params: FileListQueryParams
+        self,
+        repo_id: str,
+        username: str,
+        query_params: FileListQueryParams,
+        access: "Optional[CatalogFileAccess]" = None,
     ) -> FileListResponse:
         """
         List files in repository with pagination and filtering.
@@ -240,24 +257,13 @@ class FileListingService:
         if not os.path.exists(repo_path):
             raise FileNotFoundError(f"Repository {repo_id} not found")
 
-        # Collect all files
-        all_files = self._collect_files(repo_path)
-
-        # Apply filters
-        filtered_files = self._apply_filters(all_files, query_params)
-
-        # Apply sorting
-        sorted_files = self._apply_sorting(filtered_files, query_params.sort_by)
-
-        # Apply pagination
-        paginated_files, pagination_info = self._apply_pagination(
-            sorted_files, query_params.page, query_params.limit
-        )
-
-        return FileListResponse(files=paginated_files, pagination=pagination_info)
+        return self.list_files_by_path(repo_path, query_params, access)
 
     def list_files_by_path(
-        self, repo_path: str, query_params: FileListQueryParams
+        self,
+        repo_path: str,
+        query_params: FileListQueryParams,
+        access: "Optional[CatalogFileAccess]" = None,
     ) -> FileListResponse:
         """
         List files from a direct filesystem path (for global repos).
@@ -268,17 +274,24 @@ class FileListingService:
         Args:
             repo_path: Direct filesystem path to repository
             query_params: Query parameters for filtering and pagination
+            access: The request's catalog judgement; a restricted view keeps
+                only listable paths, before filtering, sorting and pagination.
 
         Returns:
             File list response with pagination
 
         Raises:
-            FileNotFoundError: If path doesn't exist
+            FileNotFoundError: If path doesn't exist, or it is the catalog
+                and no judgement was passed
         """
+        missing = FileNotFoundError(f"Path {repo_path} not found")
         if not os.path.exists(repo_path):
-            raise FileNotFoundError(f"Path {repo_path} not found")
+            raise missing
+        view = _catalog_view(repo_path, access, missing)
 
         all_files = self._collect_files(repo_path)
+        if view is not None:
+            all_files = [f for f in all_files if view.listable(f.path)]
         filtered_files = self._apply_filters(all_files, query_params)
         sorted_files = self._apply_sorting(filtered_files, query_params.sort_by)
         paginated_files, pagination_info = self._apply_pagination(
@@ -786,6 +799,7 @@ class FileListingService:
         offset: Optional[int] = None,
         limit: Optional[int] = None,
         skip_truncation: bool = False,
+        access: "Optional[CatalogFileAccess]" = None,
     ) -> Dict[str, Any]:
         """Get content of a specific file from repository with optional pagination.
 
@@ -818,149 +832,17 @@ class FileListingService:
             - pagination_hint: Helpful message for navigating large files
         """
         repo_path = self._get_repository_path(repository_alias, username)
-        # Bug #1891 round 2 (S1): the previous
-        # str(full_file_path).startswith(str(repo_root)) check incorrectly
-        # admitted a SIBLING directory whose name starts with repo_root's
-        # name (e.g. repo_root=".../foo" admits ".../foo-private/...").
-        # resolve_confined_path() confines via Path.relative_to() instead,
-        # which is immune to that class of bug.
-        # A path inside the repository's .git is answered as a missing file.
-        try:
-            full_file_path = resolve_confined_path(Path(repo_path), file_path)
-        except GitDirectoryPathError:
-            raise FileNotFoundError(f"File not found: {file_path}")
-        if not full_file_path.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
-        if not full_file_path.is_file():
-            raise FileNotFoundError(f"Not a file: {file_path}")
-
-        # Read all lines for pagination
-        # Bug #1449: errors="replace" so a non-UTF-8 byte (e.g. Windows-1252
-        # punctuation) is substituted with U+FFFD instead of raising
-        # UnicodeDecodeError -- a legitimately-existing file must still be
-        # readable, and byte-stable line/offset pagination is preserved.
-        with open(full_file_path, "r", encoding="utf-8", errors="replace") as f:
-            all_lines = f.readlines()
-
-        total_lines = len(all_lines)
-
-        # CRITICAL: Default behavior changed - return first chunk only (not entire file)
-        # Apply offset (convert 1-indexed to 0-indexed for slicing)
-        effective_offset = offset if offset is not None else 1
-        start_index = max(0, effective_offset - 1)
-
-        # Story #33 Fix: skip_truncation bypasses line limits and token truncation
-        # This allows MCP handlers to get full content and apply TruncationHelper
-        # for proper cache_handle support
-        if skip_truncation:
-            # Return all lines from offset to end (or respect user-specified limit only)
-            if limit is not None:
-                # User specified limit is still respected (pagination boundary)
-                end_index = start_index + limit
-                selected_lines = all_lines[start_index:end_index]
-            else:
-                # No limit: return all remaining lines
-                selected_lines = all_lines[start_index:]
-
-            # Build content string (NO token truncation)
-            content = "".join(selected_lines)
-
-            # Calculate returned_lines from content
-            returned_lines = content.count("\n") + (
-                1 if content and not content.endswith("\n") else 0
-            )
-
-            # Calculate has_more: true if more content exists after returned lines
-            last_returned_line = effective_offset + returned_lines - 1
-            has_more = last_returned_line < total_lines
-
-            # Calculate next_offset for pagination
-            next_offset = effective_offset + returned_lines if has_more else None
-
-            # Build token metadata without truncation
-            file_limits = self._get_file_content_limits_config()
-            estimated_tokens = len(content) // file_limits.chars_per_token
-            token_metadata = {
-                "estimated_tokens": estimated_tokens,
-                "max_tokens_per_request": file_limits.max_tokens_per_request,
-                "truncated": False,
-                "truncated_at_line": None,
-                "requires_pagination": has_more,
-                "pagination_hint": (
-                    f"More content available. Use offset={next_offset} to continue reading."
-                    if has_more
-                    else None
-                ),
-            }
-
-            enforced_content = content
-        else:
-            # Original behavior: Apply line-based limits and token truncation
-
-            # Story #686: Apply line-based limits IN ADDITION to token limits
-            # The stricter of (line limit, token limit) wins
-            if limit is None:
-                # No user-specified limit: apply default max lines
-                effective_limit = self.DEFAULT_MAX_LINES
-            else:
-                # User specified limit: cap at max allowed
-                effective_limit = min(limit, self.MAX_ALLOWED_LIMIT)
-
-            # Apply the effective limit
-            end_index = start_index + effective_limit
-            selected_lines = all_lines[start_index:end_index]
-
-            # Build content string
-            content = "".join(selected_lines)
-
-            # Apply token enforcement (may truncate content further)
-            enforced_content, token_metadata = self._enforce_token_limits(
-                content, total_lines, effective_offset
-            )
-
-            # Calculate returned_lines from enforced content
-            returned_lines = enforced_content.count("\n") + (
-                1 if enforced_content and not enforced_content.endswith("\n") else 0
-            )
-
-            # Calculate has_more: true if more content exists after returned lines
-            last_returned_line = effective_offset + returned_lines - 1
-            has_more = last_returned_line < total_lines
-
-            # Story #686: Calculate next_offset for pagination
-            next_offset = effective_offset + returned_lines if has_more else None
-
-        # Story #7 AC2: Compute content_hash from FULL file content for optimistic locking
-        # Hash must be of entire file (not just paginated portion) so clients can
-        # use it for edit operations regardless of which portion they read
-        full_content = "".join(all_lines)
-        content_hash = hashlib.sha256(full_content.encode("utf-8")).hexdigest()
-
-        # Build metadata with pagination info
-        stat_info = full_file_path.stat()
-        metadata = {
-            "size": stat_info.st_size,
-            "modified_at": datetime.fromtimestamp(
-                stat_info.st_mtime, tz=timezone.utc
-            ).isoformat(),
-            "language": self._detect_language(full_file_path),
-            "path": file_path,
-            # Story #7 AC2: content_hash for optimistic locking
-            "content_hash": content_hash,
-            # Original pagination metadata
-            "total_lines": total_lines,
-            "returned_lines": returned_lines,
-            "offset": effective_offset,
-            "limit": limit,  # Keep original limit for client visibility
-            "has_more": has_more,
-            # Story #686: Add next_offset for easy pagination
-            "next_offset": next_offset,
-        }
-
-        # Merge token enforcement metadata
-        metadata.update(token_metadata)
-
-        return {"content": enforced_content, "metadata": metadata}
+        # Story #686: an unbounded read is capped at DEFAULT_MAX_LINES lines.
+        return self._read_confined(
+            repo_path,
+            file_path,
+            offset,
+            limit,
+            skip_truncation,
+            default_limit=self.DEFAULT_MAX_LINES,
+            with_hash=True,
+            access=access,
+        )
 
     def get_file_content_by_path(
         self,
@@ -969,6 +851,7 @@ class FileListingService:
         offset: Optional[int] = None,
         limit: Optional[int] = None,
         skip_truncation: bool = False,
+        access: "Optional[CatalogFileAccess]" = None,
     ) -> Dict[str, Any]:
         """Get content of a specific file from a direct filesystem path (for global repos).
 
@@ -987,6 +870,9 @@ class FileListingService:
             skip_truncation: If True, bypasses line limits and token-based truncation.
                 Use this when the caller will apply its own truncation (e.g., MCP handlers
                 using TruncationHelper for cache_handle support). Default: False.
+            access: The request's catalog judgement; a restricted view
+                classifies the path before reading and projects the lines
+                before pagination (offsets address projected lines).
 
         Returns:
             Dict with 'content' and 'metadata' keys. Metadata includes pagination info:
@@ -1006,29 +892,66 @@ class FileListingService:
             PermissionError: If path traversal attempted
             FileNotFoundError: If file doesn't exist
         """
-        # Bug #1891 round 2 (S1): the previous
-        # str(full_file_path).startswith(str(repo_root)) check incorrectly
-        # admitted a SIBLING directory whose name starts with repo_root's
-        # name (e.g. repo_root=".../foo" admits ".../foo-private/...").
-        # resolve_confined_path() confines via Path.relative_to() instead,
-        # which is immune to that class of bug.
+        # Bug #939: an unbounded read is limited by tokens, not by lines.
+        return self._read_confined(
+            repo_path,
+            file_path,
+            offset,
+            limit,
+            skip_truncation,
+            default_limit=self.MAX_ALLOWED_LIMIT,
+            with_hash=False,
+            access=access,
+        )
+
+    def _read_confined(
+        self,
+        repo_path: str,
+        file_path: str,
+        offset: Optional[int],
+        limit: Optional[int],
+        skip_truncation: bool,
+        *,
+        default_limit: int,
+        with_hash: bool,
+        access: "Optional[CatalogFileAccess]",
+    ) -> Dict[str, Any]:
+        """The confined, paginated read shared by both public readers.
+
+        *access* is the request's catalog judgement: without one a catalog
+        directory is not found; with a restricted view the served path is
+        classified before anything is opened and the lines are projected
+        before pagination.
+        """
+        missing = FileNotFoundError(f"File not found: {file_path}")
+        view = _catalog_view(repo_path, access, missing)
+        # ^ ord view.lines_view<open();denied or escaping path=>missing
+        lines_view = view.lines_view(file_path) if view is not None else None
+        # Bug #1891 round 2 (S1): resolve_confined_path() confines via
+        # Path.relative_to(), never a string-prefix check (sibling escape).
         # A path inside the repository's .git is answered as a missing file.
         try:
             full_file_path = resolve_confined_path(Path(repo_path), file_path)
         except GitDirectoryPathError:
-            raise FileNotFoundError(f"File not found: {file_path}")
+            raise missing
+        except PermissionError:
+            if view is not None:
+                raise missing
+            raise
         if not full_file_path.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
+            raise missing
         if not full_file_path.is_file():
             raise FileNotFoundError(f"Not a file: {file_path}")
 
-        # Read all lines for pagination
-        # Bug #1449: errors="replace" so a non-UTF-8 byte (e.g. Windows-1252
-        # punctuation) is substituted with U+FFFD instead of raising
-        # UnicodeDecodeError -- a legitimately-existing file must still be
-        # readable, and byte-stable line/offset pagination is preserved.
+        # Bug #1449: errors="replace" keeps a non-UTF-8 file readable with
+        # byte-stable line/offset pagination.
         with open(full_file_path, "r", encoding="utf-8", errors="replace") as f:
             all_lines = f.readlines()
+        if lines_view is not None:
+            viewed = lines_view(all_lines)
+            if len(viewed) != len(all_lines):
+                raise RuntimeError("a lines view must keep every line position")
+            all_lines = viewed
 
         total_lines = len(all_lines)
 
@@ -1085,11 +1008,8 @@ class FileListingService:
         else:
             # Original behavior: Apply line-based limits and token truncation
 
-            # Bug #939: When limit=None, use MAX_ALLOWED_LIMIT so that token
-            # truncation is the authoritative constraint (not line truncation).
-            # Story #686 DEFAULT_MAX_LINES applies only to get_file_content (alias-based).
             if limit is None:
-                effective_limit = self.MAX_ALLOWED_LIMIT
+                effective_limit = default_limit
             else:
                 # User specified limit: cap at max allowed
                 effective_limit = min(limit, self.MAX_ALLOWED_LIMIT)
@@ -1120,8 +1040,11 @@ class FileListingService:
 
         # Build metadata with pagination info
         stat_info = full_file_path.stat()
+        size = stat_info.st_size
+        if lines_view is not None:
+            size = len("".join(all_lines).encode("utf-8"))
         metadata = {
-            "size": stat_info.st_size,
+            "size": size,
             "modified_at": datetime.fromtimestamp(
                 stat_info.st_mtime, tz=timezone.utc
             ).isoformat(),
@@ -1136,6 +1059,10 @@ class FileListingService:
             # Story #686: Add next_offset for easy pagination
             "next_offset": next_offset,
         }
+        if with_hash:
+            # Story #7 AC2: hash of the WHOLE (viewed) file, for optimistic locking.
+            full_content = "".join(all_lines).encode("utf-8")
+            metadata["content_hash"] = hashlib.sha256(full_content).hexdigest()
 
         # Merge token enforcement metadata
         metadata.update(token_metadata)

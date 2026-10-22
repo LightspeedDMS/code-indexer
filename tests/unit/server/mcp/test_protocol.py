@@ -591,7 +591,10 @@ class TestInternalErrorLogging:
         golden_repo_manager=None crash trigger as the sibling test, but
         with no repository_alias key in arguments at all -- proving
         arguments.get("repository_alias") in the new logging code
-        tolerates absence rather than raising."""
+        tolerates absence rather than raising. The caller is an
+        administrator with the access service wired: for a restricted
+        caller the X-Ray catalog gate refuses a request with no repository
+        before the handler runs."""
         from code_indexer.server import app as real_app_module
 
         user = User(
@@ -617,6 +620,12 @@ class TestInternalErrorLogging:
 
         with (
             patch.object(real_app_module, "golden_repo_manager", None),
+            patch.object(
+                real_app_module.app.state,
+                "access_filtering_service",
+                Mock(is_admin_user=Mock(return_value=True)),
+                create=True,
+            ),
             patch("code_indexer.server.mcp.protocol.logger") as mock_logger,
         ):
             response = await process_jsonrpc_request(request, user)

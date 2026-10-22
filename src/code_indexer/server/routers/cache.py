@@ -131,7 +131,16 @@ def get_cached_content(
             detail="Cache service not available",
         )
 
+    from code_indexer.server.services.cidx_meta_access.cached_handles import (
+        require_catalog_handle_visible,
+    )
+
     try:
+        require_catalog_handle_visible(
+            handle,
+            current_user.username,
+            getattr(request.app.state, "access_filtering_service", None),
+        )
         result = payload_cache.retrieve_owned(handle, current_user.username, page=page)
         return CacheRetrievalResponse(
             content=result.content,

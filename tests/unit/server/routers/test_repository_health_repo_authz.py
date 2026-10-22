@@ -37,6 +37,7 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterator, Optional
 from unittest.mock import MagicMock, patch
 
@@ -182,6 +183,13 @@ class TestDescriptionRepoAuthz:
         cidx_meta_dir.mkdir()
         (cidx_meta_dir / "example-repo.md").write_text("# hello\n")
         app.state.golden_repos_dir = str(tmp_path)
+        # The alias registry production always wires (list_repos maps each
+        # alias to its row): a restricted caller's catalog description is
+        # served through its projected view.
+        registry_rows = {"example-repo-global": {"repo_name": "example-repo"}}
+        app.state.backend_registry = SimpleNamespace(
+            global_repos=SimpleNamespace(list_repos=lambda: registry_rows)
+        )
         client = TestClient(app)
 
         with patch.object(
@@ -192,6 +200,7 @@ class TestDescriptionRepoAuthz:
             resp = client.get(self.ROUTE)
 
         assert resp.status_code == 200, resp.text
+        assert resp.json()["description"] == "# hello\n"
 
     def test_access_filtering_service_unavailable_fails_closed(self, tmp_path):
         user = _make_user("some_user")

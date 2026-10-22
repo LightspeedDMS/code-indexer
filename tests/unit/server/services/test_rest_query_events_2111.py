@@ -51,7 +51,10 @@ class _ActivatedRepos:
         self.activated_repos_dir = str(directory)
 
     def list_activated_repositories(self, username: str) -> List[Dict[str, Any]]:
-        return [{"user_alias": a, "username": username} for a in _ALIASES]
+        return [
+            {"user_alias": a, "username": username, "golden_repo_alias": a}
+            for a in _ALIASES
+        ]
 
     def get_activated_repo_path(self, username: str, alias: str) -> str:
         return self.activated_repos_dir
@@ -526,7 +529,7 @@ class TestOnlySearchedRepositoriesGetRows:
         repos = _Repos(
             tmp_path,
             [
-                {"user_alias": "repo-a"},
+                {"user_alias": "repo-a", "golden_repo_alias": "repo-a"},
                 {"user_alias": "repo-b-global", "is_global": True},
             ],
         )
@@ -542,9 +545,8 @@ class TestOnlySearchedRepositoriesGetRows:
         repos = _Repos(
             tmp_path,
             [
-                {"user_alias": "repo-a"},
-                {"user_alias": "repo-b"},
-                {"user_alias": "repo-c"},
+                {"user_alias": alias, "golden_repo_alias": alias}
+                for alias in ("repo-a", "repo-b", "repo-c")
             ],
         )
         searched: List[str] = []

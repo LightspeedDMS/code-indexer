@@ -492,9 +492,11 @@ class TestOnRepoRemovedLockDiscipline:
             "cidx-meta", owner_name="lifecycle_writer"
         )
 
-    def test_on_repo_removed_skips_delete_when_lock_not_acquired(self, tmp_path):
+    def test_on_repo_removed_deletes_when_lock_not_acquired(self, tmp_path):
         """When scheduler is provided but acquire_write_lock returns False,
-        on_repo_removed() must NOT delete the .md file."""
+        on_repo_removed() still deletes the .md file (a removed repository's
+        description is never left behind); the refresh is owed to the
+        debouncer rather than requested while the lock is held."""
         import code_indexer.global_repos.meta_description_hook as hook_module
         from code_indexer.global_repos.meta_description_hook import on_repo_removed
 
@@ -515,11 +517,12 @@ class TestOnRepoRemovedLockDiscipline:
         finally:
             hook_module._refresh_scheduler = original
 
-        # File must NOT have been deleted (lock was not acquired)
-        assert md_file.exists(), (
-            "on_repo_removed() deleted the file despite lock not being acquired — "
-            "it must skip deletion when lock returns False"
+        assert not md_file.exists(), (
+            "on_repo_removed() must delete the description even when the "
+            "cidx-meta write lock is held by another writer"
         )
+        # No immediate refresh while the lock is held (it would skip).
+        mock_scheduler.trigger_refresh_for_repo.assert_not_called()
         # release_write_lock must NOT have been called (lock was never acquired)
         mock_scheduler.release_write_lock.assert_not_called()
 

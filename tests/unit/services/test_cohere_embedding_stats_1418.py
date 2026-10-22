@@ -42,10 +42,13 @@ def _reset_active_writer():
     from code_indexer.server.services.embedding_stats_writer import (
         EmbeddingStatsWriter,
     )
+    from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
     EmbeddingStatsWriter._active = None
+    ProviderHealthMonitor.reset_instance()
     yield
     EmbeddingStatsWriter._active = None
+    ProviderHealthMonitor.reset_instance()
 
 
 @pytest.fixture
@@ -104,6 +107,53 @@ class TestCohereMakeSyncRequestQueryPath:
 
         assert len(writer.records) == 1
         assert writer.records[0].success is False
+
+
+class TestCohereRecordsVendorTokens:
+    """Issue #2173: token_count is Cohere's meta.billed_units.input_tokens of
+    the successful response; a failed call records 0."""
+
+    def test_success_records_billed_input_tokens(self, mock_api_key):
+        writer = _install_writer()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "embeddings": {"float": [[0.1] * 1536]},
+                    "meta": {
+                        "api_version": {"version": "2"},
+                        "billed_units": {"input_tokens": 11, "image_tokens": 0},
+                    },
+                },
+            )
+
+        provider = CohereEmbeddingProvider(
+            CohereConfig(model="embed-v4.0"),
+            http_client_factory=_FakeSyncClientFactory(handler),
+        )
+
+        provider._make_sync_request(["hello"], retry=False)
+
+        assert [r.token_count for r in writer.records] == [11]
+
+    def test_failed_attempt_records_zero_tokens(self, mock_api_key):
+        writer = _install_writer()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400, json={"meta": {"billed_units": {"input_tokens": 11}}}
+            )
+
+        provider = CohereEmbeddingProvider(
+            CohereConfig(model="embed-v4.0"),
+            http_client_factory=_FakeSyncClientFactory(handler),
+        )
+
+        with pytest.raises(httpx.HTTPStatusError):
+            provider._make_sync_request(["hello"], retry=False)
+
+        assert [(r.success, r.token_count) for r in writer.records] == [(False, 0)]
 
 
 class TestCohereMakeSyncRequestIndexingRetryCounting:

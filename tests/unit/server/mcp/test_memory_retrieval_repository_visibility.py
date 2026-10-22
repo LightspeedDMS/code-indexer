@@ -7,8 +7,8 @@ when the caller may see it under the AccessFilteringService memory rule
 before any memory body is hydrated, and a caller whose candidates were all
 hidden receives exactly the same empty-state nudge as a caller with no match.
 
-Real objects: GroupAccessManager (SQLite in tmp), AccessFilteringService,
-MemoryMetadataCache and memory files written with memory_io in tmp dirs.
+Real objects: GroupAccessManager (SQLite in tmp), AccessFilteringService
+and memory files written with memory_io in tmp dirs.
 Boundaries replaced: the HNSW candidate lookup (MemoryCandidateRetriever
 .retrieve) and the Voyage query embedding (external service).
 """
@@ -32,7 +32,6 @@ from code_indexer.server.services.memory_candidate_retriever import (
     MemoryCandidateRetriever,
 )
 from code_indexer.server.services.memory_io import atomic_write_memory_file
-from code_indexer.server.services.memory_metadata_cache import MemoryMetadataCache
 from code_indexer.server.utils.config_manager import MemoryRetrievalConfig
 
 GLOBAL_ID = "1" * 32
@@ -60,7 +59,6 @@ _SHARED_VECTOR_PATCH = (
 )
 _QUERY_VECTOR = [0.1, 0.2, 0.3, 0.4]
 _ACCESS_MODULE = "code_indexer.server.services.access_filtering_service"
-_CACHE_MODULE = "code_indexer.server.services.memory_metadata_cache"
 _PIPELINE_MODULE = "code_indexer.server.mcp.memory_retrieval_pipeline"
 
 
@@ -116,11 +114,7 @@ def access_service(tmp_path: Path, golden_dir: Path) -> AccessFilteringService:
     manager.assign_user_to_group("user-b", users, "admin")
     manager.assign_user_to_group("admin-user", _group_id(manager, "admins"), "admin")
     memories_dir = golden_dir / "cidx-meta" / "memories"
-    return AccessFilteringService(
-        manager,
-        memory_metadata_cache=MemoryMetadataCache(memories_dir),
-        memories_dir=memories_dir,
-    )
+    return AccessFilteringService(manager, memories_dir=memories_dir)
 
 
 def _user(username: str) -> User:
@@ -272,8 +266,6 @@ class TestRunMemoryRetrievalVisibility:
 
         hnsw_returns["candidates"] = _candidates([GLOBAL_ID, REPO_B_ID], golden_dir)
         with (
-            patch(f"{_ACCESS_MODULE}.read_memory_file", _recording_read),
-            patch(f"{_CACHE_MODULE}.read_memory_file", _recording_read),
             patch(f"{_PIPELINE_MODULE}.read_memory_file", _recording_read),
         ):
             result = _run("user-a", golden_dir, access_service)

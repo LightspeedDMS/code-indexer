@@ -43,6 +43,18 @@ from code_indexer.server.mcp.reranking import (
     calculate_overfetch_limit as _rest_calculate_overfetch_limit,
     extract_rerank_document as _rest_extract_rerank_document,
 )
+from code_indexer.server.cache.handle_binding import reset_handle_binding
+from code_indexer.server.services.cidx_meta_access import bind_catalog_handles
+from code_indexer.server.services.cidx_meta_access.catalog_fulltext import (
+    refuse_unevaluable_rest_fulltext,
+    rest_fulltext_rows,
+)
+from code_indexer.server.services.cidx_meta_access.catalog_search import (
+    rest_rows_for_caller,
+)
+from code_indexer.server.services.cidx_meta_access.request_activations import (
+    request_activations,
+)
 from code_indexer.server.services.deactivation_query_drain import (
     track_activated_repo_query,
 )
@@ -278,18 +290,12 @@ def _execute_temporal_via_live_dispatch_rest(
     app: FastAPI,
     activated_repo_manager,
 ) -> JSONResponse:
-    """Story #1400: the REST live async-hybrid temporal dispatch entry
-    point -- mirrors mcp/handlers/search.py's
-    _execute_temporal_via_live_dispatch exactly, adapted for REST's
-    SemanticQueryRequest shape and JSONResponse wire format.
-
-    Scenario 12: both doors call the SAME execute_live_temporal_search
-    function, so an identical logical query landing on the same node joins
-    the same in-flight job. fusion_fetch_limit is computed via the shared
-    compute_temporal_fusion_fetch_limit() (temporal_fusion_limit.py) below,
-    so an identical logical query from either door now genuinely produces
-    the identical dedup signature.
-    """
+    """Story #1400: REST twin of MCP _execute_temporal_via_live_dispatch; both
+    doors call the SAME execute_live_temporal_search (shared fusion_fetch_limit),
+    so an identical query from either door joins the same in-flight job."""
+    from code_indexer.server.services.cidx_meta_access.history_policy import (
+        refuse_catalog_temporal,
+    )
     from code_indexer.services.temporal.temporal_worker_input_adapters import (
         TemporalAliasRejectedError,
         build_temporal_worker_input_from_rest_request,
@@ -329,6 +335,12 @@ def _execute_temporal_via_live_dispatch_rest(
             },
         )
 
+    refuse_catalog_temporal(
+        worker_input.repository_alias,
+        current_user.username,
+        access_filtering_service,
+        activated_repo_manager,
+    )
     repo_path, err = _resolve_temporal_repo_path_rest(
         worker_input.repository_alias, current_user, app, activated_repo_manager
     )
@@ -555,6 +567,13 @@ def register_query_routes(
         _delivered: Optional[list] = None
         _failure_class: Optional[str] = None
         _record_on_exit = True
+        _activations = request_activations(activated_repo_manager)
+        _handle_binding = bind_catalog_handles(
+            request.repository_alias or "*",
+            current_user.username,
+            getattr(app.state, "access_filtering_service", None),
+            _activations,
+        )
 
         try:
             # Handle background job submission (semantic mode only)
@@ -781,13 +800,11 @@ def register_query_routes(
                             continue
                         repo_path = PathLib(resolved_path)
                     else:
-                        # User repos: activated-repos/username/alias.
-                        # Route through the same realpath-containment
-                        # helper every other (username, user_alias) join in
-                        # ActivatedRepoManager uses, instead of a hand-built
-                        # join that bypasses it.
+                        # User repos: the manager's realpath-contained join,
+                        # resolved once per request (_activations).
+                        assert _activations is not None
                         repo_path = PathLib(
-                            activated_repo_manager.get_activated_repo_path(
+                            _activations.get_activated_repo_path(
                                 current_user.username, repo["user_alias"]
                             )
                         )
@@ -826,7 +843,14 @@ def register_query_routes(
                 semantic_results_list = []
 
                 if search_mode_actual in ["fts", "hybrid"] and fts_available:
-                    # Execute FTS search
+                    refuse_unevaluable_rest_fulltext(
+                        request,
+                        fts_repo_alias,
+                        repo_path,
+                        current_user.username,
+                        getattr(app.state, "access_filtering_service", None),
+                        _activations,
+                    )
                     from code_indexer.services.tantivy_index_manager import (
                         TantivyIndexManager,
                     )
@@ -846,19 +870,9 @@ def register_query_routes(
                     ):
                         _event_ctx.repo_alias = fts_repo_alias
 
-                    # Codex HIGH finding (round 2): this branch reads the
-                    # Tantivy FTS index directly (never calls
-                    # query_user_repositories()), so it was completely
-                    # invisible to the track_activated_repo_query()
-                    # wrapping already applied to the semantic/hybrid
-                    # branch below -- wire the SAME tracking here too.
-                    #
-                    # Codex HIGH finding (round 5): use fts_repo_alias
-                    # (the REAL repo whose index is about to be read),
-                    # not request.repository_alias -- an alias-less/omni
-                    # request has the latter as None, which would make
-                    # tracking a silent no-op even though a concrete
-                    # activated repo's chunks are being read.
+                    # This branch reads Tantivy directly, so it tracks the
+                    # repository whose index is read (fts_repo_alias), never
+                    # the request alias (None for an alias-less request).
                     with track_activated_repo_query(
                         getattr(app.state, "query_tracker", None),
                         activated_repo_manager,
@@ -886,24 +900,16 @@ def register_query_routes(
                             )
                             tantivy_manager.open_for_search()
 
-                            # Handle fuzzy flag
-                            edit_dist = request.edit_distance
-                            if request.fuzzy and edit_dist == 0:
-                                edit_dist = 1
-
                             from ..query.filtered_search import fts_filter_kwargs
 
-                            # Execute FTS query; the filters come from the one
-                            # shared builder (Story #503 Phase 1 excludes,
-                            # #2047 file_extensions under the request deadline).
-                            fts_raw_results = tantivy_manager.search(
-                                query_text=request.query_text,
-                                case_sensitive=request.case_sensitive,
-                                edit_distance=edit_dist,
-                                snippet_lines=request.snippet_lines,
-                                limit=request.limit,
-                                use_regex=request.regex,  # Story #503 Phase 1
-                                **fts_filter_kwargs(
+                            # The filters come from the one shared builder
+                            # (Story #503 Phase 1 excludes, #2047
+                            # file_extensions under the request deadline); a
+                            # restricted catalog search runs per shown document.
+                            fts_raw_results = rest_fulltext_rows(
+                                tantivy_manager,
+                                request,
+                                fts_filter_kwargs(
                                     language=request.language,
                                     path_filter=request.path_filter,
                                     exclude_language=request.exclude_language,
@@ -911,6 +917,9 @@ def register_query_routes(
                                     file_extensions=request.file_extensions,
                                     deadline=extension_deadline,
                                 ),
+                                request.repository_alias or fts_repo_alias,
+                                repo_path,
+                                current_user.username,
                             )
 
                             # Convert to API response format
@@ -922,12 +931,8 @@ def register_query_routes(
                                         line_end=result.get("line_end", 0),
                                         snippet=result.get("snippet", ""),
                                         language=result.get("language", "unknown"),
-                                        # Codex round-6 LOW finding: use
-                                        # fts_repo_alias (the repo whose
-                                        # index was ACTUALLY read), not
-                                        # activated_repos[0] (the first
-                                        # repo in the list, which may
-                                        # lack an FTS index entirely).
+                                        # The repository whose index was
+                                        # read, not the first listed one.
                                         repository_alias=request.repository_alias
                                         or fts_repo_alias
                                         or "",
@@ -1067,24 +1072,17 @@ def register_query_routes(
                 # Calculate execution time
                 execution_time_ms = int((time.time() - start_time) * 1000)
 
-                # Apply access filtering based on user's group membership (Story #707)
-                if (
-                    hasattr(app.state, "access_filtering_service")
-                    and app.state.access_filtering_service
-                ):
-                    fts_dicts = [r.model_dump() for r in fts_results]
-                    fts_dicts = app.state.access_filtering_service.filter_query_results(
-                        fts_dicts, current_user.username
-                    )
-                    semantic_dicts = [r.model_dump() for r in semantic_results_list]
-                    semantic_dicts = (
-                        app.state.access_filtering_service.filter_query_results(
-                            semantic_dicts, current_user.username
-                        )
-                    )
-                else:
-                    fts_dicts = [r.model_dump() for r in fts_results]
-                    semantic_dicts = [r.model_dump() for r in semantic_results_list]
+                fts_dicts = rest_rows_for_caller(
+                    getattr(app.state, "access_filtering_service", None),
+                    current_user.username,
+                    [r.model_dump() for r in fts_results],
+                    fts_query=request,
+                )
+                semantic_dicts = rest_rows_for_caller(
+                    getattr(app.state, "access_filtering_service", None),
+                    current_user.username,
+                    [r.model_dump() for r in semantic_results_list],
+                )
 
                 # Apply payload truncation for consistency with MCP handlers
                 _payload_cache = getattr(app.state, "payload_cache", None)
@@ -1211,17 +1209,12 @@ def register_query_routes(
                     status=_search_status,
                 )
 
-            # Apply access filtering based on user's group membership (Story #707)
-            if (
-                hasattr(app.state, "access_filtering_service")
-                and app.state.access_filtering_service
-            ):
-                results["results"] = (
-                    app.state.access_filtering_service.filter_query_results(
-                        results["results"], current_user.username
-                    )
-                )
-                results["total_results"] = len(results["results"])
+            results["results"] = rest_rows_for_caller(
+                getattr(app.state, "access_filtering_service", None),
+                current_user.username,
+                results["results"],
+            )
+            results["total_results"] = len(results["results"])
 
             # Bug #1209: apply reranking AFTER fusion and BEFORE truncation,
             # mirroring the MCP _apply_rerank_and_filter pipeline order exactly.
@@ -1345,6 +1338,7 @@ def register_query_routes(
             # #2111); a failed one records a failure; a job or a deferred
             # handoff records later (_record_on_exit False).
             _search_event_ctx.reset(_ctx_token)
+            reset_handle_binding(_handle_binding)
             if _record_on_exit:
                 _record_rest_query_event(
                     app,

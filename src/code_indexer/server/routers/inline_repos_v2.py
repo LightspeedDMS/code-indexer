@@ -51,9 +51,16 @@ from ..models.activated_repository import ActivatedRepository
 
 from ..auth import dependencies
 from . import repo_access_http
-from ..managers.composite_file_listing import _list_composite_files
+from ..managers.composite_file_listing import (
+    composite_activation,
+    visible_composite_files,
+)
 from ..services.stats_service import stats_service
 from ..services.file_service import file_service
+from ..services.cidx_meta_access.file_doors import (
+    judge_app_request,
+    served_file_payload,
+)
 from ..services.file_listing_paths import build_non_composite_path_pattern
 from code_indexer.utils.path_confinement import resolve_confined_path
 from ..services.search_service import search_service
@@ -510,11 +517,18 @@ def register_repos_v2_routes(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid repository ID format",
             )
+        repo_access_http.refuse_catalog_history(
+            getattr(app.state, "access_filtering_service", None),
+            activated_repo_manager,
+            current_user.username,
+            cleaned_repo_id,
+        )
 
         try:
             # Check if repository exists and user has access (following existing pattern)
             repo_found = False
             repo_path = None
+            selected = cleaned_repo_id
 
             # Look for activated repository
             if activated_repo_manager:
@@ -534,6 +548,7 @@ def register_repos_v2_routes(
                             ),
                         )
                         repo_found = True
+                        selected = repo["user_alias"]
                         # Construct path from activated_repos_dir + username + user_alias
                         repo_path = (
                             Path(activated_repo_manager.activated_repos_dir)
@@ -559,6 +574,13 @@ def register_repos_v2_routes(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Repository '{cleaned_repo_id}' not found or not accessible",
                 )
+            repo_access_http.refuse_served_catalog_history(
+                app.state,
+                activated_repo_manager,
+                current_user.username,
+                selected,
+                repo_path,
+            )
 
             # Validate it's not a composite repository
             CompositeRepoValidator.check_operation(repo_path, "branch_list")
@@ -855,7 +877,7 @@ def register_repos_v2_routes(
         List files in repository with pagination and filtering.
 
         Supports both single and composite repository file listing.
-        `recursive` is COMPOSITE-ONLY: it controls _list_composite_files'
+        `recursive` is COMPOSITE-ONLY: it controls visible_composite_files'
         walk depth for composite repos and is otherwise ignored entirely
         (Bug #1886, R3 revision -- a prior round applied it as a
         non-composite depth restriction too, which regressed two absolute
@@ -899,84 +921,54 @@ def register_repos_v2_routes(
             )
 
             repo = ActivatedRepository.from_dict(repo_dict)
-
-            # Bug #1891: confine the resolved target to repo.path BEFORE any
-            # exists()/is_file()/open() touches the filesystem. A caller-
-            # supplied `path` containing parent-directory segments, an
-            # absolute path, or a symlink pointing outside the repository
-            # must never reach the filesystem calls below. The 404 here is
-            # byte-identical to the ordinary not-found response so an
-            # escape attempt cannot be distinguished from a legitimately
-            # missing file.
+            access = judge_app_request(
+                app.state,
+                repo_id,
+                str(repo.path),
+                current_user.username,
+                activated_repo_manager,
+            )
+            missing = HTTPException(status_code=404, detail=f"File '{path}' not found")
+            # Bug #1891: confine to repo.path BEFORE any exists()/is_file()/
+            # open(); an escape answers byte-identically to a missing file.
+            # A path the caller may not see is answered the same way.
             try:
                 file_path = resolve_confined_path(Path(repo.path), path)
-            except PermissionError:
-                raise HTTPException(status_code=404, detail=f"File '{path}' not found")
+                if access.view is not None:
+                    access.view.lines_view(path)
+            except (PermissionError, FileNotFoundError):
+                raise missing
 
             if not file_path.exists():
-                raise HTTPException(status_code=404, detail=f"File '{path}' not found")
+                raise missing
 
             if not file_path.is_file():
                 raise HTTPException(
                     status_code=400, detail=f"Path '{path}' is not a file"
                 )
 
-            # Detect if binary
-            try:
-                with open(file_path, "rb") as f:
-                    chunk = f.read(8192)
-                    is_binary = b"\x00" in chunk
-                    if not is_binary:
-                        try:
-                            chunk.decode("utf-8")
-                        except UnicodeDecodeError:
-                            is_binary = True
-            except Exception:
-                is_binary = True
+            return served_file_payload(path, file_path, access)
 
-            if is_binary:
-                return {
-                    "path": path,
-                    "is_binary": True,
-                    "size": file_path.stat().st_size,
-                    "content": None,
-                }
-            else:
-                try:
-                    content_text = file_path.read_text(encoding="utf-8")
-                    return {
-                        "path": path,
-                        "is_binary": False,
-                        "size": file_path.stat().st_size,
-                        "content": content_text,
-                    }
-                except UnicodeDecodeError:
-                    return {
-                        "path": path,
-                        "is_binary": True,
-                        "size": file_path.stat().st_size,
-                        "content": None,
-                    }
-
-        # Check if this is a composite repository
-        try:
-            repo_dict = activated_repo_manager.get_repository(
-                current_user.username, repo_id
+        served = activated_repo_manager.get_activated_repo_path(
+            current_user.username, repo_id
+        )
+        access = judge_app_request(
+            app.state, repo_id, served, current_user.username, activated_repo_manager
+        )
+        composite = composite_activation(
+            activated_repo_manager, current_user.username, repo_id
+        )
+        if composite is not None:
+            # Bug #1886 (R3 revision): `recursive` is composite-only.
+            files = visible_composite_files(
+                app.state,
+                composite,
+                path or "",
+                recursive,
+                current_user.username,
+                activated_repo_manager,
             )
-            if repo_dict and repo_dict.get("is_composite", False):
-                # Composite repository - use simple file listing.
-                # Bug #1886 (R3 revision): byte-identical to HEAD --
-                # `recursive` is a plain bool again (composite-only,
-                # unaffected by the non-composite path-pattern change
-                # below).
-                repo = ActivatedRepository.from_dict(repo_dict)
-                files = _list_composite_files(
-                    repo, path=path or "", recursive=recursive
-                )
-                return {"files": [f.model_dump() for f in files]}
-        except Exception as e:
-            logging.debug(f"Could not check composite status for {repo_id}: {e}")
-            # Fall through to regular file listing
+            return {"files": [f.model_dump() for f in files]}
 
         # Validate query parameters
         if page < 1:
@@ -1019,7 +1011,7 @@ def register_repos_v2_routes(
             )
 
             file_list = file_service.list_files(
-                repo_id, current_user.username, query_params
+                repo_id, current_user.username, query_params, access
             )
             return file_list
 

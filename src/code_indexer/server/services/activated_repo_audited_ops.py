@@ -65,7 +65,9 @@ def activate_repository_for_user(
     """
     try:
         require_activation_allowed(
-            module_app_access_filtering_service(), username, golden_repo_alias
+            module_app_access_filtering_service(),
+            username,
+            [golden_repo_alias, user_alias],
         )
         job_id = str(
             manager.activate_repository(

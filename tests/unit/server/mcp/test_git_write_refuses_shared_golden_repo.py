@@ -88,6 +88,11 @@ class _ActivatedRepos:
         assert user_alias == _ACTIVATED_ALIAS
         return str(self._path)
 
+    def get_repository(
+        self, username: str, user_alias: str, *, touch: bool = True
+    ) -> Dict[str, Any]:
+        return {"user_alias": user_alias, "golden_repo_alias": "example-repo"}
+
 
 class _GitLog:
     """Reads the shim's record of every git process started."""
@@ -139,7 +144,11 @@ def env(
 
     # A running server's app.state, without constructing the real app.
     running_app = SimpleNamespace(
-        state=SimpleNamespace(golden_repos_dir=str(golden), snapshot_manager=None)
+        state=SimpleNamespace(
+            golden_repos_dir=str(golden),
+            snapshot_manager=None,
+            activated_repo_manager=_ActivatedRepos(activated),
+        )
     )
     server_app = sys.modules["code_indexer.server.app"]
     monkeypatch.setitem(vars(server_app), "app", running_app)

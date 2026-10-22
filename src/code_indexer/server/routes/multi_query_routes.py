@@ -256,6 +256,24 @@ def multi_repository_query(
         http_request.app.state, "access_filtering_service", None
     )
     _enforce_repo_access(access_filtering_service, user.username, request.repositories)
+    if request.search_type == "temporal":
+        from ..services.cidx_meta_access.history_policy import (
+            CatalogSurface,
+            golden_catalog_surface_refusal,
+        )
+        from ..services.cidx_meta_access.served_identity import (
+            state_golden_repos_dir,
+        )
+
+        refusal = golden_catalog_surface_refusal(
+            CatalogSurface.TEMPORAL,
+            request.repositories,
+            user.username,
+            access_filtering_service,
+            state_golden_repos_dir(http_request.app.state),
+        )
+        if refusal is not None:
+            raise HTTPException(status_code=422, detail=refusal)
 
     # The SAME repository-count cap MCP omni search enforces (Bug #894,
     # multi_search_limits_config.omni_max_repos_per_search, read fresh so a
@@ -284,6 +302,23 @@ def multi_repository_query(
             f"Multi-repo search request from user {user.username}: "
             f"{len(request.repositories)} repos, type={request.search_type}"
         )
+        activated_repo_manager = getattr(
+            http_request.app.state, "activated_repo_manager", None
+        )
+        if request.search_type == "fts":
+            from ..services.cidx_meta_access.catalog_fulltext import (
+                refuse_unevaluable_catalog_fulltext,
+            )
+
+            refuse_unevaluable_catalog_fulltext(
+                request.query,
+                0,
+                request.repositories,
+                None,
+                user.username,
+                access_filtering_service,
+                activated_repo_manager,
+            )
 
         import time
 
@@ -320,6 +355,31 @@ def multi_repository_query(
                 correlation_id=get_correlation_id(),
             ):
                 response = service.search(request)
+                from ..services.cidx_meta_access.catalog_search import (
+                    TextRematch,
+                    project_multi_fulltext,
+                    project_multi_response,
+                )
+
+                # Catalog rows and the count are projected before recording
+                # and caching; full-text catalog groups per shown document.
+                if request.search_type == "fts":
+                    project_multi_fulltext(
+                        response,
+                        request,
+                        lambda: service.per_repo_limit(request),
+                        user.username,
+                        access_filtering_service,
+                    )
+                else:
+                    project_multi_response(
+                        response,
+                        user.username,
+                        access_filtering_service,
+                        TextRematch(request.query, regex=True)
+                        if request.search_type == "regex"
+                        else None,
+                    )
                 search_event_recording.record_multi_repository_search(
                     writer,
                     response.results,
@@ -329,11 +389,23 @@ def multi_repository_query(
                     correlation_id=get_correlation_id(),
                 )
 
-        # Story #683: Apply payload truncation to results
-        # Story #50: Now sync call (underlying handlers are sync)
-        response.results = _apply_multi_truncation(
-            response.results, request.search_type, owner=user.username
+        from ..cache.handle_binding import reset_handle_binding
+        from ..services.cidx_meta_access.cached_handles import bind_catalog_handles
+
+        # Story #683: Apply payload truncation to results; handles minted for
+        # catalog rows are bound to the caller's view.
+        binding = bind_catalog_handles(
+            request.repositories,
+            user.username,
+            access_filtering_service,
+            activated_repo_manager,
         )
+        try:
+            response.results = _apply_multi_truncation(
+                response.results, request.search_type, owner=user.username
+            )
+        finally:
+            reset_handle_binding(binding)
 
         # Log response summary
         logger.info(

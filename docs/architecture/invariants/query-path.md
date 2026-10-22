@@ -123,6 +123,12 @@ Every real (not cached, not coalesced away) vendor embedding or reranker HTTP ca
   includes both the HTTP call and its status check, so a vendor 4xx/5xx is recorded as a failure. Recording failures
   never replace the wrapped call's result or exception. A missing API key fails before the wrapper, so it records no
   row.
+- `token_count` is what the vendor billed, read from the successful response by the call site's
+  `tokens_from_result` extractor, one shared parser per vendor: Voyage `usage.total_tokens` (all four endpoints),
+  Cohere embed `meta.billed_units.input_tokens` (image tokens excluded), Cohere rerank 0 unless input tokens are
+  reported (it bills `search_units`, which are not tokens). A failed call records 0. A successful response without a
+  readable figure records 0 and logs a WARNING at most once per provider, call type, model and reason every 10
+  minutes. The local tokenizer is never used here. Rows written before 12.93.0 hold 0.
 - `stats_purpose_override("cache_shadow_audit")` tags the re-embed done by the on-mode cache audit.
 - Retention: `EmbeddingStatsRetentionScheduler` runs one short background job every 6 hours, re-reading `enabled` and
   `retention_days` (default 90) each time.

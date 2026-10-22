@@ -76,6 +76,7 @@ from ..xray import (
     _resolve_evaluator_code_off_loop,
     _resolve_repo_path,
 )
+from ..xray._catalog_guard import catalog_xray_refusal_async
 
 from ._candidates import (  # noqa: F401 -- re-exported for import-path parity
     _GRAPH_CANDIDATE_FILES_CAP,
@@ -811,6 +812,9 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
     ) = _parse_analyze_graph_request(params)
     if error is not None:
         return _mcp_response(error)
+    catalog_refusal = await catalog_xray_refusal_async(repo_alias, user.username)
+    if catalog_refusal is not None:
+        return _mcp_response(catalog_refusal)
 
     if isinstance(repo_alias, list):
         # Issue #1902 P9 review, P3: dedup BEFORE the cap check --

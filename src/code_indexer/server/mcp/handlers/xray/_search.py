@@ -31,6 +31,7 @@ from code_indexer.server.telemetry.correlation_bridge import (
 )
 from code_indexer.xray.sandbox import validate_rust_evaluator
 
+from ._catalog_guard import catalog_xray_refusal_async
 from ._infra import (
     _AWAIT_SECONDS_MIN,
     _AWAIT_SECONDS_MAX,
@@ -113,6 +114,9 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
     # sibling handler below and by `handle_analyze_graph`. Multi-element
     # lists still take the multi-repo path ({"job_ids":[...], "errors":[...]}).
     repo_alias_parsed = _parse_and_collapse_repo_alias(repo_alias)
+    catalog_refusal = await catalog_xray_refusal_async(repo_alias_parsed, user.username)
+    if catalog_refusal is not None:
+        return _mcp_response(catalog_refusal)
 
     # Bug #1876 item 4: validate and compile include/exclude patterns ONCE
     # here, on the RAW params.get(...) values, before any repo-scoped
