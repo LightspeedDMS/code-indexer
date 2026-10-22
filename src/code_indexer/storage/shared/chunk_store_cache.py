@@ -150,6 +150,7 @@ from __future__ import annotations
 import os
 import logging
 import threading
+import weakref
 from collections import OrderedDict
 from pathlib import Path, PurePosixPath
 from typing import Callable, Dict, List, Optional, Set, Tuple, Union
@@ -245,8 +246,13 @@ class ChunkStoreThreadCache:
         self._local = threading.local()
         self._lease_root = lease_root
         self._is_versioned_snapshot = is_versioned_snapshot
-        self._reader_leases: Dict[int, SnapshotReaderLease] = {}
-        self._reader_leases_lock = threading.Lock()
+        # id(lease) -> (normalized snapshot root, lease); a lease leaves only
+        # through _release_reader_lease (store closed, store collected, or
+        # its snapshot invalidated).
+        self._reader_leases: Dict[int, Tuple[str, SnapshotReaderLease]] = {}
+        # ^ hazard RLock not Lock: a GC finalizer can release a lease while this thread holds it
+        self._reader_leases_lock = threading.RLock()
+        self._store_finalizers: "weakref.WeakKeyDictionary[ChunkStore, weakref.finalize]" = weakref.WeakKeyDictionary()
         self._lease_stop_event = threading.Event()
         self._lease_thread: Optional[threading.Thread] = None
         # Bug #1775: shared, lock-protected. `_stale_prefixes` (a plain
@@ -264,7 +270,7 @@ class ChunkStoreThreadCache:
 
     def _acquire_reader_lease(
         self, collection_path: str
-    ) -> Optional[SnapshotReaderLease]:
+    ) -> Optional[Tuple[str, SnapshotReaderLease]]:
         """Best-effort lease publication for a newly opened versioned reader."""
         if self._is_versioned_snapshot is None:
             return None
@@ -299,9 +305,9 @@ class ChunkStoreThreadCache:
                 SNAPSHOT_READER_LEASE_TTL_SECONDS,
                 lease_root=self._lease_root,
             )
-            lease.acquire()
             self._ensure_lease_renewal_thread()
-            return lease
+            lease.acquire()
+            return snapshot_root, lease
         except Exception as exc:
             logger.warning(
                 "Could not publish snapshot reader lease for %s: %s",
@@ -320,16 +326,7 @@ class ChunkStoreThreadCache:
                 while not self._lease_stop_event.wait(
                     timeout=SNAPSHOT_READER_LEASE_TTL_SECONDS / 3.0
                 ):
-                    with self._reader_leases_lock:
-                        leases = tuple(self._reader_leases.values())
-                    for lease in leases:
-                        try:
-                            lease.renew()
-                        except OSError:
-                            logger.debug(
-                                "Could not renew chunk-store reader lease",
-                                exc_info=True,
-                            )
+                    self._renew_or_release_reader_leases()
 
             self._lease_thread = threading.Thread(
                 target=renew_loop, name="ChunkStoreReaderLeaseRenewal", daemon=True
@@ -339,13 +336,56 @@ class ChunkStoreThreadCache:
     def _close_store(self, store: ChunkStore) -> None:
         _safe_close(store)
         with self._reader_leases_lock:
-            lease = self._reader_leases.pop(id(store), None)
-        if lease is not None:
+            finalizer = self._store_finalizers.pop(store, None)
+        if finalizer is not None:
+            finalizer()
+
+    def _bind_lease_to_store(
+        self, store: ChunkStore, snapshot_root: str, lease: SnapshotReaderLease
+    ) -> None:
+        """The lease lives exactly as long as ``store``: released when the
+        store is closed, or collected (its thread exited), whichever first."""
+        lease_key = id(lease)
+        with self._reader_leases_lock:
+            self._reader_leases[lease_key] = (os.path.normpath(snapshot_root), lease)
+            # ^ hazard callback must not reference store => it would never be collected
+            self._store_finalizers[store] = weakref.finalize(
+                store, self._release_reader_lease, lease_key
+            )
+
+    def _release_reader_lease(self, lease_key: int) -> None:
+        with self._reader_leases_lock:
+            entry = self._reader_leases.pop(lease_key, None)
+        if entry is None:
+            return
+        try:
+            entry[1].release()
+        except OSError:
+            logger.warning(
+                "Could not release chunk-store reader lease for %s; it expires "
+                "after its TTL",
+                entry[0],
+                exc_info=True,
+            )
+
+    def _renew_or_release_reader_leases(self) -> None:
+        """One renewal tick: a lease on a superseded (invalidated) snapshot is
+        released -- its idle owner thread may still hold the open handle, which
+        only that thread ever closes -- and every other lease is renewed."""
+        with self._reader_leases_lock:
+            entries = list(self._reader_leases.items())
+        for lease_key, (snapshot_root, lease) in entries:
+            if self._is_stale(snapshot_root):
+                self._release_reader_lease(lease_key)
+                continue
             try:
-                lease.release()
+                lease.renew()
             except OSError:
-                logger.debug(
-                    "Could not release chunk-store reader lease", exc_info=True
+                logger.warning(
+                    "Could not renew chunk-store reader lease for %s; cleanup "
+                    "may treat the snapshot as unread once it expires",
+                    snapshot_root,
+                    exc_info=True,
                 )
 
     def _entries(self) -> "OrderedDict[Tuple[str, bool], _CacheEntry]":
@@ -577,10 +617,9 @@ class ChunkStoreThreadCache:
             del entries[key]
 
         store = open_chunk_store_for_path(db_path, collection_path, read_only=read_only)
-        lease = self._acquire_reader_lease(collection_path)
-        if lease is not None:
-            with self._reader_leases_lock:
-                self._reader_leases[id(store)] = lease
+        leased = self._acquire_reader_lease(collection_path)
+        if leased is not None:
+            self._bind_lease_to_store(store, *leased)
         try:
             fresh_mtime: Optional[int] = os.stat(db_path).st_mtime_ns
         except OSError:
