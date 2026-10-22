@@ -82,7 +82,10 @@ class _CountingDebouncer:
     def signal_dirty(self) -> None:
         self.signals += 1
 
-    def track_submission(self, job_id: str) -> None:
+    def note_direct_write(self) -> int:
+        return len(self.tracked) + 1
+
+    def track_submission(self, job_id: str, seq: int) -> None:
         self.tracked.append(job_id)
 
 

@@ -9,7 +9,7 @@ double keeps real write-lock state.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Tuple
 
 import pytest
 
@@ -73,9 +73,16 @@ def test_store_requests_refresh_after_releasing_the_lock(tmp_path: Path) -> None
 class _CountingDebouncer:
     def __init__(self) -> None:
         self.signals = 0
+        self.tracked: List[Tuple[str, int]] = []
 
     def signal_dirty(self) -> None:
         self.signals += 1
+
+    def note_direct_write(self) -> int:
+        return len(self.tracked) + 1
+
+    def track_submission(self, job_id: str, seq: int) -> None:
+        self.tracked.append((job_id, seq))
 
 
 @pytest.fixture

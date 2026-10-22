@@ -20,6 +20,7 @@ from code_indexer.global_repos.cidx_meta_refresh_debouncer import (  # noqa: F40
     _DEFAULT_DEBOUNCE_SECONDS,
     _MAX_RETRY_INTERVAL_SECONDS,
     CidxMetaRefreshDebouncer,
+    ran_in_process,
 )
 from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
 from code_indexer.utils.credential_redaction import mask_url_credentials
@@ -188,10 +189,14 @@ def request_cidx_meta_refresh(
     )
 
     owed_to = debouncer if debouncer is not None else _debouncer
+    seq = owed_to.note_direct_write() if owed_to is not None else 0
     try:
         job_id = refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
-        if job_id is not None and owed_to is not None:
-            owed_to.track_submission(job_id)
+        if owed_to is not None and job_id is not None:
+            owed_to.track_submission(job_id, seq)
+        elif owed_to is not None and not ran_in_process(refresh_scheduler):
+            # Suppressed (e.g. a repair quarantine): nothing ran.
+            owed_to.signal_dirty()
     except RefreshDeferredError as exc:
         logger.info(
             f"cidx-meta refresh deferred until {exc.backoff_until:.0f}: "

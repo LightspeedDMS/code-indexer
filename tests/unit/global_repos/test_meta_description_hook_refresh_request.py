@@ -10,7 +10,7 @@ boundary and the server config are replaced.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -46,9 +46,16 @@ class _Scheduler:
 class _CountingDebouncer:
     def __init__(self) -> None:
         self.signals = 0
+        self.tracked: List[Tuple[str, int]] = []
 
     def signal_dirty(self) -> None:
         self.signals += 1
+
+    def note_direct_write(self) -> int:
+        return len(self.tracked) + 1
+
+    def track_submission(self, job_id: str, seq: int) -> None:
+        self.tracked.append((job_id, seq))
 
 
 @pytest.fixture

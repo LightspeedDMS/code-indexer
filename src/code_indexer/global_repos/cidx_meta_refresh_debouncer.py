@@ -31,6 +31,13 @@ _UNFINISHED_JOB_STATES = frozenset({"pending", "running", "resolving_prerequisit
 _FINISHED_JOB_STATES = frozenset({"completed", "completed_partial"})
 
 
+def ran_in_process(refresh_scheduler: Any) -> bool:
+    """For a trigger that returned no job id: True when the scheduler ran the
+    refresh in this process (it has no background job manager), False when
+    it suppressed the submission (nothing ran, e.g. a repair quarantine)."""
+    return refresh_scheduler.background_job_manager is None
+
+
 class RefreshJobVerdict(enum.Enum):
     RUNNING = "running"
     COVERED = "covered"
@@ -122,15 +129,23 @@ class CidxMetaRefreshDebouncer:
             f"(interval={self._debounce_seconds}s)"
         )
 
-    def track_submission(self, job_id: str) -> None:
-        """Owe the write behind a refresh a writer submitted directly until
-        job *job_id* covers it; confirmed or retried like this debouncer's
-        own submissions. A later job replaces an earlier one: the job store
-        admits one active refresh per alias, so it started after it."""
+    def note_direct_write(self) -> int:
+        """Reserve the sequence of a write whose writer submits its own
+        refresh; call BEFORE submitting and pass it to track_submission."""
         with self._lock:
             self._signal_seq += 1
+            return self._signal_seq
+
+    def track_submission(self, job_id: str, seq: int) -> None:
+        """Owe the write noted at *seq* until job *job_id* covers it;
+        confirmed or retried like this debouncer's own submissions. A job is
+        awaited only if no awaited job was submitted for a later write: that
+        later job also covers this write, while this job (submitted earlier,
+        possibly tracked late) cannot cover the later one."""
+        with self._lock:
             self._dirty = True
-            self._awaiting = (job_id, self._signal_seq)
+            if self._awaiting is None or self._awaiting[1] < seq:
+                self._awaiting = (job_id, seq)
             if self._shutdown:
                 return
             self._schedule_retry_locked(self._debounce_seconds)
@@ -219,8 +234,10 @@ class CidxMetaRefreshDebouncer:
             self._retry_paced(f"{type(exc).__name__}: {exc}", failed=True)
             return
         if job_id is None:
-            # Ran in-process (no job manager) or was suppressed by a quarantine.
-            self._settle_submission(submitted_seq)
+            if ran_in_process(self._refresh_scheduler):
+                self._settle_submission(submitted_seq)
+            else:
+                self._retry_paced("the scheduler suppressed the submission", False)
             return
         logger.info(f"Debounced cidx-meta refresh submitted as job {job_id}")
         with self._lock:
@@ -250,6 +267,10 @@ class CidxMetaRefreshDebouncer:
             self._retry_delay = self._debounce_seconds
             if self._signal_seq == submitted_seq:
                 self._dirty = False
+            elif self._dirty:
+                # A later write may be owed with no timer of its own (its
+                # writer's refresh was deferred or ran in-process).
+                self._schedule_retry_locked(self._debounce_seconds)
 
     def _schedule_retry_locked(self, delay: float) -> None:
         """Start a retry timer (caller holds the lock), unless shut down or a
