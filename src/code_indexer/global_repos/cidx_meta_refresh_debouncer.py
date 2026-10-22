@@ -33,9 +33,15 @@ _FINISHED_JOB_STATES = frozenset({"completed", "completed_partial"})
 
 def ran_in_process(refresh_scheduler: Any) -> bool:
     """For a trigger that returned no job id: True when the scheduler ran the
-    refresh in this process (it has no background job manager), False when
-    it suppressed the submission (nothing ran, e.g. a repair quarantine)."""
-    return refresh_scheduler.background_job_manager is None
+    refresh in this process (it has no background job manager) and the
+    catalog alias is not repair-quarantined (a quarantined run skips the
+    source); False when nothing ran, e.g. a quarantine-suppressed
+    submission. Errs toward owed: a retry is harmless."""
+    if refresh_scheduler.background_job_manager is not None:
+        return False
+    return not refresh_scheduler._scheduled_local_repo_repair_is_quarantined(
+        META_ALIAS
+    )
 
 
 class RefreshJobVerdict(enum.Enum):
@@ -268,8 +274,7 @@ class CidxMetaRefreshDebouncer:
             if self._signal_seq == submitted_seq:
                 self._dirty = False
             elif self._dirty:
-                # A later write may be owed with no timer of its own (its
-                # writer's refresh was deferred or ran in-process).
+                # ^ hazard no timer here => a later write whose direct refresh was deferred or ran in-process is never retried
                 self._schedule_retry_locked(self._debounce_seconds)
 
     def _schedule_retry_locked(self, delay: float) -> None:

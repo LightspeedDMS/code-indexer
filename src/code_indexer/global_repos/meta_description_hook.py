@@ -195,7 +195,6 @@ def request_cidx_meta_refresh(
         if owed_to is not None and job_id is not None:
             owed_to.track_submission(job_id, seq)
         elif owed_to is not None and not ran_in_process(refresh_scheduler):
-            # Suppressed (e.g. a repair quarantine): nothing ran.
             owed_to.signal_dirty()
     except RefreshDeferredError as exc:
         logger.info(
