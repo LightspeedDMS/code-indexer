@@ -177,7 +177,8 @@ class TestRepoRowDataAttributes:
 
 
 class TestBootstrapScript:
-    """C5: applyStoredGroupedView() bootstrap call must be the only content after </style>."""
+    """C5: the bootstrap script (stored grouped view, then the repo-access
+    filter) must be the only content after </style>."""
 
     def test_apply_stored_grouped_view_is_only_content_after_style(self, test_client):
         """After the final </style> tag, the only non-whitespace content is the bootstrap script."""
@@ -187,7 +188,8 @@ class TestBootstrapScript:
         parts = response.text.rsplit("</style>", maxsplit=1)
         assert len(parts) == 2, "No </style> tag found in response"
         after_style = parts[1].strip()
-        assert after_style == "<script>applyStoredGroupedView();</script>", (
+        expected = "<script>applyStoredGroupedView(); applyRepoAccessFilter();</script>"
+        assert after_style == expected, (
             f"Expected only bootstrap script after </style>, got: {after_style!r}"
         )
 

@@ -40,6 +40,8 @@ function toggleGroupedView() {
     } else {
         ungroupRows(table);
     }
+    // Groups page only: rebuilt category headers follow the active filter.
+    if (typeof applyRepoAccessFilter === 'function') applyRepoAccessFilter();
 }
 
 /**

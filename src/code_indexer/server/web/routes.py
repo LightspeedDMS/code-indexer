@@ -2283,12 +2283,9 @@ def _create_groups_page_response(
     repo_access_map: Dict[int, List[str]] = {}
     try:
         golden_repo_manager = _get_golden_repo_manager()
-        all_repos_data = golden_repo_manager.list_golden_repos()
-        # list_golden_repos returns List[Dict] with 'alias' key
-        golden_repos = [
-            {"name": repo["alias"]}
-            for repo in sorted(all_repos_data, key=lambda x: x["alias"].lower())
-        ]
+        from .repo_access_rows import repo_access_rows
+
+        golden_repos = repo_access_rows(golden_repo_manager.list_golden_repos())
 
         # Build repo access map: group_id -> list of repo names
         for group in group_manager.get_all_groups():
@@ -2680,12 +2677,9 @@ def groups_repo_access_partial(request: Request):
     repo_access_map: Dict[int, List[str]] = {}
     try:
         golden_repo_manager = _get_golden_repo_manager()
-        all_repos_data = golden_repo_manager.list_golden_repos()
-        # list_golden_repos returns List[Dict] with 'alias' key
-        golden_repos = [
-            {"name": repo["alias"]}
-            for repo in sorted(all_repos_data, key=lambda x: x["alias"].lower())
-        ]
+        from .repo_access_rows import repo_access_rows
+
+        golden_repos = repo_access_rows(golden_repo_manager.list_golden_repos())
 
         # Build repo access map
         for group in group_manager.get_all_groups():

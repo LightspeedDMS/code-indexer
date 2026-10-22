@@ -6,6 +6,7 @@
 <!-- Hidden CSRF token for JavaScript access (C1 fix: httponly cookies cannot be read by JS) -->
 <div id="csrf-data" data-csrf-token="{{ csrf_token }}" style="display:none;"></div>
 <script src="/admin/static/js/repo_categories.js?v={{ static_version }}"></script>
+<script src="/admin/static/js/groups_repo_access.js?v={{ static_version }}"></script>
 
 <div class="groups-header">
     <h1>Group Management</h1>
