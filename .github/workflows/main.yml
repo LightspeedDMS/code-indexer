@@ -120,8 +120,7 @@ jobs:
       with:
         workspaces: "rust -> target"
 
-    # --locked: fail on Cargo.lock drift here, not at deploy (the VM
-    # auto-updater builds xray-cli with --locked too).
+    #^ why --locked => lockfile drift fails here, not at deploy (auto-updater builds --locked)
     - name: Run cargo test --locked --workspace (rust/xray-core + rust/xray-cli, incl. AC18 PREAMBLE parity check)
       working-directory: rust
       run: cargo test --locked --workspace
