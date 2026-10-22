@@ -69,24 +69,13 @@ def make_store(request, tmp_path: Path) -> Iterator[Callable[[], Any]]:
         lock_dir = tmp_path / "alias_locks"
         yield lambda: SqliteAliasLockStore(lock_dir)
         return
-    dsn = os.environ.get("TEST_POSTGRES_DSN")
-    if not dsn:
-        pytest.skip("TEST_POSTGRES_DSN not set")
-    import psycopg
-
     from code_indexer.server.services.alias_lock_store.postgres_store import (
         PostgresAliasLockStore,
     )
+    from tests.shared.alias_lock_pg import postgres_lock_store_dsn
 
-    def clear_catalog_row() -> None:
-        with psycopg.connect(dsn) as conn:
-            conn.execute(
-                "DELETE FROM golden_repo_alias_locks WHERE lock_key = %s", (_ALIAS,)
-            )
-
-    clear_catalog_row()
-    yield lambda: PostgresAliasLockStore(dsn)
-    clear_catalog_row()
+    with postgres_lock_store_dsn(_ALIAS) as dsn:
+        yield lambda: PostgresAliasLockStore(dsn)
 
 
 @pytest.fixture

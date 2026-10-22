@@ -13,7 +13,6 @@ thread; the interleaving is forced right after the check, no sleeps.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import threading
 from contextlib import closing
@@ -59,29 +58,29 @@ def backend(request, tmp_path: Path) -> Iterator[Backend]:
             "strftime('%Y-%m-%d %H:%M:%f', 'now')",
         )
         return
-    dsn = os.environ.get("TEST_POSTGRES_DSN")
-    if not dsn:
-        pytest.skip("TEST_POSTGRES_DSN not set")
     import psycopg
 
     from code_indexer.server.services.alias_lock_store.postgres_store import (
         PostgresAliasLockStore,
     )
+    from tests.shared.alias_lock_pg import postgres_lock_store_dsn
 
-    def run_pg(sql: str) -> None:
-        with closing(psycopg.connect(dsn)) as pg, pg:
-            pg.execute(sql, (_ALIAS,))
+    with postgres_lock_store_dsn(_ALIAS) as dsn:
 
-    def set_pg(expression: str) -> None:
-        run_pg(
-            f"UPDATE golden_repo_alias_locks SET last_renewed_at = {expression} "
-            "WHERE lock_key = %s"
+        def set_pg(expression: str) -> None:
+            with closing(psycopg.connect(dsn)) as pg, pg:
+                pg.execute(
+                    f"UPDATE golden_repo_alias_locks SET last_renewed_at = "
+                    f"{expression} WHERE lock_key = %s",
+                    (_ALIAS,),
+                )
+
+        yield (
+            PostgresAliasLockStore(dsn),
+            set_pg,
+            "now() - interval '2 hours'",
+            "now()",
         )
-
-    clear = "DELETE FROM golden_repo_alias_locks WHERE lock_key = %s"
-    run_pg(clear)
-    yield (PostgresAliasLockStore(dsn), set_pg, "now() - interval '2 hours'", "now()")
-    run_pg(clear)
 
 
 def _scheduler(tmp_path: Path, store: Any) -> RefreshScheduler:

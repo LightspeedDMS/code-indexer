@@ -79,27 +79,17 @@ def make_store(request, tmp_path: Path) -> Iterator[MakeStore]:
 
         yield sqlite_store
         return
-    dsn = os.environ.get("TEST_POSTGRES_DSN")
-    if not dsn:
-        pytest.skip("TEST_POSTGRES_DSN not set")
-    import psycopg
-
     from code_indexer.server.services.alias_lock_store.postgres_store import (
         PostgresAliasLockStore,
     )
+    from tests.shared.alias_lock_pg import postgres_lock_store_dsn
 
-    def clear() -> None:
-        with psycopg.connect(dsn) as pg:
-            pg.execute(
-                "DELETE FROM golden_repo_alias_locks WHERE lock_key = %s", (_ALIAS,)
-            )
+    with postgres_lock_store_dsn(_ALIAS) as dsn:
 
-    def pg_store(cls: type = PostgresAliasLockStore) -> Any:
-        return cls(dsn)
+        def pg_store(cls: type = PostgresAliasLockStore) -> Any:
+            return cls(dsn)
 
-    clear()
-    yield pg_store
-    clear()
+        yield pg_store
 
 
 def _coordinator(golden: Path, store: Any) -> AliasLockCoordinator:
