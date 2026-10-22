@@ -1,7 +1,11 @@
 """A catalog writer piggybacks on a held cidx-meta write lock only when the
-holder will publish its write (the refresh scheduler's refresh). Any other
-holder -- write mode, a restore, another writer -- holds it exclusively:
-the memory and X-Ray pattern writers refuse with a retryable error and
+holder is a cooperative catalog writer whose write is published by a later
+refresh (the refresh itself, another memory or X-Ray pattern write, the
+dependency map, the description lifecycle writers, the meta-directory
+updater). Any other holder -- write mode, a restore, reconciliation,
+anything unknown -- holds it exclusively: the memory and X-Ray pattern
+writers refuse with a retryable error naming only a neutral category (never
+the holder's raw owner name, which can carry another user's username) and
 write nothing.
 
 Real components: the real RefreshScheduler and its lock coordinator over
@@ -36,8 +40,22 @@ from code_indexer.server.services.xray_pattern_service import XrayPatternService
 from tests.fixtures.refresh_scheduler_stores import real_metadata_store
 
 CATALOG = "cidx-meta"
-WRITE_MODE_OWNER = "mcp_write_mode"
-REFRESH_OWNER = "refresh_scheduler"
+#: Holders whose catalog write is published by a later refresh.
+COOPERATIVE_HOLDERS = [
+    "refresh_scheduler",
+    "dependency_map_service",
+    "memory_store@testhost/alice",  # a concurrent memory create
+    "xray-pattern:store:other-pattern",
+    "lifecycle_writer",
+    "lifecycle_batch_runner",
+    "meta_directory_updater",
+]
+#: Holders expecting exclusive access, with the category a refusal names.
+EXCLUSIVE_HOLDERS = {
+    "mcp_write_mode": "write mode",
+    "reconciliation": "another exclusive operation",
+    "restore@testhost/bob": "another exclusive operation",
+}
 PATTERN_YAML = """\
 name: test-pattern
 description: "A test pattern"
@@ -115,7 +133,7 @@ def debouncer(monkeypatch: pytest.MonkeyPatch) -> _CountingDebouncer:
     return owed
 
 
-@pytest.fixture(params=[WRITE_MODE_OWNER, "dependency_map_service", REFRESH_OWNER])
+@pytest.fixture(params=COOPERATIVE_HOLDERS + list(EXCLUSIVE_HOLDERS))
 def holder(
     request: pytest.FixtureRequest, scheduler: RefreshScheduler
 ) -> Iterator[str]:
@@ -125,6 +143,12 @@ def holder(
         yield owner
     finally:
         assert scheduler.write_lock_manager.release(CATALOG, owner_name=owner)
+
+
+def _assert_neutral_refusal(message: str, holder: str) -> None:
+    assert EXCLUSIVE_HOLDERS[holder] in message, message
+    assert holder not in message, message
+    assert "bob" not in message, message
 
 
 def _memory_service(
@@ -157,15 +181,17 @@ def test_memory_create_respects_the_holder(
     }
     memories = tmp_path / "memories"
 
-    if holder != REFRESH_OWNER:
-        with pytest.raises(ConflictError, match=holder):
-            service.create_memory(payload, username="alice")
+    if holder in EXCLUSIVE_HOLDERS:
+        with pytest.raises(ConflictError) as refused:
+            service.create_memory(payload, username="carol")
+        # MCP returns str(exc) as its message, REST as the 423 detail.
+        _assert_neutral_refusal(str(refused.value), holder)
         assert not memories.exists() or not any(memories.iterdir())
         assert debouncer.signals == 0
     else:
-        created = service.create_memory(payload, username="alice")
+        created = service.create_memory(payload, username="carol")
         assert (memories / f"{created['id']}.md").exists()
-        assert debouncer.signals == 1, "the refresh-held write was not owed"
+        assert debouncer.signals == 1, "the piggybacked write was not owed"
 
 
 def test_xray_pattern_store_respects_the_holder(
@@ -182,16 +208,16 @@ def test_xray_pattern_store_respects_the_holder(
         scope="__any__",
         pattern_yaml=PATTERN_YAML,
         overwrite=False,
-        actor="alice",
+        actor="carol",
         may_replace_global=True,
     )
 
-    if holder != REFRESH_OWNER:
+    if holder in EXCLUSIVE_HOLDERS:
         assert result.get("error") == "catalog_locked", result
-        assert holder in str(result.get("message")), result
+        _assert_neutral_refusal(str(result.get("message")), holder)
         assert not target.exists()
         assert debouncer.signals == 0
     else:
         assert result.get("success") is True, result
         assert target.exists()
-        assert debouncer.signals == 1, "the refresh-held write was not owed"
+        assert debouncer.signals == 1, "the piggybacked write was not owed"

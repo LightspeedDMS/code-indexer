@@ -253,6 +253,7 @@ def _partial_publish_warning(
 # MIGRATION_LOCK_TTL_SECONDS precedent (server/services/fleet_migration/
 # orchestrator.py) for the identical class of problem.
 _REFRESH_PUBLISH_LOCK_TTL_SECONDS = 24 * 60 * 60
+REFRESH_LOCK_OWNER = "refresh_scheduler"  # the refresh's write-lock owner name
 
 # `git rev-parse HEAD` on the local clone is a metadata read, not indexing
 # work; a bound keeps a wedged filesystem from stalling the stale check.
@@ -1567,7 +1568,7 @@ class RefreshScheduler:
     def acquire_write_lock(
         self,
         alias: str,
-        owner_name: str = "refresh_scheduler",
+        owner_name: str = REFRESH_LOCK_OWNER,
         ttl_seconds: Optional[int] = None,
     ) -> bool:
         """
@@ -1606,7 +1607,7 @@ class RefreshScheduler:
     def release_write_lock(
         self,
         alias: str,
-        owner_name: str = "refresh_scheduler",
+        owner_name: str = REFRESH_LOCK_OWNER,
         owner_token: Optional[str] = None,
     ) -> bool:
         """
@@ -1745,7 +1746,7 @@ class RefreshScheduler:
             "global_repo_refresh", repo_alias=f"{alias}-global"
         )
 
-    def write_lock(self, alias: str, owner_name: str = "refresh_scheduler"):
+    def write_lock(self, alias: str, owner_name: str = REFRESH_LOCK_OWNER):
         """
         Context manager that acquires the write lock on entry and releases on exit.
 
@@ -3332,7 +3333,7 @@ class RefreshScheduler:
                         # still create and publish a snapshot as if it
                         # still held exclusive ownership.
                         self.raise_if_write_lock_ownership_lost(
-                            repo_name, owner_name="refresh_scheduler"
+                            repo_name, owner_name=REFRESH_LOCK_OWNER
                         )
                         _raise_if_refresh_cancelled(
                             cancel_check, alias_name, "before the snapshot"
@@ -3604,7 +3605,7 @@ class RefreshScheduler:
             # wrapper) for symmetry with the acquire call.
             acquired = self.write_lock_manager.acquire(
                 repo_name,
-                owner_name="refresh_scheduler",
+                owner_name=REFRESH_LOCK_OWNER,
                 ttl_seconds=_REFRESH_PUBLISH_LOCK_TTL_SECONDS,
             )
             try:
@@ -3612,7 +3613,7 @@ class RefreshScheduler:
             finally:
                 if acquired:
                     released = self.write_lock_manager.release(
-                        repo_name, owner_name="refresh_scheduler"
+                        repo_name, owner_name=REFRESH_LOCK_OWNER
                     )
                     if not released:
                         logger.warning(
@@ -3636,8 +3637,7 @@ class RefreshScheduler:
         backup mirror while holding the lock the refresh publishes with, so
         no backup git write races another writer. None when another owner
         holds it: the refresh skips this cycle. Every backup git call is
-        bound to the job's cancel check; the remote is a passive mirror
-        (sync publishes local HEAD with force-with-lease)."""
+        bound to the job's cancel check; the remote is a passive mirror."""
         with self._held_write_lock_for_publish(repo_name) as acquired:
             if not acquired:
                 logger.info(
@@ -3767,7 +3767,7 @@ class RefreshScheduler:
         return partial(
             self.raise_if_write_lock_ownership_lost,
             repo_name,
-            owner_name="refresh_scheduler",
+            owner_name=REFRESH_LOCK_OWNER,
         )
 
     def _run_and_publish_integrity_gate(

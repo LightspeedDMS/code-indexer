@@ -122,6 +122,8 @@ DEFAULT_EXECUTION_MODE = "legacy"
 # Coarse write-lock alias for the shared cidx-meta git repo (Bug #1037).
 # Must match the alias used by MemoryStoreService and RefreshScheduler.
 _COARSE_ALIAS = "cidx-meta"
+#: Every X-Ray pattern writer's catalog-lock owner name starts with this.
+XRAY_PATTERN_LOCK_OWNER_PREFIX = "xray-pattern:"
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +347,7 @@ class XrayPatternService:
             return refusal
 
         # 7. Write YAML and git-commit under coarse lock.
-        owner = f"xray-pattern:store:{name}"
+        owner = f"{XRAY_PATTERN_LOCK_OWNER_PREFIX}store:{name}"
 
         def _write_and_commit(piggyback: bool) -> Optional[Dict[str, Any]]:
             if self._holds(target_path, pattern_yaml):

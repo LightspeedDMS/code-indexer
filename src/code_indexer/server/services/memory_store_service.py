@@ -48,6 +48,8 @@ _T = TypeVar("_T")
 logger = logging.getLogger(__name__)
 
 _COARSE_ALIAS = "cidx-meta"
+#: Every memory writer's catalog-lock owner name starts with this.
+MEMORY_LOCK_OWNER_PREFIX = "memory_store@"
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +268,7 @@ class MemoryStoreService:
     # ------------------------------------------------------------------
 
     def _owner_name(self, username: str) -> str:
-        return f"memory_store@{self._hostname}/{username}"
+        return f"{MEMORY_LOCK_OWNER_PREFIX}{self._hostname}/{username}"
 
     def _memory_path(self, memory_id: str) -> Path:
         """Build and validate the path for a memory file.

@@ -283,18 +283,19 @@ def atomic_write_description(
         Any exception from file write or os.replace.
     """
     from code_indexer.global_repos.lifecycle_batch_runner import (
+        LIFECYCLE_WRITER_LOCK_OWNER,
         LifecycleLockUnavailableError,
     )
 
     lock_acquired = False
     if refresh_scheduler is not None:
         lock_acquired = _acquire_cidx_meta_lock_with_bounded_retry(
-            refresh_scheduler, "lifecycle_writer"
+            refresh_scheduler, LIFECYCLE_WRITER_LOCK_OWNER
         )
         if not lock_acquired:
             raise LifecycleLockUnavailableError(
                 "Could not acquire write lock for 'cidx-meta' "
-                "(attempted as owner='lifecycle_writer'); "
+                f"(attempted as owner='{LIFECYCLE_WRITER_LOCK_OWNER}'); "
                 f"{_describe_cidx_meta_holder(refresh_scheduler)} -- retry later"
             )
 
@@ -401,10 +402,14 @@ def _write_staged(target_path: Path, content: str) -> bool:
 def _release_cidx_meta_lock(refresh_scheduler: Any) -> bool:
     """Release the lifecycle writer's cidx-meta lock; False (logged) when the
     release failed or raised, i.e. the lock may still be held."""
+    from code_indexer.global_repos.lifecycle_batch_runner import (
+        LIFECYCLE_WRITER_LOCK_OWNER,
+    )
+
     try:
         released = bool(
             refresh_scheduler.release_write_lock(
-                "cidx-meta", owner_name="lifecycle_writer"
+                "cidx-meta", owner_name=LIFECYCLE_WRITER_LOCK_OWNER
             )
         )
     except Exception as exc:
@@ -655,9 +660,13 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
         # owed to the debouncer.
         _lock_still_held = False
         if _refresh_scheduler is not None:
+            from code_indexer.global_repos.lifecycle_batch_runner import (
+                LIFECYCLE_WRITER_LOCK_OWNER,
+            )
+
             try:
                 _lock_acquired = _acquire_cidx_meta_lock_with_bounded_retry(
-                    _refresh_scheduler, "lifecycle_writer"
+                    _refresh_scheduler, LIFECYCLE_WRITER_LOCK_OWNER
                 )
             except Exception as _lock_err:
                 logger.warning(

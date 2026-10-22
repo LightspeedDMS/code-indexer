@@ -244,6 +244,9 @@ def _do_write(
 # Public API
 # ---------------------------------------------------------------------------
 
+# Lock owner name used by write_meta_md when acquiring cidx-meta write lock.
+LIFECYCLE_WRITER_LOCK_OWNER: str = "lifecycle_writer"
+
 
 def write_meta_md(
     *,
@@ -319,7 +322,7 @@ def write_meta_md(
     meta_md_path = cidx_meta_path / f"{alias}.md"
 
     # -- Cooperative lock ---------------------------------------------------
-    _LOCK_OWNER = "lifecycle_writer"
+    _LOCK_OWNER = LIFECYCLE_WRITER_LOCK_OWNER
     _LOCK_KEY = "cidx-meta"
 
     if not already_locked:
@@ -473,7 +476,7 @@ _DEFAULT_TTL_SECONDS: int = 3600
 _DEFAULT_ESTIMATED_SECONDS_PER_REPO: int = 30
 
 # Lock owner name used by the batch runner when acquiring cidx-meta write lock.
-_BATCH_RUNNER_LOCK_OWNER: str = "lifecycle_batch_runner"
+BATCH_RUNNER_LOCK_OWNER: str = "lifecycle_batch_runner"
 
 
 class LifecycleBatchRunner:
@@ -798,7 +801,7 @@ class LifecycleBatchRunner:
         # frontmatter so the entire read-merge-write sequence is atomic.
         per_alias_lock_key = f"lifecycle:{alias}"
         acquired = self._refresh_scheduler.acquire_write_lock(
-            per_alias_lock_key, owner_name=_BATCH_RUNNER_LOCK_OWNER
+            per_alias_lock_key, owner_name=BATCH_RUNNER_LOCK_OWNER
         )
         if not acquired:
             raise LifecycleLockUnavailableError(
@@ -853,7 +856,7 @@ class LifecycleBatchRunner:
                 )
         finally:
             self._refresh_scheduler.release_write_lock(
-                per_alias_lock_key, owner_name=_BATCH_RUNNER_LOCK_OWNER
+                per_alias_lock_key, owner_name=BATCH_RUNNER_LOCK_OWNER
             )
 
         # Update tracking DB with lifecycle schema version after successful write.
