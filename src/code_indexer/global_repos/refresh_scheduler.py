@@ -1809,6 +1809,9 @@ class RefreshScheduler:
                     f"Unexpected error cleaning write mode marker {marker_path.name}: "
                     f"{type(exc).__name__}: {exc}"
                 )
+        from .write_mode_marker_cleanup import sweep_leftover_claims
+
+        sweep_leftover_claims(write_mode_dir, WRITE_MODE_MARKER_TTL_SECONDS)
 
     def _cleanup_single_write_mode_marker(
         self, marker_path: Path, alias: str, force: bool

@@ -140,7 +140,7 @@ class SnapshotReaderLease:
         )
         self._released = False
         self._ttl_seconds = ttl_seconds
-        # ^ inv renew and release serialize: a renewal never recreates a released lease
+        # ^ invariant renew and release serialize: a renewal never recreates a released lease
         self._lock = threading.Lock()
 
     def acquire(self) -> None:

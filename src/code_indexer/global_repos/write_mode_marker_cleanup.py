@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,6 +63,20 @@ def _remove_if_unchanged(marker_path: Path, evaluated: str) -> bool:
         return False
     finally:
         claimed.unlink(missing_ok=True)
+
+
+def sweep_leftover_claims(write_mode_dir: Path, ttl_seconds: float) -> None:
+    """Remove claim files a crashed cleanup left behind (renamed, never
+    unlinked) once they are older than the marker TTL."""
+    for claimed in write_mode_dir.glob(".*.json.cleanup-*"):
+        try:
+            modified = claimed.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        # ^ why a claim that may still be restored holds a marker written after the evaluating read => fresh mtime
+        if time.time() - modified > ttl_seconds:
+            claimed.unlink(missing_ok=True)
+            logger.info(f"Removed leftover write mode marker claim {claimed.name}")
 
 
 def cleanup_write_mode_marker(
