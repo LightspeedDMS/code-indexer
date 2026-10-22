@@ -36,6 +36,7 @@ from code_indexer.server.git.git_subprocess_env import (
     ensure_remote_url_without_credentials,
     remote_url_without_credentials,
 )
+from .cidx_meta_refresh_debouncer import WRITE_LOCK_HELD_SKIP
 from .git_pull_updater import GitPullUpdater
 from .local_source_manifest import record_source_manifest, source_change_reason
 from .meta_directory_updater import MetaDirectoryUpdater
@@ -2894,6 +2895,7 @@ class RefreshScheduler:
                                 "success": True,
                                 "alias": alias_name,
                                 "message": "Skipped, write lock held",
+                                "skipped": WRITE_LOCK_HELD_SKIP,
                             }
 
                         # Story #926: After migrate_legacy_cidx_meta() runs at server startup,
@@ -3040,6 +3042,7 @@ class RefreshScheduler:
                                 "success": True,
                                 "alias": alias_name,
                                 "message": "Skipped, write lock held",
+                                "skipped": WRITE_LOCK_HELD_SKIP,
                             }
 
                         backup_cfg = None
@@ -3315,6 +3318,7 @@ class RefreshScheduler:
                                 "success": True,
                                 "alias": alias_name,
                                 "message": "Skipped, write lock held",
+                                "skipped": WRITE_LOCK_HELD_SKIP,
                             }
 
                         # Index source first, then create versioned snapshot (Story #229)

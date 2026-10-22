@@ -9,7 +9,6 @@ meta directory management code.
 import logging
 import os
 import tempfile
-import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +16,11 @@ from typing import Any, Optional
 
 import yaml
 
+from code_indexer.global_repos.cidx_meta_refresh_debouncer import (  # noqa: F401
+    _DEFAULT_DEBOUNCE_SECONDS,
+    _MAX_RETRY_INTERVAL_SECONDS,
+    CidxMetaRefreshDebouncer,
+)
 from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
 from code_indexer.utils.credential_redaction import mask_url_credentials
 from code_indexer.global_repos.write_lock_manager import (
@@ -99,183 +103,6 @@ _tracking_backend: Optional["DescriptionRefreshTrackingBackend"] = None  # type:
 _scheduler: Optional["DescriptionRefreshScheduler"] = None  # type: ignore[name-defined]  # noqa: F821
 _refresh_scheduler: Optional[Any] = None  # type: ignore
 _debouncer: Optional["CidxMetaRefreshDebouncer"] = None
-
-_DEFAULT_DEBOUNCE_SECONDS = 30
-#: Pacing cap on the debouncer's retry interval after a generic failure
-#: (store or job tracker unavailable): retries slow down, never give up.
-_MAX_RETRY_INTERVAL_SECONDS = 900.0
-
-
-class CidxMetaRefreshDebouncer:
-    """
-    Debounces cidx-meta refresh triggers to coalesce rapid batch registrations.
-
-    When multiple repositories are registered in rapid succession, each
-    on_repo_added() call attempts trigger_refresh_for_repo("cidx-meta-global").
-    The first succeeds, but subsequent calls raise DuplicateJobError. This
-    debouncer coalesces those failures into a single deferred refresh that fires
-    after the debounce interval with no further activity.
-
-    Usage:
-        debouncer = CidxMetaRefreshDebouncer(refresh_scheduler, debounce_seconds=30)
-        debouncer.signal_dirty()   # Called when DuplicateJobError is caught
-        debouncer.shutdown()       # Called on server shutdown
-    """
-
-    def __init__(
-        self,
-        refresh_scheduler: Any,
-        debounce_seconds: float = _DEFAULT_DEBOUNCE_SECONDS,
-    ) -> None:
-        self._refresh_scheduler = refresh_scheduler
-        self._debounce_seconds = debounce_seconds
-        # Paced retry interval after a generic failure (doubles, capped).
-        self._retry_delay: float = debounce_seconds
-        # Bumped by every signal_dirty: a submission settles only the
-        # signals that arrived before it started.
-        self._signal_seq: int = 0
-        # Identifies the owned timer: only the callback carrying the current
-        # token acts (a cancelled timer's callback may still run).
-        self._timer_token: int = 0
-        self._dirty: bool = False
-        self._timer: Optional[threading.Timer] = None
-        self._lock = threading.Lock()
-        self._shutdown: bool = False
-
-    def signal_dirty(self) -> None:
-        """
-        Mark cidx-meta as needing a refresh and (re)start the debounce timer.
-
-        If a timer is already running it is cancelled and a new one is started
-        with the full debounce interval (coalescing behavior).  After shutdown
-        the call is silently ignored.
-        """
-        with self._lock:
-            self._signal_seq += 1
-            self._dirty = True
-            if self._timer is not None:
-                self._timer.cancel()
-                self._timer = None
-            if self._shutdown:
-                logger.debug(
-                    "cidx-meta debouncer: shutdown in progress, ignoring signal_dirty"
-                )
-                return
-            self._start_timer_locked(self._debounce_seconds)
-        logger.debug(
-            "cidx-meta marked dirty, debounce timer (re)started "
-            f"(interval={self._debounce_seconds}s)"
-        )
-
-    def _on_timer_expired(self, timer_token: int) -> None:
-        """
-        Called by the timer thread when the debounce interval elapses.
-
-        Bug #2022: acts only for the timer it belongs to (*timer_token*).
-        Timer.run checks cancellation only before calling back, so a timer
-        cancelled and replaced by signal_dirty can still get here: it then
-        returns without touching the replacement or submitting.
-
-        Clears dirty state after successful refresh.  If trigger raises
-        DuplicateJobError the job is still running; re-mark dirty and retry
-        after another debounce interval.  A RefreshDeferredError was
-        persisted durably and needs nothing more here.  Any other exception
-        (store or job tracker unavailable) keeps the refresh owed: it is
-        logged and retried at a doubling interval capped at
-        _MAX_RETRY_INTERVAL_SECONDS -- paced, never given up.
-
-        Bug #2022: a submission settles only the signals that arrived before
-        it started. A write signalled while it was in flight stays owed.
-        """
-        from code_indexer.global_repos.refresh_failure_recovery import (
-            RefreshDeferredError,
-        )
-        from code_indexer.server.repositories.background_jobs import DuplicateJobError
-
-        with self._lock:
-            if timer_token != self._timer_token:
-                return  # a newer timer owns the refresh
-            if not self._dirty or self._shutdown:
-                return
-            # Don't clear _dirty yet — clear after successful refresh
-            self._timer = None
-            submitted_seq = self._signal_seq
-
-        # Trigger outside lock to avoid holding lock during I/O
-        try:
-            self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
-            logger.info("Debounced cidx-meta refresh triggered successfully")
-            self._settle_submission(submitted_seq)
-        except RefreshDeferredError as exc:
-            # Bug #2022: the trigger was persisted as pending; the refresh
-            # scheduler fires it once the backoff ends -- no retry spin here.
-            logger.info(
-                f"cidx-meta refresh deferred until {exc.backoff_until:.0f}: "
-                f"persisted failure backoff; the refresh scheduler fires it "
-                f"once the backoff ends"
-            )
-            self._settle_submission(submitted_seq)
-        except DuplicateJobError:
-            logger.info("cidx-meta refresh still running, will retry after debounce")
-            with self._lock:
-                # _dirty stays True (was never cleared)
-                self._schedule_retry_locked(self._debounce_seconds)
-        except Exception as exc:
-            # Bug #2022: nothing durable records this refresh yet, so it stays
-            # owed (dirty) and is retried, paced, until it is submitted.
-            with self._lock:
-                self._retry_delay = min(
-                    self._retry_delay * 2, _MAX_RETRY_INTERVAL_SECONDS
-                )
-                delay = self._retry_delay
-                self._schedule_retry_locked(delay)
-            logger.warning(
-                "Debounced cidx-meta refresh failed (%s: %s); retrying in %.1fs",
-                type(exc).__name__,
-                exc,
-                delay,
-            )
-
-    def _settle_submission(self, submitted_seq: int) -> None:
-        """A submission (or durable deferral) that started at *submitted_seq*
-        covers the signals up to it. A signal that arrived while it was in
-        flight is a newer write it may not cover: that refresh stays owed,
-        and the timer that signal started owns it (this callback had already
-        released its own timer, so signal_dirty always starts a new one)."""
-        with self._lock:
-            self._retry_delay = self._debounce_seconds
-            if self._signal_seq == submitted_seq:
-                self._dirty = False
-
-    def _schedule_retry_locked(self, delay: float) -> None:
-        """Start a retry timer (caller holds the lock), unless shut down or a
-        timer is already pending -- one a concurrent signal started serves."""
-        if self._shutdown or self._timer is not None:
-            return
-        self._start_timer_locked(delay)
-
-    def _start_timer_locked(self, delay: float) -> None:
-        """Start the one owned timer (caller holds the lock); its callback
-        carries a fresh token, so a callback of any earlier timer is stale."""
-        self._timer_token += 1
-        self._timer = threading.Timer(
-            delay, self._on_timer_expired, args=(self._timer_token,)
-        )
-        self._timer.daemon = True
-        self._timer.start()
-
-    def shutdown(self) -> None:
-        """
-        Cancel any pending timer and prevent future timers from being started.
-
-        Safe to call multiple times (idempotent).
-        """
-        with self._lock:
-            self._shutdown = True
-            if self._timer is not None:
-                self._timer.cancel()
-                self._timer = None
-        logger.debug("CidxMetaRefreshDebouncer shut down")
 
 
 def set_tracking_backend(backend) -> None:

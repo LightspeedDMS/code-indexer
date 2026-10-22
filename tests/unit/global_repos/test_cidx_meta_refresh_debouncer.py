@@ -46,6 +46,11 @@ def mock_refresh_scheduler():
     """Create a mock RefreshScheduler."""
     scheduler = MagicMock()
     scheduler.trigger_refresh_for_repo.return_value = "job-id-123"
+    # The submitted job reads as a finished refresh that covered the write.
+    scheduler.background_job_manager.get_job_status.return_value = {
+        "status": "completed",
+        "result": {"success": True, "message": "Refresh complete"},
+    }
     return scheduler
 
 
@@ -246,7 +251,9 @@ class TestCidxMetaRefreshDebouncerSignalDirty:
             "cidx-meta-global"
         )
 
-        # State should be clean after successful refresh
+        # Clean once the job store confirms the refresh covered the write.
+        while debouncer._dirty and time.monotonic() < deadline:
+            time.sleep(0.02)
         assert debouncer._dirty is False
         assert debouncer._timer is None
 
