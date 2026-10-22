@@ -17,6 +17,7 @@ from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.local_source_manifest import (
     MANIFEST_RELATIVE_PATH,
     IncompleteSourceListingError,
+    SourceDelta,
     list_source,
     read_manifest,
     record_source_manifest,
@@ -207,11 +208,21 @@ class TestRecordSourceManifest:
 
         assert (source / MANIFEST_RELATIVE_PATH).read_bytes() == recorded
 
-    def test_nothing_removed_since_the_published_snapshot(self, source: Path) -> None:
+    def test_unchanged_source_needs_neither(self, source: Path) -> None:
+        snapshot = _publish(source)
+
+        assert record_source_manifest(str(source), str(snapshot)) == SourceDelta(
+            removed=False, reconcile=False
+        )
+
+    def test_added_file_needs_a_reconcile(self, source: Path) -> None:
         snapshot = _publish(source)
         (source / "added.md").write_text("new\n")
+        os.utime(source / "added.md", (1_000, 1_000))  # e.g. cp -p
 
-        assert record_source_manifest(str(source), str(snapshot)) is False
+        assert record_source_manifest(str(source), str(snapshot)) == SourceDelta(
+            removed=False, reconcile=True
+        )
         recorded, _ = read_manifest(str(source))
         assert recorded is not None and "added.md" in recorded.files
         assert not (
@@ -222,14 +233,17 @@ class TestRecordSourceManifest:
         snapshot = _publish(source)
         (source / "repo-one.md").unlink()
 
-        assert record_source_manifest(str(source), str(snapshot)) is True
+        assert record_source_manifest(str(source), str(snapshot)) == SourceDelta(
+            removed=True, reconcile=False
+        )
 
-    def test_unknown_baseline_removes_gone_paths(self, source: Path) -> None:
+    def test_unknown_baseline_reconciles(self, source: Path) -> None:
         snapshot = source.parent / ".versioned" / "cidx-meta" / "v_1"
         shutil.copytree(source, snapshot)
+        both = SourceDelta(removed=True, reconcile=True)
 
-        assert record_source_manifest(str(source), str(snapshot)) is True
-        assert record_source_manifest(str(source), None) is True
+        assert record_source_manifest(str(source), str(snapshot)) == both
+        assert record_source_manifest(str(source), None) == both
 
 
 def _scheduler(golden: Path, tmp_path: Path) -> Any:

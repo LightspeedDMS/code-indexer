@@ -7,8 +7,11 @@ source's ``.code-indexer/``; the snapshot that run publishes inherits it, so
 the manifest of the PUBLISHED snapshot describes exactly what that index
 was built from. A later check compares the live source with that manifest by
 equality: any added, removed or re-stamped file is a change. Equality (not
-"newer than") is immune to skewed mtimes and sees deletions; a missing,
-unreadable or invalid manifest is an unknown baseline, which is a change.
+"newer than") sees deletions and files brought in with an old mtime
+(``cp -p``, ``rsync -a``, ``tar x``); because the indexer's incremental
+selects files by mtime, a refresh that found an added or changed file
+indexes with a reconcile instead. A missing, unreadable or invalid manifest
+is an unknown baseline, which is a change.
 
 Racily clean entries: a file whose recorded mtime lies within one timestamp
 tick of the moment the listing started can be rewritten after it was stat'ed
@@ -47,6 +50,17 @@ FileIdentity = Tuple[int, int]
 
 class IncompleteSourceListingError(OSError):
     """The source could not be listed completely; nothing was recorded."""
+
+
+@dataclass(frozen=True)
+class SourceDelta:
+    """What a refresh's index run must do, judged against the published
+    manifest: ``reconcile`` (a store-derived plan) when files were added or
+    changed or the baseline is unknown; ``removed`` when a published path is
+    gone (a reconcile removes gone paths too)."""
+
+    removed: bool
+    reconcile: bool
 
 
 @dataclass(frozen=True)
@@ -162,11 +176,15 @@ def source_change_reason(
     return None
 
 
-def record_source_manifest(source_root: str, published_snapshot: Optional[str]) -> bool:
+def record_source_manifest(
+    source_root: str, published_snapshot: Optional[str]
+) -> SourceDelta:
     """Record the source as this run lists it (call BEFORE indexing) and
-    return whether any file the published snapshot listed is gone, i.e. the
-    run must remove gone paths. An unknown published baseline counts as
-    gone. Raises OSError when the manifest cannot be written: a snapshot
+    return what the run's index must do against the published snapshot:
+    reconcile when a file was added or changed (the incremental selects
+    files by mtime and misses one brought in with an old mtime) or the
+    baseline is unknown; remove gone paths when a published file is gone.
+    Raises OSError when the manifest cannot be written: a snapshot
     must never inherit an older run's manifest; raises
     IncompleteSourceListingError (writing nothing) when an entry could not
     be listed or stat'ed -- an unreadable file is never a deletion."""
@@ -198,9 +216,15 @@ def record_source_manifest(source_root: str, published_snapshot: Optional[str]) 
         os.fsync(handle.fileno())
     os.replace(temp, path)
     if published_snapshot is None:
-        return True
+        return SourceDelta(removed=True, reconcile=True)
     published, why = read_manifest(published_snapshot)
     if published is None:
-        logger.info(f"{why}; this run removes gone paths")
-        return True
-    return any(rel not in listing.files for rel in published.files)
+        logger.info(f"{why}; this run reconciles the index with the source")
+        return SourceDelta(removed=True, reconcile=True)
+    return SourceDelta(
+        removed=any(rel not in listing.files for rel in published.files),
+        reconcile=any(
+            published.files.get(rel) != identity
+            for rel, identity in listing.files.items()
+        ),
+    )

@@ -17,6 +17,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterator, Set, Tuple
@@ -184,6 +185,27 @@ class TestRacilyCleanEdit:
         )
         third = harness.scheduler._execute_refresh(ALIAS)
         assert third["message"] == "No changes detected", third
+
+
+class TestOldMtimeArrival:
+    def test_file_brought_in_with_an_old_mtime_is_indexed(
+        self, tmp_path: Path, metadata: Any, provider_env
+    ) -> None:
+        harness, env = _harness(tmp_path, metadata, provider_env)
+        arrived = harness.source / "arrived_000.py"
+        # As cp -p / rsync -a / tar x leave it: content new here, mtime old.
+        arrived.write_text(unique_python_text("arrived_000", 20))
+        a_day_ago = time.time() - 86400
+        os.utime(arrived, (a_day_ago, a_day_ago))
+
+        result = harness.scheduler._execute_refresh(ALIAS)
+
+        assert result["message"] == "Refresh complete", result
+        assert "arrived_000.py" in _fts_hits(
+            _published(harness), env, "arrived_000_function_2"
+        )
+        after = harness.scheduler._execute_refresh(ALIAS)
+        assert after["message"] == "No changes detected", after
 
 
 class TestIncompleteListing:

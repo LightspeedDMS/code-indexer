@@ -3271,12 +3271,16 @@ class RefreshScheduler:
                         )
                         # The run's source manifest (before its listing) is
                         # what the published snapshot's change check uses.
-                        _deletion_kwargs: Dict[str, Any] = (
-                            {"detect_deletions": True}
-                            if is_local_repo
-                            and record_source_manifest(
+                        _delta = (
+                            record_source_manifest(
                                 source_path, self._published_snapshot(alias_name)
                             )
+                            if is_local_repo
+                            else None
+                        )
+                        _deletion_kwargs: Dict[str, Any] = (
+                            {"detect_deletions": True}
+                            if _delta is not None and _delta.removed
                             else {}
                         )
                         try:
@@ -3287,7 +3291,8 @@ class RefreshScheduler:
                                 orphan_event_callback=_make_hnsw_orphan_event_logger(
                                     alias_name
                                 ),
-                                force_reconcile=force_reconcile,
+                                force_reconcile=force_reconcile
+                                or (_delta is not None and _delta.reconcile),
                                 cancel_check=cancel_check,
                                 job_id=job_id,
                                 **_deletion_kwargs,
