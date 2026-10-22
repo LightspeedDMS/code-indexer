@@ -202,9 +202,14 @@ class TestCleanupReleasesOnlyAGoneHolder:
         base = type(store)
 
         class NewSessionEntersDuringRelease(base):  # type: ignore[misc,valid-type]
-            def release_owned(self, lock_key, operation, *, owner_token):
+            def release_owned(
+                self, lock_key, operation, *, owner_token, only_if_stale=False
+            ):
                 outcome = super().release_owned(
-                    lock_key, operation, owner_token=owner_token
+                    lock_key,
+                    operation,
+                    owner_token=owner_token,
+                    only_if_stale=only_if_stale,
                 )
                 entering = threading.Thread(
                     target=_enter, args=(golden, make_store(), "new-token")

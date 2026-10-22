@@ -228,6 +228,29 @@ class AliasLockCoordinator:
             alias, owner_name=owner_name, owner_token=owner_token
         )
 
+    def release_if_stale(
+        self, alias: str, owner_name: str, owner_token: Optional[str] = None
+    ) -> bool:
+        """Release `alias` only while its holder is stale (lease lapsed or
+        holder process gone), checked atomically with the release; True when
+        released or nothing is held, False while a live holder remains."""
+        token = self._token_for(alias, owner_name, owner_token)
+        if self._store_resolver is not None and token is not None:
+            from code_indexer.server.services.alias_lock_store.base import (
+                LockOutcome,
+            )
+
+            outcome = self._store_resolver().release_if_stale(
+                alias, owner_name, owner_token=token
+            )
+            if outcome is LockOutcome.RELEASED:
+                self._forget_token(alias, token)
+                return True
+            if outcome is not LockOutcome.NOT_HELD:
+                return False
+        # ^ why is_locked evicts a stale lock file in the same call
+        return not self._file_manager.is_locked(alias)
+
     def renew(
         self,
         alias: str,

@@ -247,8 +247,20 @@ class PostgresAliasLockStore:
             lock_key=lock_key, owner_token=token, operation=operation, _store=self
         )
 
-    def release_owned(
+    def release_if_stale(
         self, lock_key: str, operation: str, *, owner_token: str
+    ) -> LockOutcome:
+        return self.release_owned(
+            lock_key, operation, owner_token=owner_token, only_if_stale=True
+        )
+
+    def release_owned(
+        self,
+        lock_key: str,
+        operation: str,
+        *,
+        owner_token: str,
+        only_if_stale: bool = False,
     ) -> LockOutcome:
         lock_key = _validate_non_empty_str(lock_key, "lock_key")
         conn = self._open()
@@ -262,6 +274,9 @@ class PostgresAliasLockStore:
             if not _owner_matches(current, operation, owner_token):
                 conn.rollback()
                 return LockOutcome.OWNER_MISMATCH
+            if only_if_stale and not _holder_is_stale(current):
+                conn.rollback()
+                return LockOutcome.STILL_HELD
             conn.execute(_DELETE_SQL, (lock_key, current[0]))
             conn.commit()
             return LockOutcome.RELEASED

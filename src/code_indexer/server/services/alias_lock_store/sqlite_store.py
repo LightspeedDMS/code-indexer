@@ -225,8 +225,20 @@ class SqliteAliasLockStore:
             lock_key=lock_key, owner_token=token, operation=operation, _store=self
         )
 
-    def release_owned(
+    def release_if_stale(
         self, lock_key: str, operation: str, *, owner_token: str
+    ) -> LockOutcome:
+        return self.release_owned(
+            lock_key, operation, owner_token=owner_token, only_if_stale=True
+        )
+
+    def release_owned(
+        self,
+        lock_key: str,
+        operation: str,
+        *,
+        owner_token: str,
+        only_if_stale: bool = False,
     ) -> LockOutcome:
         lock_key = _validate_non_empty_str(lock_key, "lock_key")
         with self._transaction(lock_key) as conn:
@@ -235,6 +247,8 @@ class SqliteAliasLockStore:
                 return LockOutcome.NOT_HELD
             if not _owner_matches(current, operation, owner_token):
                 return LockOutcome.OWNER_MISMATCH
+            if only_if_stale and not _holder_is_stale(current):
+                return LockOutcome.STILL_HELD
             conn.execute(
                 "DELETE FROM golden_repo_alias_locks WHERE lock_key = ? AND owner_token = ?",
                 (lock_key, current[0]),

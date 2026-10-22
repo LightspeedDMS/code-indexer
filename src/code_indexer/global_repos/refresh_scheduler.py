@@ -1814,7 +1814,9 @@ class RefreshScheduler:
         self, marker_path: Path, alias: str, force: bool
     ) -> None:
         """Release a gone holder's write-mode lock and remove its marker; a live
-        holder keeps both (see write_mode_marker_cleanup)."""
+        holder keeps both (see write_mode_marker_cleanup). The release
+        re-checks staleness atomically, so a lease renewed after the check
+        survives."""
         from .write_mode_marker_cleanup import cleanup_write_mode_marker
 
         cleanup_write_mode_marker(
@@ -1823,7 +1825,7 @@ class RefreshScheduler:
             force=force,
             ttl_seconds=WRITE_MODE_MARKER_TTL_SECONDS,
             is_locked=self.is_write_locked,
-            release=self.release_write_lock,
+            release=self.write_lock_manager.release_if_stale,
         )
 
     def _resolve_global_alias(self, alias_name: str) -> str:

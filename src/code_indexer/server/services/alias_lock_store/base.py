@@ -202,11 +202,24 @@ class AliasLockStore(Protocol):
         ...
 
     def release_owned(
-        self, lock_key: str, operation: str, *, owner_token: str
+        self,
+        lock_key: str,
+        operation: str,
+        *,
+        owner_token: str,
+        only_if_stale: bool = False,
     ) -> LockOutcome:
         """Delete the row when BOTH its operation and its exact owner_token
         match (an owner name alone never proves ownership). RELEASED,
-        NOT_HELD (no row) or OWNER_MISMATCH."""
+        NOT_HELD (no row) or OWNER_MISMATCH; with only_if_stale, STILL_HELD
+        when the holder is live (checked in the same transaction)."""
+        ...
+
+    def release_if_stale(
+        self, lock_key: str, operation: str, *, owner_token: str
+    ) -> LockOutcome:
+        """release_owned(only_if_stale=True): delete the matching row only
+        while its holder is stale (lease lapsed or holder process gone)."""
         ...
 
     def renew_owned(

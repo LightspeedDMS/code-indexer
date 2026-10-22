@@ -4,8 +4,10 @@ The marker lives on shared storage, so a live write-mode session of another
 node or worker survives this process's restart. A marker's lock is released
 only when the lock has no live holder (its lease lapsed, or its holder process
 on this host is gone); a live holder keeps both lock and marker, whether or
-not the cleanup is forced. The decision and the release token come from ONE
-read of the marker, and only that exact marker is ever removed.
+not the cleanup is forced. The release itself re-checks staleness in the same
+atomic step (``release_if_stale``), so a lease renewed after the check keeps
+lock and marker. The decision and the release token come from ONE read of the
+marker, and only that exact marker is ever removed.
 """
 
 from __future__ import annotations
@@ -95,7 +97,7 @@ def cleanup_write_mode_marker(
     if not release(alias, WRITE_MODE_OWNER, owner_token=token):
         logger.warning(
             f"Keeping write mode marker {marker_path.name}: release of its lock "
-            f"was refused (another holder owns it)"
+            f"was refused (another holder owns it or its lease was renewed)"
         )
         return
     if _remove_if_unchanged(marker_path, evaluated):
