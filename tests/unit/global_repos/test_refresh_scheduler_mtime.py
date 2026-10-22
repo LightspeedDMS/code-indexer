@@ -1,5 +1,5 @@
 """
-Unit tests for Story #224: RefreshScheduler git guards (C5).
+Unit tests for the RefreshScheduler git guards (C5).
 
 C5: _create_new_index() git guards (no git commands when no .git dir).
 """

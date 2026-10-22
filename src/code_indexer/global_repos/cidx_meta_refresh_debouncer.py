@@ -139,7 +139,7 @@ class CidxMetaRefreshDebouncer:
         """
         Called by the timer thread when the debounce interval elapses.
 
-        Bug #2022: acts only for the timer it belongs to (*timer_token*).
+        Acts only for the timer it belongs to (*timer_token*).
         Timer.run checks cancellation only before calling back, so a timer
         cancelled and replaced by signal_dirty can still get here: it then
         returns without touching the replacement or submitting.
@@ -199,7 +199,7 @@ class CidxMetaRefreshDebouncer:
         try:
             job_id = self._refresh_scheduler.trigger_refresh_for_repo(META_ALIAS)
         except RefreshDeferredError as exc:
-            # Bug #2022: the trigger was persisted as pending; the refresh
+            # The trigger was persisted as pending; the refresh
             # scheduler fires it once the backoff ends -- no retry spin here.
             logger.info(
                 f"cidx-meta refresh deferred until {exc.backoff_until:.0f}: "
@@ -214,7 +214,7 @@ class CidxMetaRefreshDebouncer:
                 self._schedule_retry_locked(self._debounce_seconds)
             return
         except Exception as exc:
-            # Bug #2022: nothing durable records this refresh yet, so it stays
+            # Nothing durable records this refresh yet, so it stays
             # owed (dirty) and is retried, paced, until it is submitted.
             self._retry_paced(f"{type(exc).__name__}: {exc}", failed=True)
             return

@@ -22,9 +22,9 @@ import pytest
 from tests.utils.cidx_fake_provider_repo import SRC_DIR, install_network_guard
 from tests.utils.fake_voyage_provider import running_fake_voyage_server
 
-#: Pins the vendor endpoint in server context; the only flag the shim drops
-#: (as in the Story #2118 test), so the child reaches the local fake that the
-#: repository config names. The network guard still refuses anything else.
+#: Pins the vendor endpoint in server context; the only flag the shim drops,
+#: so the child reaches the local fake that the repository config names. The
+#: network guard still refuses anything else.
 ENDPOINT_PIN_FLAG = "--server-managed-provider-settings"
 _CHILD_TIMEOUT_SECONDS = 180
 _STDERR_TAIL_CHARS = 3000
