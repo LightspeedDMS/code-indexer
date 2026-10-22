@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+import stat
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, cast
@@ -43,6 +45,7 @@ class _Worker:
             store_resolver=lambda: store,
         )
         self.refreshed: List[str] = []
+        self.refresh_result: Dict[str, Any] = {"success": True}
 
     def release_write_lock(
         self,
@@ -56,7 +59,7 @@ class _Worker:
 
     def _execute_refresh(self, repo_alias: str) -> Dict[str, Any]:
         self.refreshed.append(repo_alias)
-        return {"success": True, "alias": repo_alias}
+        return {**self.refresh_result, "alias": repo_alias}
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
@@ -68,11 +71,21 @@ def make_store(request, tmp_path: Path) -> Iterator[Callable[[], Any]]:
     dsn = os.environ.get("TEST_POSTGRES_DSN")
     if not dsn:
         pytest.skip("TEST_POSTGRES_DSN not set")
+    import psycopg
+
     from code_indexer.server.services.alias_lock_store.postgres_store import (
         PostgresAliasLockStore,
     )
 
+    def clear_catalog_row() -> None:
+        with psycopg.connect(dsn) as conn:
+            conn.execute(
+                "DELETE FROM golden_repo_alias_locks WHERE lock_key = %s", (_ALIAS,)
+            )
+
+    clear_catalog_row()
     yield lambda: PostgresAliasLockStore(dsn)
+    clear_catalog_row()
 
 
 @pytest.fixture
@@ -162,3 +175,134 @@ class TestWriteModeExitOnAnotherWorker:
         assert refresher.write_lock_manager.release(
             _ALIAS, owner_name="refresh_scheduler"
         )
+
+
+class TestExitReportsTheRealOutcome:
+    @pytest.mark.parametrize("marker_text", ['{"alias": "cidx-meta"}', "not json"])
+    def test_marker_without_a_usable_token_is_an_error(
+        self, golden_repos_dir: Path, make_store, marker_text: str
+    ) -> None:
+        worker = _Worker(golden_repos_dir, make_store())
+        assert _call("handle_enter_write_mode", worker, golden_repos_dir)["success"]
+        marker = golden_repos_dir / ".write_mode" / f"{_ALIAS}.json"
+        marker.write_text(marker_text)
+
+        exit_worker = _Worker(golden_repos_dir, make_store())
+        result = _call("handle_exit_write_mode", exit_worker, golden_repos_dir)
+
+        assert result["success"] is False
+        assert exit_worker.refreshed == []
+        assert not marker.exists()
+
+    def test_exit_after_another_holder_took_the_lock_is_an_error(
+        self, golden_repos_dir: Path, make_store
+    ) -> None:
+        worker = _Worker(golden_repos_dir, make_store())
+        assert _call("handle_enter_write_mode", worker, golden_repos_dir)["success"]
+        holder = _Worker(golden_repos_dir, make_store()).write_lock_manager
+        token = _marker_token(golden_repos_dir)
+        assert holder.release(_ALIAS, owner_name=_WRITE_MODE_OWNER, owner_token=token)
+        assert holder.acquire(_ALIAS, owner_name=_WRITE_MODE_OWNER)
+
+        exit_worker = _Worker(golden_repos_dir, make_store())
+        result = _call("handle_exit_write_mode", exit_worker, golden_repos_dir)
+
+        assert result["success"] is False
+        assert exit_worker.refreshed == []
+        assert holder.is_locked(_ALIAS) is True
+        assert holder.release(_ALIAS, owner_name=_WRITE_MODE_OWNER)
+
+    def test_failed_refresh_is_reported(
+        self, golden_repos_dir: Path, make_store
+    ) -> None:
+        worker = _Worker(golden_repos_dir, make_store())
+        assert _call("handle_enter_write_mode", worker, golden_repos_dir)["success"]
+        worker.refresh_result = {"success": False, "error": "indexing failed"}
+
+        result = _call("handle_exit_write_mode", worker, golden_repos_dir)
+
+        assert result["success"] is False
+        assert "indexing failed" in json.dumps(result)
+        assert worker.write_lock_manager.is_locked(_ALIAS) is False
+
+
+class TestMarkerPermissions:
+    def test_marker_is_private_to_the_service_user(
+        self, golden_repos_dir: Path, make_store
+    ) -> None:
+        previous_umask = os.umask(0o022)
+        try:
+            worker = _Worker(golden_repos_dir, make_store())
+            assert _call("handle_enter_write_mode", worker, golden_repos_dir)["success"]
+        finally:
+            os.umask(previous_umask)
+        marker_dir = golden_repos_dir / ".write_mode"
+        assert stat.S_IMODE(marker_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE((marker_dir / f"{_ALIAS}.json").stat().st_mode) == 0o600
+        assert _call("handle_exit_write_mode", worker, golden_repos_dir)["success"]
+
+
+_AGE_SQL = (
+    "UPDATE golden_repo_alias_locks SET last_renewed_at = "
+    "strftime('%Y-%m-%d %H:%M:%f', 'now', '-50 minutes')"
+)
+_ELAPSED_SQL = (
+    "SELECT (julianday('now') - julianday(last_renewed_at)) * 86400.0 "
+    "FROM golden_repo_alias_locks"
+)
+
+
+class TestFileOperationRenewsTheLease:
+    def _lock_db(self, tmp_path: Path) -> sqlite3.Connection:
+        return sqlite3.connect(str(tmp_path / "alias_locks" / f"{_ALIAS}.db"))
+
+    def _file_operation_on(self, worker: _Worker, golden: Path) -> None:
+        from types import SimpleNamespace
+
+        from code_indexer.server.mcp.handlers import files
+
+        app = SimpleNamespace(state=SimpleNamespace(golden_repos_dir=str(golden)))
+        user = User(
+            username="example-user",
+            role=UserRole.POWER_USER,
+            password_hash="unused",
+            created_at=datetime.now(),
+        )
+        with (
+            patch.object(files, "_get_app_refresh_scheduler", return_value=worker),
+            patch.object(files._utils, "_lazy_module_attr_or_none", return_value=app),
+        ):
+            files._start_auto_watch_if_needed(_REPO, user, "MCP-GENERAL-041")
+
+    def test_file_operation_under_write_mode_renews_the_lease(
+        self, golden_repos_dir: Path, tmp_path: Path
+    ) -> None:
+        store = SqliteAliasLockStore(tmp_path / "alias_locks")
+        assert _call(
+            "handle_enter_write_mode",
+            _Worker(golden_repos_dir, store),
+            golden_repos_dir,
+        )["success"]
+        with self._lock_db(tmp_path) as conn:
+            conn.execute(_AGE_SQL)
+
+        self._file_operation_on(_Worker(golden_repos_dir, store), golden_repos_dir)
+
+        with self._lock_db(tmp_path) as conn:
+            (elapsed,) = conn.execute(_ELAPSED_SQL).fetchone()
+        assert elapsed < 60
+
+    def test_file_operation_without_write_mode_renews_nothing(
+        self, golden_repos_dir: Path, tmp_path: Path
+    ) -> None:
+        store = SqliteAliasLockStore(tmp_path / "alias_locks")
+        worker = _Worker(golden_repos_dir, store)
+        assert worker.write_lock_manager.acquire(_ALIAS, owner_name="refresh_scheduler")
+        with self._lock_db(tmp_path) as conn:
+            conn.execute(_AGE_SQL)
+
+        self._file_operation_on(worker, golden_repos_dir)
+
+        with self._lock_db(tmp_path) as conn:
+            (elapsed,) = conn.execute(_ELAPSED_SQL).fetchone()
+        assert elapsed > 2900

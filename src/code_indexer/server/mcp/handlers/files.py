@@ -214,11 +214,11 @@ def _start_auto_watch_if_needed(
         )
         if not _is_write_mode_active(repository_alias, golden_repos_dir):
             auto_watch_manager.start_watch(repo_path)
-        else:
-            logger.debug(
-                f"Skipping auto-watch start for {repository_alias}: write mode active",
-                extra={"correlation_id": get_correlation_id()},
-            )
+        elif (scheduler := _get_app_refresh_scheduler()) is not None:
+            from ._write_mode_marker import renew_write_mode_lease
+
+            alias = _write_mode_strip_global(repository_alias)
+            renew_write_mode_lease(scheduler, Path(golden_repos_dir), alias)
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -273,66 +273,33 @@ def _write_mode_acquire_lock(scheduler: Any, alias: str) -> Tuple[bool, str, str
 def _write_mode_create_marker(
     golden_repos_dir: Path, alias: str, source_path: str, owner_token: str
 ) -> None:
-    """Create the .write_mode/{alias}.json marker (shared storage; carries the
-    lock's owner token so the exit on any worker can release it)."""
-    import json as _json
-    from datetime import datetime, timezone
+    """Create the private write-mode marker carrying the lock's owner token."""
+    from ._write_mode_marker import write_marker
 
-    write_mode_dir = golden_repos_dir / ".write_mode"
-    write_mode_dir.mkdir(parents=True, exist_ok=True)
-    (write_mode_dir / f"{alias}.json").write_text(
-        _json.dumps(
-            {
-                "alias": alias,
-                "source_path": source_path,
-                "owner_token": owner_token,
-                "entered_at": datetime.now(timezone.utc).isoformat(),
-            },
-            indent=2,
-        )
-    )
+    write_marker(golden_repos_dir, alias, source_path, owner_token)
 
 
 def _write_mode_run_refresh(
     refresh_scheduler: Any, repo_alias: str, golden_repos_dir: Path, alias: str
-) -> None:
-    """Run synchronous refresh, delete marker, release lock, stop auto-watch."""
-    import json as _json
-
+) -> Dict[str, Any]:
+    """Remove the marker, stop auto-watch, release the lock with the marker's
+    token and refresh; returns the real outcome as the response payload."""
     from code_indexer.server.services.auto_watch_manager import auto_watch_manager
 
-    marker_file = golden_repos_dir / ".write_mode" / f"{alias}.json"
-    source_path: Optional[str] = None
-    owner_token: Optional[str] = None
-    try:
-        marker_data = _json.loads(marker_file.read_text())
-        source_path = marker_data.get("source_path")
-        owner_token = marker_data.get("owner_token")
-    except Exception as e:
-        logger.warning(
-            f"Could not read write-mode marker for {alias} ({e}); its lock is "
-            f"released only when its lease lapses",
-            extra={"correlation_id": get_correlation_id()},
-        )
-    marker_file.unlink(missing_ok=True)
-    refresh_scheduler.release_write_lock(
-        alias, owner_name="mcp_write_mode", owner_token=owner_token
-    )
+    from ._write_mode_marker import finish_write_mode
 
-    if source_path:
+    def stop_watch(source_path: str) -> None:
         try:
             auto_watch_manager.stop_watch(source_path)
-            logger.debug(
-                f"Stopped auto-watch for {source_path} before write-mode refresh",
-                extra={"correlation_id": get_correlation_id()},
-            )
         except Exception as e:
             logger.warning(
                 f"Failed to stop auto-watch for {source_path} before refresh: {e}",
                 extra={"correlation_id": get_correlation_id()},
             )
 
-    refresh_scheduler._execute_refresh(repo_alias)
+    return finish_write_mode(
+        refresh_scheduler, repo_alias, golden_repos_dir, alias, stop_watch
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1495,10 +1462,13 @@ def handle_exit_write_mode(params: Dict[str, Any], user: User) -> Dict[str, Any]
         logger.info(
             f"exit_write_mode: triggering synchronous refresh for '{repo_alias}'"
         )
-        _write_mode_run_refresh(refresh_scheduler, repo_alias, golden_repos_dir, alias)
-        logger.info(
-            f"exit_write_mode: write mode exited for '{repo_alias}', refresh complete"
+        outcome = _write_mode_run_refresh(
+            refresh_scheduler, repo_alias, golden_repos_dir, alias
         )
+        if not outcome["success"]:
+            logger.warning(f"exit_write_mode for '{repo_alias}': {outcome['error']}")
+            return _mcp_response(outcome)
+        logger.info(f"exit_write_mode: write mode exited for '{repo_alias}'")
 
         # Story #304 AC9: Best-effort wiki cache invalidation after write mode exit
         try:
@@ -1509,13 +1479,7 @@ def handle_exit_write_mode(params: Dict[str, Any], user: User) -> Dict[str, Any]
             wiki_cache_invalidator.invalidate_repo(repo_alias)
         except Exception as e:
             logger.debug(f"Wiki cache invalidation skipped for exit_write_mode: {e}")
-
-        return _mcp_response(
-            {
-                "success": True,
-                "message": f"Refresh complete, write mode exited for '{repo_alias}'",
-            }
-        )
+        return _mcp_response(outcome)
     except Exception as e:
         logger.exception(
             f"Unexpected error in handle_exit_write_mode: {e}",

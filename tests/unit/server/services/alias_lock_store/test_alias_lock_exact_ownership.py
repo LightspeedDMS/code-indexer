@@ -13,6 +13,7 @@ Real SQLite and real PostgreSQL (``TEST_POSTGRES_DSN``); no mocks.
 from __future__ import annotations
 
 import os
+import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -113,3 +114,48 @@ class TestOnlyTheAcquirerReleasesOrRenews:
 
         assert node_b.is_locked(alias) is True
         assert node_b.release(alias, owner_name=_SHARED_OWNER) is True
+
+
+class _ReleaseFailsOnce(SqliteAliasLockStore):
+    """Real SQLite store whose first owner-addressed release hits a real
+    sqlite3 error (a transient store failure)."""
+
+    failed = False
+
+    def release_owned(self, lock_key, operation, *, owner_token):
+        if not self.failed:
+            self.failed = True
+            raise sqlite3.OperationalError("disk I/O error")
+        return super().release_owned(lock_key, operation, owner_token=owner_token)
+
+
+class TestRememberedToken:
+    def _node(self, tmp_path: Path, store: Any) -> AliasLockCoordinator:
+        return AliasLockCoordinator(
+            golden_repos_dir=tmp_path,
+            db_backed_enabled_getter=lambda: True,
+            store_resolver=lambda: store,
+        )
+
+    def test_token_survives_a_failed_release_for_the_retry(
+        self, tmp_path: Path, alias: str
+    ) -> None:
+        store = _ReleaseFailsOnce(tmp_path / "alias_locks")
+        node = self._node(tmp_path, store)
+        assert node.acquire(alias, owner_name=_SHARED_OWNER)
+        with pytest.raises(sqlite3.OperationalError):
+            node.release(alias, owner_name=_SHARED_OWNER)
+        assert node.release(alias, owner_name=_SHARED_OWNER) is True
+        assert node.is_locked(alias) is False
+
+    def test_empty_token_is_rejected_and_never_falls_back(
+        self, tmp_path: Path, alias: str
+    ) -> None:
+        node = self._node(tmp_path, SqliteAliasLockStore(tmp_path / "alias_locks"))
+        assert node.acquire(alias, owner_name=_SHARED_OWNER)
+        with pytest.raises(ValueError):
+            node.release(alias, owner_name=_SHARED_OWNER, owner_token="")
+        with pytest.raises(ValueError):
+            node.renew(alias, owner_name=_SHARED_OWNER, owner_token="")
+        assert node.is_locked(alias) is True
+        assert node.release(alias, owner_name=_SHARED_OWNER) is True

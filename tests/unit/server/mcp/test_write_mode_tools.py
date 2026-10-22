@@ -298,6 +298,7 @@ class TestHandleExitWriteMode:
                 {
                     "alias": alias_name,
                     "source_path": str(source_path),
+                    "owner_token": "tok-1",
                     "entered_at": datetime.now(timezone.utc).isoformat(),
                 }
             )
@@ -311,7 +312,7 @@ class TestHandleExitWriteMode:
         self._create_marker(golden_repos_dir, "cidx-meta", cidx_meta_source)
         # Pre-acquire lock
         mock_refresh_scheduler.write_lock_manager.acquire(
-            "cidx-meta", owner_name="mcp_write_mode"
+            "cidx-meta", owner_name="mcp_write_mode", owner_token="tok-1"
         )
 
         user = _make_user()
@@ -334,7 +335,7 @@ class TestHandleExitWriteMode:
         """AC5: Marker file is deleted after refresh completes."""
         marker = self._create_marker(golden_repos_dir, "cidx-meta", cidx_meta_source)
         mock_refresh_scheduler.write_lock_manager.acquire(
-            "cidx-meta", owner_name="mcp_write_mode"
+            "cidx-meta", owner_name="mcp_write_mode", owner_token="tok-1"
         )
 
         user = _make_user()
@@ -415,7 +416,7 @@ class TestHandleExitWriteMode:
         """
         self._create_marker(golden_repos_dir, "cidx-meta", cidx_meta_source)
         mock_refresh_scheduler.write_lock_manager.acquire(
-            "cidx-meta", owner_name="mcp_write_mode"
+            "cidx-meta", owner_name="mcp_write_mode", owner_token="tok-1"
         )
 
         lock_held_during_refresh: list[bool] = []
@@ -448,7 +449,7 @@ class TestHandleExitWriteMode:
         """Lock is released and marker is removed even when _execute_refresh raises."""
         marker = self._create_marker(golden_repos_dir, "cidx-meta", cidx_meta_source)
         mock_refresh_scheduler.write_lock_manager.acquire(
-            "cidx-meta", owner_name="mcp_write_mode"
+            "cidx-meta", owner_name="mcp_write_mode", owner_token="tok-1"
         )
 
         # Make refresh raise

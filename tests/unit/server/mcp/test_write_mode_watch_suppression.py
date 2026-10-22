@@ -64,6 +64,7 @@ def _create_write_mode_marker(golden_repos_dir: Path, alias: str) -> Path:
             {
                 "alias": alias,
                 "source_path": str(golden_repos_dir / alias),
+                "owner_token": "tok-1",
                 "entered_at": datetime.now(timezone.utc).isoformat(),
             }
         )
@@ -401,7 +402,7 @@ class TestWriteModeRunRefreshStopsWatch:
         _create_write_mode_marker(golden_repos_dir, "cidx-meta")
         # Acquire lock (will be released by _write_mode_run_refresh)
         mock_refresh_scheduler.write_lock_manager.acquire(
-            "cidx-meta", owner_name="mcp_write_mode"
+            "cidx-meta", owner_name="mcp_write_mode", owner_token="tok-1"
         )
 
         call_order = []
@@ -450,7 +451,7 @@ class TestWriteModeRunRefreshStopsWatch:
         """
         _create_write_mode_marker(golden_repos_dir, "cidx-meta")
         mock_refresh_scheduler.write_lock_manager.acquire(
-            "cidx-meta", owner_name="mcp_write_mode"
+            "cidx-meta", owner_name="mcp_write_mode", owner_token="tok-1"
         )
         mock_refresh_scheduler._execute_refresh.side_effect = RuntimeError(
             "refresh failed"
@@ -483,7 +484,7 @@ class TestWriteModeRunRefreshStopsWatch:
         """
         _create_write_mode_marker(golden_repos_dir, "cidx-meta")
         mock_refresh_scheduler.write_lock_manager.acquire(
-            "cidx-meta", owner_name="mcp_write_mode"
+            "cidx-meta", owner_name="mcp_write_mode", owner_token="tok-1"
         )
 
         # The marker contains source_path = golden_repos_dir / "cidx-meta"

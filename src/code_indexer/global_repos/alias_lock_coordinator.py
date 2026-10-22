@@ -103,17 +103,27 @@ class AliasLockCoordinator:
             return self._alias_locks[alias]
 
     def _token_for(
-        self, alias: str, owner_name: str, owner_token: Optional[str], *, pop: bool
+        self, alias: str, owner_name: str, owner_token: Optional[str]
     ) -> Optional[str]:
         """The exact token for (alias, owner_name): the caller's, else this
-        process's own acquisition's, else None."""
+        process's own acquisition's, else None. An empty token is invalid."""
+        if owner_token is not None:
+            if not owner_token:
+                raise ValueError("owner_token must be a non-empty string or None")
+            return owner_token
         with self._acquired_tokens_lock:
             recorded = self._acquired_tokens.get(alias)
-            if recorded is not None and recorded[0] == owner_name:
-                if pop and (owner_token is None or owner_token == recorded[1]):
-                    del self._acquired_tokens[alias]
-                return owner_token or recorded[1]
-        return owner_token
+        if recorded is not None and recorded[0] == owner_name:
+            return recorded[1]
+        return None
+
+    def _forget_token(self, alias: str, token: str) -> None:
+        """Drop the remembered token once its lock is confirmed released or
+        lost -- never before, so a failed release can be retried."""
+        with self._acquired_tokens_lock:
+            recorded = self._acquired_tokens.get(alias)
+            if recorded is not None and recorded[1] == token:
+                del self._acquired_tokens[alias]
 
     def acquire(
         self,
@@ -196,7 +206,7 @@ class AliasLockCoordinator:
         caller's, or this process's own acquisition's). False when the row
         belongs to another holder; True when released or not held
         (WriteLockManager.release()'s contract)."""
-        token = self._token_for(alias, owner_name, owner_token, pop=True)
+        token = self._token_for(alias, owner_name, owner_token)
         if self._store_resolver is not None and token is not None:
             from code_indexer.server.services.alias_lock_store.base import (
                 LockOutcome,
@@ -205,6 +215,7 @@ class AliasLockCoordinator:
             outcome = self._store_resolver().release_owned(
                 alias, owner_name, owner_token=token
             )
+            self._forget_token(alias, token)
             if outcome is LockOutcome.RELEASED:
                 return True
             if outcome is LockOutcome.OWNER_MISMATCH:
@@ -231,7 +242,7 @@ class AliasLockCoordinator:
         when the row belongs to someone else (callers such as the temporal
         migration heartbeat treat that as lock loss). Otherwise: the file
         lock's bool-returning renew()."""
-        token = self._token_for(alias, owner_name, owner_token, pop=False)
+        token = self._token_for(alias, owner_name, owner_token)
         if self._store_resolver is not None and token is not None:
             from code_indexer.server.services.alias_lock_store.base import (
                 AliasLockOwnershipLostError,
@@ -244,6 +255,7 @@ class AliasLockCoordinator:
             if outcome is LockOutcome.RENEWED:
                 return True
             if outcome is LockOutcome.OWNER_MISMATCH:
+                self._forget_token(alias, token)
                 raise AliasLockOwnershipLostError(
                     f"renew() for alias={alias!r} owner={owner_name!r}: the "
                     f"DB-backed lock belongs to another holder -- ownership lost"
