@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.93.0] - 2026-10-22
+
+### Upgrade notes
+
+- Server: the `cidx-meta` catalog is now served per caller. Administrators see it unchanged. Every other caller sees the descriptions of the repositories they are granted, and in shared documents (dependency-map documents, the index, wiki pages) the names of repositories and domains they cannot see appear as `[restricted repository]` and `[restricted domain]`. This applies at every door that serves catalog content: file reads and listings, directory trees, semantic, full-text, hybrid and regex search (single, multi-repository and omni), the dependency-map tools, the Web dependency map, the catalog wiki and its analytics, and the quick reference.
+- Server: REST file write routes (`POST`, `PATCH` and `DELETE` under `/api/v1/repos/{alias}/files`) now require the `repository:write` permission, as the MCP file write tools already did. Users whose role lacks that permission, including through the `cidx files` CLI, can no longer write files over REST.
+- Server: writing catalog files through the file tools is allowed for administrators and for members of the `powerusers` group who hold `repository:write` and can see every registered repository. If an administrator removes a repository from `powerusers`, power users can still write memories, X-Ray pattern files and the two dependency-map reference files, and full write returns when the repository is granted back. Other callers can write only memories, X-Ray pattern files and those two reference files. Every other catalog path answers with one fixed refusal.
+- Server: for non-administrators whose full-text search includes the catalog, boolean operators, wildcard, boost and fuzzy-distance syntax, multi-word fuzzy queries, and words longer than 40 bytes or longer than the indexing chunk overlap are refused with one neutral message. Results are ranked by the text the caller is shown, one row per document. PCRE2 regex is refused for non-administrators when the catalog is in the searched set.
+- Server: the catalog's git history, temporal search, branch metadata and X-Ray are administrator-only. Pattern-shaped repository aliases (containing `*`, `?` or `[`) are refused at the X-Ray tools for non-administrators.
+- Server: `.code-indexer` is not writable through the file write tools in any activated repository.
+- Server: `/health` reports DEGRADED while the catalog alias pointer is present but unreadable; non-administrators are then served the restricted view of every repository until it is repaired.
+- Server: `embedding_call_stats.token_count` now records the token usage reported by the embedding or reranking provider for query, refresh and key-test calls; rows written before this release keep 0.
+
+### Security
+
+- Server: catalog content is projected to the caller's granted repositories before ranking, limits, truncation, caching and search-event recording, and is denied by default on canonical paths; a denied path answers exactly like a missing one.
+- Server: catalog search results and counts are computed from the text the caller is shown; catalog full-text pages are chosen from shown text and the engine is limited to the paths the caller may read.
+- Server: caller-supplied regular expressions matched in Python run under a shared time budget.
+- Server: restricted callers may write only catalog files they see unchanged; full catalog write requires the write permission and a fresh view of every registered repository, and write replies never depend on text a caller cannot read.
+- Server: REST file write routes require the repository write permission.
+- Server: catalog identity is judged from the repository actually served, and an unreadable catalog pointer fails closed.
+
+### Fixed
+
+- Server: embedding call statistics record vendor-reported token usage; usage parsing is kept out of call latency and skipped when statistics are disabled.
+- Daemon: stopping a file watch no longer stalls for 5 seconds and logs "Watch thread did not stop within 5 seconds"; a stop requested while another is in progress returns that stop's result, and the daemon status reports `stopping` meanwhile. This also affects the server's automatic watch on write-mode exit.
+- Server: the unused omni repository pattern matcher is removed.
+- Server: memories and X-Ray patterns written to the catalog are followed by a catalog refresh. Writers request it after releasing the catalog lock, and a write made while another writer holds the lock is owed to a later refresh instead of being skipped; an expected duplicate refresh request is no longer logged as an unexpected error.
+- Server: registering or removing a golden repository while the catalog is being refreshed or written no longer skips the repository's description. Previously an ERROR was logged and the description stayed missing until an administrator generated it from diagnostics.
+- Server: a catalog snapshot copy that fails no longer leaves a partial snapshot that later change checks treat as the newest one.
+
 ## [12.92.0] - 2026-10-19
 
 ### Upgrade notes
