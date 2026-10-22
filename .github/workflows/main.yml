@@ -120,13 +120,15 @@ jobs:
       with:
         workspaces: "rust -> target"
 
-    - name: Run cargo test --workspace (rust/xray-core + rust/xray-cli, incl. AC18 PREAMBLE parity check)
+    # --locked: fail on Cargo.lock drift here, not at deploy (the VM
+    # auto-updater builds xray-cli with --locked too).
+    - name: Run cargo test --locked --workspace (rust/xray-core + rust/xray-cli, incl. AC18 PREAMBLE parity check)
       working-directory: rust
-      run: cargo test --workspace
+      run: cargo test --locked --workspace
 
-    - name: Run cargo clippy --workspace --all-targets -- -D warnings
+    - name: Run cargo clippy --locked --workspace --all-targets -- -D warnings
       working-directory: rust
-      run: cargo clippy --workspace --all-targets -- -D warnings
+      run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   check-version:
     runs-on: ubuntu-latest

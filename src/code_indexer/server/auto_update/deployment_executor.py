@@ -6916,7 +6916,7 @@ class DeploymentExecutor:
         return False
 
     def _build_xray_cli(self, rust_dir: Path, env: dict) -> bool:
-        """Run cargo build --release -p xray-cli inside rust_dir.
+        """Run cargo build --release --locked -p xray-cli inside rust_dir.
 
         Returns True on success, False on nonzero exit or timeout.
 
@@ -6931,7 +6931,7 @@ class DeploymentExecutor:
         """
         try:
             build_result = subprocess.run(
-                ["cargo", "build", "--release", "-p", "xray-cli"],
+                ["cargo", "build", "--release", "--locked", "-p", "xray-cli"],
                 cwd=str(rust_dir),
                 capture_output=True,
                 text=True,
@@ -6953,10 +6953,13 @@ class DeploymentExecutor:
             )
             return False
         if build_result.returncode != 0:
+            # ^ external cargo 1.98 "cannot update the lock file", older "needs to be updated"; same tail
+            lock_drift = "--locked was passed to prevent this" in build_result.stderr
+            cause = "Cargo.lock out of sync with Cargo.toml; " if lock_drift else ""
             logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-172",
-                    f"xray native search UNAVAILABLE: xray-cli native binary "
+                    f"xray native search UNAVAILABLE: {cause}xray-cli native binary "
                     f"failed to build (cargo build exited "
                     f"{build_result.returncode}: "
                     f"{build_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}); "
