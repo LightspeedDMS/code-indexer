@@ -150,10 +150,11 @@ from __future__ import annotations
 import os
 import logging
 import threading
+import time
 import weakref
 from collections import OrderedDict
 from pathlib import Path, PurePosixPath
-from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Callable, Dict, List, Optional, Set, Tuple, TypeVar, Union
 
 from code_indexer.global_repos.snapshot_reader_lease import (
     SNAPSHOT_READER_LEASE_TTL_SECONDS,
@@ -180,6 +181,7 @@ _MAX_ENTRIES_PER_THREAD = 32
 _MAX_TRACKED_STALE_PREFIXES = 1_000_000
 
 _CacheEntry = Tuple[Optional[int], ChunkStore]
+_T = TypeVar("_T")
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +214,18 @@ def _matches_stale_prefix(resolved_path: str, prefixes: Set[str]) -> bool:
         if str(parent) in prefixes:
             return True
     return False
+
+
+class _StoreUse:
+    """Use state of one open store: reads in progress (``run_reading``) and
+    the monotonic time it was last handed out or read."""
+
+    def __init__(self) -> None:
+        self.active = 0
+        self.touched = time.monotonic()
+
+    def idle_for(self, seconds: float) -> bool:
+        return self.active == 0 and time.monotonic() - self.touched > seconds
 
 
 class ChunkStoreThreadCache:
@@ -249,7 +263,10 @@ class ChunkStoreThreadCache:
         # id(lease) -> (normalized snapshot root, lease); a lease leaves only
         # through _release_reader_lease (store closed, store collected, or
         # its snapshot invalidated).
-        self._reader_leases: Dict[int, Tuple[str, SnapshotReaderLease]] = {}
+        self._reader_leases: Dict[int, Tuple[str, SnapshotReaderLease, _StoreUse]] = {}
+        self._store_use: "weakref.WeakKeyDictionary[ChunkStore, _StoreUse]" = (
+            weakref.WeakKeyDictionary()
+        )
         # ^ hazard RLock not Lock: a GC finalizer can release a lease while this thread holds it
         self._reader_leases_lock = threading.RLock()
         self._store_finalizers: "weakref.WeakKeyDictionary[ChunkStore, weakref.finalize]" = weakref.WeakKeyDictionary()
@@ -346,12 +363,26 @@ class ChunkStoreThreadCache:
         """The lease lives exactly as long as ``store``: released when the
         store is closed, or collected (its thread exited), whichever first."""
         lease_key = id(lease)
+        root = os.path.normpath(snapshot_root)
+        use = self._use_of(store)
         with self._reader_leases_lock:
-            self._reader_leases[lease_key] = (os.path.normpath(snapshot_root), lease)
+            self._reader_leases[lease_key] = (root, lease, use)
             # ^ hazard callback must not reference store => it would never be collected
             self._store_finalizers[store] = weakref.finalize(
                 store, self._release_reader_lease, lease_key
             )
+
+    def _use_of(self, store: ChunkStore) -> _StoreUse:
+        with self._reader_leases_lock:
+            use = self._store_use.get(store)
+            if use is None:
+                use = self._store_use[store] = _StoreUse()
+            return use
+
+    def _touch(self, store: ChunkStore) -> None:
+        use = self._use_of(store)
+        with self._reader_leases_lock:
+            use.touched = time.monotonic()
 
     def _release_reader_lease(self, lease_key: int) -> None:
         with self._reader_leases_lock:
@@ -370,12 +401,15 @@ class ChunkStoreThreadCache:
 
     def _renew_or_release_reader_leases(self) -> None:
         """One renewal tick: a lease on a superseded (invalidated) snapshot is
-        released -- its idle owner thread may still hold the open handle, which
-        only that thread ever closes -- and every other lease is renewed."""
+        released once its store is idle -- no read in progress and untouched
+        for a whole lease TTL -- and every other lease is renewed. The owner
+        thread's open handle is never touched (only that thread closes it)."""
         with self._reader_leases_lock:
             entries = list(self._reader_leases.items())
-        for lease_key, (snapshot_root, lease) in entries:
-            if self._is_stale(snapshot_root):
+        for lease_key, (snapshot_root, lease, use) in entries:
+            with self._reader_leases_lock:
+                idle = use.idle_for(SNAPSHOT_READER_LEASE_TTL_SECONDS)
+            if idle and self._is_stale(snapshot_root):
                 self._release_reader_lease(lease_key)
                 continue
             try:
@@ -609,6 +643,7 @@ class ChunkStoreThreadCache:
             cached_mtime, store = cached
             if cached_mtime == current_mtime:
                 entries.move_to_end(key)
+                self._touch(store)
                 return store
             # Underlying file identity changed (e.g. os.replace during a
             # rebuild) -- the cached handle must NEVER be reused to serve
@@ -634,6 +669,20 @@ class ChunkStoreThreadCache:
             self._close_store(evicted_store)
 
         return store
+
+    def run_reading(self, store: ChunkStore, read: Callable[[ChunkStore], _T]) -> _T:
+        """Run ``read(store)`` with the store marked in use: while it runs, the
+        store's reader lease is renewed even if its snapshot was superseded."""
+        use = self._use_of(store)
+        with self._reader_leases_lock:
+            use.active += 1
+            use.touched = time.monotonic()
+        try:
+            return read(store)
+        finally:
+            with self._reader_leases_lock:
+                use.active -= 1
+                use.touched = time.monotonic()
 
     def close_current_thread(self) -> None:
         """Close and drop every cached handle owned by THIS thread.

@@ -166,3 +166,30 @@ class TestVariantBIdleThread:
             assert str(old_db) not in cached_paths
         gc.collect()
         assert world.lease_files() == []
+
+
+class TestActiveReaderKeepsItsLease:
+    def test_active_read_keeps_the_lease_until_the_store_goes_idle(self, world: World):
+        """A query still reading a superseded snapshot must keep its lease
+        (another node's cleanup would otherwise delete it mid-read)."""
+        root, db_path, collection = world.snapshot("v_1")
+        reading, finish = threading.Event(), threading.Event()
+
+        def long_read(store: ChunkStore) -> int:
+            reading.set()
+            assert finish.wait(_JOIN_TIMEOUT_SECONDS)
+            return store.count()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            store = _run_on(pool, world.cache.get_or_open, db_path, collection)
+            pending = pool.submit(world.cache.run_reading, store, long_read)
+            assert reading.wait(_JOIN_TIMEOUT_SECONDS)
+            world.cache.invalidate_prefix(root)
+
+            _wait(_SEVERAL_RENEWAL_TICKS_SECONDS)
+            assert world.has_live_reader(root) is True
+
+            finish.set()
+            assert pending.result(_JOIN_TIMEOUT_SECONDS) == 0
+            _wait(_SEVERAL_RENEWAL_TICKS_SECONDS)
+            assert world.has_live_reader(root) is False
