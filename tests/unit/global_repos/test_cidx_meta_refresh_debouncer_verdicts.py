@@ -1,6 +1,8 @@
-"""The cidx-meta debouncer settles an owed write only on a covering refresh
-job: each job-store state maps to one verdict, and the awaiting state never
-resubmits while the job runs, nor drops a write that arrived meanwhile.
+"""The cidx-meta debouncer settles an owed write only on a refresh job whose
+result states it covered the source (``covered_source``: it published, or
+found nothing to do); each job-store state maps to one verdict, and the
+awaiting state never resubmits while the job runs, nor drops a write that
+arrived meanwhile.
 
 Timers are never waited on: each step runs the pending timer's callback."""
 
@@ -13,13 +15,13 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from code_indexer.global_repos.cidx_meta_refresh_debouncer import (
-    WRITE_LOCK_HELD_SKIP,
     CidxMetaRefreshDebouncer,
     RefreshJobVerdict,
     refresh_job_verdict,
 )
 
 DEBOUNCE_SECONDS = 3600.0
+COVERING = {"success": True, "message": "Refresh complete", "covered_source": True}
 
 
 class _JobStore:
@@ -64,11 +66,41 @@ def _expire_now(debouncer: CidxMetaRefreshDebouncer) -> None:
         ("pending", None, RefreshJobVerdict.RUNNING),
         ("running", None, RefreshJobVerdict.RUNNING),
         ("resolving_prerequisites", None, RefreshJobVerdict.RUNNING),
-        ("completed", {"message": "Refresh complete"}, RefreshJobVerdict.COVERED),
-        ("completed", {"message": "No changes detected"}, RefreshJobVerdict.COVERED),
-        ("completed_partial", {"partial": True}, RefreshJobVerdict.COVERED),
-        ("completed", {"skipped": WRITE_LOCK_HELD_SKIP}, RefreshJobVerdict.OWED),
-        ("failed", None, RefreshJobVerdict.OWED),
+        ("completed", COVERING, RefreshJobVerdict.COVERED),
+        (
+            "completed",
+            {"message": "No changes detected", "covered_source": True},
+            RefreshJobVerdict.COVERED,
+        ),
+        (
+            "completed_partial",
+            {"partial": True, "covered_source": True},
+            RefreshJobVerdict.COVERED,
+        ),
+        # A finished job that does not state it covered the source:
+        ("completed", {"message": "Refresh complete"}, RefreshJobVerdict.OWED),
+        (
+            "completed",
+            {"success": True, "message": "Alias not found, skipped"},
+            RefreshJobVerdict.OWED,
+        ),
+        (
+            "completed",
+            {"success": True, "message": "Not yet initialized, skipped"},
+            RefreshJobVerdict.OWED,
+        ),
+        (
+            "completed",
+            {"success": True, "message": "Skipped, write lock held"},
+            RefreshJobVerdict.OWED,
+        ),
+        (
+            "completed",
+            {"success": True, "skipped": "volume_alarm_deferred"},
+            RefreshJobVerdict.OWED,
+        ),
+        ("completed", {"covered_source": "yes"}, RefreshJobVerdict.OWED),
+        ("failed", {"covered_source": True}, RefreshJobVerdict.OWED),
         ("cancelled", None, RefreshJobVerdict.OWED),
         ("interrupted", None, RefreshJobVerdict.OWED),
     ],
@@ -97,7 +129,7 @@ class TestAwaitingTransitions:
                 _expire_now(debouncer)  # still running
 
             assert store.submitted == ["job-1"]
-            store.finish("job-1", "completed", {"message": "Refresh complete"})
+            store.finish("job-1", "completed", COVERING)
             _expire_now(debouncer)
             assert debouncer._dirty is False and debouncer._timer is None
         finally:
@@ -112,7 +144,7 @@ class TestAwaitingTransitions:
             debouncer.signal_dirty()
             _expire_now(debouncer)
             debouncer.signal_dirty()  # a write while job-1 runs
-            store.finish("job-1", "completed", {"message": "Refresh complete"})
+            store.finish("job-1", "completed", COVERING)
 
             _expire_now(debouncer)
 
@@ -142,7 +174,7 @@ class TestAwaitingTransitions:
         finally:
             debouncer.shutdown()
 
-    def test_skipped_job_is_retried_paced_and_logged_at_info(
+    def test_non_covering_job_is_retried_paced_and_logged_at_info(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         store = _JobStore()
@@ -150,7 +182,11 @@ class TestAwaitingTransitions:
         try:
             debouncer.signal_dirty()
             _expire_now(debouncer)
-            store.finish("job-1", "completed", {"skipped": WRITE_LOCK_HELD_SKIP})
+            store.finish(
+                "job-1",
+                "completed",
+                {"success": True, "message": "Skipped, write lock held"},
+            )
             with caplog.at_level(logging.INFO):
                 _expire_now(debouncer)
 

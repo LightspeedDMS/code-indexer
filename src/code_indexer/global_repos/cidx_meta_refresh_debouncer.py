@@ -3,10 +3,10 @@ keeps each write's refresh OWED until a refresh that started after the write
 covers it.
 
 A submitted refresh job covers the writes signalled before its submission
-only when the job store shows it finished without skipping on a held write
-lock (it published, or legitimately found nothing to do). A job that skipped,
-failed, was cancelled or cannot be found leaves those writes owed: they are
-retried at a doubling interval capped at ``_MAX_RETRY_INTERVAL_SECONDS``,
+only when the job store shows it finished with a result stating
+``covered_source`` (it published, or verified nothing changed). A job that
+skipped, failed, was cancelled or cannot be found leaves those writes owed:
+they are retried at a doubling interval capped at ``_MAX_RETRY_INTERVAL_SECONDS``,
 paced, never given up. The job is read through the scheduler's
 ``BackgroundJobManager``, whose store is shared across nodes.
 """
@@ -23,9 +23,10 @@ _DEFAULT_DEBOUNCE_SECONDS = 30
 #: (store or job tracker unavailable): retries slow down, never give up.
 _MAX_RETRY_INTERVAL_SECONDS = 900.0
 META_ALIAS = "cidx-meta-global"
-#: ``skipped`` value of a refresh result that skipped on a held write lock
-#: (it covered no write).
-WRITE_LOCK_HELD_SKIP = "write_lock_held"
+#: Result key a refresh sets (True) only when it covered the repository's
+#: source: it published, or verified nothing changed. Every other return,
+#: e.g. a skip on a held lock, an unknown alias or a deferral, covers nothing.
+COVERED_SOURCE = "covered_source"
 _UNFINISHED_JOB_STATES = frozenset({"pending", "running", "resolving_prerequisites"})
 _FINISHED_JOB_STATES = frozenset({"completed", "completed_partial"})
 
@@ -49,8 +50,10 @@ def refresh_job_verdict(refresh_scheduler: Any, job_id: str) -> RefreshJobVerdic
     if state in _UNFINISHED_JOB_STATES:
         return RefreshJobVerdict.RUNNING
     result = status.get("result")
-    if state in _FINISHED_JOB_STATES and not (
-        isinstance(result, dict) and result.get("skipped") == WRITE_LOCK_HELD_SKIP
+    if (
+        state in _FINISHED_JOB_STATES
+        and isinstance(result, dict)
+        and result.get(COVERED_SOURCE) is True
     ):
         return RefreshJobVerdict.COVERED
     return RefreshJobVerdict.OWED

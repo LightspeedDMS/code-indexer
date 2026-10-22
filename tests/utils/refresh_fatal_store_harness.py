@@ -84,7 +84,11 @@ class RecordingJobManager:
             return None
         return {
             "status": "completed",
-            "result": {"success": True, "message": "Refresh complete"},
+            "result": {
+                "success": True,
+                "message": "Refresh complete",
+                "covered_source": True,
+            },
         }
 
     def count_active_refresh_jobs(self) -> int:

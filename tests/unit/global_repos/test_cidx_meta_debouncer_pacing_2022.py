@@ -44,7 +44,10 @@ class _ScriptedScheduler:
     def get_job_status(
         self, job_id: str, username: str, is_admin: bool = False
     ) -> Dict[str, Any]:
-        return {"status": "completed", "result": {"success": True}}
+        return {
+            "status": "completed",
+            "result": {"success": True, "covered_source": True},
+        }
 
     def trigger_refresh_for_repo(self, alias_name: str) -> str:
         assert alias_name == META_ALIAS

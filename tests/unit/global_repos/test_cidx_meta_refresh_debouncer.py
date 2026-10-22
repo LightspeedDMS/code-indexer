@@ -49,7 +49,11 @@ def mock_refresh_scheduler():
     # The submitted job reads as a finished refresh that covered the write.
     scheduler.background_job_manager.get_job_status.return_value = {
         "status": "completed",
-        "result": {"success": True, "message": "Refresh complete"},
+        "result": {
+            "success": True,
+            "message": "Refresh complete",
+            "covered_source": True,
+        },
     }
     return scheduler
 

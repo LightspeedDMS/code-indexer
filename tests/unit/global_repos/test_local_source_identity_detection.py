@@ -156,6 +156,7 @@ class TestUnchangedSource:
         result = harness.scheduler._execute_refresh(ALIAS)
 
         assert result["message"] == "No changes detected", result
+        assert result.get("covered_source") is True, result
         assert _published(harness) == before
 
 
@@ -217,6 +218,7 @@ class TestDeletedFile:
         result = harness.scheduler._execute_refresh(ALIAS)
 
         assert result["message"] == "Refresh complete", result
+        assert result.get("covered_source") is True, result
         after = _published(harness)
         assert after != before
         assert "note_001.py" not in _stored_paths(after)
