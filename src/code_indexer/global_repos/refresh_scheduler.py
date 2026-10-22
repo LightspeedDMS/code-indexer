@@ -2842,41 +2842,19 @@ class RefreshScheduler:
                                         _meta_err,
                                     )
 
-                                # MED-2: Idempotent bootstrap — cheap when remote URL unchanged.
-                                # Bug #2012: every backup git call is bound
-                                # to the job's cancel check.
-                                if _backup_cfg_local.remote_url:
-                                    try:
-                                        CidxMetaBackupBootstrap(
-                                            cancel_check=cancel_check
-                                        ).bootstrap(
-                                            master_path, _backup_cfg_local.remote_url
-                                        )
-                                    except Exception as _bootstrap_err:
-                                        if _is_refresh_cancellation(_bootstrap_err):
-                                            raise
-                                        logger.warning(
-                                            "cidx-meta backup bootstrap failed for %s: %s",
-                                            alias_name,
-                                            _bootstrap_err,
-                                        )
-
-                                _branch = (
-                                    detect_default_branch(
-                                        master_path, cancel_check=cancel_check
-                                    )
-                                    or "master"
+                                _sync_result = self._sync_catalog_backup(
+                                    repo_name,
+                                    master_path,
+                                    _backup_cfg_local.remote_url,
+                                    alias_name,
+                                    cancel_check,
                                 )
-
-                                # Bug #1555: the remote is a passive backup
-                                # mirror, never a peer -- sync() publishes
-                                # local HEAD directly (force-with-lease)
-                                # rather than rebasing, so it can never get
-                                # stuck on a content conflict and there is
-                                # no quarantine state left to check.
-                                _sync_result = CidxMetaBackupSync(
-                                    master_path, _branch, cancel_check=cancel_check
-                                ).sync()
+                                if _sync_result is None:
+                                    return {
+                                        "success": True,
+                                        "alias": alias_name,
+                                        "message": "Skipped, write lock held",
+                                    }
 
                                 # A writer that committed and pushed itself
                                 # leaves the sync nothing to do.
@@ -2980,43 +2958,19 @@ class RefreshScheduler:
                                     meta_err,
                                 )
 
-                            # MED-2: Idempotent bootstrap call ensures URL changes applied
-                            # via DB-only paths (not through the Save route) are applied
-                            # on the next refresh cycle.  CidxMetaBackupBootstrap.bootstrap()
-                            # is cheap when the remote URL has not changed (reads
-                            # `git remote get-url origin` and returns immediately on match).
-                            # Bug #2012: every backup git call is bound to
-                            # the job's cancel check.
-                            if backup_cfg.remote_url:
-                                try:
-                                    CidxMetaBackupBootstrap(
-                                        cancel_check=cancel_check
-                                    ).bootstrap(master_path, backup_cfg.remote_url)
-                                except Exception as bootstrap_err:
-                                    if _is_refresh_cancellation(bootstrap_err):
-                                        raise
-                                    logger.warning(
-                                        "cidx-meta backup bootstrap failed for %s: %s",
-                                        alias_name,
-                                        bootstrap_err,
-                                    )
-                            branch = (
-                                detect_default_branch(
-                                    master_path, cancel_check=cancel_check
-                                )
-                                or "master"
+                            sync_result = self._sync_catalog_backup(
+                                repo_name,
+                                master_path,
+                                backup_cfg.remote_url,
+                                alias_name,
+                                cancel_check,
                             )
-
-                            # Bug #1555: the remote is a passive backup
-                            # mirror, never a peer -- sync() publishes local
-                            # HEAD directly (force-with-lease) rather than
-                            # rebasing, so it can never get stuck on a
-                            # content conflict and there is no quarantine
-                            # state left to check. Mirrors the post-migration
-                            # block's identical call above.
-                            sync_result = CidxMetaBackupSync(
-                                master_path, branch, cancel_check=cancel_check
-                            ).sync()
+                            if sync_result is None:
+                                return {
+                                    "success": True,
+                                    "alias": alias_name,
+                                    "message": "Skipped, write lock held",
+                                }
                             if sync_result.skipped and not (
                                 force_reset or regate or fts_rebuild_due
                             ):
@@ -3669,6 +3623,48 @@ class RefreshScheduler:
                         )
 
         return _ctx()
+
+    def _sync_catalog_backup(
+        self,
+        repo_name: str,
+        master_path: str,
+        remote_url: Optional[str],
+        alias_name: str,
+        cancel_check: Optional[Callable[[], bool]],
+    ) -> Optional[Any]:
+        """Bootstrap (when a remote is configured) and sync the catalog's
+        backup mirror while holding the lock the refresh publishes with, so
+        no backup git write races another writer. None when another owner
+        holds it: the refresh skips this cycle. Every backup git call is
+        bound to the job's cancel check; the remote is a passive mirror
+        (sync publishes local HEAD with force-with-lease)."""
+        with self._held_write_lock_for_publish(repo_name) as acquired:
+            if not acquired:
+                logger.info(
+                    f"Skipping refresh for {alias_name}, write lock held by "
+                    f"another owner before the backup sync"
+                )
+                return None
+            if remote_url:
+                try:
+                    CidxMetaBackupBootstrap(cancel_check=cancel_check).bootstrap(
+                        master_path, remote_url
+                    )
+                except Exception as bootstrap_err:
+                    if _is_refresh_cancellation(bootstrap_err):
+                        raise
+                    logger.warning(
+                        "cidx-meta backup bootstrap failed for %s: %s",
+                        alias_name,
+                        bootstrap_err,
+                    )
+            branch = (
+                detect_default_branch(master_path, cancel_check=cancel_check)
+                or "master"
+            )
+            return CidxMetaBackupSync(
+                master_path, branch, cancel_check=cancel_check
+            ).sync()
 
     def _get_refresh_integrity_quarantine_state_if_active(
         self, alias_name: str
