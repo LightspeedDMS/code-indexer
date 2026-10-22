@@ -39,9 +39,7 @@ def ran_in_process(refresh_scheduler: Any) -> bool:
     submission. Errs toward owed: a retry is harmless."""
     if refresh_scheduler.background_job_manager is not None:
         return False
-    return not refresh_scheduler._scheduled_local_repo_repair_is_quarantined(
-        META_ALIAS
-    )
+    return not refresh_scheduler._scheduled_local_repo_repair_is_quarantined(META_ALIAS)
 
 
 class RefreshJobVerdict(enum.Enum):
