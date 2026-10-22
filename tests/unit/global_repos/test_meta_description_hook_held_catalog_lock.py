@@ -15,7 +15,10 @@ boundary and the server config are replaced.
 
 from __future__ import annotations
 
+import logging
 import os
+import stat
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 from unittest.mock import MagicMock, patch
@@ -183,6 +186,75 @@ def test_failed_release_after_removal_owes_the_refresh(
     assert not _description(golden).exists()
     assert scheduler.triggers == []
     assert debouncer.signals == 1
+
+
+def _staging(golden: Path) -> Path:
+    return golden / ".cidx-meta-staging"
+
+
+def test_stale_staging_leftovers_are_swept(
+    golden: Path, debouncer: _CountingDebouncer
+) -> None:
+    # A prior process crashed mid-write and left its temp file behind.
+    _wire(_Scheduler(golden))
+    staging = _staging(golden)
+    staging.mkdir()
+    old = time.time() - 16 * 60
+    stale = staging / ".other-repo.md.abc123.tmp"
+    stale.write_text("partial", encoding="utf-8")
+    os.utime(stale, (old, old))
+    fresh = staging / ".busy-repo.md.def456.tmp"
+    fresh.write_text("being written", encoding="utf-8")
+    unrelated = staging / "keep.txt"
+    unrelated.write_text("not a staging temp", encoding="utf-8")
+    os.utime(unrelated, (old, old))
+
+    _register(golden, [])
+
+    assert not stale.exists()
+    assert fresh.exists()
+    assert unrelated.exists()
+    assert _description(golden).is_file()
+
+
+def test_description_is_world_readable_under_a_restrictive_umask(
+    golden: Path, debouncer: _CountingDebouncer
+) -> None:
+    _wire(_Scheduler(golden))
+    previous = os.umask(0o077)
+    try:
+        _register(golden, [])
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(_description(golden).stat().st_mode) == 0o644
+
+
+def test_failed_directory_fsync_keeps_the_write_and_owes_the_refresh(
+    golden: Path,
+    debouncer: _CountingDebouncer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scheduler = _wire(_Scheduler(golden))
+    real_fsync = os.fsync
+    calls: List[int] = []
+
+    def _fsync(fd: int) -> None:
+        calls.append(fd)
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("directory fsync failed")
+        real_fsync(fd)
+
+    monkeypatch.setattr(meta_description_hook.os, "fsync", _fsync)
+
+    with caplog.at_level(logging.WARNING):
+        _register(golden, [])
+
+    assert _description(golden).is_file()
+    assert scheduler.triggers == []
+    assert debouncer.signals == 1
+    assert any("directory fsync failed" in r.getMessage() for r in caplog.records)
 
 
 def test_description_temp_file_is_staged_outside_cidx_meta(

@@ -169,7 +169,19 @@ class MetaDirectoryUpdater(UpdateStrategy):
                 desc_file = self.meta_dir / f"{alias}.md"
                 if not desc_file.exists():
                     # INVARIANT: cidx-meta filenames use SHORT alias ({alias}.md), NOT {alias}-global.md
-                    desc_file.write_text(f"# {alias}\n\nGolden repository: {alias}\n")
+                    # Exclusive create: a real description written since the
+                    # check (registration writes it without the catalog lock
+                    # when the lock is busy) is never overwritten by a stub.
+                    try:
+                        with desc_file.open("x", encoding="utf-8") as fh:
+                            fh.write(f"# {alias}\n\nGolden repository: {alias}\n")
+                    except FileExistsError:
+                        logger.debug(
+                            "MetaDirectoryUpdater: %s appeared since the check; "
+                            "kept as is",
+                            desc_file,
+                        )
+                        continue
                     logger.info(
                         "MetaDirectoryUpdater: created description file %s", desc_file
                     )

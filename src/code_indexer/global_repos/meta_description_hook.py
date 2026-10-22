@@ -446,28 +446,57 @@ def atomic_write_description(
             )
 
     released = True
+    durable = True
     try:
-        _write_staged(target_path, content)
+        durable = _write_staged(target_path, content)
     finally:
         if lock_acquired:
             released = _release_cidx_meta_lock(refresh_scheduler)
-    return released
+    return released and durable
 
 
 #: Hidden staging directory beside the real cidx-meta directory (same
 #: filesystem, outside the catalog tree) for description temp files.
 _STAGING_DIR_NAME = ".cidx-meta-staging"
+#: A staging temp file older than this was left by a crashed writer.
+_STALE_STAGING_SECONDS = 15 * 60
 
 
-def _write_staged(target_path: Path, content: str) -> None:
-    """Stage *content* outside the catalog, fsync, and move it into place."""
+def _sweep_stale_staging(staging_dir: Path) -> None:
+    """Remove staging temp files (``.*.tmp``) older than
+    ``_STALE_STAGING_SECONDS``: a crashed writer's leftovers. Only the staging
+    directory is scanned (the destination lives in the catalog), and a file
+    another writer removes concurrently is tolerated."""
+    cutoff = time.time() - _STALE_STAGING_SECONDS
+    for entry in os.scandir(staging_dir):
+        if not (entry.name.startswith(".") and entry.name.endswith(".tmp")):
+            continue
+        try:
+            if entry.is_file(follow_symlinks=False) and (
+                entry.stat(follow_symlinks=False).st_mtime < cutoff
+            ):
+                os.unlink(entry.path)
+                logger.info("Removed stale description staging file %s", entry.path)
+        except FileNotFoundError:
+            continue
+
+
+def _write_staged(target_path: Path, content: str) -> bool:
+    """Stage *content* outside the catalog, fsync, and move it into place.
+
+    Returns False when the content is in place but the catalog directory
+    could not be fsync'd (logged): the caller then owes the refresh."""
     catalog_dir = Path(os.path.realpath(target_path.parent))
     staging_dir = catalog_dir.parent / _STAGING_DIR_NAME
     staging_dir.mkdir(exist_ok=True)
+    _sweep_stale_staging(staging_dir)
     fd, tmp_path = tempfile.mkstemp(
         dir=str(staging_dir), prefix=f".{target_path.name}.", suffix=".tmp"
     )
     try:
+        # mkstemp creates 0600; a snapshot copy (possibly as another OS user)
+        # must be able to read the description.
+        os.fchmod(fd, 0o644)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(content)
             fh.flush()
@@ -485,11 +514,23 @@ def _write_staged(target_path: Path, content: str) -> None:
                 cleanup_exc,
             )
         raise
-    dir_fd = os.open(str(catalog_dir), os.O_RDONLY)
     try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+        dir_fd = os.open(str(catalog_dir), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError as exc:
+        logger.warning(
+            "Description %s is in place but %s could not be fsync'd (%s: %s); "
+            "the refresh is owed to the debouncer",
+            target_path.name,
+            catalog_dir,
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    return True
 
 
 def _release_cidx_meta_lock(refresh_scheduler: Any) -> bool:
