@@ -41,6 +41,7 @@ def _foreign_identity() -> str:
     boot = local_holder_identity().split("|")[1]
     return f"foreign-host.example.com|{boot}|pid:[4026531836]"
 
+
 MakeStore = Callable[..., Any]
 
 
