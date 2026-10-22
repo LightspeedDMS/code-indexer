@@ -331,14 +331,6 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # Anchored on the static message prefix; a sentinel claim failure or corruption
     # surfaces with a different message shape.
     "SharedJobSentinel.release: no sentinel for op_type=",
-    # meta_description_hook.on_repo_removed: when the cidx-meta coarse write lock is
-    # held by another operation during repo removal, the description-.md deletion is
-    # gracefully skipped and the orphan is reaped on the next pass.  This is the
-    # documented non-fatal lock-contention path (the write lock guard intentionally
-    # returns False rather than blocking).  Appears during Phase-3 test teardown when
-    # concurrent cidx-meta operations overlap.  Anchored on the static message prefix;
-    # a genuine write-failure would surface with a different error shape.
-    "on_repo_removed: write lock not acquired, skipping deletion of",
     # test_01_mcp_search.py's parametrized test_mcp_search_tool[search_code_fts] case
     # calls the MCP search_code tool with search_mode="fts" and deliberately omits
     # repository_alias.  query_user_repositories (semantic_query_manager.py:~404,

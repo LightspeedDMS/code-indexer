@@ -175,8 +175,10 @@ class TestOnRepoRemovedBoundedRetry:
 
         on_repo_removed(repo_name="some-repo", golden_repos_dir=str(tmp_path))
 
-        assert existing_repo_md_file.exists(), (
-            "file must survive when lock is never acquired"
+        # Giving up on the lock never leaves the removed repo's description
+        # behind: it is deleted and the refresh is owed to the debouncer.
+        assert not existing_repo_md_file.exists(), (
+            "description must be deleted even when the lock is never acquired"
         )
         assert 1 < scheduler.acquire_write_lock.call_count <= 5, (
             scheduler.acquire_write_lock.call_count

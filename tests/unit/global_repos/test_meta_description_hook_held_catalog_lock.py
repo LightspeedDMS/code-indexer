@@ -1,25 +1,23 @@
-"""Registering a golden repository while the catalog write lock is held never
-loses its description.
+"""A registered or removed repository's description change is never lost to a
+held catalog write lock, and the catalog is refreshed afterwards.
 
-* Held by a catalog refresh (owner ``refresh_scheduler``, which holds it
-  across indexing and publish): the description is written and the refresh
-  it needs is owed to the debouncer -- a refresh requested now would skip
-  on the held lock.
-* Held by any other owner (an exclusive writer such as write mode): nothing
-  is written under that lock; the description is handed to the durable
-  description-refresh pipeline (its tracking row is made due now), which
-  writes it under the lock later.
+Whoever holds the cidx-meta write lock past the hook's short bounded retry (a
+catalog refresh across indexing and publish, an operator's write mode, the
+dependency map...), the description is written (or removed) atomically and
+the refresh that follows is owed to the debouncer: a refresh requested while
+the lock is held would skip and owe nothing. The same holds when the hook's
+own lock release fails. The temp file of a description write is staged
+outside cidx-meta, so neither a snapshot copy nor a backup commit sees it.
 
 Real hook, real files, a real WriteLockManager lock file; only the Claude CLI
-boundary and the server config are replaced. The description is generated
-exactly once by the hook.
+boundary and the server config are replaced.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import os
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,19 +26,23 @@ from code_indexer.global_repos import meta_description_hook
 from code_indexer.global_repos.write_lock_manager import WriteLockManager
 
 REPO = "example-repo"
+HOLDERS = ["refresh_scheduler", "mcp_write_mode"]
 
 
 class _Scheduler:
     """Scheduler double whose catalog lock is a real WriteLockManager."""
 
-    def __init__(self, golden: Path) -> None:
+    def __init__(self, golden: Path, release: Optional[Callable[[], bool]] = None):
         self.write_lock_manager = WriteLockManager(golden)
         self.triggers: List[str] = []
+        self._release = release
 
     def acquire_write_lock(self, alias: str, owner_name: str) -> bool:
         return self.write_lock_manager.acquire(alias, owner_name=owner_name)
 
     def release_write_lock(self, alias: str, owner_name: str) -> bool:
+        if self._release is not None:
+            return self._release()
         return self.write_lock_manager.release(alias, owner_name=owner_name)
 
     def trigger_refresh_for_repo(self, alias_name: str) -> Optional[str]:
@@ -56,14 +58,6 @@ class _CountingDebouncer:
         self.signals += 1
 
 
-class _TrackingBackend:
-    def __init__(self) -> None:
-        self.rows: Dict[str, Dict[str, Any]] = {}
-
-    def upsert_tracking(self, repo_alias: str, **fields: Any) -> None:
-        self.rows.setdefault(repo_alias, {}).update(fields)
-
-
 @pytest.fixture
 def golden(tmp_path: Path) -> Path:
     root = tmp_path / "golden-repos"
@@ -73,20 +67,21 @@ def golden(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def wired(golden: Path) -> Iterator[Dict[str, Any]]:
-    scheduler = _Scheduler(golden)
-    debouncer = _CountingDebouncer()
-    tracking = _TrackingBackend()
-    meta_description_hook.set_refresh_scheduler(scheduler)
-    meta_description_hook.set_debouncer(debouncer)  # type: ignore[arg-type]
-    meta_description_hook.set_tracking_backend(tracking)
+def debouncer() -> Iterator[_CountingDebouncer]:
+    counting = _CountingDebouncer()
+    meta_description_hook.set_debouncer(counting)  # type: ignore[arg-type]
+    meta_description_hook.set_tracking_backend(None)
     meta_description_hook.set_scheduler(None)
     try:
-        yield {"scheduler": scheduler, "debouncer": debouncer, "tracking": tracking}
+        yield counting
     finally:
         meta_description_hook.set_refresh_scheduler(None)
         meta_description_hook.set_debouncer(None)
-        meta_description_hook.set_tracking_backend(None)
+
+
+def _wire(scheduler: _Scheduler) -> _Scheduler:
+    meta_description_hook.set_refresh_scheduler(scheduler)
+    return scheduler
 
 
 def _register(golden: Path, generated: List[str]) -> None:
@@ -118,59 +113,97 @@ def _register(golden: Path, generated: List[str]) -> None:
         )
 
 
-def test_registration_during_a_refresh_writes_and_owes_the_refresh(
-    golden: Path, wired: Dict[str, Any]
+def _description(golden: Path) -> Path:
+    return golden / "cidx-meta" / f"{REPO}.md"
+
+
+@pytest.mark.parametrize("holder", HOLDERS)
+def test_registration_under_a_held_lock_writes_and_owes_the_refresh(
+    golden: Path, debouncer: _CountingDebouncer, holder: str
 ) -> None:
-    scheduler: _Scheduler = wired["scheduler"]
-    assert scheduler.write_lock_manager.acquire(
-        "cidx-meta", owner_name="refresh_scheduler"
-    )
+    scheduler = _wire(_Scheduler(golden))
+    assert scheduler.write_lock_manager.acquire("cidx-meta", owner_name=holder)
     generated: List[str] = []
 
     _register(golden, generated)
 
-    description = golden / "cidx-meta" / f"{REPO}.md"
-    assert description.read_text(encoding="utf-8").startswith("# example-repo")
+    assert _description(golden).read_text(encoding="utf-8").startswith("# example-repo")
     assert generated == [REPO]
     assert scheduler.triggers == []
-    assert wired["debouncer"].signals == 1
+    assert debouncer.signals == 1
     info = scheduler.write_lock_manager.get_lock_info("cidx-meta")
-    assert info is not None and info["owner"] == "refresh_scheduler"
+    assert info is not None and info["owner"] == holder
 
 
-def test_removal_during_a_refresh_deletes_and_owes_the_refresh(
-    golden: Path, wired: Dict[str, Any]
+@pytest.mark.parametrize("holder", HOLDERS)
+def test_removal_under_a_held_lock_deletes_and_owes_the_refresh(
+    golden: Path, debouncer: _CountingDebouncer, holder: str
 ) -> None:
-    scheduler: _Scheduler = wired["scheduler"]
-    description = golden / "cidx-meta" / f"{REPO}.md"
-    description.write_text("# example-repo\n", encoding="utf-8")
-    assert scheduler.write_lock_manager.acquire(
-        "cidx-meta", owner_name="refresh_scheduler"
-    )
+    scheduler = _wire(_Scheduler(golden))
+    _description(golden).write_text("# example-repo\n", encoding="utf-8")
+    assert scheduler.write_lock_manager.acquire("cidx-meta", owner_name=holder)
 
     meta_description_hook.on_repo_removed(REPO, str(golden))
 
-    assert not description.exists()
+    assert not _description(golden).exists()
     assert scheduler.triggers == []
-    assert wired["debouncer"].signals == 1
+    assert debouncer.signals == 1
 
 
-def test_registration_under_an_exclusive_writer_is_handed_to_the_pipeline(
-    golden: Path, wired: Dict[str, Any]
+def _raise_release() -> bool:
+    raise OSError("lock store unavailable")
+
+
+@pytest.mark.parametrize(
+    "release", [lambda: False, _raise_release], ids=["returns_false", "raises"]
+)
+def test_failed_release_after_registration_owes_the_refresh(
+    golden: Path, debouncer: _CountingDebouncer, release: Callable[[], bool]
 ) -> None:
-    scheduler: _Scheduler = wired["scheduler"]
-    assert scheduler.write_lock_manager.acquire(
-        "cidx-meta", owner_name="mcp_write_mode"
-    )
-    generated: List[str] = []
-    before = datetime.now(timezone.utc)
+    scheduler = _wire(_Scheduler(golden, release=release))
 
-    _register(golden, generated)
+    _register(golden, [])
 
-    assert not (golden / "cidx-meta" / f"{REPO}.md").exists()
-    assert generated == [REPO]
+    assert _description(golden).is_file()
     assert scheduler.triggers == []
-    row = wired["tracking"].rows[REPO]
-    assert row["status"] == "pending"
-    assert datetime.fromisoformat(str(row["next_run"])) <= datetime.now(timezone.utc)
-    assert datetime.fromisoformat(str(row["next_run"])) >= before
+    assert debouncer.signals == 1
+
+
+@pytest.mark.parametrize(
+    "release", [lambda: False, _raise_release], ids=["returns_false", "raises"]
+)
+def test_failed_release_after_removal_owes_the_refresh(
+    golden: Path, debouncer: _CountingDebouncer, release: Callable[[], bool]
+) -> None:
+    scheduler = _wire(_Scheduler(golden, release=release))
+    _description(golden).write_text("# example-repo\n", encoding="utf-8")
+
+    meta_description_hook.on_repo_removed(REPO, str(golden))
+
+    assert not _description(golden).exists()
+    assert scheduler.triggers == []
+    assert debouncer.signals == 1
+
+
+def test_description_temp_file_is_staged_outside_cidx_meta(
+    golden: Path, debouncer: _CountingDebouncer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wire(_Scheduler(golden))
+    catalog = golden / "cidx-meta"
+    seen: Dict[str, Any] = {}
+    real_replace = os.replace
+
+    def _spy_replace(src: Any, dst: Any) -> None:
+        if Path(dst) == _description(golden):
+            seen["src"] = Path(src)
+            seen["catalog_at_replace"] = sorted(p.name for p in catalog.iterdir())
+        real_replace(src, dst)
+
+    monkeypatch.setattr(meta_description_hook.os, "replace", _spy_replace)
+
+    _register(golden, [])
+
+    assert seen["src"].parent.resolve() != catalog.resolve()
+    assert seen["src"].parent.resolve().parent == golden.resolve()
+    assert seen["catalog_at_replace"] == []
+    assert sorted(p.name for p in catalog.iterdir()) == [f"{REPO}.md"]

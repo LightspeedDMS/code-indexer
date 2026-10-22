@@ -415,20 +415,16 @@ class TestOnRepoAddedPassesRefreshSchedulerToAtomicWrite:
             f"production writer. Got call: {mock_atomic_write.call_args!r}"
         )
 
-    def test_on_repo_added_propagates_lock_unavailable_error_when_lock_held(
+    def test_on_repo_added_writes_description_when_lock_held(
         self, temp_golden_repos_dir
     ):
         """
         When the cidx-meta write lock cannot be acquired (another writer
-        holds it), on_repo_added() must propagate LifecycleLockUnavailableError
-        rather than swallowing it -- the real callers in golden_repo_manager.py
-        already catch Exception broadly around on_repo_added() and log without
-        failing golden-repo registration, so propagation is the correct,
-        already-handled behavior.
+        holds it), on_repo_added() still writes the already-generated
+        description atomically and owes the refresh to the debouncer: it
+        neither raises nor requests a refresh that would skip on the held
+        lock.
         """
-        from code_indexer.global_repos.lifecycle_batch_runner import (
-            LifecycleLockUnavailableError,
-        )
         from code_indexer.global_repos.meta_description_hook import (
             on_repo_added,
             set_refresh_scheduler,
@@ -458,19 +454,19 @@ class TestOnRepoAddedPassesRefreshSchedulerToAtomicWrite:
                 return_value=_make_mock_repo_analyzer(),
             ),
         ):
-            with pytest.raises(LifecycleLockUnavailableError):
-                on_repo_added(
-                    repo_name=repo_name,
-                    repo_url="https://github.com/test/lock-blocked-repo",
-                    clone_path=str(clone_path),
-                    golden_repos_dir=temp_golden_repos_dir,
-                )
+            on_repo_added(
+                repo_name=repo_name,
+                repo_url="https://github.com/test/lock-blocked-repo",
+                clone_path=str(clone_path),
+                golden_repos_dir=temp_golden_repos_dir,
+            )
 
-        assert not md_file.exists(), (
-            "Description file must NOT be written when the cidx-meta write "
-            "lock could not be acquired"
+        assert md_file.exists(), (
+            "The description must be written even when the cidx-meta write "
+            "lock is held by another writer"
         )
         blocked_scheduler.trigger_refresh_for_repo.assert_not_called()
+        blocked_scheduler.release_write_lock.assert_not_called()
 
 
 class TestOnRepoRemovedTriggersRefresh:
