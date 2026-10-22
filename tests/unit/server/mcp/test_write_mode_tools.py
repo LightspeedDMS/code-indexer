@@ -91,8 +91,10 @@ def mock_refresh_scheduler(golden_repos_dir):
     def _acquire(alias, owner_name="refresh_scheduler"):
         return scheduler.write_lock_manager.acquire(alias, owner_name=owner_name)
 
-    def _release(alias, owner_name="refresh_scheduler"):
-        return scheduler.write_lock_manager.release(alias, owner_name=owner_name)
+    def _release(alias, owner_name="refresh_scheduler", owner_token=None):
+        return scheduler.write_lock_manager.release(
+            alias, owner_name=owner_name, owner_token=owner_token
+        )
 
     def _is_locked(alias):
         return scheduler.write_lock_manager.is_locked(alias)
@@ -117,6 +119,22 @@ def file_crud_service_with_exception(golden_repos_dir, cidx_meta_source):
     # Expose golden_repos_dir so enforcement logic can find write_mode markers
     service._golden_repos_dir = golden_repos_dir
     return service
+
+
+@pytest.fixture(autouse=True)
+def _catalog_bound_on_file_crud_singleton(
+    monkeypatch, golden_repos_dir, cidx_meta_source
+):
+    """The handlers read the process-wide file_crud_service: bind the catalog
+    as a write exception for this test only (monkeypatch restores it)."""
+    from code_indexer.server.services.file_crud_service import file_crud_service
+
+    monkeypatch.setattr(
+        file_crud_service,
+        "_global_write_exceptions",
+        {"cidx-meta-global": cidx_meta_source},
+    )
+    monkeypatch.setattr(file_crud_service, "_golden_repos_dir", golden_repos_dir)
 
 
 # ===========================================================================
@@ -176,9 +194,12 @@ class TestHandleEnterWriteMode:
 
         self._call_handler(params, user, mock_refresh_scheduler, golden_repos_dir)
 
-        mock_refresh_scheduler.acquire_write_lock.assert_called_once_with(
-            "cidx-meta", owner_name="mcp_write_mode"
+        info = mock_refresh_scheduler.write_lock_manager.get_lock_info("cidx-meta")
+        marker = json.loads(
+            (golden_repos_dir / ".write_mode" / "cidx-meta.json").read_text()
         )
+        assert info is not None and info["owner"] == "mcp_write_mode"
+        assert marker["owner_token"] and marker["owner_token"] == info["owner_token"]
 
     def test_noop_for_activated_repo(self, mock_refresh_scheduler, golden_repos_dir):
         """AC2: enter_write_mode is silent no-op for activated (non-exception) repos."""
@@ -326,10 +347,13 @@ class TestHandleExitWriteMode:
     def test_releases_write_lock_after_refresh(
         self, mock_refresh_scheduler, golden_repos_dir, cidx_meta_source
     ):
-        """AC5: Write lock is released after exit."""
-        self._create_marker(golden_repos_dir, "cidx-meta", cidx_meta_source)
+        """AC5: Write lock is released after exit, with the marker's token."""
+        marker = self._create_marker(golden_repos_dir, "cidx-meta", cidx_meta_source)
+        marker.write_text(
+            json.dumps({**json.loads(marker.read_text()), "owner_token": "tok-1"})
+        )
         mock_refresh_scheduler.write_lock_manager.acquire(
-            "cidx-meta", owner_name="mcp_write_mode"
+            "cidx-meta", owner_name="mcp_write_mode", owner_token="tok-1"
         )
 
         user = _make_user()
@@ -338,8 +362,9 @@ class TestHandleExitWriteMode:
         self._call_handler(params, user, mock_refresh_scheduler, golden_repos_dir)
 
         mock_refresh_scheduler.release_write_lock.assert_called_once_with(
-            "cidx-meta", owner_name="mcp_write_mode"
+            "cidx-meta", owner_name="mcp_write_mode", owner_token="tok-1"
         )
+        assert not mock_refresh_scheduler.write_lock_manager.is_locked("cidx-meta")
 
     def test_noop_for_activated_repo(self, mock_refresh_scheduler, golden_repos_dir):
         """AC6: exit_write_mode is silent no-op for activated (non-exception) repos."""

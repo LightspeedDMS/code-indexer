@@ -373,7 +373,9 @@ class TestOwnershipLossPropagation:
         assert (
             coordinator.acquire("myalias", owner_name="a", owner_token="tok-1") is True
         )
-        assert other_worker.release("myalias", owner_name="a") is True
+        assert (
+            other_worker.release("myalias", owner_name="a", owner_token="tok-1") is True
+        )
         assert other_worker.acquire("myalias", owner_name="b") is True
 
         with pytest.raises(AliasLockOwnershipLostError):

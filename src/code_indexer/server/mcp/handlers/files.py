@@ -260,35 +260,32 @@ def _is_writable_repo(
     return False
 
 
-def _write_mode_acquire_lock(refresh_scheduler: Any, alias: str) -> Tuple[bool, str]:
-    """Acquire write lock; return (acquired, owner_if_held)."""
-    acquired = refresh_scheduler.acquire_write_lock(alias, owner_name="mcp_write_mode")
-    if acquired:
-        return True, ""
-    wlm = getattr(refresh_scheduler, "write_lock_manager", None)
-    owner = "unknown"
-    if wlm is not None:
-        info = wlm.get_lock_info(alias)
-        if info:
-            owner = info.get("owner", "unknown")
-    return False, owner
+def _write_mode_acquire_lock(scheduler: Any, alias: str) -> Tuple[bool, str, str]:
+    """Acquire write lock; return (acquired, owner_if_held, owner_token)."""
+    import uuid
+
+    token, wlm = uuid.uuid4().hex, scheduler.write_lock_manager
+    if wlm.acquire(alias, owner_name="mcp_write_mode", owner_token=token):
+        return True, "", token
+    return False, (wlm.get_lock_info(alias) or {}).get("owner", "unknown"), ""
 
 
 def _write_mode_create_marker(
-    golden_repos_dir: Path, alias: str, source_path: str
+    golden_repos_dir: Path, alias: str, source_path: str, owner_token: str
 ) -> None:
-    """Create the .write_mode/{alias}.json marker file."""
+    """Create the .write_mode/{alias}.json marker (shared storage; carries the
+    lock's owner token so the exit on any worker can release it)."""
     import json as _json
     from datetime import datetime, timezone
 
     write_mode_dir = golden_repos_dir / ".write_mode"
     write_mode_dir.mkdir(parents=True, exist_ok=True)
-    marker_file = write_mode_dir / f"{alias}.json"
-    marker_file.write_text(
+    (write_mode_dir / f"{alias}.json").write_text(
         _json.dumps(
             {
                 "alias": alias,
                 "source_path": source_path,
+                "owner_token": owner_token,
                 "entered_at": datetime.now(timezone.utc).isoformat(),
             },
             indent=2,
@@ -306,20 +303,21 @@ def _write_mode_run_refresh(
 
     marker_file = golden_repos_dir / ".write_mode" / f"{alias}.json"
     source_path: Optional[str] = None
+    owner_token: Optional[str] = None
     try:
         marker_data = _json.loads(marker_file.read_text())
         source_path = marker_data.get("source_path")
+        owner_token = marker_data.get("owner_token")
     except Exception as e:
-        logger.debug(
-            f"Could not read write-mode marker for {alias}: {e}",
+        logger.warning(
+            f"Could not read write-mode marker for {alias} ({e}); its lock is "
+            f"released only when its lease lapses",
             extra={"correlation_id": get_correlation_id()},
         )
-
-    try:
-        marker_file.unlink()
-    except FileNotFoundError:
-        pass
-    refresh_scheduler.release_write_lock(alias, owner_name="mcp_write_mode")
+    marker_file.unlink(missing_ok=True)
+    refresh_scheduler.release_write_lock(
+        alias, owner_name="mcp_write_mode", owner_token=owner_token
+    )
 
     if source_path:
         try:
@@ -1425,7 +1423,7 @@ def handle_enter_write_mode(params: Dict[str, Any], user: User) -> Dict[str, Any
                 {"success": False, "error": "RefreshScheduler not available"}
             )
 
-        acquired, owner = _write_mode_acquire_lock(refresh_scheduler, alias)
+        acquired, owner, token = _write_mode_acquire_lock(refresh_scheduler, alias)
         if not acquired:
             return _mcp_response(
                 {
@@ -1439,9 +1437,11 @@ def handle_enter_write_mode(params: Dict[str, Any], user: User) -> Dict[str, Any
 
             source_path = file_crud_service.get_write_exception_path(repo_alias)
             golden_repos_dir = Path(_get_golden_repos_dir())
-            _write_mode_create_marker(golden_repos_dir, alias, str(source_path))
+            _write_mode_create_marker(golden_repos_dir, alias, str(source_path), token)
         except Exception:
-            refresh_scheduler.release_write_lock(alias, owner_name="mcp_write_mode")
+            refresh_scheduler.release_write_lock(
+                alias, owner_name="mcp_write_mode", owner_token=token
+            )
             raise
 
         logger.info(

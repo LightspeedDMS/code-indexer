@@ -122,8 +122,10 @@ def mock_refresh_scheduler(golden_repos_dir):
     def _acquire(alias, owner_name="refresh_scheduler"):
         return scheduler.write_lock_manager.acquire(alias, owner_name=owner_name)
 
-    def _release(alias, owner_name="refresh_scheduler"):
-        return scheduler.write_lock_manager.release(alias, owner_name=owner_name)
+    def _release(alias, owner_name="refresh_scheduler", owner_token=None):
+        return scheduler.write_lock_manager.release(
+            alias, owner_name=owner_name, owner_token=owner_token
+        )
 
     scheduler.acquire_write_lock.side_effect = _acquire
     scheduler.release_write_lock.side_effect = _release

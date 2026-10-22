@@ -2,8 +2,9 @@
 
 The backend-agnostic contract lives in ``test_alias_lock_store_contract.py``.
 This module covers what only the solo store has: one file per alias, the
-in-place upgrade of lock files written by the previous release, and use from
-other threads and other worker processes. Real SQLite only.
+in-place upgrade of lock files written by the previous release (and a
+previous-release process still holding its file lock), and use from other
+threads and other worker processes. Real SQLite only.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from code_indexer.server.services.alias_lock_store.sqlite_store import (
 )
 
 _JOIN_TIMEOUT_SECONDS = 30
+_SHORT_BUSY_TIMEOUT_SECONDS = 0.2
 
 _PREVIOUS_RELEASE_SCHEMA = """
 CREATE TABLE golden_repo_alias_locks (
@@ -31,8 +33,15 @@ CREATE TABLE golden_repo_alias_locks (
 """
 
 
-def _make_store(tmp_path: Path) -> SqliteAliasLockStore:
-    return SqliteAliasLockStore(tmp_path / "alias_locks")
+def _make_store(tmp_path: Path, **kwargs) -> SqliteAliasLockStore:
+    return SqliteAliasLockStore(tmp_path / "alias_locks", **kwargs)
+
+
+def _previous_release_file(lock_dir: Path) -> sqlite3.Connection:
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(lock_dir / "example-repo.db"), isolation_level=None)
+    conn.execute(_PREVIOUS_RELEASE_SCHEMA)
+    return conn
 
 
 def _on_thread(fn) -> object:
@@ -52,10 +61,9 @@ def _on_thread(fn) -> object:
     return outcome.get("value")
 
 
-def _release_in_child(lock_dir: str, key: str, result) -> None:
-    result.put(
-        SqliteAliasLockStore(lock_dir).release_owned(key, "mcp_write_mode").value
-    )
+def _release_in_child(lock_dir: str, key: str, token: str, result) -> None:
+    store = SqliteAliasLockStore(lock_dir)
+    result.put(store.release_owned(key, "mcp_write_mode", owner_token=token).value)
 
 
 class TestPerAliasFiles:
@@ -67,32 +75,48 @@ class TestPerAliasFiles:
         store.release(handle)
 
 
-class TestPreviousReleaseLockFile:
+class TestPreviousRelease:
     def test_old_schema_file_is_upgraded_and_its_legacy_row_honoured(self, tmp_path):
         lock_dir = tmp_path / "alias_locks"
-        lock_dir.mkdir()
-        conn = sqlite3.connect(str(lock_dir / "example-repo.db"))
-        with conn:
-            conn.execute(_PREVIOUS_RELEASE_SCHEMA)
-            conn.execute(
-                "INSERT INTO golden_repo_alias_locks (lock_key, owner_token, operation) "
-                "VALUES ('example-repo', 'legacy', 'refresh_scheduler')"
-            )
+        conn = _previous_release_file(lock_dir)
+        conn.execute(
+            "INSERT INTO golden_repo_alias_locks (lock_key, owner_token, operation) "
+            "VALUES ('example-repo', 'legacy', 'refresh_scheduler')"
+        )
         conn.close()
 
         store = SqliteAliasLockStore(lock_dir)
-        # ^ why a leftover row with no pid/ttl => default 1h lease from its last renewal
+        # ^ why a leftover row with no pid/ttl => default 1h lease, never "free"
         assert store.is_held("example-repo") is True
         assert store.try_acquire("example-repo", operation="op") is None
-        assert (
-            store.release_owned("example-repo", "refresh_scheduler")
-            is LockOutcome.RELEASED
+        released = store.release_owned(
+            "example-repo", "refresh_scheduler", owner_token="legacy"
         )
+        assert released is LockOutcome.RELEASED
         handle = store.try_acquire("example-repo", operation="op", ttl_seconds=60)
         assert handle is not None
         holder = store.get_holder("example-repo")
         assert holder is not None and holder["ttl_seconds"] == 60
         store.release(handle)
+
+    def test_previous_release_process_holding_the_file_lock_reads_as_held(
+        self, tmp_path
+    ):
+        """A previous-release process holds its lock as an open BEGIN
+        IMMEDIATE transaction on the alias file (rolling restart)."""
+        conn = _previous_release_file(tmp_path / "alias_locks")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            store = _make_store(
+                tmp_path, busy_timeout_seconds=_SHORT_BUSY_TIMEOUT_SECONDS
+            )
+            assert store.is_held("example-repo") is True
+            assert store.get_holder("example-repo") is not None
+            assert store.try_acquire("example-repo", operation="op") is None
+        finally:
+            conn.execute("ROLLBACK")
+            conn.close()
+        assert store.is_held("example-repo") is False
 
 
 class TestOtherThreadsAndProcesses:
@@ -107,12 +131,18 @@ class TestOtherThreadsAndProcesses:
 
     def test_release_served_by_another_worker_process(self, tmp_path):
         store = _make_store(tmp_path)
-        assert store.try_acquire("example-repo", operation="mcp_write_mode")
+        handle = store.try_acquire("example-repo", operation="mcp_write_mode")
+        assert handle is not None
         ctx = multiprocessing.get_context("fork")
         result = ctx.Queue()
         child = ctx.Process(
             target=_release_in_child,
-            args=(str(tmp_path / "alias_locks"), "example-repo", result),
+            args=(
+                str(tmp_path / "alias_locks"),
+                "example-repo",
+                handle.owner_token,
+                result,
+            ),
         )
         child.start()
         child.join(_JOIN_TIMEOUT_SECONDS)

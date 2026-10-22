@@ -8,12 +8,15 @@ site reaches the lock through ``scheduler.acquire_write_lock()`` /
 ``scheduler.write_lock_manager.acquire/release/renew`` directly, so this one
 instance rewires all of them with no call-site changes.
 
-The DB lock is a committed, row-owned lease (``alias_lock_store/base.py``):
-this coordinator keeps NO per-process record of what it acquired. Release,
-renew and the read-only probes address the row by alias + owner name (+
-owner token when the caller passes one), so a write mode entered on one
-worker process is exited on another, and a lock released elsewhere is never
-reported as held from a stale in-memory copy. ``ttl_seconds`` is the lease,
+The DB lock is a committed, row-owned lease (``alias_lock_store/base.py``).
+Release and renew act on the row ONLY with its exact owner token: the token
+the caller passes, or the token of an acquisition THIS process made (kept in
+``_acquired_tokens``, which only ever supplies this process's own token).
+Owner names are shared across nodes ("refresh_scheduler" on every node), so
+an owner name alone never proves ownership. A release served by another
+process (write mode exited on a different worker) passes the token the
+acquirer recorded in cluster-visible state. ``is_locked``/``get_lock_info``
+read the store, never ``_acquired_tokens``. ``ttl_seconds`` is the lease,
 exactly as for the file lock.
 
 Dispatch:
@@ -22,9 +25,9 @@ Dispatch:
       take the DB lock, then re-check the file lock and roll back on a
       conflict that appeared meanwhile. Flag off: refuse while the store
       reports a live DB holder, then take the file lock.
-    - release()/renew(): the DB row first whenever a store is wired (a lock
-      taken before a flag flip is still found); only when no DB row exists
-      do they fall through to the file lock's own contract.
+    - release()/renew(): the DB row when a store is wired and an exact token
+      is known; otherwise (or when no such row exists) the file lock's own
+      contract.
     - is_locked()/get_lock_info(): held under EITHER mechanism.
 
 Cross-mechanism checks are check-then-act across two independent stores and
@@ -49,7 +52,7 @@ import threading
 import uuid
 from collections import defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, DefaultDict, Dict, Optional
+from typing import TYPE_CHECKING, Callable, DefaultDict, Dict, Optional, Tuple
 
 from .write_lock_manager import DEFAULT_LOCK_TTL_SECONDS, WriteLockManager
 
@@ -88,6 +91,9 @@ class AliasLockCoordinator:
             threading.Lock
         )
         self._alias_locks_guard = threading.Lock()
+        # ^ invariant only supplies THIS process's own acquisition token; never read for is_locked
+        self._acquired_tokens: Dict[str, Tuple[str, str]] = {}
+        self._acquired_tokens_lock = threading.Lock()
 
     def _db_backed(self) -> bool:
         return bool(self._db_backed_enabled_getter())
@@ -95,6 +101,19 @@ class AliasLockCoordinator:
     def _get_alias_lock(self, alias: str) -> threading.Lock:
         with self._alias_locks_guard:
             return self._alias_locks[alias]
+
+    def _token_for(
+        self, alias: str, owner_name: str, owner_token: Optional[str], *, pop: bool
+    ) -> Optional[str]:
+        """The exact token for (alias, owner_name): the caller's, else this
+        process's own acquisition's, else None."""
+        with self._acquired_tokens_lock:
+            recorded = self._acquired_tokens.get(alias)
+            if recorded is not None and recorded[0] == owner_name:
+                if pop and (owner_token is None or owner_token == recorded[1]):
+                    del self._acquired_tokens[alias]
+                return owner_token or recorded[1]
+        return owner_token
 
     def acquire(
         self,
@@ -163,6 +182,8 @@ class AliasLockCoordinator:
                 f"just-acquired DB lock (rollback_ok={rollback_ok})"
             )
             return False
+        with self._acquired_tokens_lock:
+            self._acquired_tokens[alias] = (owner_name, handle.owner_token)
         return True
 
     def release(
@@ -171,17 +192,18 @@ class AliasLockCoordinator:
         owner_name: str = "refresh_scheduler",
         owner_token: Optional[str] = None,
     ) -> bool:
-        """Release `alias` held by `owner_name` (and `owner_token`, when
-        given), whichever process acquired it. False on an owner mismatch,
-        True when released or not held (WriteLockManager.release()'s
-        contract)."""
-        if self._store_resolver is not None:
+        """Release `alias` held by `owner_name` under the exact token (the
+        caller's, or this process's own acquisition's). False when the row
+        belongs to another holder; True when released or not held
+        (WriteLockManager.release()'s contract)."""
+        token = self._token_for(alias, owner_name, owner_token, pop=True)
+        if self._store_resolver is not None and token is not None:
             from code_indexer.server.services.alias_lock_store.base import (
                 LockOutcome,
             )
 
             outcome = self._store_resolver().release_owned(
-                alias, owner_name, owner_token=owner_token
+                alias, owner_name, owner_token=token
             )
             if outcome is LockOutcome.RELEASED:
                 return True
@@ -202,20 +224,22 @@ class AliasLockCoordinator:
         ttl_seconds: int = DEFAULT_LOCK_TTL_SECONDS,
         owner_token: Optional[str] = None,
     ) -> bool:
-        """Extend the lease of a lock held by `owner_name`.
+        """Extend the lease of a lock held under the exact token (the
+        caller's, or this process's own acquisition's).
 
         DB row present: True when renewed; RAISES AliasLockOwnershipLostError
         when the row belongs to someone else (callers such as the temporal
-        migration heartbeat treat that as lock loss). No DB row: the file
+        migration heartbeat treat that as lock loss). Otherwise: the file
         lock's bool-returning renew()."""
-        if self._store_resolver is not None:
+        token = self._token_for(alias, owner_name, owner_token, pop=False)
+        if self._store_resolver is not None and token is not None:
             from code_indexer.server.services.alias_lock_store.base import (
                 AliasLockOwnershipLostError,
                 LockOutcome,
             )
 
             outcome = self._store_resolver().renew_owned(
-                alias, owner_name, ttl_seconds=ttl_seconds, owner_token=owner_token
+                alias, owner_name, ttl_seconds=ttl_seconds, owner_token=token
             )
             if outcome is LockOutcome.RENEWED:
                 return True

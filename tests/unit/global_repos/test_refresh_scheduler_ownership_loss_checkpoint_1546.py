@@ -120,7 +120,7 @@ class TestDbBackedModeCheckpoint:
             "myalias", owner_name="tester", owner_token="tok-1"
         )
         assert acquired is True
-        store.release_owned("myalias", "tester")
+        store.release_owned("myalias", "tester", owner_token="tok-1")
         successor = store.try_acquire("myalias", operation="other-worker")
         assert successor is not None
 

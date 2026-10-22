@@ -562,6 +562,8 @@ def lock_holder_is_stale(
     pid: Any,
     elapsed_seconds: Optional[float],
     ttl_seconds: Any,
+    *,
+    local_host: Optional[str] = None,
 ) -> bool:
     """The write-lock lease rule shared by the file lock and the DB-backed
     alias lock stores.
@@ -569,11 +571,17 @@ def lock_holder_is_stale(
     A holder is stale when its lease lapsed (``elapsed_seconds`` since the
     last acquire/renew is greater than ``ttl_seconds``; a missing or
     non-numeric TTL means ``DEFAULT_LOCK_TTL_SECONDS``), or when it was taken
-    on THIS host (``hostname`` absent or equal to the local host name) by a
-    process that no longer exists. A foreign host's PID is never checked.
-    ``elapsed_seconds=None`` (unknown) never makes a holder stale by time.
+    by THIS host's process that no longer exists. Another host's PID is never
+    checked. "This host": with ``local_host`` (the DB stores pass their
+    host+boot+PID-namespace identity) the recorded ``hostname`` must equal it
+    exactly; without it (the file lock) ``hostname`` absent or equal to the
+    local host name. ``elapsed_seconds=None`` (unknown) never makes a holder
+    stale by time.
     """
-    is_local = hostname is None or hostname == socket.gethostname()
+    if local_host is not None:
+        is_local = hostname is not None and hostname == local_host
+    else:
+        is_local = hostname is None or hostname == socket.gethostname()
     if is_local and pid is not None:
         try:
             os.kill(pid, 0)

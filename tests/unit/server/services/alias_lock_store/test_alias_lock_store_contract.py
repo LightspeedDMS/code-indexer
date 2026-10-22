@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import socket
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -19,6 +20,7 @@ import pytest
 from code_indexer.server.services.alias_lock_store.base import (
     AliasLockOwnershipLostError,
     LockOutcome,
+    local_holder_identity,
 )
 from code_indexer.server.services.alias_lock_store.sqlite_store import (
     SqliteAliasLockStore,
@@ -27,6 +29,8 @@ from code_indexer.server.services.alias_lock_store.sqlite_store import (
 MakeStore = Callable[[], Any]
 _FOREIGN_HOST = "foreign-host.example.com"
 _CHILD_TIMEOUT_SECONDS = 30
+_LONG_TTL_SECONDS = 3600
+_DAY_TTL_SECONDS = 86400
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
@@ -109,9 +113,6 @@ class TestAcquireRelease:
         assert make_store().is_held(key) is True
         holder.release(handle)
         assert make_store().is_held(key) is False
-        again = make_store().try_acquire(key, operation="op")
-        assert again is not None
-        again._store.release(again)
 
     def test_different_keys_are_independent(self, make_store: MakeStore):
         store = make_store()
@@ -121,20 +122,27 @@ class TestAcquireRelease:
         store.release(a)
         store.release(b)
 
+
+class TestExactTokenOwnership:
     def test_release_owned_reports_each_outcome(self, make_store: MakeStore, key: str):
         store = make_store()
-        assert store.release_owned(key, "op") is LockOutcome.NOT_HELD
+        assert store.release_owned(key, "op", owner_token="t1") is LockOutcome.NOT_HELD
         assert store.try_acquire(key, operation="op", owner_token="t1") is not None
-        assert store.release_owned(key, "other") is LockOutcome.OWNER_MISMATCH
+        assert (
+            store.release_owned(key, "other", owner_token="t1")
+            is LockOutcome.OWNER_MISMATCH
+        )
         assert (
             store.release_owned(key, "op", owner_token="t2")
             is LockOutcome.OWNER_MISMATCH
         )
-        assert make_store().release_owned(key, "op") is LockOutcome.RELEASED
+        assert store.is_held(key) is True
+        assert (
+            make_store().release_owned(key, "op", owner_token="t1")
+            is LockOutcome.RELEASED
+        )
 
-
-class TestOwnershipLoss:
-    def test_wrong_token_release_raises_and_lock_stays_held(
+    def test_wrong_token_release_and_renew_raise_and_lock_stays_held(
         self, make_store: MakeStore, key: str
     ):
         store = make_store()
@@ -142,53 +150,27 @@ class TestOwnershipLoss:
         assert handle is not None
         real = handle.owner_token
         handle.owner_token = "not-the-real-token"
+        with pytest.raises(AliasLockOwnershipLostError):
+            store.renew(handle)
         with pytest.raises(AliasLockOwnershipLostError):
             store.release(handle)
         assert store.is_held(key) is True
         assert store.release_owned(key, "op", owner_token=real) is LockOutcome.RELEASED
 
-    def test_wrong_token_renew_raises_and_lock_stays_held(
+    def test_release_and_renew_after_another_worker_released_raise(
         self, make_store: MakeStore, key: str
     ):
         store = make_store()
         handle = store.try_acquire(key, operation="op")
         assert handle is not None
-        real = handle.owner_token
-        handle.owner_token = "not-the-real-token"
-        with pytest.raises(AliasLockOwnershipLostError):
-            store.renew(handle)
-        assert store.is_held(key) is True
-        handle.owner_token = real
-        store.renew(handle)
-        store.release(handle)
-
-    def test_release_after_another_worker_released_raises(
-        self, make_store: MakeStore, key: str
-    ):
-        store = make_store()
-        handle = store.try_acquire(key, operation="op")
-        assert handle is not None
-        assert make_store().release_owned(key, "op") is LockOutcome.RELEASED
+        assert (
+            make_store().release_owned(key, "op", owner_token=handle.owner_token)
+            is LockOutcome.RELEASED
+        )
         with pytest.raises(AliasLockOwnershipLostError):
             store.renew(handle)
         with pytest.raises(AliasLockOwnershipLostError):
             store.release(handle)
-
-    def test_with_block_cleanup_failure_chains_the_body_exception(
-        self, make_store: MakeStore, key: str
-    ):
-        store = make_store()
-        handle = store.try_acquire(key, operation="op")
-        assert handle is not None
-
-        class _BodyError(Exception):
-            pass
-
-        with pytest.raises(AliasLockOwnershipLostError) as exc_info:
-            with handle:
-                make_store().release_owned(key, "op")
-                raise _BodyError("body raised before cleanup also failed")
-        assert isinstance(exc_info.value.__context__, _BodyError)
 
 
 class TestContextManager:
@@ -201,7 +183,6 @@ class TestContextManager:
         with handle:
             assert store.is_held(key)
         assert not store.is_held(key)
-
         handle = store.try_acquire(key, operation="op")
         assert handle is not None
         with pytest.raises(ValueError):
@@ -209,74 +190,91 @@ class TestContextManager:
                 raise ValueError("body")
         assert not store.is_held(key)
 
-    def test_entering_released_handle_raises(self, make_store: MakeStore, key: str):
+    def test_cleanup_failure_chains_the_body_exception(
+        self, make_store: MakeStore, key: str
+    ):
         store = make_store()
         handle = store.try_acquire(key, operation="op")
         assert handle is not None
-        store.release(handle)
-        with pytest.raises(RuntimeError):
-            with handle:
-                pass
 
-    def test_release_inside_body_then_exit_is_a_no_op(
+        class _BodyError(Exception):
+            pass
+
+        with pytest.raises(AliasLockOwnershipLostError) as exc_info:
+            with handle:
+                make_store().release_owned(key, "op", owner_token=handle.owner_token)
+                raise _BodyError("body raised before cleanup also failed")
+        assert isinstance(exc_info.value.__context__, _BodyError)
+
+    def test_released_or_storeless_handles_refuse_the_with_block(
         self, make_store: MakeStore, key: str
     ):
         store = make_store()
         handle = store.try_acquire(key, operation="op")
         assert handle is not None
         with handle:
-            store.release(handle)
-
-    def test_handle_without_store_raises_on_exit(self, make_store: MakeStore, key: str):
-        store = make_store()
-        handle = store.try_acquire(key, operation="op")
-        assert handle is not None
-        handle._store = None
+            store.release(handle)  # early release inside the body: exit no-ops
         with pytest.raises(RuntimeError):
             with handle:
                 pass
-        store.release_owned(key, "op")
+        storeless = store.try_acquire(key, operation="op")
+        assert storeless is not None
+        token = storeless.owner_token
+        storeless._store = None
+        with pytest.raises(RuntimeError):
+            with storeless:
+                pass
+        assert store.release_owned(key, "op", owner_token=token) is LockOutcome.RELEASED
 
 
 class TestLease:
-    def test_dead_local_holder_is_taken_over_immediately(
+    def test_dead_holder_with_this_process_identity_is_taken_over(
         self, make_store: MakeStore, key: str
     ):
-        import socket
-
         store = make_store()
-        assert store.try_acquire(key, operation="op", ttl_seconds=3600) is not None
-        _rewrite_holder(store, key, hostname=socket.gethostname(), pid=_dead_pid())
+        assert store.try_acquire(key, operation="op", ttl_seconds=_LONG_TTL_SECONDS)
+        _rewrite_holder(store, key, hostname=local_holder_identity(), pid=_dead_pid())
 
         survivor = make_store()
         assert survivor.is_held(key) is False
         assert survivor.get_holder(key) is None
         taken = survivor.try_acquire(key, operation="successor")
         assert taken is not None
-        assert survivor.get_holder(key)["owner"] == "successor"
+        holder = survivor.get_holder(key)
+        assert holder is not None and holder["owner"] == "successor"
         survivor.release(taken)
 
-    def test_foreign_host_holder_is_kept_until_its_lease_lapses(
-        self, make_store: MakeStore, key: str
+    @pytest.mark.parametrize(
+        "identity", [_FOREIGN_HOST, socket.gethostname()], ids=["foreign", "same-name"]
+    )
+    def test_holder_of_another_identity_is_kept_until_its_lease_lapses(
+        self, make_store: MakeStore, key: str, identity: str
     ):
+        """A bare host name may be shared by another container or host with
+        its own PID namespace: its PIDs are never checked here."""
         store = make_store()
-        assert store.try_acquire(key, operation="op", ttl_seconds=3600) is not None
-        # ^ why a dead pid on a foreign host => liveness is never checked cross-host
-        _rewrite_holder(store, key, hostname=_FOREIGN_HOST, pid=_dead_pid())
+        handle = store.try_acquire(key, operation="op", ttl_seconds=_LONG_TTL_SECONDS)
+        assert handle is not None
+        _rewrite_holder(store, key, hostname=identity, pid=_dead_pid())
         assert make_store().is_held(key) is True
         assert make_store().try_acquire(key, operation="successor") is None
-        assert store.release_owned(key, "op") is LockOutcome.RELEASED
+        store.release(handle)
 
     def test_renew_never_shortens_the_lease(self, make_store: MakeStore, key: str):
         store = make_store()
-        assert store.try_acquire(key, operation="op", ttl_seconds=86400) is not None
-        assert store.renew_owned(key, "op", ttl_seconds=60) is LockOutcome.RENEWED
-        assert store.get_holder(key)["ttl_seconds"] == 86400
-        assert store.renew_owned(key, "op", ttl_seconds=90000) is LockOutcome.RENEWED
-        assert store.get_holder(key)["ttl_seconds"] == 90000
-        assert store.renew_owned(key, "other") is LockOutcome.OWNER_MISMATCH
-        assert store.release_owned(key, "op") is LockOutcome.RELEASED
-        assert store.renew_owned(key, "op") is LockOutcome.NOT_HELD
+        assert store.try_acquire(
+            key, operation="op", owner_token="t1", ttl_seconds=_DAY_TTL_SECONDS
+        )
+        renew = store.renew_owned
+        assert renew(key, "op", owner_token="t1", ttl_seconds=60) is LockOutcome.RENEWED
+        holder = store.get_holder(key)
+        assert holder is not None and holder["ttl_seconds"] == _DAY_TTL_SECONDS
+        assert renew(key, "op", owner_token="t1", ttl_seconds=_DAY_TTL_SECONDS + 1)
+        holder = store.get_holder(key)
+        assert holder is not None and holder["ttl_seconds"] == _DAY_TTL_SECONDS + 1
+        assert renew(key, "op", owner_token="t2") is LockOutcome.OWNER_MISMATCH
+        assert store.release_owned(key, "op", owner_token="t1") is LockOutcome.RELEASED
+        assert renew(key, "op", owner_token="t1") is LockOutcome.NOT_HELD
 
     def test_ttl_must_be_positive(self, make_store: MakeStore, key: str):
         with pytest.raises(ValueError):

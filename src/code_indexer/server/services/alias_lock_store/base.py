@@ -16,9 +16,11 @@ identity -- never by the database session that inserted it.
       holder process on THIS host is gone. Default lease
       ``DEFAULT_LOCK_TTL_SECONDS``; callers guarding long work pass a longer
       ``ttl_seconds`` or renew, exactly as with the file lock.
-    - Release: by owner (``release_owned``), from ANY process -- a write
-      mode entered on one worker is exited on another. An owner-name (or,
-      when given, owner-token) mismatch is refused, like the file lock.
+    - Release/renew: by the EXACT owner token plus operation
+      (``release_owned``/``renew_owned``), from whichever process holds the
+      token -- e.g. a write mode exited on another worker, which reads the
+      token the enter recorded. Owner names are shared across nodes, so a
+      name alone never releases or renews anything.
     - Renew: extends the lease (``last_renewed_at = now``); never shortens
       the TTL recorded at acquire.
 
@@ -33,9 +35,31 @@ per-alias files), ``postgres_store.PostgresAliasLockStore`` (cluster).
 from __future__ import annotations
 
 import enum
+import functools
+import os
+import socket
 import threading
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Protocol
+
+
+@functools.lru_cache(maxsize=1)
+def local_holder_identity() -> str:
+    """Identity under which a holder's PID is meaningful: host name, kernel
+    boot id and PID namespace. Two containers sharing a host name (or one
+    host after a reboot) get different identities, so a PID is only ever
+    checked inside the namespace that issued it. When the ids cannot be
+    read, the identity is unique to this process: PID liveness is then never
+    applied to its locks, which fall back to their lease alone."""
+    hostname = socket.gethostname()
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+            boot_id = handle.read().strip()
+        pid_namespace = os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return f"{hostname}|unidentified|{uuid.uuid4().hex}"
+    return f"{hostname}|{boot_id}|{pid_namespace}"
 
 
 class AliasLockOwnershipLostError(RuntimeError):
@@ -176,21 +200,23 @@ class AliasLockStore(Protocol):
         ...
 
     def release_owned(
-        self, lock_key: str, operation: str, owner_token: Optional[str] = None
+        self, lock_key: str, operation: str, *, owner_token: str
     ) -> LockOutcome:
-        """Delete the row when its operation (and owner_token, when given)
-        match. RELEASED, NOT_HELD (no row) or OWNER_MISMATCH."""
+        """Delete the row when BOTH its operation and its exact owner_token
+        match (an owner name alone never proves ownership). RELEASED,
+        NOT_HELD (no row) or OWNER_MISMATCH."""
         ...
 
     def renew_owned(
         self,
         lock_key: str,
         operation: str,
+        *,
+        owner_token: str,
         ttl_seconds: Optional[int] = None,
-        owner_token: Optional[str] = None,
     ) -> LockOutcome:
-        """Restart the lease of a matching row. RENEWED, NOT_HELD or
-        OWNER_MISMATCH."""
+        """Restart the lease of the row with this operation AND exact
+        owner_token. RENEWED, NOT_HELD or OWNER_MISMATCH."""
         ...
 
     def is_held(self, lock_key: str) -> bool:

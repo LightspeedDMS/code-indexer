@@ -94,7 +94,8 @@ def test_real_ownership_loss_marks_lock_loss_signal(tmp_path, monkeypatch):
         resolver = scheduler.write_lock_manager._store_resolver
         assert resolver is not None
         store = resolver()
-        store.release_owned(bare_alias, MIGRATION_OWNER_NAME)
+        token = scheduler.write_lock_manager._acquired_tokens[bare_alias][1]
+        store.release_owned(bare_alias, MIGRATION_OWNER_NAME, owner_token=token)
         assert store.try_acquire(bare_alias, operation="other-worker") is not None
         lock_taken_over.set()
 

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import logging
 import os
-import socket
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -30,7 +29,13 @@ from code_indexer.global_repos.write_lock_manager import (
     lock_holder_is_stale,
 )
 
-from .base import AliasLockHandle, LockOutcome, release_handle, renew_handle
+from .base import (
+    AliasLockHandle,
+    LockOutcome,
+    local_holder_identity,
+    release_handle,
+    renew_handle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,12 +129,16 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 def _holder_is_stale(row: _HolderRow) -> bool:
     _token, _operation, hostname, pid, ttl_seconds, _acquired, elapsed = row
     return lock_holder_is_stale(
-        hostname, pid, float(elapsed) if elapsed is not None else None, ttl_seconds
+        hostname,
+        pid,
+        float(elapsed) if elapsed is not None else None,
+        ttl_seconds,
+        local_host=local_holder_identity(),
     )
 
 
-def _owner_matches(row: _HolderRow, operation: str, owner_token: Optional[str]) -> bool:
-    return row[1] == operation and (owner_token is None or row[0] == owner_token)
+def _owner_matches(row: _HolderRow, operation: str, owner_token: str) -> bool:
+    return row[1] == operation and row[0] == owner_token
 
 
 class SqliteAliasLockStore:
@@ -189,7 +198,7 @@ class SqliteAliasLockStore:
         operation = _validate_non_empty_str(operation, "operation")
         ttl = _validate_ttl(ttl_seconds)
         token = owner_token or str(uuid.uuid4())
-        holder = (socket.gethostname(), os.getpid())
+        holder = (local_holder_identity(), os.getpid())
         try:
             with self._transaction(lock_key) as conn:
                 current = conn.execute(_SELECT_HOLDER_SQL, (lock_key,)).fetchone()
@@ -217,7 +226,7 @@ class SqliteAliasLockStore:
         )
 
     def release_owned(
-        self, lock_key: str, operation: str, owner_token: Optional[str] = None
+        self, lock_key: str, operation: str, *, owner_token: str
     ) -> LockOutcome:
         lock_key = _validate_non_empty_str(lock_key, "lock_key")
         with self._transaction(lock_key) as conn:
@@ -236,8 +245,9 @@ class SqliteAliasLockStore:
         self,
         lock_key: str,
         operation: str,
+        *,
+        owner_token: str,
         ttl_seconds: Optional[int] = None,
-        owner_token: Optional[str] = None,
     ) -> LockOutcome:
         lock_key = _validate_non_empty_str(lock_key, "lock_key")
         ttl = _validate_ttl(ttl_seconds)
@@ -264,8 +274,14 @@ class SqliteAliasLockStore:
 
     def _live_holder(self, lock_key: str) -> Optional[_HolderRow]:
         lock_key = _validate_non_empty_str(lock_key, "lock_key")
-        with self._transaction(lock_key) as conn:
-            current = conn.execute(_SELECT_HOLDER_SQL, (lock_key,)).fetchone()
+        try:
+            with self._transaction(lock_key) as conn:
+                current = conn.execute(_SELECT_HOLDER_SQL, (lock_key,)).fetchone()
+        except sqlite3.OperationalError as exc:
+            if not _is_lock_contention_error(exc):
+                raise
+            # ^ why a previous-release process holds BEGIN IMMEDIATE for its whole hold
+            return ("", "unknown", None, None, None, None, None)
         if current is None or _holder_is_stale(current):
             return None
         return tuple(current)  # type: ignore[return-value]
@@ -282,7 +298,9 @@ class SqliteAliasLockStore:
             "owner": operation,
             "pid": pid,
             "hostname": hostname,
-            "acquired_at": f"{str(acquired_at).replace(' ', 'T')}+00:00",
+            "acquired_at": (
+                f"{str(acquired_at).replace(' ', 'T')}+00:00" if acquired_at else None
+            ),
             "ttl_seconds": ttl_seconds,
             "db_backed": True,
         }
