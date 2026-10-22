@@ -129,9 +129,10 @@ async function bulkToggle(control) {
     try {
         var names = toChange.map(function (cell) { return cell.dataset.repo; });
         var data = await _postBulkChange(groupId, action, names);
-        var changed = new Set(data.changed || []);
+        //^ why unchanged = already in target state (concurrent change) => show the truth
+        var inTarget = new Set((data.changed || []).concat(data.unchanged || []));
         toChange.forEach(function (cell) {
-            if (changed.has(cell.dataset.repo)) _setAccessCell(cell, targetState);
+            if (inTarget.has(cell.dataset.repo)) _setAccessCell(cell, targetState);
         });
         var rejected = data.rejected || [];
         if (rejected.length > 0) {

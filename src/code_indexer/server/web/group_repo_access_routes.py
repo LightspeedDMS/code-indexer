@@ -87,12 +87,19 @@ def _apply_bulk_change(
             rejected.append({"repo_name": name, "reason": _REASON_UNKNOWN})
         else:
             valid.append(name)
-    if action == "grant":
-        changed = group_manager.grant_repos_access_audited(valid, group_id, actor=actor)
-    else:
-        changed = group_manager.revoke_repos_access_audited_aliases(
-            valid, group_id, actor=actor
-        )
+    from code_indexer.server.services.group_access_manager import GroupNotFoundError
+
+    try:
+        if action == "grant":
+            changed = group_manager.grant_repos_access_audited(
+                valid, group_id, actor=actor
+            )
+        else:
+            changed = group_manager.revoke_repos_access_audited_aliases(
+                valid, group_id, actor=actor
+            )
+    except GroupNotFoundError:
+        raise _BulkRefused(404, "Group not found")
     changed_set = set(changed)
     return {
         "success": True,

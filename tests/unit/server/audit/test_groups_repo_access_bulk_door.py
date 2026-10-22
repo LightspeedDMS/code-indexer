@@ -185,6 +185,19 @@ class TestRefusals:
     def test_unknown_group_is_not_found(self, door) -> None:
         self._refused(door, door.post(_body(door, "grant", _REPOS, 987654)), 404)
 
+    def test_group_deleted_mid_request_is_not_found(self, door, monkeypatch) -> None:
+        groups = door.groups
+        original = groups.grant_repos_access_audited
+
+        def delete_then_grant(names, group_id, *, actor):  # type: ignore[no-untyped-def]
+            # The group disappears after the route's own lookup.
+            groups.remove_user_from_group(_MEMBER, group_id)
+            groups.delete_group(group_id)
+            return original(names, group_id, actor=actor)
+
+        monkeypatch.setattr(groups, "grant_repos_access_audited", delete_then_grant)
+        self._refused(door, door.post(_body(door, "grant", _REPOS)), 404)
+
     @pytest.mark.parametrize(
         "body",
         [

@@ -332,21 +332,30 @@ def scenario_bulk_grant(ctx: SimpleNamespace) -> None:
     page: Page = ctx.page
     page.click("tr.category-group-header:has-text('Platform')")
     expected = [a for a in ctx.team_b if a not in ctx.plat and a not in PRE_GRANTED]
-    before = _audited(ctx, "repo_access_grant", expected)
+    raced = expected[0]
+    by_bulk = expected[1:]
+    before = _audited(ctx, "repo_access_grant", by_bulk)
     message = bulk_with_dialog(ctx, "grant", accept=False)
     question = f"Grant {len(expected)} repositories to {GROUP}?"
     check("S3 dialog names the count and group", message == question, message)
     check("S3 cancel sends no request", ctx.bodies == [], ctx.bodies)
     states = [cell_state(page, a, ctx.group_id) for a in expected]
     check("S3 cancel changes nothing", set(states) == {"denied"}, states)
+    ctx.client.post(
+        f"/api/v1/groups/{ctx.group_id}/repos",
+        json={"repos": [raced]},
+        headers=ctx.admin,
+    ).raise_for_status()
     bulk_with_dialog(ctx, "grant", accept=True)
+    raced_state = cell_state(page, raced, ctx.group_id)
+    check("S3 concurrently granted cell shows Yes", raced_state == "granted")
     states = [cell_state(page, a, ctx.group_id) for a in expected]
     check("S3 confirmed rows show Yes", set(states) == {"granted"}, states)
     plat = [cell_state(page, a, ctx.group_id) for a in ctx.plat]
     unchanged = ["granted" if a in PRE_GRANTED else "denied" for a in ctx.plat]
     check("S3 collapsed rows untouched", plat == unchanged, plat)
-    added = _audited(ctx, "repo_access_grant", expected) - before
-    check("S3 one grant audit row per repository", added == len(expected), added)
+    added = _audited(ctx, "repo_access_grant", by_bulk) - before
+    check("S3 one grant audit row per repository", added == len(by_bulk), added)
     sees = _member_sees(ctx)
     check("S3 member now sees the granted repos", set(expected) <= set(sees), sees)
 
