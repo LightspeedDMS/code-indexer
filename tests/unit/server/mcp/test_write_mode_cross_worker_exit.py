@@ -428,3 +428,33 @@ class TestFileWriteRequiresLockOwnership:
 
         assert result["success"] is False
         assert not (golden_repos_dir / _ALIAS / "x.md").exists()
+
+
+class TestExitReleasesBeforeRemovingTheMarker:
+    def test_release_that_raises_keeps_the_marker_and_reports_failure(
+        self, golden_repos_dir: Path, make_store
+    ) -> None:
+        assert _call(
+            "handle_enter_write_mode",
+            _Worker(golden_repos_dir, make_store()),
+            golden_repos_dir,
+        )["success"]
+        original = make_store()
+
+        class ReleaseFails(type(original)):  # type: ignore[misc]
+            def release_owned(self, *args: Any, **kwargs: Any) -> Any:
+                raise sqlite3.OperationalError("disk I/O error")
+
+        source = (
+            original._lock_dir
+            if isinstance(original, SqliteAliasLockStore)
+            else original._dsn
+        )
+        exit_worker = _Worker(golden_repos_dir, ReleaseFails(source))
+
+        result = _call("handle_exit_write_mode", exit_worker, golden_repos_dir)
+
+        assert result["success"] is False
+        assert (golden_repos_dir / ".write_mode" / f"{_ALIAS}.json").exists()
+        assert _Worker(golden_repos_dir, original).write_lock_manager.is_locked(_ALIAS)
+        assert exit_worker.refreshed == []

@@ -125,17 +125,22 @@ def finish_write_mode(
     alias: str,
     stop_watch: Callable[[str], None],
 ) -> Dict[str, Any]:
-    """End write mode: remove the marker, stop its auto-watch, release the
-    lock with the marker's token and refresh. Returns the response payload;
-    a release that cannot be done or is refused, or a failed refresh, is an
-    error -- never reported as a completed refresh."""
+    """End write mode: release the lock with the marker's token, then remove
+    the marker, stop its auto-watch and refresh. The marker is removed only
+    after a confirmed release (a marker without a usable token is dropped);
+    a release that fails or is refused, or a failed refresh, is an error --
+    never reported as a completed refresh."""
     marker, problem = read_marker(golden_repos_dir, alias)
-    marker_path(golden_repos_dir, alias).unlink(missing_ok=True)
     source_path = marker.get("source_path") if marker else None
-    if source_path:
-        stop_watch(source_path)
+
+    def drop_marker() -> None:
+        marker_path(golden_repos_dir, alias).unlink(missing_ok=True)
+        if source_path:
+            stop_watch(source_path)
+
     token = marker.get("owner_token") if marker else None
     if not isinstance(token, str) or not token:
+        drop_marker()
         reason = problem or "write-mode marker carries no lock token"
         logger.warning(
             "exit_write_mode for %s: %s; its write lock is released only when "
@@ -144,9 +149,22 @@ def finish_write_mode(
             reason,
         )
         return {"success": False, "error": f"{reason}; write lock not released"}
-    if not refresh_scheduler.release_write_lock(
-        alias, owner_name=WRITE_MODE_OWNER, owner_token=token
-    ):
+    try:
+        released = refresh_scheduler.release_write_lock(
+            alias, owner_name=WRITE_MODE_OWNER, owner_token=token
+        )
+    except Exception as exc:
+        logger.warning("exit_write_mode for %s: release failed: %s", repo_alias, exc)
+        return {
+            "success": False,
+            "error": (
+                f"releasing the write lock failed ({type(exc).__name__}: {exc}); "
+                f"write mode is still active, call exit_write_mode again"
+            ),
+        }
+    if released:
+        drop_marker()
+    else:
         return {
             "success": False,
             "error": (
