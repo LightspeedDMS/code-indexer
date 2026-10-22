@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from unittest.mock import MagicMock
 
 import pytest
@@ -38,6 +39,25 @@ def source(tmp_path: Path) -> Path:
     return root
 
 
+_NEEDS_NON_ROOT = pytest.mark.skipif(
+    os.geteuid() == 0, reason="root lists a directory without read permission"
+)
+
+
+@contextlib.contextmanager
+def _unlistable_dir(source: Path) -> Iterator[Path]:
+    """A source directory that cannot be listed (no read permission): a
+    genuinely unreadable entry, unlike a broken link."""
+    locked = source / "locked"
+    locked.mkdir()
+    (locked / "hidden-from-listing.md").write_text("x\n")
+    locked.chmod(0o300)
+    try:
+        yield locked
+    finally:
+        locked.chmod(0o755)
+
+
 def _publish(source: Path, name: str = "v_1000") -> Path:
     """Record the manifest as a refresh does, then snapshot the source."""
     record_source_manifest(str(source), None)
@@ -62,10 +82,18 @@ class TestListSource:
         assert sorted(listing.files) == ["memories/a.md", "repo-one.md"]
         assert listing.unreadable == ()
 
-    def test_dangling_symlink_is_reported_unreadable(self, source: Path) -> None:
+    def test_dangling_symlink_is_absent(self, source: Path) -> None:
         (source / "gone.md").symlink_to(source / "missing-target.md")
 
-        assert list_source(str(source)).unreadable == ("gone.md",)
+        listing = list_source(str(source))
+
+        assert "gone.md" not in listing.files
+        assert listing.unreadable == ()
+
+    @_NEEDS_NON_ROOT
+    def test_unlistable_directory_is_reported_unreadable(self, source: Path) -> None:
+        with _unlistable_dir(source):
+            assert list_source(str(source)).unreadable == ("locked",)
 
 
 class TestSourceChangeReason:
@@ -102,11 +130,11 @@ class TestSourceChangeReason:
 
         assert reason is not None and "removed" in reason
 
+    @_NEEDS_NON_ROOT
     def test_unreadable_entry_is_a_change(self, source: Path) -> None:
         snapshot = _publish(source)
-        (source / "gone.md").symlink_to(source / "missing-target.md")
-
-        reason = source_change_reason(str(snapshot), str(source))
+        with _unlistable_dir(source):
+            reason = source_change_reason(str(snapshot), str(source))
 
         assert reason is not None and "could not be read" in reason
 
@@ -168,13 +196,14 @@ class TestRacilyCleanEntries:
 
 
 class TestRecordSourceManifest:
+    @_NEEDS_NON_ROOT
     def test_incomplete_listing_fails_and_records_nothing(self, source: Path) -> None:
         snapshot = _publish(source)
         recorded = (source / MANIFEST_RELATIVE_PATH).read_bytes()
-        (source / "gone.md").symlink_to(source / "missing-target.md")
 
-        with pytest.raises(IncompleteSourceListingError, match="gone.md"):
-            record_source_manifest(str(source), str(snapshot))
+        with _unlistable_dir(source):
+            with pytest.raises(IncompleteSourceListingError, match="locked"):
+                record_source_manifest(str(source), str(snapshot))
 
         assert (source / MANIFEST_RELATIVE_PATH).read_bytes() == recorded
 

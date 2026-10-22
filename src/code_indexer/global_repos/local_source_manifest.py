@@ -17,8 +17,10 @@ granularity). Such entries are recorded as racy and count as changed at the
 next check; that refresh records them again, later, and converges. The tick
 is judged on the filesystem's own clock: a file created just before listing.
 
-Hidden files and directories (leading ``.``) are not repository content, and
-symlinked directories are not followed (the indexer descends into neither).
+Hidden files and directories (leading ``.``) are not repository content,
+symlinked directories are not followed and a dangling symlink is absent
+(the indexer descends into none of them); any other entry that cannot be
+listed or stat'ed is unreadable.
 """
 
 from __future__ import annotations
@@ -86,6 +88,12 @@ def list_source(root: str) -> SourceListing:
                         pending.append(rel)
                     continue
                 stat = entry.stat()
+            except FileNotFoundError as exc:
+                if entry.is_symlink():
+                    continue  # dangling link: not content, the indexer skips it
+                unreadable.append(rel)
+                logger.warning(f"Cannot stat {entry.path}: {exc}")
+                continue
             except OSError as exc:
                 unreadable.append(rel)
                 logger.warning(f"Cannot stat {entry.path}: {exc}")
