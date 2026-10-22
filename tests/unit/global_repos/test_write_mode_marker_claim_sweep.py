@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock
 
 from code_indexer.global_repos.cleanup_manager import CleanupManager
@@ -54,3 +55,30 @@ class TestLeftoverClaimSweep:
 
         assert not aged.exists()
         assert fresh.exists()
+
+
+class TestClaimAgeCountsFromTheClaim:
+    def test_sweep_during_a_claim_keeps_the_marker_to_restore(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from code_indexer.global_repos import write_mode_marker_cleanup as cleanup
+
+        write_mode_dir = tmp_path / ".write_mode"
+        write_mode_dir.mkdir()
+        marker = write_mode_dir / "example-repo.json"
+        marker.write_text('{"owner_token": "newer-session"}')
+        old = time.time() - 2 * WRITE_MODE_MARKER_TTL_SECONDS
+        os.utime(marker, (old, old))
+        real_link = os.link
+
+        def sweep_then_link(src: Any, dst: Any) -> None:
+            # ^ why a sweep in another process lands between the claim and the restore
+            cleanup.sweep_leftover_claims(write_mode_dir, WRITE_MODE_MARKER_TTL_SECONDS)
+            real_link(src, dst)
+
+        monkeypatch.setattr(cleanup.os, "link", sweep_then_link)
+
+        removed = cleanup._remove_if_unchanged(marker, '{"owner_token": "evaluated"}')
+
+        assert removed is False
+        assert marker.read_text() == '{"owner_token": "newer-session"}'

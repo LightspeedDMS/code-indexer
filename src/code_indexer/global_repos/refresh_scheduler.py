@@ -1795,36 +1795,10 @@ class RefreshScheduler:
             force: startup: skip only the marker-age filter. Otherwise only
                 markers older than WRITE_MODE_MARKER_TTL_SECONDS are considered.
         """
-        write_mode_dir = self.golden_repos_dir / ".write_mode"
-        if not write_mode_dir.exists():
-            return
+        from .write_mode_marker_cleanup import cleanup_write_mode_markers
 
-        for marker_path in write_mode_dir.glob("*.json"):
-            alias = marker_path.stem  # filename without .json
-            try:
-                self._cleanup_single_write_mode_marker(marker_path, alias, force)
-            except Exception as exc:
-                # Never let a single marker failure crash the scheduler
-                logger.warning(
-                    f"Unexpected error cleaning write mode marker {marker_path.name}: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-        from .write_mode_marker_cleanup import sweep_leftover_claims
-
-        sweep_leftover_claims(write_mode_dir, WRITE_MODE_MARKER_TTL_SECONDS)
-
-    def _cleanup_single_write_mode_marker(
-        self, marker_path: Path, alias: str, force: bool
-    ) -> None:
-        """Release a gone holder's write-mode lock and remove its marker; a live
-        holder keeps both (see write_mode_marker_cleanup). The release
-        re-checks staleness atomically, so a lease renewed after the check
-        survives."""
-        from .write_mode_marker_cleanup import cleanup_write_mode_marker
-
-        cleanup_write_mode_marker(
-            marker_path,
-            alias,
+        cleanup_write_mode_markers(
+            self.golden_repos_dir / ".write_mode",
             force=force,
             ttl_seconds=WRITE_MODE_MARKER_TTL_SECONDS,
             is_locked=self.is_write_locked,

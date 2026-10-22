@@ -53,6 +53,11 @@ def _remove_if_unchanged(marker_path: Path, evaluated: str) -> bool:
     except FileNotFoundError:
         return False
     try:
+        # ^ why sweep_leftover_claims ages a claim from the claim, not from the marker's write
+        os.utime(claimed)
+    except OSError as exc:
+        logger.warning(f"Could not touch marker claim {claimed.name}: {exc}")
+    try:
         if claimed.read_text() == evaluated:
             return True
         try:
@@ -119,3 +124,33 @@ def cleanup_write_mode_marker(
         logger.info(
             f"Cleaned up write mode marker {marker_path.name} (alias={alias!r})"
         )
+
+
+def cleanup_write_mode_markers(
+    write_mode_dir: Path,
+    *,
+    force: bool,
+    ttl_seconds: float,
+    is_locked: Callable[[str], bool],
+    release: Callable[..., Any],
+) -> None:
+    """Clean every marker in ``write_mode_dir`` (one failure never stops the
+    sweep), then remove leftover claims."""
+    if not write_mode_dir.exists():
+        return
+    for marker_path in write_mode_dir.glob("*.json"):
+        try:
+            cleanup_write_mode_marker(
+                marker_path,
+                marker_path.stem,
+                force=force,
+                ttl_seconds=ttl_seconds,
+                is_locked=is_locked,
+                release=release,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Unexpected error cleaning write mode marker {marker_path.name}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+    sweep_leftover_claims(write_mode_dir, ttl_seconds)
