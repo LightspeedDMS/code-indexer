@@ -57,6 +57,12 @@ def _foreign_machine() -> str:
     return "|".join([host, _OTHER_BOOT, namespace, _OTHER_MACHINE])
 
 
+def _cloned_machine() -> str:
+    # ^ why VMs cloned from one template (or one image) can share a machine id
+    _host, _boot, namespace, machine = _fields()
+    return "|".join(["clone-host.example.com", _OTHER_BOOT, namespace, machine])
+
+
 def _legacy_previous_boot() -> str:
     host, _boot, namespace, _machine = _fields()
     return "|".join([host, _OTHER_BOOT, namespace])
@@ -121,6 +127,14 @@ class TestEarlierBootHolder:
         if kind == "sqlite":
             pytest.skip("SQLite lock files are node-local: no other machine")
         assert _held_by(make_store, _foreign_machine()) is None
+
+    def test_cloned_machine_id_on_another_host_keeps_its_lease(
+        self, backend: Backend
+    ) -> None:
+        kind, make_store = backend
+        if kind == "sqlite":
+            pytest.skip("SQLite lock files are node-local: no other host")
+        assert _held_by(make_store, _cloned_machine()) is None
 
     def test_row_without_a_machine_id(self, backend: Backend) -> None:
         kind, make_store = backend

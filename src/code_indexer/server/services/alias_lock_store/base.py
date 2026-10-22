@@ -81,7 +81,8 @@ def holder_from_earlier_boot(recorded: Optional[str], *, node_local: bool) -> bo
     """True when ``recorded`` (a holder identity) is provably an earlier boot
     of THIS machine, so none of its processes can still be running. A
     node-local store only ever holds this machine's rows, so a different
-    boot id is enough; a shared store also needs the same machine id. An
+    boot id is enough; a shared store also needs the same host name AND
+    machine id (cloned VMs and images can duplicate a machine id). An
     unreadable id, or a row without a machine id in a shared store, proves
     nothing."""
     if not recorded:
@@ -94,7 +95,12 @@ def holder_from_earlier_boot(recorded: Optional[str], *, node_local: bool) -> bo
         return False
     if node_local:
         return True
-    return len(theirs) == 4 and len(mine) == 4 and theirs[3] == mine[3]
+    return (
+        len(theirs) == 4
+        and len(mine) == 4
+        and theirs[0] == mine[0]
+        and theirs[3] == mine[3]
+    )
 
 
 class AliasLockOwnershipLostError(RuntimeError):
