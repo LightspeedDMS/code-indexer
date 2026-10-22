@@ -141,6 +141,8 @@ class FileCRUDService:
         # Golden repos directory for write-mode marker lookup (Story #231).
         # Set at startup via set_golden_repos_dir() or directly via _golden_repos_dir.
         self._golden_repos_dir: Optional[Path] = None
+        # ^ invariant wired at startup (service_init); None refuses every write-mode write
+        self._write_mode_lease_renewer: Optional[Callable[[Path, str], bool]] = None
 
     def register_write_exception(self, alias: str, canonical_path: Path) -> None:
         """
@@ -191,6 +193,13 @@ class FileCRUDService:
         """
         self._golden_repos_dir = Path(golden_repos_dir)
 
+    def set_write_mode_lease_renewer(
+        self, renewer: Callable[[Path, str], bool]
+    ) -> None:
+        """Install renewer(golden_repos_dir, alias): renews the write-mode
+        lock by the marker's token, True only when ownership is confirmed."""
+        self._write_mode_lease_renewer = renewer
+
     def _check_write_mode_active(self, repo_alias: str) -> None:
         """
         Enforce write-mode gate for write-exception repos (Story #231).
@@ -206,7 +215,8 @@ class FileCRUDService:
 
         Raises:
             PermissionError: If the repo is a write exception and no active
-                             write-mode marker exists.
+                             write-mode marker exists, or the marker's token
+                             no longer owns the write-mode lock.
         """
         if not self.is_write_exception(repo_alias):
             return
@@ -231,6 +241,12 @@ class FileCRUDService:
             raise PermissionError(
                 f"Repo '{repo_alias}' requires write mode. "
                 f"Call enter_write_mode('{repo_alias}') before performing file operations."
+            )
+        renewer = self._write_mode_lease_renewer
+        if renewer is None or not renewer(golden_repos_dir, alias_without_global):
+            raise PermissionError(
+                f"Write mode for '{repo_alias}' no longer holds its write lock; "
+                f"call enter_write_mode('{repo_alias}') again. Nothing was written."
             )
 
     def _resolve_repo_path(self, repo_alias: str, username: str) -> Path:

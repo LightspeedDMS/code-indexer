@@ -106,6 +106,18 @@ def renew_write_mode_lease(
         return False
 
 
+def renew_app_write_mode_lease(golden_repos_dir: Path, alias: str) -> bool:
+    """FileCRUDService's write-mode renewer: the running app's refresh
+    scheduler renews by the marker's token; no scheduler confirms nothing."""
+    from ._utils import _get_app_refresh_scheduler
+
+    scheduler = _get_app_refresh_scheduler()
+    if scheduler is None:
+        logger.warning("Write-mode lease for %s not renewed: no scheduler", alias)
+        return False
+    return renew_write_mode_lease(scheduler, golden_repos_dir, alias)
+
+
 def finish_write_mode(
     refresh_scheduler: Any,
     repo_alias: str,

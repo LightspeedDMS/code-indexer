@@ -630,25 +630,23 @@ class TestFileCRUDServiceWriteModeEnforcement:
         self, file_crud_service_with_exception, golden_repos_dir, cidx_meta_source
     ):
         """AC8: create_file succeeds for write-exception repo when write-mode marker exists."""
+        from tests.shared.real_write_mode import real_write_mode
+
         service = file_crud_service_with_exception
 
-        # Create valid marker
-        write_mode_dir = golden_repos_dir / ".write_mode"
-        write_mode_dir.mkdir(parents=True, exist_ok=True)
-        marker = write_mode_dir / "cidx-meta.json"
-        marker.write_text(
-            json.dumps(
-                {
-                    "alias": "cidx-meta",
-                    "source_path": str(cidx_meta_source),
-                    "entered_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-        )
-
-        with patch(
-            "code_indexer.server.services.api_metrics_service.api_metrics_service"
-        ) as mock_metrics:
+        # A valid write mode: the marker's token owns the write-mode lock
+        with (
+            real_write_mode(
+                service,
+                golden_repos_dir,
+                "cidx-meta",
+                cidx_meta_source,
+                golden_repos_dir.parent / "write-mode-locks",
+            ),
+            patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics,
+        ):
             mock_metrics.increment_other_api_call.return_value = None
             from code_indexer.server.services.cidx_meta_access.file_doors import (
                 CatalogFileAccess,

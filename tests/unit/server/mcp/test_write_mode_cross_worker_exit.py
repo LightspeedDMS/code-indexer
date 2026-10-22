@@ -93,10 +93,17 @@ def make_store(request, tmp_path: Path) -> Iterator[Callable[[], Any]]:
 def golden_repos_dir(tmp_path: Path, monkeypatch) -> Path:
     """Golden repos dir with the catalog bound as a write exception on the
     process-wide file_crud_service (monkeypatch restores the singleton)."""
+    from code_indexer.server.mcp.handlers._write_mode_marker import (
+        renew_app_write_mode_lease,
+    )
     from code_indexer.server.services.file_crud_service import file_crud_service
 
     golden = tmp_path / "golden-repos"
     (golden / _ALIAS).mkdir(parents=True)
+    # ^ why mirrors service_init's wiring of the shared write-mode gate
+    monkeypatch.setattr(
+        file_crud_service, "_write_mode_lease_renewer", renew_app_write_mode_lease
+    )
     monkeypatch.setattr(
         file_crud_service, "_global_write_exceptions", {_REPO: golden / _ALIAS}
     )
@@ -121,6 +128,10 @@ def _call(handler_name: str, worker: _Worker, golden: Path) -> Dict[str, Any]:
         patch(
             "code_indexer.server.mcp.handlers._get_golden_repos_dir",
             return_value=str(golden),
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers._utils._get_app_refresh_scheduler",
+            return_value=worker,
         ),
     ):
         response = getattr(handlers, handler_name)({"repo_alias": _REPO}, user)
@@ -269,18 +280,17 @@ class TestFileOperationRenewsTheLease:
         return sqlite3.connect(str(tmp_path / "alias_locks" / f"{_ALIAS}.db"))
 
     def _file_operation_on(self, worker: _Worker, golden: Path) -> None:
-        from types import SimpleNamespace
-
         from code_indexer.server.mcp.handlers import files
+        from code_indexer.server.services.file_crud_service import file_crud_service
 
-        app = SimpleNamespace(state=SimpleNamespace(golden_repos_dir=str(golden)))
-        with (
-            patch.object(files, "_get_app_refresh_scheduler", return_value=worker),
-            patch.object(files, "_get_golden_repos_dir", return_value=str(golden)),
-            patch.object(files._utils, "_lazy_module_attr_or_none", return_value=app),
+        with patch.object(
+            files._utils, "_get_app_refresh_scheduler", return_value=worker
         ):
-            # create/edit/delete run this gate before writing
-            files._write_mode_refusal(_REPO)
+            # create/edit/delete run this gate before writing, on every door
+            try:
+                file_crud_service._check_write_mode_active(_REPO)
+            except PermissionError:
+                pass  # no write mode: refused, and nothing renewed
 
     def test_file_operation_under_write_mode_renews_the_lease(
         self, golden_repos_dir: Path, tmp_path: Path
@@ -334,7 +344,7 @@ def _create_file(worker: _Worker, golden: Path, file_path: str) -> Dict[str, Any
     with (
         # ^ why access judging is a separate concern from write-mode lock ownership
         patch.object(files, "_judge", return_value=UNRESTRICTED),
-        patch.object(files, "_get_app_refresh_scheduler", return_value=worker),
+        patch.object(files._utils, "_get_app_refresh_scheduler", return_value=worker),
         patch.object(files, "_get_golden_repos_dir", return_value=str(golden)),
         patch.object(files._utils, "_lazy_module_attr_or_none", return_value=app),
     ):
