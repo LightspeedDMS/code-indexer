@@ -169,10 +169,12 @@ def request_cidx_meta_refresh(
     refresh_scheduler: Any, debouncer: Optional[Any] = None
 ) -> None:
     """Trigger a cidx-meta refresh for a writer; never raises into the writer
-    (callers run it in ``finally`` blocks). A refresh already queued or
-    running may have listed the catalog before the write, so it is handed
-    to the debouncer (*debouncer*, else the module's), which owes the
-    refresh that follows. A refresh deferred by the Bug #2022 failure
+    (callers run it in ``finally`` blocks). The submitted job is handed to
+    the debouncer (*debouncer*, else the module's), which owes the write
+    until the job covers it (the job may still skip, e.g. on another
+    writer's lock). A refresh already queued or running may have listed the
+    catalog before the write, so it too is handed to the debouncer, which
+    owes the refresh that follows. A refresh deferred by the failure
     backoff was persisted as a pending trigger, which the refresh scheduler
     fires once the backoff ends. Any other failure (store or job tracker
     unavailable) is logged at ERROR and handed to the debouncer for a
@@ -187,7 +189,9 @@ def request_cidx_meta_refresh(
 
     owed_to = debouncer if debouncer is not None else _debouncer
     try:
-        refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+        job_id = refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+        if job_id is not None and owed_to is not None:
+            owed_to.track_submission(job_id)
     except RefreshDeferredError as exc:
         logger.info(
             f"cidx-meta refresh deferred until {exc.backoff_until:.0f}: "

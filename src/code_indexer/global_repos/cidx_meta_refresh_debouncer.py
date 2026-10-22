@@ -122,6 +122,19 @@ class CidxMetaRefreshDebouncer:
             f"(interval={self._debounce_seconds}s)"
         )
 
+    def track_submission(self, job_id: str) -> None:
+        """Owe the write behind a refresh a writer submitted directly until
+        job *job_id* covers it; confirmed or retried like this debouncer's
+        own submissions. A later job replaces an earlier one: the job store
+        admits one active refresh per alias, so it started after it."""
+        with self._lock:
+            self._signal_seq += 1
+            self._dirty = True
+            self._awaiting = (job_id, self._signal_seq)
+            if self._shutdown:
+                return
+            self._schedule_retry_locked(self._debounce_seconds)
+
     def _on_timer_expired(self, timer_token: int) -> None:
         """
         Called by the timer thread when the debounce interval elapses.

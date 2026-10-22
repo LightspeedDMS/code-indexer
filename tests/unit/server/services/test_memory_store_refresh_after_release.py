@@ -77,9 +77,13 @@ class _LockingScheduler:
 class _CountingDebouncer:
     def __init__(self) -> None:
         self.signals = 0
+        self.tracked: List[str] = []
 
     def signal_dirty(self) -> None:
         self.signals += 1
+
+    def track_submission(self, job_id: str) -> None:
+        self.tracked.append(job_id)
 
 
 def _payload(summary: str) -> Dict[str, Any]:
@@ -127,6 +131,7 @@ def test_create_edit_delete_request_refresh_after_releasing_the_lock(
     assert scheduler.lock_held_at_trigger == [False, False, False]
     assert scheduler.holder is None
     assert debouncer.signals == 0
+    assert debouncer.tracked == ["job-1"] * 3, "a direct refresh was not tracked"
 
 
 def test_refresh_already_running_is_owed_to_debouncer_without_warning(

@@ -117,6 +117,8 @@ class RefreshDebouncerProtocol(Protocol):
 
     def signal_dirty(self) -> None: ...
 
+    def track_submission(self, job_id: str) -> None: ...
+
 
 # ---------------------------------------------------------------------------
 # Configuration

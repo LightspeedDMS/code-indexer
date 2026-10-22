@@ -29,9 +29,13 @@ class _Scheduler:
 class _Debouncer:
     def __init__(self) -> None:
         self.signals = 0
+        self.tracked: List[str] = []
 
     def signal_dirty(self) -> None:
         self.signals += 1
+
+    def track_submission(self, job_id: str) -> None:
+        self.tracked.append(job_id)
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +62,7 @@ def test_released_lock_requests_the_refresh_now() -> None:
 
     assert scheduler.triggers == ["cidx-meta-global"]
     assert debouncer.signals == 0
+    assert debouncer.tracked == ["job-1"]
 
 
 def test_held_lock_owes_the_refresh_to_the_given_debouncer() -> None:

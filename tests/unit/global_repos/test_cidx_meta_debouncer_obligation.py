@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterator, Optional, Set, Tuple
 
 import pytest
 
+from code_indexer.global_repos import meta_description_hook
 from code_indexer.global_repos.meta_description_hook import CidxMetaRefreshDebouncer
 from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 from tests.utils.fatal_chunk_store_fixtures import COLLECTION_NAME
@@ -133,6 +134,51 @@ class _RecordingTrigger:
         job_id = self._real(alias_name)
         self.job_ids.append(job_id)
         return job_id
+
+
+class TestDirectWriterRefreshIsTracked:
+    def test_direct_writer_refresh_skipped_on_another_writers_lock_is_still_covered(
+        self,
+        tmp_path: Path,
+        metadata: Any,
+        provider_env,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fake, env, _ = provider_env
+        harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
+        meta = _published_catalog(harness, fake, env)
+        manager = _job_manager(harness)
+        trigger = _RecordingTrigger(harness)
+        monkeypatch.setattr(harness.scheduler, "trigger_refresh_for_repo", trigger)
+        debouncer = CidxMetaRefreshDebouncer(
+            harness.scheduler, debounce_seconds=DEBOUNCE_SECONDS
+        )
+        monkeypatch.setattr(meta_description_hook, "_debouncer", debouncer)
+        writer_b = "dependency_map_service"
+        try:
+            # Writer A wrote under its own lock and released it ...
+            (meta / "memories" / "writer-a.md").write_text("# a\n\nwriter a body\n")
+            # ... writer B takes the lock before A's refresh job runs ...
+            assert harness.scheduler.acquire_write_lock("cidx-meta", writer_b)
+            meta_description_hook.refresh_after_catalog_write(
+                harness.scheduler, lock_still_held=False
+            )
+            skipped = _wait_for_terminal(manager, trigger.job_ids[0])
+            assert skipped["result"]["message"] == "Skipped, write lock held"
+            # ... and B releases without ever requesting a refresh.
+            assert harness.scheduler.release_write_lock("cidx-meta", writer_b)
+
+            for _ in range(3):  # bounded: the job check, a pacing timer, a resubmit
+                if len(trigger.job_ids) > 1:
+                    break
+                _expire_now(debouncer)
+            assert len(trigger.job_ids) == 2, trigger.job_ids
+            covered = _wait_for_terminal(manager, trigger.job_ids[1])
+            assert covered["result"]["message"] == "Refresh complete", covered
+            assert "memories/writer-a.md" in _stored_paths(harness)
+        finally:
+            debouncer.shutdown()
+            manager.shutdown()
 
 
 class TestSkippedRefreshKeepsTheObligation:
