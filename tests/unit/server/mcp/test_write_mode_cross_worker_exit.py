@@ -17,6 +17,7 @@ import json
 import os
 import sqlite3
 import stat
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, cast
@@ -262,17 +263,13 @@ class TestFileOperationRenewsTheLease:
         from code_indexer.server.mcp.handlers import files
 
         app = SimpleNamespace(state=SimpleNamespace(golden_repos_dir=str(golden)))
-        user = User(
-            username="example-user",
-            role=UserRole.POWER_USER,
-            password_hash="unused",
-            created_at=datetime.now(),
-        )
         with (
             patch.object(files, "_get_app_refresh_scheduler", return_value=worker),
+            patch.object(files, "_get_golden_repos_dir", return_value=str(golden)),
             patch.object(files._utils, "_lazy_module_attr_or_none", return_value=app),
         ):
-            files._start_auto_watch_if_needed(_REPO, user, "MCP-GENERAL-041")
+            # create/edit/delete run this gate before writing
+            files._write_mode_refusal(_REPO)
 
     def test_file_operation_under_write_mode_renews_the_lease(
         self, golden_repos_dir: Path, tmp_path: Path
@@ -306,3 +303,118 @@ class TestFileOperationRenewsTheLease:
         with self._lock_db(tmp_path) as conn:
             (elapsed,) = conn.execute(_ELAPSED_SQL).fetchone()
         assert elapsed > 2900
+
+
+def _create_file(worker: _Worker, golden: Path, file_path: str) -> Dict[str, Any]:
+    from types import SimpleNamespace
+
+    from code_indexer.server.mcp.handlers import files
+
+    app = SimpleNamespace(state=SimpleNamespace(golden_repos_dir=str(golden)))
+    user = User(
+        username="example-admin",
+        role=UserRole.ADMIN,
+        password_hash="unused",
+        created_at=datetime.now(),
+    )
+    from code_indexer.server.services.cidx_meta_access.file_doors import UNRESTRICTED
+
+    params = {"repository_alias": _REPO, "file_path": file_path, "content": "x\n"}
+    with (
+        # ^ why access judging is a separate concern from write-mode lock ownership
+        patch.object(files, "_judge", return_value=UNRESTRICTED),
+        patch.object(files, "_get_app_refresh_scheduler", return_value=worker),
+        patch.object(files, "_get_golden_repos_dir", return_value=str(golden)),
+        patch.object(files._utils, "_lazy_module_attr_or_none", return_value=app),
+    ):
+        response = files.handle_create_file(params, user)
+    return cast(Dict[str, Any], json.loads(response["content"][0]["text"]))
+
+
+class TestFileWriteRequiresLockOwnership:
+    def test_write_proceeds_while_the_lock_is_owned(
+        self, golden_repos_dir: Path, make_store
+    ) -> None:
+        worker = _Worker(golden_repos_dir, make_store())
+        assert _call("handle_enter_write_mode", worker, golden_repos_dir)["success"]
+
+        result = _create_file(worker, golden_repos_dir, "owned.md")
+
+        assert result["success"] is True, result
+        assert (golden_repos_dir / _ALIAS / "owned.md").is_file()
+
+    def test_write_after_another_writer_took_the_lock_is_refused(
+        self, golden_repos_dir: Path, make_store
+    ) -> None:
+        worker = _Worker(golden_repos_dir, make_store())
+        assert _call("handle_enter_write_mode", worker, golden_repos_dir)["success"]
+        other = _Worker(golden_repos_dir, make_store()).write_lock_manager
+        token = _marker_token(golden_repos_dir)
+        assert other.release(_ALIAS, owner_name=_WRITE_MODE_OWNER, owner_token=token)
+        assert other.acquire(_ALIAS, owner_name="refresh_scheduler")
+
+        result = _create_file(worker, golden_repos_dir, "late.md")
+
+        assert result["success"] is False
+        assert "enter_write_mode" in json.dumps(result)
+        assert not (golden_repos_dir / _ALIAS / "late.md").exists()
+        assert other.release(_ALIAS, owner_name="refresh_scheduler")
+
+    def test_write_after_the_lease_lapsed_is_refused(
+        self, golden_repos_dir: Path, make_store
+    ) -> None:
+        store = make_store()
+        assert _call(
+            "handle_enter_write_mode",
+            _Worker(golden_repos_dir, store),
+            golden_repos_dir,
+        )["success"]
+        if isinstance(store, SqliteAliasLockStore):
+            with closing(sqlite3.connect(str(store._lock_dir / f"{_ALIAS}.db"))) as db:
+                with db:
+                    db.execute(
+                        "UPDATE golden_repo_alias_locks SET last_renewed_at = "
+                        "strftime('%Y-%m-%d %H:%M:%f', 'now', '-2 hours')"
+                    )
+        else:
+            import psycopg
+
+            with psycopg.connect(store._dsn) as pg:
+                pg.execute(
+                    "UPDATE golden_repo_alias_locks SET last_renewed_at = "
+                    "now() - interval '2 hours' WHERE lock_key = %s",
+                    (_ALIAS,),
+                )
+
+        result = _create_file(
+            _Worker(golden_repos_dir, store), golden_repos_dir, "l.md"
+        )
+
+        assert result["success"] is False
+        assert "enter_write_mode" in json.dumps(result)
+        assert not (golden_repos_dir / _ALIAS / "l.md").exists()
+
+    def test_write_is_refused_when_the_store_cannot_confirm_ownership(
+        self, golden_repos_dir: Path, make_store
+    ) -> None:
+        assert _call(
+            "handle_enter_write_mode",
+            _Worker(golden_repos_dir, make_store()),
+            golden_repos_dir,
+        )["success"]
+        original = make_store()
+
+        class RenewFails(type(original)):  # type: ignore[misc]
+            def renew_owned(self, *args: Any, **kwargs: Any) -> Any:
+                raise sqlite3.OperationalError("disk I/O error")
+
+        source = (
+            original._lock_dir
+            if isinstance(original, SqliteAliasLockStore)
+            else original._dsn
+        )
+        worker = _Worker(golden_repos_dir, RenewFails(source))
+        result = _create_file(worker, golden_repos_dir, "x.md")
+
+        assert result["success"] is False
+        assert not (golden_repos_dir / _ALIAS / "x.md").exists()

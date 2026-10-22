@@ -289,6 +289,9 @@ class PostgresAliasLockStore:
             if not _owner_matches(current, operation, owner_token):
                 conn.rollback()
                 return LockOutcome.OWNER_MISMATCH
+            if _holder_is_stale(current):
+                conn.rollback()
+                return LockOutcome.LAPSED
             conn.execute(
                 _RENEW_SQL, (DEFAULT_LOCK_TTL_SECONDS, ttl, lock_key, current[0])
             )

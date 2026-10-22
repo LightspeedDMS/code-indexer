@@ -254,11 +254,11 @@ class AliasLockCoordinator:
             )
             if outcome is LockOutcome.RENEWED:
                 return True
-            if outcome is LockOutcome.OWNER_MISMATCH:
+            if outcome in (LockOutcome.OWNER_MISMATCH, LockOutcome.LAPSED):
                 self._forget_token(alias, token)
                 raise AliasLockOwnershipLostError(
                     f"renew() for alias={alias!r} owner={owner_name!r}: the "
-                    f"DB-backed lock belongs to another holder -- ownership lost"
+                    f"DB-backed lock is {outcome.value} -- ownership lost"
                 )
         return self._file_manager.renew(
             alias,

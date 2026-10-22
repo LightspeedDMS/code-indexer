@@ -75,12 +75,9 @@ def read_marker(
 def renew_write_mode_lease(
     refresh_scheduler: Any, golden_repos_dir: Path, alias: str
 ) -> bool:
-    """Extend the write-mode lock's lease on a write-mode file operation, by
-    the token the enter recorded; an abandoned session still lapses."""
-    from code_indexer.server.services.alias_lock_store.base import (
-        AliasLockOwnershipLostError,
-    )
-
+    """Extend the write-mode lock's lease by the token the enter recorded.
+    True only when ownership is confirmed; refused, lapsed, taken over or a
+    store error is False (an abandoned session still lapses)."""
     marker, problem = read_marker(golden_repos_dir, alias)
     token = marker.get("owner_token") if marker else None
     if not isinstance(token, str) or not token:
@@ -96,8 +93,13 @@ def renew_write_mode_lease(
                 alias, owner_name=WRITE_MODE_OWNER, owner_token=token
             )
         )
-    except AliasLockOwnershipLostError as exc:
-        logger.warning("Write-mode lease for %s not renewed: %s", alias, exc)
+    except Exception as exc:
+        logger.warning(
+            "Write-mode lease for %s not renewed: %s: %s",
+            alias,
+            type(exc).__name__,
+            exc,
+        )
         return False
 
 

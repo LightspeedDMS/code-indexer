@@ -257,6 +257,8 @@ class SqliteAliasLockStore:
                 return LockOutcome.NOT_HELD
             if not _owner_matches(current, operation, owner_token):
                 return LockOutcome.OWNER_MISMATCH
+            if _holder_is_stale(current):
+                return LockOutcome.LAPSED
             # ^ invariant renew never shortens a lease: checkpoint renews pass the 1h default under 24h holds
             conn.execute(
                 f"UPDATE golden_repo_alias_locks SET last_renewed_at = {_NOW}, "

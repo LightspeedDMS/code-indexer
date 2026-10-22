@@ -214,11 +214,6 @@ def _start_auto_watch_if_needed(
         )
         if not _is_write_mode_active(repository_alias, golden_repos_dir):
             auto_watch_manager.start_watch(repo_path)
-        elif (scheduler := _get_app_refresh_scheduler()) is not None:
-            from ._write_mode_marker import renew_write_mode_lease
-
-            alias = _write_mode_strip_global(repository_alias)
-            renew_write_mode_lease(scheduler, Path(golden_repos_dir), alias)
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -226,6 +221,31 @@ def _start_auto_watch_if_needed(
                 f"Failed to start auto-watch for {repository_alias}: {e}",
             )
         )
+
+
+def _write_mode_refusal(repository_alias: str) -> Optional[Dict[str, Any]]:
+    """An error payload unless a write-mode write still owns its lock: renews
+    the lease by the marker's token; anything but confirmed ownership refuses."""
+    from code_indexer.server.services.file_crud_service import file_crud_service
+
+    from ._write_mode_marker import renew_write_mode_lease
+
+    golden = _golden_dir_or_none()
+    if not file_crud_service.is_write_exception(repository_alias) or not (
+        _is_write_mode_active(repository_alias, golden)
+    ):
+        return None
+    scheduler = _get_app_refresh_scheduler()
+    alias = _write_mode_strip_global(repository_alias)
+    if scheduler is not None and renew_write_mode_lease(scheduler, Path(golden), alias):
+        return None
+    return {
+        "success": False,
+        "error": (
+            f"Write mode for '{repository_alias}' no longer holds its write lock; "
+            f"call enter_write_mode('{repository_alias}') again. Nothing was written."
+        ),
+    }
 
 
 def _invalidate_wiki_cache(repository_alias: str, file_path: str) -> None:
@@ -1246,6 +1266,8 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         repository_alias = params["repository_alias"]
         file_path = params["file_path"]
 
+        if (refusal := _write_mode_refusal(repository_alias)) is not None:
+            return _mcp_response(refusal)
         _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-041")
 
         result = file_crud_service.create_file(
@@ -1287,6 +1309,8 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         repository_alias = params["repository_alias"]
         file_path = params["file_path"]
 
+        if (refusal := _write_mode_refusal(repository_alias)) is not None:
+            return _mcp_response(refusal)
         _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-046")
 
         result = file_crud_service.edit_file(
@@ -1318,6 +1342,8 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         repository_alias = params["repository_alias"]
         file_path = params["file_path"]
 
+        if (refusal := _write_mode_refusal(repository_alias)) is not None:
+            return _mcp_response(refusal)
         _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-052")
 
         result = file_crud_service.delete_file(

@@ -75,6 +75,8 @@ class LockOutcome(enum.Enum):
     RENEWED = "renewed"
     NOT_HELD = "not_held"
     OWNER_MISMATCH = "owner_mismatch"
+    LAPSED = "lapsed"  # the row matches but its holder is stale: not confirmed
+    STILL_HELD = "still_held"  # a release-if-stale found a live holder
 
 
 @dataclass
