@@ -37,6 +37,7 @@ from code_indexer.server.git.git_subprocess_env import (
     remote_url_without_credentials,
 )
 from .git_pull_updater import GitPullUpdater
+from .local_source_manifest import record_source_manifest, source_change_reason
 from .meta_directory_updater import MetaDirectoryUpdater
 from .update_strategy import UpdateStrategy
 from .query_tracker import QueryTracker
@@ -1055,44 +1056,6 @@ class RefreshScheduler:
         if keep < 1:
             return self._DEFAULT_SNAPSHOT_RETENTION_KEEP_LAST
         return keep
-
-    def _latest_versioned_timestamp(self, alias_name: str) -> Optional[int]:
-        """Return the newest snapshot timestamp for *alias_name*, or None (Bug #1084 A7).
-
-        Uses the discovery API (:meth:`VersionedSnapshotManager.list_snapshots`)
-        when a snapshot_manager is wired — this is backend-correct on cow-daemon
-        where snapshots live under the NFS mount, NOT under
-        ``golden_repos_dir/.versioned``. When no snapshot_manager is wired (unit
-        tests / pure-local), falls back to globbing the local ``.versioned``
-        directory so existing local behavior is preserved.
-        """
-        if self._snapshot_manager is not None:
-            try:
-                snaps = self._snapshot_manager.list_snapshots(alias_name)
-            except Exception as exc:
-                logger.warning(
-                    f"_latest_versioned_timestamp: discovery failed for "
-                    f"{alias_name} (non-fatal): {type(exc).__name__}: {exc}"
-                )
-                return None
-            if not snaps:
-                return None
-            # snaps sorted ascending by ts; last is newest.
-            return int(snaps[-1][1])
-
-        # Local fallback: glob golden_repos_dir/.versioned/{repo}/v_*.
-        repo_name = alias_name.removesuffix("-global")
-        versioned_base = self.golden_repos_dir / ".versioned" / repo_name
-        if not versioned_base.exists():
-            return None
-        timestamps = []
-        for d in versioned_base.iterdir():
-            if d.is_dir() and d.name.startswith("v_"):
-                try:
-                    timestamps.append(int(d.name[2:]))
-                except (ValueError, IndexError):
-                    continue
-        return max(timestamps) if timestamps else None
 
     def _enforce_retention(self, alias_name: str, current_target: str) -> None:
         """Schedule deletion of superseded snapshots beyond keep-last-N (Bug #1084 A6).
@@ -3016,8 +2979,14 @@ class RefreshScheduler:
                                     master_path, _branch, cancel_check=cancel_check
                                 ).sync()
 
-                                if _sync_result.skipped and not (
-                                    force_reset or regate or fts_rebuild_due
+                                # A writer that committed and pushed itself
+                                # leaves the sync nothing to do.
+                                if (
+                                    _sync_result.skipped
+                                    and not (force_reset or regate or fts_rebuild_due)
+                                    and not self._has_local_changes(
+                                        source_path, alias_name
+                                    )
                                 ):
                                     logger.info(
                                         "No cidx-meta backup changes detected for %s, "
@@ -3371,6 +3340,16 @@ class RefreshScheduler:
                             and not regate
                             else None
                         )
+                        # The run's source manifest (before its listing) is
+                        # what the published snapshot's change check uses.
+                        _deletion_kwargs: Dict[str, Any] = (
+                            {"detect_deletions": True}
+                            if is_local_repo
+                            and record_source_manifest(
+                                source_path, self._published_snapshot(alias_name)
+                            )
+                            else {}
+                        )
                         try:
                             run_spend = self._index_source(
                                 alias_name=alias_name,
@@ -3382,6 +3361,7 @@ class RefreshScheduler:
                                 force_reconcile=force_reconcile,
                                 cancel_check=cancel_check,
                                 job_id=job_id,
+                                **_deletion_kwargs,
                             )
                         except FatalChunkStoreIndexError as fatal_exc:
                             # Bug #2022: self-heal under the lock; stay failed.
@@ -3936,9 +3916,14 @@ class RefreshScheduler:
         orphan_event_callback: Optional[Any] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
         job_id: Optional[str] = None,
+        detect_deletions: bool = False,
     ) -> Optional[Dict[str, int]]:
         """
         Index the golden repo source in place (Story #229: index-source-first).
+
+        ``detect_deletions``: the run removes points of gone paths (a
+        non-git incremental leaves them otherwise); a reconcile does so
+        already.
 
         Returns the semantic child's metered provider spend (Story #2122):
         ``{"inputs_sent": N, "attempts": M}`` from its final
@@ -3997,6 +3982,14 @@ class RefreshScheduler:
 
         if needs_reconcile:
             index_command = ["cidx", "index", "--fts", "--reconcile", "--progress-json"]
+        elif detect_deletions:
+            index_command = [
+                "cidx",
+                "index",
+                "--fts",
+                "--detect-deletions",
+                "--progress-json",
+            ]
         else:
             index_command = ["cidx", "index", "--fts", "--progress-json"]
 
@@ -4981,76 +4974,20 @@ class RefreshScheduler:
                 f"{type(reset_exc).__name__}: {reset_exc}"
             )
 
+    def _published_snapshot(self, alias_name: str) -> Optional[str]:
+        """The alias's published target when it is a versioned snapshot
+        (never the newest ``v_*`` directory, which may be unpublished)."""
+        target = self.alias_manager.read_alias(alias_name)
+        return target if target and self._is_versioned_snapshot(target) else None
+
     def _has_local_changes(self, source_path: str, alias_name: str) -> bool:
-        """
-        Detect changes in a local (non-git) repository using file mtime comparison.
-
-        Compares the maximum mtime of all non-hidden files in source_path against
-        the timestamp embedded in the latest versioned directory name.
-
-        Algorithm:
-        1. Derive repo_name from alias_name (strip "-global")
-        2. Look in .versioned/{repo_name}/ for v_* directories
-        3. If none exist -> return True (first version needed)
-        4. Parse latest version timestamp from directory name
-        5. Walk source_path, skip hidden dirs/files (starting with '.')
-        6. Get max mtime of all non-hidden files
-        7. If no visible files -> return False
-        8. Return max_mtime > latest_version_timestamp
-
-        Args:
-            source_path: Path to the live local repository directory
-            alias_name: Global alias name (e.g., "cidx-meta-global")
-
-        Returns:
-            True if changes detected or first version needed, False otherwise
-        """
-        # Bug #1084 Phase A7 (Defect C): use the discovery API instead of globbing
-        # golden_repos_dir/.versioned. On cow-daemon the snapshots live under the
-        # NFS mount, so the old glob always missed -> always "first version" ->
-        # spurious re-index + snapshot every cycle.
-        latest_timestamp = self._latest_versioned_timestamp(alias_name)
-
-        if latest_timestamp is None:
-            logger.debug(
-                f"No versioned snapshot found for {alias_name} — treating as first version"
-            )
-            return True
-
-        logger.debug(
-            f"Latest versioned snapshot timestamp for {alias_name}: {latest_timestamp}"
-        )
-
-        # Walk source_path, skip hidden dirs and files
-        max_mtime: float = 0.0
-        found_files = False
-
-        for root, dirs, files in os.walk(source_path):
-            # Skip hidden directories in-place (prevents descent into them)
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
-
-            for filename in files:
-                if filename.startswith("."):
-                    continue
-                file_path = os.path.join(root, filename)
-                try:
-                    mtime = os.stat(file_path).st_mtime
-                    found_files = True
-                    if mtime > max_mtime:
-                        max_mtime = mtime
-                except OSError as e:
-                    logger.debug(f"Cannot stat {file_path}: {e}")
-
-        if not found_files:
-            logger.debug(f"No visible files in {source_path} — no changes")
-            return False
-
-        has_changes = max_mtime > latest_timestamp
-        logger.debug(
-            f"mtime check for {alias_name}: max_mtime={max_mtime:.0f} "
-            f"vs latest_version={latest_timestamp} -> changes={has_changes}"
-        )
-        return has_changes
+        """Whether a local (non-git) repository's source differs, by file
+        identity, from what its PUBLISHED snapshot indexed (see
+        ``local_source_manifest``). An unknown baseline is a change."""
+        reason = source_change_reason(self._published_snapshot(alias_name), source_path)
+        if reason is not None:
+            logger.info(f"Local repo {alias_name} changed: {reason}")
+        return reason is not None
 
     def _check_extension_drift(self, source_path: str, alias_name: str) -> bool:
         """Check for extension drift and return True if --reconcile is needed.
