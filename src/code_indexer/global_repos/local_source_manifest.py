@@ -29,8 +29,14 @@ logger = logging.getLogger(__name__)
 MANIFEST_RELATIVE_PATH = Path(".code-indexer") / "refresh_source_manifest.json"
 _MANIFEST_FORMAT = 1
 
+_UNREADABLE_SHOWN = 5
+
 #: (size in bytes, mtime in nanoseconds)
 FileIdentity = Tuple[int, int]
+
+
+class IncompleteSourceListingError(OSError):
+    """The source could not be listed completely; nothing was recorded."""
 
 
 @dataclass(frozen=True)
@@ -131,8 +137,16 @@ def record_source_manifest(source_root: str, published_snapshot: Optional[str]) 
     return whether any file the published snapshot listed is gone, i.e. the
     run must remove gone paths. An unknown published baseline counts as
     gone. Raises OSError when the manifest cannot be written: a snapshot
-    must never inherit an older run's manifest."""
+    must never inherit an older run's manifest; raises
+    IncompleteSourceListingError (writing nothing) when an entry could not
+    be listed or stat'ed -- an unreadable file is never a deletion."""
     listing = list_source(source_root)
+    if listing.unreadable:
+        shown = ", ".join(listing.unreadable[:_UNREADABLE_SHOWN])
+        raise IncompleteSourceListingError(
+            f"{len(listing.unreadable)} source entries of {source_root} could "
+            f"not be read ({shown}); refresh stopped before indexing"
+        )
     path = Path(source_root) / MANIFEST_RELATIVE_PATH
     temp = path.with_name(path.name + ".tmp")
     payload = {

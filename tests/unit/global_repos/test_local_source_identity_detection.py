@@ -156,6 +156,25 @@ class TestUnchangedSource:
         assert _published(harness) == before
 
 
+class TestIncompleteListing:
+    def test_unreadable_entry_fails_the_refresh_before_indexing(
+        self, tmp_path: Path, metadata: Any, provider_env
+    ) -> None:
+        harness, _ = _harness(tmp_path, metadata, provider_env)
+        fake = provider_env[0]
+        before = _published(harness)
+        (harness.source / "note_001.py").unlink()
+        (harness.source / "note_001.py").symlink_to(harness.source / "absent.py")
+        fake.ledger.begin_run("incomplete-listing")
+
+        with pytest.raises(RuntimeError, match="could not be read"):
+            harness.scheduler._execute_refresh(ALIAS)
+
+        assert _published(harness) == before
+        assert "note_001.py" in _stored_paths(harness.source)
+        assert fake.ledger.run_stats("incomplete-listing")["requests"] == 0
+
+
 class TestDeletedFile:
     def test_deleted_file_leaves_the_published_index(
         self, tmp_path: Path, metadata: Any, provider_env

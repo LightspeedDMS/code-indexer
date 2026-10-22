@@ -15,6 +15,7 @@ import pytest
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.local_source_manifest import (
     MANIFEST_RELATIVE_PATH,
+    IncompleteSourceListingError,
     list_source,
     read_manifest,
     record_source_manifest,
@@ -141,6 +142,16 @@ class TestSourceChangeReason:
 
 
 class TestRecordSourceManifest:
+    def test_incomplete_listing_fails_and_records_nothing(self, source: Path) -> None:
+        snapshot = _publish(source)
+        recorded = (source / MANIFEST_RELATIVE_PATH).read_bytes()
+        (source / "gone.md").symlink_to(source / "missing-target.md")
+
+        with pytest.raises(IncompleteSourceListingError, match="gone.md"):
+            record_source_manifest(str(source), str(snapshot))
+
+        assert (source / MANIFEST_RELATIVE_PATH).read_bytes() == recorded
+
     def test_nothing_removed_since_the_published_snapshot(self, source: Path) -> None:
         snapshot = _publish(source)
         (source / "added.md").write_text("new\n")
