@@ -21,6 +21,7 @@
 - [Never assert on whole env](feedback_never_assert_on_whole_environment.md) - a failing env assertion dumps secrets; assert scalars only
 - [No leaked literals in guards](feedback_never_store_leaked_literals_in_public_guards.md) - never put a leaked value in a public denylist/test
 - [No secrets in memory](feedback_no_secrets_in_memory.md) - memory is versioned: no secrets, PII, topology
+- [reports/ subdirs tracked](feedback_reports_subdirs_not_gitignored.md) - only top-level reports/*.md is ignored; check-ignore before writing real detail
 - [Secrets in local output OK](feedback_staging_creds_local_exposure_ok.md) - local transcript exposure is not an incident; never commit secrets
 - [Auth retry loops](feedback_never_retry_loop_auth_endpoint.md) - auth rejection is terminal; retrying locks the account
 - [Own all changes](feedback_own_all_repo_changes.md) - never revert another subagent's changes
