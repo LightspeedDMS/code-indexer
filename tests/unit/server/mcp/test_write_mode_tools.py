@@ -82,11 +82,14 @@ def alias_manager(golden_repos_dir):
 
 @pytest.fixture
 def mock_refresh_scheduler(golden_repos_dir):
-    """A mock RefreshScheduler with a real write_lock_manager backed by temp dir."""
-    from code_indexer.global_repos.write_lock_manager import WriteLockManager
+    """A mock RefreshScheduler with a real write_lock_manager backed by temp dir
+    (the AliasLockCoordinator RefreshScheduler installs, in file-lock mode)."""
+    from code_indexer.global_repos.alias_lock_coordinator import AliasLockCoordinator
 
     scheduler = MagicMock()
-    scheduler.write_lock_manager = WriteLockManager(golden_repos_dir=golden_repos_dir)
+    scheduler.write_lock_manager = AliasLockCoordinator(
+        golden_repos_dir=golden_repos_dir
+    )
 
     def _acquire(alias, owner_name="refresh_scheduler"):
         return scheduler.write_lock_manager.acquire(alias, owner_name=owner_name)

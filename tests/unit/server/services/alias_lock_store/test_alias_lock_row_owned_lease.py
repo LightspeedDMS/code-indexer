@@ -143,11 +143,13 @@ class TestAbandonedLockExpires:
         self, tmp_path: Path, store_factory: StoreFactory, alias: str, token: str
     ) -> None:
         abandoned = _coordinator(tmp_path, store_factory())
+        # ^ why write mode acquires without a heartbeat so an abandoned session lapses
         assert abandoned.acquire(
             alias,
             owner_name=_WRITE_MODE_OWNER,
             ttl_seconds=_SHORT_TTL_SECONDS,
             owner_token=token,
+            heartbeat=False,
         )
         time.sleep(_EXPIRY_WAIT_SECONDS)
 

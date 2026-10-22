@@ -61,6 +61,75 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_HEARTBEAT_RENEWALS_PER_LEASE = 3
+_HEARTBEAT_STOP_TIMEOUT_SECONDS = 30.0
+
+
+class _Heartbeat:
+    """Keeps one held lease fresh while its holder process lives: renews by
+    the exact token every ``ttl / 3``. It ends when stopped (release, or
+    ownership found lost by the holder) or when a renewal reports the lock
+    is no longer this holder's; the holder's next checkpoint then raises.
+    A store error is logged and retried at the next interval. A daemon
+    thread, so a dead process renews nothing and its lease lapses."""
+
+    def __init__(
+        self,
+        store_resolver: Callable[[], "AliasLockStore"],
+        alias: str,
+        owner_name: str,
+        owner_token: str,
+        ttl_seconds: int,
+    ) -> None:
+        self.owner_token = owner_token
+        self._store_resolver = store_resolver
+        self._alias = alias
+        self._owner_name = owner_name
+        self._ttl_seconds = ttl_seconds
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name=f"alias-lock-heartbeat-{alias}", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if threading.current_thread() is not self._thread:
+            self._thread.join(_HEARTBEAT_STOP_TIMEOUT_SECONDS)
+
+    def _run(self) -> None:
+        from code_indexer.server.services.alias_lock_store.base import LockOutcome
+
+        interval = self._ttl_seconds / _HEARTBEAT_RENEWALS_PER_LEASE
+        # ^ invariant bounded by the holder: ends on stop() or the first non-RENEWED outcome
+        while not self._stop.wait(interval):
+            try:
+                outcome = self._store_resolver().renew_owned(
+                    self._alias,
+                    self._owner_name,
+                    owner_token=self.owner_token,
+                    ttl_seconds=self._ttl_seconds,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Lease renewal for %r (owner=%r) failed, retrying: %s: %s",
+                    self._alias,
+                    self._owner_name,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
+            if outcome is not LockOutcome.RENEWED:
+                logger.warning(
+                    "Lease renewal for %r (owner=%r) stopped: lock is %s",
+                    self._alias,
+                    self._owner_name,
+                    outcome.value,
+                )
+                return
+
 
 class AliasLockCoordinator:
     """Facade preserving WriteLockManager's bool-based public API
@@ -94,6 +163,7 @@ class AliasLockCoordinator:
         # ^ invariant only supplies THIS process's own acquisition token; never read for is_locked
         self._acquired_tokens: Dict[str, Tuple[str, str]] = {}
         self._acquired_tokens_lock = threading.Lock()
+        self._heartbeats: Dict[str, _Heartbeat] = {}
 
     def _db_backed(self) -> bool:
         return bool(self._db_backed_enabled_getter())
@@ -124,6 +194,13 @@ class AliasLockCoordinator:
             recorded = self._acquired_tokens.get(alias)
             if recorded is not None and recorded[1] == token:
                 del self._acquired_tokens[alias]
+            heartbeat = self._heartbeats.get(alias)
+            if heartbeat is not None and heartbeat.owner_token == token:
+                del self._heartbeats[alias]
+            else:
+                heartbeat = None
+        if heartbeat is not None:
+            heartbeat.stop()
 
     def acquire(
         self,
@@ -131,15 +208,19 @@ class AliasLockCoordinator:
         owner_name: str,
         ttl_seconds: int = DEFAULT_LOCK_TTL_SECONDS,
         owner_token: Optional[str] = None,
+        *,
+        heartbeat: bool = True,
     ) -> bool:
         """Non-blocking acquire; see WriteLockManager.acquire(). In DB-backed
-        mode `ttl_seconds` is the row's lease."""
+        mode `ttl_seconds` is the row's lease, kept fresh while this process
+        holds the lock (``heartbeat``); write mode passes False so an
+        abandoned session's lease lapses."""
         with self._get_alias_lock(alias):
             if self._db_backed():
                 if self._file_manager.is_locked(alias):
                     return False
                 return self._acquire_db_backed(
-                    alias, owner_name, ttl_seconds, owner_token
+                    alias, owner_name, ttl_seconds, owner_token, heartbeat
                 )
             if self._store_resolver is not None and self._store_resolver().is_held(
                 alias
@@ -158,6 +239,7 @@ class AliasLockCoordinator:
         owner_name: str,
         ttl_seconds: int,
         owner_token: Optional[str],
+        heartbeat: bool,
     ) -> bool:
         """Take the DB lock, then re-check the file lock and roll back when a
         file lock appeared during the insert (see module docstring)."""
@@ -192,8 +274,19 @@ class AliasLockCoordinator:
                 f"just-acquired DB lock (rollback_ok={rollback_ok})"
             )
             return False
+        renewal = (
+            _Heartbeat(
+                self._store_resolver, alias, owner_name, handle.owner_token, ttl_seconds
+            )
+            if heartbeat
+            else None
+        )
         with self._acquired_tokens_lock:
             self._acquired_tokens[alias] = (owner_name, handle.owner_token)
+            if renewal is not None:
+                self._heartbeats[alias] = renewal
+        if renewal is not None:
+            renewal.start()
         return True
 
     def release(

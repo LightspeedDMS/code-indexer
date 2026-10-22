@@ -102,8 +102,12 @@ class TestOnlyTheAcquirerReleasesOrRenews:
         self, make_node: MakeNode, alias: str
     ) -> None:
         node_a, node_b = make_node(), make_node()
+        # ^ why stands for a holder whose renewals stopped; a live heartbeat keeps the lease
         assert node_a.acquire(
-            alias, owner_name=_SHARED_OWNER, ttl_seconds=_SHORT_TTL_SECONDS
+            alias,
+            owner_name=_SHARED_OWNER,
+            ttl_seconds=_SHORT_TTL_SECONDS,
+            heartbeat=False,
         )
         time.sleep(_EXPIRY_WAIT_SECONDS)
         assert node_b.acquire(alias, owner_name=_SHARED_OWNER)
@@ -122,11 +126,13 @@ class _ReleaseFailsOnce(SqliteAliasLockStore):
 
     failed = False
 
-    def release_owned(self, lock_key, operation, *, owner_token):
+    def release_owned(self, lock_key, operation, *, owner_token, only_if_stale=False):
         if not self.failed:
             self.failed = True
             raise sqlite3.OperationalError("disk I/O error")
-        return super().release_owned(lock_key, operation, owner_token=owner_token)
+        return super().release_owned(
+            lock_key, operation, owner_token=owner_token, only_if_stale=only_if_stale
+        )
 
 
 class TestRememberedToken:

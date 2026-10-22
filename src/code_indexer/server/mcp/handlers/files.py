@@ -256,11 +256,14 @@ def _is_writable_repo(
 
 
 def _write_mode_acquire_lock(scheduler: Any, alias: str) -> Tuple[bool, str, str]:
-    """Acquire write lock; return (acquired, owner_if_held, owner_token)."""
+    """Acquire write lock (no heartbeat: an abandoned session lapses); return
+    (acquired, owner_if_held, owner_token)."""
     import uuid
 
     token, wlm = uuid.uuid4().hex, scheduler.write_lock_manager
-    if wlm.acquire(alias, owner_name="mcp_write_mode", owner_token=token):
+    if wlm.acquire(
+        alias, owner_name="mcp_write_mode", owner_token=token, heartbeat=False
+    ):
         return True, "", token
     return False, (wlm.get_lock_info(alias) or {}).get("owner", "unknown"), ""
 
