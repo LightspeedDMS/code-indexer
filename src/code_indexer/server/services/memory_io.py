@@ -8,10 +8,8 @@ Story #877 Phase 1b.
 
 import hashlib
 import logging
-import os
-import tempfile
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import yaml
 
@@ -207,49 +205,36 @@ def atomic_write_memory_file(
     path: Path,
     frontmatter_dict: Dict[str, Any],
     body: str = "",
+    *,
+    catalog_root: Optional[Path] = None,
 ) -> str:
-    """Write a memory file atomically (tempfile + os.replace).
+    """Write a memory file atomically through
+    ``catalog_staged_write.write_catalog_file``: the temp file is staged
+    outside ``catalog_root`` (the catalog the file lives in; None = the
+    file's own directory), fsync'd and moved over *path* with os.replace, so
+    a reader of the catalog sees the old file or the new one, never a
+    partial or temp file. Creates parent directories if missing.
 
-    - Creates parent directories if missing.
-    - Uses tempfile.mkstemp(dir=path.parent, suffix='.tmp') in the same
-      directory so os.replace is atomic on the same filesystem.
-    - Best-effort cleanup of temp file on write failure (logs, does not mask
-      the original exception).
-    - Returns the SHA-256 content_hash of the bytes that were written
-      (matches what read_memory_file would compute).
+    Returns the SHA-256 content_hash of the bytes that were written
+    (matches what read_memory_file would compute).
 
     Does NOT take any locks (caller owns locking).
 
     Raises:
         TypeError: when path is None or not a Path.
     """
+    from code_indexer.global_repos.catalog_staged_write import write_catalog_file
+
     if path is None:
         raise TypeError("path must be a Path, got NoneType")
     if not isinstance(path, Path):
         raise TypeError(f"path must be a Path, got {type(path).__name__}")
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-
     content = serialize_memory(frontmatter_dict, body)
-    content_bytes = content.encode("utf-8")
-
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(content)
-        os.replace(tmp_path, str(path))
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError as cleanup_exc:
-            logger.debug(
-                "atomic_write_memory_file: temp file cleanup failed "
-                "(non-fatal, original exception will propagate): %s",
-                cleanup_exc,
-            )
-        raise
-
-    return compute_content_hash(content_bytes)
+    if not write_catalog_file(catalog_root or path.parent, path, content):
+        # ^ why the file is in place and readable; only its directory fsync failed
+        logger.warning("Memory file %s written without a directory fsync", path)
+    return compute_content_hash(content.encode("utf-8"))
 
 
 def atomic_delete_memory_file(path: Path) -> None:

@@ -7,8 +7,6 @@ meta directory management code.
 """
 
 import logging
-import os
-import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +14,7 @@ from typing import Any, Optional
 
 import yaml
 
+from code_indexer.global_repos.catalog_staged_write import write_catalog_file
 from code_indexer.global_repos.cidx_meta_refresh_debouncer import (  # noqa: F401
     _DEFAULT_DEBOUNCE_SECONDS,
     _MAX_RETRY_INTERVAL_SECONDS,
@@ -255,8 +254,8 @@ def atomic_write_description(
     """
     Write content to target_path atomically.
 
-    The temp file is staged in ``_STAGING_DIR_NAME``, a hidden sibling of the
-    real cidx-meta directory (same filesystem), fsync'd, then moved into place
+    ``catalog_staged_write.write_catalog_file`` stages the temp file in a
+    hidden sibling of the real cidx-meta directory, fsyncs it, moves it in
     with ``os.replace``: neither a snapshot copy nor the backup sync's
     ``git add -A`` of cidx-meta can see an unfinished file. If
     refresh_scheduler is provided, acquires the cidx-meta write lock before
@@ -302,101 +301,11 @@ def atomic_write_description(
     released = True
     durable = True
     try:
-        durable = _write_staged(target_path, content)
+        durable = write_catalog_file(target_path.parent, target_path, content)
     finally:
         if lock_acquired:
             released = _release_cidx_meta_lock(refresh_scheduler)
     return released and durable
-
-
-#: Hidden staging directory beside the real cidx-meta directory (same
-#: filesystem, outside the catalog tree) for description temp files.
-_STAGING_DIR_NAME = ".cidx-meta-staging"
-#: A staging temp file older than this was left by a crashed writer.
-_STALE_STAGING_SECONDS = 15 * 60
-
-
-def _sweep_stale_staging(staging_dir: Path) -> None:
-    """Remove staging temp files (``.*.tmp``) older than
-    ``_STALE_STAGING_SECONDS``: a crashed writer's leftovers. Only the staging
-    directory is scanned (the destination lives in the catalog), and a file
-    another writer removes concurrently is tolerated. Cleanup never blocks the
-    write: any other filesystem error ends the sweep with a WARNING."""
-    cutoff = time.time() - _STALE_STAGING_SECONDS
-    try:
-        with os.scandir(staging_dir) as entries:
-            for entry in entries:
-                if not (entry.name.startswith(".") and entry.name.endswith(".tmp")):
-                    continue
-                try:
-                    if entry.is_file(follow_symlinks=False) and (
-                        entry.stat(follow_symlinks=False).st_mtime < cutoff
-                    ):
-                        os.unlink(entry.path)
-                        logger.info(
-                            "Removed stale description staging file %s", entry.path
-                        )
-                except FileNotFoundError:
-                    continue
-    except OSError as exc:
-        logger.warning(
-            "Description staging sweep of %s stopped (%s: %s); the write proceeds",
-            staging_dir,
-            type(exc).__name__,
-            getattr(exc, "filename", None) or staging_dir,
-        )
-
-
-def _write_staged(target_path: Path, content: str) -> bool:
-    """Stage *content* outside the catalog, fsync, and move it into place.
-
-    Returns False when the content is in place but the catalog directory
-    could not be fsync'd (logged): the caller then owes the refresh."""
-    catalog_dir = Path(os.path.realpath(target_path.parent))
-    staging_dir = catalog_dir.parent / _STAGING_DIR_NAME
-    staging_dir.mkdir(exist_ok=True)
-    _sweep_stale_staging(staging_dir)
-    fd, tmp_path = tempfile.mkstemp(
-        dir=str(staging_dir), prefix=f".{target_path.name}.", suffix=".tmp"
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            # mkstemp creates 0600; a snapshot copy (possibly as another OS
-            # user) must be able to read the description.
-            os.fchmod(fh.fileno(), 0o644)
-            fh.write(content)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_path, str(catalog_dir / target_path.name))
-    except Exception:
-        # Best-effort cleanup: remove the temp file so it does not linger.
-        # A failure here is non-fatal; the original exception is the real error.
-        try:
-            os.unlink(tmp_path)
-        except OSError as cleanup_exc:
-            logger.debug(
-                "atomic_write_description: temp file cleanup failed "
-                "(non-fatal, original exception will propagate): %s",
-                cleanup_exc,
-            )
-        raise
-    try:
-        dir_fd = os.open(str(catalog_dir), os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    except OSError as exc:
-        logger.warning(
-            "Description %s is in place but %s could not be fsync'd (%s: %s); "
-            "the refresh is owed to the debouncer",
-            target_path.name,
-            catalog_dir,
-            type(exc).__name__,
-            exc,
-        )
-        return False
-    return True
 
 
 def _release_cidx_meta_lock(refresh_scheduler: Any) -> bool:

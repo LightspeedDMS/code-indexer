@@ -244,7 +244,7 @@ def test_sweep_failure_never_blocks_the_write(
             raise PermissionError(13, "Permission denied", str(path))
         real_unlink(path, *args, **kwargs)
 
-    monkeypatch.setattr(meta_description_hook.os, "unlink", _unlink)
+    monkeypatch.setattr(os, "unlink", _unlink)
 
     with caplog.at_level(logging.WARNING):
         _register(golden, [])
@@ -282,7 +282,7 @@ def test_failed_directory_fsync_keeps_the_write_and_owes_the_refresh(
             raise OSError("directory fsync failed")
         real_fsync(fd)
 
-    monkeypatch.setattr(meta_description_hook.os, "fsync", _fsync)
+    monkeypatch.setattr(os, "fsync", _fsync)
 
     with caplog.at_level(logging.WARNING):
         _register(golden, [])
@@ -307,7 +307,7 @@ def test_description_temp_file_is_staged_outside_cidx_meta(
             seen["catalog_at_replace"] = sorted(p.name for p in catalog.iterdir())
         real_replace(src, dst)
 
-    monkeypatch.setattr(meta_description_hook.os, "replace", _spy_replace)
+    monkeypatch.setattr(os, "replace", _spy_replace)
 
     _register(golden, [])
 

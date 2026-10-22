@@ -65,9 +65,7 @@ DEPENDENCY_MAP_LOCK_OWNER = "dependency_map_service"  # cidx-meta write-lock own
 _DEFAULT_DELTA_INTERVAL_HOURS = (
     168  # Fallback when config unavailable (matches ClaudeIntegrationConfig default)
 )
-_AUTO_REPAIR_JOB_ID_SUFFIX_LEN = (
-    8  # Story #927: hex suffix length for auto-repair job IDs
-)
+_AUTO_REPAIR_JOB_ID_SUFFIX_LEN = 8  # hex suffix length for auto-repair job IDs
 # TODO: expose via Web UI Config Screen (Story #1035 follow-up)
 ANALYSIS_STALE_TIMEOUT_SECONDS = 14400  # 4 hours — sentinel stale recovery threshold
 

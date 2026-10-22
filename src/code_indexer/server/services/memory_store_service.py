@@ -194,7 +194,10 @@ class MemoryStoreService:
 
             path = self._memory_path(memory_id)
             content_hash = self._run_with_coarse_lock(
-                owner, lambda: atomic_write_memory_file(path, full_payload)
+                owner,
+                lambda: atomic_write_memory_file(
+                    path, full_payload, catalog_root=self._config.memories_dir.parent
+                ),
             )
             return {"id": memory_id, "content_hash": content_hash, "path": str(path)}
 
@@ -230,7 +233,10 @@ class MemoryStoreService:
 
             merged: Dict[str, Any] = {**current_fm, **edit_dict}
             content_hash = self._run_with_coarse_lock(
-                owner, lambda: atomic_write_memory_file(path, merged)
+                owner,
+                lambda: atomic_write_memory_file(
+                    path, merged, catalog_root=self._config.memories_dir.parent
+                ),
             )
             return {"id": memory_id, "content_hash": content_hash, "path": str(path)}
 

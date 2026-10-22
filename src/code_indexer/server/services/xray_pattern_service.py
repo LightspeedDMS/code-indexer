@@ -360,8 +360,7 @@ class XrayPatternService:
             previous = target_path.read_text("utf-8") if target_path.exists() else None
             facts["details"]["overwrite"] = previous is not None
             action = "add" if previous is None else "update"
-            target_dir.mkdir(parents=True, exist_ok=True)
-            target_path.write_text(pattern_yaml, encoding="utf-8")
+            self._put_catalog_file(target_path, pattern_yaml)
             if piggyback:
                 return None
             try:
@@ -373,7 +372,7 @@ class XrayPatternService:
                 if previous is None:
                     target_path.unlink(missing_ok=True)
                 else:
-                    target_path.write_text(previous, encoding="utf-8")
+                    self._put_catalog_file(target_path, previous)
                 self._unstage(target_path)
                 raise
             return None
@@ -404,6 +403,15 @@ class XrayPatternService:
         )
 
         refresh_after_catalog_write(self._scheduler, lock_still_held)
+
+    def _put_catalog_file(self, target: Path, content: str) -> None:
+        """Put *target* in place atomically, staged outside the catalog."""
+        from code_indexer.global_repos.catalog_staged_write import (
+            write_catalog_file,
+        )
+
+        if not write_catalog_file(self._cidx_meta, target, content):
+            logger.warning("X-Ray pattern %s written without a directory fsync", target)
 
     @staticmethod
     def _holds(target_path: Path, pattern_yaml: str) -> bool:
@@ -619,7 +627,7 @@ class XrayPatternService:
         ):
             target = any_dir / f"{stem}.yaml"
             if not target.exists():
-                target.write_text(content, encoding="utf-8")
+                self._put_catalog_file(target, content)
                 created.append(target)
 
         if created:

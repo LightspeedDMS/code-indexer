@@ -80,6 +80,7 @@ def require_publishing_holder(refresh_scheduler: Any) -> None:
     info = refresh_scheduler.write_lock_manager.get_lock_info(CATALOG_LOCK_ALIAS)
     owner: Optional[str] = str(info["owner"]) if info and info.get("owner") else None
     exact, prefixes = _cooperative_owners()
+    # ^ hazard a piggyback holds nothing => an exclusive holder may take the lock before the write lands; bounded because writers stage outside the catalog and os.replace (catalog_staged_write), so readers see the old or new file, never a partial one
     if owner is not None and (owner in exact or owner.startswith(prefixes)):
         return
     logger.info(f"cidx-meta write refused: catalog lock held by {owner!r}")

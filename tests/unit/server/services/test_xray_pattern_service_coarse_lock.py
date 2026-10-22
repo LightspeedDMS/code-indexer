@@ -250,9 +250,9 @@ def test_store_pattern_does_not_release_when_piggybacking(
     scheduler = FakeScheduler(is_locked=True, acquire_returns=True)
     svc = XrayPatternService(cidx_meta_path=cidx_meta, refresh_scheduler=scheduler)
 
-    # Patch write_text on the specific path object to simulate disk full
+    # The staged catalog writer's fsync fails, as on a full disk.
     with patch(
-        "code_indexer.server.services.xray_pattern_service.Path.write_text",
+        "code_indexer.global_repos.catalog_staged_write.os.fsync",
         side_effect=OSError("disk full"),
     ):
         with pytest.raises(OSError, match="disk full"):
