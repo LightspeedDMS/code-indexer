@@ -201,13 +201,14 @@ class CidxMetaRefreshDebouncer:
                 self._schedule_retry_locked(self._debounce_seconds)
             return False
         with self._lock:
-            self._awaiting = None
+            if self._awaiting == awaiting:
+                self._awaiting = None
         if verdict is RefreshJobVerdict.OWED:
             self._retry_paced(f"job {job_id} did not cover the write", failed=False)
             return False
         self._settle_submission(covered_seq)
         with self._lock:
-            return self._dirty and not self._shutdown
+            return self._dirty and not self._shutdown and self._awaiting is None
 
     def _submit(self, submitted_seq: int) -> None:
         from code_indexer.global_repos.refresh_failure_recovery import (
@@ -245,7 +246,8 @@ class CidxMetaRefreshDebouncer:
             return
         logger.info(f"Debounced cidx-meta refresh submitted as job {job_id}")
         with self._lock:
-            self._awaiting = (job_id, submitted_seq)
+            if self._awaiting is None or self._awaiting[1] < submitted_seq:
+                self._awaiting = (job_id, submitted_seq)
             self._schedule_retry_locked(self._debounce_seconds)
 
     def _retry_paced(self, why: str, failed: bool) -> None:

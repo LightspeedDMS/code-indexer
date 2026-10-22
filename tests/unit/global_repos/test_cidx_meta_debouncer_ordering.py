@@ -11,7 +11,7 @@ from __future__ import annotations
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import pytest
 
@@ -95,6 +95,73 @@ def test_an_older_job_tracked_late_never_settles_a_newer_write() -> None:
         assert store.submitted == ["job-1", "job-2"]
     finally:
         store.release_first.set()
+        debouncer.shutdown()
+
+
+class _CallbackStore:
+    """A job store whose next status read / next trigger first runs a
+    callback: a writer acting at exactly that point."""
+
+    def __init__(self) -> None:
+        self.statuses: Dict[str, Dict[str, Any]] = {}
+        self.submitted: List[str] = []
+        self.on_status: Optional[Callable[[], None]] = None
+        self.on_trigger: Optional[Callable[[], None]] = None
+        self.background_job_manager = self
+
+    def trigger_refresh_for_repo(self, alias_name: str) -> str:
+        job_id = f"job-{len(self.submitted) + 1}"
+        self.submitted.append(job_id)
+        self.statuses[job_id] = {"status": "running", "result": None}
+        callback, self.on_trigger = self.on_trigger, None
+        if callback is not None:
+            callback()
+        return job_id
+
+    def get_job_status(
+        self, job_id: str, username: str, is_admin: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        callback, self.on_status = self.on_status, None
+        if callback is not None:
+            callback()
+        return self.statuses.get(job_id)
+
+
+def _writer_tracks(debouncer: CidxMetaRefreshDebouncer, job_id: str) -> None:
+    debouncer.track_submission(job_id, debouncer.note_direct_write())
+
+
+def test_newer_tracked_job_survives_confirming_an_older_one() -> None:
+    store = _CallbackStore()
+    debouncer = CidxMetaRefreshDebouncer(store, debounce_seconds=DEBOUNCE_SECONDS)
+    try:
+        debouncer.signal_dirty()
+        _expire_now(debouncer)  # submits job-1
+        store.statuses["job-1"] = {"status": "completed", "result": COVERING}
+        store.on_status = lambda: _writer_tracks(debouncer, "job-writer")
+
+        _expire_now(debouncer)  # confirms job-1 while the writer tracks
+
+        with debouncer._lock:
+            assert debouncer._awaiting == ("job-writer", 2)
+            assert debouncer._dirty is True
+        assert store.submitted == ["job-1"]
+    finally:
+        debouncer.shutdown()
+
+
+def test_newer_tracked_job_survives_the_debouncers_own_submission() -> None:
+    store = _CallbackStore()
+    debouncer = CidxMetaRefreshDebouncer(store, debounce_seconds=DEBOUNCE_SECONDS)
+    try:
+        debouncer.signal_dirty()
+        store.on_trigger = lambda: _writer_tracks(debouncer, "job-writer")
+
+        _expire_now(debouncer)  # submits job-1 while the writer tracks
+
+        with debouncer._lock:
+            assert debouncer._awaiting == ("job-writer", 2)
+    finally:
         debouncer.shutdown()
 
 
