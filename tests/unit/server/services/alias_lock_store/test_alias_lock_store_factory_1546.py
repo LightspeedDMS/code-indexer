@@ -92,7 +92,9 @@ class TestClusterModeResolvesPostgres:
             node_id="node-a",
         )
 
-        assert factory.resolve()._node_id == "node-a"
+        store = factory.resolve()
+        assert isinstance(store, PostgresAliasLockStore)
+        assert store._node_id == "node-a"
 
     def test_postgres_store_without_node_id_records_none(self, monkeypatch, tmp_path):
         monkeypatch.setattr(f"{_MODULE}.is_postgres_storage_mode", lambda: True)
