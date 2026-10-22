@@ -28,6 +28,7 @@ from .constants import (
     DEFAULT_GROUP_POWERUSERS,
     DEFAULT_GROUP_USERS,
 )
+from .group_repo_access_batch import RepoAccessBatchMixin
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.audit_events import ALL_TARGETS_MARKER
 from code_indexer.server.services.audit_outcome import audit_target_id, record_outcome
@@ -142,7 +143,7 @@ DEFAULT_GROUPS = [
 ]
 
 
-class GroupAccessManager:
+class GroupAccessManager(RepoAccessBatchMixin):
     """
     Manages user groups and group-based access control.
 
@@ -1016,49 +1017,6 @@ class GroupAccessManager:
             {"repo": alias, "group": group.name},
         )
         return True
-
-    def revoke_repos_access_audited(
-        self, repo_names: List[str], group_id: int, *, actor: str
-    ) -> int:
-        """Revoke many repositories from a group; return how many were revoked.
-
-        The one entry point of the bulk revoke doors.  cidx-meta is skipped
-        silently.  Each revoked repository writes its own ``success`` row (as
-        the single-repository door does); the repositories that were not in
-        the group write ONE ``failure`` row between them, carrying only their
-        count, so an unbounded request never writes one row per absent name.
-        A missing group, or a revocation that raised, writes one ``failure``
-        row and the exception propagates.
-
-        Raises:
-            GroupNotFoundError: *group_id* names no group.
-        """
-        action = "repo_access_revoke"
-        not_in_group = 0
-        revoked = 0
-        try:
-            group = self.get_group(group_id)
-            if group is None:
-                raise GroupNotFoundError(f"Group with ID {group_id} not found")
-            for repo_name in repo_names:
-                if repo_name == CIDX_META_REPO:
-                    continue
-                if not self.revoke_repo_access(repo_name, group_id):
-                    not_in_group += 1
-                    continue
-                revoked += 1
-                alias = audit_target_id("repo", repo_name)
-                details = {"repo": alias, "group": group.name}
-                self._record_group_outcome(
-                    actor, action, "repo", alias, "success", details
-                )
-        except Exception:
-            self._record_group_outcome(actor, action, "repo", None, "failure", None)
-            raise
-        if not_in_group:
-            summary = {"group": group.name, "not_in_group_count": not_in_group}
-            self._record_group_outcome(actor, action, "repo", None, "failure", summary)
-        return revoked
 
     def get_group_repos(self, group_id: int) -> List[str]:
         """
