@@ -30,6 +30,11 @@ from code_indexer.server.storage.shared.snapshot_manager import (
 )
 from tests.fixtures.refresh_scheduler_stores import real_metadata_store
 
+pytestmark = pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="root reads a chmod 0 file, so cp would not fail part-way",
+)
+
 REPO = "cidx-meta"
 PREVIOUS_TS = 1_700_000_000
 

@@ -217,6 +217,35 @@ def test_stale_staging_leftovers_are_swept(
     assert _description(golden).is_file()
 
 
+def test_sweep_failure_never_blocks_the_write(
+    golden: Path,
+    debouncer: _CountingDebouncer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _wire(_Scheduler(golden))
+    staging = _staging(golden)
+    staging.mkdir()
+    old = time.time() - 16 * 60
+    stale = staging / ".other-repo.md.abc123.tmp"
+    stale.write_text("partial", encoding="utf-8")
+    os.utime(stale, (old, old))
+    real_unlink = os.unlink
+
+    def _unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == stale:
+            raise PermissionError(13, "Permission denied", str(path))
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(meta_description_hook.os, "unlink", _unlink)
+
+    with caplog.at_level(logging.WARNING):
+        _register(golden, [])
+
+    assert _description(golden).is_file()
+    assert any("PermissionError" in r.getMessage() for r in caplog.records)
+
+
 def test_description_is_world_readable_under_a_restrictive_umask(
     golden: Path, debouncer: _CountingDebouncer
 ) -> None:

@@ -421,7 +421,9 @@ def atomic_write_description(
     Returns:
         True when a refresh may be requested now; False when this call's own
         lock release failed (the lock may still be held, so a refresh
-        requested now would skip -- the caller owes it to the debouncer).
+        requested now would skip) or the catalog directory could not be
+        fsync'd after the description was put in place -- either way the
+        caller owes the refresh to the debouncer.
 
     Raises:
         LifecycleLockUnavailableError: If refresh_scheduler is provided and
@@ -466,19 +468,31 @@ def _sweep_stale_staging(staging_dir: Path) -> None:
     """Remove staging temp files (``.*.tmp``) older than
     ``_STALE_STAGING_SECONDS``: a crashed writer's leftovers. Only the staging
     directory is scanned (the destination lives in the catalog), and a file
-    another writer removes concurrently is tolerated."""
+    another writer removes concurrently is tolerated. Cleanup never blocks the
+    write: any other filesystem error ends the sweep with a WARNING."""
     cutoff = time.time() - _STALE_STAGING_SECONDS
-    for entry in os.scandir(staging_dir):
-        if not (entry.name.startswith(".") and entry.name.endswith(".tmp")):
-            continue
-        try:
-            if entry.is_file(follow_symlinks=False) and (
-                entry.stat(follow_symlinks=False).st_mtime < cutoff
-            ):
-                os.unlink(entry.path)
-                logger.info("Removed stale description staging file %s", entry.path)
-        except FileNotFoundError:
-            continue
+    try:
+        with os.scandir(staging_dir) as entries:
+            for entry in entries:
+                if not (entry.name.startswith(".") and entry.name.endswith(".tmp")):
+                    continue
+                try:
+                    if entry.is_file(follow_symlinks=False) and (
+                        entry.stat(follow_symlinks=False).st_mtime < cutoff
+                    ):
+                        os.unlink(entry.path)
+                        logger.info(
+                            "Removed stale description staging file %s", entry.path
+                        )
+                except FileNotFoundError:
+                    continue
+    except OSError as exc:
+        logger.warning(
+            "Description staging sweep of %s stopped (%s: %s); the write proceeds",
+            staging_dir,
+            type(exc).__name__,
+            getattr(exc, "filename", None) or staging_dir,
+        )
 
 
 def _write_staged(target_path: Path, content: str) -> bool:
@@ -494,10 +508,10 @@ def _write_staged(target_path: Path, content: str) -> bool:
         dir=str(staging_dir), prefix=f".{target_path.name}.", suffix=".tmp"
     )
     try:
-        # mkstemp creates 0600; a snapshot copy (possibly as another OS user)
-        # must be able to read the description.
-        os.fchmod(fd, 0o644)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            # mkstemp creates 0600; a snapshot copy (possibly as another OS
+            # user) must be able to read the description.
+            os.fchmod(fh.fileno(), 0o644)
             fh.write(content)
             fh.flush()
             os.fsync(fh.fileno())
