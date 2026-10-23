@@ -462,13 +462,6 @@ def on_repo_added(
         cli_manager,
     )
 
-    # INVARIANT: cidx-meta descriptions use the SHORT repo alias as filename:
-    #   {short_alias}.md  (e.g., JSqlParser.md)
-    # The "-global" suffix belongs to the registry alias_name, NOT the filename.
-    # DO NOT change this to use "-global" in the filename -- v10.4.9 did this
-    # and broke 10 read paths, the UI, and access filtering. Fixed in v10.7.x.
-    md_file = cidx_meta_path / f"{repo_name}.md"
-
     # Story #724 v2: optional post-generation verification pass BEFORE atomic write
     from code_indexer.server.services.config_service import (
         get_config_service,
@@ -529,13 +522,23 @@ def on_repo_added(
             tmp_path.unlink(missing_ok=True)
 
     # Single atomic write with (verified or original) content — always ONCE
-    # (the content is generated once, above). Bug #1506 7th-pass review: the
-    # configured module-level _refresh_scheduler is forwarded so the write
-    # takes the cidx-meta write lock when it is free.
+    # (the content is generated once, above).
+    put_repo_description(golden_repos_dir, repo_name, verified_content)
+
+
+def put_repo_description(golden_repos_dir: str, repo_name: str, content: str) -> None:
+    """Put *repo_name*'s description in cidx-meta through catalog admission
+    (taking the cidx-meta write lock when free -- Bug #1506 7th-pass review:
+    the module-level _refresh_scheduler is forwarded -- else under a
+    cooperative holder, else parked until an exclusive holder releases),
+    then request or owe the catalog refresh."""
     from code_indexer.global_repos.lifecycle_batch_runner import (
         LifecycleLockUnavailableError,
     )
 
+    md_file = Path(golden_repos_dir) / "cidx-meta" / f"{repo_name}.md"
+    # ^ invariant filename is the SHORT alias, never "-global" (v10.4.9 broke 10 read paths)
+    verified_content = content
     try:
         refresh_now = atomic_write_description(
             md_file, verified_content, refresh_scheduler=_refresh_scheduler
