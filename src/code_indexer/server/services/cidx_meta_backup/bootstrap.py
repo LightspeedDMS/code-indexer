@@ -13,6 +13,15 @@ from .branch_detect import detect_default_branch
 from .paths import cidx_meta_is_git_repository
 
 
+class BackupPushFailed(RuntimeError):
+    """The bootstrap push failed; *reason* is neutral (no URL, no raw git
+    output) and safe to show an operator."""
+
+    def __init__(self, reason: str, output: str) -> None:
+        self.reason = reason
+        super().__init__(f"backup push failed ({reason}): {output}")
+
+
 class CidxMetaBackupBootstrap:
     """Bootstrap a mutable cidx-meta directory into a git-backed remote."""
 
@@ -83,13 +92,16 @@ class CidxMetaBackupBootstrap:
         gitignore_path.write_text(new_content)
 
     def _push(self, cidx_meta_path: str, branch: str) -> None:
-        """Push to remote. Raises RuntimeError on rejection -- never force-pushes."""
+        """Push to remote. Raises BackupPushFailed on any failure (stall,
+        unreachable remote, rejection) -- never force-pushes."""
+        from .stall_detection import push_failure_reason
+
         result = self._git(
             cidx_meta_path, "push", "origin", f"HEAD:{branch}", check=False
         )
         if result.returncode != 0:
             stderr = (result.stderr or result.stdout or "").strip()
-            raise RuntimeError(f"push rejected by remote: {stderr}")
+            raise BackupPushFailed(push_failure_reason(stderr), stderr)
 
     def bootstrap(self, cidx_meta_path: str, remote_url: str) -> str:
         """Initialize or re-point git backup state for cidx-meta."""

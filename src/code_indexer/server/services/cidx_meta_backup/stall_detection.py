@@ -41,3 +41,38 @@ def with_ssh_keepalive(env: Dict[str, str]) -> Dict[str, str]:
         f" -o ServerAliveCountMax={SSH_SERVER_ALIVE_COUNT_MAX}"
     )
     return env
+
+
+# ^ coupled curl's low-speed abort and ssh's unanswered keepalives print these
+_STALL_MARKERS = ("Operation too slow", "not responding")
+_REJECTION_MARKERS = (
+    "rejected",
+    "declined",
+    "denied",
+    "Authentication failed",
+    "returned error: 403",
+)
+_UNREACHABLE_MARKERS = (
+    "does not appear to be a git repository",
+    "Could not resolve",
+    "Connection refused",
+    "Connection timed out",
+    "No route to host",
+    "Network is unreachable",
+    "unable to access",
+    "Could not read from remote repository",
+)
+
+
+def push_failure_reason(git_output: str) -> str:
+    """A neutral reason for a failed push, from git's output: never the raw
+    output (it can carry the remote URL). Stall is checked first because a
+    stalled transfer's output also says "unable to access"."""
+    for markers, reason in (
+        (_STALL_MARKERS, "the remote stalled"),
+        (_REJECTION_MARKERS, "the remote rejected the push"),
+        (_UNREACHABLE_MARKERS, "the remote is unreachable"),
+    ):
+        if any(marker in git_output for marker in markers):
+            return reason
+    return "the push failed"
