@@ -98,7 +98,7 @@ outputSchema:
       description: Repository-relative path of the edited memory file (present when success=true).
     error:
       type: string
-      description: Error message - includes stale-content indication with current content_hash when expected_content_hash did not match (present when success=false).
+      description: Error message - includes stale-content indication with current content_hash when expected_content_hash did not match (present when success=false). "conflict" is retryable - the cidx-meta catalog is briefly exclusive during a backup, write mode or a restore; nothing was written, retry shortly.
   required:
   - success
 ---
