@@ -173,6 +173,37 @@ class TestRestWriteModeOwnership:
         assert "enter_write_mode" in response.json()["detail"]
         assert _snapshot(env.fx.root) == before
 
+    def test_store_error_answers_503_and_writes_nothing(
+        self, client: TestClient, env: CatalogFileDoorEnv, monkeypatch
+    ) -> None:
+        healthy = client.store  # type: ignore[attr-defined]
+
+        class RenewFails(type(healthy)):  # type: ignore[misc]
+            def renew_owned(self, *args: Any, **kwargs: Any) -> Any:
+                raise sqlite3.OperationalError("disk I/O error at example.com")
+
+        source = (
+            healthy._lock_dir
+            if isinstance(healthy, SqliteAliasLockStore)
+            else healthy._dsn
+        )
+        failing = SimpleNamespace(
+            write_lock_manager=_coordinator(env.golden_root, RenewFails(source))
+        )
+        monkeypatch.setattr(
+            file_crud_service,
+            "_write_mode_lease_renewer",
+            lambda golden, alias: renew_write_mode_lease(failing, golden, alias),
+        )
+
+        response = _send(client, "create", _VISIBLE)
+
+        assert response.status_code == 503, response.text
+        detail = response.json()["detail"]
+        assert "unavailable" in detail and "retry" in detail
+        assert "enter_write_mode" not in detail and "example.com" not in detail
+        assert not (env.fx.root / _VISIBLE).exists()
+
     def test_write_after_the_lease_lapsed_is_refused(
         self, client: TestClient, env: CatalogFileDoorEnv
     ) -> None:

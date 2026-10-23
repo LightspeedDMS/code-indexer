@@ -88,8 +88,16 @@ def renew_write_mode_lease(
     refresh_scheduler: Any, golden_repos_dir: Path, alias: str
 ) -> bool:
     """Extend the write-mode lock's lease by the token the enter recorded.
-    True only when ownership is confirmed; refused, lapsed, taken over or a
-    store error is False (an abandoned session still lapses)."""
+    True only when ownership is confirmed; refused, lapsed or taken over is
+    False (an abandoned session still lapses); a store error raises
+    WriteModeLockUnavailableError (retry, nothing written)."""
+    from code_indexer.server.services.alias_lock_store.base import (
+        AliasLockOwnershipLostError,
+    )
+    from code_indexer.server.services.file_crud_service import (
+        WriteModeLockUnavailableError,
+    )
+
     marker, problem = read_marker(golden_repos_dir, alias)
     token = marker.get("owner_token") if marker else None
     if not isinstance(token, str) or not token:
@@ -105,14 +113,19 @@ def renew_write_mode_lease(
                 alias, owner_name=WRITE_MODE_OWNER, owner_token=token
             )
         )
+    except AliasLockOwnershipLostError as exc:
+        logger.warning("Write-mode lease for %s not renewed: %s", alias, exc)
+        return False
     except Exception as exc:
         logger.warning(
-            "Write-mode lease for %s not renewed: %s: %s",
+            "Write-mode lease for %s not renewed: lock store error: %s: %s",
             alias,
             type(exc).__name__,
             exc,
         )
-        return False
+        raise WriteModeLockUnavailableError(
+            "The write-mode lock store is unavailable; retry. Nothing was written."
+        ) from exc
 
 
 def renew_app_write_mode_lease(golden_repos_dir: Path, alias: str) -> bool:

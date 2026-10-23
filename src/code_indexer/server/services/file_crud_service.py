@@ -104,6 +104,12 @@ class CRUDOperationError(Exception):
     pass
 
 
+class WriteModeLockUnavailableError(CRUDOperationError):
+    """The write-mode lock store could not confirm or deny ownership (a
+    transient failure): nothing was written; retry, do not re-enter write
+    mode."""
+
+
 class FileCRUDService:
     """
     Service for file CRUD operations in activated repositories.

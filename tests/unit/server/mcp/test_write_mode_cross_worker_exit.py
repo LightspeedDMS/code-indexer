@@ -427,6 +427,9 @@ class TestFileWriteRequiresLockOwnership:
         result = _create_file(worker, golden_repos_dir, "x.md")
 
         assert result["success"] is False
+        assert "unavailable" in result["error"] and "retry" in result["error"]
+        assert "enter_write_mode" not in result["error"]
+        assert "disk I/O error" not in result["error"]
         assert not (golden_repos_dir / _ALIAS / "x.md").exists()
 
 
