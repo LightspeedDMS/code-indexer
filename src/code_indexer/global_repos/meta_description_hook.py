@@ -477,7 +477,10 @@ def on_repo_added(
             DependencyMapAnalyzer,
         )
 
-        from code_indexer.global_repos.catalog_staged_write import STAGING_DIR_NAME
+        from code_indexer.global_repos.catalog_staged_write import (
+            STAGING_DIR_NAME,
+            VERIFY_TEMP_MARKER,
+        )
 
         # The verification input lives in the staging dir beside the catalog,
         # never inside it: a backup stage-all must not see an unverified file.
@@ -485,7 +488,7 @@ def on_repo_added(
         staging_dir.mkdir(exist_ok=True)
         with tempfile.NamedTemporaryFile(
             mode="w",
-            prefix=f".{repo_name}.verify.",
+            prefix=f".{repo_name}{VERIFY_TEMP_MARKER}",
             suffix=".md",
             dir=str(staging_dir),
             delete=False,

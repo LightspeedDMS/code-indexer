@@ -22,22 +22,36 @@ logger = logging.getLogger(__name__)
 STAGING_DIR_NAME = ".cidx-meta-staging"
 #: A staging temp file older than this was left by a crashed writer.
 STALE_STAGING_SECONDS = 15 * 60
+#: Names the description fact-check input staged here
+#: (``.<alias>.verify.<random>.md``, written by meta_description_hook).
+VERIFY_TEMP_MARKER = ".verify."
+# ^ why one verification pass is bounded by the dependency-map pass timeout (default 600 s), so a day exceeds any realistic pass; sweeping a live input only degrades that pass to unverified content
+STALE_VERIFY_SECONDS = 24 * 60 * 60
 #: Descriptions and X-Ray patterns: a snapshot copy made as another OS user
 #: must be able to read them.
 SHARED_CATALOG_FILE_MODE = 0o644
 
 
 def _sweep_stale_staging(staging_dir: Path) -> None:
-    """Remove staging temp files (``.*.tmp``) older than
-    ``STALE_STAGING_SECONDS``: a crashed writer's leftovers. Only the staging
-    directory is scanned (the destination lives in the catalog), and a file
-    another writer removes concurrently is tolerated. Cleanup never blocks the
-    write: any other filesystem error ends the sweep with a WARNING."""
-    cutoff = time.time() - STALE_STAGING_SECONDS
+    """Remove a crashed writer's leftovers: staging temp files (``.*.tmp``)
+    older than ``STALE_STAGING_SECONDS`` and fact-check inputs
+    (``.*.verify.*.md``) older than ``STALE_VERIFY_SECONDS``. Only the
+    staging directory is scanned (the destination lives in the catalog), and
+    a file another writer removes concurrently is tolerated. Cleanup never
+    blocks the write: any other filesystem error ends the sweep with a
+    WARNING."""
+    now = time.time()
     try:
         with os.scandir(staging_dir) as entries:
             for entry in entries:
-                if not (entry.name.startswith(".") and entry.name.endswith(".tmp")):
+                name = entry.name
+                if not name.startswith("."):
+                    continue
+                if name.endswith(".tmp"):
+                    cutoff = now - STALE_STAGING_SECONDS
+                elif VERIFY_TEMP_MARKER in name and name.endswith(".md"):
+                    cutoff = now - STALE_VERIFY_SECONDS
+                else:
                     continue
                 try:
                     if entry.is_file(follow_symlinks=False) and (
