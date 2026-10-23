@@ -48,6 +48,8 @@ _T = TypeVar("_T")
 logger = logging.getLogger(__name__)
 
 _COARSE_ALIAS = "cidx-meta"
+#: Every memory writer's catalog-lock owner name starts with this.
+MEMORY_LOCK_OWNER_PREFIX = "memory_store@"
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +86,9 @@ class RateLimitError(Exception):
 class RefreshSchedulerProtocol(Protocol):
     """Minimal subset of refresh_scheduler used by MemoryStoreService."""
 
+    #: Lock manager whose get_lock_info names the current holder.
+    write_lock_manager: Any
+
     def acquire_write_lock(
         self,
         alias: str,
@@ -116,6 +121,10 @@ class RefreshDebouncerProtocol(Protocol):
     """Minimal subset of CidxMetaRefreshDebouncer used by MemoryStoreService."""
 
     def signal_dirty(self) -> None: ...
+
+    def note_direct_write(self) -> int: ...
+
+    def track_submission(self, job_id: str, seq: int) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +194,10 @@ class MemoryStoreService:
 
             path = self._memory_path(memory_id)
             content_hash = self._run_with_coarse_lock(
-                owner, lambda: atomic_write_memory_file(path, full_payload)
+                owner,
+                lambda: atomic_write_memory_file(
+                    path, full_payload, catalog_root=self._config.memories_dir.parent
+                ),
             )
             return {"id": memory_id, "content_hash": content_hash, "path": str(path)}
 
@@ -221,7 +233,10 @@ class MemoryStoreService:
 
             merged: Dict[str, Any] = {**current_fm, **edit_dict}
             content_hash = self._run_with_coarse_lock(
-                owner, lambda: atomic_write_memory_file(path, merged)
+                owner,
+                lambda: atomic_write_memory_file(
+                    path, merged, catalog_root=self._config.memories_dir.parent
+                ),
             )
             return {"id": memory_id, "content_hash": content_hash, "path": str(path)}
 
@@ -259,7 +274,7 @@ class MemoryStoreService:
     # ------------------------------------------------------------------
 
     def _owner_name(self, username: str) -> str:
-        return f"memory_store@{self._hostname}/{username}"
+        return f"{MEMORY_LOCK_OWNER_PREFIX}{self._hostname}/{username}"
 
     def _memory_path(self, memory_id: str) -> Path:
         """Build and validate the path for a memory file.
@@ -309,19 +324,24 @@ class MemoryStoreService:
     def _coarse_piggyback_or_acquire(self, owner: str) -> bool:
         """Return True if piggybacking (skip acquire/release).
 
-        Piggyback when is_write_locked returns True, or when acquire
-        returns False (race — another process acquired between check and here).
+        Admission is the shared catalog rule (catalog_lock_holder): hold the
+        lock, or piggyback on a cooperative holder; an exclusive holder
+        refuses the write with ConflictError.
         """
-        if self._scheduler.is_write_locked(_COARSE_ALIAS):
-            return True
         # Story #932 follow-up: ttl_seconds NOT forwarded here — the real
         # RefreshScheduler.acquire_write_lock delegates to WriteLockManager which
         # owns TTL internally.  coarse_lock_ttl_seconds is kept in the config
         # dataclass as a documented knob for future use should WriteLockManager
         # ever expose an override.
-        acquired = self._scheduler.acquire_write_lock(_COARSE_ALIAS, owner)
-        # acquired=False means a race into piggyback; we never held the lock.
-        return not acquired
+        from code_indexer.global_repos.catalog_lock_holder import (
+            CatalogLockedExclusively,
+            admit_catalog_write,
+        )
+
+        try:
+            return not admit_catalog_write(self._scheduler, owner)
+        except CatalogLockedExclusively as exc:
+            raise ConflictError(str(exc)) from exc
 
     def _signal_refresh(self, piggyback: bool) -> None:
         """Signal refresh. Piggyback always uses debouncer.
@@ -331,13 +351,12 @@ class MemoryStoreService:
         the refresh scheduler, any other failure is retried by the debouncer.
         """
         from code_indexer.global_repos.meta_description_hook import (
-            request_cidx_meta_refresh,
+            refresh_after_catalog_write,
         )
 
-        if piggyback:
-            self._debouncer.signal_dirty()
-            return
-        request_cidx_meta_refresh(self._scheduler, debouncer=self._debouncer)
+        refresh_after_catalog_write(
+            self._scheduler, lock_still_held=piggyback, debouncer=self._debouncer
+        )
 
     def _release_coarse_lock(self, owner: str) -> bool:
         """Release coarse lock; False when the lock could not be removed."""

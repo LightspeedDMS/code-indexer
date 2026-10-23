@@ -227,9 +227,11 @@ class TestCrossMechanismConflictDetection:
         original_try_acquire = store.try_acquire
 
         def _try_acquire_with_interleaved_file_lock(
-            lock_key, operation, owner_token=None
+            lock_key, operation, owner_token=None, ttl_seconds=None
         ):
-            handle = original_try_acquire(lock_key, operation, owner_token)
+            handle = original_try_acquire(
+                lock_key, operation, owner_token, ttl_seconds=ttl_seconds
+            )
             acquired = coordinator._file_manager.acquire(
                 lock_key, owner_name="other-proc"
             )
@@ -242,7 +244,7 @@ class TestCrossMechanismConflictDetection:
 
         try:
             assert coordinator.acquire("myalias", owner_name="b") is False
-            assert coordinator._handles.get("myalias") is None
+            assert store.get_holder("myalias") is None
             assert store.is_held("myalias") is False
         finally:
             # WriteLockManager.release() DOES return bool (unlike
@@ -361,37 +363,48 @@ class TestOwnershipLossPropagation:
             coordinator.renew("myalias", owner_name="a", owner_token="tok-1") is False
         )
 
-    def test_renew_on_severed_connection_raises_ownership_lost(self, tmp_path):
-        """Simulates a crash mid-hold (the connection dies but the
-        in-process handle is still tracked) -- renew() must raise
+    def test_renew_after_another_holder_took_over_raises_ownership_lost(self, tmp_path):
+        """The row now belongs to someone else: renew() must raise
         AliasLockOwnershipLostError, not return False, not swallow it."""
         store = SqliteAliasLockStore(tmp_path / "alias_locks")
         coordinator = _db_mode_coordinator(tmp_path, store)
+        other_worker = _db_mode_coordinator(tmp_path, store)
 
         assert (
             coordinator.acquire("myalias", owner_name="a", owner_token="tok-1") is True
         )
-        handle = coordinator._handles["myalias"]
-        handle._connection.close()  # simulate the connection dying
+        assert (
+            other_worker.release("myalias", owner_name="a", owner_token="tok-1") is True
+        )
+        assert other_worker.acquire("myalias", owner_name="b") is True
 
         with pytest.raises(AliasLockOwnershipLostError):
             coordinator.renew("myalias", owner_name="a", owner_token="tok-1")
+        assert other_worker.release("myalias", owner_name="b") is True
 
 
 class TestCrashRecovery:
-    """AC6: a process/connection dying while holding the lock is
-    IMMEDIATELY recoverable via connection-death rollback -- no TTL, no
-    reaper, no clock comparison."""
+    """A holder process that died on this host is stale at once -- no TTL
+    wait (same rule as the file lock's dead-PID eviction)."""
 
-    def test_closing_the_connection_immediately_frees_the_lock(self, tmp_path):
+    def test_dead_local_holder_is_replaced_immediately(self, tmp_path):
+        import multiprocessing
+        import os
+        import sqlite3
+
         store = SqliteAliasLockStore(tmp_path / "alias_locks")
         coordinator = _db_mode_coordinator(tmp_path, store)
-
         assert coordinator.acquire("myalias", owner_name="a") is True
-        handle = coordinator._handles["myalias"]
-        handle._connection.close()  # simulate a hard crash
 
-        # A fresh acquisition must succeed immediately -- no TTL wait.
+        child = multiprocessing.get_context("fork").Process(target=os._exit, args=(0,))
+        child.start()
+        child.join(30)
+        conn = sqlite3.connect(str(tmp_path / "alias_locks" / "myalias.db"))
+        with conn:
+            conn.execute("UPDATE golden_repo_alias_locks SET pid = ?", (child.pid,))
+        conn.close()
+
+        assert coordinator.is_locked("myalias") is False
         assert coordinator.acquire("myalias", owner_name="b") is True
         assert coordinator.release("myalias", owner_name="b") is True
 

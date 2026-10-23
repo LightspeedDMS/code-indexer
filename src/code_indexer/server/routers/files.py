@@ -18,6 +18,7 @@ from code_indexer.server.services.cidx_meta_access.file_doors import (
 )
 from code_indexer.server.services.file_crud_service import (
     HashMismatchError,
+    WriteModeLockUnavailableError,
     file_crud_service,
 )
 from code_indexer.server.logging_utils import format_error_log
@@ -40,6 +41,13 @@ def _require_activation_access(alias: str, user: User) -> None:
     repo_access_http.enforce_activated_repo_access(
         repo_access_http.module_app_access_filtering_service(), user.username, alias
     )
+
+
+def _lock_store_unavailable(alias: str, exc: Exception) -> HTTPException:
+    """503 for a transient write-mode lock store error: retry, nothing written."""
+    logger.warning(f"Write-mode lock store unavailable for {alias}")
+    unavailable = status.HTTP_503_SERVICE_UNAVAILABLE
+    return HTTPException(status_code=unavailable, detail=str(exc))
 
 
 def _catalog_judge(
@@ -170,6 +178,8 @@ def create_file(
             )
         )
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except WriteModeLockUnavailableError as e:
+        raise _lock_store_unavailable(alias, e)
     except PermissionError as e:
         logger.warning(
             format_error_log(
@@ -268,6 +278,8 @@ def edit_file(
             )
         )
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except WriteModeLockUnavailableError as e:
+        raise _lock_store_unavailable(alias, e)
     except PermissionError as e:
         logger.warning(
             format_error_log(
@@ -355,6 +367,8 @@ def delete_file(
         )
         return DeleteFileResponse(**result)
 
+    except WriteModeLockUnavailableError as e:
+        raise _lock_store_unavailable(alias, e)
     except PermissionError as e:
         logger.warning(
             format_error_log(

@@ -157,9 +157,11 @@ _ENTRY_POINTS: Dict[str, FrozenSet[str]] = {
         "siem_credential_changed": {"set_credential", "remove_credential"},
         # Legacy types whose rows now come from one audited entry point.
         "user_group_change": {"assign_user_to_group_audited"},
+        "repo_access_grant": {"grant_repos_access_audited"},
         "repo_access_revoke": {
             "revoke_repo_access_audited",
             "revoke_repos_access_audited",
+            "revoke_repos_access_audited_aliases",
         },
     }.items()
 }
@@ -338,6 +340,7 @@ _ROUTE_MAPPED: Dict[str, Tuple[str, ...]] = {
     "POST /admin/groups/users/{user_id:path}/assign": _USER_GROUP,
     "POST /admin/groups/repo-access/grant": ("repo_access_grant",),
     "POST /admin/groups/repo-access/revoke": ("repo_access_revoke",),
+    "POST /admin/groups/repo-access/bulk": ("repo_access_grant", "repo_access_revoke"),
     # Credentials
     "POST /api/keys": ("api_key_created",),
     "DELETE /api/keys/{key_id}": ("api_key_deleted",),

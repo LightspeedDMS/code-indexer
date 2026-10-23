@@ -38,7 +38,10 @@ from tests.e2e.cidx_meta_world import (
     Reply,
     leaks,
     mentions,
+    refresh_in_progress_refusal,
     wait_for_catalog_refresh_after,
+    wait_for_catalog_refresh_covering,
+    wait_for_idle_catalog_refreshes,
 )
 from tests.e2e.helpers import wait_for_job
 from tests.e2e.log_audit_claims import exact, utc_now
@@ -104,6 +107,43 @@ def _wait(caller: Caller, reply: Reply) -> None:
             caller.world.client, job, caller.token(), timeout=JOB_TIMEOUT_SECONDS
         )
         assert status.get("status") == "completed", status
+
+
+ACTIVATION_ATTEMPTS = 3
+_ACTIVATION_LOGGER = "code_indexer.server.repositories.activated_repo_manager"
+
+
+def _activate_catalog_as_admin(admin: Caller) -> None:
+    """The admin's catalog activation, completed.  A catalog refresh running
+    when the job starts refuses it with the server's retryable refusal; a
+    debounced refresh starts with no job to wait for beforehand, so that
+    refusal's two ERROR entries are claimed (bound to the refresh job) and
+    the activation is retried once refreshes are idle."""
+    for _ in range(ACTIVATION_ATTEMPTS):
+        mark = admin.log_mark()
+        accepted = admin.mcp("activate_repository", {"golden_repo_alias": CATALOG})
+        assert accepted.ok, f"admin activation: {accepted.snippet()}"
+        job = str(accepted.body["job_id"])
+        status = wait_for_job(
+            admin.world.client, job, admin.token(), timeout=JOB_TIMEOUT_SECONDS
+        )
+        if status.get("status") == "completed":
+            return
+        error = str(status.get("error") or "")
+        refresh = refresh_in_progress_refusal(error)
+        assert refresh is not None, status
+        admin.claim_logs(
+            mark,
+            (
+                exact(_ACTIVATION_LOGGER, error, bound_to=refresh),
+                exact("root", f"Background job {job} failed: {error}", refresh),
+            ),
+        )
+        wait_for_idle_catalog_refreshes(admin.world.client, admin.world.admin)
+    raise AssertionError(
+        f"admin activation refused by a running catalog refresh "
+        f"{ACTIVATION_ATTEMPTS} times"
+    )
 
 
 def _activated_paths(user: Caller, admin: Caller) -> None:
@@ -376,9 +416,7 @@ class CatalogDoorSuite:
         ):
             assert not reply.ok and mentions(reply, "not accessible"), reply.snippet()
             assert not leaks(reply), reply.snippet()
-        accepted = admin.mcp("activate_repository", {"golden_repo_alias": CATALOG})
-        assert accepted.ok, f"admin activation: {accepted.snippet()}"
-        _wait(admin, accepted)
+        _activate_catalog_as_admin(admin)
         try:
             _activated_paths(user, admin)
         finally:
@@ -475,7 +513,6 @@ class CatalogDoorSuite:
         self, catalog_callers: Callers
     ) -> None:
         user = catalog_callers[0]
-        started = utc_now()
         created = user.mcp("create_memory", _memory_args(MEMORY_SUMMARY))
         assert created.ok and not leaks(created), created.snippet()
         memory_id = str(created.body["id"])
@@ -493,11 +530,16 @@ class CatalogDoorSuite:
                 content_hash = str(edited.body["content_hash"])
             assert edited.ok and not leaks(edited), edited.snippet()
         finally:
+            # The lifecycle leaves the catalog as published: the refresh
+            # after the delete covers it and publishes nothing.
+            deleting = utc_now()
             deleted = user.mcp(
                 "delete_memory",
                 {"memory_id": memory_id, "expected_content_hash": content_hash},
             )
-            wait_for_catalog_refresh_after(user.world.client, user.world.admin, started)
+            wait_for_catalog_refresh_covering(
+                user.world.client, user.world.admin, deleting
+            )
             assert deleted.ok and not leaks(deleted), deleted.snippet()
 
     def test_restricted_xray_pattern_store_names_nothing_hidden(

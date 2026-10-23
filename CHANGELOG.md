@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.94.0] - 2026-10-23
+
+### Upgrade notes
+
+- Server: the Groups page Repository Access matrix shows each repository's clone URL on hover (credentials masked), filters repositories, and offers per-group bulk Yes/No. A bulk change (`POST /admin/groups/repo-access/bulk`) requires an administrator, elevation and the CSRF token, and writes one audit row per repository it changed.
+- Server: the database-backed golden-repository write lock (the default) is now a committed lease row rather than an open transaction, so a release served by any worker takes effect. PostgreSQL migration 077 adds nullable columns only. A live holder renews its lease automatically, so long work (dependency-map analysis, migrations, refresh publish) keeps its lock. Write mode is the exception: each write-mode file write renews its lock, so an idle write-mode session loses the lock after an hour and must re-enter write mode. A lock left by a crashed process frees once its holder is provably gone: its lease lapsed, its process has exited (checked on the same host, boot and PID namespace), or it is from an earlier boot of the same node. On PostgreSQL an earlier boot is recognised only through the configured cluster `node_id`; without one such a lock frees when its lease lapses. During a rolling upgrade a lock held by a node on the previous release still reads as held.
+- Server: a write-mode file write over REST or MCP requires the session to still own the write-mode lock. A session whose lock was lost is asked to re-enter write mode (REST 403); a lock-store error answers 503 with a request to retry. Nothing is written in either case.
+- Server: while write mode, a restore, reconciliation or the catalog backup holds the `cidx-meta` catalog, memory writes answer `conflict` (REST 423) and X-Ray pattern writes answer `catalog_locked`; both are retryable, and a holder that cannot be identified yet answers a retryable "busy". A golden-repository registration, removal or description backfill made meanwhile is parked in the hidden `.cidx-meta-pending` directory beside the catalog (one record per repository, the latest change wins) and applied once the holder releases.
+- Server: memory files in the catalog stay readable only by the service user (0600). Memory, X-Ray pattern and repository-description files, and the regenerated dependency-map `_index.md`, are written atomically (staged outside the catalog, then moved into place), so a backup or snapshot never sees a partial copy of them.
+- Server: the `cidx-meta` backup's git commit and push run under the catalog lock; only the catalog refresh's backup phase and the Web UI backup-settings save push the backup mirror (the X-Ray pattern store no longer does). A backup git transfer fails instead of blocking catalog writes when an HTTP(S) transfer stays below 1 KB/s for 60 seconds or an SSH connection misses about 60 seconds of keepalives; there is no overall time limit.
+- Server: a non-git (local) golden repository refresh detects changes by comparing each file's identity with the published snapshot, including files copied in with old timestamps, same-size edits and deletions, and removes deleted files from the index and full-text search. The first refresh of each local repository after the upgrade reconciles it once against its index; unchanged content is not re-embedded. A source entry that cannot be listed or read (a permission or I/O error) now fails the refresh before indexing instead of publishing; broken symbolic links are ignored.
+- Server: saving the `cidx-meta` backup settings in the Web UI reports them saved when the following push fails, and says why (the remote stalled, rejected the push or is unreachable). While another owner holds the catalog, the settings are saved and the next catalog refresh sets the backup up.
+- Server: refresh job results state `covered_source: true` when the refresh covered its source.
+- Build: the auto-updater builds `xray-cli` with `cargo build --locked` (a stale `Cargo.lock` fails that build, not the deploy, with an explicit message), and the Rust gates run test and clippy with `--locked`.
+
+### Security
+
+- Server: a database-backed golden-repository write lock is released or renewed only with the acquiring holder's exact token, and a holder is treated as gone only by lease lapse, the death of its process under the exact recorded identity, or an earlier boot of the same node.
+- Server: every front door's write-mode file write requires confirmed ownership of the write-mode lock.
+- Server: lock tokens never appear in responses, logs or error text, and the write-mode marker is private to the service user.
+- Server: catalog writers are admitted only alongside cooperative lock holders, and a refusal names only a neutral category.
+- Server: bulk repository access changes require an administrator, elevation and the CSRF token.
+- Server: `cidx-meta` backup git errors in logs, job errors and Web responses carry no remote credentials.
+
+### Fixed
+
+- Server: a write-mode exit served by a different worker than the one that entered it no longer leaves the catalog lock held (catalog refreshes were skipped until a restart).
+- Server: a catalog write whose refresh was skipped (another owner held the catalog lock, or the refresh never looked at the source) is no longer dropped; it stays owed and is retried, paced up to every 15 minutes, until a refresh states it covered the source.
+- Server: a lock held when its host rebooted is freed at once on a solo server, and on PostgreSQL when the node has a cluster `node_id`; otherwise it frees when its lease lapses.
+- Server: write-mode marker cleanup (at startup and periodically) no longer ends another node's or worker's live write-mode session.
+- Server: write-mode exit reports the real outcome of its release and refresh, and no longer logs a "No watch running" warning on every exit.
+- Server: a reader lease of a store that is still being read is kept, lease renewal and release no longer race, and superseded snapshots are no longer kept forever by leases of closed or idle stores; cleanup blocked by a lease escalates at WARNING.
+- Server: a bulk revoke of a repository the group does not have writes no audit row, and a bulk change for a group deleted during the request answers 404 with nothing changed.
+- Server: the dependency-map repair (Web route and scheduled auto-repair) runs only while it holds the catalog lock itself, refuses as busy (retryable, nothing written) while any other owner holds it, and requests a catalog refresh after it runs.
+- Server: X-Ray seed patterns are written only under the catalog lock, including from `xray_search_batch`; a seed refused under an exclusive holder is retried on the next search, and naming it answers `catalog_locked` instead of `pattern_not_found`.
+- Indexing: a `cidx index --reconcile` whose read of the index store fails reports the store failure with its reserved exit code (unavailable or corrupt) instead of a generic failure, so the refresh backs off and restores only when safe.
+- Server: flushing query-embedding decision records waits for the batch the background writer is saving and writes only the records pending when it began, so the embedding-cache audit sees the records it expects and a flush cannot keep a search request writing under steady traffic.
+- Tests: the end-to-end log audit no longer excuses a watch thread that fails to stop.
+
 ## [12.93.0] - 2026-10-22
 
 ### Upgrade notes

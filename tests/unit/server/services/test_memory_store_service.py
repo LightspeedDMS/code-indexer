@@ -101,7 +101,11 @@ def _build_service(
     )
     scheduler = MagicMock()
     scheduler.is_write_locked.return_value = is_held
-    scheduler.acquire_write_lock.return_value = acquire_ok
+    # Held = held by a refresh (the only holder a write may piggyback on).
+    scheduler.acquire_write_lock.return_value = acquire_ok and not is_held
+    scheduler.write_lock_manager.get_lock_info.return_value = (
+        {"owner": "refresh_scheduler"} if is_held else None
+    )
     scheduler.release_write_lock.return_value = True
     debouncer = MagicMock()
     svc = MemoryStoreService(
@@ -129,7 +133,7 @@ def _assert_refresh_direct(scheduler: MagicMock, debouncer: MagicMock) -> None:
 
 def _assert_refresh_piggyback(scheduler: MagicMock, debouncer: MagicMock) -> None:
     scheduler.trigger_refresh_for_repo.assert_not_called()
-    scheduler.acquire_write_lock.assert_not_called()
+    scheduler.acquire_write_lock.assert_called_once()  # the attempt that lost
     scheduler.release_write_lock.assert_not_called()
     debouncer.signal_dirty.assert_called_once()
 
@@ -510,7 +514,7 @@ def test_edit_memory_triggers_refresh_piggyback(
     svc_edit.edit_memory(memory_id, edit_payload, original_hash, username="alice")
 
     scheduler_edit.trigger_refresh_for_repo.assert_not_called()
-    scheduler_edit.acquire_write_lock.assert_not_called()
+    scheduler_edit.acquire_write_lock.assert_called_once()  # the attempt that lost
     scheduler_edit.release_write_lock.assert_not_called()
     debouncer_edit.signal_dirty.assert_called_once()
 
@@ -619,7 +623,7 @@ def test_delete_triggers_refresh_piggyback(memories_dir, lock_manager, rate_limi
     svc_delete.delete_memory(memory_id, correct_hash, username="alice")
 
     scheduler_del.trigger_refresh_for_repo.assert_not_called()
-    scheduler_del.acquire_write_lock.assert_not_called()
+    scheduler_del.acquire_write_lock.assert_called_once()  # the attempt that lost
     scheduler_del.release_write_lock.assert_not_called()
     debouncer_del.signal_dirty.assert_called_once()
 

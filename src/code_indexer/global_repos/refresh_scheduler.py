@@ -36,7 +36,9 @@ from code_indexer.server.git.git_subprocess_env import (
     ensure_remote_url_without_credentials,
     remote_url_without_credentials,
 )
+from .cidx_meta_refresh_debouncer import COVERED_SOURCE
 from .git_pull_updater import GitPullUpdater
+from .local_source_manifest import record_source_manifest, source_change_reason
 from .meta_directory_updater import MetaDirectoryUpdater
 from .update_strategy import UpdateStrategy
 from .query_tracker import QueryTracker
@@ -56,9 +58,11 @@ from code_indexer.utils.subprocess_diagnostics import (
 from code_indexer.server.repositories.golden_repo_manager import (
     _make_hnsw_orphan_event_logger,
 )
+from code_indexer.global_repos.catalog_lock_holder import held_catalog_backup_lock
 from code_indexer.server.services.cidx_meta_backup import (
     CidxMetaBackupBootstrap,
     CidxMetaBackupSync,
+    SyncResult,
     detect_default_branch,
 )
 from code_indexer.server.services.config_service import get_config_service
@@ -251,6 +255,7 @@ def _partial_publish_warning(
 # MIGRATION_LOCK_TTL_SECONDS precedent (server/services/fleet_migration/
 # orchestrator.py) for the identical class of problem.
 _REFRESH_PUBLISH_LOCK_TTL_SECONDS = 24 * 60 * 60
+REFRESH_LOCK_OWNER = "refresh_scheduler"  # the refresh's write-lock owner name
 
 # `git rev-parse HEAD` on the local clone is a metadata read, not indexing
 # work; a bound keeps a wedged filesystem from stalling the stale check.
@@ -1056,44 +1061,6 @@ class RefreshScheduler:
             return self._DEFAULT_SNAPSHOT_RETENTION_KEEP_LAST
         return keep
 
-    def _latest_versioned_timestamp(self, alias_name: str) -> Optional[int]:
-        """Return the newest snapshot timestamp for *alias_name*, or None (Bug #1084 A7).
-
-        Uses the discovery API (:meth:`VersionedSnapshotManager.list_snapshots`)
-        when a snapshot_manager is wired — this is backend-correct on cow-daemon
-        where snapshots live under the NFS mount, NOT under
-        ``golden_repos_dir/.versioned``. When no snapshot_manager is wired (unit
-        tests / pure-local), falls back to globbing the local ``.versioned``
-        directory so existing local behavior is preserved.
-        """
-        if self._snapshot_manager is not None:
-            try:
-                snaps = self._snapshot_manager.list_snapshots(alias_name)
-            except Exception as exc:
-                logger.warning(
-                    f"_latest_versioned_timestamp: discovery failed for "
-                    f"{alias_name} (non-fatal): {type(exc).__name__}: {exc}"
-                )
-                return None
-            if not snaps:
-                return None
-            # snaps sorted ascending by ts; last is newest.
-            return int(snaps[-1][1])
-
-        # Local fallback: glob golden_repos_dir/.versioned/{repo}/v_*.
-        repo_name = alias_name.removesuffix("-global")
-        versioned_base = self.golden_repos_dir / ".versioned" / repo_name
-        if not versioned_base.exists():
-            return None
-        timestamps = []
-        for d in versioned_base.iterdir():
-            if d.is_dir() and d.name.startswith("v_"):
-                try:
-                    timestamps.append(int(d.name[2:]))
-                except (ValueError, IndexError):
-                    continue
-        return max(timestamps) if timestamps else None
-
     def _enforce_retention(self, alias_name: str, current_target: str) -> None:
         """Schedule deletion of superseded snapshots beyond keep-last-N (Bug #1084 A6).
 
@@ -1603,7 +1570,7 @@ class RefreshScheduler:
     def acquire_write_lock(
         self,
         alias: str,
-        owner_name: str = "refresh_scheduler",
+        owner_name: str = REFRESH_LOCK_OWNER,
         ttl_seconds: Optional[int] = None,
     ) -> bool:
         """
@@ -1642,7 +1609,7 @@ class RefreshScheduler:
     def release_write_lock(
         self,
         alias: str,
-        owner_name: str = "refresh_scheduler",
+        owner_name: str = REFRESH_LOCK_OWNER,
         owner_token: Optional[str] = None,
     ) -> bool:
         """
@@ -1781,7 +1748,7 @@ class RefreshScheduler:
             "global_repo_refresh", repo_alias=f"{alias}-global"
         )
 
-    def write_lock(self, alias: str, owner_name: str = "refresh_scheduler"):
+    def write_lock(self, alias: str, owner_name: str = REFRESH_LOCK_OWNER):
         """
         Context manager that acquires the write lock on entry and releases on exit.
 
@@ -1822,126 +1789,24 @@ class RefreshScheduler:
         exit_write_mode, the marker file persists indefinitely because there is no
         session-lifecycle hook to trigger cleanup.
 
-        This method is called:
-        - On start() with force=True: removes ALL markers because no MCP sessions
-          survive a server restart (every marker left over is definitively orphaned).
-        - On each _scheduler_loop iteration: removes markers older than
-          WRITE_MODE_MARKER_TTL_SECONDS (30 minutes), preserving fresh markers for
-          active sessions.
-
-        For each removed marker the corresponding write lock (owner='mcp_write_mode')
-        is released so the refresh scheduler is not permanently blocked.
+        Markers live on shared storage: a live session of another node or worker
+        survives this process's restart. A marker and its write lock are removed
+        only when the lock has no live holder (lease lapsed, or holder process
+        gone), releasing with the marker's own token.
 
         Args:
-            force: If True, remove ALL markers regardless of age (startup cleanup).
-                   If False (default), only remove markers older than
-                   WRITE_MODE_MARKER_TTL_SECONDS.
+            force: startup: skip only the marker-age filter. Otherwise only
+                markers older than WRITE_MODE_MARKER_TTL_SECONDS are considered.
         """
-        write_mode_dir = self.golden_repos_dir / ".write_mode"
-        if not write_mode_dir.exists():
-            return
+        from .write_mode_marker_cleanup import cleanup_write_mode_markers
 
-        for marker_path in write_mode_dir.glob("*.json"):
-            alias = marker_path.stem  # filename without .json
-            try:
-                self._cleanup_single_write_mode_marker(marker_path, alias, force)
-            except Exception as exc:
-                # Never let a single marker failure crash the scheduler
-                logger.warning(
-                    f"Unexpected error cleaning write mode marker {marker_path.name}: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-
-    def _cleanup_single_write_mode_marker(
-        self, marker_path: Path, alias: str, force: bool
-    ) -> None:
-        """
-        Evaluate and optionally remove a single write mode marker file.
-
-        If force=True, the marker is always removed (startup cleanup).
-        If force=False, the marker is removed only when:
-        - it contains invalid/corrupt JSON, OR
-        - the 'entered_at' field is missing, OR
-        - entered_at + WRITE_MODE_MARKER_TTL_SECONDS < now.
-
-        When a marker is removed the corresponding write lock is released.
-        """
-        import json as _json
-        from datetime import datetime, timezone
-
-        should_remove = force  # Always remove on startup
-        entered_at_str = ""  # H1: initialized here so TOCTOU guard can reference it
-
-        if not should_remove:
-            # Determine staleness from marker content
-            try:
-                content = _json.loads(marker_path.read_text())
-            except (OSError, _json.JSONDecodeError) as exc:
-                logger.warning(
-                    f"Corrupt write mode marker {marker_path.name} ({exc}), treating as stale"
-                )
-                should_remove = True
-            else:
-                entered_at_str = content.get("entered_at", "")
-                if not entered_at_str:
-                    logger.warning(
-                        f"Write mode marker {marker_path.name} has no 'entered_at', treating as stale"
-                    )
-                    should_remove = True
-                else:
-                    try:
-                        entered_at = datetime.fromisoformat(entered_at_str)
-                        if entered_at.tzinfo is None:
-                            entered_at = entered_at.replace(tzinfo=timezone.utc)
-                        elapsed = (
-                            datetime.now(timezone.utc) - entered_at
-                        ).total_seconds()
-                        if elapsed > WRITE_MODE_MARKER_TTL_SECONDS:
-                            should_remove = True
-                    except (ValueError, TypeError):
-                        logger.warning(
-                            f"Write mode marker {marker_path.name} has unparseable "
-                            f"'entered_at' ({entered_at_str!r}), treating as stale"
-                        )
-                        should_remove = True
-
-        if not should_remove:
-            return
-
-        # H1 fix: Re-read marker to check a new session hasn't taken over (TOCTOU guard).
-        # Only applies for non-force cleanups: startup force=True removes everything unconditionally.
-        if not force:
-            try:
-                current_content = _json.loads(marker_path.read_text())
-                current_entered_at = current_content.get("entered_at", "")
-                if current_entered_at != entered_at_str:
-                    logger.debug(
-                        f"Write mode marker {marker_path.name} was refreshed by new session, skipping cleanup"
-                    )
-                    return
-            except (OSError, _json.JSONDecodeError):
-                pass  # File gone or corrupt — proceed with cleanup
-
-        # Remove the marker file
-        try:
-            marker_path.unlink(missing_ok=True)
-            logger.info(
-                f"Cleaned up {'orphaned' if not force else 'startup'} write mode marker: "
-                f"{marker_path.name} (alias={alias!r})"
-            )
-        except OSError as exc:
-            logger.warning(
-                f"Could not delete write mode marker {marker_path.name}: {exc}"
-            )
-            return
-
-        # Release the corresponding write lock so the scheduler is not blocked
-        self.release_write_lock(alias, owner_name="mcp_write_mode")
-        if self.is_write_locked(alias):
-            logger.warning(
-                f"Stale marker removed for {alias!r} but write lock release was refused "
-                f"(owner mismatch). Lock may be held by a different service."
-            )
+        cleanup_write_mode_markers(
+            self.golden_repos_dir / ".write_mode",
+            force=force,
+            ttl_seconds=WRITE_MODE_MARKER_TTL_SECONDS,
+            is_locked=self.is_write_locked,
+            release=self.write_lock_manager.release_if_stale,
+        )
 
     def _resolve_global_alias(self, alias_name: str) -> str:
         """Resolve bare alias to global alias format.
@@ -2980,44 +2845,28 @@ class RefreshScheduler:
                                         _meta_err,
                                     )
 
-                                # MED-2: Idempotent bootstrap — cheap when remote URL unchanged.
-                                # Bug #2012: every backup git call is bound
-                                # to the job's cancel check.
-                                if _backup_cfg_local.remote_url:
-                                    try:
-                                        CidxMetaBackupBootstrap(
-                                            cancel_check=cancel_check
-                                        ).bootstrap(
-                                            master_path, _backup_cfg_local.remote_url
-                                        )
-                                    except Exception as _bootstrap_err:
-                                        if _is_refresh_cancellation(_bootstrap_err):
-                                            raise
-                                        logger.warning(
-                                            "cidx-meta backup bootstrap failed for %s: %s",
-                                            alias_name,
-                                            _bootstrap_err,
-                                        )
-
-                                _branch = (
-                                    detect_default_branch(
-                                        master_path, cancel_check=cancel_check
-                                    )
-                                    or "master"
+                                _sync_result = self._sync_catalog_backup(
+                                    repo_name,
+                                    master_path,
+                                    _backup_cfg_local.remote_url,
+                                    alias_name,
+                                    cancel_check,
                                 )
+                                if _sync_result is None:
+                                    return {
+                                        "success": True,
+                                        "alias": alias_name,
+                                        "message": "Skipped, write lock held",
+                                    }
 
-                                # Bug #1555: the remote is a passive backup
-                                # mirror, never a peer -- sync() publishes
-                                # local HEAD directly (force-with-lease)
-                                # rather than rebasing, so it can never get
-                                # stuck on a content conflict and there is
-                                # no quarantine state left to check.
-                                _sync_result = CidxMetaBackupSync(
-                                    master_path, _branch, cancel_check=cancel_check
-                                ).sync()
-
-                                if _sync_result.skipped and not (
-                                    force_reset or regate or fts_rebuild_due
+                                # A writer that committed and pushed itself
+                                # leaves the sync nothing to do.
+                                if (
+                                    _sync_result.skipped
+                                    and not (force_reset or regate or fts_rebuild_due)
+                                    and not self._has_local_changes(
+                                        source_path, alias_name
+                                    )
                                 ):
                                     logger.info(
                                         "No cidx-meta backup changes detected for %s, "
@@ -3028,6 +2877,7 @@ class RefreshScheduler:
                                         "success": True,
                                         "alias": alias_name,
                                         "message": "No changes detected",
+                                        COVERED_SOURCE: True,
                                     }
 
                                 sync_failure = _sync_result.sync_failure
@@ -3055,6 +2905,7 @@ class RefreshScheduler:
                                         "success": True,
                                         "alias": alias_name,
                                         "message": "No changes detected",
+                                        COVERED_SOURCE: True,
                                     }
 
                             logger.info(
@@ -3110,43 +2961,19 @@ class RefreshScheduler:
                                     meta_err,
                                 )
 
-                            # MED-2: Idempotent bootstrap call ensures URL changes applied
-                            # via DB-only paths (not through the Save route) are applied
-                            # on the next refresh cycle.  CidxMetaBackupBootstrap.bootstrap()
-                            # is cheap when the remote URL has not changed (reads
-                            # `git remote get-url origin` and returns immediately on match).
-                            # Bug #2012: every backup git call is bound to
-                            # the job's cancel check.
-                            if backup_cfg.remote_url:
-                                try:
-                                    CidxMetaBackupBootstrap(
-                                        cancel_check=cancel_check
-                                    ).bootstrap(master_path, backup_cfg.remote_url)
-                                except Exception as bootstrap_err:
-                                    if _is_refresh_cancellation(bootstrap_err):
-                                        raise
-                                    logger.warning(
-                                        "cidx-meta backup bootstrap failed for %s: %s",
-                                        alias_name,
-                                        bootstrap_err,
-                                    )
-                            branch = (
-                                detect_default_branch(
-                                    master_path, cancel_check=cancel_check
-                                )
-                                or "master"
+                            sync_result = self._sync_catalog_backup(
+                                repo_name,
+                                master_path,
+                                backup_cfg.remote_url,
+                                alias_name,
+                                cancel_check,
                             )
-
-                            # Bug #1555: the remote is a passive backup
-                            # mirror, never a peer -- sync() publishes local
-                            # HEAD directly (force-with-lease) rather than
-                            # rebasing, so it can never get stuck on a
-                            # content conflict and there is no quarantine
-                            # state left to check. Mirrors the post-migration
-                            # block's identical call above.
-                            sync_result = CidxMetaBackupSync(
-                                master_path, branch, cancel_check=cancel_check
-                            ).sync()
+                            if sync_result is None:
+                                return {
+                                    "success": True,
+                                    "alias": alias_name,
+                                    "message": "Skipped, write lock held",
+                                }
                             if sync_result.skipped and not (
                                 force_reset or regate or fts_rebuild_due
                             ):
@@ -3158,6 +2985,7 @@ class RefreshScheduler:
                                     "success": True,
                                     "alias": alias_name,
                                     "message": "No changes detected",
+                                    COVERED_SOURCE: True,
                                 }
                             sync_failure = sync_result.sync_failure
                             source_path = master_path
@@ -3289,6 +3117,7 @@ class RefreshScheduler:
                                                 "success": True,
                                                 "alias": alias_name,
                                                 "message": "No changes detected",
+                                                COVERED_SOURCE: True,
                                             }
                                         # Drift detected — skip git pull but proceed to indexing.
                                     else:
@@ -3371,6 +3200,20 @@ class RefreshScheduler:
                             and not regate
                             else None
                         )
+                        # The run's source manifest (before its listing) is
+                        # what the published snapshot's change check uses.
+                        _delta = (
+                            record_source_manifest(
+                                source_path, self._published_snapshot(alias_name)
+                            )
+                            if is_local_repo
+                            else None
+                        )
+                        _deletion_kwargs: Dict[str, Any] = (
+                            {"detect_deletions": True}
+                            if _delta is not None and _delta.removed
+                            else {}
+                        )
                         try:
                             run_spend = self._index_source(
                                 alias_name=alias_name,
@@ -3379,9 +3222,11 @@ class RefreshScheduler:
                                 orphan_event_callback=_make_hnsw_orphan_event_logger(
                                     alias_name
                                 ),
-                                force_reconcile=force_reconcile,
+                                force_reconcile=force_reconcile
+                                or (_delta is not None and _delta.reconcile),
                                 cancel_check=cancel_check,
                                 job_id=job_id,
+                                **_deletion_kwargs,
                             )
                         except FatalChunkStoreIndexError as fatal_exc:
                             # Bug #2022: self-heal under the lock; stay failed.
@@ -3428,6 +3273,7 @@ class RefreshScheduler:
                                     "success": True,
                                     "alias": alias_name,
                                     "message": "No changes detected",
+                                    COVERED_SOURCE: True,
                                 },
                                 run_spend,
                             )
@@ -3489,7 +3335,7 @@ class RefreshScheduler:
                         # still create and publish a snapshot as if it
                         # still held exclusive ownership.
                         self.raise_if_write_lock_ownership_lost(
-                            repo_name, owner_name="refresh_scheduler"
+                            repo_name, owner_name=REFRESH_LOCK_OWNER
                         )
                         _raise_if_refresh_cancelled(
                             cancel_check, alias_name, "before the snapshot"
@@ -3635,6 +3481,7 @@ class RefreshScheduler:
                             "success": True,
                             "alias": alias_name,
                             "message": "Refresh complete",
+                            COVERED_SOURCE: True,
                         },
                         run_spend,
                     )
@@ -3760,7 +3607,7 @@ class RefreshScheduler:
             # wrapper) for symmetry with the acquire call.
             acquired = self.write_lock_manager.acquire(
                 repo_name,
-                owner_name="refresh_scheduler",
+                owner_name=REFRESH_LOCK_OWNER,
                 ttl_seconds=_REFRESH_PUBLISH_LOCK_TTL_SECONDS,
             )
             try:
@@ -3768,7 +3615,7 @@ class RefreshScheduler:
             finally:
                 if acquired:
                     released = self.write_lock_manager.release(
-                        repo_name, owner_name="refresh_scheduler"
+                        repo_name, owner_name=REFRESH_LOCK_OWNER
                     )
                     if not released:
                         logger.warning(
@@ -3779,6 +3626,45 @@ class RefreshScheduler:
                         )
 
         return _ctx()
+
+    def _sync_catalog_backup(
+        self,
+        repo_name: str,
+        master_path: str,
+        remote_url: Optional[str],
+        alias_name: str,
+        cancel_check: Optional[Callable[[], bool]],
+    ) -> Optional[SyncResult]:
+        """Bootstrap (when a remote is configured) and sync the backup mirror
+        holding the catalog lock as the exclusive backup owner, bound to the
+        job's cancel check; None when another owner holds it (skip a cycle)."""
+        with held_catalog_backup_lock(self.write_lock_manager, repo_name) as acquired:
+            if not acquired:
+                logger.info(
+                    f"Skipping refresh for {alias_name}, write lock held by "
+                    f"another owner before the backup sync"
+                )
+                return None
+            if remote_url:
+                try:
+                    CidxMetaBackupBootstrap(cancel_check=cancel_check).bootstrap(
+                        master_path, remote_url
+                    )
+                except Exception as bootstrap_err:
+                    if _is_refresh_cancellation(bootstrap_err):
+                        raise
+                    logger.warning(
+                        "cidx-meta backup bootstrap failed for %s: %s",
+                        alias_name,
+                        bootstrap_err,
+                    )
+            branch = (
+                detect_default_branch(master_path, cancel_check=cancel_check)
+                or "master"
+            )
+            return CidxMetaBackupSync(
+                master_path, branch, cancel_check=cancel_check
+            ).sync()
 
     def _get_refresh_integrity_quarantine_state_if_active(
         self, alias_name: str
@@ -3881,7 +3767,7 @@ class RefreshScheduler:
         return partial(
             self.raise_if_write_lock_ownership_lost,
             repo_name,
-            owner_name="refresh_scheduler",
+            owner_name=REFRESH_LOCK_OWNER,
         )
 
     def _run_and_publish_integrity_gate(
@@ -3936,9 +3822,14 @@ class RefreshScheduler:
         orphan_event_callback: Optional[Any] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
         job_id: Optional[str] = None,
+        detect_deletions: bool = False,
     ) -> Optional[Dict[str, int]]:
         """
         Index the golden repo source in place (Story #229: index-source-first).
+
+        ``detect_deletions``: the run removes points of gone paths (a
+        non-git incremental leaves them otherwise); a reconcile does so
+        already.
 
         Returns the semantic child's metered provider spend (Story #2122):
         ``{"inputs_sent": N, "attempts": M}`` from its final
@@ -3997,6 +3888,14 @@ class RefreshScheduler:
 
         if needs_reconcile:
             index_command = ["cidx", "index", "--fts", "--reconcile", "--progress-json"]
+        elif detect_deletions:
+            index_command = [
+                "cidx",
+                "index",
+                "--fts",
+                "--detect-deletions",
+                "--progress-json",
+            ]
         else:
             index_command = ["cidx", "index", "--fts", "--progress-json"]
 
@@ -4981,76 +4880,20 @@ class RefreshScheduler:
                 f"{type(reset_exc).__name__}: {reset_exc}"
             )
 
+    def _published_snapshot(self, alias_name: str) -> Optional[str]:
+        """The alias's published target when it is a versioned snapshot
+        (never the newest ``v_*`` directory, which may be unpublished)."""
+        target = self.alias_manager.read_alias(alias_name)
+        return target if target and self._is_versioned_snapshot(target) else None
+
     def _has_local_changes(self, source_path: str, alias_name: str) -> bool:
-        """
-        Detect changes in a local (non-git) repository using file mtime comparison.
-
-        Compares the maximum mtime of all non-hidden files in source_path against
-        the timestamp embedded in the latest versioned directory name.
-
-        Algorithm:
-        1. Derive repo_name from alias_name (strip "-global")
-        2. Look in .versioned/{repo_name}/ for v_* directories
-        3. If none exist -> return True (first version needed)
-        4. Parse latest version timestamp from directory name
-        5. Walk source_path, skip hidden dirs/files (starting with '.')
-        6. Get max mtime of all non-hidden files
-        7. If no visible files -> return False
-        8. Return max_mtime > latest_version_timestamp
-
-        Args:
-            source_path: Path to the live local repository directory
-            alias_name: Global alias name (e.g., "cidx-meta-global")
-
-        Returns:
-            True if changes detected or first version needed, False otherwise
-        """
-        # Bug #1084 Phase A7 (Defect C): use the discovery API instead of globbing
-        # golden_repos_dir/.versioned. On cow-daemon the snapshots live under the
-        # NFS mount, so the old glob always missed -> always "first version" ->
-        # spurious re-index + snapshot every cycle.
-        latest_timestamp = self._latest_versioned_timestamp(alias_name)
-
-        if latest_timestamp is None:
-            logger.debug(
-                f"No versioned snapshot found for {alias_name} — treating as first version"
-            )
-            return True
-
-        logger.debug(
-            f"Latest versioned snapshot timestamp for {alias_name}: {latest_timestamp}"
-        )
-
-        # Walk source_path, skip hidden dirs and files
-        max_mtime: float = 0.0
-        found_files = False
-
-        for root, dirs, files in os.walk(source_path):
-            # Skip hidden directories in-place (prevents descent into them)
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
-
-            for filename in files:
-                if filename.startswith("."):
-                    continue
-                file_path = os.path.join(root, filename)
-                try:
-                    mtime = os.stat(file_path).st_mtime
-                    found_files = True
-                    if mtime > max_mtime:
-                        max_mtime = mtime
-                except OSError as e:
-                    logger.debug(f"Cannot stat {file_path}: {e}")
-
-        if not found_files:
-            logger.debug(f"No visible files in {source_path} — no changes")
-            return False
-
-        has_changes = max_mtime > latest_timestamp
-        logger.debug(
-            f"mtime check for {alias_name}: max_mtime={max_mtime:.0f} "
-            f"vs latest_version={latest_timestamp} -> changes={has_changes}"
-        )
-        return has_changes
+        """Whether a local (non-git) repository's source differs, by file
+        identity, from what its PUBLISHED snapshot indexed (see
+        ``local_source_manifest``). An unknown baseline is a change."""
+        reason = source_change_reason(self._published_snapshot(alias_name), source_path)
+        if reason is not None:
+            logger.info(f"Local repo {alias_name} changed: {reason}")
+        return reason is not None
 
     def _check_extension_drift(self, source_path: str, alias_name: str) -> bool:
         """Check for extension drift and return True if --reconcile is needed.

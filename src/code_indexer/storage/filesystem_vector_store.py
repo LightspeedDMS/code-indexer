@@ -7735,10 +7735,10 @@ class FilesystemVectorStore:
         t0 = time.time()
 
         def _hydrate_from_chunk_store(chunk_store: Any) -> List[Dict[str, Any]]:
-            """CHUNKS_DB Case-A/Case-B hydration, on the MAIN thread. Reused by
-            the normal CHUNKS_DB path AND Bug #1486 Finding 5's re-hydrate retry
-            (a concurrent migration that deleted the legacy JSON mid-hydration),
-            so the read logic exists once and always returns a FRESH list."""
+            return self._chunk_store_cache.run_reading(chunk_store, _hydrate_rows)
+
+        def _hydrate_rows(chunk_store: Any) -> List[Dict[str, Any]]:
+            """CHUNKS_DB hydration (one read path, a FRESH list each call)."""
             _res: List[Dict[str, Any]] = []
             if not filter_conditions:
                 # Case A (CHUNKS_DB): Story #1456 AC4 -- apply score_threshold on

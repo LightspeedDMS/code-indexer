@@ -84,17 +84,20 @@ def test_real_ownership_loss_marks_lock_loss_signal(tmp_path, monkeypatch):
     scheduler = _make_real_db_backed_scheduler(tmp_path)
     bare_alias = "real-db-alias"
 
-    connection_closed = threading.Event()
+    lock_taken_over = threading.Event()
 
     with guarded_by_refresh_lock(scheduler, bare_alias) as lock_loss_signal:
         assert lock_loss_signal.is_lost() is False
 
-        # Simulate a crash: sever the tracked handle's live connection
-        # out from under the heartbeat, exactly like
-        # AliasLockCoordinator's own crash-recovery tests do.
-        handle = scheduler.write_lock_manager._handles[bare_alias]
-        handle._connection.close()
-        connection_closed.set()
+        # Another worker releases the migration's row and a different
+        # owner takes the lock, out from under the heartbeat.
+        resolver = scheduler.write_lock_manager._store_resolver
+        assert resolver is not None
+        store = resolver()
+        token = scheduler.write_lock_manager._acquired_tokens[bare_alias][1]
+        store.release_owned(bare_alias, MIGRATION_OWNER_NAME, owner_token=token)
+        assert store.try_acquire(bare_alias, operation="other-worker") is not None
+        lock_taken_over.set()
 
         # Proof 1: a direct, unmodified real call to the SAME coordinator
         # instance -- proves the exact exception type at the real
@@ -112,9 +115,9 @@ def test_real_ownership_loss_marks_lock_loss_signal(tmp_path, monkeypatch):
             time.sleep(_POLL_SLEEP_SECONDS)
 
         assert lock_loss_signal.is_lost() is True, (
-            "the real AliasLockOwnershipLostError from the severed "
-            "connection must reach the heartbeat and mark the "
+            "the real AliasLockOwnershipLostError from the takeover by "
+            "another holder must reach the heartbeat and mark the "
             "LockLossSignal lost within the timeout"
         )
 
-    assert connection_closed.is_set()
+    assert lock_taken_over.is_set()

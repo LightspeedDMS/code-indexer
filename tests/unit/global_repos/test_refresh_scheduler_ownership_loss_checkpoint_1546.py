@@ -107,9 +107,9 @@ class TestDbBackedModeCheckpoint:
                 "myalias", owner_name="tester", owner_token="tok-1"
             )
 
-    def test_checkpoint_raises_on_severed_connection(self, tmp_path):
-        """Simulates a crash mid-hold: the connection dies but the
-        in-process handle is still tracked."""
+    def test_checkpoint_raises_after_another_holder_took_over(self, tmp_path):
+        """Another worker released the row and a different owner holds the
+        lock now: the original holder's checkpoint must raise."""
         store = SqliteAliasLockStore(tmp_path / "alias_locks")
         scheduler = _make_scheduler(
             tmp_path,
@@ -120,8 +120,9 @@ class TestDbBackedModeCheckpoint:
             "myalias", owner_name="tester", owner_token="tok-1"
         )
         assert acquired is True
-        handle = scheduler.write_lock_manager._handles["myalias"]
-        handle._connection.close()
+        store.release_owned("myalias", "tester", owner_token="tok-1")
+        successor = store.try_acquire("myalias", operation="other-worker")
+        assert successor is not None
 
         try:
             with pytest.raises(AliasLockOwnershipLostError):
@@ -129,11 +130,4 @@ class TestDbBackedModeCheckpoint:
                     "myalias", owner_name="tester", owner_token="tok-1"
                 )
         finally:
-            # release_write_lock() returns None. Internally,
-            # AliasLockCoordinator.release() catches
-            # AliasLockOwnershipLostError from the dead connection and
-            # reports False to release_write_lock() (logged there as a
-            # warning) -- it never raises, per its documented contract.
-            scheduler.release_write_lock(
-                "myalias", owner_name="tester", owner_token="tok-1"
-            )
+            store.release(successor)

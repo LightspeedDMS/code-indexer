@@ -61,16 +61,20 @@ def write_exception_repo() -> Iterator[Tuple[str, Path]]:
         repo_dir = golden_repos_dir / "bug1704-write-exception"
         repo_dir.mkdir(parents=True)
 
-        # Story #231 write-mode marker: required for
-        # _check_write_mode_active() to allow the write through.
-        write_mode_dir = golden_repos_dir / ".write_mode"
-        write_mode_dir.mkdir(parents=True)
-        (write_mode_dir / f"{_TEST_ALIAS_WITHOUT_GLOBAL}.json").write_text("{}")
-
         file_crud_service.register_write_exception(_TEST_ALIAS, repo_dir)
         file_crud_service.set_golden_repos_dir(golden_repos_dir)
 
-        yield _TEST_ALIAS, repo_dir
+        from tests.shared.real_write_mode import real_write_mode
+
+        # ^ why _check_write_mode_active() admits a write only under a real write-mode lock
+        with real_write_mode(
+            file_crud_service,
+            golden_repos_dir,
+            _TEST_ALIAS_WITHOUT_GLOBAL,
+            repo_dir,
+            tmp_root / "write-mode-locks",
+        ):
+            yield _TEST_ALIAS, repo_dir
     finally:
         file_crud_service._global_write_exceptions = saved_exceptions
         file_crud_service._golden_repos_dir = saved_golden_repos_dir

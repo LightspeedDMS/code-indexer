@@ -239,10 +239,14 @@ def test_run_acquires_and_releases_lock_per_sub_batch(golden_repos_dir: Path) ->
     )
     runner.run(aliases, parent_job_id="job-1")
 
-    # One acquire/release per alias
-    assert len(scheduler.acquire_calls) == len(aliases)
-    assert len(scheduler.release_calls) == len(aliases)
-    for key, owner in scheduler.acquire_calls:
+    # One per-alias acquire/release per alias, plus the cidx-meta catalog
+    # lock around each description write (as the lifecycle writer).
+    per_alias = [c for c in scheduler.acquire_calls if c[0] != "cidx-meta"]
+    catalog = [c for c in scheduler.acquire_calls if c[0] == "cidx-meta"]
+    assert len(per_alias) == len(aliases)
+    assert catalog == [("cidx-meta", "lifecycle_writer")] * len(aliases)
+    assert len(scheduler.release_calls) == 2 * len(aliases)
+    for key, owner in per_alias:
         assert key.startswith("lifecycle:"), (
             f"Expected per-alias key starting with 'lifecycle:', got {key!r}"
         )

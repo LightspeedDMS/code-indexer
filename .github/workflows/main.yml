@@ -120,13 +120,14 @@ jobs:
       with:
         workspaces: "rust -> target"
 
-    - name: Run cargo test --workspace (rust/xray-core + rust/xray-cli, incl. AC18 PREAMBLE parity check)
+    #^ why --locked => lockfile drift fails here, not at deploy (auto-updater builds --locked)
+    - name: Run cargo test --locked --workspace (rust/xray-core + rust/xray-cli, incl. AC18 PREAMBLE parity check)
       working-directory: rust
-      run: cargo test --workspace
+      run: cargo test --locked --workspace
 
-    - name: Run cargo clippy --workspace --all-targets -- -D warnings
+    - name: Run cargo clippy --locked --workspace --all-targets -- -D warnings
       working-directory: rust
-      run: cargo clippy --workspace --all-targets -- -D warnings
+      run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   check-version:
     runs-on: ubuntu-latest

@@ -15,7 +15,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Iterator, List, Optional, Set
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set
 from unittest.mock import Mock
 
 from code_indexer.global_repos.cleanup_manager import CleanupManager
@@ -73,6 +73,23 @@ class RecordingJobManager:
             raise DuplicateJobError("global_repo_refresh", alias, "job-in-flight")
         self.submitted.append(alias)
         return f"job-{len(self.submitted)}"
+
+    def get_job_status(
+        self, job_id: str, username: str, is_admin: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """Every job it issued reads as a finished refresh that covered its
+        writes (the store read the cidx-meta debouncer confirms with)."""
+        issued = {f"job-{n}" for n in range(1, len(self.submitted) + 1)}
+        if job_id not in issued:
+            return None
+        return {
+            "status": "completed",
+            "result": {
+                "success": True,
+                "message": "Refresh complete",
+                "covered_source": True,
+            },
+        }
 
     def count_active_refresh_jobs(self) -> int:
         return 0

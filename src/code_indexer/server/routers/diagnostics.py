@@ -541,8 +541,11 @@ def _make_description_callback(
         if success:
             try:
                 content = generate_fn(repo_alias, repo_url, clone_path)
-                md_path.parent.mkdir(parents=True, exist_ok=True)
-                md_path.write_text(content, encoding="utf-8")
+                from code_indexer.global_repos.meta_description_hook import (
+                    put_repo_description,
+                )
+
+                put_repo_description(str(md_path.parent.parent), md_path.stem, content)
                 logger.info(f"Generated description for {repo_alias}: {md_path}")
             except Exception as gen_err:
                 logger.warning(

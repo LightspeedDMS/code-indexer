@@ -4,18 +4,20 @@ golden_repos_dir/.versioned glob.
 Defect C (`_has_local_changes`): on cow-daemon the snapshots live under the NFS
 mount, NOT under golden_repos_dir/.versioned, so the old glob always missed and
 returned True ("first version") every cycle -> spurious re-index + snapshot.
+The baseline is now the alias's published snapshot, read where it lives.
 
 Defect E (`_restore_master_from_versioned`): same glob meant a lost master could
 not be restored on cow-daemon even though snapshots exist at the mount.
 """
 
-import os
-import time
+import shutil
 from unittest.mock import MagicMock
 
 import pytest
 
+from code_indexer.global_repos.local_source_manifest import record_source_manifest
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
+from tests.utils.source_tree_age import age_source_files
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 
@@ -40,86 +42,55 @@ def _make_scheduler(golden_repos_dir, snapshot_manager):
     )
 
 
+class _CowSnapshotPredicate:
+    """Recognizes one cow-mount snapshot path; records any listing call."""
+
+    def __init__(self, snapshot) -> None:
+        self._snapshot = str(snapshot)
+        self.listed = 0
+
+    def is_versioned_snapshot(self, path: str) -> bool:
+        return path == self._snapshot
+
+    def list_snapshots(self, alias_name: str):
+        self.listed += 1
+        return []
+
+
 class TestDefectCHasLocalChanges:
-    """`_has_local_changes` uses snapshot_manager.list_snapshots, not the glob."""
+    """`_has_local_changes` reads the baseline manifest from the alias's
+    published snapshot directory wherever the backend keeps it (cow-daemon:
+    under the NFS mount, not golden_repos_dir/.versioned) -- no listing."""
+
+    def _published_cow_snapshot(self, tmp_path):
+        source = tmp_path / "live"
+        source.mkdir()
+        (source / ".code-indexer").mkdir()
+        (source / "file.txt").write_text("x")
+        age_source_files(source)
+        record_source_manifest(str(source), None)
+        snapshot = tmp_path / "cow-storage" / ".versioned" / "cidx-meta" / "v_5"
+        shutil.copytree(source, snapshot)
+        return source, snapshot, _CowSnapshotPredicate(snapshot)
 
     def test_cow_layout_no_changes_returns_false(self, golden_repos_dir, tmp_path):
-        """Old snapshot ts >> source mtime -> no changes -> False (no spurious snapshot)."""
-        # Source files with mtime in the PAST relative to the snapshot ts.
-        source = tmp_path / "live"
-        source.mkdir()
-        f = source / "file.txt"
-        f.write_text("x")
-        old_mtime = time.time() - 10_000
-        os.utime(f, (old_mtime, old_mtime))
-
-        # Snapshot recorded at a MUCH later ts than the source mtime.
-        future_ts = int(time.time()) + 10_000
-        sm = MagicMock()
-        sm.list_snapshots.return_value = [
-            (f"/mnt/cow-storage/.versioned/cidx-meta/v_{future_ts}", future_ts)
-        ]
+        source, snapshot, sm = self._published_cow_snapshot(tmp_path)
         sched = _make_scheduler(golden_repos_dir, sm)
+        sched.alias_manager.create_alias(
+            "cidx-meta-global", str(snapshot), repo_name="cidx-meta"
+        )
 
-        result = sched._has_local_changes(str(source), "cidx-meta-global")
-
-        assert result is False
-        sm.list_snapshots.assert_called_once_with("cidx-meta-global")
+        assert sched._has_local_changes(str(source), "cidx-meta-global") is False
+        assert sm.listed == 0
 
     def test_cow_layout_with_changes_returns_true(self, golden_repos_dir, tmp_path):
-        """Source mtime newer than the latest snapshot ts -> changes -> True."""
-        source = tmp_path / "live"
-        source.mkdir()
-        f = source / "file.txt"
-        f.write_text("x")
-        # Fresh mtime (now).
-        now = time.time()
-        os.utime(f, (now, now))
-
-        old_ts = int(now) - 10_000
-        sm = MagicMock()
-        sm.list_snapshots.return_value = [
-            (f"/mnt/cow-storage/.versioned/cidx-meta/v_{old_ts}", old_ts)
-        ]
+        source, snapshot, sm = self._published_cow_snapshot(tmp_path)
+        (source / "file.txt").write_text("edited")
         sched = _make_scheduler(golden_repos_dir, sm)
+        sched.alias_manager.create_alias(
+            "cidx-meta-global", str(snapshot), repo_name="cidx-meta"
+        )
 
-        result = sched._has_local_changes(str(source), "cidx-meta-global")
-
-        assert result is True
-
-    def test_no_snapshots_returns_true_first_version(self, golden_repos_dir, tmp_path):
-        """No snapshots at all -> first version needed -> True."""
-        source = tmp_path / "live"
-        source.mkdir()
-        (source / "f.txt").write_text("x")
-
-        sm = MagicMock()
-        sm.list_snapshots.return_value = []
-        sched = _make_scheduler(golden_repos_dir, sm)
-
-        assert sched._has_local_changes(str(source), "cidx-meta-global") is True
-
-    def test_local_glob_fallback_when_no_snapshot_manager(
-        self, golden_repos_dir, tmp_path
-    ):
-        """Backward compat: with NO snapshot_manager, falls back to the local
-        golden_repos_dir/.versioned glob (existing behavior preserved)."""
-        # Create a local .versioned snapshot with an old ts.
-        ns_dir = golden_repos_dir / ".versioned" / "cidx-meta"
-        ns_dir.mkdir(parents=True)
-        old_ts = int(time.time()) - 10_000
-        (ns_dir / f"v_{old_ts}").mkdir()
-
-        source = tmp_path / "live"
-        source.mkdir()
-        f = source / "file.txt"
-        f.write_text("x")
-        now = time.time()
-        os.utime(f, (now, now))
-
-        sched = _make_scheduler(golden_repos_dir, snapshot_manager=None)
-
-        # Newer source mtime than the old snapshot -> changes detected.
         assert sched._has_local_changes(str(source), "cidx-meta-global") is True
 
 

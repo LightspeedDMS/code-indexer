@@ -5,7 +5,7 @@ Implements the one-call-per-repo lifecycle detection rebuild:
   - write_meta_md: cooperative-lock writer for cidx-meta/<alias>.md
   - LifecycleLockUnavailableError: raised when write lock cannot be acquired
   - _validate_alias: path-traversal guard
-  - _do_write: atomic write via tempfile.mkstemp + os.rename
+  - _do_write: atomic write staged outside cidx-meta (catalog_staged_write)
 
 The LifecycleBatchRunner class and LifecycleFleetScanner will be added in
 subsequent increments.
@@ -15,7 +15,6 @@ import logging as _logging
 import math
 import os
 import re
-import tempfile
 from concurrent.futures import as_completed
 
 from code_indexer.server.services.jittered_dispatcher import (
@@ -198,9 +197,8 @@ def _do_write(
 
     Algorithm:
       1. Render YAML frontmatter from *lifecycle_frontmatter*.
-      2. Write to a temporary file in *cidx_meta_path/* (same filesystem as
-         destination — required for atomic rename to work on Linux).
-      3. Rename temp → *meta_md_path* (atomic on POSIX).
+      2. Put it in place through catalog_staged_write.write_catalog_file:
+         staged outside cidx-meta, fsync'd, moved in whole at mode 0644.
 
     Raises:
         yaml.YAMLError: if lifecycle_frontmatter cannot be serialised to YAML.
@@ -222,27 +220,27 @@ def _do_write(
 
     content = f"---\n{frontmatter_yaml}---\n\n{body}\n"
 
-    cidx_meta_path.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=str(cidx_meta_path))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(content)
-    except Exception:
-        # Best-effort cleanup: the original write exception is the real failure.
-        # If unlink also fails we discard that secondary OSError intentionally —
-        # the orphaned temp file is harmless and the caller sees the root cause.
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass  # Discard: cleanup is best-effort; original exception propagates
-        raise
+    from code_indexer.global_repos.catalog_staged_write import (
+        SHARED_CATALOG_FILE_MODE,
+        write_catalog_file,
+    )
 
-    os.rename(tmp_path, str(meta_md_path))
+    if not write_catalog_file(
+        cidx_meta_path, meta_md_path, content, mode=SHARED_CATALOG_FILE_MODE
+    ):
+        _logger.warning(f"Description {meta_md_path} written, not yet durable")
+    from code_indexer.global_repos.catalog_pending_changes import discard_pending
+
+    # ^ invariant the new content is in place (the writer raises otherwise), so it supersedes any parked change
+    discard_pending(cidx_meta_path.parent, meta_md_path.stem)
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+# Lock owner name used by write_meta_md when acquiring cidx-meta write lock.
+LIFECYCLE_WRITER_LOCK_OWNER: str = "lifecycle_writer"
 
 
 def write_meta_md(
@@ -264,8 +262,8 @@ def write_meta_md(
       - already_locked=True: assumes the caller already holds the lock;
         neither acquires nor releases it.
 
-    Atomic write: uses tempfile.mkstemp(dir=cidx-meta/) + os.rename so
-    readers never see a partial file.
+    Atomic write: staged outside cidx-meta and moved in whole
+    (catalog_staged_write), so readers never see a partial or temp file.
 
     Does NOT call cidx_meta_refresh_debouncer.signal_dirty — that is the
     caller's responsibility (Messi Rule #12 — Anti-Orphan-Code: the signal
@@ -319,7 +317,7 @@ def write_meta_md(
     meta_md_path = cidx_meta_path / f"{alias}.md"
 
     # -- Cooperative lock ---------------------------------------------------
-    _LOCK_OWNER = "lifecycle_writer"
+    _LOCK_OWNER = LIFECYCLE_WRITER_LOCK_OWNER
     _LOCK_KEY = "cidx-meta"
 
     if not already_locked:
@@ -473,7 +471,7 @@ _DEFAULT_TTL_SECONDS: int = 3600
 _DEFAULT_ESTIMATED_SECONDS_PER_REPO: int = 30
 
 # Lock owner name used by the batch runner when acquiring cidx-meta write lock.
-_BATCH_RUNNER_LOCK_OWNER: str = "lifecycle_batch_runner"
+BATCH_RUNNER_LOCK_OWNER: str = "lifecycle_batch_runner"
 
 
 class LifecycleBatchRunner:
@@ -798,7 +796,7 @@ class LifecycleBatchRunner:
         # frontmatter so the entire read-merge-write sequence is atomic.
         per_alias_lock_key = f"lifecycle:{alias}"
         acquired = self._refresh_scheduler.acquire_write_lock(
-            per_alias_lock_key, owner_name=_BATCH_RUNNER_LOCK_OWNER
+            per_alias_lock_key, owner_name=BATCH_RUNNER_LOCK_OWNER
         )
         if not acquired:
             raise LifecycleLockUnavailableError(
@@ -832,14 +830,26 @@ class LifecycleBatchRunner:
                 # First write: no prior frontmatter to merge.
                 merged_fm = new_lifecycle_fm
 
-            write_meta_md(
-                alias=alias,
-                description_body=result.description,
-                lifecycle_frontmatter=merged_fm,
-                already_locked=True,
-                refresh_scheduler=self._refresh_scheduler,
-                golden_repos_dir=self._golden_repos_dir,
+            from code_indexer.global_repos.catalog_lock_holder import (
+                CatalogLockedExclusively,
+                admitted_catalog_write,
             )
+
+            try:
+                with admitted_catalog_write(
+                    self._refresh_scheduler, LIFECYCLE_WRITER_LOCK_OWNER
+                ):
+                    write_meta_md(
+                        alias=alias,
+                        description_body=result.description,
+                        lifecycle_frontmatter=merged_fm,
+                        already_locked=True,
+                        refresh_scheduler=self._refresh_scheduler,
+                        golden_repos_dir=self._golden_repos_dir,
+                    )
+            except CatalogLockedExclusively as exc:
+                # ^ why the alias fails and nothing is written; the caller's next run retries it
+                raise LifecycleLockUnavailableError(str(exc)) from exc
             # MESSI Rule 15 defensive invariant: post-write frontmatter must be a
             # superset of merged_fm (no key loss). Both re-read and assert are
             # skipped under python -O via the __debug__ guard.
@@ -853,7 +863,7 @@ class LifecycleBatchRunner:
                 )
         finally:
             self._refresh_scheduler.release_write_lock(
-                per_alias_lock_key, owner_name=_BATCH_RUNNER_LOCK_OWNER
+                per_alias_lock_key, owner_name=BATCH_RUNNER_LOCK_OWNER
             )
 
         # Update tracking DB with lifecycle schema version after successful write.

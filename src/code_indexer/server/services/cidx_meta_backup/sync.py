@@ -64,13 +64,15 @@ class CidxMetaBackupSync:
         self._cancel_check = cancel_check
 
     def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-        env = build_non_interactive_git_env()
+        from .stall_detection import stall_detecting_git_argv, with_ssh_keepalive
+
+        env = with_ssh_keepalive(build_non_interactive_git_env())
         env.setdefault("GIT_AUTHOR_NAME", "cidx-meta-backup")
         env.setdefault("GIT_AUTHOR_EMAIL", "cidx-meta-backup@example.invalid")
         env.setdefault("GIT_COMMITTER_NAME", env["GIT_AUTHOR_NAME"])
         env.setdefault("GIT_COMMITTER_EMAIL", env["GIT_AUTHOR_EMAIL"])
         return run_with_cancel(
-            ["git", *args],
+            stall_detecting_git_argv(*args),
             self._cancel_check,
             cwd=self.cidx_meta_path,
             capture_output=True,
@@ -81,7 +83,12 @@ class CidxMetaBackupSync:
 
     @staticmethod
     def _stderr_or_stdout(result: subprocess.CompletedProcess) -> str:
-        return (result.stderr or result.stdout or "").strip()
+        from code_indexer.utils.credential_redaction import redact_command_output
+
+        # ^ security git and the remote can echo a URL whose userinfo holds credentials
+        return str(
+            redact_command_output((result.stderr or result.stdout or "").strip(), None)
+        )
 
     def sync(self) -> SyncResult:
         status = self._git("status", "--porcelain")

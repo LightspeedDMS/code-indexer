@@ -1,12 +1,25 @@
-<div style="margin-bottom: 1rem;">
+<div class="repo-access-toolbar">
     <button id="toggle-grouped" class="outline secondary" onclick="toggleGroupedView()">Group by Category</button>
+    <input type="search" id="repo-access-filter" class="repo-access-filter"
+           placeholder="Filter by name or clone URL" aria-label="Filter repositories by name or clone URL"
+           oninput="onRepoAccessFilterInput()">
+    <span id="repo-access-count" class="repo-access-count"></span>
+    <span id="repo-access-status" class="repo-access-status" role="status" aria-live="polite"></span>
 </div>
 <table class="repo-access-table">
     <thead>
         <tr>
             <th>Repository</th>
             {% for group in all_groups %}
-            <th class="group-column">{{ group.name }}</th>
+            <th class="group-column">
+                {{ group.name }}
+                {% if group.name != 'admins' %}
+                <div class="bulk-controls">
+                    <button type="button" class="bulk-btn" data-group="{{ group.id }}" data-group-name="{{ group.name }}" data-action="grant" onclick="bulkToggle(this)" title="Grant every visible repository to {{ group.name }}">All Yes</button>
+                    <button type="button" class="bulk-btn" data-group="{{ group.id }}" data-group-name="{{ group.name }}" data-action="revoke" onclick="bulkToggle(this)" title="Revoke every visible repository from {{ group.name }}">All No</button>
+                </div>
+                {% endif %}
+            </th>
             {% endfor %}
         </tr>
     </thead>
@@ -14,10 +27,11 @@
         {% if golden_repos %}
         {% for repo in golden_repos %}
         <tr data-repo-alias="{{ repo.name }}"
+            data-repo-url="{{ repo.repo_url or '' }}"
             data-category-id="{{ repo.category_id or '' }}"
             data-category-name="{{ repo.category_name or 'Unassigned' }}"
             data-category-priority="{{ repo.category_priority if repo.category_priority is not none else 999999 }}">
-            <td class="repo-name">
+            <td class="repo-name" title="{{ repo.repo_url or '' }}">
                 {{ repo.name }}
                 {% if repo.name == 'cidx-meta' %}
                 <span class="badge badge-info">Always Accessible</span>
@@ -68,6 +82,58 @@
 </table>
 
 <style>
+.repo-access-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.repo-access-toolbar button,
+.repo-access-toolbar .repo-access-filter {
+    margin-bottom: 0;
+    width: auto;
+}
+
+.repo-access-filter {
+    min-width: 18rem;
+}
+
+.repo-access-count,
+.repo-access-status {
+    color: var(--pico-muted-color);
+    font-size: 0.9rem;
+}
+
+.repo-filter-hidden {
+    display: none !important;
+}
+
+.bulk-controls {
+    display: flex;
+    justify-content: center;
+    gap: 0.25rem;
+    margin-top: 0.25rem;
+}
+
+.bulk-btn {
+    background: none;
+    border: 1px solid var(--pico-muted-border-color);
+    color: inherit;
+    padding: 0.1rem 0.4rem;
+    margin: 0;
+    width: auto;
+    font-size: 0.75rem;
+    border-radius: 0.25rem;
+    cursor: pointer;
+}
+
+.bulk-btn:disabled {
+    opacity: 0.5;
+    cursor: wait;
+}
+
 .repo-access-table {
     width: 100%;
     border-collapse: collapse;
@@ -154,4 +220,4 @@
     padding: 2rem;
 }
 </style>
-<script>applyStoredGroupedView();</script>
+<script>applyStoredGroupedView(); applyRepoAccessFilter();</script>

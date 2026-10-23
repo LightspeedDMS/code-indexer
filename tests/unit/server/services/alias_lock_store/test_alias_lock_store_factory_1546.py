@@ -84,6 +84,29 @@ class TestClusterModeResolvesPostgres:
 
         assert first is second
 
+    def test_postgres_store_carries_the_configured_node_id(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(f"{_MODULE}.is_postgres_storage_mode", lambda: True)
+        factory = AliasLockStoreFactory(
+            postgres_dsn="postgresql://user:pass@host/db",
+            server_data_dir=str(tmp_path),
+            node_id="node-a",
+        )
+
+        store = factory.resolve()
+        assert isinstance(store, PostgresAliasLockStore)
+        assert store._node_id == "node-a"
+
+    def test_postgres_store_without_node_id_records_none(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(f"{_MODULE}.is_postgres_storage_mode", lambda: True)
+        factory = AliasLockStoreFactory(
+            postgres_dsn="postgresql://user:pass@host/db",
+            server_data_dir=str(tmp_path),
+        )
+
+        store = factory.resolve()
+        assert isinstance(store, PostgresAliasLockStore)
+        assert store._node_id == ""
+
     def test_postgres_mode_without_dsn_fails_loud(self, monkeypatch, tmp_path):
         """AC: fail LOUD if cluster ever resolves to SQLite -- a missing
         DSN in postgres mode is a wiring bug, not a reason to silently

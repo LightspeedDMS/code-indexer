@@ -90,7 +90,7 @@ outputSchema:
       description: Repository-relative path of the written memory file, e.g. cidx-meta/memories/{uuid}.md (present when success=true).
     error:
       type: string
-      description: Error message (present when success=false).
+      description: Error code (present when success=false). "conflict" is retryable - the cidx-meta catalog is briefly exclusive during a backup, write mode or a restore; nothing was written, retry shortly.
   required:
   - success
 ---

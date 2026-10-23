@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import socket
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -139,6 +140,9 @@ class SnapshotReaderLease:
         )
         self._released = False
         self._ttl_seconds = ttl_seconds
+        # ^ invariant renew and release serialize: a renewal never recreates a released lease
+        # ^ why RLock: a weakref finalizer may release on the renewing thread
+        self._lock = threading.RLock()
 
     def acquire(self) -> None:
         payload = {
@@ -155,30 +159,34 @@ class SnapshotReaderLease:
             os.close(fd)
 
     def renew(self) -> None:
-        if self._released:
-            return
-        payload = {
-            "snapshot_path": self.snapshot_path,
-            "lease_id": self._lease_id,
-            "updated_at": time.time(),
-            "ttl_seconds": self._ttl_seconds,
-        }
-        temporary = self._path.with_suffix(f".tmp.{uuid.uuid4().hex}")
-        try:
-            temporary.write_text(json.dumps(payload), encoding="utf-8")
-            os.replace(str(temporary), str(self._path))
-        finally:
+        with self._lock:
+            if self._released:
+                return
+            payload = {
+                "snapshot_path": self.snapshot_path,
+                "lease_id": self._lease_id,
+                "updated_at": time.time(),
+                "ttl_seconds": self._ttl_seconds,
+            }
+            temporary = self._path.with_suffix(f".tmp.{uuid.uuid4().hex}")
             try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+                temporary.write_text(json.dumps(payload), encoding="utf-8")
+                os.replace(str(temporary), str(self._path))
+                if self._released:  # released re-entrantly during this renewal
+                    self._path.unlink(missing_ok=True)
+            finally:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
 
     def release(self) -> None:
-        self._released = True
-        try:
-            self._path.unlink()
-        except FileNotFoundError:
-            pass
+        with self._lock:
+            self._released = True
+            try:
+                self._path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def snapshot_has_live_reader(snapshot_path: str, *, lease_root: Path) -> bool:

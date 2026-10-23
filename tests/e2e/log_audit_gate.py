@@ -187,11 +187,6 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     "[CACHE-GENERAL-016] Cannot trigger migration: metadata file not found",
     # test_05: git_pull on cidx-meta raises FileNotFoundError (no activated-repo dir).
     "git_pull file not found",
-    # test_07 (AC8 cidx-meta-backup): refresh/backup paths call auto_watch_manager
-    # stop/reset on cidx-meta, which has no active file watch in the ephemeral e2e
-    # data dir.  [APP-GENERAL-050] is a benign idempotent no-op WARNING (the watch
-    # was never running); it does not affect backup or refresh correctness.
-    "No watch running for",
     # test_07 + test_08: deliberate negative tests send invalid/empty request bodies;
     # server returns 422 and logs REPO-GENERAL-017 ValidationError.
     "[REPO-GENERAL-017] ValidationError",
@@ -503,11 +498,6 @@ LOG_AUDIT_EXACT_ALLOWLIST: List[Tuple[str, str]] = [
     (
         "code_indexer.services.git_aware_watch_handler",
         r"Git not available - proceeding with file-only monitoring",
-    ),
-    # Stopping that auto-watch (exit_write_mode, deactivation); Bug #2180
-    (
-        "code_indexer.daemon.watch_manager",
-        r"Watch thread did not stop within 5 seconds",
     ),
 ]
 

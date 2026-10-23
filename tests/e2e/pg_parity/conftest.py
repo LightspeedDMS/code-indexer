@@ -19,6 +19,7 @@ CIDX data, not for the operational log store.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Iterator, Optional, Tuple
 
@@ -33,6 +34,8 @@ from tests.e2e.helpers import (
     wait_for_repo_activation,
 )
 from tests.e2e.server.conftest import AdminTokenProvider
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -84,11 +87,31 @@ def pg_admin_token_provider(pg_server_url: str) -> AdminTokenProvider:
         body = resp.json()
         return str(body["access_token"]), body.get("refresh_token")
 
+    def _refresh_via_grant(refresh_token: str) -> Optional[Tuple[str, Optional[str]]]:
+        """Renew through the refresh-token grant: credentials are never
+        resubmitted, so renewal cannot trip the login throttle. None on a
+        failed grant (the provider then re-logs in)."""
+        resp = httpx.post(
+            f"{pg_server_url}/api/auth/refresh",
+            json={"refresh_token": refresh_token},
+            timeout=15.0,
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                "pg_admin_token_provider refresh-token grant failed (%s), "
+                "falling back to a full re-login",
+                resp.status_code,
+            )
+            return None
+        body = resp.json()
+        return str(body["access_token"]), body.get("refresh_token")
+
     initial_access, initial_refresh = _relogin()
     return AdminTokenProvider(
         login_fn=_relogin,
         initial_access_token=initial_access,
         initial_refresh_token=initial_refresh,
+        refresh_fn=_refresh_via_grant,
     )
 
 

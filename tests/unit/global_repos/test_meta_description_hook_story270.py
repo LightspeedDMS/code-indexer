@@ -432,6 +432,10 @@ class TestOnRepoAddedPassesRefreshSchedulerToAtomicWrite:
 
         blocked_scheduler = MagicMock()
         blocked_scheduler.acquire_write_lock.return_value = False
+        # A cooperative writer holds it (an exclusive one parks the change).
+        blocked_scheduler.write_lock_manager.get_lock_info.return_value = {
+            "owner": "refresh_scheduler"
+        }
         set_refresh_scheduler(blocked_scheduler)
 
         repo_name = "lock-blocked-repo"

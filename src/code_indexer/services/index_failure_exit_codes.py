@@ -34,12 +34,13 @@ from __future__ import annotations
 import logging
 import sqlite3
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Iterator, NoReturn, Optional
 
 from code_indexer.services.run_spend_meter import RunSpendDefect, get_run_spend_meter
 from code_indexer.storage.sqlite_chunk_store import (
     ChunkStoreUnavailableError,
     MissingEstablishedChunkStoreError,
+    is_fatal_chunk_store_write_error,
     message_reports_sqlite_corruption,
     sqlite_error_reports_corruption,
 )
@@ -205,3 +206,14 @@ class FatalChunkStoreIndexError(RuntimeError):
     def __init__(self, message: str, kind: ChunkStoreFailureKind) -> None:
         super().__init__(message)
         self.kind = kind
+
+
+def reraise_typed_if_fatal(exc: BaseException, what: str) -> NoReturn:
+    """Re-raise ``exc``, raised by an indexing run's own read of its store:
+    as a ``ChunkStoreUnavailableError`` chained to it when
+    ``is_fatal_chunk_store_write_error`` calls it fatal (the run then exits
+    86/87/89, never the generic 1), unchanged otherwise (lock contention
+    stays untyped). Query reads keep their bare errors by design."""
+    if is_fatal_chunk_store_write_error(exc):
+        raise ChunkStoreUnavailableError(f"{what} failed: {exc}") from exc
+    raise exc

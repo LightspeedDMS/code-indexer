@@ -16,7 +16,12 @@ from tests.e2e.cidx_meta_tool_recipes import (
     repository_tools,
     schema_repository_tools,
 )
-from tests.e2e.cidx_meta_world import Reply, leaks, run_cleanup_steps
+from tests.e2e.cidx_meta_world import (
+    Reply,
+    covering_catalog_refresh,
+    leaks,
+    run_cleanup_steps,
+)
 from tests.e2e.log_audit_gate import is_allowlisted
 from tests.e2e.log_audit_claims import (
     LogClaim,
@@ -263,11 +268,6 @@ EXACT_ALLOWLISTED: List[Tuple[str, str, str]] = [
         "Git not available - proceeding with file-only monitoring",
         "Git monitoring stopped unexpectedly",
     ),
-    (
-        "code_indexer.daemon.watch_manager",
-        "Watch thread did not stop within 5 seconds",
-        "Watch thread did not stop within 50 seconds",
-    ),
 ]
 
 
@@ -285,6 +285,16 @@ class TestExactLogAllowlist:
             assert not is_allowlisted(
                 {"source": "example.other_logger", "message": message}
             ), message
+
+    def test_stuck_watch_thread_is_not_excused(self) -> None:
+        """A normal watch stop no longer times out, so this warning means a
+        genuinely stuck worker and must fail the audit."""
+        assert not is_allowlisted(
+            {
+                "source": "code_indexer.daemon.watch_manager",
+                "message": "Watch thread did not stop within 5 seconds",
+            }
+        )
 
 
 class TestCleanupSteps:
@@ -314,3 +324,94 @@ class TestCleanupSteps:
 
     def test_clean_run_reports_nothing(self) -> None:
         assert run_cleanup_steps((("noop", lambda: None),)) == []
+
+
+_SINCE = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+
+
+def _refresh_job(
+    message: str,
+    covered: bool,
+    created: datetime = _SINCE + timedelta(seconds=1),
+    alias: str = "cidx-meta-global",
+    operation_type: str = "global_repo_refresh",
+) -> Dict[str, Any]:
+    """A completed job exactly as GET /api/jobs lists it."""
+    result: Dict[str, Any] = {"success": True, "alias": alias, "message": message}
+    if covered:
+        result["covered_source"] = True
+    return {
+        "job_id": "job-1",
+        "operation_type": operation_type,
+        "status": "completed",
+        "created_at": created.isoformat(),
+        "result": result,
+    }
+
+
+class TestCoveringCatalogRefresh:
+    """A write that leaves the catalog as published (create, edit, delete
+    of one memory) publishes nothing, so the wait keys on the refresh that
+    covered the source, not on the catalog's last publish time."""
+
+    def test_no_change_refresh_covering_the_source_counts(self) -> None:
+        assert covering_catalog_refresh(
+            [_refresh_job("No changes detected", covered=True)], _SINCE
+        )
+
+    def test_lock_held_skip_does_not_count(self) -> None:
+        jobs = [_refresh_job("Skipped, write lock held", covered=False)]
+        assert not covering_catalog_refresh(jobs, _SINCE)
+
+    def test_refresh_created_before_since_does_not_count(self) -> None:
+        early = _SINCE - timedelta(seconds=1)
+        jobs = [_refresh_job("Refresh complete", covered=True, created=early)]
+        assert not covering_catalog_refresh(jobs, _SINCE)
+
+    def test_refresh_of_another_alias_does_not_count(self) -> None:
+        jobs = [_refresh_job("Refresh complete", covered=True, alias="other-global")]
+        assert not covering_catalog_refresh(jobs, _SINCE)
+
+    def test_other_operation_type_does_not_count(self) -> None:
+        jobs = [
+            _refresh_job(
+                "Refresh complete", covered=True, operation_type="add_golden_repo"
+            )
+        ]
+        assert not covering_catalog_refresh(jobs, _SINCE)
+
+
+_REFRESH_JOB = "a1861217-845e-4cc7-8ea7-0405006e8d04"
+_REFUSAL = (
+    "Failed to activate repository 'cidx-meta' for user 'admin': Cannot "
+    "activate golden repository 'cidx-meta': a refresh is currently in "
+    "progress for it (Duplicate job: global_repo_refresh for "
+    f"cidx-meta-global (existing: {_REFRESH_JOB})). Retry activation once "
+    "the refresh completes."
+)
+
+
+class TestCatalogRefreshRefusal:
+    """The one activation failure the suite retries: the server's documented
+    refusal while a catalog refresh runs (a debounced catalog refresh the
+    job listing cannot show in advance may start at any time)."""
+
+    def test_refusal_names_the_blocking_refresh_job(self) -> None:
+        from tests.e2e.cidx_meta_world import refresh_in_progress_refusal
+
+        assert refresh_in_progress_refusal(_REFUSAL) == _REFRESH_JOB
+
+    def test_other_activation_failure_is_not_retried(self) -> None:
+        from tests.e2e.cidx_meta_world import refresh_in_progress_refusal
+
+        other = (
+            "Failed to activate repository 'cidx-meta' for user 'admin': "
+            "Cannot clone golden repository 'cidx-meta': write lock is already "
+            "held by another writer. Retry activation once it completes."
+        )
+        assert refresh_in_progress_refusal(other) is None
+
+    def test_empty_error_is_not_retried(self) -> None:
+        from tests.e2e.cidx_meta_world import refresh_in_progress_refusal
+
+        assert refresh_in_progress_refusal("") is None

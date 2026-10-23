@@ -33,6 +33,19 @@ COARSE_ALIAS = "cidx-meta"
 REFRESH_ALIAS = "cidx-meta-global"
 
 
+class _HolderInfo:
+    """The write lock manager view of the double: get_lock_info names the
+    current holder, as WriteLockManager.get_lock_info does."""
+
+    def __init__(self, scheduler: "_LockingScheduler") -> None:
+        self._scheduler = scheduler
+
+    def get_lock_info(self, alias: str) -> Optional[Dict[str, Any]]:
+        assert alias == COARSE_ALIAS
+        holder = self._scheduler.holder
+        return {"owner": holder} if holder is not None else None
+
+
 class _LockingScheduler:
     """Scheduler double with real write-lock state; records whether the
     lock was held at each refresh request."""
@@ -41,6 +54,7 @@ class _LockingScheduler:
         self.holder: Optional[str] = None
         self.lock_held_at_trigger: List[bool] = []
         self._duplicate = duplicate
+        self.write_lock_manager: Any = _HolderInfo(self)
 
     def is_write_locked(self, alias: str) -> bool:
         assert alias == COARSE_ALIAS
@@ -77,9 +91,16 @@ class _LockingScheduler:
 class _CountingDebouncer:
     def __init__(self) -> None:
         self.signals = 0
+        self.tracked: List[str] = []
 
     def signal_dirty(self) -> None:
         self.signals += 1
+
+    def note_direct_write(self) -> int:
+        return len(self.tracked) + 1
+
+    def track_submission(self, job_id: str, seq: int) -> None:
+        self.tracked.append(job_id)
 
 
 def _payload(summary: str) -> Dict[str, Any]:
@@ -127,6 +148,7 @@ def test_create_edit_delete_request_refresh_after_releasing_the_lock(
     assert scheduler.lock_held_at_trigger == [False, False, False]
     assert scheduler.holder is None
     assert debouncer.signals == 0
+    assert debouncer.tracked == ["job-1"] * 3, "a direct refresh was not tracked"
 
 
 def test_refresh_already_running_is_owed_to_debouncer_without_warning(

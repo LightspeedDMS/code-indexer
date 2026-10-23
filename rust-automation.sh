@@ -86,12 +86,13 @@ print_step "Checking cargo/rustc/clippy toolchain (pinned via rust/rust-toolchai
 (cd rust && cargo --version && rustc --version && cargo clippy --version)
 print_success "Toolchain checked"
 
-print_step "Running cargo test --workspace (rust/xray-core + rust/xray-cli, includes AC18 PREAMBLE parity check)"
-(cd rust && cargo test --workspace)
+#^ why --locked: fail on Cargo.lock drift here, not at deploy (the auto-updater builds with --locked)
+print_step "Running cargo test --locked --workspace (rust/xray-core + rust/xray-cli, includes AC18 PREAMBLE parity check)"
+(cd rust && cargo test --locked --workspace)
 print_success "Rust test suite passed"
 
-print_step "Running cargo clippy --workspace --all-targets -- -D warnings"
-(cd rust && cargo clippy --workspace --all-targets -- -D warnings)
+print_step "Running cargo clippy --locked --workspace --all-targets -- -D warnings"
+(cd rust && cargo clippy --locked --workspace --all-targets -- -D warnings)
 print_success "Rust clippy check passed (zero warnings)"
 
 echo -e "\n${GREEN}Rust automation completed successfully!${NC}"

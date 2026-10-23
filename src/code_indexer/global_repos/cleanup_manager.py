@@ -590,6 +590,20 @@ class CleanupManager:
         )
         return True
 
+    def _defer_or_escalate_reader_lease(
+        self, index_path: str, refusal: SnapshotInUseError
+    ) -> None:
+        """A reader lease still blocks ``index_path``: defer within the budget;
+        once it is spent, escalate to the failure path (never delete)."""
+        if self._defer_in_use(index_path, refusal):
+            return
+        logger.warning(
+            f"Snapshot {index_path} is still blocked by a reader lease after "
+            f"{self.MAX_IN_USE_DEFERRALS} deferrals ({refusal.detail}); "
+            f"escalating to the failure path so the circuit breaker applies."
+        )
+        self._handle_cleanup_failure(index_path, refusal, None)
+
     def _handle_cleanup_failure(
         self,
         index_path: str,
@@ -740,7 +754,7 @@ class CleanupManager:
                         path,
                         exc,
                     )
-                    self._defer_in_use(
+                    self._defer_or_escalate_reader_lease(
                         path,
                         SnapshotInUseError(
                             "snapshot reader lease directory is ambiguous",
@@ -750,7 +764,7 @@ class CleanupManager:
                     continue
                 if has_live_reader:
                     logger.debug("Skipping cleanup for %s: live snapshot reader", path)
-                    self._defer_in_use(
+                    self._defer_or_escalate_reader_lease(
                         path,
                         SnapshotInUseError(
                             "snapshot has a live reader lease", detail="reader lease"

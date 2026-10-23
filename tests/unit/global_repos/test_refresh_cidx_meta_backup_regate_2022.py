@@ -18,6 +18,7 @@ with the backup enabled), the git backup sync (returns a real
 from __future__ import annotations
 
 import contextlib
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable, Iterator, List, Optional
@@ -25,6 +26,7 @@ from unittest.mock import patch
 
 import pytest
 
+from code_indexer.global_repos.local_source_manifest import record_source_manifest
 from code_indexer.server.services.cidx_meta_backup.sync import SyncResult
 from code_indexer.server.utils.config_manager import (
     CidxMetaBackupConfig,
@@ -36,6 +38,7 @@ from tests.utils.golden_repo_metadata_stores import (
     golden_repo_metadata_store,
 )
 from tests.utils.refresh_fatal_store_harness import Harness, build_harness
+from tests.utils.source_tree_age import age_source_files
 
 if TYPE_CHECKING:
     from code_indexer.server.storage.protocols.golden_repo_metadata_backend import (
@@ -71,11 +74,21 @@ def _meta_harness(
     harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
     meta_dir = tmp_path / "data" / "golden-repos" / "cidx-meta"
     make_chunks_db_repo(meta_dir, metadata_marker="meta")
+    # Published as a completed refresh leaves it: a snapshot carrying the
+    # source manifest its run recorded.
+    age_source_files(meta_dir)
+    record_source_manifest(str(meta_dir), None)
+    published = meta_dir.parent / ".versioned" / "cidx-meta" / "v_1000000000"
+    shutil.copytree(meta_dir, published, symlinks=True)
     harness.registry.register_global_repo(
-        "cidx-meta", META_ALIAS, repo_url, index_path=str(meta_dir), allow_reserved=True
+        "cidx-meta",
+        META_ALIAS,
+        repo_url,
+        index_path=str(published),
+        allow_reserved=True,
     )
     harness.scheduler.alias_manager.create_alias(
-        META_ALIAS, str(meta_dir), repo_name="cidx-meta"
+        META_ALIAS, str(published), repo_name="cidx-meta"
     )
     return harness
 

@@ -9,7 +9,7 @@ double keeps real write-lock state.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Tuple
 
 import pytest
 
@@ -29,9 +29,13 @@ class _LockingScheduler:
     def __init__(self) -> None:
         self.holder: Optional[str] = None
         self.lock_held_at_trigger: List[bool] = []
+        self.write_lock_manager = self
 
     def is_write_locked(self, alias: str) -> bool:
         return self.holder is not None
+
+    def get_lock_info(self, alias: str) -> Optional[dict]:
+        return {"owner": self.holder} if self.holder is not None else None
 
     def acquire_write_lock(self, alias: str, owner: str) -> bool:
         if self.holder is not None:
@@ -70,27 +74,19 @@ def test_store_requests_refresh_after_releasing_the_lock(tmp_path: Path) -> None
     assert scheduler.holder is None
 
 
-def test_delete_requests_refresh_after_releasing_the_lock(tmp_path: Path) -> None:
-    catalog = tmp_path / "cidx-meta"
-    pattern = catalog / "xray-patterns" / "__any__" / "test-pattern.yaml"
-    pattern.parent.mkdir(parents=True)
-    pattern.write_text(MINIMAL_PATTERN_YAML, encoding="utf-8")
-    scheduler = _LockingScheduler()
-    svc = XrayPatternService(catalog, refresh_scheduler=scheduler)
-
-    result = svc.delete_pattern("__any__", "test-pattern")
-
-    assert result == {"success": True}
-    assert not pattern.exists()
-    assert scheduler.lock_held_at_trigger == [False]
-
-
 class _CountingDebouncer:
     def __init__(self) -> None:
         self.signals = 0
+        self.tracked: List[Tuple[str, int]] = []
 
     def signal_dirty(self) -> None:
         self.signals += 1
+
+    def note_direct_write(self) -> int:
+        return len(self.tracked) + 1
+
+    def track_submission(self, job_id: str, seq: int) -> None:
+        self.tracked.append((job_id, seq))
 
 
 @pytest.fixture
@@ -106,13 +102,12 @@ def module_debouncer() -> Iterator[_CountingDebouncer]:
 def test_piggyback_store_owes_refresh_to_debouncer(
     tmp_path: Path, module_debouncer: _CountingDebouncer
 ) -> None:
-    # Another writer holds the catalog lock: a refresh requested now would
-    # skip on that lock and owe nothing, so the write is owed to the
-    # debouncer instead.
+    # A refresh holds the catalog lock: a refresh requested now would skip
+    # on that lock and owe nothing, so the write is owed to the debouncer.
     catalog = tmp_path / "cidx-meta"
     catalog.mkdir()
     scheduler = _LockingScheduler()
-    scheduler.holder = "dependency-map-writer"
+    scheduler.holder = "refresh_scheduler"
     svc = XrayPatternService(catalog, refresh_scheduler=scheduler)
 
     result = svc.store_xray_pattern_audited(
@@ -126,7 +121,7 @@ def test_piggyback_store_owes_refresh_to_debouncer(
     assert result.get("success") is True, result
     assert scheduler.lock_held_at_trigger == []
     assert module_debouncer.signals == 1
-    assert scheduler.holder == "dependency-map-writer"
+    assert scheduler.holder == "refresh_scheduler"
 
 
 class _StuckLockScheduler(_LockingScheduler):
@@ -154,21 +149,5 @@ def test_failed_lock_release_owes_refresh_to_debouncer(
     )
 
     assert result.get("success") is True, result
-    assert scheduler.lock_held_at_trigger == []
-    assert module_debouncer.signals == 1
-
-
-def test_piggyback_delete_owes_refresh_to_debouncer(
-    tmp_path: Path, module_debouncer: _CountingDebouncer
-) -> None:
-    catalog = tmp_path / "cidx-meta"
-    pattern = catalog / "xray-patterns" / "__any__" / "test-pattern.yaml"
-    pattern.parent.mkdir(parents=True)
-    pattern.write_text(MINIMAL_PATTERN_YAML, encoding="utf-8")
-    scheduler = _LockingScheduler()
-    scheduler.holder = "dependency-map-writer"
-    svc = XrayPatternService(catalog, refresh_scheduler=scheduler)
-
-    assert svc.delete_pattern("__any__", "test-pattern") == {"success": True}
     assert scheduler.lock_held_at_trigger == []
     assert module_debouncer.signals == 1

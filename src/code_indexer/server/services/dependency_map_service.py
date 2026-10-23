@@ -61,12 +61,11 @@ logger = logging.getLogger(__name__)
 SCHEDULER_POLL_INTERVAL_SECONDS = 60  # Story #193: Delta refresh polling interval
 THREAD_JOIN_TIMEOUT_SECONDS = 5.0  # Story #193: Daemon thread join timeout
 MAX_DOMAIN_RETRIES = 3  # Bug #849: module-level constant for retry loop
+DEPENDENCY_MAP_LOCK_OWNER = "dependency_map_service"  # cidx-meta write-lock owner
 _DEFAULT_DELTA_INTERVAL_HOURS = (
     168  # Fallback when config unavailable (matches ClaudeIntegrationConfig default)
 )
-_AUTO_REPAIR_JOB_ID_SUFFIX_LEN = (
-    8  # Story #927: hex suffix length for auto-repair job IDs
-)
+_AUTO_REPAIR_JOB_ID_SUFFIX_LEN = 8  # hex suffix length for auto-repair job IDs
 # TODO: expose via Web UI Config Screen (Story #1035 follow-up)
 ANALYSIS_STALE_TIMEOUT_SECONDS = 14400  # 4 hours — sentinel stale recovery threshold
 
@@ -689,7 +688,7 @@ class DependencyMapService:
         _write_lock_acquired = False
         if self._refresh_scheduler is not None:
             _write_lock_acquired = self._refresh_scheduler.acquire_write_lock(
-                "cidx-meta", owner_name="dependency_map_service"
+                "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
             )
             if not _write_lock_acquired:
                 logger.info(
@@ -761,7 +760,7 @@ class DependencyMapService:
                     # destructive pre-flight step.
                     if _write_lock_acquired and self._refresh_scheduler is not None:
                         self._refresh_scheduler.raise_if_write_lock_ownership_lost(
-                            "cidx-meta", owner_name="dependency_map_service"
+                            "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
                         )
                     runner = LifecycleBatchRunner(
                         golden_repos_dir=self._golden_repos_manager.golden_repos_dir,
@@ -774,7 +773,7 @@ class DependencyMapService:
         except Exception:
             if _write_lock_acquired and self._refresh_scheduler is not None:
                 self._refresh_scheduler.release_write_lock(
-                    "cidx-meta", owner_name="dependency_map_service"
+                    "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
                 )
             # Bug #1842 Finding 1: release a route-pre-claimed sentinel
             # before re-raising -- this exception path never reaches the
@@ -803,7 +802,7 @@ class DependencyMapService:
             # must be released here on this early-raise path too.
             if _write_lock_acquired and self._refresh_scheduler is not None:
                 self._refresh_scheduler.release_write_lock(
-                    "cidx-meta", owner_name="dependency_map_service"
+                    "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
                 )
             # Bug #1842 Finding 1: release a route-pre-claimed sentinel --
             # self._lock was never acquired by this call (the acquire just
@@ -840,7 +839,7 @@ class DependencyMapService:
                 # lock branch above for the identical rationale).
                 if _write_lock_acquired and self._refresh_scheduler is not None:
                     self._refresh_scheduler.release_write_lock(
-                        "cidx-meta", owner_name="dependency_map_service"
+                        "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
                     )
                 raise AnalysisAlreadyRunningError(
                     active_job_id=_claim.active.job_id
@@ -1023,7 +1022,7 @@ class DependencyMapService:
             # Story #227: Release write lock so RefreshScheduler can proceed.
             if _write_lock_acquired and self._refresh_scheduler is not None:
                 self._refresh_scheduler.release_write_lock(
-                    "cidx-meta", owner_name="dependency_map_service"
+                    "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
                 )
 
             # Story #227: Trigger explicit refresh after lock released (only on success).
@@ -3513,7 +3512,7 @@ class DependencyMapService:
         _write_lock_acquired = False
         if self._refresh_scheduler is not None:
             _write_lock_acquired = self._refresh_scheduler.acquire_write_lock(
-                "cidx-meta", owner_name="dependency_map_service"
+                "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
             )
             if not _write_lock_acquired:
                 logger.info(
@@ -3579,7 +3578,7 @@ class DependencyMapService:
                     # fix in run_full_analysis() above.
                     if _write_lock_acquired and self._refresh_scheduler is not None:
                         self._refresh_scheduler.raise_if_write_lock_ownership_lost(
-                            "cidx-meta", owner_name="dependency_map_service"
+                            "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
                         )
                     runner = LifecycleBatchRunner(
                         golden_repos_dir=self._golden_repos_manager.golden_repos_dir,
@@ -3592,7 +3591,7 @@ class DependencyMapService:
         except Exception:
             if _write_lock_acquired and self._refresh_scheduler is not None:
                 self._refresh_scheduler.release_write_lock(
-                    "cidx-meta", owner_name="dependency_map_service"
+                    "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
                 )
             # Bug #1842 Finding 1: release a route-pre-claimed sentinel
             # before re-raising -- this exception path never reaches the
@@ -3618,7 +3617,7 @@ class DependencyMapService:
             # it must be released here on this early-return path too.
             if _write_lock_acquired and self._refresh_scheduler is not None:
                 self._refresh_scheduler.release_write_lock(
-                    "cidx-meta", owner_name="dependency_map_service"
+                    "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
                 )
             # Bug #1842 Finding 1: release a route-pre-claimed sentinel --
             # self._lock was never acquired by this call (the acquire just
@@ -3654,7 +3653,7 @@ class DependencyMapService:
                 # lock on this early-raise path too.
                 if _write_lock_acquired and self._refresh_scheduler is not None:
                     self._refresh_scheduler.release_write_lock(
-                        "cidx-meta", owner_name="dependency_map_service"
+                        "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
                     )
                 raise AnalysisAlreadyRunningError(
                     active_job_id=(
@@ -4090,7 +4089,7 @@ class DependencyMapService:
             # Story #227: Release write lock so RefreshScheduler can proceed.
             if _write_lock_acquired and self._refresh_scheduler is not None:
                 self._refresh_scheduler.release_write_lock(
-                    "cidx-meta", owner_name="dependency_map_service"
+                    "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
                 )
 
             # Story #227: Trigger explicit refresh after lock released (only on success).
@@ -4256,7 +4255,7 @@ class DependencyMapService:
         _write_lock_acquired = False
         if self._refresh_scheduler is not None:
             _write_lock_acquired = self._refresh_scheduler.acquire_write_lock(
-                "cidx-meta", owner_name="dependency_map_service"
+                "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
             )
             if not _write_lock_acquired:
                 logger.info(
@@ -4293,7 +4292,7 @@ class DependencyMapService:
                     logger.debug(f"Non-fatal journal log error (disabled path): {e}")
                 if _write_lock_acquired and self._refresh_scheduler is not None:
                     self._refresh_scheduler.release_write_lock(
-                        "cidx-meta", owner_name="dependency_map_service"
+                        "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
                     )
                 return None
 
@@ -4312,13 +4311,13 @@ class DependencyMapService:
                     logger.debug(f"Non-fatal journal log error (lock-skip path): {e}")
                 if _write_lock_acquired and self._refresh_scheduler is not None:
                     self._refresh_scheduler.release_write_lock(
-                        "cidx-meta", owner_name="dependency_map_service"
+                        "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
                     )
                 return None
         except Exception:
             if _write_lock_acquired and self._refresh_scheduler is not None:
                 self._refresh_scheduler.release_write_lock(
-                    "cidx-meta", owner_name="dependency_map_service"
+                    "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
                 )
             raise
 
@@ -4503,7 +4502,7 @@ class DependencyMapService:
             self._lock.release()
             if _write_lock_acquired and self._refresh_scheduler is not None:
                 self._refresh_scheduler.release_write_lock(
-                    "cidx-meta", owner_name="dependency_map_service"
+                    "cidx-meta", owner_name=DEPENDENCY_MAP_LOCK_OWNER
                 )
             if any_changed:
                 self._request_cidx_meta_refresh()

@@ -13,10 +13,9 @@ always; PostgreSQL when ``TEST_POSTGRES_DSN`` is set).
 
 from __future__ import annotations
 
-import json
 import os
+import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Set, Tuple
@@ -28,12 +27,12 @@ from code_indexer.server.services.embedding_stats_attribution import (
     StatsAttribution,
 )
 from code_indexer.server.utils.index_command_layout import append_server_layout_args
-from tests.utils.cidx_fake_provider_repo import (
-    SRC_DIR,
-    install_network_guard,
-    unique_python_text,
+from tests.utils.cidx_fake_provider_repo import unique_python_text
+from tests.utils.refresh_fake_provider_env import (
+    ENDPOINT_PIN_FLAG,
+    fake_provider_refresh_env,
+    point_repo_at_fake,
 )
-from tests.utils.fake_voyage_provider import running_fake_voyage_server
 from tests.utils.fatal_chunk_store_fixtures import (
     DUMMY_VOYAGE_KEY,
     cidx_child_command,
@@ -329,26 +328,6 @@ class TestMissingStoreRestore:
 
 _FAKE_KEY = "issue-2126-fake-key"
 _GIT = ["git", "-c", "user.email=test@example.com", "-c", "user.name=test"]
-#: Pins the vendor endpoint in server context; the only flag the shim drops
-#: (as in the Story #2118 test), so the child reaches the local fake that the
-#: repository config names. The network guard still refuses anything else.
-_ENDPOINT_PIN_FLAG = "--server-managed-provider-settings"
-
-
-def _install_endpoint_shim(bin_dir: Path) -> Path:
-    """A ``cidx`` on PATH running this interpreter's real CLI without
-    ``_ENDPOINT_PIN_FLAG``."""
-    bin_dir.mkdir(parents=True)
-    shim = bin_dir / "cidx"
-    shim.write_text(
-        f"#!{sys.executable}\n"
-        "import os, sys\n"
-        f"args = [a for a in sys.argv[1:] if a != {_ENDPOINT_PIN_FLAG!r}]\n"
-        "os.execv(sys.executable, "
-        "[sys.executable, '-m', 'code_indexer.cli', *args])\n"
-    )
-    shim.chmod(0o755)
-    return bin_dir
 
 
 def _commit_files(repo: Path, prefix: str, count: int) -> None:
@@ -370,12 +349,7 @@ def _real_indexed_source(fake: Any, env: Dict[str, str]) -> Callable[[Path], Non
         run = dict(cwd=source, env=env, capture_output=True, text=True, timeout=180)
         init = subprocess.run(cidx_child_command(["init"]), **run)  # type: ignore[call-overload]
         assert init.returncode == 0, init.stderr[-3000:]
-        config_path = source / ".code-indexer" / "config.json"
-        config = json.loads(config_path.read_text())
-        config.setdefault("voyage_ai", {})["api_endpoint"] = (
-            f"{fake.base_url}/v1/embeddings"
-        )
-        config_path.write_text(json.dumps(config))
+        point_repo_at_fake(source, fake)
         args = append_server_layout_args(
             ["cidx", "index", "--fts", "--progress-json"],
             attribution=StatsAttribution(
@@ -387,7 +361,7 @@ def _real_indexed_source(fake: Any, env: Dict[str, str]) -> Callable[[Path], Non
         )
         fake.ledger.begin_run("initial")
         index = subprocess.run(
-            cidx_child_command([a for a in args[1:] if a != _ENDPOINT_PIN_FLAG]),
+            cidx_child_command([a for a in args[1:] if a != ENDPOINT_PIN_FLAG]),
             **run,  # type: ignore[call-overload]
         )
         assert index.returncode == 0, index.stderr[-3000:]
@@ -404,17 +378,8 @@ def fake_provider_env(
     runs with -- also the ones the scheduler spawns: the cidx shim on PATH,
     the fake's sentinel key, an offline tokenizer cache, and a network guard
     refusing any non-loopback connection."""
-    with running_fake_voyage_server(_FAKE_KEY) as fake:
-        guard_root = tmp_path / "guard"
-        guard_root.mkdir()
-        site_dir, blocked_log = install_network_guard(guard_root)
-        shim_dir = _install_endpoint_shim(tmp_path / "bin")
-        monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
-        monkeypatch.setenv("VOYAGE_API_KEY", _FAKE_KEY)
-        monkeypatch.setenv("PYTHONPATH", f"{site_dir}{os.pathsep}{SRC_DIR}")
-        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-        yield fake, dict(os.environ), blocked_log
-        assert not blocked_log.exists(), blocked_log.read_text()
+    with fake_provider_refresh_env(tmp_path, monkeypatch, _FAKE_KEY) as env:
+        yield env
 
 
 def _stored_rows_of(chunks_db: Path, path_suffix: str) -> Set[str]:
@@ -516,7 +481,15 @@ def _unrepairable_reasons(metadata: Any) -> Dict[str, str]:
 class TestQuietRepositoryMissingStore2150:
     """Bug #2150: with nothing to index the child exits 0 without opening the
     store, so the PUBLISH gate must classify an established collection's
-    missing chunks.db as a missing store and run the #2126 restore."""
+    missing chunks.db as a missing store and run the missing-store restore.
+
+    A local repository nothing touched since its published snapshot (whose
+    source manifest matches) skips a plain refresh as "no changes"; the
+    cycle that still runs -- and reaches the gate -- is a re-gate: an earlier
+    failure no verified publish has resolved yet. (Without a published
+    snapshot there is no baseline, so the refresh reconciles and the CHILD
+    reports the missing store: test_no_snapshot_stays_failed_with_operator_reason.)
+    """
 
     def _quiet_harness(
         self,
@@ -525,6 +498,11 @@ class TestQuietRepositoryMissingStore2150:
         env_fixture: Tuple[Any, Dict[str, str], Path],
         snapshot_mode: str,
     ) -> Tuple[Any, Harness]:
+        from code_indexer.global_repos.local_source_manifest import (
+            MANIFEST_RELATIVE_PATH,
+            record_source_manifest,
+        )
+
         fake, env, _ = env_fixture
         harness = build_harness(
             tmp_path,
@@ -533,6 +511,14 @@ class TestQuietRepositoryMissingStore2150:
             source_builder=_real_indexed_source(fake, env),
         )
         _make_quiet(harness.source)
+        assert harness.snapshot is not None
+        # The published snapshot carries the manifest of what it was built from.
+        record_source_manifest(str(harness.source), None)
+        shutil.copy2(
+            harness.source / MANIFEST_RELATIVE_PATH,
+            harness.snapshot / MANIFEST_RELATIVE_PATH,
+        )
+        metadata.record_refresh_failure_backoff(ALIAS, "an earlier refresh failed")
         harness.source_db.unlink()
         return fake, harness
 
@@ -579,7 +565,7 @@ class TestQuietRepositoryMissingStore2150:
     @pytest.mark.parametrize(
         "snapshot_mode, cause",
         [
-            ("none", "no published snapshot"),
+            # ^ coupled no published snapshot = no baseline => a local refresh reconciles and the child reports it (gate unreachable); see test_no_snapshot_stays_failed_with_operator_reason
             ("corrupt", "failed its integrity check"),
         ],
     )
@@ -614,7 +600,8 @@ class TestQuietRepositoryMissingStore2150:
             assert sha256_of(harness.snapshot_db()) == snapshot_sha
         assert harness.strikes() == 0
         state = metadata.get_refresh_failure_backoff_state(ALIAS)
-        assert state is not None and state["consecutive_failure_count"] == 1
+        # the seeded earlier failure plus this one
+        assert state is not None and state["consecutive_failure_count"] == 2
         assert cause in _unrepairable_reasons(metadata).get(ALIAS, ""), (
             _unrepairable_reasons(metadata)
         )
@@ -653,5 +640,12 @@ class TestQuietRepositoryMissingStore2150:
         assert any(
             isinstance(e, AliasLockOwnershipLostError) for e in iter_chain(error)
         ), repr(error)
+        from code_indexer.services.index_failure_exit_codes import (
+            FatalChunkStoreIndexError,
+        )
+
+        assert not any(
+            isinstance(e, FatalChunkStoreIndexError) for e in iter_chain(error)
+        ), "the child reported the store: the gate-side veto was not exercised"
         assert not harness.source_db.exists(), "restored without the write lock"
         assert harness.strikes() == 0

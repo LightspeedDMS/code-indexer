@@ -50,10 +50,8 @@ def env(tmp_path: Path) -> CatalogFileDoorEnv:
 @pytest.fixture
 def client(env: CatalogFileDoorEnv) -> Iterator[TestClient]:
     from code_indexer.server.routers.files import router
+    from tests.shared.real_write_mode import real_write_mode
 
-    marker = env.golden_root / ".write_mode" / "cidx-meta.json"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text("{}")
     app = FastAPI()
     for name, value in vars(env.state).items():
         setattr(app.state, name, value)
@@ -70,6 +68,13 @@ def client(env: CatalogFileDoorEnv) -> Iterator[TestClient]:
         with (
             patch.object(
                 crud_module, "_get_activated_repo_manager", lambda: env.activations
+            ),
+            real_write_mode(
+                file_crud_service,
+                env.golden_root,
+                "cidx-meta",
+                env.fx.root,
+                env.golden_root.parent / "write-mode-locks",
             ),
             TestClient(app, raise_server_exceptions=False) as test_client,
         ):

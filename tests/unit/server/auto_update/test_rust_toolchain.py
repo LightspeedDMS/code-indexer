@@ -447,6 +447,95 @@ class TestCargoBuildFails:
 
 
 # ---------------------------------------------------------------------------
+# The xray-cli build is locked to the tracked Cargo.lock: a deploy never
+# re-resolves dependencies or rewrites rust/Cargo.lock.
+# ---------------------------------------------------------------------------
+
+# cargo's error when a manifest drifted from Cargo.lock, as printed by the
+# pinned toolchain (cargo 1.98, captured from a real drifted build).
+_LOCKFILE_DRIFT_STDERR = (
+    "error: cannot update the lock file /srv/example/rust/Cargo.lock "
+    "because --locked was passed to prevent this\n"
+    "help: to generate the lock file without accessing the network, "
+    "remove the --locked flag and use --offline instead.\n"
+)
+# The same error as worded by older cargo releases.
+_LOCKFILE_DRIFT_STDERR_OLDER_CARGO = (
+    "error: the lock file /srv/example/rust/Cargo.lock needs to be updated "
+    "but --locked was passed to prevent this\n"
+    "If you want to try to generate the lock file without accessing the "
+    "network, remove the --locked flag and use --offline instead.\n"
+)
+
+
+class TestCargoBuildLocked:
+    """_build_xray_cli builds with --locked and names lockfile drift."""
+
+    def test_build_argv_is_locked_release_build_of_xray_cli(
+        self, tmp_path: Path
+    ) -> None:
+        executor = _make_executor()
+        with patch("subprocess.run", return_value=_proc(0)) as mock_run:
+            assert executor._build_xray_cli(rust_dir=tmp_path, env={}) is True
+        assert mock_run.call_args.args[0] == [
+            "cargo",
+            "build",
+            "--release",
+            "--locked",
+            "-p",
+            "xray-cli",
+        ]
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [_LOCKFILE_DRIFT_STDERR, _LOCKFILE_DRIFT_STDERR_OLDER_CARGO],
+        ids=["cargo-1.98", "older-cargo"],
+    )
+    def test_lockfile_drift_logs_explicit_out_of_sync_message(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, stderr: str
+    ) -> None:
+        executor = _make_executor()
+        with caplog.at_level(logging.ERROR):
+            with patch("subprocess.run", return_value=_proc(101, stderr=stderr)):
+                result = executor._build_xray_cli(rust_dir=tmp_path, env={})
+        assert result is False
+        messages = [r.getMessage() for r in caplog.records]
+        drift = [m for m in messages if "DEPLOY-GENERAL-172" in m]
+        assert len(drift) == 1, messages
+        assert "Cargo.lock out of sync with Cargo.toml" in drift[0]
+        # The existing stderr snippet stays in the message.
+        assert "--locked was passed to prevent this" in drift[0]
+
+    def test_other_build_failure_keeps_generic_message(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        executor = _make_executor()
+        with caplog.at_level(logging.ERROR):
+            with patch(
+                "subprocess.run",
+                return_value=_proc(101, stderr="error[E0425]: cannot find value"),
+            ):
+                result = executor._build_xray_cli(rust_dir=tmp_path, env={})
+        assert result is False
+        messages = [r.getMessage() for r in caplog.records]
+        failure = [m for m in messages if "DEPLOY-GENERAL-172" in m]
+        assert len(failure) == 1, messages
+        assert "Cargo.lock out of sync" not in failure[0]
+        assert "cargo build exited 101: error[E0425]" in failure[0]
+
+    def test_lockfile_drift_stays_non_fatal_to_the_deploy(self, tmp_path: Path) -> None:
+        executor = _make_executor()
+        (tmp_path / "rust").mkdir()
+        with _rust_env(tmp_path) as mock_run:
+            mock_run.side_effect = [
+                _proc(0, stdout="rustc 1.78.0"),  # rustc --version
+                _proc(101, stderr=_LOCKFILE_DRIFT_STDERR),  # cargo build
+            ]
+            with patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"):
+                assert executor._ensure_rust_toolchain() is True
+
+
+# ---------------------------------------------------------------------------
 # Step 16 in execute(): FATAL - deployment returns False when toolchain fails
 # ---------------------------------------------------------------------------
 
@@ -527,7 +616,7 @@ class TestTimeoutHandling:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired(
-                cmd=["cargo", "build", "--release", "-p", "xray-cli"],
+                cmd=["cargo", "build", "--release", "--locked", "-p", "xray-cli"],
                 timeout=1200,
             )
             result = executor._build_xray_cli(rust_dir=rust_dir, env={})

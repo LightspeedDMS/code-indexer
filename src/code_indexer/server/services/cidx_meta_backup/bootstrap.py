@@ -13,6 +13,20 @@ from .branch_detect import detect_default_branch
 from .paths import cidx_meta_is_git_repository
 
 
+class BackupPushFailed(RuntimeError):
+    """The bootstrap push failed; *reason* is neutral (no URL, no raw git
+    output) and safe to show an operator."""
+
+    def __init__(self, reason: str, output: str) -> None:
+        from code_indexer.utils.credential_redaction import redact_command_output
+
+        self.reason = reason
+        # ^ security git and the remote can echo a URL whose userinfo holds credentials
+        super().__init__(
+            f"backup push failed ({reason}): {redact_command_output(output, None)}"
+        )
+
+
 class CidxMetaBackupBootstrap:
     """Bootstrap a mutable cidx-meta directory into a git-backed remote."""
 
@@ -33,7 +47,9 @@ class CidxMetaBackupBootstrap:
     def _git(
         self, cidx_meta_path: str, *args: str, check: bool = True
     ) -> subprocess.CompletedProcess:
-        env = build_non_interactive_git_env()
+        from .stall_detection import stall_detecting_git_argv, with_ssh_keepalive
+
+        env = with_ssh_keepalive(build_non_interactive_git_env())
         env.setdefault("GIT_AUTHOR_NAME", "cidx-meta-backup")
         env.setdefault("GIT_AUTHOR_EMAIL", "cidx-meta-backup@example.invalid")
         env.setdefault("GIT_COMMITTER_NAME", env["GIT_AUTHOR_NAME"])
@@ -45,7 +61,7 @@ class CidxMetaBackupBootstrap:
         # -- see CidxMetaBackupSync._git() for the active fix this mirrors.
         env.setdefault("GIT_EDITOR", "true")
         return run_with_cancel(
-            ["git", *args],
+            stall_detecting_git_argv(*args),
             self._cancel_check,
             cwd=cidx_meta_path,
             capture_output=True,
@@ -81,13 +97,16 @@ class CidxMetaBackupBootstrap:
         gitignore_path.write_text(new_content)
 
     def _push(self, cidx_meta_path: str, branch: str) -> None:
-        """Push to remote. Raises RuntimeError on rejection -- never force-pushes."""
+        """Push to remote. Raises BackupPushFailed on any failure (stall,
+        unreachable remote, rejection) -- never force-pushes."""
+        from .stall_detection import push_failure_reason
+
         result = self._git(
             cidx_meta_path, "push", "origin", f"HEAD:{branch}", check=False
         )
         if result.returncode != 0:
             stderr = (result.stderr or result.stdout or "").strip()
-            raise RuntimeError(f"push rejected by remote: {stderr}")
+            raise BackupPushFailed(push_failure_reason(stderr), stderr)
 
     def bootstrap(self, cidx_meta_path: str, remote_url: str) -> str:
         """Initialize or re-point git backup state for cidx-meta."""

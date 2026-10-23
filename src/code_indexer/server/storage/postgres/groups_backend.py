@@ -407,6 +407,60 @@ class GroupsPostgresBackend:
             conn.commit()
         return revoked
 
+    def grant_repos_access(
+        self, repo_names: List[str], group_id: int, granted_by: str
+    ) -> List[str]:
+        """Grant every name in ONE transaction; return the newly granted ones
+        in request order.
+
+        Raises:
+            ValueError: if the group does not exist.
+        """
+        if self.get_group(group_id) is None:
+            raise ValueError(f"Group with ID {group_id} not found")
+        now = datetime.now(timezone.utc)
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO repo_group_access "
+                    "(repo_name, group_id, granted_at, granted_by) "
+                    "SELECT name, %s, %s, %s FROM unnest(%s::text[]) AS name "
+                    "ON CONFLICT (repo_name, group_id) DO NOTHING "
+                    "RETURNING repo_name",
+                    (group_id, now, granted_by, list(repo_names)),
+                )
+                inserted = {row[0] for row in cur.fetchall()}
+            conn.commit()
+        return [name for name in repo_names if name in inserted]
+
+    def revoke_repos_access(self, repo_names: List[str], group_id: int) -> List[str]:
+        """Revoke every name in ONE transaction; return the revoked ones in
+        request order.
+
+        Raises:
+            CidxMetaCannotBeRevokedError: if cidx-meta is among the names.
+        """
+        from code_indexer.server.services.group_access_manager import (
+            CidxMetaCannotBeRevokedError,
+        )
+        from code_indexer.server.services.constants import CIDX_META_REPO
+
+        if CIDX_META_REPO in repo_names:
+            raise CidxMetaCannotBeRevokedError(
+                f"{CIDX_META_REPO} access cannot be revoked from any group"
+            )
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM repo_group_access "
+                    "WHERE group_id = %s AND repo_name = ANY(%s) "
+                    "RETURNING repo_name",
+                    (group_id, list(repo_names)),
+                )
+                deleted = {row[0] for row in cur.fetchall()}
+            conn.commit()
+        return [name for name in repo_names if name in deleted]
+
     def get_group_repos(self, group_id: int) -> List[str]:
         """Return repos accessible by a group. cidx-meta is always prepended."""
         from code_indexer.server.services.constants import CIDX_META_REPO

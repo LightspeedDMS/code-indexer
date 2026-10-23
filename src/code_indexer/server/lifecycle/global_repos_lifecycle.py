@@ -195,9 +195,13 @@ class GlobalReposLifecycleManager:
             from ..services.alias_lock_store.factory import AliasLockStoreFactory
 
             server_config = get_config_service().get_config()
+            cluster = getattr(server_config, "cluster", None)
+            # ^ why only an explicit cluster.node_id is unique; the hostname fallback is not
+            node_id = (cluster.node_id or "") if cluster is not None else ""
             self._alias_lock_store_factory = AliasLockStoreFactory(
                 postgres_dsn=getattr(server_config, "postgres_dsn", None),
                 golden_repos_dir=str(self.golden_repos_dir),
+                node_id=node_id,
             )
         return self._alias_lock_store_factory.resolve()
 

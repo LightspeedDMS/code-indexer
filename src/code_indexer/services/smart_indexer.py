@@ -41,6 +41,7 @@ from .git_topology_service import GitTopologyService
 # Removed: BranchAwareIndexer (replaced with HighThroughputProcessor)
 from .indexing_lock import IndexingLockError, create_indexing_lock
 from .high_throughput_processor import HighThroughputProcessor
+from .index_failure_exit_codes import reraise_typed_if_fatal
 from .git_hook_manager import GitHookManager
 from ..utils.enhanced_messaging import OperationType, create_enhanced_callback
 from ..utils.path_confinement import resolve_if_within_root
@@ -3623,10 +3624,9 @@ class SmartIndexer(HighThroughputProcessor):
     def _scroll_content_points_through_lock_contention(
         self, collection_name: str
     ) -> List[Dict[str, Any]]:
-        """``_scroll_all_content_points``, retried while another connection
-        holds the chunks.db lock (at most ``_SNAPSHOT_LOCK_MAX_ATTEMPTS``
-        attempts, each waiting up to sqlite's busy timeout). Any other error,
-        and contention outlasting the last attempt, is raised."""
+        """``_scroll_all_content_points``, retried while chunks.db is locked by
+        another connection (``_SNAPSHOT_LOCK_MAX_ATTEMPTS`` attempts); a fatal
+        store failure is raised typed (exit 86/87/89), anything else as is."""
         for attempt in range(1, _SNAPSHOT_LOCK_MAX_ATTEMPTS + 1):
             try:
                 return self._scroll_all_content_points(collection_name)
@@ -3635,7 +3635,7 @@ class SmartIndexer(HighThroughputProcessor):
                     not is_chunk_store_lock_contention(exc)
                     or attempt == _SNAPSHOT_LOCK_MAX_ATTEMPTS
                 ):
-                    raise
+                    reraise_typed_if_fatal(exc, "Index snapshot read")
                 logger.info(
                     "Index snapshot read of %r found chunks.db locked by another "
                     "writer (attempt %d of %d); retrying",

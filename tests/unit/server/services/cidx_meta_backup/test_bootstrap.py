@@ -200,7 +200,7 @@ def test_push_raises_on_divergent_remote(tmp_path):
     repo_path.mkdir()
     _write_seed_files(repo_path)
 
-    with pytest.raises(RuntimeError, match="push rejected by remote"):
+    with pytest.raises(RuntimeError, match="the remote rejected the push"):
         CidxMetaBackupBootstrap().bootstrap(str(repo_path), remote_path.as_uri())
 
 
@@ -217,7 +217,7 @@ def test_push_raises_on_bad_remote(tmp_path):
     _write_seed_files(repo_path)
 
     bad_remote = str(tmp_path / "nonexistent" / "repo.git")
-    with pytest.raises(RuntimeError, match="push rejected by remote"):
+    with pytest.raises(RuntimeError, match="the remote is unreachable"):
         CidxMetaBackupBootstrap().bootstrap(str(repo_path), bad_remote)
 
 

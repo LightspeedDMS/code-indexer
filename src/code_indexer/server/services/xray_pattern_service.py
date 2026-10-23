@@ -46,10 +46,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
-from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
-from code_indexer.server.services.cidx_meta_backup.branch_detect import (
-    detect_default_branch,
+from code_indexer.global_repos.catalog_lock_holder import (
+    CatalogLockedExclusively,
+    admit_catalog_write,
 )
+from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from code_indexer.server.services.audit_outcome import (
     conforming_details,
     record_outcome,
@@ -57,8 +58,6 @@ from code_indexer.server.services.audit_outcome import (
 from code_indexer.server.services.cidx_meta_backup.paths import (
     cidx_meta_is_git_repository,
 )
-from code_indexer.server.services.cidx_meta_backup.sync import CidxMetaBackupSync
-from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.xray_pattern_params import (
     build_const_lines,
     resolve_params,
@@ -118,6 +117,8 @@ DEFAULT_EXECUTION_MODE = "legacy"
 # Coarse write-lock alias for the shared cidx-meta git repo (Bug #1037).
 # Must match the alias used by MemoryStoreService and RefreshScheduler.
 _COARSE_ALIAS = "cidx-meta"
+#: Every X-Ray pattern writer's catalog-lock owner name starts with this.
+XRAY_PATTERN_LOCK_OWNER_PREFIX = "xray-pattern:"
 
 
 # ---------------------------------------------------------------------------
@@ -135,10 +136,10 @@ class XrayPatternService:
     Args:
         cidx_meta_path: The mutable cidx-meta base path (from get_cidx_meta_path()).
         refresh_scheduler: Optional RefreshScheduler instance. When provided,
-            store_xray_pattern_audited() and delete_pattern() acquire the
+            store_xray_pattern_audited() acquires the
             cidx-meta coarse write lock (mirroring
             MemoryStoreService._run_with_coarse_lock) before touching the shared
-            git index; when the lock is already held they piggyback (write the
+            git index; when the lock is already held it piggybacks (write the
             file, skip the commit, which the holder's refresh picks up). When
             None (default) there is no coarse lock: writes and commits run
             directly.
@@ -146,6 +147,7 @@ class XrayPatternService:
 
     PATTERNS_DIR = "xray-patterns"
     ANY_SCOPE = "__any__"
+    SEED_PATTERN_NAMES = ("catch-rethrow", "deep-nesting")
 
     def __init__(
         self,
@@ -341,7 +343,7 @@ class XrayPatternService:
             return refusal
 
         # 7. Write YAML and git-commit under coarse lock.
-        owner = f"xray-pattern:store:{name}"
+        owner = f"{XRAY_PATTERN_LOCK_OWNER_PREFIX}store:{name}"
 
         def _write_and_commit(piggyback: bool) -> Optional[Dict[str, Any]]:
             if self._holds(target_path, pattern_yaml):
@@ -354,8 +356,7 @@ class XrayPatternService:
             previous = target_path.read_text("utf-8") if target_path.exists() else None
             facts["details"]["overwrite"] = previous is not None
             action = "add" if previous is None else "update"
-            target_dir.mkdir(parents=True, exist_ok=True)
-            target_path.write_text(pattern_yaml, encoding="utf-8")
+            self._put_catalog_file(target_path, pattern_yaml)
             if piggyback:
                 return None
             try:
@@ -367,7 +368,7 @@ class XrayPatternService:
                 if previous is None:
                     target_path.unlink(missing_ok=True)
                 else:
-                    target_path.write_text(previous, encoding="utf-8")
+                    self._put_catalog_file(target_path, previous)
                 self._unstage(target_path)
                 raise
             return None
@@ -378,6 +379,8 @@ class XrayPatternService:
             )
         except PatternCommitError as exc:
             return {"success": False, "error": "commit_failed", "message": str(exc)}
+        except CatalogLockedExclusively as exc:
+            return {"success": False, "error": "catalog_locked", "message": str(exc)}
         if locked_result is not None:
             return dict(locked_result)
         self._request_refresh(lock_still_held)
@@ -392,14 +395,22 @@ class XrayPatternService:
         if self._scheduler is None:
             return
         from code_indexer.global_repos.meta_description_hook import (
-            owe_cidx_meta_refresh,
-            request_cidx_meta_refresh,
+            refresh_after_catalog_write,
         )
 
-        if lock_still_held:
-            owe_cidx_meta_refresh()
-            return
-        request_cidx_meta_refresh(self._scheduler)
+        refresh_after_catalog_write(self._scheduler, lock_still_held)
+
+    def _put_catalog_file(self, target: Path, content: str) -> None:
+        """Put *target* in place atomically, staged outside the catalog."""
+        from code_indexer.global_repos.catalog_staged_write import (
+            SHARED_CATALOG_FILE_MODE,
+            write_catalog_file,
+        )
+
+        if not write_catalog_file(
+            self._cidx_meta, target, content, mode=SHARED_CATALOG_FILE_MODE
+        ):
+            logger.warning("X-Ray pattern %s written without a directory fsync", target)
 
     @staticmethod
     def _holds(target_path: Path, pattern_yaml: str) -> bool:
@@ -595,82 +606,48 @@ class XrayPatternService:
             )
         return str(spec.get("execution_mode") or DEFAULT_EXECUTION_MODE)
 
-    def ensure_seed_patterns(self) -> None:
-        """Create seed patterns in __any__/ if they don't already exist.
+    def ensure_seed_patterns(self) -> bool:
+        """Create the seed patterns (catch-rethrow, deep-nesting) in __any__/
+        that do not exist yet, under the catalog write lock as an X-Ray
+        pattern writer (piggyback rules apply; a piggybacked write is left
+        for the holder's refresh to commit). Idempotent.
 
-        Creates:
-            - catch-rethrow.yaml
-            - deep-nesting.yaml
-
-        Idempotent: skips files that already exist.
-        """
+        Returns True when every seed is in place; False when an exclusive
+        holder refused the write (logged; nothing written): the caller
+        retries on its next call."""
         any_dir = self._patterns_root / self.ANY_SCOPE
-        any_dir.mkdir(parents=True, exist_ok=True)
-
-        created: List[Path] = []
-
-        for stem, content in (
-            ("catch-rethrow", _SEED_CATCH_RETHROW),
-            ("deep-nesting", _SEED_DEEP_NESTING),
-        ):
-            target = any_dir / f"{stem}.yaml"
-            if not target.exists():
-                target.write_text(content, encoding="utf-8")
-                created.append(target)
-
-        if created:
-            self._git_commit_tolerating_failure(
-                files=created,
-                message="xray-patterns: add seed patterns to __any__/",
+        seeds = [
+            (any_dir / f"{stem}.yaml", content)
+            for stem, content in zip(
+                self.SEED_PATTERN_NAMES, (_SEED_CATCH_RETHROW, _SEED_DEEP_NESTING)
             )
+        ]
+        if all(target.exists() for target, _content in seeds):
+            return True
 
-    def delete_pattern(self, scope: str, name: str) -> Dict[str, Any]:
-        """Delete a pattern from cidx-meta/xray-patterns/{scope}/{name}.yaml.
-
-        Removes the YAML file from disk under the coarse write lock.
-        When piggybacking (lock already held by another operation) the file
-        is removed from disk but _git_commit is skipped — the lock-holder's
-        refresh picks up the deletion via ``git add -A``.
-
-        Args:
-            scope: Target scope — "__any__" for cross-repo or a repo alias.
-            name: Name of the pattern (filename stem without .yaml).
-
-        Returns:
-            Dict with {"success": True} on success, or
-            {"error": "<code>", "message": "<detail>"} on failure.
-        """
-        for field_label, field_value in (("scope", scope), ("name", name)):
-            if "/" in field_value or "\\" in field_value or ".." in field_value:
-                return {
-                    "error": "path_traversal_rejected",
-                    "message": (
-                        f"{field_label} '{field_value}' contains path traversal sequences"
-                    ),
-                }
-
-        target_path = self._patterns_root / scope / f"{name}.yaml"
-
-        if not target_path.exists():
-            return {
-                "error": "pattern_not_found",
-                "message": f"Pattern '{name}' not found in scope '{scope}'",
-            }
-
-        owner = f"xray-pattern:delete:{name}"
-
-        def _delete_and_commit(piggyback: bool) -> None:
-            target_path.unlink()
-            if not piggyback:
+        def _write_and_commit(piggyback: bool) -> None:
+            created = [target for target, _content in seeds if not target.exists()]
+            for target, content in seeds:
+                if target in created:
+                    self._put_catalog_file(target, content)
+            if created and not piggyback:
                 self._git_commit_tolerating_failure(
-                    files=[target_path],
-                    message=f"xray-patterns: delete {scope}/{name}",
+                    files=created,
+                    message="xray-patterns: add seed patterns to __any__/",
                 )
 
-        _, lock_still_held = self._run_with_coarse_lock(owner, _delete_and_commit)
+        try:
+            _result, lock_still_held = self._run_with_coarse_lock(
+                f"{XRAY_PATTERN_LOCK_OWNER_PREFIX}seed", _write_and_commit
+            )
+        except CatalogLockedExclusively as exc:
+            logger.warning(
+                "X-Ray seed patterns not written (%s); retried at the next xray_search",
+                exc,
+            )
+            return False
         self._request_refresh(lock_still_held)
-
-        return {"success": True}
+        return True
 
     # ------------------------------------------------------------------
     # Coarse write-lock coordination (Bug #1037)
@@ -681,18 +658,15 @@ class XrayPatternService:
     def _coarse_piggyback_or_acquire(self, owner: str) -> bool:
         """Return True if piggybacking (caller must skip acquire/release).
 
-        Piggyback when is_write_locked returns True, or when acquire returns
-        False (race — another process acquired between check and here).
-        When no scheduler is injected, always returns False (caller owns lock
+        Admission is the shared catalog rule (catalog_lock_holder): hold the
+        lock, or piggyback on a cooperative holder; an exclusive holder
+        raises CatalogLockedExclusively before anything is written. When no
+        scheduler is injected, always returns False (caller owns lock
         conceptually and will call _git_commit directly).
         """
         if self._scheduler is None:
             return False
-        if self._scheduler.is_write_locked(_COARSE_ALIAS):
-            return True
-        acquired = self._scheduler.acquire_write_lock(_COARSE_ALIAS, owner)
-        # acquired=False means a race into piggyback; we never held the lock.
-        return not acquired
+        return not admit_catalog_write(self._scheduler, owner)
 
     def _release_coarse_lock(self, owner: str) -> bool:
         """Release the coarse write lock; False when it could not be removed.
@@ -735,21 +709,20 @@ class XrayPatternService:
 
     def _git_commit_tolerating_failure(self, files: List[Path], message: str) -> None:
         """:meth:`_git_commit`, logging a failed commit as a WARNING
-        (seed and delete paths, where a missing commit is tolerated)."""
+        (the seed path, where a missing commit is tolerated)."""
         try:
             self._git_commit(files, message)
         except PatternCommitError as exc:
             logger.warning("xray_pattern_service: git commit failed: %s", exc)
 
     def _git_commit(self, files: List[Path], message: str) -> None:
-        """Add files and create a git commit in cidx-meta, then trigger backup sync.
+        """Add files and create a local git commit in cidx-meta.
 
-        Uses canonical cidx-meta-backup author/committer identity. After a
-        successful commit, calls CidxMetaBackupSync.sync() when backup is
-        configured and enabled. Any sync failure is surfaced as a WARNING
-        (deferred-failure pattern) — the commit itself is not rolled back.
-        A cidx-meta that is not a git repository keeps plain files: nothing
-        is committed and nothing fails.
+        Uses canonical cidx-meta-backup author/committer identity. The commit
+        is never pushed here: the catalog refresh the store requests runs the
+        backup sync under the exclusive backup lock, the one writer of the
+        backup mirror. A cidx-meta that is not a git repository keeps plain
+        files: nothing is committed and nothing fails.
 
         Raises:
             PatternCommitError: git add or git commit failed.
@@ -782,22 +755,6 @@ class XrayPatternService:
             )
         except subprocess.CalledProcessError as exc:
             raise PatternCommitError(f"git commit in cidx-meta failed: {exc}") from exc
-
-        # Trigger backup sync when configured and enabled
-        config = get_config_service().get_config()
-        backup_cfg = getattr(config, "cidx_meta_backup_config", None)
-        if backup_cfg is not None and getattr(backup_cfg, "enabled", False):
-            branch = detect_default_branch(str(self._cidx_meta)) or "master"
-            sync = CidxMetaBackupSync(
-                cidx_meta_path=str(self._cidx_meta),
-                branch=branch,
-            )
-            result = sync.sync()
-            if result.sync_failure:
-                logger.warning(
-                    "XrayPatternService: cidx-meta backup sync deferred-failure: %s",
-                    result.sync_failure,
-                )
 
     # ------------------------------------------------------------------
     # Private helpers

@@ -1,22 +1,9 @@
 """Tests for AliasLockStore.is_held() (Issue #1546 Phase 2).
 
-`is_held()` is a NEW, additive, read-only capability needed by
-`WriteLockManager`'s DB-backed dispatch to answer "is this lock currently
-held by ANYONE" -- mirroring the legacy file-based `is_locked()`'s
-cross-process visibility -- WITHOUT acquiring the lock for keeps.
-
-Architecture fact discovered while designing this (see base.py's own
-docstring: the lock IS a held, UNCOMMITTED transaction, committed exactly
-once, at release()). A direct consequence of that guarantee is that the
-row is genuinely INVISIBLE to any other connection for as long as it is
-held -- SQL isolation means an uncommitted INSERT in one connection's
-open transaction cannot be read by a plain SELECT on a different
-connection, on EITHER backend. There is therefore no way to observe WHO
-holds a lock from outside it (owner_token/operation are unobservable) --
-only WHETHER something holds it, via a bounded, non-destructive
-attempt-then-rollback probe (the same mechanism try_acquire() already
-uses, just always rolled back rather than ever returned as a handle).
-This is why the API is a plain boolean, not a metadata dict.
+`is_held()` answers "is this lock currently held by ANYONE" -- a live
+(non-stale) committed holder row, visible from any store instance or worker
+process -- WITHOUT acquiring the lock. Holder identity is available
+separately through `get_holder()`.
 
 Real SQLite only in this module -- no mocking. The PostgreSQL backend's
 `is_held()` is covered by test_alias_lock_store_postgres_1546.py (skipped

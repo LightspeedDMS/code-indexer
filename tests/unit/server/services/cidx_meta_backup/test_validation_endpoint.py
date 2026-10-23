@@ -16,8 +16,17 @@ def _build_client(monkeypatch, config_service, ssh_key_manager, bootstrap):
 
     from code_indexer.server.web import routes
 
+    from pathlib import Path
+
+    from code_indexer.global_repos.write_lock_manager import WriteLockManager
+
     app = FastAPI()
     app.include_router(routes.web_router, prefix="/admin")
+    # The route bootstraps only while holding the real catalog write lock.
+    golden = Path(config_service.config_manager.server_dir) / "data" / "golden-repos"
+    app.state.global_lifecycle_manager = SimpleNamespace(
+        refresh_scheduler=SimpleNamespace(write_lock_manager=WriteLockManager(golden))
+    )
 
     # Bypass require_elevation() dependencies so tests don't need TOTP setup.
     for route in routes.web_router.routes:

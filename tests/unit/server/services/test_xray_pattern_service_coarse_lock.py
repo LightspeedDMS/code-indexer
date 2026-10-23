@@ -1,6 +1,6 @@
 """Unit tests for XrayPatternService coarse-lock coordination — Bug #1037.
 
-Tests that store_xray_pattern() and delete_pattern() acquire the cidx-meta
+Tests that store_xray_pattern() acquires the cidx-meta
 coarse write lock (mirroring MemoryStoreService._run_with_coarse_lock) before
 touching the shared git index.
 
@@ -13,7 +13,7 @@ test approach in test_xray_pattern_service.py).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from unittest.mock import patch
 
 import pytest
@@ -49,13 +49,16 @@ class FakeScheduler:
         self,
         is_locked: bool = False,
         acquire_returns: bool = True,
+        holder: str = "refresh_scheduler",
     ) -> None:
         self._is_locked = is_locked
         self._acquire_returns = acquire_returns
+        self._holder = holder
         # Call records
         self.is_write_locked_calls: list[tuple[str, ...]] = []
         self.acquire_write_lock_calls: list[tuple[str, str]] = []
         self.release_write_lock_calls: list[tuple[str, str]] = []
+        self.write_lock_manager = self
 
     def is_write_locked(self, alias: str) -> bool:
         self.is_write_locked_calls.append((alias,))
@@ -63,7 +66,11 @@ class FakeScheduler:
 
     def acquire_write_lock(self, alias: str, owner: str) -> bool:
         self.acquire_write_lock_calls.append((alias, owner))
-        return self._acquire_returns
+        return self._acquire_returns and not self._is_locked
+
+    def get_lock_info(self, alias: str) -> Optional[dict]:
+        held = self._is_locked or not self._acquire_returns
+        return {"owner": self._holder} if held else None
 
     def release_write_lock(self, alias: str, owner: str) -> bool:
         self.release_write_lock_calls.append((alias, owner))
@@ -148,8 +155,8 @@ def test_store_pattern_piggybacks_when_already_locked(
         )
 
     assert result.get("success") is True, f"Expected success, got {result}"
-    assert len(scheduler.acquire_write_lock_calls) == 0, (
-        "acquire_write_lock must NOT be called when piggybacking"
+    assert len(scheduler.acquire_write_lock_calls) == 1, (
+        "piggybacking follows exactly one failed acquire attempt"
     )
     assert len(scheduler.release_write_lock_calls) == 0, (
         "release_write_lock must NOT be called when piggybacking"
@@ -243,9 +250,9 @@ def test_store_pattern_does_not_release_when_piggybacking(
     scheduler = FakeScheduler(is_locked=True, acquire_returns=True)
     svc = XrayPatternService(cidx_meta_path=cidx_meta, refresh_scheduler=scheduler)
 
-    # Patch write_text on the specific path object to simulate disk full
+    # The staged catalog writer's fsync fails, as on a full disk.
     with patch(
-        "code_indexer.server.services.xray_pattern_service.Path.write_text",
+        "code_indexer.global_repos.catalog_staged_write.os.fsync",
         side_effect=OSError("disk full"),
     ):
         with pytest.raises(OSError, match="disk full"):
@@ -260,74 +267,6 @@ def test_store_pattern_does_not_release_when_piggybacking(
     assert len(scheduler.release_write_lock_calls) == 0, (
         "release_write_lock must NOT be called when piggybacking (never owned the lock)"
     )
-
-
-# ---------------------------------------------------------------------------
-# Test 6: delete_pattern acquires coarse lock
-# ---------------------------------------------------------------------------
-
-
-def test_delete_pattern_acquires_coarse_lock(
-    cidx_meta: Path,
-) -> None:
-    """delete_pattern must call acquire_write_lock with alias='cidx-meta' and owner='xray-pattern:delete:<name>'."""
-    scheduler = FakeScheduler(is_locked=False, acquire_returns=True)
-    svc = XrayPatternService(cidx_meta_path=cidx_meta, refresh_scheduler=scheduler)
-
-    # Pre-create the pattern file so delete_pattern can find it
-    scope_dir = cidx_meta / "xray-patterns" / "__any__"
-    scope_dir.mkdir(parents=True)
-    (scope_dir / "test-pattern.yaml").write_text(MINIMAL_PATTERN_YAML, encoding="utf-8")
-
-    with patch.object(svc, "_git_commit", return_value=None):
-        result = svc.delete_pattern(scope="__any__", name="test-pattern")
-
-    assert result.get("success") is True, f"Expected success, got {result}"
-    assert len(scheduler.acquire_write_lock_calls) == 1
-    alias, owner = scheduler.acquire_write_lock_calls[0]
-    assert alias == _COARSE_ALIAS
-    assert owner == "xray-pattern:delete:test-pattern"
-    assert len(scheduler.release_write_lock_calls) == 1
-    rel_alias, rel_owner = scheduler.release_write_lock_calls[0]
-    assert rel_alias == _COARSE_ALIAS
-    assert rel_owner == owner
-
-
-# ---------------------------------------------------------------------------
-# Test 7: delete_pattern piggybacks when lock held — file still removed
-# ---------------------------------------------------------------------------
-
-
-def test_delete_pattern_piggybacks_when_locked(
-    cidx_meta: Path,
-) -> None:
-    """When piggybacking, delete_pattern removes file from disk but skips _git_commit."""
-    scheduler = FakeScheduler(is_locked=True, acquire_returns=True)
-    svc = XrayPatternService(cidx_meta_path=cidx_meta, refresh_scheduler=scheduler)
-
-    # Pre-create pattern file
-    scope_dir = cidx_meta / "xray-patterns" / "__any__"
-    scope_dir.mkdir(parents=True)
-    pattern_file = scope_dir / "test-pattern.yaml"
-    pattern_file.write_text(MINIMAL_PATTERN_YAML, encoding="utf-8")
-
-    git_commit_called: list[Any] = []
-
-    def _capture_git_commit(files: list, message: str) -> None:
-        git_commit_called.append((files, message))
-
-    with patch.object(svc, "_git_commit", side_effect=_capture_git_commit):
-        result = svc.delete_pattern(scope="__any__", name="test-pattern")
-
-    assert result.get("success") is True, f"Expected success, got {result}"
-    assert not pattern_file.exists(), (
-        "File must be removed from disk even when piggybacking"
-    )
-    assert len(git_commit_called) == 0, (
-        "_git_commit must NOT be called when piggybacking"
-    )
-    assert len(scheduler.acquire_write_lock_calls) == 0
-    assert len(scheduler.release_write_lock_calls) == 0
 
 
 # ---------------------------------------------------------------------------

@@ -260,7 +260,7 @@ _KNOWN_SERVER_SPAWN_MODULES: Dict[str, int] = {
     "server/services/activated_repo_index_manager.py": 3,
     "server/mcp/handlers/repos.py": 1,
     "server/mcp/handlers/_temporal_index_cmd.py": 1,
-    "global_repos/refresh_scheduler.py": 3,
+    "global_repos/refresh_scheduler.py": 4,
     "server/services/claude_cli_manager.py": 1,
 }
 

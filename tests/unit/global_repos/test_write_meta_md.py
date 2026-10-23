@@ -155,35 +155,37 @@ def test_write_meta_md_uses_atomic_rename(
     golden_repos_dir: Path, mock_scheduler_ok: MagicMock
 ) -> None:
     """
-    Atomic write contract:
-      - tempfile.mkstemp must be called with dir=<cidx-meta dir>
-      - os.rename must be called with the final destination = cidx-meta/<alias>.md
+    Atomic write contract (staged writer):
+      - tempfile.mkstemp is called in the hidden staging directory beside
+        cidx-meta (outside the catalog)
+      - os.replace moves it to the final destination = cidx-meta/<alias>.md
     """
     cidx_meta_dir = golden_repos_dir / "cidx-meta"
     final_path = str(cidx_meta_dir / "foo.md")
+    staging_dir = str(golden_repos_dir / ".cidx-meta-staging")
 
     mkstemp_calls: list = []
-    rename_calls: list = []
+    replace_calls: list = []
 
     real_mkstemp = tempfile.mkstemp
-    real_rename = os.rename
+    real_replace = os.replace
 
     def capturing_mkstemp(**kwargs: Any) -> Any:
         mkstemp_calls.append(kwargs)
         return real_mkstemp(**kwargs)
 
-    def capturing_rename(src: str, dst: str) -> None:
-        rename_calls.append((src, dst))
-        real_rename(src, dst)
+    def capturing_replace(src: str, dst: str) -> None:
+        replace_calls.append((src, dst))
+        real_replace(src, dst)
 
     with (
         patch(
-            "code_indexer.global_repos.lifecycle_batch_runner.tempfile.mkstemp",
+            "code_indexer.global_repos.catalog_staged_write.tempfile.mkstemp",
             side_effect=capturing_mkstemp,
         ),
         patch(
-            "code_indexer.global_repos.lifecycle_batch_runner.os.rename",
-            side_effect=capturing_rename,
+            "code_indexer.global_repos.catalog_staged_write.os.replace",
+            side_effect=capturing_replace,
         ),
     ):
         write_meta_md(
@@ -197,14 +199,14 @@ def test_write_meta_md_uses_atomic_rename(
 
     assert len(mkstemp_calls) == 1, "Exactly one mkstemp call expected"
     mkstemp_dir = mkstemp_calls[0].get("dir")
-    assert mkstemp_dir == str(cidx_meta_dir), (
-        f"mkstemp must use dir=cidx-meta/, got: {mkstemp_dir}"
+    assert mkstemp_dir == staging_dir, (
+        f"mkstemp must stage outside cidx-meta, got: {mkstemp_dir}"
     )
 
-    assert len(rename_calls) == 1, "Exactly one os.rename call expected"
-    _, dst_path = rename_calls[0]
+    assert len(replace_calls) == 1, "Exactly one os.replace call expected"
+    _, dst_path = replace_calls[0]
     assert dst_path == final_path, (
-        f"os.rename destination should be {final_path}, got: {dst_path}"
+        f"os.replace destination should be {final_path}, got: {dst_path}"
     )
 
 

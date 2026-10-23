@@ -186,9 +186,17 @@ class TestCleanupReleasesCorrespondingWriteLock:
         )
         assert acquired, "Should be able to acquire write lock for test setup"
 
-        # Verify lock IS held before cleanup
-        assert scheduler.is_write_locked("locked-repo"), (
-            "Write lock must be held before cleanup runs"
+        # The holder is gone (the client's process died): only then may the
+        # cleanup release its lock.
+        import multiprocessing
+        import os
+
+        child = multiprocessing.get_context("fork").Process(target=os._exit, args=(0,))
+        child.start()
+        child.join(30)
+        lock_file = golden_repos_dir / ".locks" / "locked-repo.lock"
+        lock_file.write_text(
+            json.dumps({**json.loads(lock_file.read_text()), "pid": child.pid})
         )
 
         scheduler.cleanup_stale_write_mode_markers()

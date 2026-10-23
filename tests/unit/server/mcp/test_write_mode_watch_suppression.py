@@ -64,6 +64,7 @@ def _create_write_mode_marker(golden_repos_dir: Path, alias: str) -> Path:
             {
                 "alias": alias,
                 "source_path": str(golden_repos_dir / alias),
+                "owner_token": "tok-1",
                 "entered_at": datetime.now(timezone.utc).isoformat(),
             }
         )
@@ -74,6 +75,15 @@ def _create_write_mode_marker(golden_repos_dir: Path, alias: str) -> Path:
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _app_and_routers_loaded_before_patching():
+    # ^ hazard routers bind file_crud_service at import => loading them under a patch leaks the mock
+    import code_indexer.server.routers.files  # noqa: F401
+    from code_indexer.server import app as app_module
+
+    assert app_module.app is not None
 
 
 @pytest.fixture
@@ -122,8 +132,10 @@ def mock_refresh_scheduler(golden_repos_dir):
     def _acquire(alias, owner_name="refresh_scheduler"):
         return scheduler.write_lock_manager.acquire(alias, owner_name=owner_name)
 
-    def _release(alias, owner_name="refresh_scheduler"):
-        return scheduler.write_lock_manager.release(alias, owner_name=owner_name)
+    def _release(alias, owner_name="refresh_scheduler", owner_token=None):
+        return scheduler.write_lock_manager.release(
+            alias, owner_name=owner_name, owner_token=owner_token
+        )
 
     scheduler.acquire_write_lock.side_effect = _acquire
     scheduler.release_write_lock.side_effect = _release
@@ -399,7 +411,7 @@ class TestWriteModeRunRefreshStopsWatch:
         _create_write_mode_marker(golden_repos_dir, "cidx-meta")
         # Acquire lock (will be released by _write_mode_run_refresh)
         mock_refresh_scheduler.write_lock_manager.acquire(
-            "cidx-meta", owner_name="mcp_write_mode"
+            "cidx-meta", owner_name="mcp_write_mode", owner_token="tok-1"
         )
 
         call_order = []
@@ -448,7 +460,7 @@ class TestWriteModeRunRefreshStopsWatch:
         """
         _create_write_mode_marker(golden_repos_dir, "cidx-meta")
         mock_refresh_scheduler.write_lock_manager.acquire(
-            "cidx-meta", owner_name="mcp_write_mode"
+            "cidx-meta", owner_name="mcp_write_mode", owner_token="tok-1"
         )
         mock_refresh_scheduler._execute_refresh.side_effect = RuntimeError(
             "refresh failed"
@@ -481,7 +493,7 @@ class TestWriteModeRunRefreshStopsWatch:
         """
         _create_write_mode_marker(golden_repos_dir, "cidx-meta")
         mock_refresh_scheduler.write_lock_manager.acquire(
-            "cidx-meta", owner_name="mcp_write_mode"
+            "cidx-meta", owner_name="mcp_write_mode", owner_token="tok-1"
         )
 
         # The marker contains source_path = golden_repos_dir / "cidx-meta"
@@ -502,3 +514,54 @@ class TestWriteModeRunRefreshStopsWatch:
 
         # Verify stop_watch was called with the source_path from the marker
         mock_auto_watch_manager.stop_watch.assert_called_once_with(expected_repo_path)
+
+
+_OPERATIONS = {
+    "create_file": {"content": "hello"},
+    "edit_file": {"old_string": "a", "new_string": "b", "content_hash": "0" * 64},
+    "delete_file": {},
+}
+
+
+class TestRefusedWriteStartsNoWatch:
+    """A write the shared gate refuses starts no auto-watch."""
+
+    @pytest.mark.parametrize("operation", sorted(_OPERATIONS))
+    def test_refused_write_does_not_start_watch(
+        self,
+        operation,
+        golden_repos_dir,
+        mock_auto_watch_manager,
+        mock_file_crud_service,
+    ):
+        from code_indexer.server import app as app_module
+        from code_indexer.server.mcp import handlers
+
+        getattr(mock_file_crud_service, operation).side_effect = PermissionError(
+            "refused"
+        )
+        params = {
+            "repository_alias": "cidx-meta-global",
+            "file_path": "test.md",
+            **_OPERATIONS[operation],
+        }
+        with (
+            patch(
+                "code_indexer.server.services.auto_watch_manager.auto_watch_manager",
+                mock_auto_watch_manager,
+            ),
+            patch(
+                "code_indexer.server.services.file_crud_service.file_crud_service",
+                mock_file_crud_service,
+            ),
+            patch.object(
+                app_module.app.state,
+                "golden_repos_dir",
+                str(golden_repos_dir),
+                create=True,
+            ),
+        ):
+            response = getattr(handlers, f"handle_{operation}")(params, _make_user())
+
+        assert json.loads(response["content"][0]["text"])["success"] is False
+        mock_auto_watch_manager.start_watch.assert_not_called()

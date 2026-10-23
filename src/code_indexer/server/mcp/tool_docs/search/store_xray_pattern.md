@@ -163,6 +163,7 @@ Store in `__any__` scope for patterns that apply to any codebase. Store in a rep
 | invalid_execution_mode | execution_mode is present but is neither "legacy" nor "graph" |
 | xray_evaluator_validation_failed | evaluator_code fails the Rust security whitelist (see error_code, offending_construct, offending_line) |
 | pattern_already_exists | Pattern with this name already exists in scope and overwrite=false |
+| catalog_locked | Retryable: the cidx-meta catalog is briefly exclusive (a backup, write mode or a restore); nothing was written, retry shortly |
 | invalid_parameter | A parameter declaration uses an unknown field |
 | invalid_parameter_type | Parameter type is not one of: usize, i64, f64, bool, str |
 

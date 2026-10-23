@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from code_indexer.global_repos.meta_description_hook import (
     _MAX_RETRY_INTERVAL_SECONDS,
@@ -37,6 +37,17 @@ class _ScriptedScheduler:
         self._outcomes: List[Outcome] = list(outcomes)
         self.before_outcome: Optional[Callable[[], None]] = None
         self.calls = 0
+        # Its own job store: a returned job id reads as a finished refresh
+        # that covered the writes before it.
+        self.background_job_manager = self
+
+    def get_job_status(
+        self, job_id: str, username: str, is_admin: bool = False
+    ) -> Dict[str, Any]:
+        return {
+            "status": "completed",
+            "result": {"success": True, "covered_source": True},
+        }
 
     def trigger_refresh_for_repo(self, alias_name: str) -> str:
         assert alias_name == META_ALIAS
@@ -105,6 +116,7 @@ def test_a_success_resets_the_retry_interval() -> None:
         assert _next_retry_interval(debouncer) > FIRST_RETRY_SECONDS
 
         _expire_now(debouncer)  # the outage clears: submitted
+        _expire_now(debouncer)  # the job store confirms it covered the write
         assert debouncer._dirty is False
         assert debouncer._timer is None
 

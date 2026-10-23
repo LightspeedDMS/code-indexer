@@ -374,15 +374,11 @@ def test_a_store_into_a_non_git_cidx_meta_succeeds_and_is_audited(
     assert not _noisy(caplog), _noisy(caplog)
 
 
-def test_seed_and_delete_in_a_non_git_cidx_meta_log_no_warning(
-    cidx_meta, caplog
-) -> None:
+def test_seed_in_a_non_git_cidx_meta_logs_no_warning(cidx_meta, caplog) -> None:
     shutil.rmtree(cidx_meta / ".git")
     service = XrayPatternService(cidx_meta)
     caplog.clear()
     service.ensure_seed_patterns()
     seed = cidx_meta / "xray-patterns" / "__any__" / "catch-rethrow.yaml"
     assert seed.exists()
-    service.delete_pattern("__any__", "catch-rethrow")
-    assert not seed.exists()
     assert not _noisy(caplog), _noisy(caplog)

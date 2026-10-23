@@ -38,6 +38,9 @@ _SAFE_ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 MAX_DELETE_RATIO = 0.5
 MIN_FILES_FOR_THRESHOLD = 3
 
+# Lock owner name used when acquiring the cidx-meta write lock.
+META_DIRECTORY_UPDATER_LOCK_OWNER = "meta_directory_updater"
+
 
 class MetaDirectoryMassDeleteBlocked(RuntimeError):
     """Raised when update() would delete more than the safety threshold allows."""
@@ -138,7 +141,7 @@ class MetaDirectoryUpdater(UpdateStrategy):
         if self._refresh_scheduler is not None:
             try:
                 lock_acquired = self._refresh_scheduler.acquire_write_lock(
-                    "cidx-meta", owner_name="meta_directory_updater"
+                    "cidx-meta", owner_name=META_DIRECTORY_UPDATER_LOCK_OWNER
                 )
             except Exception as lock_err:
                 logger.warning(
@@ -169,12 +172,26 @@ class MetaDirectoryUpdater(UpdateStrategy):
                 desc_file = self.meta_dir / f"{alias}.md"
                 if not desc_file.exists():
                     # INVARIANT: cidx-meta filenames use SHORT alias ({alias}.md), NOT {alias}-global.md
-                    # Exclusive create: a real description written since the
-                    # check (registration writes it without the catalog lock
-                    # when the lock is busy) is never overwritten by a stub.
+                    # Exclusive create, staged outside the catalog: a real
+                    # description written since the check (a piggybacked
+                    # registration) is never overwritten by a stub.
+                    from .catalog_staged_write import (
+                        SHARED_CATALOG_FILE_MODE,
+                        write_catalog_file,
+                    )
+
                     try:
-                        with desc_file.open("x", encoding="utf-8") as fh:
-                            fh.write(f"# {alias}\n\nGolden repository: {alias}\n")
+                        if not write_catalog_file(
+                            self.meta_dir,
+                            desc_file,
+                            f"# {alias}\n\nGolden repository: {alias}\n",
+                            mode=SHARED_CATALOG_FILE_MODE,
+                            exclusive=True,
+                        ):
+                            logger.warning(
+                                "MetaDirectoryUpdater: %s created, not yet durable",
+                                desc_file,
+                            )
                     except FileExistsError:
                         logger.debug(
                             "MetaDirectoryUpdater: %s appeared since the check; "
@@ -210,7 +227,7 @@ class MetaDirectoryUpdater(UpdateStrategy):
         finally:
             if lock_acquired and self._refresh_scheduler is not None:
                 self._refresh_scheduler.release_write_lock(
-                    "cidx-meta", owner_name="meta_directory_updater"
+                    "cidx-meta", owner_name=META_DIRECTORY_UPDATER_LOCK_OWNER
                 )
 
     def get_source_path(self) -> str:

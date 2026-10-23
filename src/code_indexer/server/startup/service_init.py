@@ -708,6 +708,11 @@ def initialize_services() -> Dict[str, Any]:
             file_crud_service.set_golden_repos_dir(
                 Path(golden_repo_manager.golden_repos_dir)
             )
+            from code_indexer.server.mcp.handlers._write_mode_marker import (
+                renew_app_write_mode_lease,
+            )
+
+            file_crud_service.set_write_mode_lease_renewer(renew_app_write_mode_lease)
             logger.info(
                 "Registered cidx-meta-global as write exception for direct editing",
                 extra={"correlation_id": get_correlation_id()},
