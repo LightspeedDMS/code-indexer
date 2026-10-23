@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from .constants import CIDX_META_REPO
 from code_indexer.server.services.audit_outcome import audit_target_id
@@ -139,6 +139,17 @@ class RepoAccessBatchMixin:
         self._record_successes(actor, _GRANT, granted, group)
         return granted
 
+    def _revoke_recorded(
+        self, repo_names: List[str], group_id: int, actor: str
+    ) -> Tuple[Group, List[str], List[str]]:
+        """Revoke in one transaction and write one success row per revoked
+        repository; return (group, requested unique names, revoked names)."""
+        unique = [n for n in dict.fromkeys(repo_names) if n != CIDX_META_REPO]
+        group = self._existing_group(group_id)
+        revoked = self.revoke_repos_access(unique, group_id) if unique else []
+        self._record_successes(actor, _REVOKE, revoked, group)
+        return group, unique, revoked
+
     def revoke_repos_access_audited_aliases(
         self, repo_names: List[str], group_id: int, *, actor: str
     ) -> List[str]:
@@ -146,35 +157,32 @@ class RepoAccessBatchMixin:
 
         cidx-meta and duplicates are skipped.  One ``success`` row per revoked
         repository (as the single-repository door writes), written after the
-        batch committed; the requested names that were not in the group write
-        ONE ``failure`` row between them carrying only their count.  A missing
-        group or a failed batch revokes nothing, writes no row and the
+        batch committed; names that were not in the group write nothing.  A
+        missing group or a failed batch revokes nothing, writes no row and the
         exception propagates.
 
         Raises:
             GroupNotFoundError: *group_id* names no group.
         """
-        unique = [n for n in dict.fromkeys(repo_names) if n != CIDX_META_REPO]
-        group = self._existing_group(group_id)
-        revoked = self.revoke_repos_access(unique, group_id) if unique else []
-        self._record_successes(actor, _REVOKE, revoked, group)
-        not_in_group = len(unique) - len(revoked)
-        if not_in_group:
-            summary = {"group": group.name, "not_in_group_count": not_in_group}
-            self._record_group_outcome(actor, _REVOKE, "repo", None, "failure", summary)
-        return revoked
+        return self._revoke_recorded(repo_names, group_id, actor)[2]
 
     def revoke_repos_access_audited(
         self, repo_names: List[str], group_id: int, *, actor: str
     ) -> int:
-        """Count form of :meth:`revoke_repos_access_audited_aliases` for the
-        REST and MCP bulk-revoke doors: a missing group or a failed batch
-        also writes one ``failure`` row before the exception propagates."""
+        """Count form for the REST and MCP bulk-revoke doors.
+
+        Besides the success rows, the requested names that were not in the
+        group write ONE ``failure`` row between them carrying only their
+        count, and a missing group or a failed batch writes one ``failure``
+        row before the exception propagates.
+        """
         try:
-            revoked = self.revoke_repos_access_audited_aliases(
-                repo_names, group_id, actor=actor
-            )
+            group, unique, revoked = self._revoke_recorded(repo_names, group_id, actor)
         except Exception:
             self._record_group_outcome(actor, _REVOKE, "repo", None, "failure", None)
             raise
+        not_in_group = len(unique) - len(revoked)
+        if not_in_group:
+            summary = {"group": group.name, "not_in_group_count": not_in_group}
+            self._record_group_outcome(actor, _REVOKE, "repo", None, "failure", summary)
         return len(revoked)

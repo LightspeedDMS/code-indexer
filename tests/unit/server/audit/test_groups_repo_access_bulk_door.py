@@ -164,6 +164,13 @@ class TestBulkGrantAndRevoke:
         ]
         assert _visible_to_member(door) == ["example-beta"]
 
+    def test_revoke_of_names_not_in_group_writes_no_row(self, door) -> None:
+        resp = door.post(_body(door, "revoke", ["example-alpha"]))
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["changed"] == []
+        assert resp.json()["unchanged"] == ["example-alpha"]
+        assert door.env.rows("repo_access_revoke") == []
+
     def test_no_size_cap(self, door) -> None:
         unknown = [f"example-missing-{n}" for n in range(1200)]
         resp = door.post(_body(door, "grant", unknown + _REPOS))

@@ -147,6 +147,21 @@ class TestBulkRevoke:
             )
         ]
 
+    def test_door_revoke_of_names_not_in_group_writes_no_failure_row(self, env) -> None:
+        m, g, tmp = env["m"], env["g"], env["tmp"]
+        m.grant_repo_access("example-a", g.id, "setup")
+        names = ["example-a", "example-x", "example-y"]
+        revoked = m.revoke_repos_access_audited_aliases(names, g.id, actor=_ACTOR)
+        assert revoked == ["example-a"]
+        assert _rows(tmp, "repo_access_revoke") == [
+            (
+                _ACTOR,
+                "success",
+                "example-a",
+                {"repo": "example-a", "group": "example-team"},
+            )
+        ]
+
     def _poisoned_revoke(self, env) -> List[str]:
         m, g, tmp = env["m"], env["g"], env["tmp"]
         for alias in ("example-a", _POISON, "example-c"):

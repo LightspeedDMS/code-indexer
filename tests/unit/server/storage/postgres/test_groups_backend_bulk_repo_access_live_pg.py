@@ -133,6 +133,20 @@ def test_bulk_grant_and_revoke_round_trip(pg) -> None:
     assert revoke_targets == ["example-a", "example-c"]
 
 
+@pytest.mark.parametrize(
+    "entry_point, outcomes",
+    [
+        ("revoke_repos_access_audited", ["success", "failure"]),  # existing callers
+        ("revoke_repos_access_audited_aliases", ["success"]),  # the bulk door
+    ],
+)
+def test_revoke_of_names_not_in_group(pg, entry_point, outcomes) -> None:
+    manager, group, _dsn, tmp = pg
+    manager.grant_repo_access("example-a", group.id, "setup")
+    getattr(manager, entry_point)(["example-a", "example-x"], group.id, actor=_ACTOR)
+    assert [r[0] for r in _rows(tmp, "repo_access_revoke")] == outcomes
+
+
 def test_failed_bulk_grant_leaves_no_partial_grants(pg) -> None:
     import psycopg
 
