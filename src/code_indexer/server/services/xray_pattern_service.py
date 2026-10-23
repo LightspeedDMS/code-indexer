@@ -48,7 +48,7 @@ import yaml
 
 from code_indexer.global_repos.catalog_lock_holder import (
     CatalogLockedExclusively,
-    require_publishing_holder,
+    admit_catalog_write,
 )
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from code_indexer.server.services.audit_outcome import (
@@ -658,19 +658,15 @@ class XrayPatternService:
     def _coarse_piggyback_or_acquire(self, owner: str) -> bool:
         """Return True if piggybacking (caller must skip acquire/release).
 
-        Piggybacks only on a lock held by a refresh, which publishes the
-        write; any other holder (write mode, a restore, another writer)
-        holds it exclusively: CatalogLockedExclusively is raised before
-        anything is written. When no scheduler is injected, always returns
-        False (caller owns lock conceptually and will call _git_commit
-        directly).
+        Admission is the shared catalog rule (catalog_lock_holder): hold the
+        lock, or piggyback on a cooperative holder; an exclusive holder
+        raises CatalogLockedExclusively before anything is written. When no
+        scheduler is injected, always returns False (caller owns lock
+        conceptually and will call _git_commit directly).
         """
         if self._scheduler is None:
             return False
-        if self._scheduler.acquire_write_lock(_COARSE_ALIAS, owner):
-            return False
-        require_publishing_holder(self._scheduler)
-        return True
+        return not admit_catalog_write(self._scheduler, owner)
 
     def _release_coarse_lock(self, owner: str) -> bool:
         """Release the coarse write lock; False when it could not be removed.

@@ -130,36 +130,38 @@ def require_publishing_holder(refresh_scheduler: Any) -> None:
     raise CatalogLockedExclusively(category)
 
 
-@contextmanager
-def admitted_catalog_write(refresh_scheduler: Any, owner_name: str) -> Iterator[bool]:
-    """Admit one catalog write: hold the cidx-meta lock as *owner_name*, or,
-    when it is held, write under a cooperative holder; yields whether this
-    writer holds the lock (False: a piggyback, owed to a later refresh).
-    Raises CatalogLockedExclusively, before anything is written, when an
-    exclusive holder has it. A held lock is released on exit."""
-    acquired = False
+def admit_catalog_write(refresh_scheduler: Any, owner_name: str) -> bool:
+    """The one admission rule for every catalog writer: True when this
+    writer now holds the cidx-meta lock as *owner_name* (it must release
+    it); False when it may write under a cooperative holder (a piggyback,
+    owed to a later refresh). Raises CatalogLockedExclusively, before
+    anything is written, when an exclusive holder has it. A holder that
+    released between the failed acquire and the holder read is retried."""
     for attempt in range(_ADMISSION_ATTEMPTS):
-        acquired = bool(
-            refresh_scheduler.acquire_write_lock(
-                CATALOG_LOCK_ALIAS, owner_name=owner_name
-            )
-        )
-        if acquired:
-            break
+        if refresh_scheduler.acquire_write_lock(CATALOG_LOCK_ALIAS, owner_name):
+            return True
         try:
             require_publishing_holder(refresh_scheduler)
-            break
+            return False
         except CatalogLockedExclusively:
             released = not refresh_scheduler.write_lock_manager.get_lock_info(
                 CATALOG_LOCK_ALIAS
             )
             if not released or attempt == _ADMISSION_ATTEMPTS - 1:
                 raise
+    raise AssertionError("unreachable: the last attempt returns or raises")
+
+
+@contextmanager
+def admitted_catalog_write(refresh_scheduler: Any, owner_name: str) -> Iterator[bool]:
+    """admit_catalog_write for the duration of a block; yields whether this
+    writer holds the lock, and releases a held lock on exit."""
+    acquired = admit_catalog_write(refresh_scheduler, owner_name)
     try:
         yield acquired
     finally:
         if acquired and not refresh_scheduler.release_write_lock(
-            CATALOG_LOCK_ALIAS, owner_name=owner_name
+            CATALOG_LOCK_ALIAS, owner_name
         ):
             logger.warning(
                 f"cidx-meta write lock release for {owner_name!r} returned False; "

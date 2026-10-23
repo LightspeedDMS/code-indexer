@@ -539,14 +539,22 @@ def on_repo_added(
         # refresh is owed to the debouncer (one requested now would skip).
         from code_indexer.global_repos.catalog_lock_holder import (
             CatalogLockedExclusively,
-            require_publishing_holder,
+            admitted_catalog_write,
         )
         from code_indexer.global_repos.catalog_pending_changes import (
             defer_description,
         )
+        from code_indexer.global_repos.lifecycle_batch_runner import (
+            LIFECYCLE_WRITER_LOCK_OWNER,
+        )
 
         try:
-            require_publishing_holder(_refresh_scheduler)
+            with admitted_catalog_write(
+                _refresh_scheduler, LIFECYCLE_WRITER_LOCK_OWNER
+            ):
+                atomic_write_description(
+                    md_file, verified_content, refresh_scheduler=None
+                )
         except CatalogLockedExclusively as refused:
             defer_description(golden_repos_dir, repo_name, verified_content)
             logger.info(
@@ -554,7 +562,6 @@ def on_repo_added(
                 f"applied once released"
             )
         else:
-            atomic_write_description(md_file, verified_content, refresh_scheduler=None)
             logger.info(
                 f"Created meta description file {md_file} while the cidx-meta "
                 f"write lock was held ({lock_busy}); the refresh is owed to the "
@@ -621,14 +628,16 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
                 _lock_still_held = True
                 from code_indexer.global_repos.catalog_lock_holder import (
                     CatalogLockedExclusively,
-                    require_publishing_holder,
+                    admit_catalog_write,
                 )
                 from code_indexer.global_repos.catalog_pending_changes import (
                     defer_removal,
                 )
 
                 try:
-                    require_publishing_holder(_refresh_scheduler)
+                    _lock_acquired = admit_catalog_write(
+                        _refresh_scheduler, LIFECYCLE_WRITER_LOCK_OWNER
+                    )
                 except CatalogLockedExclusively as refused:
                     defer_removal(golden_repos_dir, repo_name)
                     logger.info(
@@ -638,12 +647,15 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
                     refresh_after_catalog_write(_refresh_scheduler, True)
                     _parked = True
                 else:
-                    logger.info(
-                        "on_repo_removed: deleting %s while the cidx-meta write "
-                        "lock is held -- %s; the refresh is owed to the debouncer",
-                        md_file,
-                        _describe_cidx_meta_holder(_refresh_scheduler),
-                    )
+                    _lock_still_held = not _lock_acquired
+                    if _lock_still_held:
+                        logger.info(
+                            "on_repo_removed: deleting %s while the cidx-meta "
+                            "write lock is held -- %s; the refresh is owed to "
+                            "the debouncer",
+                            md_file,
+                            _describe_cidx_meta_holder(_refresh_scheduler),
+                        )
         _deleted = False
         try:
             if not _parked:

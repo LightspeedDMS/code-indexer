@@ -324,27 +324,24 @@ class MemoryStoreService:
     def _coarse_piggyback_or_acquire(self, owner: str) -> bool:
         """Return True if piggybacking (skip acquire/release).
 
-        Piggybacks only on a lock held by a refresh, which publishes the
-        write; any other holder (write mode, a restore, another writer)
-        holds it exclusively and the write is refused with ConflictError.
+        Admission is the shared catalog rule (catalog_lock_holder): hold the
+        lock, or piggyback on a cooperative holder; an exclusive holder
+        refuses the write with ConflictError.
         """
         # Story #932 follow-up: ttl_seconds NOT forwarded here — the real
         # RefreshScheduler.acquire_write_lock delegates to WriteLockManager which
         # owns TTL internally.  coarse_lock_ttl_seconds is kept in the config
         # dataclass as a documented knob for future use should WriteLockManager
         # ever expose an override.
-        if self._scheduler.acquire_write_lock(_COARSE_ALIAS, owner):
-            return False
         from code_indexer.global_repos.catalog_lock_holder import (
             CatalogLockedExclusively,
-            require_publishing_holder,
+            admit_catalog_write,
         )
 
         try:
-            require_publishing_holder(self._scheduler)
+            return not admit_catalog_write(self._scheduler, owner)
         except CatalogLockedExclusively as exc:
             raise ConflictError(str(exc)) from exc
-        return True
 
     def _signal_refresh(self, piggyback: bool) -> None:
         """Signal refresh. Piggyback always uses debouncer.

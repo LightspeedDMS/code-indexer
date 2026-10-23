@@ -285,3 +285,58 @@ def test_a_refused_memory_write_still_spends_its_token(
 
     with pytest.raises(RateLimitError):
         service.create_memory(MEMORY_PAYLOAD, username="carol")
+
+
+@pytest.fixture
+def releasing_holder(
+    scheduler: RefreshScheduler, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """A cooperative holder that lets go between the writer's failed
+    acquire and its read of the holder."""
+    locks = scheduler.write_lock_manager
+    assert locks.acquire(CATALOG, owner_name="refresh_scheduler")
+    real_info = locks.get_lock_info
+    released: List[bool] = []
+
+    def _release_then_read(alias: str) -> Any:
+        if alias == CATALOG and not released:
+            released.append(locks.release(CATALOG, owner_name="refresh_scheduler"))
+        return real_info(alias)
+
+    monkeypatch.setattr(locks, "get_lock_info", _release_then_read)
+    yield
+    assert released == [True], "the holder never released"
+    assert real_info(CATALOG) is None
+
+
+def test_memory_create_survives_a_holder_releasing_meanwhile(
+    tmp_path: Path,
+    scheduler: RefreshScheduler,
+    debouncer: _CountingDebouncer,
+    releasing_holder: None,
+) -> None:
+    created = _memory_service(tmp_path, scheduler, debouncer).create_memory(
+        MEMORY_PAYLOAD, username="carol"
+    )
+
+    assert (tmp_path / "memories" / f"{created['id']}.md").exists()
+
+
+def test_xray_store_survives_a_holder_releasing_meanwhile(
+    scheduler: RefreshScheduler,
+    debouncer: _CountingDebouncer,
+    releasing_holder: None,
+) -> None:
+    catalog = Path(scheduler.golden_repos_dir) / CATALOG
+    result = XrayPatternService(
+        catalog, refresh_scheduler=scheduler
+    ).store_xray_pattern_audited(
+        scope="__any__",
+        pattern_yaml=PATTERN_YAML,
+        overwrite=False,
+        actor="carol",
+        may_replace_global=True,
+    )
+
+    assert result.get("success") is True, result
+    assert (catalog / "xray-patterns" / "__any__" / "test-pattern.yaml").exists()
