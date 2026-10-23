@@ -402,10 +402,13 @@ class XrayPatternService:
     def _put_catalog_file(self, target: Path, content: str) -> None:
         """Put *target* in place atomically, staged outside the catalog."""
         from code_indexer.global_repos.catalog_staged_write import (
+            SHARED_CATALOG_FILE_MODE,
             write_catalog_file,
         )
 
-        if not write_catalog_file(self._cidx_meta, target, content):
+        if not write_catalog_file(
+            self._cidx_meta, target, content, mode=SHARED_CATALOG_FILE_MODE
+        ):
             logger.warning("X-Ray pattern %s written without a directory fsync", target)
 
     @staticmethod

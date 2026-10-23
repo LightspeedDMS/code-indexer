@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 STAGING_DIR_NAME = ".cidx-meta-staging"
 #: A staging temp file older than this was left by a crashed writer.
 STALE_STAGING_SECONDS = 15 * 60
+#: Descriptions and X-Ray patterns: a snapshot copy made as another OS user
+#: must be able to read them.
+SHARED_CATALOG_FILE_MODE = 0o644
 
 
 def _sweep_stale_staging(staging_dir: Path) -> None:
@@ -53,9 +56,13 @@ def _sweep_stale_staging(staging_dir: Path) -> None:
         )
 
 
-def write_catalog_file(catalog_root: Path, target_path: Path, content: str) -> bool:
+def write_catalog_file(
+    catalog_root: Path, target_path: Path, content: str, *, mode: int
+) -> bool:
     """Stage *content* outside *catalog_root*, fsync, and move it over
-    *target_path* (a file inside the catalog; missing parents are created).
+    *target_path* (a file inside the catalog; missing parents are created)
+    with exactly *mode* -- each writer states its own, e.g. owner-only for
+    memories, SHARED_CATALOG_FILE_MODE for descriptions and X-Ray patterns.
 
     Returns False when the content is in place but its directory could not
     be fsync'd (logged): the caller then owes the refresh. Any failure before
@@ -70,9 +77,8 @@ def write_catalog_file(catalog_root: Path, target_path: Path, content: str) -> b
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            # mkstemp creates 0600; a snapshot copy (possibly as another OS
-            # user) must be able to read the catalog file.
-            os.fchmod(fh.fileno(), 0o644)
+            # ^ invariant the mode is set before the move, so the file never appears wider
+            os.fchmod(fh.fileno(), mode)
             fh.write(content)
             fh.flush()
             os.fsync(fh.fileno())

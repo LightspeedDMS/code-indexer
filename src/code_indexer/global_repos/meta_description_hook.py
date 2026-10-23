@@ -14,7 +14,10 @@ from typing import Any, Optional
 
 import yaml
 
-from code_indexer.global_repos.catalog_staged_write import write_catalog_file
+from code_indexer.global_repos.catalog_staged_write import (
+    SHARED_CATALOG_FILE_MODE,
+    write_catalog_file,
+)
 from code_indexer.global_repos.cidx_meta_refresh_debouncer import (  # noqa: F401
     _DEFAULT_DEBOUNCE_SECONDS,
     _MAX_RETRY_INTERVAL_SECONDS,
@@ -301,7 +304,9 @@ def atomic_write_description(
     released = True
     durable = True
     try:
-        durable = write_catalog_file(target_path.parent, target_path, content)
+        durable = write_catalog_file(
+            target_path.parent, target_path, content, mode=SHARED_CATALOG_FILE_MODE
+        )
     finally:
         if lock_acquired:
             released = _release_cidx_meta_lock(refresh_scheduler)

@@ -201,6 +201,10 @@ def read_memory_frontmatter(
     return frontmatter_dict
 
 
+#: Memory files hold users' memories: readable by the server's account only.
+MEMORY_FILE_MODE = 0o600
+
+
 def atomic_write_memory_file(
     path: Path,
     frontmatter_dict: Dict[str, Any],
@@ -213,7 +217,8 @@ def atomic_write_memory_file(
     outside ``catalog_root`` (the catalog the file lives in; None = the
     file's own directory), fsync'd and moved over *path* with os.replace, so
     a reader of the catalog sees the old file or the new one, never a
-    partial or temp file. Creates parent directories if missing.
+    partial or temp file. The file gets MEMORY_FILE_MODE (owner-only).
+    Creates parent directories if missing.
 
     Returns the SHA-256 content_hash of the bytes that were written
     (matches what read_memory_file would compute).
@@ -231,7 +236,9 @@ def atomic_write_memory_file(
         raise TypeError(f"path must be a Path, got {type(path).__name__}")
 
     content = serialize_memory(frontmatter_dict, body)
-    if not write_catalog_file(catalog_root or path.parent, path, content):
+    if not write_catalog_file(
+        catalog_root or path.parent, path, content, mode=MEMORY_FILE_MODE
+    ):
         # ^ why the file is in place and readable; only its directory fsync failed
         logger.warning("Memory file %s written without a directory fsync", path)
     return compute_content_hash(content.encode("utf-8"))

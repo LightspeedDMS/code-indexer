@@ -14,13 +14,15 @@ performs the real replace.
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Set
+from typing import Any, Callable, Dict, Iterator, List, Set
 from unittest.mock import MagicMock
 
 import pytest
 
 from code_indexer.global_repos import meta_description_hook
+from code_indexer.global_repos.catalog_staged_write import STAGING_DIR_NAME
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
@@ -192,3 +194,73 @@ def test_xray_pattern_store_is_staged_outside_the_catalog(
     assert _store("second").get("success") is True
     assert len(seen) == 2
     assert "second" in target.read_text("utf-8")
+
+
+@pytest.fixture
+def umask_022() -> Iterator[None]:
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+MEMORY_PAYLOAD = {
+    "type": "architectural-fact",
+    "scope": "global",
+    "summary": "example fact",
+    "evidence": [{"commit": "abc123"}],
+}
+
+
+def test_memory_files_stay_owner_only(
+    tmp_path: Path, catalog: Path, scheduler: RefreshScheduler, umask_022: None
+) -> None:
+    service = _memory_service(tmp_path, catalog, scheduler)
+    target = catalog / "memories" / f"{'a' * 32}.md"
+
+    created = service.create_memory(MEMORY_PAYLOAD, username="carol")
+    assert _mode(target) == 0o600, "a memory became readable by other accounts"
+
+    service.edit_memory(
+        created["id"],
+        {**MEMORY_PAYLOAD, "summary": "example fact, revised"},
+        created["content_hash"],
+        username="carol",
+    )
+    assert _mode(target) == 0o600, "an edited memory became readable by others"
+
+
+def test_xray_pattern_and_description_files_stay_world_readable(
+    catalog: Path, scheduler: RefreshScheduler, umask_022: None
+) -> None:
+    pattern = catalog / "xray-patterns" / "__any__" / "test-pattern.yaml"
+    result = XrayPatternService(
+        catalog, refresh_scheduler=scheduler
+    ).store_xray_pattern_audited(
+        scope="__any__",
+        pattern_yaml=PATTERN_YAML.format(description="first"),
+        overwrite=True,
+        actor="carol",
+        may_replace_global=True,
+    )
+    assert result.get("success") is True, result
+    assert _mode(pattern) == 0o644
+
+    description = catalog / "example-repo.md"
+    meta_description_hook.atomic_write_description(description, "# example-repo\n")
+    assert _mode(description) == 0o644
+
+
+def test_staging_directory_is_no_wider_than_a_plain_mkdir(
+    catalog: Path, umask_022: None
+) -> None:
+    meta_description_hook.atomic_write_description(
+        catalog / "example-repo.md", "# example-repo\n"
+    )
+
+    assert _mode(catalog.parent / STAGING_DIR_NAME) == 0o755
