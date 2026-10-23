@@ -14,6 +14,7 @@ always; PostgreSQL when ``TEST_POSTGRES_DSN`` is set).
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -480,7 +481,15 @@ def _unrepairable_reasons(metadata: Any) -> Dict[str, str]:
 class TestQuietRepositoryMissingStore2150:
     """Bug #2150: with nothing to index the child exits 0 without opening the
     store, so the PUBLISH gate must classify an established collection's
-    missing chunks.db as a missing store and run the #2126 restore."""
+    missing chunks.db as a missing store and run the #2126 restore.
+
+    A local repository nothing touched since its published snapshot (whose
+    source manifest matches) skips a plain refresh as "no changes"; the
+    cycle that still runs -- and reaches the gate -- is a re-gate: an earlier
+    failure no verified publish has resolved yet. (Without a published
+    snapshot there is no baseline, so the refresh reconciles and the CHILD
+    reports the missing store: test_no_snapshot_stays_failed_with_operator_reason.)
+    """
 
     def _quiet_harness(
         self,
@@ -489,6 +498,11 @@ class TestQuietRepositoryMissingStore2150:
         env_fixture: Tuple[Any, Dict[str, str], Path],
         snapshot_mode: str,
     ) -> Tuple[Any, Harness]:
+        from code_indexer.global_repos.local_source_manifest import (
+            MANIFEST_RELATIVE_PATH,
+            record_source_manifest,
+        )
+
         fake, env, _ = env_fixture
         harness = build_harness(
             tmp_path,
@@ -497,6 +511,14 @@ class TestQuietRepositoryMissingStore2150:
             source_builder=_real_indexed_source(fake, env),
         )
         _make_quiet(harness.source)
+        assert harness.snapshot is not None
+        # The published snapshot carries the manifest of what it was built from.
+        record_source_manifest(str(harness.source), None)
+        shutil.copy2(
+            harness.source / MANIFEST_RELATIVE_PATH,
+            harness.snapshot / MANIFEST_RELATIVE_PATH,
+        )
+        metadata.record_refresh_failure_backoff(ALIAS, "an earlier refresh failed")
         harness.source_db.unlink()
         return fake, harness
 
@@ -543,7 +565,7 @@ class TestQuietRepositoryMissingStore2150:
     @pytest.mark.parametrize(
         "snapshot_mode, cause",
         [
-            ("none", "no published snapshot"),
+            # ^ coupled no published snapshot = no baseline => a local refresh reconciles and the child reports it (gate unreachable); see test_no_snapshot_stays_failed_with_operator_reason
             ("corrupt", "failed its integrity check"),
         ],
     )
@@ -578,7 +600,8 @@ class TestQuietRepositoryMissingStore2150:
             assert sha256_of(harness.snapshot_db()) == snapshot_sha
         assert harness.strikes() == 0
         state = metadata.get_refresh_failure_backoff_state(ALIAS)
-        assert state is not None and state["consecutive_failure_count"] == 1
+        # the seeded earlier failure plus this one
+        assert state is not None and state["consecutive_failure_count"] == 2
         assert cause in _unrepairable_reasons(metadata).get(ALIAS, ""), (
             _unrepairable_reasons(metadata)
         )
@@ -617,5 +640,12 @@ class TestQuietRepositoryMissingStore2150:
         assert any(
             isinstance(e, AliasLockOwnershipLostError) for e in iter_chain(error)
         ), repr(error)
+        from code_indexer.services.index_failure_exit_codes import (
+            FatalChunkStoreIndexError,
+        )
+
+        assert not any(
+            isinstance(e, FatalChunkStoreIndexError) for e in iter_chain(error)
+        ), "the child reported the store: the gate-side veto was not exercised"
         assert not harness.source_db.exists(), "restored without the write lock"
         assert harness.strikes() == 0
