@@ -835,14 +835,26 @@ class LifecycleBatchRunner:
                 # First write: no prior frontmatter to merge.
                 merged_fm = new_lifecycle_fm
 
-            write_meta_md(
-                alias=alias,
-                description_body=result.description,
-                lifecycle_frontmatter=merged_fm,
-                already_locked=True,
-                refresh_scheduler=self._refresh_scheduler,
-                golden_repos_dir=self._golden_repos_dir,
+            from code_indexer.global_repos.catalog_lock_holder import (
+                CatalogLockedExclusively,
+                admitted_catalog_write,
             )
+
+            try:
+                with admitted_catalog_write(
+                    self._refresh_scheduler, LIFECYCLE_WRITER_LOCK_OWNER
+                ):
+                    write_meta_md(
+                        alias=alias,
+                        description_body=result.description,
+                        lifecycle_frontmatter=merged_fm,
+                        already_locked=True,
+                        refresh_scheduler=self._refresh_scheduler,
+                        golden_repos_dir=self._golden_repos_dir,
+                    )
+            except CatalogLockedExclusively as exc:
+                # ^ why the alias fails and nothing is written; the caller's next run retries it
+                raise LifecycleLockUnavailableError(str(exc)) from exc
             # MESSI Rule 15 defensive invariant: post-write frontmatter must be a
             # superset of merged_fm (no key loss). Both re-read and assert are
             # skipped under python -O via the __debug__ guard.

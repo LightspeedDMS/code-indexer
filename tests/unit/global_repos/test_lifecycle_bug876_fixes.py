@@ -128,6 +128,9 @@ def _make_stub_scheduler(golden_repos_dir: Path):
     mgr = WriteLockManager(golden_repos_dir)
 
     class _StubScheduler:
+        # A writer that finds the catalog lock held reads its holder here.
+        write_lock_manager = mgr
+
         def acquire_write_lock(self, alias: str, owner_name: str = "") -> bool:
             return bool(mgr.acquire(alias, owner_name=owner_name))
 

@@ -126,3 +126,27 @@ def require_publishing_holder(refresh_scheduler: Any) -> None:
         "write mode" if owner == _WRITE_MODE_OWNER else ("another exclusive operation")
     )
     raise CatalogLockedExclusively(category)
+
+
+@contextmanager
+def admitted_catalog_write(refresh_scheduler: Any, owner_name: str) -> Iterator[bool]:
+    """Admit one catalog write: hold the cidx-meta lock as *owner_name*, or,
+    when it is held, write under a cooperative holder; yields whether this
+    writer holds the lock (False: a piggyback, owed to a later refresh).
+    Raises CatalogLockedExclusively, before anything is written, when an
+    exclusive holder has it. A held lock is released on exit."""
+    acquired = bool(
+        refresh_scheduler.acquire_write_lock(CATALOG_LOCK_ALIAS, owner_name=owner_name)
+    )
+    if not acquired:
+        require_publishing_holder(refresh_scheduler)
+    try:
+        yield acquired
+    finally:
+        if acquired and not refresh_scheduler.release_write_lock(
+            CATALOG_LOCK_ALIAS, owner_name=owner_name
+        ):
+            logger.warning(
+                f"cidx-meta write lock release for {owner_name!r} returned False; "
+                f"staleness eviction reclaims it"
+            )
