@@ -775,6 +775,48 @@ def wait_for_catalog_refresh_after(
     wait_for_idle_catalog_refreshes(client, admin)
 
 
+def covering_catalog_refresh(jobs: Sequence[Dict[str, Any]], since: datetime) -> bool:
+    """Whether *jobs* (a GET /api/jobs listing) hold a completed catalog
+    refresh created after *since* that covered the catalog source, whether
+    it published or found the catalog as published."""
+    for job in jobs:
+        result = job.get("result") or {}
+        if (
+            job.get("operation_type") == "global_repo_refresh"
+            and job.get("status") == "completed"
+            and result.get("alias") == CATALOG_GLOBAL
+            and result.get("covered_source") is True
+            and datetime.fromisoformat(str(job["created_at"]).replace("Z", "+00:00"))
+            > since
+        ):
+            return True
+    return False
+
+
+def wait_for_catalog_refresh_covering(
+    client: httpx.Client, admin: HeaderSource, since: datetime
+) -> None:
+    """Wait until a catalog refresh created after *since* covered the
+    catalog source and no refresh is running.  Unlike
+    ``wait_for_catalog_refresh_after`` this also ends for writes that leave
+    the catalog as published (nothing to publish, last refresh unchanged)."""
+    deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        listing = rest(
+            client,
+            "GET",
+            "/api/jobs",
+            admin.get_headers(),
+            params={"status": "completed", "limit": 100},
+        )
+        assert listing.status == 200, f"job listing: {listing.snippet()}"
+        if covering_catalog_refresh(listing.body.get("jobs", []), since):
+            wait_for_idle_catalog_refreshes(client, admin)
+            return
+        time.sleep(JOB_POLL_SECONDS)
+    raise TimeoutError(f"no catalog refresh covered the source after {since}")
+
+
 def web_session(world: CatalogWorld, username: str, password: str) -> httpx.Client:
     """A fresh client (own cookie jar) logged in to the Web UI."""
     client = world.web_client_factory()

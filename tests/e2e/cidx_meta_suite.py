@@ -39,6 +39,7 @@ from tests.e2e.cidx_meta_world import (
     leaks,
     mentions,
     wait_for_catalog_refresh_after,
+    wait_for_catalog_refresh_covering,
 )
 from tests.e2e.helpers import wait_for_job
 from tests.e2e.log_audit_claims import exact, utc_now
@@ -475,7 +476,6 @@ class CatalogDoorSuite:
         self, catalog_callers: Callers
     ) -> None:
         user = catalog_callers[0]
-        started = utc_now()
         created = user.mcp("create_memory", _memory_args(MEMORY_SUMMARY))
         assert created.ok and not leaks(created), created.snippet()
         memory_id = str(created.body["id"])
@@ -493,11 +493,16 @@ class CatalogDoorSuite:
                 content_hash = str(edited.body["content_hash"])
             assert edited.ok and not leaks(edited), edited.snippet()
         finally:
+            # The lifecycle leaves the catalog as published: the refresh
+            # after the delete covers it and publishes nothing.
+            deleting = utc_now()
             deleted = user.mcp(
                 "delete_memory",
                 {"memory_id": memory_id, "expected_content_hash": content_hash},
             )
-            wait_for_catalog_refresh_after(user.world.client, user.world.admin, started)
+            wait_for_catalog_refresh_covering(
+                user.world.client, user.world.admin, deleting
+            )
             assert deleted.ok and not leaks(deleted), deleted.snippet()
 
     def test_restricted_xray_pattern_store_names_nothing_hidden(

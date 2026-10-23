@@ -16,7 +16,12 @@ from tests.e2e.cidx_meta_tool_recipes import (
     repository_tools,
     schema_repository_tools,
 )
-from tests.e2e.cidx_meta_world import Reply, leaks, run_cleanup_steps
+from tests.e2e.cidx_meta_world import (
+    Reply,
+    covering_catalog_refresh,
+    leaks,
+    run_cleanup_steps,
+)
 from tests.e2e.log_audit_gate import is_allowlisted
 from tests.e2e.log_audit_claims import (
     LogClaim,
@@ -319,3 +324,58 @@ class TestCleanupSteps:
 
     def test_clean_run_reports_nothing(self) -> None:
         assert run_cleanup_steps((("noop", lambda: None),)) == []
+
+
+_SINCE = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+
+
+def _refresh_job(
+    message: str,
+    covered: bool,
+    created: datetime = _SINCE + timedelta(seconds=1),
+    alias: str = "cidx-meta-global",
+    operation_type: str = "global_repo_refresh",
+) -> Dict[str, Any]:
+    """A completed job exactly as GET /api/jobs lists it."""
+    result: Dict[str, Any] = {"success": True, "alias": alias, "message": message}
+    if covered:
+        result["covered_source"] = True
+    return {
+        "job_id": "job-1",
+        "operation_type": operation_type,
+        "status": "completed",
+        "created_at": created.isoformat(),
+        "result": result,
+    }
+
+
+class TestCoveringCatalogRefresh:
+    """A write that leaves the catalog as published (create, edit, delete
+    of one memory) publishes nothing, so the wait keys on the refresh that
+    covered the source, not on the catalog's last publish time."""
+
+    def test_no_change_refresh_covering_the_source_counts(self) -> None:
+        assert covering_catalog_refresh(
+            [_refresh_job("No changes detected", covered=True)], _SINCE
+        )
+
+    def test_lock_held_skip_does_not_count(self) -> None:
+        jobs = [_refresh_job("Skipped, write lock held", covered=False)]
+        assert not covering_catalog_refresh(jobs, _SINCE)
+
+    def test_refresh_created_before_since_does_not_count(self) -> None:
+        early = _SINCE - timedelta(seconds=1)
+        jobs = [_refresh_job("Refresh complete", covered=True, created=early)]
+        assert not covering_catalog_refresh(jobs, _SINCE)
+
+    def test_refresh_of_another_alias_does_not_count(self) -> None:
+        jobs = [_refresh_job("Refresh complete", covered=True, alias="other-global")]
+        assert not covering_catalog_refresh(jobs, _SINCE)
+
+    def test_other_operation_type_does_not_count(self) -> None:
+        jobs = [
+            _refresh_job(
+                "Refresh complete", covered=True, operation_type="add_golden_repo"
+            )
+        ]
+        assert not covering_catalog_refresh(jobs, _SINCE)
