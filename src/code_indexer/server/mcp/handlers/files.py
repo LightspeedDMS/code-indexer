@@ -1244,8 +1244,6 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         repository_alias = params["repository_alias"]
         file_path = params["file_path"]
 
-        _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-041")
-
         result = file_crud_service.create_file(
             repo_alias=repository_alias,
             file_path=file_path,
@@ -1253,6 +1251,7 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             username=user.username,
             access_for=lambda served: _judge(repository_alias, served, user),
         )
+        _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-041")
 
         _invalidate_wiki_cache(repository_alias, file_path)
         return _mcp_response(result)
@@ -1285,8 +1284,6 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         repository_alias = params["repository_alias"]
         file_path = params["file_path"]
 
-        _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-046")
-
         result = file_crud_service.edit_file(
             repo_alias=repository_alias,
             file_path=file_path,
@@ -1297,6 +1294,7 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             username=user.username,
             access_for=lambda served: _judge(repository_alias, served, user),
         )
+        _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-046")
 
         _invalidate_wiki_cache(repository_alias, file_path)
         return _mcp_response(result)
@@ -1316,8 +1314,6 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         repository_alias = params["repository_alias"]
         file_path = params["file_path"]
 
-        _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-052")
-
         result = file_crud_service.delete_file(
             repo_alias=repository_alias,
             file_path=file_path,
@@ -1325,6 +1321,7 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             username=user.username,
             access_for=lambda served: _judge(repository_alias, served, user),
         )
+        _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-052")
 
         _invalidate_wiki_cache(repository_alias, file_path)
         return _mcp_response(result)
