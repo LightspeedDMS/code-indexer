@@ -78,7 +78,9 @@ class TestClaimAgeCountsFromTheClaim:
 
         monkeypatch.setattr(cleanup.os, "link", sweep_then_link)
 
-        removed = cleanup._remove_if_unchanged(marker, '{"owner_token": "evaluated"}')
+        removed = cleanup.remove_marker_if_unchanged(
+            marker, '{"owner_token": "evaluated"}'
+        )
 
         assert removed is False
         assert marker.read_text() == '{"owner_token": "newer-session"}'

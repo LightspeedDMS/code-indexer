@@ -27,6 +27,17 @@ def marker_path(golden_repos_dir: Path, alias: str) -> Path:
     return Path(golden_repos_dir) / ".write_mode" / f"{alias}.json"
 
 
+def parse_marker(text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """A marker's text as a dict, or (None, why it could not be used)."""
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        return None, f"unreadable write-mode marker ({type(exc).__name__})"
+    if not isinstance(data, dict):
+        return None, "write-mode marker is not a JSON object"
+    return data, None
+
+
 def write_marker(
     golden_repos_dir: Path, alias: str, source_path: str, owner_token: str
 ) -> None:
@@ -67,12 +78,10 @@ def read_marker(
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """The marker as a dict, or (None, why it could not be used)."""
     try:
-        data = json.loads(marker_path(golden_repos_dir, alias).read_text())
-    except (OSError, ValueError) as exc:
+        text = marker_path(golden_repos_dir, alias).read_text()
+    except OSError as exc:
         return None, f"unreadable write-mode marker ({type(exc).__name__})"
-    if not isinstance(data, dict):
-        return None, "write-mode marker is not a JSON object"
-    return data, None
+    return parse_marker(text)
 
 
 def renew_write_mode_lease(
@@ -127,16 +136,31 @@ def finish_write_mode(
 ) -> Dict[str, Any]:
     """End write mode: release the lock with the marker's token, then remove
     the marker, stop its auto-watch and refresh. The marker is removed only
-    after a confirmed release (a marker without a usable token is dropped);
-    a release that fails or is refused, or a failed refresh, is an error --
-    never reported as a completed refresh."""
-    marker, problem = read_marker(golden_repos_dir, alias)
+    after a confirmed release (a marker without a usable token is dropped),
+    and only while it is still the marker this exit read (a newer session's
+    marker is kept); a release that fails or is refused, or a failed
+    refresh, is an error -- never reported as a completed refresh."""
+    from code_indexer.global_repos.write_mode_marker_cleanup import (
+        remove_marker_if_unchanged,
+    )
+
+    path = marker_path(golden_repos_dir, alias)
+    evaluated: Optional[str]
+    marker: Optional[Dict[str, Any]]
+    problem: Optional[str]
+    try:
+        evaluated = path.read_text()
+    except OSError as exc:
+        evaluated = None
+        marker, problem = None, f"unreadable write-mode marker ({type(exc).__name__})"
+    else:
+        marker, problem = parse_marker(evaluated)
     source_path = marker.get("source_path") if marker else None
 
     def drop_marker() -> None:
-        marker_path(golden_repos_dir, alias).unlink(missing_ok=True)
-        if source_path:
-            stop_watch(source_path)
+        if evaluated is not None and remove_marker_if_unchanged(path, evaluated):
+            if source_path:
+                stop_watch(source_path)
 
     token = marker.get("owner_token") if marker else None
     if not isinstance(token, str) or not token:

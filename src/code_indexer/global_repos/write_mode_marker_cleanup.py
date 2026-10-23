@@ -43,7 +43,7 @@ def _older_than(content: Optional[dict], ttl_seconds: float, name: str) -> bool:
     return (datetime.now(timezone.utc) - moment).total_seconds() > ttl_seconds
 
 
-def _remove_if_unchanged(marker_path: Path, evaluated: str) -> bool:
+def remove_marker_if_unchanged(marker_path: Path, evaluated: str) -> bool:
     """Remove the marker only if it still holds the evaluated content: claim
     it by an atomic rename, compare, and restore it without clobbering a
     newer marker when a new session replaced it meanwhile."""
@@ -120,7 +120,7 @@ def cleanup_write_mode_marker(
             f"was refused (another holder owns it or its lease was renewed)"
         )
         return
-    if _remove_if_unchanged(marker_path, evaluated):
+    if remove_marker_if_unchanged(marker_path, evaluated):
         logger.info(
             f"Cleaned up write mode marker {marker_path.name} (alias={alias!r})"
         )

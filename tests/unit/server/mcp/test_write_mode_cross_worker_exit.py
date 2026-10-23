@@ -458,3 +458,52 @@ class TestExitReleasesBeforeRemovingTheMarker:
         assert (golden_repos_dir / ".write_mode" / f"{_ALIAS}.json").exists()
         assert _Worker(golden_repos_dir, original).write_lock_manager.is_locked(_ALIAS)
         assert exit_worker.refreshed == []
+
+    def test_session_entering_after_the_release_keeps_its_marker(
+        self, golden_repos_dir: Path, make_store
+    ) -> None:
+        import threading
+
+        assert _call(
+            "handle_enter_write_mode",
+            _Worker(golden_repos_dir, make_store()),
+            golden_repos_dir,
+        )["success"]
+        token_a = _marker_token(golden_repos_dir)
+        original = make_store()
+        entered: List[Dict[str, Any]] = []
+
+        class SessionBEntersAfterRelease(type(original)):  # type: ignore[misc]
+            def release_owned(self, *args: Any, **kwargs: Any) -> Any:
+                outcome = super().release_owned(*args, **kwargs)
+                session_b = threading.Thread(
+                    target=lambda: entered.append(
+                        _call(
+                            "handle_enter_write_mode",
+                            _Worker(golden_repos_dir, make_store()),
+                            golden_repos_dir,
+                        )
+                    )
+                )
+                session_b.start()
+                session_b.join(30)
+                return outcome
+
+        source = (
+            original._lock_dir
+            if isinstance(original, SqliteAliasLockStore)
+            else original._dsn
+        )
+        exit_worker = _Worker(golden_repos_dir, SessionBEntersAfterRelease(source))
+
+        _call("handle_exit_write_mode", exit_worker, golden_repos_dir)
+
+        assert entered and entered[0]["success"] is True
+        assert _marker_token(golden_repos_dir) != token_a
+        holder = _Worker(golden_repos_dir, original).write_lock_manager
+        assert holder.is_locked(_ALIAS)
+        assert holder.release(
+            _ALIAS,
+            owner_name=_WRITE_MODE_OWNER,
+            owner_token=_marker_token(golden_repos_dir),
+        )
