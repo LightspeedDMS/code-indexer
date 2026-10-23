@@ -28,7 +28,11 @@ from code_indexer.server.utils.config_manager import (
 )
 from tests.utils.fatal_chunk_store_fixtures import cidx_child_command, child_env
 from tests.utils.golden_repo_metadata_stores import golden_repo_metadata_store
-from tests.utils.refresh_fatal_store_harness import Harness, build_harness
+from tests.utils.refresh_fatal_store_harness import (
+    Harness,
+    RecordingJobManager,
+    build_harness,
+)
 
 pytestmark = pytest.mark.timeout(300)
 
@@ -355,3 +359,43 @@ def test_backup_lock_is_released_when_the_sync_raises(
     assert not scheduler.write_lock_manager.get_lock_info(CATALOG)
     assert scheduler.write_lock_manager.acquire(CATALOG, owner_name="mcp_write_mode")
     assert scheduler.write_lock_manager.release(CATALOG, owner_name="mcp_write_mode")
+
+
+@LOCK_KINDS
+def test_xray_pattern_store_leaves_the_backup_push_to_the_refresh(
+    tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch, lock_kind: str
+) -> None:
+    from code_indexer.global_repos import refresh_scheduler as scheduler_module
+    from code_indexer.server.services import xray_pattern_service
+
+    harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
+    _use_lock_store(harness, lock_kind, tmp_path)
+    scheduler = harness.scheduler
+    origin = tmp_path / "cidx-meta-backup.git"
+    meta = _backed_up_catalog(harness, origin)
+    origin_before = _git_out(origin, "rev-parse", "HEAD")
+    pattern = "xray-patterns/__any__/test-pattern.yaml"
+    # records the refresh the store requests instead of running it in process
+    jobs = RecordingJobManager()
+    # the attribute is typed as the real BackgroundJobManager
+    scheduler.background_job_manager = jobs  # type: ignore[assignment]
+
+    with _backup_enabled(tmp_path, origin):
+        # the pattern store must see the same (enabled) backup config
+        monkeypatch.setattr(
+            xray_pattern_service,
+            "get_config_service",
+            scheduler_module.get_config_service,
+            raising=False,
+        )
+        assert _xray_writer(scheduler, meta, tmp_path)() == ""
+        assert len(jobs.submitted) == 1, "the store requested no catalog refresh"
+        assert pattern in _git_out(meta, "ls-files").splitlines()
+        assert _git_out(origin, "rev-parse", "HEAD") == origin_before, (
+            "the pattern store ran a backup push of its own"
+        )
+
+        scheduler._execute_refresh(META_ALIAS)
+
+    assert _git_out(origin, "rev-parse", "HEAD") == _git_out(meta, "rev-parse", "HEAD")
+    assert pattern in _git_out(origin, "ls-tree", "-r", "--name-only", "HEAD")

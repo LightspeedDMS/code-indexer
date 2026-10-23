@@ -51,9 +51,6 @@ from code_indexer.global_repos.catalog_lock_holder import (
     require_publishing_holder,
 )
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
-from code_indexer.server.services.cidx_meta_backup.branch_detect import (
-    detect_default_branch,
-)
 from code_indexer.server.services.audit_outcome import (
     conforming_details,
     record_outcome,
@@ -61,8 +58,6 @@ from code_indexer.server.services.audit_outcome import (
 from code_indexer.server.services.cidx_meta_backup.paths import (
     cidx_meta_is_git_repository,
 )
-from code_indexer.server.services.cidx_meta_backup.sync import CidxMetaBackupSync
-from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.xray_pattern_params import (
     build_const_lines,
     resolve_params,
@@ -707,14 +702,13 @@ class XrayPatternService:
             logger.warning("xray_pattern_service: git commit failed: %s", exc)
 
     def _git_commit(self, files: List[Path], message: str) -> None:
-        """Add files and create a git commit in cidx-meta, then trigger backup sync.
+        """Add files and create a local git commit in cidx-meta.
 
-        Uses canonical cidx-meta-backup author/committer identity. After a
-        successful commit, calls CidxMetaBackupSync.sync() when backup is
-        configured and enabled. Any sync failure is surfaced as a WARNING
-        (deferred-failure pattern) — the commit itself is not rolled back.
-        A cidx-meta that is not a git repository keeps plain files: nothing
-        is committed and nothing fails.
+        Uses canonical cidx-meta-backup author/committer identity. The commit
+        is never pushed here: the catalog refresh the store requests runs the
+        backup sync under the exclusive backup lock, the one writer of the
+        backup mirror. A cidx-meta that is not a git repository keeps plain
+        files: nothing is committed and nothing fails.
 
         Raises:
             PatternCommitError: git add or git commit failed.
@@ -747,22 +741,6 @@ class XrayPatternService:
             )
         except subprocess.CalledProcessError as exc:
             raise PatternCommitError(f"git commit in cidx-meta failed: {exc}") from exc
-
-        # Trigger backup sync when configured and enabled
-        config = get_config_service().get_config()
-        backup_cfg = getattr(config, "cidx_meta_backup_config", None)
-        if backup_cfg is not None and getattr(backup_cfg, "enabled", False):
-            branch = detect_default_branch(str(self._cidx_meta)) or "master"
-            sync = CidxMetaBackupSync(
-                cidx_meta_path=str(self._cidx_meta),
-                branch=branch,
-            )
-            result = sync.sync()
-            if result.sync_failure:
-                logger.warning(
-                    "XrayPatternService: cidx-meta backup sync deferred-failure: %s",
-                    result.sync_failure,
-                )
 
     # ------------------------------------------------------------------
     # Private helpers
