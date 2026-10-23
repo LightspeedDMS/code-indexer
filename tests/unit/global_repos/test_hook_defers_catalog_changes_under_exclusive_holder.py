@@ -22,8 +22,8 @@ import pytest
 
 from code_indexer.global_repos import meta_description_hook
 from code_indexer.global_repos.catalog_pending_changes import (
-    PENDING_DIR_NAME,
     apply_pending_catalog_changes,
+    pending_operation,
 )
 from code_indexer.global_repos.cidx_meta_refresh_debouncer import (
     CidxMetaRefreshDebouncer,
@@ -87,8 +87,8 @@ def _description(scheduler: RefreshScheduler) -> Path:
 
 
 def _pending(scheduler: RefreshScheduler) -> List[str]:
-    pending = _golden(scheduler) / PENDING_DIR_NAME
-    return sorted(p.name for p in pending.iterdir()) if pending.exists() else []
+    op = pending_operation(_golden(scheduler), REPO)
+    return [op] if op is not None else []
 
 
 def _register(scheduler: RefreshScheduler) -> None:
@@ -131,7 +131,7 @@ def test_registration_under_an_exclusive_holder_is_parked_then_applied(
     try:
         _register(scheduler)
         assert not _description(scheduler).exists(), "written under " + holder
-        assert _pending(scheduler) == [f"{REPO}.md"]
+        assert _pending(scheduler) == ["add"]
         assert debouncer.signals == 1, "the refresh was not owed"
         info = locks.get_lock_info(CATALOG)
         assert info and info["owner"] == holder
@@ -157,7 +157,7 @@ def test_removal_under_an_exclusive_holder_is_parked_then_applied(
     try:
         meta_description_hook.on_repo_removed(REPO, str(_golden(scheduler)))
         assert _description(scheduler).exists(), "removed under " + holder
-        assert _pending(scheduler) == [f"{REPO}.remove"]
+        assert _pending(scheduler) == ["remove"]
         assert debouncer.signals == 1, "the refresh was not owed"
     finally:
         assert locks.release(CATALOG, owner_name=holder)
