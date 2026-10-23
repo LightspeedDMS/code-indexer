@@ -33,7 +33,9 @@ class CidxMetaBackupBootstrap:
     def _git(
         self, cidx_meta_path: str, *args: str, check: bool = True
     ) -> subprocess.CompletedProcess:
-        env = build_non_interactive_git_env()
+        from .stall_detection import stall_detecting_git_argv, with_ssh_keepalive
+
+        env = with_ssh_keepalive(build_non_interactive_git_env())
         env.setdefault("GIT_AUTHOR_NAME", "cidx-meta-backup")
         env.setdefault("GIT_AUTHOR_EMAIL", "cidx-meta-backup@example.invalid")
         env.setdefault("GIT_COMMITTER_NAME", env["GIT_AUTHOR_NAME"])
@@ -45,7 +47,7 @@ class CidxMetaBackupBootstrap:
         # -- see CidxMetaBackupSync._git() for the active fix this mirrors.
         env.setdefault("GIT_EDITOR", "true")
         return run_with_cancel(
-            ["git", *args],
+            stall_detecting_git_argv(*args),
             self._cancel_check,
             cwd=cidx_meta_path,
             capture_output=True,
