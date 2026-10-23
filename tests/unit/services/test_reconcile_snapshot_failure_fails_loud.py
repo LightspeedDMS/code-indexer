@@ -6,7 +6,8 @@ re-embeds every file (paid provider calls) and records the store as
 verified without having read it. Every snapshot error must propagate:
 ``smart_index`` marks the run failed (the next refresh retries with
 --reconcile) and the CLI maps the error to its exit code (86 for SQLite-
-reported corruption -- the restore path -- and 1 otherwise).
+reported corruption -- the restore path -- 87 for any other fatal store
+failure, and 1 for a non-fatal one).
 
 Real SmartIndexer, real FilesystemVectorStore with the CHUNKS_DB layout,
 real temp git repository and real on-disk damage. The only test double is
@@ -26,7 +27,10 @@ from code_indexer.config import Config
 from code_indexer.services.index_failure_exit_codes import index_failure_exit_code
 from code_indexer.services.smart_indexer import SmartIndexer
 from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
-from code_indexer.storage.sqlite_chunk_store import CorruptChunkDataError
+from code_indexer.storage.sqlite_chunk_store import (
+    ChunkStoreUnavailableError,
+    CorruptChunkDataError,
+)
 from tests.unit.services.test_reconcile_non_git_content_id_2013 import (
     _CountingEmbeddingProvider,
     _committed_git_repo,
@@ -67,37 +71,45 @@ def _corrupt_one_data_blob(chunks_db: Path) -> None:
         conn.close()
 
 
-# case -> (damage, error the snapshot read raises, CLI exit code, message
-# fragment). The exact type proves the snapshot read itself raised -- the
-# later write path wraps store failures in ChunkStoreUnavailableError.
+# case -> (damage, raw error the store raises, whether the snapshot read
+# re-raises it typed, CLI exit code, message fragment of the raw error). A
+# fatal store failure is re-raised as ChunkStoreUnavailableError chained to
+# the raw error (exit 86 corruption / 87 other); a non-fatal one propagates
+# as is. The snapshot read's own message prefix proves the snapshot read
+# raised, not the later write path.
 _DAMAGE_CASES: Dict[
-    str, Tuple[Callable[[Path], None], Type[BaseException], int, str]
+    str, Tuple[Callable[[Path], None], Type[BaseException], bool, int, str]
 ] = {
     "not_a_database": (
         _overwrite_with_non_database_bytes,
         sqlite3.DatabaseError,
+        True,
         86,
         "not a database",
     ),
     "malformed": (
         _corrupt_every_page_after_the_first,
         sqlite3.DatabaseError,
+        True,
         86,
         "malformed",
     ),
     "disk_io_error": (
         _block_the_rollback_journal,
         sqlite3.OperationalError,
-        1,
+        True,
+        87,
         "disk I/O error",
     ),
     "corrupt_data_blob": (
         _corrupt_one_data_blob,
         CorruptChunkDataError,
+        False,
         1,
         "corrupt 'data' blob",
     ),
 }
+_SNAPSHOT_READ_PREFIX = "Index snapshot read failed: "
 
 
 def _indexed_chunks_db_repo(
@@ -131,7 +143,7 @@ def test_reconcile_over_a_damaged_store_raises_without_embedding_or_verifying(
 ) -> None:
     """``_reconcile_and_verify`` is the reconcile every entry point runs (the
     ambiguous-store check, --reconcile, the unsealed-resume fallback)."""
-    damage, expected_type, expected_exit_code, expected_fragment = _DAMAGE_CASES[case]
+    damage, raw_type, typed, expected_exit_code, expected_fragment = _DAMAGE_CASES[case]
     indexer, embedder, chunks_db = _indexed_chunks_db_repo(tmp_path)
     damage(chunks_db)
     embedder.embedded_texts.clear()
@@ -149,8 +161,14 @@ def test_reconcile_over_a_damaged_store_raises_without_embedding_or_verifying(
             fts_manager=None,
         )
 
-    assert type(raised.value) is expected_type, repr(raised.value)
-    assert expected_fragment in str(raised.value), repr(raised.value)
+    if typed:
+        assert type(raised.value) is ChunkStoreUnavailableError, repr(raised.value)
+        assert str(raised.value).startswith(_SNAPSHOT_READ_PREFIX), repr(raised.value)
+        raw = raised.value.__cause__
+    else:
+        raw = raised.value
+    assert type(raw) is raw_type, repr(raw)
+    assert expected_fragment in str(raw), repr(raw)
     assert index_failure_exit_code(raised.value) == expected_exit_code
     assert embedder.embedded_texts == [], (
         f"{case}: a reconcile over an unreadable store must not re-embed: "

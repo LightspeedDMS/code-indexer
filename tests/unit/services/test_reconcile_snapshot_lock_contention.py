@@ -29,6 +29,7 @@ from code_indexer.config import Config
 from code_indexer.services import smart_indexer as smart_indexer_module
 from code_indexer.services.smart_indexer import SmartIndexer
 from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.storage.sqlite_chunk_store import ChunkStoreUnavailableError
 
 VECTOR_DIM = 8
 COLLECTION = "coll"
@@ -159,15 +160,21 @@ def test_persistent_lock_stops_at_the_real_attempt_bound(
 def test_non_lock_error_is_raised_without_a_retry(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    store = _AlwaysFailingScrollStore(sqlite3.OperationalError("disk I/O error"))
+    raw = sqlite3.OperationalError("disk I/O error")
+    store = _AlwaysFailingScrollStore(raw)
     indexer = SmartIndexer.__new__(SmartIndexer)
     indexer.vector_store_client = store  # type: ignore[assignment]
     indexer.config = Config(codebase_dir=tmp_path)
 
     with caplog.at_level(logging.INFO, logger=smart_indexer_module.__name__):
-        with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+        with pytest.raises(ChunkStoreUnavailableError) as raised:
             indexer._get_indexed_files_snapshot(COLLECTION)
 
+    # A fatal store failure is re-raised typed (exit 87), chained to the raw error.
+    assert type(raised.value) is ChunkStoreUnavailableError, repr(raised.value)
+    assert str(raised.value) == "Index snapshot read failed: disk I/O error"
+    assert raised.value.__cause__ is raw
+    assert type(raised.value.__cause__) is sqlite3.OperationalError
     assert store.scroll_calls == 1
     assert _retry_records(caplog) == []
 
