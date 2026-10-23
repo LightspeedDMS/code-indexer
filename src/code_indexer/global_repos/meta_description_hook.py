@@ -601,8 +601,14 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
     # and broke 10 read paths, the UI, and access filtering. Fixed in v10.7.x.
     md_file = cidx_meta_path / f"{repo_name}.md"
 
-    # Delete .md file if it exists
-    if md_file.exists():
+    from code_indexer.global_repos.catalog_pending_changes import (
+        discard_pending,
+        pending_operation,
+    )
+
+    # Delete the .md file -- also when only a parked add exists for it: a
+    # removal supersedes any pending change for the alias.
+    if md_file.exists() or pending_operation(golden_repos_dir, repo_name):
         _lock_acquired = False
         # True while a refresh requested now would skip on a held lock: the
         # lock stayed busy past the bounded retry (any holder), or our own
@@ -659,7 +665,8 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
         _deleted = False
         try:
             if not _parked:
-                md_file.unlink()
+                md_file.unlink(missing_ok=True)
+                discard_pending(golden_repos_dir, repo_name)
                 _deleted = True
                 logger.info(f"Deleted meta description file: {md_file}")
         except Exception as e:

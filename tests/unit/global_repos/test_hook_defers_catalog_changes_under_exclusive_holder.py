@@ -196,3 +196,37 @@ def test_the_debouncer_applies_the_parked_change_before_the_refresh(
     assert applied_at_trigger[0] is True
     assert _description(scheduler).read_text() == GENERATED
     assert _pending(scheduler) == []
+
+
+def test_a_removal_under_an_exclusive_holder_supersedes_a_parked_add(
+    scheduler: RefreshScheduler,
+) -> None:
+    meta_description_hook.set_debouncer(_CountingDebouncer())  # type: ignore[arg-type]
+    locks = scheduler.write_lock_manager
+    assert locks.acquire(CATALOG, owner_name="mcp_write_mode")
+    try:
+        _register(scheduler)
+        assert _pending(scheduler) == ["add"]
+        meta_description_hook.on_repo_removed(REPO, str(_golden(scheduler)))
+        assert _pending(scheduler) == ["remove"], "the parked add survived"
+    finally:
+        assert locks.release(CATALOG, owner_name="mcp_write_mode")
+
+    assert apply_pending_catalog_changes(scheduler) is True
+    assert not _description(scheduler).exists(), "a removed repo regained its file"
+
+
+def test_a_direct_removal_discards_a_parked_add(scheduler: RefreshScheduler) -> None:
+    meta_description_hook.set_debouncer(_CountingDebouncer())  # type: ignore[arg-type]
+    locks = scheduler.write_lock_manager
+    assert locks.acquire(CATALOG, owner_name="mcp_write_mode")
+    try:
+        _register(scheduler)
+    finally:
+        assert locks.release(CATALOG, owner_name="mcp_write_mode")
+
+    meta_description_hook.on_repo_removed(REPO, str(_golden(scheduler)))
+
+    assert _pending(scheduler) == [], "the parked add survived the removal"
+    assert apply_pending_catalog_changes(scheduler) is True
+    assert not _description(scheduler).exists(), "a removed repo regained its file"
