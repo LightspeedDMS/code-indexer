@@ -63,13 +63,15 @@ def save_backup_settings(
                 CidxMetaBackupBootstrap().bootstrap(str(repo_root), remote_url)
     except Exception as exc:
         # ^ invariant the settings are committed: report the failure, never a failed save
+        # ^ security never log {exc}: git output and argv can carry the remote URL's credentials
+        reason = exc.reason if isinstance(exc, BackupPushFailed) else "setup failed"
         logger.warning(
             f"cidx-meta backup bootstrap failed after the settings were saved: "
-            f"{type(exc).__name__}: {exc}"
+            f"{type(exc).__name__}: {reason}"
         )
         owe_cidx_meta_refresh()
         if isinstance(exc, BackupPushFailed):
-            return f"{SAVED_MESSAGE}; the backup push failed: {exc.reason}{_RETRY_NOTE}"
+            return f"{SAVED_MESSAGE}; the backup push failed: {reason}{_RETRY_NOTE}"
         return (
             f"{SAVED_MESSAGE}; the backup setup failed ({type(exc).__name__})"
             f"{_RETRY_NOTE}"

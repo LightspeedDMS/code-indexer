@@ -15,6 +15,7 @@ stall is detected in about a second.
 
 from __future__ import annotations
 
+import logging
 import socket
 import subprocess
 import threading
@@ -126,3 +127,29 @@ def test_a_rejected_push_is_reported_after_saving(
         ["git", "log", "--all", "--oneline"], cwd=origin, capture_output=True, text=True
     )
     assert log.stdout.strip() == ""
+
+
+def test_push_failure_detail_never_logs_or_returns_a_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    world: Dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "example-secret-token-0123"
+    origin: Path = world["origin"]
+    hook = origin / "hooks" / "pre-receive"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f"echo 'refused; mirror is https://example-user:{secret}@example.com/r.git' >&2\n"
+        "exit 1\n"
+    )
+    hook.chmod(0o755)
+    client = _client(monkeypatch, world["config"], world["locks"])
+
+    with caplog.at_level(logging.DEBUG):
+        response = _post(client, origin.as_uri())
+
+    assert response.status_code == 200, response.text
+    assert secret not in response.text
+    assert secret not in caplog.text, "a log record carries the credential"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("the remote rejected the push" in m for m in warnings), warnings

@@ -18,8 +18,13 @@ class BackupPushFailed(RuntimeError):
     output) and safe to show an operator."""
 
     def __init__(self, reason: str, output: str) -> None:
+        from code_indexer.utils.credential_redaction import redact_command_output
+
         self.reason = reason
-        super().__init__(f"backup push failed ({reason}): {output}")
+        # ^ security git and the remote can echo a URL whose userinfo holds credentials
+        super().__init__(
+            f"backup push failed ({reason}): {redact_command_output(output, None)}"
+        )
 
 
 class CidxMetaBackupBootstrap:

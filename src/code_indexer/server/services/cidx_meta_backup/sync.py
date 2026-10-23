@@ -83,7 +83,12 @@ class CidxMetaBackupSync:
 
     @staticmethod
     def _stderr_or_stdout(result: subprocess.CompletedProcess) -> str:
-        return (result.stderr or result.stdout or "").strip()
+        from code_indexer.utils.credential_redaction import redact_command_output
+
+        # ^ security git and the remote can echo a URL whose userinfo holds credentials
+        return str(
+            redact_command_output((result.stderr or result.stdout or "").strip(), None)
+        )
 
     def sync(self) -> SyncResult:
         status = self._git("status", "--porcelain")
