@@ -125,6 +125,14 @@ class TestNodeLocalStore:
     ) -> None:
         assert _successor_after(sqlite_store, _earlier_boot()) is not None
 
+    def test_holder_of_another_host_keeps_its_lease(
+        self, sqlite_store: MakeStore
+    ) -> None:
+        # ^ why a reboot keeps the host name; another host's row proves nothing about this boot
+        _host, _boot, namespace = _fields()
+        identity = "|".join(["other-host.example.com", _OTHER_BOOT, namespace])
+        assert _successor_after(sqlite_store, identity) is None
+
 
 class TestSharedStore:
     def test_cloned_vm_with_same_host_and_machine_id_keeps_its_lease(

@@ -78,8 +78,8 @@ def holder_from_earlier_boot(
 ) -> bool:
     """True when ``recorded`` (a holder identity) is provably an earlier boot
     of THIS node, so none of its processes can still be running. A
-    node-local store only ever holds this node's rows, so a different boot
-    id is enough. On a shared store host names and machine ids can be
+    node-local store only ever holds this node's rows, so the same host name
+    (a reboot keeps it) with a different boot id is enough. On a shared store host names and machine ids can be
     duplicated (cloned VMs, images), so only the configured cluster
     ``node_id`` identifies a node: the row must record this non-empty node
     id. An unreadable id, or no node id on either side, proves nothing."""
@@ -92,7 +92,7 @@ def holder_from_earlier_boot(
     if theirs[1] == mine[1]:
         return False
     if node_local:
-        return True
+        return theirs[0] == mine[0]
     # ^ invariant cluster node ids are unique (leader election, job claims); host and machine ids are not
     return bool(node_id) and len(theirs) == 4 and theirs[3] == node_id
 
