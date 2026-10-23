@@ -18,6 +18,7 @@ user's username, so the raw name is logged server-side only.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import contextmanager
 from typing import Any, FrozenSet, Iterator, Optional, Protocol, Tuple
 
@@ -30,8 +31,8 @@ _WRITE_MODE_OWNER = "mcp_write_mode"
 CATALOG_BACKUP_LOCK_OWNER = "catalog_backup"
 # ^ why a backup push carries no timeout, so the lock must outlive a slow push
 CATALOG_BACKUP_LOCK_TTL_SECONDS = 24 * 60 * 60
-# ^ why a holder may release between our failed acquire and the holder read
-_ADMISSION_ATTEMPTS = 3
+# ^ why a holder read as None (mid-acquire or just released) is re-checked after yielding the processor; no timed sleep
+_ADMISSION_ATTEMPTS = 100
 
 
 class CatalogLockManager(Protocol):
@@ -79,6 +80,18 @@ class CatalogLockedExclusively(Exception):
         )
 
 
+class CatalogBusy(CatalogLockedExclusively):
+    """The catalog lock could be neither taken nor attributed to an owner
+    after every bounded attempt (another writer mid-acquire); retryable."""
+
+    def __init__(self) -> None:
+        self.category = "busy"
+        Exception.__init__(
+            self,
+            "the cidx-meta catalog is busy; nothing was written -- retry shortly",
+        )
+
+
 def _cooperative_owners() -> Tuple[FrozenSet[str], Tuple[str, ...]]:
     """(exact owner names, owner-name prefixes) of the cooperative writers,
     each defined once next to where its writer builds the name."""
@@ -112,22 +125,12 @@ def _cooperative_owners() -> Tuple[FrozenSet[str], Tuple[str, ...]]:
     return exact, (MEMORY_LOCK_OWNER_PREFIX, XRAY_PATTERN_LOCK_OWNER_PREFIX)
 
 
-def require_publishing_holder(refresh_scheduler: Any) -> None:
-    """Return when the current holder of the catalog lock is a cooperative
-    catalog writer (a later refresh publishes a write made under it); raise
-    CatalogLockedExclusively otherwise, including for a holder that released
-    it meanwhile (the caller retries the acquire)."""
+def _holder_owner(refresh_scheduler: Any) -> Optional[str]:
+    """The catalog lock's owner name, or None when no owner can be read (the
+    lock is free, or another writer is mid-acquire: its lock file exists
+    before its owner is written)."""
     info = refresh_scheduler.write_lock_manager.get_lock_info(CATALOG_LOCK_ALIAS)
-    owner: Optional[str] = str(info["owner"]) if info and info.get("owner") else None
-    exact, prefixes = _cooperative_owners()
-    # ^ hazard a piggyback holds nothing => an exclusive holder may take the lock before the write lands; bounded because writers stage outside the catalog and os.replace (catalog_staged_write), so readers see the old or new file, never a partial one
-    if owner is not None and (owner in exact or owner.startswith(prefixes)):
-        return
-    logger.info(f"cidx-meta write refused: catalog lock held by {owner!r}")
-    category = (
-        "write mode" if owner == _WRITE_MODE_OWNER else ("another exclusive operation")
-    )
-    raise CatalogLockedExclusively(category)
+    return str(info["owner"]) if info and info.get("owner") else None
 
 
 def admit_catalog_write(refresh_scheduler: Any, owner_name: str) -> bool:
@@ -135,21 +138,28 @@ def admit_catalog_write(refresh_scheduler: Any, owner_name: str) -> bool:
     writer now holds the cidx-meta lock as *owner_name* (it must release
     it); False when it may write under a cooperative holder (a piggyback,
     owed to a later refresh). Raises CatalogLockedExclusively, before
-    anything is written, when an exclusive holder has it. A holder that
-    released between the failed acquire and the holder read is retried."""
-    for attempt in range(_ADMISSION_ATTEMPTS):
+    anything is written, only for an OBSERVED non-cooperative owner; a
+    holder that reads as None is re-checked, and one still None after every
+    attempt is refused as CatalogBusy (retryable), never written under."""
+    exact, prefixes = _cooperative_owners()
+    for _attempt in range(_ADMISSION_ATTEMPTS):
         if refresh_scheduler.acquire_write_lock(CATALOG_LOCK_ALIAS, owner_name):
             return True
-        try:
-            require_publishing_holder(refresh_scheduler)
+        owner = _holder_owner(refresh_scheduler)
+        if owner is None:
+            os.sched_yield()
+            continue
+        # ^ hazard a piggyback holds nothing => an exclusive holder may take the lock before the write lands; bounded because writers stage outside the catalog and os.replace (catalog_staged_write), so readers see the old or new file, never a partial one
+        if owner in exact or owner.startswith(prefixes):
             return False
-        except CatalogLockedExclusively:
-            released = not refresh_scheduler.write_lock_manager.get_lock_info(
-                CATALOG_LOCK_ALIAS
-            )
-            if not released or attempt == _ADMISSION_ATTEMPTS - 1:
-                raise
-    raise AssertionError("unreachable: the last attempt returns or raises")
+        logger.info(f"cidx-meta write refused: catalog lock held by {owner!r}")
+        raise CatalogLockedExclusively(
+            "write mode"
+            if owner == _WRITE_MODE_OWNER
+            else "another exclusive operation"
+        )
+    logger.info("cidx-meta write refused: the lock holder never became readable")
+    raise CatalogBusy()
 
 
 @contextmanager
