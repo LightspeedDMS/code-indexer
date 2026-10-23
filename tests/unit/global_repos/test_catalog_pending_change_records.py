@@ -111,6 +111,40 @@ def test_a_change_parked_during_an_apply_survives_for_the_next(
     assert _description(scheduler).read_text() == "v2\n"
 
 
+def test_two_racing_appliers_each_change_is_applied_once(
+    scheduler: RefreshScheduler, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    golden = _golden(scheduler)
+    other = "example-repo-b"
+    pending.defer_description(golden, ALIAS, "a\n")
+    pending.defer_description(golden, other, "b\n")
+    started: List[bool] = []
+    second: List[bool] = []
+    applied: List[str] = []
+
+    def _second_applier_runs_mid_apply(
+        real: Any, root: Path, target: Path, content: str, **kwargs: Any
+    ) -> bool:
+        if target.parent.name == CATALOG:
+            applied.append(target.name)
+            if not started:
+                started.append(True)
+                # the first applier listed both records; the second takes the rest
+                second.append(pending.apply_pending_catalog_changes(scheduler))
+        return bool(real(root, target, content, **kwargs))
+
+    _wrap_writer(monkeypatch, _second_applier_runs_mid_apply)
+    first = pending.apply_pending_catalog_changes(scheduler)
+    monkeypatch.undo()
+
+    assert second == [False], "the first applier's claim was live"
+    assert first is True
+    assert sorted(applied) == sorted([f"{ALIAS}.md", f"{other}.md"]), applied
+    assert _description(scheduler).read_text() == "a\n"
+    assert (golden / CATALOG / f"{other}.md").read_text() == "b\n"
+    assert list((golden / pending.PENDING_DIR_NAME).iterdir()) == []
+
+
 def test_a_failed_apply_keeps_the_change_parked(
     scheduler: RefreshScheduler, monkeypatch: pytest.MonkeyPatch
 ) -> None:
