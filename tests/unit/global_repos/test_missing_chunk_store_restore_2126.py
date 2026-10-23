@@ -481,7 +481,7 @@ def _unrepairable_reasons(metadata: Any) -> Dict[str, str]:
 class TestQuietRepositoryMissingStore2150:
     """Bug #2150: with nothing to index the child exits 0 without opening the
     store, so the PUBLISH gate must classify an established collection's
-    missing chunks.db as a missing store and run the #2126 restore.
+    missing chunks.db as a missing store and run the missing-store restore.
 
     A local repository nothing touched since its published snapshot (whose
     source manifest matches) skips a plain refresh as "no changes"; the
