@@ -696,6 +696,8 @@ class SearchEmbedEventWriter:
         self._overflow_warned = False
         # ^ invariant held from dequeue to commit => flush() waits for a batch already taken off the queue
         self._drain_lock = threading.Lock()
+        # ^ invariant changed only under _drain_lock; records ever taken off the queue
+        self._taken = 0
 
     @property
     def backend(self) -> Any:
@@ -717,18 +719,22 @@ class SearchEmbedEventWriter:
     def _drain(self) -> None:
         """Drain at most _MAX_DRAIN_BATCH records and write them to the backend."""
         with self._drain_lock:
-            self._drain_locked()
+            self._drain_locked(_MAX_DRAIN_BATCH)
 
-    def _drain_locked(self) -> None:
+    def _drain_locked(self, limit: int) -> int:
+        """Take at most *limit* records off the queue and write them; returns
+        how many were taken. Caller holds _drain_lock."""
         batch: List[SearchEmbedEventRecord] = []
-        for _ in range(_MAX_DRAIN_BATCH):
+        for _ in range(limit):
             try:
                 record = self._queue.get_nowait()
                 batch.append(record)
             except Empty:
                 break
+        self._taken += len(batch)
         if batch:
             self._backend.insert_batch(batch)
+        return len(batch)
 
     def _loop(self) -> None:
         """Background loop: drain every 5 seconds, stop on signal."""
@@ -769,7 +775,16 @@ class SearchEmbedEventWriter:
 
     def flush(self) -> None:
         """Synchronously write every record enqueued before this call,
-        including a batch the background drain is writing right now."""
+        including a batch the background drain is writing right now. Records
+        enqueued after the call began are left to the background drain, so
+        the work is bounded by what was pending (at most the queue size)."""
+        pending = self._queue.qsize()
+        # ^ order qsize before _taken: a record dequeued between the reads is counted twice, never missed
+        taken_before = self._taken
         with self._drain_lock:
-            while not self._queue.empty():
-                self._drain_locked()
+            remaining = taken_before + pending - self._taken
+            while remaining > 0:
+                taken = self._drain_locked(min(remaining, _MAX_DRAIN_BATCH))
+                if taken == 0:
+                    break
+                remaining -= taken

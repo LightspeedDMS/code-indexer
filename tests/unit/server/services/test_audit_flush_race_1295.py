@@ -22,6 +22,7 @@ backend, or the SQLite file -- to reproduce the exact race and prove the fix.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -127,22 +128,63 @@ class TestAuditUpdateFlushesBeforeQuery:
             clear_search_embed_event_writer()
 
 
+def _event_record(correlation_id: str):
+    import time
+
+    from code_indexer.server.services.search_embed_event_writer import (
+        SearchEmbedEventRecord,
+    )
+
+    return SearchEmbedEventRecord(
+        timestamp=time.time(),
+        correlation_id=correlation_id,
+        node_id="test-node",
+        provider="voyage-ai",
+        model="voyage-code-3",
+        config_digest="d",
+        cache_mode="on",
+        outcome="hit",
+        role="owner",
+        live_batch_id=None,
+        embed_key=f"s:d:{correlation_id}",
+        long_key=False,
+        latency_ms=1,
+        shadow_cosine=None,
+    )
+
+
+class _LockEntrySignal:
+    """The writer's drain lock, setting *attempted* when a thread starts to
+    acquire it: the test's view of flush() blocking on the lock."""
+
+    def __init__(self, lock: Any, attempted: Any) -> None:
+        self._lock = lock
+        self._attempted = attempted
+
+    def __enter__(self) -> "_LockEntrySignal":
+        self._attempted.set()
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self._lock.release()
+
+
 class TestFlushWaitsForInFlightDrain:
     """flush() must also wait for a batch the background drain already took
     off the queue: an empty queue does not mean the rows are committed."""
 
     def test_flush_returns_only_after_a_concurrent_drain_committed(self, tmp_path):
         import threading
-        import time
 
         from code_indexer.server.services.search_embed_event_writer import (
-            SearchEmbedEventRecord,
             SearchEmbedEventSqliteBackend,
             SearchEmbedEventWriter,
         )
 
         inserting = threading.Event()
         release = threading.Event()
+        flusher_waiting_or_done = threading.Event()
 
         class _GatedBackend(SearchEmbedEventSqliteBackend):
             # Real SQLite insert, held open until the test releases it.
@@ -153,27 +195,16 @@ class TestFlushWaitsForInFlightDrain:
 
         backend = _GatedBackend(str(tmp_path / "flush_in_flight.db"))
         writer = SearchEmbedEventWriter(backend)
-        writer.enqueue(
-            SearchEmbedEventRecord(
-                timestamp=time.time(),
-                correlation_id="in-flight-drain",
-                node_id="test-node",
-                provider="voyage-ai",
-                model="voyage-code-3",
-                config_digest="d",
-                cache_mode="on",
-                outcome="hit",
-                role="owner",
-                live_batch_id=None,
-                embed_key="s:d:in-flight",
-                long_key=False,
-                latency_ms=1,
-                shadow_cosine=None,
-            )
-        )
+        writer.enqueue(_event_record("in-flight-drain"))
         background = threading.Thread(target=writer._drain)  # the 5 s loop's drain
         background.start()
         assert inserting.wait(timeout=10), "background drain never took the record"
+        # The background drain already holds the real lock; flush() meets the
+        # signalling wrapper around that same lock.
+        # ^ why getattr: a writer without the lock must fail on behaviour, not on the seam
+        writer._drain_lock = _LockEntrySignal(  # type: ignore[assignment]
+            getattr(writer, "_drain_lock", threading.Lock()), flusher_waiting_or_done
+        )
 
         seen_after_flush = []
 
@@ -182,15 +213,80 @@ class TestFlushWaitsForInFlightDrain:
             seen_after_flush.append(
                 len(backend.query(correlation_id="in-flight-drain")[0])
             )
+            flusher_waiting_or_done.set()
 
         flusher = threading.Thread(target=_flush_then_count)
         flusher.start()
-        time.sleep(0.2)
+        assert flusher_waiting_or_done.wait(timeout=10), "flush() never started"
         release.set()
         background.join(timeout=10)
         flusher.join(timeout=10)
         assert seen_after_flush == [1], (
             "flush() returned before the background drain committed its batch"
+        )
+
+
+class TestFlushWritesOnlyWhatWasPendingAtEntry:
+    """A sampled audit flushes on the search request path: flush() writes the
+    records pending when it started and returns, however fast others enqueue."""
+
+    def test_flush_ends_after_the_records_pending_at_entry_under_continuous_enqueue(
+        self, tmp_path
+    ):
+        import threading
+
+        from code_indexer.server.services.search_embed_event_writer import (
+            SearchEmbedEventSqliteBackend,
+            SearchEmbedEventWriter,
+        )
+
+        pending_at_entry = 1200
+        late_per_insert = 600
+        max_producing_inserts = 20
+        produce = threading.Event()
+        produced = threading.Event()
+        stop = threading.Event()
+        written: list[str] = []
+        insert_calls: list[int] = []
+
+        class _CountingBackend(SearchEmbedEventSqliteBackend):
+            # Real SQLite insert; while it runs, the producer enqueues more.
+            def insert_batch(self, records):
+                super().insert_batch(records)
+                written.extend(r.correlation_id for r in records)
+                insert_calls.append(len(records))
+                if len(insert_calls) <= max_producing_inserts:
+                    produced.clear()
+                    produce.set()
+                    assert produced.wait(timeout=10), "producer never enqueued"
+
+        writer = SearchEmbedEventWriter(_CountingBackend(str(tmp_path / "busy.db")))
+        for i in range(pending_at_entry):
+            writer.enqueue(_event_record(f"early-{i}"))
+
+        def _producer() -> None:
+            sent = 0
+            for _ in range(max_producing_inserts):
+                if not produce.wait(timeout=10) or stop.is_set():
+                    return
+                produce.clear()
+                for _ in range(late_per_insert):
+                    writer.enqueue(_event_record(f"late-{sent}"))
+                    sent += 1
+                produced.set()
+
+        producer = threading.Thread(target=_producer)
+        producer.start()
+        try:
+            writer.flush()
+        finally:
+            stop.set()
+            produce.set()
+            producer.join(timeout=10)
+
+        assert written == [f"early-{i}" for i in range(pending_at_entry)], (
+            f"flush() wrote {len(written)} records in {len(insert_calls)} inserts; "
+            f"expected exactly the {pending_at_entry} pending at entry"
         )
 
 
