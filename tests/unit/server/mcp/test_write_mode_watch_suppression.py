@@ -77,6 +77,15 @@ def _create_write_mode_marker(golden_repos_dir: Path, alias: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _app_and_routers_loaded_before_patching():
+    # ^ hazard routers bind file_crud_service at import => loading them under a patch leaks the mock
+    import code_indexer.server.routers.files  # noqa: F401
+    from code_indexer.server import app as app_module
+
+    assert app_module.app is not None
+
+
 @pytest.fixture
 def golden_repos_dir(tmp_path):
     """Real temporary golden_repos_dir."""
