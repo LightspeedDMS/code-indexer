@@ -280,15 +280,17 @@ def _write_mode_create_marker(
 def _write_mode_run_refresh(
     refresh_scheduler: Any, repo_alias: str, golden_repos_dir: Path, alias: str
 ) -> Dict[str, Any]:
-    """Remove the marker, stop auto-watch, release the lock with the marker's
-    token and refresh; returns the real outcome as the response payload."""
+    """Exit write mode via finish_write_mode; returns the real outcome payload."""
     from code_indexer.server.services.auto_watch_manager import auto_watch_manager
 
     from ._write_mode_marker import finish_write_mode
 
     def stop_watch(source_path: str) -> None:
         try:
-            auto_watch_manager.stop_watch(source_path)
+            if auto_watch_manager.is_watching(source_path):
+                auto_watch_manager.stop_watch(source_path)
+            else:  # write mode never starts a watch on its repository
+                logger.debug(f"No watch to stop for {source_path}")
         except Exception as e:
             logger.warning(
                 f"Failed to stop auto-watch for {source_path} before refresh: {e}",

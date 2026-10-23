@@ -433,6 +433,27 @@ class TestFileWriteRequiresLockOwnership:
         assert not (golden_repos_dir / _ALIAS / "x.md").exists()
 
 
+class TestExitWithNoWatchRunning:
+    def test_exit_logs_no_watch_warning(
+        self, golden_repos_dir: Path, make_store, caplog
+    ) -> None:
+        import logging
+
+        worker = _Worker(golden_repos_dir, make_store())
+        assert _call("handle_enter_write_mode", worker, golden_repos_dir)["success"]
+
+        with caplog.at_level(logging.WARNING):
+            result = _call("handle_exit_write_mode", worker, golden_repos_dir)
+
+        assert result["success"] is True
+        noisy = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno >= logging.WARNING and "No watch running" in r.getMessage()
+        ]
+        assert noisy == []
+
+
 class TestExitReleasesBeforeRemovingTheMarker:
     def test_release_that_raises_keeps_the_marker_and_reports_failure(
         self, golden_repos_dir: Path, make_store
