@@ -605,34 +605,49 @@ class XrayPatternService:
             )
         return str(spec.get("execution_mode") or DEFAULT_EXECUTION_MODE)
 
-    def ensure_seed_patterns(self) -> None:
-        """Create seed patterns in __any__/ if they don't already exist.
+    def ensure_seed_patterns(self) -> bool:
+        """Create the seed patterns (catch-rethrow, deep-nesting) in __any__/
+        that do not exist yet, under the catalog write lock as an X-Ray
+        pattern writer (piggyback rules apply; a piggybacked write is left
+        for the holder's refresh to commit). Idempotent.
 
-        Creates:
-            - catch-rethrow.yaml
-            - deep-nesting.yaml
-
-        Idempotent: skips files that already exist.
-        """
+        Returns True when every seed is in place; False when an exclusive
+        holder refused the write (logged; nothing written): the caller
+        retries on its next call."""
         any_dir = self._patterns_root / self.ANY_SCOPE
-        any_dir.mkdir(parents=True, exist_ok=True)
-
-        created: List[Path] = []
-
-        for stem, content in (
-            ("catch-rethrow", _SEED_CATCH_RETHROW),
-            ("deep-nesting", _SEED_DEEP_NESTING),
-        ):
-            target = any_dir / f"{stem}.yaml"
-            if not target.exists():
-                self._put_catalog_file(target, content)
-                created.append(target)
-
-        if created:
-            self._git_commit_tolerating_failure(
-                files=created,
-                message="xray-patterns: add seed patterns to __any__/",
+        seeds = [
+            (any_dir / f"{stem}.yaml", content)
+            for stem, content in (
+                ("catch-rethrow", _SEED_CATCH_RETHROW),
+                ("deep-nesting", _SEED_DEEP_NESTING),
             )
+        ]
+        if all(target.exists() for target, _content in seeds):
+            return True
+
+        def _write_and_commit(piggyback: bool) -> None:
+            created = [target for target, _content in seeds if not target.exists()]
+            for target, content in seeds:
+                if target in created:
+                    self._put_catalog_file(target, content)
+            if created and not piggyback:
+                self._git_commit_tolerating_failure(
+                    files=created,
+                    message="xray-patterns: add seed patterns to __any__/",
+                )
+
+        try:
+            _result, lock_still_held = self._run_with_coarse_lock(
+                f"{XRAY_PATTERN_LOCK_OWNER_PREFIX}seed", _write_and_commit
+            )
+        except CatalogLockedExclusively as exc:
+            logger.warning(
+                "X-Ray seed patterns not written (%s); retried at the next xray_search",
+                exc,
+            )
+            return False
+        self._request_refresh(lock_still_held)
+        return True
 
     # ------------------------------------------------------------------
     # Coarse write-lock coordination (Bug #1037)

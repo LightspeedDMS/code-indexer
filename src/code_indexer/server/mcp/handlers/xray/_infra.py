@@ -301,8 +301,8 @@ def _resolve_evaluator_code(
         )
         try:
             if not _seeds_ensured:
-                svc.ensure_seed_patterns()
-                _seeds_ensured = True
+                # ^ why False = refused under an exclusive catalog holder; retried next call
+                _seeds_ensured = svc.ensure_seed_patterns()
             if expected_execution_mode is not None:
                 declared_mode = svc.get_pattern_execution_mode(repo_alias, pattern_name)
                 if declared_mode != expected_execution_mode:
