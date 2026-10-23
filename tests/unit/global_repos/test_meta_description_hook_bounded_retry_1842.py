@@ -171,6 +171,10 @@ class TestOnRepoRemovedBoundedRetry:
     ):
         scheduler = MagicMock()
         scheduler.acquire_write_lock.return_value = False
+        # A cooperative writer holds it (an exclusive one parks the removal).
+        scheduler.write_lock_manager.get_lock_info.return_value = {
+            "owner": "refresh_scheduler"
+        }
         set_refresh_scheduler(scheduler)
 
         on_repo_removed(repo_name="some-repo", golden_repos_dir=str(tmp_path))

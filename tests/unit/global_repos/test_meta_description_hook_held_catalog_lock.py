@@ -1,11 +1,12 @@
 """A registered or removed repository's description change is never lost to a
 held catalog write lock, and the catalog is refreshed afterwards.
 
-Whoever holds the cidx-meta write lock past the hook's short bounded retry (a
-catalog refresh across indexing and publish, an operator's write mode, the
+When a cooperative writer holds the cidx-meta write lock past the hook's
+short bounded retry (a catalog refresh across indexing and publish, the
 dependency map...), the description is written (or removed) atomically and
 the refresh that follows is owed to the debouncer: a refresh requested while
-the lock is held would skip and owe nothing. The same holds when the hook's
+the lock is held would skip and owe nothing. (An exclusive holder parks the
+change instead: test_hook_defers_catalog_changes_under_exclusive_holder.py.) The same holds when the hook's
 own lock release fails. The temp file of a description write is staged
 outside cidx-meta, so neither a snapshot copy nor a backup commit sees it.
 
@@ -29,7 +30,7 @@ from code_indexer.global_repos import meta_description_hook
 from code_indexer.global_repos.write_lock_manager import WriteLockManager
 
 REPO = "example-repo"
-HOLDERS = ["refresh_scheduler", "mcp_write_mode"]
+HOLDERS = ["refresh_scheduler", "dependency_map_service"]
 
 
 class _Scheduler:

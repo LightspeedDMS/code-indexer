@@ -211,11 +211,22 @@ class CidxMetaRefreshDebouncer:
             return self._dirty and not self._shutdown and self._awaiting is None
 
     def _submit(self, submitted_seq: int) -> None:
+        from code_indexer.global_repos.catalog_pending_changes import (
+            apply_pending_catalog_changes,
+        )
         from code_indexer.global_repos.refresh_failure_recovery import (
             RefreshDeferredError,
         )
         from code_indexer.server.repositories.background_jobs import DuplicateJobError
 
+        try:
+            applied = apply_pending_catalog_changes(self._refresh_scheduler)
+        except Exception as exc:
+            self._retry_paced(f"parked catalog changes: {exc!r}", failed=True)
+            return
+        if not applied:
+            self._retry_paced("parked catalog changes wait for the catalog", False)
+            return
         try:
             job_id = self._refresh_scheduler.trigger_refresh_for_repo(META_ALIAS)
         except RefreshDeferredError as exc:

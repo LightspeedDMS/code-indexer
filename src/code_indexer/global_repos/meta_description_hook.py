@@ -190,7 +190,18 @@ def request_cidx_meta_refresh(
         DuplicateJobError as TrackedDuplicateJobError,
     )
 
+    from code_indexer.global_repos.catalog_pending_changes import (
+        apply_pending_catalog_changes,
+    )
+
     owed_to = debouncer if debouncer is not None else _debouncer
+    try:
+        parked_settled = apply_pending_catalog_changes(refresh_scheduler)
+    except Exception as exc:
+        logger.warning(f"Parked catalog changes not applied: {exc!r}")
+        parked_settled = False
+    if not parked_settled and owed_to is not None:
+        owed_to.signal_dirty()
     seq = owed_to.note_direct_write() if owed_to is not None else 0
     try:
         job_id = refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
@@ -520,17 +531,35 @@ def on_repo_added(
             md_file, verified_content, refresh_scheduler=_refresh_scheduler
         )
     except LifecycleLockUnavailableError as lock_busy:
-        # The lock stayed busy past the bounded retry (a refresh across
-        # indexing and publish, write mode, the dependency map...). The
-        # description is never discarded: it is written atomically now, and
-        # the refresh is owed to the debouncer since one requested now would
-        # skip on the held lock.
-        atomic_write_description(md_file, verified_content, refresh_scheduler=None)
-        logger.info(
-            f"Created meta description file {md_file} while the cidx-meta "
-            f"write lock was held ({lock_busy}); the refresh is owed to the "
-            f"debouncer"
+        # The lock stayed busy past the bounded retry. The description is
+        # never discarded: under a cooperative holder (a refresh, the
+        # dependency map...) it is written atomically now; under an
+        # exclusive one (write mode, the catalog backup) it is parked
+        # outside the catalog and applied once released. Either way the
+        # refresh is owed to the debouncer (one requested now would skip).
+        from code_indexer.global_repos.catalog_lock_holder import (
+            CatalogLockedExclusively,
+            require_publishing_holder,
         )
+        from code_indexer.global_repos.catalog_pending_changes import (
+            defer_description,
+        )
+
+        try:
+            require_publishing_holder(_refresh_scheduler)
+        except CatalogLockedExclusively as refused:
+            defer_description(golden_repos_dir, repo_name, verified_content)
+            logger.info(
+                f"Parked the description of {repo_name}: {refused}; it is "
+                f"applied once released"
+            )
+        else:
+            atomic_write_description(md_file, verified_content, refresh_scheduler=None)
+            logger.info(
+                f"Created meta description file {md_file} while the cidx-meta "
+                f"write lock was held ({lock_busy}); the refresh is owed to the "
+                f"debouncer"
+            )
         refresh_now = False
     else:
         logger.info(f"Created meta description file: {md_file}")
@@ -573,6 +602,8 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
         # release failed. The deletion is never skipped; the refresh is then
         # owed to the debouncer.
         _lock_still_held = False
+        # True when an exclusive holder had the catalog: the removal is parked.
+        _parked = False
         if _refresh_scheduler is not None:
             from code_indexer.global_repos.lifecycle_batch_runner import (
                 LIFECYCLE_WRITER_LOCK_OWNER,
@@ -588,17 +619,37 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
                 )
             if not _lock_acquired:
                 _lock_still_held = True
-                logger.info(
-                    "on_repo_removed: deleting %s while the cidx-meta write lock "
-                    "is held -- %s; the refresh is owed to the debouncer",
-                    md_file,
-                    _describe_cidx_meta_holder(_refresh_scheduler),
+                from code_indexer.global_repos.catalog_lock_holder import (
+                    CatalogLockedExclusively,
+                    require_publishing_holder,
                 )
+                from code_indexer.global_repos.catalog_pending_changes import (
+                    defer_removal,
+                )
+
+                try:
+                    require_publishing_holder(_refresh_scheduler)
+                except CatalogLockedExclusively as refused:
+                    defer_removal(golden_repos_dir, repo_name)
+                    logger.info(
+                        f"Parked the removal of {md_file}: {refused}; it is "
+                        f"applied once released"
+                    )
+                    refresh_after_catalog_write(_refresh_scheduler, True)
+                    _parked = True
+                else:
+                    logger.info(
+                        "on_repo_removed: deleting %s while the cidx-meta write "
+                        "lock is held -- %s; the refresh is owed to the debouncer",
+                        md_file,
+                        _describe_cidx_meta_holder(_refresh_scheduler),
+                    )
         _deleted = False
         try:
-            md_file.unlink()
-            _deleted = True
-            logger.info(f"Deleted meta description file: {md_file}")
+            if not _parked:
+                md_file.unlink()
+                _deleted = True
+                logger.info(f"Deleted meta description file: {md_file}")
         except Exception as e:
             logger.error(
                 f"Failed to delete meta description for {repo_name}: {e}", exc_info=True
