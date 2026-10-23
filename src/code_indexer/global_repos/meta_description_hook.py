@@ -480,11 +480,17 @@ def on_repo_added(
             DependencyMapAnalyzer,
         )
 
-        # Write to a temp file inside cidx_meta_path so same-filesystem rename works later
+        from code_indexer.global_repos.catalog_staged_write import STAGING_DIR_NAME
+
+        # The verification input lives in the staging dir beside the catalog,
+        # never inside it: a backup stage-all must not see an unverified file.
+        staging_dir = Path(golden_repos_dir) / STAGING_DIR_NAME
+        staging_dir.mkdir(exist_ok=True)
         with tempfile.NamedTemporaryFile(
             mode="w",
+            prefix=f".{repo_name}.verify.",
             suffix=".md",
-            dir=str(cidx_meta_path),
+            dir=str(staging_dir),
             delete=False,
             encoding="utf-8",
         ) as tmp:
