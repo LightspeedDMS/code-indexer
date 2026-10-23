@@ -127,5 +127,72 @@ class TestAuditUpdateFlushesBeforeQuery:
             clear_search_embed_event_writer()
 
 
+class TestFlushWaitsForInFlightDrain:
+    """flush() must also wait for a batch the background drain already took
+    off the queue: an empty queue does not mean the rows are committed."""
+
+    def test_flush_returns_only_after_a_concurrent_drain_committed(self, tmp_path):
+        import threading
+        import time
+
+        from code_indexer.server.services.search_embed_event_writer import (
+            SearchEmbedEventRecord,
+            SearchEmbedEventSqliteBackend,
+            SearchEmbedEventWriter,
+        )
+
+        inserting = threading.Event()
+        release = threading.Event()
+
+        class _GatedBackend(SearchEmbedEventSqliteBackend):
+            # Real SQLite insert, held open until the test releases it.
+            def insert_batch(self, records):
+                inserting.set()
+                assert release.wait(timeout=10), "insert never released"
+                super().insert_batch(records)
+
+        backend = _GatedBackend(str(tmp_path / "flush_in_flight.db"))
+        writer = SearchEmbedEventWriter(backend)
+        writer.enqueue(
+            SearchEmbedEventRecord(
+                timestamp=time.time(),
+                correlation_id="in-flight-drain",
+                node_id="test-node",
+                provider="voyage-ai",
+                model="voyage-code-3",
+                config_digest="d",
+                cache_mode="on",
+                outcome="hit",
+                role="owner",
+                live_batch_id=None,
+                embed_key="s:d:in-flight",
+                long_key=False,
+                latency_ms=1,
+                shadow_cosine=None,
+            )
+        )
+        background = threading.Thread(target=writer._drain)  # the 5 s loop's drain
+        background.start()
+        assert inserting.wait(timeout=10), "background drain never took the record"
+
+        seen_after_flush = []
+
+        def _flush_then_count() -> None:
+            writer.flush()
+            seen_after_flush.append(
+                len(backend.query(correlation_id="in-flight-drain")[0])
+            )
+
+        flusher = threading.Thread(target=_flush_then_count)
+        flusher.start()
+        time.sleep(0.2)
+        release.set()
+        background.join(timeout=10)
+        flusher.join(timeout=10)
+        assert seen_after_flush == [1], (
+            "flush() returned before the background drain committed its batch"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

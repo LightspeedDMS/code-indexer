@@ -694,6 +694,8 @@ class SearchEmbedEventWriter:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._overflow_warned = False
+        # ^ invariant held from dequeue to commit => flush() waits for a batch already taken off the queue
+        self._drain_lock = threading.Lock()
 
     @property
     def backend(self) -> Any:
@@ -714,6 +716,10 @@ class SearchEmbedEventWriter:
 
     def _drain(self) -> None:
         """Drain at most _MAX_DRAIN_BATCH records and write them to the backend."""
+        with self._drain_lock:
+            self._drain_locked()
+
+    def _drain_locked(self) -> None:
         batch: List[SearchEmbedEventRecord] = []
         for _ in range(_MAX_DRAIN_BATCH):
             try:
@@ -762,6 +768,8 @@ class SearchEmbedEventWriter:
                 )
 
     def flush(self) -> None:
-        """Synchronously drain the entire queue NOW (test/manual-flush helper)."""
-        while not self._queue.empty():
-            self._drain()
+        """Synchronously write every record enqueued before this call,
+        including a batch the background drain is writing right now."""
+        with self._drain_lock:
+            while not self._queue.empty():
+                self._drain_locked()
