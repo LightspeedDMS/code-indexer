@@ -1,17 +1,20 @@
 """
-Tests for MCP handlers auto-watch with write exceptions (Story #197 AC3).
+MCP file tools on a write exception repo (cidx-meta-global) start no auto-watch.
 
-Verifies that auto-watch starts on the correct path (canonical golden repo path)
-when a write to a write exception repo like cidx-meta-global is admitted and
-succeeds. A refused write starts no watch: see
+Every write to a write exception repo requires write mode, and write-mode exit
+owns the refresh, so a write the real write-mode gate admits succeeds and
+starts no auto-watch. The handler's watch check and the file service's gate
+read the SAME golden-repos directory here, as they do on a server. A refused
+write starts no watch either: see
 test_write_mode_watch_suppression.py::TestRefusedWriteStartsNoWatch.
 """
 
+import hashlib
 import json
 import tempfile
 from contextlib import contextmanager
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterator
 from unittest.mock import Mock, patch
 
@@ -24,10 +27,11 @@ from tests.shared.real_write_mode import real_write_mode
 
 
 @contextmanager
-def _admitted_exception_repo(tmpdir: str) -> Iterator[Path]:
+def _admitted_write_mode(tmpdir: str) -> Iterator[Path]:
     """cidx-meta-global registered as a write exception and in real write
-    mode, with the real access service installed so the admin caller passes
-    the catalog path gate; all singleton state is restored afterwards."""
+    mode, one golden-repos directory shared by the file service and
+    app.state, and the real access service installed so the admin caller
+    passes the catalog path gate; all singleton state is restored afterwards."""
     from code_indexer.server.mcp.handlers import _utils
     from code_indexer.server.services.file_crud_service import file_crud_service
 
@@ -47,6 +51,9 @@ def _admitted_exception_repo(tmpdir: str) -> Iterator[Path]:
                 "access_filtering_service",
                 fx.access_service,
                 create=True,
+            ),
+            patch.object(
+                app_state, "golden_repos_dir", str(golden_repos_dir), create=True
             ),
             real_write_mode(
                 file_crud_service,
@@ -77,107 +84,84 @@ def _assert_succeeded(response: Dict[str, Any]) -> None:
     assert payload["success"] is True, payload
 
 
-class TestAutoWatchWithExceptions:
-    """Test auto-watch path resolution for write exceptions."""
+def _watch_manager() -> Any:
+    # auto_watch_manager is imported inside the handler, so it is patched at
+    # its source module.
+    return patch(
+        "code_indexer.server.services.auto_watch_manager.auto_watch_manager",
+        Mock(),
+    )
 
-    # ^ why the handler's write-mode suppression probe reads app.state.golden_repos_dir, never this tmp dir => watch not suppressed; suppression covered in test_write_mode_watch_suppression.py
 
-    def test_handle_create_file_starts_watch_on_exception_path(self):
-        """Test that create_file starts auto-watch on canonical path for exceptions."""
+class TestAdmittedWriteModeWriteStartsNoWatch:
+    """An admitted write-mode write on a write exception repo starts no watch."""
+
+    def test_admitted_create_file_starts_no_watch(self):
         from code_indexer.server.mcp.handlers import handle_create_file
 
         with (
             tempfile.TemporaryDirectory() as tmpdir,
-            _admitted_exception_repo(tmpdir) as canonical_path,
+            _admitted_write_mode(tmpdir) as canonical_path,
+            _watch_manager() as mock_watch,
         ):
-            # Mock auto_watch_manager (imported inside handler)
-            with patch(
-                "code_indexer.server.services.auto_watch_manager.auto_watch_manager"
-            ) as mock_watch:
-                mock_watch.start_watch = Mock()
-
-                params = {
+            response = handle_create_file(
+                {
                     "repository_alias": "cidx-meta-global",
                     "file_path": "dependency-map/test.md",
                     "content": "test content",
-                }
+                },
+                _admin_user(),
+            )
 
-                response = handle_create_file(params, _admin_user())
+            _assert_succeeded(response)
+            assert (canonical_path / "dependency-map" / "test.md").read_text() == (
+                "test content"
+            )
+            mock_watch.start_watch.assert_not_called()
 
-                _assert_succeeded(response)
-                assert (canonical_path / "dependency-map" / "test.md").read_text() == (
-                    "test content"
-                )
-                # Verify auto-watch was called with canonical path
-                mock_watch.start_watch.assert_called_once()
-                called_path = str(mock_watch.start_watch.call_args[0][0])
-                assert called_path == str(canonical_path)
-
-    def test_handle_edit_file_starts_watch_on_exception_path(self):
-        """Test that edit_file starts auto-watch on canonical path for exceptions."""
+    def test_admitted_edit_file_starts_no_watch(self):
         from code_indexer.server.mcp.handlers import handle_edit_file
-        import hashlib
 
         with (
             tempfile.TemporaryDirectory() as tmpdir,
-            _admitted_exception_repo(tmpdir) as canonical_path,
+            _admitted_write_mode(tmpdir) as canonical_path,
+            _watch_manager() as mock_watch,
         ):
             test_file = canonical_path / "test.md"
-            original_content = "original"
-            test_file.write_text(original_content)
+            test_file.write_text("original")
 
-            # Mock auto_watch_manager (imported inside handler)
-            with patch(
-                "code_indexer.server.services.auto_watch_manager.auto_watch_manager"
-            ) as mock_watch:
-                mock_watch.start_watch = Mock()
-
-                content_hash = hashlib.sha256(original_content.encode()).hexdigest()
-                params = {
+            response = handle_edit_file(
+                {
                     "repository_alias": "cidx-meta-global",
                     "file_path": "test.md",
                     "old_string": "original",
                     "new_string": "modified",
-                    "content_hash": content_hash,
+                    "content_hash": hashlib.sha256(b"original").hexdigest(),
                     "replace_all": False,
-                }
+                },
+                _admin_user(),
+            )
 
-                response = handle_edit_file(params, _admin_user())
+            _assert_succeeded(response)
+            assert test_file.read_text() == "modified"
+            mock_watch.start_watch.assert_not_called()
 
-                _assert_succeeded(response)
-                assert test_file.read_text() == "modified"
-                # Verify auto-watch was called with canonical path
-                mock_watch.start_watch.assert_called_once()
-                called_path = str(mock_watch.start_watch.call_args[0][0])
-                assert called_path == str(canonical_path)
-
-    def test_handle_delete_file_starts_watch_on_exception_path(self):
-        """Test that delete_file starts auto-watch on canonical path for exceptions."""
+    def test_admitted_delete_file_starts_no_watch(self):
         from code_indexer.server.mcp.handlers import handle_delete_file
 
         with (
             tempfile.TemporaryDirectory() as tmpdir,
-            _admitted_exception_repo(tmpdir) as canonical_path,
+            _admitted_write_mode(tmpdir) as canonical_path,
+            _watch_manager() as mock_watch,
         ):
             test_file = canonical_path / "test.md"
             test_file.write_text("to delete")
 
-            # Mock auto_watch_manager (imported inside handler)
-            with patch(
-                "code_indexer.server.services.auto_watch_manager.auto_watch_manager"
-            ) as mock_watch:
-                mock_watch.start_watch = Mock()
+            response = handle_delete_file(
+                {"repository_alias": "cidx-meta-global", "file_path": "test.md"},
+                _admin_user(),
+            )
 
-                params = {
-                    "repository_alias": "cidx-meta-global",
-                    "file_path": "test.md",
-                }
-
-                response = handle_delete_file(params, _admin_user())
-
-                _assert_succeeded(response)
-                assert not test_file.exists()
-                # Verify auto-watch was called with canonical path
-                mock_watch.start_watch.assert_called_once()
-                called_path = str(mock_watch.start_watch.call_args[0][0])
-                assert called_path == str(canonical_path)
+            _assert_succeeded(response)
+            assert not test_file.exists()
+            mock_watch.start_watch.assert_not_called()
