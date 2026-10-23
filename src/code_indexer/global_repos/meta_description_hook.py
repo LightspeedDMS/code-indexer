@@ -318,6 +318,10 @@ def atomic_write_description(
         durable = write_catalog_file(
             target_path.parent, target_path, content, mode=SHARED_CATALOG_FILE_MODE
         )
+        from code_indexer.global_repos.catalog_pending_changes import discard_pending
+
+        # ^ invariant a direct write supersedes any parked change for the alias
+        discard_pending(target_path.parent.parent, target_path.stem)
     finally:
         if lock_acquired:
             released = _release_cidx_meta_lock(refresh_scheduler)

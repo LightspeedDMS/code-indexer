@@ -229,6 +229,10 @@ def _do_write(
         cidx_meta_path, meta_md_path, content, mode=SHARED_CATALOG_FILE_MODE
     ):
         _logger.warning(f"Description {meta_md_path} written, not yet durable")
+    from code_indexer.global_repos.catalog_pending_changes import discard_pending
+
+    # ^ invariant the new content is in place (the writer raises otherwise), so it supersedes any parked change
+    discard_pending(cidx_meta_path.parent, meta_md_path.stem)
 
 
 # ---------------------------------------------------------------------------

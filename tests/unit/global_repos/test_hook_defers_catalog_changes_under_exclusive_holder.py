@@ -230,3 +230,47 @@ def test_a_direct_removal_discards_a_parked_add(scheduler: RefreshScheduler) -> 
     assert _pending(scheduler) == [], "the parked add survived the removal"
     assert apply_pending_catalog_changes(scheduler) is True
     assert not _description(scheduler).exists(), "a removed repo regained its file"
+
+
+def test_a_direct_registration_clears_a_parked_removal(
+    scheduler: RefreshScheduler,
+) -> None:
+    meta_description_hook.set_debouncer(_CountingDebouncer())  # type: ignore[arg-type]
+    _description(scheduler).write_text("# example-repo\n\nOld.\n")
+    locks = scheduler.write_lock_manager
+    assert locks.acquire(CATALOG, owner_name="mcp_write_mode")
+    try:
+        meta_description_hook.on_repo_removed(REPO, str(_golden(scheduler)))
+        assert _pending(scheduler) == ["remove"]
+    finally:
+        assert locks.release(CATALOG, owner_name="mcp_write_mode")
+
+    _register(scheduler)
+
+    assert _pending(scheduler) == [], "the stale parked removal survived"
+    assert apply_pending_catalog_changes(scheduler) is True
+    assert _description(scheduler).read_text() == GENERATED, (
+        "a stale parked removal deleted the fresh description"
+    )
+
+
+def test_a_lifecycle_write_clears_a_parked_add(scheduler: RefreshScheduler) -> None:
+    from code_indexer.global_repos.catalog_pending_changes import defer_description
+    from code_indexer.global_repos.lifecycle_batch_runner import write_meta_md
+
+    defer_description(_golden(scheduler), REPO, "# example-repo\n\nOld.\n")
+
+    write_meta_md(
+        alias=REPO,
+        description_body="A refined description.",
+        lifecycle_frontmatter={"lifecycle": {"confidence": "high"}},
+        already_locked=False,
+        refresh_scheduler=scheduler,
+        golden_repos_dir=_golden(scheduler),
+    )
+
+    assert _pending(scheduler) == [], "the stale parked add survived"
+    assert apply_pending_catalog_changes(scheduler) is True
+    assert "A refined description." in _description(scheduler).read_text(), (
+        "a stale parked add overwrote the refinement"
+    )
