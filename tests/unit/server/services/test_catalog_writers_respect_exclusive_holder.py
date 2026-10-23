@@ -222,3 +222,34 @@ def test_xray_pattern_store_respects_the_holder(
         assert result.get("success") is True, result
         assert target.exists()
         assert debouncer.signals == 1, "the piggybacked write was not owed"
+
+
+def test_a_refused_memory_write_keeps_the_rate_limit_token(
+    tmp_path: Path, scheduler: RefreshScheduler, debouncer: _CountingDebouncer
+) -> None:
+    service = MemoryStoreService(
+        config=MemoryStoreConfig(memories_dir=tmp_path / "memories"),
+        lock_manager=MemoryFileLockManager(tmp_path / "memory-locks"),
+        refresh_scheduler=scheduler,
+        refresh_debouncer=debouncer,
+        rate_limiter=MemoryRateLimiter(
+            RateLimitConfig(capacity=1, refill_per_second=0.0001)
+        ),
+        hostname="testhost",
+    )
+    payload = {
+        "type": "architectural-fact",
+        "scope": "global",
+        "summary": "example fact",
+        "evidence": [{"commit": "abc123"}],
+    }
+    locks = scheduler.write_lock_manager
+    assert locks.acquire(CATALOG, owner_name="mcp_write_mode")
+    try:
+        with pytest.raises(ConflictError):
+            service.create_memory(payload, username="carol")
+    finally:
+        assert locks.release(CATALOG, owner_name="mcp_write_mode")
+
+    created = service.create_memory(payload, username="carol")
+    assert (tmp_path / "memories" / f"{created['id']}.md").exists()
